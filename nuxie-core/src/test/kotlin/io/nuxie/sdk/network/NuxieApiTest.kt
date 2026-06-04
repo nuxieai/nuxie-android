@@ -2,12 +2,16 @@ package io.nuxie.sdk.network
 
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import io.nuxie.sdk.network.models.PlayStorePurchaseRequest
+import io.nuxie.sdk.purchases.PlayStoreProductType
 import java.io.ByteArrayInputStream
 import java.util.zip.GZIPInputStream
 
@@ -134,6 +138,73 @@ class NuxieApiTest {
       assertEquals("d1", obj["customerId"]?.toString()?.trim('"'))
       assertEquals("f1", obj["featureId"]?.toString()?.trim('"'))
       assertEquals("1", obj["requiredBalance"]?.toString()?.trim('"'))
+    } finally {
+      server.shutdown()
+    }
+  }
+
+  @Test
+  fun sync_play_store_purchase_posts_google_play_contract() = runBlocking {
+    val server = MockWebServer()
+    server.enqueue(
+      MockResponse()
+        .setResponseCode(200)
+        .setHeader("Content-Type", "application/json")
+        .setBody(
+          """
+          {
+            "success": true,
+            "customer_id": "cus_123",
+            "features": [
+              {
+                "id": "pro",
+                "ext_id": "pro",
+                "type": "boolean",
+                "allowed": true,
+                "balance": null,
+                "unlimited": false
+              }
+            ]
+          }
+          """.trimIndent()
+        ),
+    )
+    server.start()
+    try {
+      val api = NuxieApi(
+        apiKey = "k",
+        baseUrl = server.url("/").toString().removeSuffix("/"),
+      )
+      val res = api.syncPlayStorePurchase(
+        PlayStorePurchaseRequest(
+          type = "playstore",
+          purchaseToken = "token_abc",
+          productId = "pro_monthly",
+          packageName = "io.nuxie.example",
+          basePlanId = "monthly",
+          distinctId = "user_123",
+          productType = PlayStoreProductType.SUBSCRIPTION,
+          consumePurchase = null,
+        )
+      )
+      assertTrue(res.success)
+      assertEquals("cus_123", res.customerId)
+
+      val req = server.takeRequest()
+      assertEquals("POST", req.method)
+      assertEquals("/purchase", req.path)
+
+      val body = req.body.readUtf8()
+      val obj = json.parseToJsonElement(body).jsonObject
+      assertEquals("k", obj["apiKey"]?.jsonPrimitive?.content)
+      assertEquals("playstore", obj["type"]?.jsonPrimitive?.content)
+      assertEquals("token_abc", obj["purchase_token"]?.jsonPrimitive?.content)
+      assertEquals("pro_monthly", obj["product_id"]?.jsonPrimitive?.content)
+      assertEquals("io.nuxie.example", obj["package_name"]?.jsonPrimitive?.content)
+      assertEquals("monthly", obj["base_plan_id"]?.jsonPrimitive?.content)
+      assertEquals("user_123", obj["distinct_id"]?.jsonPrimitive?.content)
+      assertEquals("subscription", obj["product_type"]?.jsonPrimitive?.content)
+      assertEquals(null, obj["consume_purchase"]?.jsonPrimitive?.booleanOrNull)
     } finally {
       server.shutdown()
     }

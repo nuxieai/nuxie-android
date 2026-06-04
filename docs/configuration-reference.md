@@ -89,6 +89,8 @@ Embedded `FlowView` hosts use `ComponentActivity` and provide a stable embedded 
 | `enablePlugins` | `true` | If `false`, config-provided plugins are not auto-installed. |
 | `plugins` | empty list | Add with `addPlugin(plugin)` / remove with `removePlugin(pluginId)`. |
 | `purchaseDelegate` | `null` | Required for flow purchase/restore actions to succeed. |
+| `enablePlayStorePurchaseSync` | `true` | Starts the Play Billing observer and syncs completed purchase tokens. |
+| `consumablePlayStoreProductIds` | empty set | Product IDs that should be consumed by the backend after validation. Prefer `addConsumablePlayStoreProduct(productId)`. |
 
 ## Event Hooks
 
@@ -108,6 +110,7 @@ val config = NuxieConfiguration("YOUR_API_KEY").apply {
   eventLinkingPolicy = EventLinkingPolicy.MIGRATE_ON_IDENTIFY
   localeIdentifier = "en_US"
   purchaseDelegate = myPurchaseDelegate
+  addConsumablePlayStoreProduct("coins_100")
   addPlugin(myPlugin)
 }
 ```

@@ -1,5 +1,6 @@
 package io.nuxie.sdk.network.models
 
+import io.nuxie.sdk.purchases.PlayStoreProductType
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
@@ -56,6 +57,29 @@ data class FeatureCheckRequest(
   val requiredBalance: Int? = null,
   val entityId: String? = null,
 )
+
+@Serializable
+data class PlayStorePurchaseRequest(
+  val type: String,
+  @SerialName("purchase_token")
+  val purchaseToken: String,
+  @SerialName("product_id")
+  val productId: String? = null,
+  @SerialName("package_name")
+  val packageName: String? = null,
+  @SerialName("base_plan_id")
+  val basePlanId: String? = null,
+  @SerialName("distinct_id")
+  val distinctId: String? = null,
+  @SerialName("product_type")
+  val productType: PlayStoreProductType? = null,
+  @SerialName("consume_purchase")
+  val consumePurchase: Boolean? = null,
+) {
+  init {
+    require(type == "playstore") { "Play Store purchase requests must use type=playstore" }
+  }
+}
 
 @Serializable
 data class ResponseFieldRequest(

@@ -10,12 +10,12 @@ val demoApiEndpoint = (project.findProperty("NUXIE_EXAMPLE_API_ENDPOINT") as? St
 
 android {
   namespace = "io.nuxie.example"
-  compileSdk = 34
+  compileSdk = 35
 
   defaultConfig {
     applicationId = "io.nuxie.example"
     minSdk = 21
-    targetSdk = 34
+    targetSdk = 35
     versionCode = 1
     versionName = "1.0"
 

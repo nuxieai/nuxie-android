@@ -87,6 +87,15 @@ class NuxieConfiguration(
 
   // Purchases
   var purchaseDelegate: NuxiePurchaseDelegate? = null
+  var enablePlayStorePurchaseSync: Boolean = true
+  var consumablePlayStoreProductIds: MutableSet<String> = mutableSetOf()
+
+  fun addConsumablePlayStoreProduct(productId: String) {
+    val normalized = productId.trim()
+    if (normalized.isNotEmpty()) {
+      consumablePlayStoreProductIds.add(normalized)
+    }
+  }
 
   // Event system hooks
   var propertiesSanitizer: NuxiePropertiesSanitizer? = null

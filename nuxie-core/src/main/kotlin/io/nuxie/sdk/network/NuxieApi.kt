@@ -9,6 +9,7 @@ import io.nuxie.sdk.network.models.BatchResponse
 import io.nuxie.sdk.network.models.EventRequest
 import io.nuxie.sdk.network.models.EventResponse
 import io.nuxie.sdk.network.models.FeatureCheckRequest
+import io.nuxie.sdk.network.models.PlayStorePurchaseRequest
 import io.nuxie.sdk.network.models.ProfileRequest
 import io.nuxie.sdk.network.models.ProfileResponse
 import io.nuxie.sdk.network.models.ResponseAbandonRequest
@@ -17,6 +18,7 @@ import io.nuxie.sdk.network.models.ResponseFieldRequest
 import io.nuxie.sdk.network.models.ResponseSubmitRequest
 import io.nuxie.sdk.network.models.ResponseSubmitResponse
 import io.nuxie.sdk.network.models.ResponseWriteResponse
+import io.nuxie.sdk.features.PurchaseResponse
 import io.nuxie.sdk.util.Iso8601
 import io.nuxie.sdk.util.UuidV7
 import kotlinx.coroutines.Dispatchers
@@ -160,6 +162,16 @@ class NuxieApi(
     val body = json.encodeToJsonElement(FeatureCheckRequest.serializer(), req)
     return request(
       path = "/entitled",
+      method = "POST",
+      auth = AuthMethod.API_KEY_IN_BODY,
+      body = body,
+    )
+  }
+
+  override suspend fun syncPlayStorePurchase(request: PlayStorePurchaseRequest): PurchaseResponse {
+    val body = json.encodeToJsonElement(PlayStorePurchaseRequest.serializer(), request)
+    return request(
+      path = "/purchase",
       method = "POST",
       auth = AuthMethod.API_KEY_IN_BODY,
       body = body,

@@ -195,6 +195,9 @@ To support purchase/restore actions from flow runtime:
 
 ```kotlin
 import io.nuxie.sdk.purchases.NuxiePurchaseDelegate
+import io.nuxie.sdk.purchases.PlayStoreProductType
+import io.nuxie.sdk.purchases.PlayStorePurchase
+import io.nuxie.sdk.purchases.PurchaseOutcome
 import io.nuxie.sdk.purchases.PurchaseResult
 import io.nuxie.sdk.purchases.RestoreResult
 
@@ -203,13 +206,40 @@ class MyPurchaseDelegate : NuxiePurchaseDelegate {
     return PurchaseResult.Success
   }
 
+  override suspend fun purchaseOutcome(productId: String): PurchaseOutcome {
+    val billingPurchase = launchYourPlayBillingFlow(productId)
+    return PurchaseOutcome(
+      result = PurchaseResult.Success,
+      productId = productId,
+      playStorePurchase = PlayStorePurchase(
+        purchaseToken = billingPurchase.purchaseToken,
+        productIds = billingPurchase.products,
+        packageName = billingPurchase.packageName,
+        productType = PlayStoreProductType.SUBSCRIPTION,
+      ),
+    )
+  }
+
   override suspend fun restore(): RestoreResult {
     return RestoreResult.NoPurchases
   }
 }
 ```
 
-Attach it via `NuxieConfiguration.purchaseDelegate`.
+Attach it via `NuxieConfiguration.purchaseDelegate`. When `PurchaseOutcome.playStorePurchase`
+is present, Nuxie sends the purchase token to `/purchase`, waits for backend validation,
+and updates feature access before confirming the flow purchase.
+
+The SDK also starts a Play Billing observer by default. It queries active subscriptions
+and non-consumed one-time products on startup and syncs completed purchases to Nuxie.
+Disable this with `enablePlayStorePurchaseSync = false` if another SDK owns BillingClient.
+For consumables, mark product IDs so the backend consumes them after validation:
+
+```kotlin
+val config = NuxieConfiguration("YOUR_API_KEY").apply {
+  addConsumablePlayStoreProduct("coins_100")
+}
+```
 
 ## Example App
 

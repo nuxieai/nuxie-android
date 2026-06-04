@@ -5,10 +5,12 @@ import io.nuxie.sdk.flows.RemoteFlow
 import io.nuxie.sdk.network.models.BatchRequest
 import io.nuxie.sdk.network.models.BatchResponse
 import io.nuxie.sdk.network.models.EventResponse
+import io.nuxie.sdk.network.models.PlayStorePurchaseRequest
 import io.nuxie.sdk.network.models.ProfileResponse
 import io.nuxie.sdk.network.models.ResponseAbandonResponse
 import io.nuxie.sdk.network.models.ResponseSubmitResponse
 import io.nuxie.sdk.network.models.ResponseWriteResponse
+import io.nuxie.sdk.features.PurchaseResponse
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonElement
 
@@ -41,6 +43,10 @@ interface NuxieApiProtocol {
     requiredBalance: Int? = null,
     entityId: String? = null,
   ): FeatureCheckResult
+
+  suspend fun syncPlayStorePurchase(request: PlayStorePurchaseRequest): PurchaseResponse {
+    throw UnsupportedOperationException("syncPlayStorePurchase is not implemented")
+  }
 
   suspend fun setResponseField(
     distinctId: String,

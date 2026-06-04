@@ -26,6 +26,22 @@ This SDK is split into core runtime and Android platform integration.
 4. Flow UI is shown if required (`showFlow` / journey presentation).
 5. Delegate callbacks are emitted for flow actions.
 6. Profile refresh syncs features, segments, journeys, and flows.
+7. Play Billing purchase tokens are synced through `/purchase`; the backend verifies,
+   acknowledges or consumes, and returns feature updates before the SDK confirms purchases.
+
+Android mirrors iOS transaction-observation behavior at the entitlement boundary, but not
+by copying StoreKit's API shape. The SDK listens for live `PurchasesUpdatedListener`
+callbacks while BillingClient is connected, queries owned purchases after connection, and
+re-queries when the app becomes active so purchases completed while the app was stopped,
+disconnected, or pending are still synced. Successful restore actions also trigger the
+same owned-purchase query so the restore path converges entitlements through Google
+Play's current-purchase API.
+
+The Android SDK depends on Google Play Billing Library 8.0.0. Billing 8.0 preserves the
+SDK's minSdk 21 baseline while adding automatic service reconnection and modern
+one-time product support. Billing 8.1+ adds suspended-subscription query flags but raises
+minSdk to 23, so the adapter uses that query flag reflectively only when a host app
+overrides Billing to a newer compatible version.
 
 ## Flow Interaction Contract
 
