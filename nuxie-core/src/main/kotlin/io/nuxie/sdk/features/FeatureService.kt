@@ -150,8 +150,9 @@ class DefaultFeatureService(
   }
 
   override suspend fun updateFromPurchase(features: List<PurchaseFeature>) {
-    val map = features.associate { it.id to it.toFeatureAccess }
-    featureInfo.update(map)
+    for (feature in features) {
+      featureInfo.update(feature.id, feature.toFeatureAccess)
+    }
     NuxieLogger.info("Updated FeatureInfo from purchase response (${features.size} features)")
   }
 
@@ -159,4 +160,3 @@ class DefaultFeatureService(
     return if (entityId != null) "$featureId:$entityId" else featureId
   }
 }
-

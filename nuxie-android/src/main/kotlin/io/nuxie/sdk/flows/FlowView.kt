@@ -28,6 +28,7 @@ import io.nuxie.sdk.R
 import io.nuxie.sdk.events.SystemEventNames
 import io.nuxie.sdk.logging.NuxieLogger
 import io.nuxie.sdk.purchases.NuxiePurchaseDelegate
+import io.nuxie.sdk.purchases.PlayStorePurchase
 import io.nuxie.sdk.purchases.PurchaseResult
 import io.nuxie.sdk.purchases.RestoreResult
 import io.nuxie.sdk.util.toJsonObject
@@ -539,6 +540,9 @@ class FlowView(context: Context) : FrameLayout(context) {
         journeyId = journeyId,
       )
     }
+  internal var playStorePurchaseRefresh: () -> Unit = {
+    NuxieSDK.shared().refreshPlayStorePurchases()
+  }
 
   private data class SafeAreaInsets(
     val top: Int,
@@ -966,14 +970,52 @@ class FlowView(context: Context) : FrameLayout(context) {
 
       when (val res = outcome.result) {
         PurchaseResult.Success -> {
+          val confirmedProductId = outcome.productId ?: productId
           sendImmediateBridgeResult(
             type = "purchase_ui_success",
-            payload = buildJsonObject { put("productId", JsonPrimitive(productId)) },
+            payload = buildJsonObject { put("productId", JsonPrimitive(confirmedProductId)) },
           )
-          sendImmediateBridgeResult(
-            type = "purchase_confirmed",
-            payload = buildJsonObject { put("productId", JsonPrimitive(productId)) },
-          )
+
+          val playStorePurchase = outcome.playStorePurchase ?: outcome.purchaseToken
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?.let { token ->
+              PlayStorePurchase(
+                purchaseToken = token,
+                productIds = listOfNotNull(confirmedProductId),
+                orderId = outcome.orderId,
+              )
+            }
+
+          if (playStorePurchase == null) {
+            sendImmediateBridgeResult(
+              type = "purchase_confirmed",
+              payload = buildJsonObject { put("productId", JsonPrimitive(confirmedProductId)) },
+            )
+            return@launch
+          }
+
+          val response = runCatching {
+            NuxieSDK.shared().syncPlayStorePurchase(playStorePurchase)
+          }.getOrElse {
+            sendImmediateBridgeResult(
+              type = "purchase_error",
+              payload = buildJsonObject { put("error", JsonPrimitive(it.message ?: "purchase_sync_failed")) },
+            )
+            return@launch
+          }
+
+          if (response.success) {
+            sendImmediateBridgeResult(
+              type = "purchase_confirmed",
+              payload = buildJsonObject { put("productId", JsonPrimitive(confirmedProductId)) },
+            )
+          } else {
+            sendImmediateBridgeResult(
+              type = "purchase_error",
+              payload = buildJsonObject { put("error", JsonPrimitive(response.error ?: "purchase_sync_failed")) },
+            )
+          }
         }
         PurchaseResult.Cancelled -> {
           sendImmediateBridgeResult(type = "purchase_cancelled", payload = JsonObject(emptyMap()))
@@ -1016,7 +1058,10 @@ class FlowView(context: Context) : FrameLayout(context) {
       when (result) {
         is RestoreResult.Success,
         RestoreResult.NoPurchases,
-        -> sendImmediateBridgeResult(type = "restore_success", payload = JsonObject(emptyMap()))
+        -> {
+          playStorePurchaseRefresh()
+          sendImmediateBridgeResult(type = "restore_success", payload = JsonObject(emptyMap()))
+        }
 
         is RestoreResult.Failed -> sendImmediateBridgeResult(
           type = "restore_error",

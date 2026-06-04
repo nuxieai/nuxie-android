@@ -44,6 +44,9 @@ import io.nuxie.sdk.plugins.NuxiePlugin
 import io.nuxie.sdk.plugins.NuxiePluginHost
 import io.nuxie.sdk.plugins.PluginError
 import io.nuxie.sdk.plugins.PluginService
+import io.nuxie.sdk.purchases.GooglePlayBillingPurchaseObserver
+import io.nuxie.sdk.purchases.PlayStorePurchase
+import io.nuxie.sdk.purchases.PurchaseSyncService
 import io.nuxie.sdk.segments.FileSegmentMembershipStore
 import io.nuxie.sdk.segments.SegmentService
 import io.nuxie.sdk.session.DefaultSessionService
@@ -65,6 +68,7 @@ import io.nuxie.sdk.triggers.TriggerError
 import io.nuxie.sdk.triggers.TriggerBroker
 import io.nuxie.sdk.triggers.TriggerHandle
 import io.nuxie.sdk.triggers.TriggerUpdate
+import io.nuxie.sdk.features.PurchaseResponse
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -147,10 +151,14 @@ class NuxieSDK private constructor() {
   internal var irRuntime: IRRuntime? = null
     private set
 
+  internal var purchaseSyncService: PurchaseSyncService? = null
+    private set
+
   private var scope: CoroutineScope? = null
   private var database: NuxieDatabase? = null
   private var activityTracker: CurrentActivityTracker? = null
   private var pluginService: PluginService? = null
+  private var playBillingObserver: GooglePlayBillingPurchaseObserver? = null
 
   val isSetup: Boolean
     get() {
@@ -255,6 +263,12 @@ class NuxieSDK private constructor() {
       profileService = profile,
       configuration = configuration,
       featureInfo = info,
+    )
+    val purchases = PurchaseSyncService(
+      api = api,
+      identityService = requireNotNull(identityService),
+      featureService = features,
+      eventService = events,
     )
 
     val flowCacheBaseDir = configuration.customStoragePath?.let { File(it) } ?: appContext.cacheDir
@@ -449,6 +463,20 @@ class NuxieSDK private constructor() {
     this.journeyService = journeys
     this.triggerBroker = broker
     this.irRuntime = runtime
+    this.purchaseSyncService = purchases
+
+    if (configuration.enablePlayStorePurchaseSync) {
+      playBillingObserver = GooglePlayBillingPurchaseObserver.create(
+        context = appContext,
+        scope = sdkScope,
+        syncService = purchases,
+        consumableProductIds = {
+          configuration.consumablePlayStoreProductIds
+            .mapNotNull { it.trim().takeIf(String::isNotEmpty) }
+            .toSet()
+        },
+      ).also { it.start() }
+    }
 
     val plugins = PluginService().also {
       it.initialize(
@@ -500,6 +528,7 @@ class NuxieSDK private constructor() {
             runCatching { profile.onAppBecameActive() }
             runCatching { features.syncFeatureInfo() }
             runCatching { journeys.checkExpiredTimers() }
+            playBillingObserver?.refreshPurchases()
             pluginService?.onAppBecameActive()
           }
         },
@@ -919,9 +948,11 @@ class NuxieSDK private constructor() {
   suspend fun shutdown() {
     // Best-effort cleanup.
     networkQueue?.stop()
+    playBillingObserver?.stop()
     profileService?.shutdown()
     journeyService?.shutdown()
     pluginService?.cleanup()
+    playBillingObserver = null
     triggerBroker?.reset()
     activityTracker?.stop()
     activityTracker = null
@@ -943,6 +974,7 @@ class NuxieSDK private constructor() {
     journeyService = null
     triggerBroker = null
     irRuntime = null
+    purchaseSyncService = null
     pluginService = null
     delegate = null
     configuration = null
@@ -1036,6 +1068,19 @@ class NuxieSDK private constructor() {
 
   suspend fun refreshFeature(featureId: String, requiredBalance: Int? = null, entityId: String? = null): FeatureCheckResult {
     return checkFeature(featureId = featureId, requiredBalance = requiredBalance, entityId = entityId)
+  }
+
+  suspend fun syncPlayStorePurchase(purchase: PlayStorePurchase): PurchaseResponse {
+    if (!isSetup) throw NuxieError.NotConfigured
+    val service = purchaseSyncService ?: throw NuxieError.NotConfigured
+    return service.syncPlayStorePurchase(purchase)
+  }
+
+  internal fun refreshPlayStorePurchases() {
+    if (configuration == null) {
+      return
+    }
+    playBillingObserver?.refreshPurchases()
   }
 
   fun useFeature(

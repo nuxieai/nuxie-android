@@ -145,10 +145,22 @@ Flow actions `purchase` / `restore` are routed through `NuxiePurchaseDelegate`:
 ```kotlin
 interface NuxiePurchaseDelegate {
   suspend fun purchase(productId: String): PurchaseResult
+  suspend fun purchaseOutcome(productId: String): PurchaseOutcome
   suspend fun restore(): RestoreResult
 }
 ```
 
 Attach with `NuxieConfiguration.purchaseDelegate`.
+
+When `purchaseOutcome` returns a successful `PurchaseOutcome` with `playStorePurchase`,
+Nuxie syncs the Google Play purchase token with the backend before sending
+`purchase_confirmed` back to the flow runtime. This lets the backend verify the token,
+acknowledge or consume the purchase, and return updated feature access.
+
+The Android SDK also starts a Play Billing observer by default. It listens for purchase
+updates and queries owned purchases on startup, then syncs only completed purchases.
+Pending purchases are ignored until Google Play reports them as purchased. Set
+`enablePlayStorePurchaseSync = false` if the host app needs to own the BillingClient
+connection exclusively.
 
 When purchase delegate is not configured, flow runtime sends purchase/restore error messages back to flow UI.

@@ -6,7 +6,7 @@ plugins {
 
 android {
   namespace = "io.nuxie.sdk"
-  compileSdk = 34
+  compileSdk = 35
 
   defaultConfig {
     minSdk = 21
@@ -43,10 +43,12 @@ dependencies {
   implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
   implementation("androidx.room:room-runtime:2.6.1")
   implementation("androidx.room:room-ktx:2.6.1")
+  implementation("com.android.billingclient:billing:8.0.0")
   ksp("androidx.room:room-compiler:2.6.1")
 
   testImplementation("junit:junit:4.13.2")
   testImplementation("androidx.test:core:1.6.1")
+  testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
   testImplementation("org.robolectric:robolectric:4.13")
   testImplementation("androidx.room:room-testing:2.6.1")
 }

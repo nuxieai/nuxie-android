@@ -29,14 +29,47 @@ sealed class PurchaseResult {
 data class PurchaseOutcome(
   val result: PurchaseResult,
   val productId: String? = null,
-  // Reserved for future Play Billing parity:
+  /**
+   * Optional Play Store purchase metadata. When present on a successful outcome,
+   * the SDK syncs the purchase token with Nuxie before confirming the flow purchase.
+   */
+  val playStorePurchase: PlayStorePurchase? = null,
   val purchaseToken: String? = null,
   val orderId: String? = null,
 )
+
+enum class PlayStorePurchaseState {
+  UNSPECIFIED,
+  PURCHASED,
+  PENDING,
+}
+
+@kotlinx.serialization.Serializable
+enum class PlayStoreProductType {
+  @kotlinx.serialization.SerialName("subscription")
+  SUBSCRIPTION,
+
+  @kotlinx.serialization.SerialName("one_time")
+  ONE_TIME,
+}
+
+data class PlayStorePurchase(
+  val purchaseToken: String,
+  val productIds: List<String> = emptyList(),
+  val packageName: String? = null,
+  val basePlanId: String? = null,
+  val productType: PlayStoreProductType? = null,
+  val consumePurchase: Boolean = false,
+  val orderId: String? = null,
+  val purchaseState: PlayStorePurchaseState = PlayStorePurchaseState.PURCHASED,
+  val distinctId: String? = null,
+) {
+  val productId: String?
+    get() = productIds.mapNotNull { it.trim().takeIf(String::isNotEmpty) }.distinct().singleOrNull()
+}
 
 sealed class RestoreResult {
   data class Success(val restoredCount: Int) : RestoreResult()
   data object NoPurchases : RestoreResult()
   data class Failed(val message: String) : RestoreResult()
 }
-

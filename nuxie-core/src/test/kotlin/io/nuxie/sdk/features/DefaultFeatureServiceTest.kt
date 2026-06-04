@@ -268,4 +268,51 @@ class DefaultFeatureServiceTest {
     service.syncFeatureInfo()
     assertTrue(info.feature("pro")!!.allowed)
   }
+
+  @Test
+  fun updateFromPurchase_merges_purchase_features_without_dropping_existing_features() = runTest {
+    val identity = DefaultIdentityService(InMemoryKeyValueStore()).also { it.setDistinctId("u") }
+    val info = FeatureInfo()
+    info.update(
+      mapOf(
+        "pro" to FeatureAccess(
+          allowed = false,
+          unlimited = false,
+          balance = null,
+          type = FeatureType.BOOLEAN,
+        ),
+        "credits" to FeatureAccess(
+          allowed = true,
+          unlimited = false,
+          balance = 10,
+          type = FeatureType.METERED,
+        ),
+      )
+    )
+
+    val service = DefaultFeatureService(
+      api = FakeApi { throw AssertionError("should not call network") },
+      identityService = identity,
+      profileService = FakeProfileService(null),
+      configuration = NuxieConfiguration(apiKey = "k"),
+      featureInfo = info,
+      clock = FakeClock(0),
+    )
+
+    service.updateFromPurchase(
+      listOf(
+        PurchaseFeature(
+          id = "pro",
+          extId = "pro",
+          type = FeatureType.BOOLEAN,
+          allowed = true,
+          balance = null,
+          unlimited = false,
+        )
+      )
+    )
+
+    assertTrue(info.feature("pro")!!.allowed)
+    assertEquals(10, info.feature("credits")!!.balance)
+  }
 }
