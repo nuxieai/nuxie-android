@@ -1,5 +1,9 @@
 package io.nuxie.sdk.flows.bridge
 
+import io.nuxie.sdk.flows.FLOW_PRODUCTS_MESSAGE_TYPE
+import io.nuxie.sdk.flows.FlowProduct
+import io.nuxie.sdk.flows.ProductPeriod
+import io.nuxie.sdk.flows.buildFlowProductsRuntimePayload
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -62,5 +66,36 @@ class FlowBridgeTest {
     assertEquals("req_1", reply.replyTo)
     val payload = reply.payload as JsonObject
     assertTrue(payload["result"]?.toString()?.contains("pong") == true)
+  }
+
+  @Test
+  fun send_buffers_products_until_runtime_ready() {
+    val transport = CapturingTransport()
+    val bridge = FlowBridge(transport)
+
+    bridge.send(
+      FLOW_PRODUCTS_MESSAGE_TYPE,
+      buildFlowProductsRuntimePayload(
+        listOf(
+          FlowProduct(
+            id = "pro_monthly",
+            name = "Pro Monthly",
+            price = "$9.99",
+            period = ProductPeriod.MONTH,
+          )
+        )
+      ),
+    )
+
+    assertEquals(0, transport.sent.size)
+
+    bridge.handleIncomingJson("""{"type":"runtime/ready","payload":{}}""")
+
+    assertEquals(1, transport.sent.size)
+    val envelope = transport.sent.single()
+    assertEquals(FLOW_PRODUCTS_MESSAGE_TYPE, envelope.type)
+    val payload = envelope.payload as JsonObject
+    assertTrue(payload.toString().contains("pro_monthly"))
+    assertTrue(payload.toString().contains("month"))
   }
 }

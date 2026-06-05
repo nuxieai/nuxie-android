@@ -702,6 +702,7 @@ class FlowView(context: Context) : FrameLayout(context) {
     interceptor.setBundleDir(bundleStore.getCachedBundleDir(flow))
     webView.setResourceInterceptor(interceptor)
     webView.resetBridge()
+    sendProductsToRuntime()
     sendColorSchemeToRuntime()
 
     // Prefetch fonts and bundle in the background (best-effort).
@@ -946,6 +947,15 @@ class FlowView(context: Context) : FrameLayout(context) {
       put("mode", JsonPrimitive(colorSchemeMode.rawValue))
     }
     webView.sendBridgeMessage(type = "runtime/color_scheme", payload = payload)
+  }
+
+  private fun sendProductsToRuntime() {
+    if (!::webView.isInitialized) return
+    val loadedFlow = flow ?: return
+    webView.sendBridgeMessage(
+      type = FLOW_PRODUCTS_MESSAGE_TYPE,
+      payload = buildFlowProductsRuntimePayload(loadedFlow.products),
+    )
   }
 
   private fun handlePurchase(productId: String) {
