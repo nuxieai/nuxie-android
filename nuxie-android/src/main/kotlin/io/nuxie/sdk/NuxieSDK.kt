@@ -44,8 +44,11 @@ import io.nuxie.sdk.plugins.NuxiePlugin
 import io.nuxie.sdk.plugins.NuxiePluginHost
 import io.nuxie.sdk.plugins.PluginError
 import io.nuxie.sdk.plugins.PluginService
+import io.nuxie.sdk.purchases.AndroidPlayBillingClient
+import io.nuxie.sdk.purchases.GooglePlayBillingProductService
 import io.nuxie.sdk.purchases.GooglePlayBillingPurchaseObserver
 import io.nuxie.sdk.purchases.PlayStorePurchase
+import io.nuxie.sdk.purchases.PlayBillingClient
 import io.nuxie.sdk.purchases.PurchaseSyncService
 import io.nuxie.sdk.segments.FileSegmentMembershipStore
 import io.nuxie.sdk.segments.SegmentService
@@ -158,6 +161,7 @@ class NuxieSDK private constructor() {
   private var database: NuxieDatabase? = null
   private var activityTracker: CurrentActivityTracker? = null
   private var pluginService: PluginService? = null
+  private var playBillingClient: PlayBillingClient? = null
   private var playBillingObserver: GooglePlayBillingPurchaseObserver? = null
 
   val isSetup: Boolean
@@ -270,6 +274,8 @@ class NuxieSDK private constructor() {
       featureService = features,
       eventService = events,
     )
+    val billingClient = AndroidPlayBillingClient(appContext)
+    playBillingClient = billingClient
 
     val flowCacheBaseDir = configuration.customStoragePath?.let { File(it) } ?: appContext.cacheDir
     val flows = FlowService(
@@ -277,6 +283,7 @@ class NuxieSDK private constructor() {
       configuration = configuration,
       scope = sdkScope,
       cacheDirectory = flowCacheBaseDir,
+      productService = GooglePlayBillingProductService(billingClient),
     )
 
     val runtime = IRRuntime()
@@ -466,10 +473,10 @@ class NuxieSDK private constructor() {
     this.purchaseSyncService = purchases
 
     if (configuration.enablePlayStorePurchaseSync) {
-      playBillingObserver = GooglePlayBillingPurchaseObserver.create(
-        context = appContext,
+      playBillingObserver = GooglePlayBillingPurchaseObserver(
         scope = sdkScope,
         syncService = purchases,
+        client = billingClient,
         consumableProductIds = {
           configuration.consumablePlayStoreProductIds
             .mapNotNull { it.trim().takeIf(String::isNotEmpty) }
@@ -949,6 +956,7 @@ class NuxieSDK private constructor() {
     // Best-effort cleanup.
     networkQueue?.stop()
     playBillingObserver?.stop()
+    playBillingClient?.endConnection()
     profileService?.shutdown()
     journeyService?.shutdown()
     pluginService?.cleanup()
@@ -975,6 +983,7 @@ class NuxieSDK private constructor() {
     triggerBroker = null
     irRuntime = null
     purchaseSyncService = null
+    playBillingClient = null
     pluginService = null
     delegate = null
     configuration = null

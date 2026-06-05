@@ -39,7 +39,16 @@ class GooglePlayBillingPurchaseObserverTest {
     val queries = mutableListOf<QueryCall>()
     var ended = false
     var startConnectionCalls = 0
+    override var isReady: Boolean = false
+      private set
+    private var purchasesUpdatedListener: ((PlayBillingResult, List<PlayBillingPurchaseSnapshot>?) -> Unit)? = null
     private var disconnect: (() -> Unit)? = null
+
+    override fun setPurchasesUpdatedListener(
+      listener: ((PlayBillingResult, List<PlayBillingPurchaseSnapshot>?) -> Unit)?,
+    ) {
+      purchasesUpdatedListener = listener
+    }
 
     override fun startConnection(
       onSetupFinished: (PlayBillingResult) -> Unit,
@@ -47,15 +56,18 @@ class GooglePlayBillingPurchaseObserverTest {
     ) {
       startConnectionCalls += 1
       disconnect = onDisconnected
+      isReady = true
       onSetupFinished(PlayBillingResult(BillingClient.BillingResponseCode.OK, "OK"))
     }
 
     fun disconnect() {
+      isReady = false
       disconnect?.invoke()
     }
 
     override fun endConnection() {
       ended = true
+      isReady = false
     }
 
     override fun queryPurchases(
@@ -69,6 +81,21 @@ class GooglePlayBillingPurchaseObserverTest {
         PlayStoreProductType.ONE_TIME -> oneTimePurchases
       }
       listener(PlayBillingResult(BillingClient.BillingResponseCode.OK, "OK"), purchases)
+    }
+
+    override fun queryProductDetails(
+      productType: PlayStoreProductType,
+      productIds: List<String>,
+      listener: (PlayBillingResult, List<PlayBillingProductDetailsSnapshot>) -> Unit,
+    ) {
+      listener(PlayBillingResult(BillingClient.BillingResponseCode.OK, "OK"), emptyList())
+    }
+
+    fun emitPurchaseUpdate(
+      result: PlayBillingResult,
+      purchases: List<PlayBillingPurchaseSnapshot>?,
+    ) {
+      purchasesUpdatedListener?.invoke(result, purchases)
     }
   }
 

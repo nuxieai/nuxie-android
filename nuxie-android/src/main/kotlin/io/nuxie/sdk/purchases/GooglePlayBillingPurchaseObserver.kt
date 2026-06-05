@@ -2,11 +2,6 @@ package io.nuxie.sdk.purchases
 
 import android.content.Context
 import com.android.billingclient.api.BillingClient
-import com.android.billingclient.api.BillingClientStateListener
-import com.android.billingclient.api.BillingResult
-import com.android.billingclient.api.PendingPurchasesParams
-import com.android.billingclient.api.Purchase
-import com.android.billingclient.api.QueryPurchasesParams
 import io.nuxie.sdk.logging.NuxieLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -22,6 +17,10 @@ internal class GooglePlayBillingPurchaseObserver(
   private val syncedTokens = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
   @Volatile private var started = false
   @Volatile private var connected = false
+
+  init {
+    client.setPurchasesUpdatedListener(::onPurchasesUpdated)
+  }
 
   fun start() {
     if (connected) {
@@ -63,6 +62,7 @@ internal class GooglePlayBillingPurchaseObserver(
   fun stop() {
     started = false
     connected = false
+    client.setPurchasesUpdatedListener(null)
     client.endConnection()
   }
 
@@ -170,139 +170,13 @@ internal class GooglePlayBillingPurchaseObserver(
       syncService: PurchaseSyncService,
       consumableProductIds: () -> Set<String>,
     ): GooglePlayBillingPurchaseObserver {
-      lateinit var observer: GooglePlayBillingPurchaseObserver
-      val client = AndroidPlayBillingClient(context.applicationContext) { result, purchases ->
-        observer.onPurchasesUpdated(result, purchases)
-      }
-      observer = GooglePlayBillingPurchaseObserver(
+      val client = AndroidPlayBillingClient(context.applicationContext)
+      return GooglePlayBillingPurchaseObserver(
         scope = scope,
         syncService = syncService,
         client = client,
         consumableProductIds = consumableProductIds,
       )
-      return observer
     }
-  }
-}
-
-internal data class PlayBillingResult(
-  val responseCode: Int,
-  val debugMessage: String,
-)
-
-internal data class PlayBillingPurchaseSnapshot(
-  val purchaseToken: String,
-  val productIds: List<String>,
-  val packageName: String?,
-  val orderId: String?,
-  val purchaseState: PlayStorePurchaseState,
-)
-
-internal interface PlayBillingClient {
-  fun startConnection(
-    onSetupFinished: (PlayBillingResult) -> Unit,
-    onDisconnected: () -> Unit,
-  )
-
-  fun endConnection()
-
-  fun queryPurchases(
-    productType: PlayStoreProductType,
-    includeSuspendedSubscriptions: Boolean,
-    listener: (PlayBillingResult, List<PlayBillingPurchaseSnapshot>) -> Unit,
-  )
-}
-
-private class AndroidPlayBillingClient(
-  context: Context,
-  private val purchasesUpdated: (PlayBillingResult, List<PlayBillingPurchaseSnapshot>?) -> Unit,
-) : PlayBillingClient {
-  private val billingClient: BillingClient = BillingClient.newBuilder(context)
-    .setListener { result, purchases ->
-      purchasesUpdated(result.toPlayBillingResult(), purchases?.map { it.toSnapshot() })
-    }
-    .enablePendingPurchases(
-      PendingPurchasesParams.newBuilder()
-        .enableOneTimeProducts()
-        .enablePrepaidPlans()
-        .build()
-    )
-    .enableAutoServiceReconnection()
-    .build()
-
-  override fun startConnection(
-    onSetupFinished: (PlayBillingResult) -> Unit,
-    onDisconnected: () -> Unit,
-  ) {
-    billingClient.startConnection(
-      object : BillingClientStateListener {
-        override fun onBillingSetupFinished(billingResult: BillingResult) {
-          onSetupFinished(billingResult.toPlayBillingResult())
-        }
-
-        override fun onBillingServiceDisconnected() {
-          onDisconnected()
-        }
-      }
-    )
-  }
-
-  override fun endConnection() {
-    billingClient.endConnection()
-  }
-
-  override fun queryPurchases(
-    productType: PlayStoreProductType,
-    includeSuspendedSubscriptions: Boolean,
-    listener: (PlayBillingResult, List<PlayBillingPurchaseSnapshot>) -> Unit,
-  ) {
-    val builder = QueryPurchasesParams.newBuilder()
-      .setProductType(productType.billingProductType)
-
-    if (productType == PlayStoreProductType.SUBSCRIPTION) {
-      builder.includeSuspendedSubscriptionsIfAvailable(includeSuspendedSubscriptions)
-    }
-
-    billingClient.queryPurchasesAsync(builder.build()) { result, purchases ->
-      listener(result.toPlayBillingResult(), purchases.map { it.toSnapshot() })
-    }
-  }
-}
-
-private val PlayStoreProductType.billingProductType: String
-  get() = when (this) {
-    PlayStoreProductType.SUBSCRIPTION -> BillingClient.ProductType.SUBS
-    PlayStoreProductType.ONE_TIME -> BillingClient.ProductType.INAPP
-  }
-
-private fun BillingResult.toPlayBillingResult(): PlayBillingResult {
-  return PlayBillingResult(
-    responseCode = responseCode,
-    debugMessage = debugMessage,
-  )
-}
-
-private fun Purchase.toSnapshot(): PlayBillingPurchaseSnapshot {
-  return PlayBillingPurchaseSnapshot(
-    purchaseToken = purchaseToken,
-    productIds = products,
-    packageName = packageName,
-    orderId = orderId,
-    purchaseState = when (purchaseState) {
-      Purchase.PurchaseState.PURCHASED -> PlayStorePurchaseState.PURCHASED
-      Purchase.PurchaseState.PENDING -> PlayStorePurchaseState.PENDING
-      else -> PlayStorePurchaseState.UNSPECIFIED
-    },
-  )
-}
-
-private fun QueryPurchasesParams.Builder.includeSuspendedSubscriptionsIfAvailable(include: Boolean) {
-  runCatching {
-    val method = javaClass.methods.firstOrNull { method ->
-      method.name == "includeSuspendedSubscriptions" &&
-        method.parameterTypes.size == 1 &&
-        method.parameterTypes[0] == java.lang.Boolean.TYPE
-    } ?: return
-    method.invoke(this, include)
   }
 }
