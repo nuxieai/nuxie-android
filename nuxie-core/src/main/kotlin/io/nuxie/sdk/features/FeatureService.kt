@@ -23,6 +23,10 @@ interface FeatureService {
   suspend fun clearCache()
   suspend fun handleUserChange(fromOldDistinctId: String, toNewDistinctId: String)
   suspend fun syncFeatureInfo()
+  suspend fun syncFeatureInfoFromProfileRefresh() {
+    syncFeatureInfo()
+  }
+
   suspend fun updateFromPurchase(features: List<PurchaseFeature>)
 }
 
@@ -43,13 +47,21 @@ class DefaultFeatureService(
   )
 
   private val realTimeCache: MutableMap<String, CachedResult> = mutableMapOf()
+  private val purchaseFeatureOverrides: MutableMap<String, FeatureAccess> = mutableMapOf()
 
   private val ttlMillis: Long get() = configuration.featureCacheTtlSeconds * 1000L
 
   override suspend fun getCached(featureId: String, entityId: String?): FeatureAccess? {
     val distinctId = identityService.getDistinctId()
 
-    // 1) profile cache
+    // 1) purchase sync cache. Purchase responses are fresher than the profile
+    // cache until a refreshed profile demonstrably includes the purchased access.
+    if (entityId == null) {
+      val purchaseAccess = mutex.withLock { purchaseFeatureOverrides[featureId] }
+      if (purchaseAccess != null) return purchaseAccess
+    }
+
+    // 2) profile cache
     val profile = profileService.getCachedProfile(distinctId)
     val feature = profile?.features?.firstOrNull { it.id == featureId }
     if (feature != null) {
@@ -66,7 +78,7 @@ class DefaultFeatureService(
       return FeatureAccess.fromFeature(feature)
     }
 
-    // 2) real-time cache
+    // 3) real-time cache
     val cacheKey = makeCacheKey(featureId, entityId)
     val cached = mutex.withLock { realTimeCache[cacheKey] } ?: return null
     val age = clock.nowEpochMillis() - cached.cachedAtEpochMillis
@@ -78,10 +90,9 @@ class DefaultFeatureService(
   }
 
   override suspend fun getAllCached(): Map<String, FeatureAccess> {
-    val distinctId = identityService.getDistinctId()
-    val profile = profileService.getCachedProfile(distinctId) ?: return emptyMap()
-    val features = profile.features ?: return emptyMap()
-    return features.associate { it.id to FeatureAccess.fromFeature(it) }
+    val profileFeatures = getProfileFeatureAccess()
+    val purchaseFeatures = mutex.withLock { purchaseFeatureOverrides.toMap() }
+    return profileFeatures + purchaseFeatures
   }
 
   override suspend fun check(
@@ -100,6 +111,9 @@ class DefaultFeatureService(
     val cacheKey = makeCacheKey(featureId, entityId)
     mutex.withLock {
       realTimeCache[cacheKey] = CachedResult(result = result, cachedAtEpochMillis = clock.nowEpochMillis())
+      if (entityId == null) {
+        purchaseFeatureOverrides.remove(featureId)
+      }
     }
 
     // Update FeatureInfo for reactivity.
@@ -133,7 +147,10 @@ class DefaultFeatureService(
   }
 
   override suspend fun clearCache() {
-    mutex.withLock { realTimeCache.clear() }
+    mutex.withLock {
+      realTimeCache.clear()
+      purchaseFeatureOverrides.clear()
+    }
     NuxieLogger.info("Feature cache cleared")
   }
 
@@ -146,12 +163,42 @@ class DefaultFeatureService(
   }
 
   override suspend fun syncFeatureInfo() {
-    featureInfo.update(getAllCached())
+    syncFeatureInfo(profileWasRefreshed = false)
+  }
+
+  override suspend fun syncFeatureInfoFromProfileRefresh() {
+    syncFeatureInfo(profileWasRefreshed = true)
+  }
+
+  private suspend fun syncFeatureInfo(profileWasRefreshed: Boolean) {
+    val profileFeatures = getProfileFeatureAccess()
+    val effectiveFeatures = mutex.withLock {
+      val coveredFeatureIds = purchaseFeatureOverrides
+        .filter { (featureId, purchaseAccess) ->
+          if (profileWasRefreshed) {
+            true
+          } else {
+            profileFeatures[featureId]?.coversPurchaseOverride(purchaseAccess) == true
+          }
+        }
+        .keys
+      for (featureId in coveredFeatureIds) {
+        purchaseFeatureOverrides.remove(featureId)
+      }
+      profileFeatures + purchaseFeatureOverrides
+    }
+    featureInfo.update(effectiveFeatures)
   }
 
   override suspend fun updateFromPurchase(features: List<PurchaseFeature>) {
+    val purchaseFeatures = features.associate { it.publicFeatureKey to it.toFeatureAccess }
+    mutex.withLock {
+      realTimeCache.clear()
+      purchaseFeatureOverrides.putAll(purchaseFeatures)
+    }
+
     for (feature in features) {
-      featureInfo.update(feature.id, feature.toFeatureAccess)
+      featureInfo.update(feature.publicFeatureKey, feature.toFeatureAccess)
     }
     NuxieLogger.info("Updated FeatureInfo from purchase response (${features.size} features)")
   }
@@ -159,4 +206,25 @@ class DefaultFeatureService(
   private fun makeCacheKey(featureId: String, entityId: String?): String {
     return if (entityId != null) "$featureId:$entityId" else featureId
   }
+
+  private suspend fun getProfileFeatureAccess(): Map<String, FeatureAccess> {
+    val distinctId = identityService.getDistinctId()
+    val profile = profileService.getCachedProfile(distinctId)
+    return profile?.features
+      ?.associate { it.id to FeatureAccess.fromFeature(it) }
+      .orEmpty()
+  }
+
+  private fun FeatureAccess.coversPurchaseOverride(purchaseAccess: FeatureAccess): Boolean {
+    if (type != purchaseAccess.type) return false
+    if (purchaseAccess.allowed && !allowed) return false
+    if (purchaseAccess.unlimited) return unlimited
+    if (unlimited) return true
+
+    val requiredBalance = purchaseAccess.balance
+    return requiredBalance == null || (balance ?: Int.MIN_VALUE) >= requiredBalance
+  }
 }
+
+private val PurchaseFeature.publicFeatureKey: String
+  get() = extId?.trim()?.takeIf(String::isNotEmpty) ?: id

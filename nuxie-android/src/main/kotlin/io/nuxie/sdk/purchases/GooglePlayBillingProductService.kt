@@ -3,28 +3,39 @@ package io.nuxie.sdk.purchases
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.ProductDetails
 import io.nuxie.sdk.flows.FlowProduct
+import io.nuxie.sdk.flows.FlowProductFetchException
 import io.nuxie.sdk.flows.FlowProductService
 import io.nuxie.sdk.flows.ProductPeriod
 import io.nuxie.sdk.logging.NuxieLogger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+private const val MAX_PRODUCT_DETAILS_QUERY_PRODUCT_COUNT = 20
+
 internal class GooglePlayBillingProductService(
   private val client: PlayBillingClient,
 ) : FlowProductService {
+  private val readyLock = Any()
+  private var pendingReady: CompletableDeferred<Boolean>? = null
+
   override suspend fun fetchProducts(productIds: Set<String>): List<FlowProduct> {
     val normalizedIds = productIds
       .mapNotNull { it.trim().takeIf(String::isNotEmpty) }
       .distinct()
 
     if (normalizedIds.isEmpty()) return emptyList()
-    if (!ensureReady()) return emptyList()
+    if (!ensureReady()) {
+      throw FlowProductFetchException("Play Billing product metadata setup failed")
+    }
 
-    val details = buildList {
-      addAll(queryProductDetailsOrEmpty(PlayStoreProductType.SUBSCRIPTION, normalizedIds))
-      addAll(queryProductDetailsOrEmpty(PlayStoreProductType.ONE_TIME, normalizedIds))
+    val subscriptionDetails = queryProductDetailsCollectingFailures(PlayStoreProductType.SUBSCRIPTION, normalizedIds)
+    val oneTimeDetails = queryProductDetailsCollectingFailures(PlayStoreProductType.ONE_TIME, normalizedIds)
+    val details = subscriptionDetails.products + oneTimeDetails.products
+    if (details.isEmpty() && (subscriptionDetails.hadFailure || oneTimeDetails.hadFailure)) {
+      throw FlowProductFetchException("Play Billing product metadata query failed")
     }
 
     val productsById = linkedMapOf<String, FlowProduct>()
@@ -44,40 +55,60 @@ internal class GooglePlayBillingProductService(
   private suspend fun ensureReady(): Boolean {
     if (client.isReady) return true
 
-    return suspendCancellableCoroutine { continuation ->
-      val resumed = AtomicBoolean(false)
-
-      fun resumeOnce(value: Boolean) {
-        if (resumed.compareAndSet(false, true) && continuation.isActive) {
-          continuation.resume(value)
+    var shouldStart = false
+    var alreadyReady = false
+    val pending = synchronized(readyLock) {
+      if (client.isReady) {
+        alreadyReady = true
+        null
+      } else {
+        pendingReady ?: CompletableDeferred<Boolean>().also {
+          pendingReady = it
+          shouldStart = true
         }
       }
+    }
 
+    if (alreadyReady) return true
+    if (pending == null) return false
+    if (shouldStart) {
+      startReadyConnection(pending)
+    }
+
+    return pending.await()
+  }
+
+  private fun startReadyConnection(pending: CompletableDeferred<Boolean>) {
+    val resumed = AtomicBoolean(false)
+
+    fun completeOnce(value: Boolean) {
+      if (resumed.compareAndSet(false, true)) {
+        pending.complete(value)
+        synchronized(readyLock) {
+          if (pendingReady === pending) {
+            pendingReady = null
+          }
+        }
+      }
+    }
+
+    try {
       client.startConnection(
         onSetupFinished = { result ->
           val ready = result.responseCode == BillingClient.BillingResponseCode.OK
           if (!ready) {
             NuxieLogger.debug("Play Billing product metadata setup skipped: ${result.debugMessage}")
           }
-          resumeOnce(ready)
+          completeOnce(ready)
         },
         onDisconnected = {
           NuxieLogger.debug("Play Billing disconnected before product metadata query")
-          resumeOnce(false)
+          completeOnce(false)
         },
       )
-    }
-  }
-
-  private suspend fun queryProductDetailsOrEmpty(
-    productType: PlayStoreProductType,
-    productIds: List<String>,
-  ): List<PlayBillingProductDetailsSnapshot> {
-    return runCatching {
-      queryProductDetails(productType, productIds)
-    }.getOrElse { error ->
-      NuxieLogger.debug("Play Billing ${productType.name.lowercase()} product metadata query failed: ${error.message}")
-      emptyList()
+    } catch (error: Throwable) {
+      NuxieLogger.debug("Play Billing product metadata setup failed: ${error.message}")
+      completeOnce(false)
     }
   }
 
@@ -100,6 +131,30 @@ internal class GooglePlayBillingProductService(
       }
     }
   }
+
+  private data class ProductDetailsQueryResult(
+    val products: List<PlayBillingProductDetailsSnapshot>,
+    val hadFailure: Boolean,
+  )
+
+  private suspend fun queryProductDetailsCollectingFailures(
+    productType: PlayStoreProductType,
+    productIds: List<String>,
+  ): ProductDetailsQueryResult {
+    var hadFailure = false
+    val products = productIds.chunked(MAX_PRODUCT_DETAILS_QUERY_PRODUCT_COUNT).flatMap { batch ->
+      val details = runCatching {
+        queryProductDetails(productType, batch)
+      }.getOrElse { error ->
+        hadFailure = true
+        NuxieLogger.debug("Play Billing ${productType.name.lowercase()} product metadata query failed: ${error.message}")
+        emptyList()
+      }
+      details
+    }
+    return ProductDetailsQueryResult(products = products, hadFailure = hadFailure)
+  }
+
 }
 
 private class PlayBillingProductQueryException(message: String) : Exception(message)

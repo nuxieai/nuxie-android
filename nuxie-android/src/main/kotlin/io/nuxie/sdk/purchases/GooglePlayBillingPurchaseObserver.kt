@@ -12,9 +12,15 @@ internal class GooglePlayBillingPurchaseObserver(
   private val scope: CoroutineScope,
   private val syncService: PurchaseSyncService,
   private val client: PlayBillingClient,
+  private val distinctIdProvider: () -> String,
   private val consumableProductIds: () -> Set<String>,
 ) {
-  private val syncedTokens = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+  private data class SyncedPurchaseKey(
+    val distinctId: String,
+    val purchaseToken: String,
+  )
+
+  private val syncedPurchases = Collections.newSetFromMap(ConcurrentHashMap<SyncedPurchaseKey, Boolean>())
   @Volatile private var started = false
   @Volatile private var connected = false
 
@@ -34,6 +40,7 @@ internal class GooglePlayBillingPurchaseObserver(
     started = true
     client.startConnection(
       onSetupFinished = { result ->
+        if (!started) return@startConnection
         if (result.responseCode == BillingClient.BillingResponseCode.OK) {
           connected = true
           queryCurrentPurchases()
@@ -71,6 +78,7 @@ internal class GooglePlayBillingPurchaseObserver(
       productType = PlayStoreProductType.SUBSCRIPTION,
       includeSuspendedSubscriptions = true,
     ) { result, purchases ->
+      if (!isActive()) return@queryPurchases
       if (result.responseCode == BillingClient.BillingResponseCode.OK) {
         processPurchases(purchases, productType = PlayStoreProductType.SUBSCRIPTION)
       } else {
@@ -82,6 +90,7 @@ internal class GooglePlayBillingPurchaseObserver(
       productType = PlayStoreProductType.ONE_TIME,
       includeSuspendedSubscriptions = false,
     ) { result, purchases ->
+      if (!isActive()) return@queryPurchases
       if (result.responseCode == BillingClient.BillingResponseCode.OK) {
         processPurchases(purchases, productType = PlayStoreProductType.ONE_TIME)
       } else {
@@ -91,6 +100,7 @@ internal class GooglePlayBillingPurchaseObserver(
   }
 
   internal fun onPurchasesUpdated(result: PlayBillingResult, purchases: List<PlayBillingPurchaseSnapshot>?) {
+    if (!isActive()) return
     if (result.responseCode != BillingClient.BillingResponseCode.OK || purchases == null) {
       if (result.responseCode != BillingClient.BillingResponseCode.USER_CANCELED) {
         NuxieLogger.debug("Play Billing purchase update ignored: ${result.debugMessage}")
@@ -105,6 +115,7 @@ internal class GooglePlayBillingPurchaseObserver(
     purchases: List<PlayBillingPurchaseSnapshot>,
     productType: PlayStoreProductType?,
   ) {
+    if (!isActive()) return
     for (purchase in purchases) {
       processPurchase(purchase, productType)
     }
@@ -114,6 +125,7 @@ internal class GooglePlayBillingPurchaseObserver(
     purchase: PlayBillingPurchaseSnapshot,
     productType: PlayStoreProductType?,
   ) {
+    if (!isActive()) return
     val token = purchase.purchaseToken.trim()
     if (token.isEmpty()) {
       return
@@ -124,21 +136,28 @@ internal class GooglePlayBillingPurchaseObserver(
       return
     }
 
-    if (!syncedTokens.add(token)) {
+    val distinctId = distinctIdProvider().trim()
+    val syncedKey = SyncedPurchaseKey(distinctId = distinctId, purchaseToken = token)
+    if (!syncedPurchases.add(syncedKey)) {
       return
     }
 
     val consumables = consumableProductIds()
     val normalizedProductIds = purchase.productIds.mapNotNull { it.trim().takeIf(String::isNotEmpty) }.distinct()
-    val resolvedProductType = productType ?: if (normalizedProductIds.any { it in consumables }) {
+    val allProductsAreConsumable = normalizedProductIds.isNotEmpty() && normalizedProductIds.all { it in consumables }
+    val resolvedProductType = productType ?: if (allProductsAreConsumable) {
       PlayStoreProductType.ONE_TIME
     } else {
       null
     }
-    val shouldConsume = resolvedProductType == PlayStoreProductType.ONE_TIME &&
-      normalizedProductIds.any { it in consumables }
+    val shouldConsume = resolvedProductType == PlayStoreProductType.ONE_TIME && allProductsAreConsumable
 
     scope.launch {
+      if (!isActive()) {
+        syncedPurchases.remove(syncedKey)
+        return@launch
+      }
+
       val response = runCatching {
         syncService.syncPlayStorePurchase(
           PlayStorePurchase(
@@ -149,25 +168,29 @@ internal class GooglePlayBillingPurchaseObserver(
             consumePurchase = shouldConsume,
             orderId = purchase.orderId,
             purchaseState = purchase.purchaseState,
+            distinctId = distinctId,
           )
         )
       }.getOrElse {
-        syncedTokens.remove(token)
+        syncedPurchases.remove(syncedKey)
         NuxieLogger.warning("Play Store purchase sync failed: ${it.message}")
         return@launch
       }
 
       if (!response.success) {
-        syncedTokens.remove(token)
+        syncedPurchases.remove(syncedKey)
       }
     }
   }
+
+  private fun isActive(): Boolean = started && connected
 
   companion object {
     fun create(
       context: Context,
       scope: CoroutineScope,
       syncService: PurchaseSyncService,
+      distinctIdProvider: () -> String,
       consumableProductIds: () -> Set<String>,
     ): GooglePlayBillingPurchaseObserver {
       val client = AndroidPlayBillingClient(context.applicationContext)
@@ -175,6 +198,7 @@ internal class GooglePlayBillingPurchaseObserver(
         scope = scope,
         syncService = syncService,
         client = client,
+        distinctIdProvider = distinctIdProvider,
         consumableProductIds = consumableProductIds,
       )
     }

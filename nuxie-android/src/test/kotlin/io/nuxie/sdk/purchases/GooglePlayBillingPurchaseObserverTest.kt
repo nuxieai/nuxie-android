@@ -30,10 +30,15 @@ class GooglePlayBillingPurchaseObserverTest {
   private class FakeBillingClient(
     private val subscriptionPurchases: List<PlayBillingPurchaseSnapshot> = emptyList(),
     private val oneTimePurchases: List<PlayBillingPurchaseSnapshot> = emptyList(),
+    private val autoCompleteQueries: Boolean = true,
   ) : PlayBillingClient {
     data class QueryCall(
       val productType: PlayStoreProductType,
       val includeSuspendedSubscriptions: Boolean,
+    )
+    private data class PendingQuery(
+      val productType: PlayStoreProductType,
+      val listener: (PlayBillingResult, List<PlayBillingPurchaseSnapshot>) -> Unit,
     )
 
     val queries = mutableListOf<QueryCall>()
@@ -43,6 +48,7 @@ class GooglePlayBillingPurchaseObserverTest {
       private set
     private var purchasesUpdatedListener: ((PlayBillingResult, List<PlayBillingPurchaseSnapshot>?) -> Unit)? = null
     private var disconnect: (() -> Unit)? = null
+    private val pendingQueries = mutableListOf<PendingQuery>()
 
     override fun setPurchasesUpdatedListener(
       listener: ((PlayBillingResult, List<PlayBillingPurchaseSnapshot>?) -> Unit)?,
@@ -76,6 +82,25 @@ class GooglePlayBillingPurchaseObserverTest {
       listener: (PlayBillingResult, List<PlayBillingPurchaseSnapshot>) -> Unit,
     ) {
       queries += QueryCall(productType, includeSuspendedSubscriptions)
+      if (!autoCompleteQueries) {
+        pendingQueries += PendingQuery(productType, listener)
+        return
+      }
+      completeQuery(productType, listener)
+    }
+
+    fun completePendingQueries() {
+      val queries = pendingQueries.toList()
+      pendingQueries.clear()
+      for (query in queries) {
+        completeQuery(query.productType, query.listener)
+      }
+    }
+
+    private fun completeQuery(
+      productType: PlayStoreProductType,
+      listener: (PlayBillingResult, List<PlayBillingPurchaseSnapshot>) -> Unit,
+    ) {
       val purchases = when (productType) {
         PlayStoreProductType.SUBSCRIPTION -> subscriptionPurchases
         PlayStoreProductType.ONE_TIME -> oneTimePurchases
@@ -229,6 +254,62 @@ class GooglePlayBillingPurchaseObserverTest {
   }
 
   @Test
+  fun one_time_purchase_with_mixed_consumable_and_non_consumable_products_is_not_consumed() = runTest {
+    val mixedPurchase = PlayBillingPurchaseSnapshot(
+      purchaseToken = "token_mixed_cart_001",
+      productIds = listOf("coins_100", "lifetime_unlock"),
+      packageName = "io.nuxie.example",
+      orderId = "GPA.5555-6666-7777-88888",
+      purchaseState = PlayStorePurchaseState.PURCHASED,
+    )
+    val client = FakeBillingClient(oneTimePurchases = listOf(mixedPurchase))
+    val api = FakeApi()
+    val observer = newObserver(
+      scope = this,
+      client = client,
+      api = api,
+      consumables = setOf("coins_100"),
+    )
+
+    observer.start()
+    advanceUntilIdle()
+
+    val request = api.requests.single()
+    assertNull(request.productId)
+    assertEquals(PlayStoreProductType.ONE_TIME, request.productType)
+    assertNull(request.consumePurchase)
+  }
+
+  @Test
+  fun query_callbacks_after_stop_do_not_sync_purchases() = runTest {
+    val purchase = PlayBillingPurchaseSnapshot(
+      purchaseToken = "token_sub_001",
+      productIds = listOf("pro_monthly"),
+      packageName = "io.nuxie.example",
+      orderId = "GPA.1111-2222-3333-44444",
+      purchaseState = PlayStorePurchaseState.PURCHASED,
+    )
+    val client = FakeBillingClient(
+      subscriptionPurchases = listOf(purchase),
+      autoCompleteQueries = false,
+    )
+    val api = FakeApi()
+    val observer = newObserver(
+      scope = this,
+      client = client,
+      api = api,
+      consumables = emptySet(),
+    )
+
+    observer.start()
+    observer.stop()
+    client.completePendingQueries()
+    advanceUntilIdle()
+
+    assertEquals(0, api.requests.size)
+  }
+
+  @Test
   fun refreshPurchases_queries_owned_purchases_again_without_reconnecting_when_connected() = runTest {
     val subscription = PlayBillingPurchaseSnapshot(
       purchaseToken = "token_sub_001",
@@ -310,6 +391,7 @@ class GooglePlayBillingPurchaseObserverTest {
       consumables = emptySet(),
     )
 
+    observer.start()
     observer.onPurchasesUpdated(
       PlayBillingResult(BillingClient.BillingResponseCode.OK, "OK"),
       listOf(
@@ -337,6 +419,7 @@ class GooglePlayBillingPurchaseObserverTest {
       consumables = emptySet(),
     )
 
+    observer.start()
     observer.onPurchasesUpdated(
       PlayBillingResult(BillingClient.BillingResponseCode.OK, "OK"),
       listOf(
@@ -358,13 +441,49 @@ class GooglePlayBillingPurchaseObserverTest {
     assertNull(api.requests.single().consumePurchase)
   }
 
+  @Test
+  fun purchase_update_syncs_same_token_again_after_identity_changes() = runTest {
+    val identity = DefaultIdentityService(InMemoryKeyValueStore()).also { it.setDistinctId("user_123") }
+    val api = FakeApi()
+    val observer = newObserver(
+      scope = this,
+      client = FakeBillingClient(),
+      api = api,
+      consumables = emptySet(),
+      identity = identity,
+    )
+    val purchase = PlayBillingPurchaseSnapshot(
+      purchaseToken = "token_sub_001",
+      productIds = listOf("pro_monthly"),
+      packageName = "io.nuxie.example",
+      orderId = "GPA.1111-2222-3333-44444",
+      purchaseState = PlayStorePurchaseState.PURCHASED,
+    )
+
+    observer.start()
+    observer.onPurchasesUpdated(
+      PlayBillingResult(BillingClient.BillingResponseCode.OK, "OK"),
+      listOf(purchase),
+    )
+    advanceUntilIdle()
+
+    identity.setDistinctId("user_456")
+    observer.onPurchasesUpdated(
+      PlayBillingResult(BillingClient.BillingResponseCode.OK, "OK"),
+      listOf(purchase),
+    )
+    advanceUntilIdle()
+
+    assertEquals(listOf("user_123", "user_456"), api.requests.map { it.distinctId })
+  }
+
   private fun newObserver(
     scope: CoroutineScope,
     client: PlayBillingClient,
     api: FakeApi,
     consumables: Set<String>,
+    identity: DefaultIdentityService = DefaultIdentityService(InMemoryKeyValueStore()).also { it.setDistinctId("user_123") },
   ): GooglePlayBillingPurchaseObserver {
-    val identity = DefaultIdentityService(InMemoryKeyValueStore()).also { it.setDistinctId("user_123") }
     val syncService = PurchaseSyncService(
       api = api,
       identityService = identity,
@@ -374,6 +493,7 @@ class GooglePlayBillingPurchaseObserverTest {
       scope = scope,
       syncService = syncService,
       client = client,
+      distinctIdProvider = { identity.getDistinctId() },
       consumableProductIds = { consumables },
     )
   }

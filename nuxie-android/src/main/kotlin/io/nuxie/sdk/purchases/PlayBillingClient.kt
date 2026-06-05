@@ -77,24 +77,35 @@ internal interface PlayBillingClient {
   )
 }
 
-internal class AndroidPlayBillingClient(
-  context: Context,
-) : PlayBillingClient {
+internal class AndroidPlayBillingClient : PlayBillingClient {
   @Volatile
   private var purchasesUpdatedListener: ((PlayBillingResult, List<PlayBillingPurchaseSnapshot>?) -> Unit)? = null
 
-  private val billingClient: BillingClient = BillingClient.newBuilder(context)
-    .setListener { result, purchases ->
-      purchasesUpdatedListener?.invoke(result.toPlayBillingResult(), purchases?.map { it.toSnapshot() })
-    }
-    .enablePendingPurchases(
-      PendingPurchasesParams.newBuilder()
-        .enableOneTimeProducts()
-        .enablePrepaidPlans()
-        .build()
-    )
-    .enableAutoServiceReconnection()
-    .build()
+  private val connectionLock = Any()
+  private var connectionInFlight = false
+  private val setupCallbacks = mutableListOf<(PlayBillingResult) -> Unit>()
+  private val disconnectionCallbacks = mutableListOf<() -> Unit>()
+
+  private val billingClient: BillingClient
+
+  constructor(context: Context) {
+    billingClient = BillingClient.newBuilder(context)
+      .setListener { result, purchases ->
+        purchasesUpdatedListener?.invoke(result.toPlayBillingResult(), purchases?.map { it.toSnapshot() })
+      }
+      .enablePendingPurchases(
+        PendingPurchasesParams.newBuilder()
+          .enableOneTimeProducts()
+          .enablePrepaidPlans()
+          .build()
+      )
+      .enableAutoServiceReconnection()
+      .build()
+  }
+
+  internal constructor(billingClient: BillingClient) {
+    this.billingClient = billingClient
+  }
 
   override val isReady: Boolean
     get() = billingClient.isReady
@@ -109,26 +120,97 @@ internal class AndroidPlayBillingClient(
     onSetupFinished: (PlayBillingResult) -> Unit,
     onDisconnected: () -> Unit,
   ) {
-    if (billingClient.isReady) {
-      onSetupFinished(PlayBillingResult(BillingClient.BillingResponseCode.OK, "Billing service ready"))
+    var readyResult: PlayBillingResult? = null
+    var shouldStart = false
+    synchronized(connectionLock) {
+      disconnectionCallbacks += onDisconnected
+      if (billingClient.isReady) {
+        readyResult = PlayBillingResult(BillingClient.BillingResponseCode.OK, "Billing service ready")
+      } else {
+        setupCallbacks += onSetupFinished
+        if (!connectionInFlight) {
+          connectionInFlight = true
+          shouldStart = true
+        }
+      }
+    }
+
+    readyResult?.let {
+      onSetupFinished(it)
       return
     }
 
-    billingClient.startConnection(
-      object : BillingClientStateListener {
-        override fun onBillingSetupFinished(billingResult: BillingResult) {
-          onSetupFinished(billingResult.toPlayBillingResult())
-        }
+    if (!shouldStart) return
 
-        override fun onBillingServiceDisconnected() {
-          onDisconnected()
+    try {
+      billingClient.startConnection(
+        object : BillingClientStateListener {
+          override fun onBillingSetupFinished(billingResult: BillingResult) {
+            finishSetup(billingResult.toPlayBillingResult())
+          }
+
+          override fun onBillingServiceDisconnected() {
+            notifyDisconnected()
+          }
         }
-      }
-    )
+      )
+    } catch (error: Throwable) {
+      finishSetup(
+        PlayBillingResult(
+          responseCode = BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE,
+          debugMessage = "Play Billing connection failed: ${error.message}",
+        )
+      )
+    }
   }
 
   override fun endConnection() {
-    billingClient.endConnection()
+    val pendingSetup = synchronized(connectionLock) {
+      connectionInFlight = false
+      val pending = setupCallbacks.toList()
+      setupCallbacks.clear()
+      disconnectionCallbacks.clear()
+      pending
+    }
+    val closedResult = PlayBillingResult(
+      responseCode = BillingClient.BillingResponseCode.SERVICE_DISCONNECTED,
+      debugMessage = "Billing connection closed",
+    )
+    try {
+      billingClient.endConnection()
+    } finally {
+      pendingSetup.forEach { it(closedResult) }
+    }
+  }
+
+  private fun finishSetup(result: PlayBillingResult) {
+    val callbacks = synchronized(connectionLock) {
+      connectionInFlight = false
+      val pending = setupCallbacks.toList()
+      setupCallbacks.clear()
+      if (result.responseCode != BillingClient.BillingResponseCode.OK) {
+        disconnectionCallbacks.clear()
+      }
+      pending
+    }
+    callbacks.forEach { it(result) }
+  }
+
+  private fun notifyDisconnected() {
+    val setupResult = PlayBillingResult(
+      responseCode = BillingClient.BillingResponseCode.SERVICE_DISCONNECTED,
+      debugMessage = "Billing service disconnected",
+    )
+    val (setup, disconnected) = synchronized(connectionLock) {
+      connectionInFlight = false
+      val setup = setupCallbacks.toList()
+      val disconnected = disconnectionCallbacks.toList()
+      setupCallbacks.clear()
+      disconnectionCallbacks.clear()
+      setup to disconnected
+    }
+    setup.forEach { it(setupResult) }
+    disconnected.forEach { it() }
   }
 
   override fun queryPurchases(

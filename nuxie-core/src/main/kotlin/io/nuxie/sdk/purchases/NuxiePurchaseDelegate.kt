@@ -29,14 +29,29 @@ sealed class PurchaseResult {
 data class PurchaseOutcome(
   val result: PurchaseResult,
   val productId: String? = null,
+  val purchaseToken: String? = null,
+  val orderId: String? = null,
+) {
   /**
    * Optional Play Store purchase metadata. When present on a successful outcome,
    * the SDK syncs the purchase token with Nuxie before confirming the flow purchase.
    */
-  val playStorePurchase: PlayStorePurchase? = null,
-  val purchaseToken: String? = null,
-  val orderId: String? = null,
-)
+  var playStorePurchase: PlayStorePurchase? = null
+    private set
+
+  constructor(
+    result: PurchaseResult,
+    productId: String?,
+    playStorePurchase: PlayStorePurchase,
+  ) : this(
+    result = result,
+    productId = productId,
+    purchaseToken = null,
+    orderId = null,
+  ) {
+    this.playStorePurchase = playStorePurchase
+  }
+}
 
 enum class PlayStorePurchaseState {
   UNSPECIFIED,

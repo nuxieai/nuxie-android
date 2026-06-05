@@ -51,22 +51,35 @@ class PurchaseSyncService(
       return response
     }
 
-    response.features?.let { featureService.updateFromPurchase(it) }
-    eventService?.track(
-      "\$purchase_synced",
-      properties = buildMap {
-        put("provider", "playstore")
-        put("product_id", productId ?: "")
-        put("product_ids", purchase.productIds)
-        put("product_type", purchase.productType?.wireValue ?: "")
-        put("package_name", request.packageName ?: "")
-        put("base_plan_id", request.basePlanId ?: "")
-        put("order_id", purchase.orderId ?: "")
-        put("customer_id", response.customerId ?: "")
-      },
-    )
+    if (isCurrentDistinctId(distinctId)) {
+      response.features?.let { featureService.updateFromPurchase(it) }
+      runCatching {
+        eventService?.track(
+          "\$purchase_synced",
+          properties = buildMap {
+            put("provider", "playstore")
+            put("product_id", productId ?: "")
+            put("product_ids", purchase.productIds)
+            put("product_type", purchase.productType?.wireValue ?: "")
+            put("package_name", request.packageName ?: "")
+            put("base_plan_id", request.basePlanId ?: "")
+            put("order_id", purchase.orderId ?: "")
+            put("customer_id", response.customerId ?: "")
+          },
+        )
+      }.onFailure { error ->
+        NuxieLogger.warning("Failed to track Play Store purchase sync: ${error.message}", error)
+      }
+    } else {
+      NuxieLogger.debug("Skipping local Play Store purchase side effects for stale distinct id")
+    }
 
     return response
+  }
+
+  private fun isCurrentDistinctId(syncedDistinctId: String?): Boolean {
+    val currentDistinctId = identityService.getDistinctId().trimToNull()
+    return syncedDistinctId == null || syncedDistinctId == currentDistinctId
   }
 }
 

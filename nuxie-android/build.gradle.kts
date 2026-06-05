@@ -49,6 +49,6 @@ dependencies {
   testImplementation("junit:junit:4.13.2")
   testImplementation("androidx.test:core:1.6.1")
   testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
-  testImplementation("org.robolectric:robolectric:4.13")
+  testImplementation("org.robolectric:robolectric:4.16.1")
   testImplementation("androidx.room:room-testing:2.6.1")
 }

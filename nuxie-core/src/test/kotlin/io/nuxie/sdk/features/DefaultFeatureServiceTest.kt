@@ -14,6 +14,7 @@ import io.nuxie.sdk.util.Clock
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -67,7 +68,7 @@ class DefaultFeatureServiceTest {
   }
 
   private class FakeProfileService(
-    private val profile: ProfileResponse?,
+    var profile: ProfileResponse?,
   ) : ProfileService {
     override suspend fun fetchProfile(distinctId: String): ProfileResponse = throw UnsupportedOperationException()
     override suspend fun getCachedProfile(distinctId: String): ProfileResponse? = profile
@@ -302,7 +303,7 @@ class DefaultFeatureServiceTest {
     service.updateFromPurchase(
       listOf(
         PurchaseFeature(
-          id = "pro",
+          id = "feature_internal_pro",
           extId = "pro",
           type = FeatureType.BOOLEAN,
           allowed = true,
@@ -313,6 +314,205 @@ class DefaultFeatureServiceTest {
     )
 
     assertTrue(info.feature("pro")!!.allowed)
+    assertNull(info.feature("feature_internal_pro"))
+    assertTrue(service.getCached("pro")!!.allowed)
+    assertNull(service.getCached("feature_internal_pro"))
     assertEquals(10, info.feature("credits")!!.balance)
+  }
+
+  @Test
+  fun updateFromPurchase_overrides_stale_profile_and_realtime_feature_caches() = runTest {
+    val identity = DefaultIdentityService(InMemoryKeyValueStore()).also { it.setDistinctId("u") }
+    val staleProfile = ProfileResponse(
+      campaigns = emptyList(),
+      segments = emptyList(),
+      flows = emptyList(),
+      features = listOf(
+        Feature(
+          id = "credits",
+          type = FeatureType.METERED,
+          balance = 0,
+          unlimited = false,
+        ),
+      ),
+    )
+    val profileService = FakeProfileService(staleProfile)
+    val api = FakeApi {
+      FeatureCheckResult(
+        customerId = "u",
+        featureId = "credits",
+        requiredBalance = 1,
+        code = "feature_denied",
+        allowed = false,
+        unlimited = false,
+        balance = 0,
+        type = FeatureType.METERED,
+      )
+    }
+    val info = FeatureInfo()
+    val service = DefaultFeatureService(
+      api = api,
+      identityService = identity,
+      profileService = profileService,
+      configuration = NuxieConfiguration(apiKey = "k"),
+      featureInfo = info,
+      clock = FakeClock(0),
+    )
+
+    val denied = service.checkWithCache("credits", requiredBalance = 1)
+    assertFalse(denied.allowed)
+    assertEquals(1, api.checkCalls)
+
+    service.updateFromPurchase(
+      listOf(
+        PurchaseFeature(
+          id = "credits",
+          extId = "credits",
+          type = FeatureType.METERED,
+          allowed = true,
+          balance = 10,
+          unlimited = false,
+        )
+      )
+    )
+
+    val purchased = service.checkWithCache("credits", requiredBalance = 1)
+    assertTrue(purchased.allowed)
+    assertEquals(10, purchased.balance)
+    assertEquals(1, api.checkCalls)
+
+    service.syncFeatureInfo()
+    assertTrue(info.feature("credits")!!.allowed)
+    assertEquals(10, info.feature("credits")!!.balance)
+
+    val stillPurchased = service.checkWithCache("credits", requiredBalance = 1)
+    assertTrue(stillPurchased.allowed)
+    assertEquals(1, api.checkCalls)
+
+    profileService.profile = staleProfile.copy(
+      features = listOf(
+        Feature(
+          id = "credits",
+          type = FeatureType.METERED,
+          balance = 10,
+          unlimited = false,
+        )
+      )
+    )
+    service.syncFeatureInfo()
+    assertTrue(info.feature("credits")!!.allowed)
+    assertEquals(10, info.feature("credits")!!.balance)
+
+    profileService.profile = staleProfile
+    service.syncFeatureInfo()
+    assertFalse(info.feature("credits")!!.allowed)
+    assertEquals(0, info.feature("credits")!!.balance)
+  }
+
+  @Test
+  fun syncFeatureInfoFromProfileRefresh_replaces_purchase_override_with_lower_metered_balance() = runTest {
+    val identity = DefaultIdentityService(InMemoryKeyValueStore()).also { it.setDistinctId("u") }
+    val profileService = FakeProfileService(
+      ProfileResponse(
+        campaigns = emptyList(),
+        segments = emptyList(),
+        flows = emptyList(),
+        features = listOf(
+          Feature(
+            id = "credits",
+            type = FeatureType.METERED,
+            balance = 0,
+            unlimited = false,
+          ),
+        ),
+      )
+    )
+    val info = FeatureInfo()
+    val service = DefaultFeatureService(
+      api = FakeApi { throw AssertionError("should not call network") },
+      identityService = identity,
+      profileService = profileService,
+      configuration = NuxieConfiguration(apiKey = "k"),
+      featureInfo = info,
+      clock = FakeClock(0),
+    )
+
+    service.updateFromPurchase(
+      listOf(
+        PurchaseFeature(
+          id = "credits",
+          extId = "credits",
+          type = FeatureType.METERED,
+          allowed = true,
+          balance = 10,
+          unlimited = false,
+        )
+      )
+    )
+
+    service.syncFeatureInfo()
+    assertTrue(info.feature("credits")!!.allowed)
+    assertEquals(10, info.feature("credits")!!.balance)
+
+    profileService.profile = profileService.profile!!.copy(
+      features = listOf(
+        Feature(
+          id = "credits",
+          type = FeatureType.METERED,
+          balance = 4,
+          unlimited = false,
+        )
+      )
+    )
+
+    service.syncFeatureInfoFromProfileRefresh()
+
+    assertTrue(info.feature("credits")!!.allowed)
+    assertEquals(4, info.feature("credits")!!.balance)
+    assertEquals(4, service.getCached("credits")!!.balance)
+  }
+
+  @Test
+  fun syncFeatureInfoFromProfileRefresh_clears_purchase_override_when_feature_is_missing() = runTest {
+    val identity = DefaultIdentityService(InMemoryKeyValueStore()).also { it.setDistinctId("u") }
+    val profileService = FakeProfileService(
+      ProfileResponse(
+        campaigns = emptyList(),
+        segments = emptyList(),
+        flows = emptyList(),
+        features = emptyList(),
+      )
+    )
+    val info = FeatureInfo()
+    val service = DefaultFeatureService(
+      api = FakeApi { throw AssertionError("should not call network") },
+      identityService = identity,
+      profileService = profileService,
+      configuration = NuxieConfiguration(apiKey = "k"),
+      featureInfo = info,
+      clock = FakeClock(0),
+    )
+
+    service.updateFromPurchase(
+      listOf(
+        PurchaseFeature(
+          id = "feature_internal_pro",
+          extId = "pro",
+          type = FeatureType.BOOLEAN,
+          allowed = true,
+          balance = null,
+          unlimited = false,
+        )
+      )
+    )
+
+    service.syncFeatureInfo()
+    assertTrue(info.feature("pro")!!.allowed)
+    assertTrue(service.getCached("pro")!!.allowed)
+
+    service.syncFeatureInfoFromProfileRefresh()
+
+    assertNull(info.feature("pro"))
+    assertNull(service.getCached("pro"))
   }
 }
