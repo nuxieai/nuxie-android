@@ -5,6 +5,11 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 /**
  * Cache + fetch for Flow models.
@@ -12,12 +17,10 @@ import kotlinx.coroutines.sync.withLock
  * Mirrors iOS `FlowStore` behavior:
  * - in-memory cache of enriched `Flow` models
  * - concurrent fetch de-duping per flow id
- *
- * Note: Android product enrichment (Play Billing) is not implemented yet, so
- * this currently returns `Flow(remoteFlow, products=[])`.
  */
 class FlowStore(
   private val api: NuxieApiProtocol,
+  private val productService: FlowProductService = NoopFlowProductService,
 ) {
   private val mutex = Mutex()
   private val cachedById = mutableMapOf<String, Flow>()
@@ -50,7 +53,7 @@ class FlowStore(
     if (shouldFetch) {
       try {
         val remote = api.fetchFlow(flowId = id)
-        val flow = Flow(remoteFlow = remote)
+        val flow = enrichFlow(remote)
         mutex.withLock { cachedById[id] = flow }
         deferred.complete(flow)
       } catch (t: Throwable) {
@@ -69,9 +72,10 @@ class FlowStore(
    */
   suspend fun preloadFlows(remoteFlows: List<RemoteFlow>) {
     if (remoteFlows.isEmpty()) return
+    val flows = remoteFlows.map { enrichFlow(it) }
     mutex.withLock {
-      for (rf in remoteFlows) {
-        cachedById[rf.id] = Flow(remoteFlow = rf)
+      for (flow in flows) {
+        cachedById[flow.id] = flow
       }
     }
   }
@@ -92,5 +96,135 @@ class FlowStore(
       pendingById.clear()
     }
   }
-}
 
+  private suspend fun enrichFlow(remoteFlow: RemoteFlow): Flow {
+    val productIds = extractProductIds(remoteFlow)
+    val products = if (productIds.isEmpty()) {
+      emptyList()
+    } else {
+      productService.fetchProducts(productIds)
+    }
+
+    return Flow(remoteFlow = remoteFlow, products = products)
+  }
+
+  private fun extractProductIds(remoteFlow: RemoteFlow): Set<String> {
+    val ids = linkedSetOf<String>()
+    val viewModelsById = remoteFlow.viewModels.associateBy { it.id }
+    val instancesByViewModel = remoteFlow.viewModelInstances.orEmpty().groupBy { it.viewModelId }
+
+    for (viewModel in remoteFlow.viewModels) {
+      val instances = instancesByViewModel[viewModel.id].orEmpty()
+      if (instances.isEmpty()) {
+        collectProductIdsFromSchema(
+          schema = viewModel.properties,
+          values = emptyMap(),
+          viewModelsById = viewModelsById,
+          ids = ids,
+          path = emptyList(),
+        )
+      } else {
+        for (instance in instances) {
+          collectProductIdsFromSchema(
+            schema = viewModel.properties,
+            values = instance.values,
+            viewModelsById = viewModelsById,
+            ids = ids,
+            path = emptyList(),
+          )
+        }
+      }
+    }
+
+    return ids
+  }
+
+  private fun collectProductIdsFromSchema(
+    schema: Map<String, ViewModelProperty>,
+    values: Map<String, JsonElement>,
+    viewModelsById: Map<String, ViewModel>,
+    ids: MutableSet<String>,
+    path: List<String>,
+  ) {
+    for ((name, property) in schema) {
+      val hasInstanceValue = values.containsKey(name)
+      val value = if (hasInstanceValue) values[name] else property.defaultValue
+      collectProductIdsFromProperty(
+        property = property,
+        value = value,
+        viewModelsById = viewModelsById,
+        ids = ids,
+        path = path + name,
+      )
+    }
+  }
+
+  private fun collectProductIdsFromProperty(
+    property: ViewModelProperty,
+    value: JsonElement?,
+    viewModelsById: Map<String, ViewModel>,
+    ids: MutableSet<String>,
+    path: List<String>,
+  ) {
+    if (path.lastOrNull() == "productId") {
+      extractProductId(value)?.let(ids::add)
+    }
+
+    when (property.type) {
+      ViewModelPropertyType.OBJECT -> {
+        val objectValue = value as? JsonObject
+        val nestedSchema = property.schema.orEmpty()
+        collectProductIdsFromSchema(
+          schema = nestedSchema,
+          values = objectValue?.toMap().orEmpty(),
+          viewModelsById = viewModelsById,
+          ids = ids,
+          path = path,
+        )
+      }
+      ViewModelPropertyType.VIEW_MODEL -> {
+        val viewModel = property.viewModelId?.let(viewModelsById::get) ?: return
+        val objectValue = value as? JsonObject
+        if (objectValue == null || objectValue.containsKey("vmInstanceId")) return
+        collectProductIdsFromSchema(
+          schema = viewModel.properties,
+          values = objectValue.toMap(),
+          viewModelsById = viewModelsById,
+          ids = ids,
+          path = path,
+        )
+      }
+      ViewModelPropertyType.LIST -> {
+        val itemProperty = property.itemType ?: return
+        val arrayValue = value as? JsonArray ?: return
+        for (item in arrayValue) {
+          collectProductIdsFromProperty(
+            property = itemProperty,
+            value = item,
+            viewModelsById = viewModelsById,
+            ids = ids,
+            path = path,
+          )
+        }
+      }
+      else -> Unit
+    }
+  }
+
+  private fun extractProductId(value: JsonElement?): String? {
+    return when (value) {
+      is JsonPrimitive -> value.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
+      is JsonObject -> {
+        val productId = (value["productId"] as? JsonPrimitive)
+          ?.contentOrNull
+          ?.trim()
+          ?.takeIf(String::isNotEmpty)
+        productId ?: (value["id"] as? JsonPrimitive)
+          ?.contentOrNull
+          ?.trim()
+          ?.takeIf(String::isNotEmpty)
+      }
+      else -> null
+    }
+  }
+}

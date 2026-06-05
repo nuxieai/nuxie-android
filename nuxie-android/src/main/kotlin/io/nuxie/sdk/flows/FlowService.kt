@@ -23,8 +23,9 @@ class FlowService(
   private val configuration: NuxieConfiguration,
   private val scope: CoroutineScope,
   cacheDirectory: File,
+  productService: FlowProductService = NoopFlowProductService,
 ) {
-  private val flowStore = FlowStore(api)
+  private val flowStore = FlowStore(api, productService = productService)
 
   private val bundleStore = FlowBundleStore(
     cacheDirectory = File(cacheDirectory, "nuxie_flows"),
