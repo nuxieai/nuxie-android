@@ -22,7 +22,9 @@ import io.nuxie.sdk.features.FeatureService
 import io.nuxie.sdk.features.FeatureUsageResult
 import io.nuxie.sdk.flows.FlowService
 import io.nuxie.sdk.flows.FlowColorSchemeMode
+import io.nuxie.sdk.flows.FlowProductService
 import io.nuxie.sdk.flows.FlowView
+import io.nuxie.sdk.flows.NoopFlowProductService
 import io.nuxie.sdk.flows.NuxieFlowActivity
 import io.nuxie.sdk.flows.RemoteFlow
 import io.nuxie.sdk.gating.GatePlan
@@ -49,6 +51,7 @@ import io.nuxie.sdk.purchases.GooglePlayBillingProductService
 import io.nuxie.sdk.purchases.GooglePlayBillingPurchaseObserver
 import io.nuxie.sdk.purchases.PlayStorePurchase
 import io.nuxie.sdk.purchases.PlayBillingClient
+import io.nuxie.sdk.purchases.PlayStoreProductType
 import io.nuxie.sdk.purchases.PurchaseSyncService
 import io.nuxie.sdk.segments.FileSegmentMembershipStore
 import io.nuxie.sdk.segments.SegmentService
@@ -274,7 +277,11 @@ class NuxieSDK private constructor() {
       featureService = features,
       eventService = events,
     )
-    val billingClient = AndroidPlayBillingClient(appContext)
+    val billingClient = if (configuration.enablePlayStorePurchaseSync) {
+      AndroidPlayBillingClient(appContext)
+    } else {
+      null
+    }
     playBillingClient = billingClient
 
     val flowCacheBaseDir = configuration.customStoragePath?.let { File(it) } ?: appContext.cacheDir
@@ -283,7 +290,7 @@ class NuxieSDK private constructor() {
       configuration = configuration,
       scope = sdkScope,
       cacheDirectory = flowCacheBaseDir,
-      productService = GooglePlayBillingProductService(billingClient),
+      productService = playStoreFlowProductService(billingClient),
     )
 
     val runtime = IRRuntime()
@@ -455,6 +462,7 @@ class NuxieSDK private constructor() {
         runCatching { journeys.resumeFromServerState(activeJourneys, campaigns = nextProfile.campaigns) }
       }
 
+      runCatching { features.syncFeatureInfoFromProfileRefresh() }
       runCatching { syncFlows(nextProfile.flows, previousProfile?.flows) }
     }
 
@@ -472,11 +480,12 @@ class NuxieSDK private constructor() {
     this.irRuntime = runtime
     this.purchaseSyncService = purchases
 
-    if (configuration.enablePlayStorePurchaseSync) {
+    if (billingClient != null) {
       playBillingObserver = GooglePlayBillingPurchaseObserver(
         scope = sdkScope,
         syncService = purchases,
         client = billingClient,
+        distinctIdProvider = { requireNotNull(identityService).getDistinctId() },
         consumableProductIds = {
           configuration.consumablePlayStoreProductIds
             .mapNotNull { it.trim().takeIf(String::isNotEmpty) }
@@ -829,6 +838,7 @@ class NuxieSDK private constructor() {
         featureService?.handleUserChange(fromOldDistinctId = oldDistinctId, toNewDistinctId = currentDistinctId)
         segmentService?.handleUserChange(fromOldDistinctId = oldDistinctId, toNewDistinctId = currentDistinctId)
         journeyService?.handleUserChange(fromOldDistinctId = oldDistinctId, toNewDistinctId = currentDistinctId)
+        playBillingObserver?.refreshPurchases()
       }
     }
 
@@ -875,6 +885,7 @@ class NuxieSDK private constructor() {
       featureService?.handleUserChange(fromOldDistinctId = prevDistinctId, toNewDistinctId = newDistinctId)
       segmentService?.handleUserChange(fromOldDistinctId = prevDistinctId, toNewDistinctId = newDistinctId)
       journeyService?.handleUserChange(fromOldDistinctId = prevDistinctId, toNewDistinctId = newDistinctId)
+      playBillingObserver?.refreshPurchases()
       flowService?.clearCache()
     }
   }
@@ -1000,7 +1011,7 @@ class NuxieSDK private constructor() {
     val profile = profileService ?: throw NuxieError.NotConfigured
     val features = featureService ?: throw NuxieError.NotConfigured
     val res = profile.refetchProfile()
-    features.syncFeatureInfo()
+    features.syncFeatureInfoFromProfileRefresh()
     return res
   }
 
@@ -1080,9 +1091,11 @@ class NuxieSDK private constructor() {
   }
 
   suspend fun syncPlayStorePurchase(purchase: PlayStorePurchase): PurchaseResponse {
-    if (!isSetup) throw NuxieError.NotConfigured
+    val config = configuration ?: throw NuxieError.NotConfigured
     val service = purchaseSyncService ?: throw NuxieError.NotConfigured
-    return service.syncPlayStorePurchase(purchase)
+    return service.syncPlayStorePurchase(
+      purchase.normalizedForConfiguredConsumables(config.consumablePlayStoreProductIds)
+    )
   }
 
   internal fun refreshPlayStorePurchases() {
@@ -1165,6 +1178,33 @@ class NuxieSDK private constructor() {
       },
     )
   }
+}
+
+internal fun playStoreFlowProductService(
+  billingClient: PlayBillingClient?,
+): FlowProductService {
+  return if (billingClient != null) {
+    GooglePlayBillingProductService(billingClient)
+  } else {
+    NoopFlowProductService
+  }
+}
+
+private fun PlayStorePurchase.normalizedForConfiguredConsumables(
+  configuredConsumableProductIds: Set<String>,
+): PlayStorePurchase {
+  val consumables = configuredConsumableProductIds
+    .mapNotNull { it.trim().takeIf(String::isNotEmpty) }
+    .toSet()
+  if (consumables.isEmpty()) return this
+
+  val normalizedProductIds = productIds.mapNotNull { it.trim().takeIf(String::isNotEmpty) }
+  if (normalizedProductIds.isEmpty() || normalizedProductIds.any { it !in consumables }) return this
+
+  return copy(
+    productType = PlayStoreProductType.ONE_TIME,
+    consumePurchase = true,
+  )
 }
 
 private class AndroidLogcatSink : NuxieLogSink {

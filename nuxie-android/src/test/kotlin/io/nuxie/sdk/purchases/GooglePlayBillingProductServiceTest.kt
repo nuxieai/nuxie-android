@@ -3,16 +3,23 @@ package io.nuxie.sdk.purchases
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.ProductDetails
 import io.nuxie.sdk.flows.FlowProduct
+import io.nuxie.sdk.flows.FlowProductFetchException
 import io.nuxie.sdk.flows.ProductPeriod
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.fail
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class GooglePlayBillingProductServiceTest {
   private class FakeBillingClient(
     private val setupResult: PlayBillingResult = PlayBillingResult(BillingClient.BillingResponseCode.OK, "OK"),
     private val productsByType: Map<PlayStoreProductType, List<PlayBillingProductDetailsSnapshot>> = emptyMap(),
     private val queryResultsByType: Map<PlayStoreProductType, PlayBillingResult> = emptyMap(),
+    private val autoCompleteSetup: Boolean = true,
   ) : PlayBillingClient {
     data class ProductQuery(
       val productType: PlayStoreProductType,
@@ -25,6 +32,7 @@ class GooglePlayBillingProductServiceTest {
     val productQueries = mutableListOf<ProductQuery>()
     var startConnectionCalls = 0
     var ended = false
+    private var pendingSetupFinished: ((PlayBillingResult) -> Unit)? = null
 
     override fun setPurchasesUpdatedListener(
       listener: ((PlayBillingResult, List<PlayBillingPurchaseSnapshot>?) -> Unit)?,
@@ -36,8 +44,18 @@ class GooglePlayBillingProductServiceTest {
       onDisconnected: () -> Unit,
     ) {
       startConnectionCalls += 1
-      isReady = setupResult.responseCode == BillingClient.BillingResponseCode.OK
-      onSetupFinished(setupResult)
+      if (autoCompleteSetup) {
+        isReady = setupResult.responseCode == BillingClient.BillingResponseCode.OK
+        onSetupFinished(setupResult)
+      } else {
+        pendingSetupFinished = onSetupFinished
+      }
+    }
+
+    fun completeSetup(result: PlayBillingResult = setupResult) {
+      isReady = result.responseCode == BillingClient.BillingResponseCode.OK
+      pendingSetupFinished?.invoke(result)
+      pendingSetupFinished = null
     }
 
     override fun endConnection() {
@@ -198,16 +216,100 @@ class GooglePlayBillingProductServiceTest {
   }
 
   @Test
-  fun fetchProducts_returns_empty_when_billing_setup_fails() = runTest {
+  fun fetchProducts_chunks_product_detail_queries_at_play_billing_limit() = runTest {
+    val productIds = (1..21).map { "pro_$it" }
+    val subscriptions = productIds.mapIndexed { index, productId ->
+      subscriptionDetails(
+        productId = productId,
+        name = "Pro $index",
+        phases = listOf(
+          pricingPhase(
+            formattedPrice = "\$${index + 1}.99",
+            priceAmountMicros = (index + 1) * 1_000_000L,
+            billingPeriod = "P1M",
+            recurrenceMode = ProductDetails.RecurrenceMode.INFINITE_RECURRING,
+          )
+        ),
+      )
+    }
+    val client = FakeBillingClient(
+      productsByType = mapOf(PlayStoreProductType.SUBSCRIPTION to subscriptions)
+    )
+    val service = GooglePlayBillingProductService(client)
+
+    val products = service.fetchProducts(linkedSetOf(*productIds.toTypedArray()))
+
+    assertEquals(
+      listOf(
+        FakeBillingClient.ProductQuery(
+          productType = PlayStoreProductType.SUBSCRIPTION,
+          productIds = productIds.take(20),
+        ),
+        FakeBillingClient.ProductQuery(
+          productType = PlayStoreProductType.SUBSCRIPTION,
+          productIds = productIds.drop(20),
+        ),
+        FakeBillingClient.ProductQuery(
+          productType = PlayStoreProductType.ONE_TIME,
+          productIds = productIds.take(20),
+        ),
+        FakeBillingClient.ProductQuery(
+          productType = PlayStoreProductType.ONE_TIME,
+          productIds = productIds.drop(20),
+        ),
+      ),
+      client.productQueries,
+    )
+    assertEquals(productIds, products.map { it.id })
+  }
+
+  @Test
+  fun fetchProducts_throws_when_billing_setup_fails() = runTest {
     val client = FakeBillingClient(
       setupResult = PlayBillingResult(BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE, "offline")
     )
     val service = GooglePlayBillingProductService(client)
 
-    val products = service.fetchProducts(setOf("pro_monthly"))
+    try {
+      service.fetchProducts(setOf("pro_monthly"))
+      fail("expected FlowProductFetchException")
+    } catch (_: FlowProductFetchException) {
+    }
 
-    assertEquals(emptyList<FlowProduct>(), products)
     assertEquals(emptyList<FakeBillingClient.ProductQuery>(), client.productQueries)
+  }
+
+  @Test
+  fun fetchProducts_waits_for_in_flight_billing_setup_before_querying() = runTest {
+    val subscription = subscriptionDetails(
+      productId = "pro_monthly",
+      name = "Nuxie Pro",
+      phases = listOf(
+        pricingPhase(
+          formattedPrice = "\$9.99",
+          priceAmountMicros = 9_990_000,
+          billingPeriod = "P1M",
+          recurrenceMode = ProductDetails.RecurrenceMode.INFINITE_RECURRING,
+        )
+      ),
+    )
+    val client = FakeBillingClient(
+      productsByType = mapOf(PlayStoreProductType.SUBSCRIPTION to listOf(subscription)),
+      autoCompleteSetup = false,
+    )
+    val service = GooglePlayBillingProductService(client)
+
+    val first = async { service.fetchProducts(setOf("pro_monthly")) }
+    val second = async { service.fetchProducts(setOf("pro_monthly")) }
+    runCurrent()
+
+    assertEquals(1, client.startConnectionCalls)
+    assertEquals(emptyList<FakeBillingClient.ProductQuery>(), client.productQueries)
+
+    client.completeSetup()
+
+    assertEquals("pro_monthly", first.await().single().id)
+    assertEquals("pro_monthly", second.await().single().id)
   }
 
   @Test

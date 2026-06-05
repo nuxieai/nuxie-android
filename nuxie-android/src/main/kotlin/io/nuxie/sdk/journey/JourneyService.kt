@@ -47,6 +47,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -133,6 +135,7 @@ class JourneyService(
   private val runtimeDelegates: MutableMap<String, FlowRuntimeDelegateAdapter> = mutableMapOf()
   private val presentedJourneyIds: MutableSet<String> = mutableSetOf()
   private val activeTasks: MutableMap<String, Job> = mutableMapOf()
+  private val journeyPersistenceMutex = Mutex()
   private var segmentMonitoringJob: Job? = null
 
   private val goalEvaluator: GoalEvaluator = DefaultGoalEvaluator(
@@ -1082,8 +1085,14 @@ class JourneyService(
   private fun persistJourney(journey: Journey) {
     scope.launch {
       runCatching {
-        journeyStore.saveJourney(journey)
-        journeyStore.updateCache(journey)
+        journeyPersistenceMutex.withLock {
+          if (journey.status.isLive) {
+            journeyStore.saveJourney(journey)
+            journeyStore.updateCache(journey)
+          } else {
+            journeyStore.deleteJourney(journey.id)
+          }
+        }
       }.onFailure {
         NuxieLogger.warning("Failed to persist journey ${journey.id}: ${it.message}", it)
       }
@@ -1143,8 +1152,10 @@ class JourneyService(
 
     scope.launch {
       runCatching {
-        journeyStore.deleteJourney(journey.id)
-        journeyStore.recordCompletion(JourneyCompletionRecord(journey))
+        journeyPersistenceMutex.withLock {
+          journeyStore.deleteJourney(journey.id)
+          journeyStore.recordCompletion(JourneyCompletionRecord(journey))
+        }
       }
     }
   }

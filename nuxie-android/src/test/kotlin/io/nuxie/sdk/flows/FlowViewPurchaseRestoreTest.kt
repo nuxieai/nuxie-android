@@ -3,6 +3,7 @@ package io.nuxie.sdk.flows
 import android.os.Looper
 import androidx.activity.ComponentActivity
 import io.nuxie.sdk.purchases.NuxiePurchaseDelegate
+import io.nuxie.sdk.purchases.PlayStorePurchase
 import io.nuxie.sdk.purchases.PurchaseResult
 import io.nuxie.sdk.purchases.RestoreResult
 import kotlinx.coroutines.CoroutineScope
@@ -18,10 +19,68 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import java.io.File
+import java.lang.reflect.Proxy
 import java.nio.file.Files
 
 @RunWith(RobolectricTestRunner::class)
 class FlowViewPurchaseRestoreTest {
+  @Test
+  fun purchaseOutcomeCompat_fallsBackToPurchaseForLegacyDelegates() = runBlocking {
+    var purchaseCalls = 0
+    var purchasedProductId: String? = null
+    val delegate = Proxy.newProxyInstance(
+      NuxiePurchaseDelegate::class.java.classLoader,
+      arrayOf(NuxiePurchaseDelegate::class.java),
+    ) { _, method, args ->
+      when (method.name) {
+        "purchaseOutcome" -> throw AbstractMethodError("purchaseOutcome")
+        "purchase" -> {
+          purchaseCalls += 1
+          purchasedProductId = args?.firstOrNull() as? String
+          PurchaseResult.Success
+        }
+        "restore" -> RestoreResult.NoPurchases
+        "toString" -> "LegacyPurchaseDelegate"
+        "hashCode" -> 1
+        "equals" -> false
+        else -> throw UnsupportedOperationException(method.name)
+      }
+    } as NuxiePurchaseDelegate
+
+    val outcome = delegate.purchaseOutcomeCompat("pro_monthly")
+
+    assertEquals(1, purchaseCalls)
+    assertEquals("pro_monthly", purchasedProductId)
+    assertEquals(PurchaseResult.Success, outcome.result)
+    assertEquals("pro_monthly", outcome.productId)
+  }
+
+  @Test
+  fun withKnownProductId_backfillsEmptyPlayStorePurchaseProductIds() {
+    val purchase = PlayStorePurchase(
+      purchaseToken = "token_flow_purchase",
+      productIds = emptyList(),
+    )
+
+    val backfilled = purchase.withKnownProductId(" pro_monthly ")
+
+    assertEquals(listOf("pro_monthly"), backfilled.productIds)
+    assertEquals("pro_monthly", backfilled.productId)
+  }
+
+  @Test
+  fun withKnownProductId_preservesDelegateProvidedProductIds() {
+    val purchase = PlayStorePurchase(
+      purchaseToken = "token_existing_product",
+      productIds = listOf("coins_100"),
+    )
+
+    val backfilled = purchase.withKnownProductId("pro_monthly")
+
+    assertEquals(listOf("coins_100"), backfilled.productIds)
+    assertEquals("coins_100", backfilled.productId)
+  }
+
   @Test
   fun performRestore_refreshesPlayStorePurchasesAfterSuccessfulRestore() = runBlocking {
     val harness = newHarness(RestoreResult.Success(restoredCount = 2))

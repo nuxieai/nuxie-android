@@ -29,6 +29,7 @@ import io.nuxie.sdk.events.SystemEventNames
 import io.nuxie.sdk.logging.NuxieLogger
 import io.nuxie.sdk.purchases.NuxiePurchaseDelegate
 import io.nuxie.sdk.purchases.PlayStorePurchase
+import io.nuxie.sdk.purchases.PurchaseOutcome
 import io.nuxie.sdk.purchases.PurchaseResult
 import io.nuxie.sdk.purchases.RestoreResult
 import io.nuxie.sdk.util.toJsonObject
@@ -970,7 +971,7 @@ class FlowView(context: Context) : FrameLayout(context) {
 
     val s = scope ?: return
     s.launch(Dispatchers.Main) {
-      val outcome = runCatching { delegate.purchaseOutcome(productId) }.getOrElse {
+      val outcome = runCatching { delegate.purchaseOutcomeCompat(productId) }.getOrElse {
         sendImmediateBridgeResult(
           type = "purchase_error",
           payload = buildJsonObject { put("error", JsonPrimitive(it.message ?: "purchase_failed")) },
@@ -986,7 +987,9 @@ class FlowView(context: Context) : FrameLayout(context) {
             payload = buildJsonObject { put("productId", JsonPrimitive(confirmedProductId)) },
           )
 
-          val playStorePurchase = outcome.playStorePurchase ?: outcome.purchaseToken
+          val playStorePurchase = outcome.playStorePurchase
+            ?.withKnownProductId(confirmedProductId)
+            ?: outcome.purchaseToken
             ?.trim()
             ?.takeIf(String::isNotEmpty)
             ?.let { token ->
@@ -1776,4 +1779,34 @@ class FlowView(context: Context) : FrameLayout(context) {
     container.addView(stack)
     return container
   }
+}
+
+internal suspend fun NuxiePurchaseDelegate.purchaseOutcomeCompat(productId: String): PurchaseOutcome {
+  return try {
+    purchaseOutcome(productId)
+  } catch (_: AbstractMethodError) {
+    legacyPurchaseOutcome(productId)
+  } catch (_: NoSuchMethodError) {
+    legacyPurchaseOutcome(productId)
+  }
+}
+
+private suspend fun NuxiePurchaseDelegate.legacyPurchaseOutcome(productId: String): PurchaseOutcome {
+  return PurchaseOutcome(
+    result = purchase(productId),
+    productId = productId,
+  )
+}
+
+internal fun PlayStorePurchase.withKnownProductId(productId: String): PlayStorePurchase {
+  val normalizedProductId = productId.trim().takeIf(String::isNotEmpty) ?: return this
+  val normalizedProductIds = productIds
+    .mapNotNull { it.trim().takeIf(String::isNotEmpty) }
+    .distinct()
+
+  if (normalizedProductIds.isNotEmpty()) {
+    return if (normalizedProductIds == productIds) this else copy(productIds = normalizedProductIds)
+  }
+
+  return copy(productIds = listOf(normalizedProductId))
 }

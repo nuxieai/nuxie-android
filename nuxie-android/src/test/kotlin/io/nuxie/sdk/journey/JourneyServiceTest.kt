@@ -60,6 +60,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -973,10 +974,11 @@ class JourneyServiceTest {
         eventName = SystemEventNames.notificationsEnabled,
         properties = mapOf("journey_id" to started.journey.id),
       )
-      delay(80)
 
-      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
-      assertTrue(harness.journeyStore.loadActiveJourneys().isEmpty())
+      waitUntil {
+        harness.service.getActiveJourneys("user_1").isEmpty() &&
+          harness.journeyStore.loadActiveJourneys().isEmpty()
+      }
     } finally {
       harness.close()
     }
@@ -2284,6 +2286,14 @@ class JourneyServiceTest {
   ) {
     fun close() {
       scope.cancel()
+    }
+  }
+
+  private suspend fun waitUntil(condition: suspend () -> Boolean) {
+    withTimeout(1_000) {
+      while (!condition()) {
+        delay(10)
+      }
     }
   }
 

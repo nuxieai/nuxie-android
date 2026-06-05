@@ -1,5 +1,11 @@
 package io.nuxie.sdk.purchases
 
+import io.nuxie.sdk.config.NuxieConfiguration
+import io.nuxie.sdk.config.NuxiePropertiesSanitizer
+import io.nuxie.sdk.events.EventService
+import io.nuxie.sdk.events.queue.InMemoryEventQueueStore
+import io.nuxie.sdk.events.queue.NuxieNetworkQueue
+import io.nuxie.sdk.events.store.InMemoryEventHistoryStore
 import io.nuxie.sdk.features.FeatureAccess
 import io.nuxie.sdk.features.FeatureCheckResult
 import io.nuxie.sdk.features.FeatureService
@@ -14,6 +20,7 @@ import io.nuxie.sdk.network.models.BatchResponse
 import io.nuxie.sdk.network.models.EventResponse
 import io.nuxie.sdk.network.models.PlayStorePurchaseRequest
 import io.nuxie.sdk.network.models.ProfileResponse
+import io.nuxie.sdk.session.DefaultSessionService
 import io.nuxie.sdk.storage.InMemoryKeyValueStore
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
@@ -39,6 +46,7 @@ class PurchaseSyncServiceTest {
         )
       ),
     ),
+    private val beforeResponse: ((PlayStorePurchaseRequest) -> Unit)? = null,
   ) : NuxieApiProtocol {
     val requests = mutableListOf<PlayStorePurchaseRequest>()
 
@@ -78,6 +86,7 @@ class PurchaseSyncServiceTest {
 
     override suspend fun syncPlayStorePurchase(request: PlayStorePurchaseRequest): PurchaseResponse {
       requests += request
+      beforeResponse?.invoke(request)
       return response
     }
   }
@@ -106,6 +115,44 @@ class PurchaseSyncServiceTest {
     override suspend fun updateFromPurchase(features: List<PurchaseFeature>) {
       purchaseUpdates += features
     }
+  }
+
+  @Test
+  fun purchaseOutcome_keeps_legacy_positional_constructor_order() {
+    val outcome = PurchaseOutcome(
+      PurchaseResult.Success,
+      "pro_monthly",
+      "token_sub_2026",
+      "GPA.3344-5566-7788-99001",
+    )
+
+    assertEquals(PurchaseResult.Success, outcome.result)
+    assertEquals("pro_monthly", outcome.productId)
+    assertEquals("token_sub_2026", outcome.purchaseToken)
+    assertEquals("GPA.3344-5566-7788-99001", outcome.orderId)
+    assertNull(outcome.playStorePurchase)
+  }
+
+  @Test
+  fun purchaseOutcome_accepts_play_store_purchase_without_changing_primary_constructor_order() {
+    val playStorePurchase = PlayStorePurchase(
+      purchaseToken = "token_sub_2026",
+      productIds = listOf("pro_monthly"),
+      packageName = "io.nuxie.example",
+      productType = PlayStoreProductType.SUBSCRIPTION,
+    )
+
+    val outcome = PurchaseOutcome(
+      result = PurchaseResult.Success,
+      productId = "pro_monthly",
+      playStorePurchase = playStorePurchase,
+    )
+
+    assertEquals(PurchaseResult.Success, outcome.result)
+    assertEquals("pro_monthly", outcome.productId)
+    assertNull(outcome.purchaseToken)
+    assertNull(outcome.orderId)
+    assertEquals(playStorePurchase, outcome.playStorePurchase)
   }
 
   @Test
@@ -141,6 +188,87 @@ class PurchaseSyncServiceTest {
     assertEquals("user_123", request.distinctId)
     assertEquals(PlayStoreProductType.SUBSCRIPTION, request.productType)
     assertNull(request.consumePurchase)
+    assertEquals("pro", features.purchaseUpdates.single().single().id)
+  }
+
+  @Test
+  fun syncPlayStorePurchase_skips_local_feature_update_when_identity_changes_before_response() = runTest {
+    val identity = DefaultIdentityService(InMemoryKeyValueStore()).also { it.setDistinctId("user_123") }
+    val api = FakeApi(
+      beforeResponse = {
+        identity.setDistinctId("user_456")
+      },
+    )
+    val features = FakeFeatureService()
+    val service = PurchaseSyncService(
+      api = api,
+      identityService = identity,
+      featureService = features,
+    )
+
+    val response = service.syncPlayStorePurchase(
+      PlayStorePurchase(
+        purchaseToken = "token_sub_2026",
+        productIds = listOf("pro_monthly"),
+        packageName = "io.nuxie.example",
+        productType = PlayStoreProductType.SUBSCRIPTION,
+        distinctId = "user_123",
+      )
+    )
+
+    assertTrue(response.success)
+    assertEquals("user_123", api.requests.single().distinctId)
+    assertEquals(0, features.purchaseUpdates.size)
+  }
+
+  @Test
+  fun syncPlayStorePurchase_keeps_success_when_purchaseSynced_tracking_hook_throws() = runTest {
+    val identity = DefaultIdentityService(InMemoryKeyValueStore()).also { it.setDistinctId("user_123") }
+    val api = FakeApi()
+    val features = FakeFeatureService()
+    val eventStore = InMemoryEventQueueStore()
+    val eventService = EventService(
+      identityService = identity,
+      sessionService = DefaultSessionService(),
+      configuration = NuxieConfiguration(apiKey = "k").also {
+        it.propertiesSanitizer = NuxiePropertiesSanitizer {
+          throw IllegalStateException("analytics_blocked")
+        }
+      },
+      api = api,
+      store = eventStore,
+      historyStore = InMemoryEventHistoryStore(),
+      networkQueue = NuxieNetworkQueue(
+        store = eventStore,
+        api = api,
+        scope = this,
+        flushAt = 999,
+        flushIntervalSeconds = 999,
+        maxQueueSize = 1000,
+        maxBatchSize = 50,
+        maxRetries = 0,
+        baseRetryDelaySeconds = 1,
+      ),
+      scope = this,
+    )
+    val service = PurchaseSyncService(
+      api = api,
+      identityService = identity,
+      featureService = features,
+      eventService = eventService,
+    )
+
+    val response = service.syncPlayStorePurchase(
+      PlayStorePurchase(
+        purchaseToken = "token_sub_2026",
+        productIds = listOf("pro_monthly"),
+        packageName = "io.nuxie.example",
+        productType = PlayStoreProductType.SUBSCRIPTION,
+      )
+    )
+
+    assertTrue(response.success)
+    assertEquals(1, api.requests.size)
     assertEquals("pro", features.purchaseUpdates.single().single().id)
   }
 

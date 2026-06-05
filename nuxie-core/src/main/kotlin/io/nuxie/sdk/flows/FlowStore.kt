@@ -112,6 +112,7 @@ class FlowStore(
     val ids = linkedSetOf<String>()
     val viewModelsById = remoteFlow.viewModels.associateBy { it.id }
     val instancesByViewModel = remoteFlow.viewModelInstances.orEmpty().groupBy { it.viewModelId }
+    val instancesById = remoteFlow.viewModelInstances.orEmpty().associateBy { it.instanceId }
 
     for (viewModel in remoteFlow.viewModels) {
       val instances = instancesByViewModel[viewModel.id].orEmpty()
@@ -120,8 +121,10 @@ class FlowStore(
           schema = viewModel.properties,
           values = emptyMap(),
           viewModelsById = viewModelsById,
+          instancesById = instancesById,
           ids = ids,
           path = emptyList(),
+          visitedInstanceIds = emptySet(),
         )
       } else {
         for (instance in instances) {
@@ -129,10 +132,18 @@ class FlowStore(
             schema = viewModel.properties,
             values = instance.values,
             viewModelsById = viewModelsById,
+            instancesById = instancesById,
             ids = ids,
             path = emptyList(),
+            visitedInstanceIds = setOf(instance.instanceId),
           )
         }
+      }
+    }
+
+    for (interactions in remoteFlow.interactions.values) {
+      for (interaction in interactions) {
+        collectProductIdsFromActions(interaction.actions, ids)
       }
     }
 
@@ -143,8 +154,10 @@ class FlowStore(
     schema: Map<String, ViewModelProperty>,
     values: Map<String, JsonElement>,
     viewModelsById: Map<String, ViewModel>,
+    instancesById: Map<String, ViewModelInstance>,
     ids: MutableSet<String>,
     path: List<String>,
+    visitedInstanceIds: Set<String>,
   ) {
     for ((name, property) in schema) {
       val hasInstanceValue = values.containsKey(name)
@@ -153,8 +166,10 @@ class FlowStore(
         property = property,
         value = value,
         viewModelsById = viewModelsById,
+        instancesById = instancesById,
         ids = ids,
         path = path + name,
+        visitedInstanceIds = visitedInstanceIds,
       )
     }
   }
@@ -163,8 +178,10 @@ class FlowStore(
     property: ViewModelProperty,
     value: JsonElement?,
     viewModelsById: Map<String, ViewModel>,
+    instancesById: Map<String, ViewModelInstance>,
     ids: MutableSet<String>,
     path: List<String>,
+    visitedInstanceIds: Set<String>,
   ) {
     if (path.lastOrNull() == "productId") {
       extractProductId(value)?.let(ids::add)
@@ -178,20 +195,44 @@ class FlowStore(
           schema = nestedSchema,
           values = objectValue?.toMap().orEmpty(),
           viewModelsById = viewModelsById,
+          instancesById = instancesById,
           ids = ids,
           path = path,
+          visitedInstanceIds = visitedInstanceIds,
         )
       }
       ViewModelPropertyType.VIEW_MODEL -> {
         val viewModel = property.viewModelId?.let(viewModelsById::get) ?: return
         val objectValue = value as? JsonObject
-        if (objectValue == null || objectValue.containsKey("vmInstanceId")) return
+        if (objectValue == null) return
+
+        val referencedInstance = resolveReferencedViewModelInstance(
+          value = objectValue,
+          expectedViewModelId = viewModel.id,
+          instancesById = instancesById,
+          visitedInstanceIds = visitedInstanceIds,
+        )
+        if (referencedInstance != null) {
+          collectProductIdsFromSchema(
+            schema = viewModel.properties,
+            values = referencedInstance.values,
+            viewModelsById = viewModelsById,
+            instancesById = instancesById,
+            ids = ids,
+            path = path,
+            visitedInstanceIds = visitedInstanceIds + referencedInstance.instanceId,
+          )
+          return
+        }
+
         collectProductIdsFromSchema(
           schema = viewModel.properties,
           values = objectValue.toMap(),
           viewModelsById = viewModelsById,
+          instancesById = instancesById,
           ids = ids,
           path = path,
+          visitedInstanceIds = visitedInstanceIds,
         )
       }
       ViewModelPropertyType.LIST -> {
@@ -202,12 +243,38 @@ class FlowStore(
             property = itemProperty,
             value = item,
             viewModelsById = viewModelsById,
+            instancesById = instancesById,
             ids = ids,
             path = path,
+            visitedInstanceIds = visitedInstanceIds,
           )
         }
       }
       else -> Unit
+    }
+  }
+
+  private fun collectProductIdsFromActions(
+    actions: List<InteractionAction>,
+    ids: MutableSet<String>,
+  ) {
+    for (action in actions) {
+      when (action) {
+        is InteractionAction.Purchase -> extractProductId(action.productId)?.let(ids::add)
+        is InteractionAction.TimeWindow -> collectProductIdsFromActions(action.successActions.orEmpty(), ids)
+        is InteractionAction.Condition -> {
+          for (branch in action.branches) {
+            collectProductIdsFromActions(branch.actions, ids)
+          }
+          collectProductIdsFromActions(action.defaultActions.orEmpty(), ids)
+        }
+        is InteractionAction.Experiment -> {
+          for (variant in action.variants) {
+            collectProductIdsFromActions(variant.actions, ids)
+          }
+        }
+        else -> Unit
+      }
     }
   }
 
@@ -226,5 +293,20 @@ class FlowStore(
       }
       else -> null
     }
+  }
+
+  private fun resolveReferencedViewModelInstance(
+    value: JsonObject,
+    expectedViewModelId: String,
+    instancesById: Map<String, ViewModelInstance>,
+    visitedInstanceIds: Set<String>,
+  ): ViewModelInstance? {
+    val instanceId = (value["vmInstanceId"] as? JsonPrimitive)?.contentOrNull
+      ?: (value["instanceId"] as? JsonPrimitive)?.contentOrNull
+      ?: return null
+    if (instanceId in visitedInstanceIds) return null
+
+    val instance = instancesById[instanceId] ?: return null
+    return instance.takeIf { it.viewModelId == expectedViewModelId }
   }
 }

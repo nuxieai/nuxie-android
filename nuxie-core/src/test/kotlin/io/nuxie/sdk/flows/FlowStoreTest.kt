@@ -9,9 +9,11 @@ import io.nuxie.sdk.network.models.ProfileResponse
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.fail
 import org.junit.Test
 
 class FlowStoreTest {
@@ -78,6 +80,7 @@ class FlowStoreTest {
   private fun sampleRemoteFlow(
     id: String,
     contentHash: String = "sha256:abc",
+    interactions: Map<String, List<Interaction>> = emptyMap(),
     viewModels: List<ViewModel> = emptyList(),
     viewModelInstances: List<ViewModelInstance>? = null,
   ): RemoteFlow {
@@ -96,7 +99,7 @@ class FlowStoreTest {
         manifest = manifest,
       ),
       screens = listOf(RemoteFlowScreen(id = "screen_1")),
-      interactions = emptyMap(),
+      interactions = interactions,
       viewModels = viewModels,
       viewModelInstances = viewModelInstances,
     )
@@ -230,6 +233,52 @@ class FlowStoreTest {
   }
 
   @Test
+  fun flow_does_not_cache_when_product_enrichment_fails() = runTest {
+    val remoteFlow = sampleRemoteFlow(
+      id = "flow_1",
+      viewModels = listOf(
+        paywallViewModel(
+          properties = mapOf(
+            "productId" to ViewModelProperty(
+              type = ViewModelPropertyType.STRING,
+              defaultValue = JsonPrimitive("pro_monthly"),
+            ),
+          )
+        )
+      ),
+    )
+    val api = FakeApi { remoteFlow }
+    var productFetchCalls = 0
+    val productService = FlowProductService { productIds ->
+      productFetchCalls += 1
+      if (productFetchCalls == 1) {
+        throw FlowProductFetchException("billing unavailable")
+      }
+      productIds.map { productId ->
+        FlowProduct(
+          id = productId,
+          name = productId,
+          price = "\$9.99",
+          period = ProductPeriod.MONTH,
+        )
+      }
+    }
+    val store = FlowStore(api, productService = productService)
+
+    try {
+      store.flow("flow_1")
+      fail("expected FlowProductFetchException")
+    } catch (_: FlowProductFetchException) {
+    }
+
+    val flow = store.flow("flow_1")
+
+    assertEquals(2, api.fetchFlowCalls)
+    assertEquals(2, productFetchCalls)
+    assertEquals("pro_monthly", flow.products.single().id)
+  }
+
+  @Test
   fun flow_extracts_object_shaped_product_ids() = runTest {
     val productService = FakeProductService()
     val remoteFlow = sampleRemoteFlow(
@@ -294,6 +343,137 @@ class FlowStoreTest {
 
     assertEquals(listOf(setOf("pro_annual")), productService.requests)
     assertEquals("pro_annual", flow.products.single().id)
+  }
+
+  @Test
+  fun flow_extracts_product_ids_from_referenced_view_model_instances() = runTest {
+    val productService = FakeProductService()
+    val productViewModel = ViewModel(
+      id = "vm_product",
+      name = "Product",
+      properties = mapOf(
+        "productId" to ViewModelProperty(type = ViewModelPropertyType.STRING),
+      ),
+    )
+    val remoteFlow = sampleRemoteFlow(
+      id = "flow_1",
+      viewModels = listOf(
+        paywallViewModel(
+          properties = mapOf(
+            "primaryOffer" to ViewModelProperty(
+              type = ViewModelPropertyType.VIEW_MODEL,
+              viewModelId = "vm_product",
+            ),
+            "otherOffers" to ViewModelProperty(
+              type = ViewModelPropertyType.LIST,
+              itemType = ViewModelProperty(
+                type = ViewModelPropertyType.VIEW_MODEL,
+                viewModelId = "vm_product",
+              ),
+            ),
+          )
+        ),
+        productViewModel,
+      ),
+      viewModelInstances = listOf(
+        ViewModelInstance(
+          viewModelId = "vm_paywall",
+          instanceId = "paywall_1",
+          values = mapOf(
+            "primaryOffer" to JsonObject(mapOf("vmInstanceId" to JsonPrimitive("product_monthly"))),
+            "otherOffers" to JsonArray(
+              listOf(
+                JsonObject(mapOf("instanceId" to JsonPrimitive("product_annual"))),
+              )
+            ),
+          ),
+        ),
+        ViewModelInstance(
+          viewModelId = "vm_product",
+          instanceId = "product_monthly",
+          values = mapOf("productId" to JsonPrimitive("pro_monthly")),
+        ),
+        ViewModelInstance(
+          viewModelId = "vm_product",
+          instanceId = "product_annual",
+          values = mapOf("productId" to JsonPrimitive("pro_annual")),
+        ),
+      ),
+    )
+    val api = FakeApi { remoteFlow }
+    val store = FlowStore(api, productService = productService)
+
+    val flow = store.flow("flow_1")
+
+    assertEquals(listOf(setOf("pro_monthly", "pro_annual")), productService.requests)
+    assertEquals(listOf("pro_monthly", "pro_annual"), flow.products.map { it.id })
+  }
+
+  @Test
+  fun flow_extracts_product_ids_from_purchase_actions() = runTest {
+    val productService = FakeProductService()
+    val purchasePlacement = JsonPrimitive(0)
+    val remoteFlow = sampleRemoteFlow(
+      id = "flow_1",
+      interactions = mapOf(
+        "screen_1" to listOf(
+          Interaction(
+            id = "purchase_button",
+            trigger = InteractionTrigger.Press,
+            actions = listOf(
+              InteractionAction.Purchase(
+                placementIndex = purchasePlacement,
+                productId = JsonPrimitive("direct_monthly"),
+              ),
+              InteractionAction.Condition(
+                branches = listOf(
+                  InteractionAction.ConditionBranch(
+                    id = "annual_branch",
+                    actions = listOf(
+                      InteractionAction.Purchase(
+                        placementIndex = purchasePlacement,
+                        productId = JsonPrimitive("branch_annual"),
+                      )
+                    ),
+                  )
+                ),
+                defaultActions = listOf(
+                  InteractionAction.Experiment(
+                    experimentId = "pricing_test",
+                    variants = listOf(
+                      InteractionAction.ExperimentVariant(
+                        id = "lifetime",
+                        percentage = 100.0,
+                        actions = listOf(
+                          InteractionAction.TimeWindow(
+                            startTime = "00:00",
+                            endTime = "23:59",
+                            timezone = "UTC",
+                            successActions = listOf(
+                              InteractionAction.Purchase(
+                                placementIndex = purchasePlacement,
+                                productId = JsonObject(mapOf("id" to JsonPrimitive("window_lifetime"))),
+                              )
+                            ),
+                          )
+                        ),
+                      )
+                    ),
+                  )
+                ),
+              )
+            ),
+          )
+        ),
+      ),
+    )
+    val api = FakeApi { remoteFlow }
+    val store = FlowStore(api, productService = productService)
+
+    val flow = store.flow("flow_1")
+
+    assertEquals(listOf(setOf("direct_monthly", "branch_annual", "window_lifetime")), productService.requests)
+    assertEquals(listOf("direct_monthly", "branch_annual", "window_lifetime"), flow.products.map { it.id })
   }
 
   @Test

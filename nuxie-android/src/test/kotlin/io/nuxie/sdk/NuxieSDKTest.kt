@@ -4,6 +4,7 @@ import android.app.Application
 import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.test.core.app.ApplicationProvider
+import com.android.billingclient.api.BillingClient
 import io.nuxie.sdk.campaigns.Campaign
 import io.nuxie.sdk.campaigns.CampaignReentry
 import io.nuxie.sdk.campaigns.CampaignTrigger
@@ -19,6 +20,7 @@ import io.nuxie.sdk.features.FeatureInfo
 import io.nuxie.sdk.features.FeatureService
 import io.nuxie.sdk.features.FeatureType
 import io.nuxie.sdk.features.PurchaseFeature
+import io.nuxie.sdk.features.PurchaseResponse
 import io.nuxie.sdk.flows.BuildManifest
 import io.nuxie.sdk.flows.BuildManifestFile
 import io.nuxie.sdk.flows.FlowBundleRef
@@ -40,8 +42,17 @@ import io.nuxie.sdk.network.models.ActiveJourney
 import io.nuxie.sdk.network.models.BatchRequest
 import io.nuxie.sdk.network.models.BatchResponse
 import io.nuxie.sdk.network.models.EventResponse
+import io.nuxie.sdk.network.models.PlayStorePurchaseRequest
 import io.nuxie.sdk.network.models.ProfileResponse
 import io.nuxie.sdk.profile.ProfileService
+import io.nuxie.sdk.purchases.GooglePlayBillingPurchaseObserver
+import io.nuxie.sdk.purchases.PlayBillingClient
+import io.nuxie.sdk.purchases.PlayBillingProductDetailsSnapshot
+import io.nuxie.sdk.purchases.PlayBillingPurchaseSnapshot
+import io.nuxie.sdk.purchases.PlayBillingResult
+import io.nuxie.sdk.purchases.PlayStorePurchase
+import io.nuxie.sdk.purchases.PlayStoreProductType
+import io.nuxie.sdk.purchases.PurchaseSyncService
 import io.nuxie.sdk.segments.SegmentService
 import io.nuxie.sdk.session.DefaultSessionService
 import io.nuxie.sdk.storage.InMemoryKeyValueStore
@@ -59,6 +70,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.After
 import org.junit.Test
@@ -82,6 +94,7 @@ class NuxieSDKTest {
 
     var gatePayload: JsonObject? = allowGatePayload()
     val trackedEvents: MutableList<TrackedEvent> = mutableListOf()
+    val purchaseRequests: MutableList<PlayStorePurchaseRequest> = mutableListOf()
 
     override suspend fun fetchProfile(distinctId: String, locale: String?): ProfileResponse = profile
 
@@ -125,6 +138,11 @@ class NuxieSDKTest {
         balance = 0,
         type = FeatureType.BOOLEAN,
       )
+    }
+
+    override suspend fun syncPlayStorePurchase(request: PlayStorePurchaseRequest): PurchaseResponse {
+      purchaseRequests += request
+      return PurchaseResponse(success = true, customerId = request.distinctId, features = emptyList())
     }
 
     companion object {
@@ -197,10 +215,59 @@ class NuxieSDKTest {
     override suspend fun updateFromPurchase(features: List<PurchaseFeature>) {}
   }
 
+  private class RecordingPlayBillingClient : PlayBillingClient {
+    data class QueryCall(
+      val productType: PlayStoreProductType,
+      val includeSuspendedSubscriptions: Boolean,
+    )
+
+    val queries = mutableListOf<QueryCall>()
+    var startConnectionCalls = 0
+    override var isReady: Boolean = false
+      private set
+
+    override fun setPurchasesUpdatedListener(
+      listener: ((PlayBillingResult, List<PlayBillingPurchaseSnapshot>?) -> Unit)?,
+    ) {
+    }
+
+    override fun startConnection(
+      onSetupFinished: (PlayBillingResult) -> Unit,
+      onDisconnected: () -> Unit,
+    ) {
+      startConnectionCalls += 1
+      isReady = true
+      onSetupFinished(PlayBillingResult(BillingClient.BillingResponseCode.OK, "OK"))
+    }
+
+    override fun endConnection() {
+      isReady = false
+    }
+
+    override fun queryPurchases(
+      productType: PlayStoreProductType,
+      includeSuspendedSubscriptions: Boolean,
+      listener: (PlayBillingResult, List<PlayBillingPurchaseSnapshot>) -> Unit,
+    ) {
+      queries += QueryCall(productType, includeSuspendedSubscriptions)
+      listener(PlayBillingResult(BillingClient.BillingResponseCode.OK, "OK"), emptyList())
+    }
+
+    override fun queryProductDetails(
+      productType: PlayStoreProductType,
+      productIds: List<String>,
+      listener: (PlayBillingResult, List<PlayBillingProductDetailsSnapshot>) -> Unit,
+    ) {
+      listener(PlayBillingResult(BillingClient.BillingResponseCode.OK, "OK"), emptyList())
+    }
+  }
+
   private data class Harness(
     val sdk: NuxieSDK,
     val scope: CoroutineScope,
+    val identity: DefaultIdentityService,
     val api: FakeApi,
+    val featureService: FeatureService,
     val broker: DefaultTriggerBroker,
     val journeyService: JourneyService,
     val closeActivity: () -> Unit,
@@ -312,6 +379,96 @@ class NuxieSDKTest {
     }
   }
 
+  @Test
+  fun identify_refreshesPlayStorePurchasesForNewDistinctId() = runBlocking {
+    val harness = newHarness()
+    try {
+      val billingClient = RecordingPlayBillingClient()
+      val observer = GooglePlayBillingPurchaseObserver(
+        scope = harness.scope,
+        syncService = PurchaseSyncService(
+          api = harness.api,
+          identityService = harness.identity,
+          featureService = harness.featureService,
+        ),
+        client = billingClient,
+        distinctIdProvider = { harness.identity.getDistinctId() },
+        consumableProductIds = { emptySet() },
+      )
+      observer.start()
+      harness.sdk.setPrivateField("playBillingObserver", observer)
+
+      waitForTrigger { billingClient.queries.size == 2 }
+
+      harness.sdk.identify("identified_user")
+      waitForTrigger { billingClient.queries.size >= 4 }
+
+      assertEquals("identified_user", harness.identity.getDistinctId())
+      assertEquals(1, billingClient.startConnectionCalls)
+      assertEquals(
+        listOf(
+          RecordingPlayBillingClient.QueryCall(PlayStoreProductType.SUBSCRIPTION, true),
+          RecordingPlayBillingClient.QueryCall(PlayStoreProductType.ONE_TIME, false),
+          RecordingPlayBillingClient.QueryCall(PlayStoreProductType.SUBSCRIPTION, true),
+          RecordingPlayBillingClient.QueryCall(PlayStoreProductType.ONE_TIME, false),
+        ),
+        billingClient.queries,
+      )
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun syncPlayStorePurchase_appliesConsumableConfigurationToDirectSync() = runBlocking {
+    val harness = newHarness()
+    try {
+      harness.sdk.configuration!!.addConsumablePlayStoreProduct("coins_100")
+
+      val response = harness.sdk.syncPlayStorePurchase(
+        PlayStorePurchase(
+          purchaseToken = "token_consumable_2026",
+          productIds = listOf(" coins_100 "),
+          packageName = "io.nuxie.example",
+        )
+      )
+
+      assertTrue(response.success)
+      val request = harness.api.purchaseRequests.single()
+      assertEquals("token_consumable_2026", request.purchaseToken)
+      assertEquals("coins_100", request.productId)
+      assertEquals(PlayStoreProductType.ONE_TIME, request.productType)
+      assertEquals(true, request.consumePurchase)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun syncPlayStorePurchase_doesNotConsumeMixedConsumableDirectSync() = runBlocking {
+    val harness = newHarness()
+    try {
+      harness.sdk.configuration!!.addConsumablePlayStoreProduct("coins_100")
+
+      val response = harness.sdk.syncPlayStorePurchase(
+        PlayStorePurchase(
+          purchaseToken = "token_mixed_cart_2026",
+          productIds = listOf("coins_100", "lifetime_unlock"),
+          packageName = "io.nuxie.example",
+        )
+      )
+
+      assertTrue(response.success)
+      val request = harness.api.purchaseRequests.single()
+      assertEquals("token_mixed_cart_2026", request.purchaseToken)
+      assertNull(request.productId)
+      assertNull(request.productType)
+      assertNull(request.consumePurchase)
+    } finally {
+      harness.close()
+    }
+  }
+
   private fun TriggerUpdate.decisionOrNull(): TriggerDecision? {
     return (this as? TriggerUpdate.Decision)?.decision
   }
@@ -371,9 +528,10 @@ class NuxieSDKTest {
       maxRetries = 2,
       baseRetryDelaySeconds = 1,
     )
+    val sessionService = DefaultSessionService()
     val eventService = EventService(
       identityService = identity,
-      sessionService = DefaultSessionService(),
+      sessionService = sessionService,
       configuration = config,
       api = api,
       store = queueStore,
@@ -394,6 +552,7 @@ class NuxieSDKTest {
     val broker = DefaultTriggerBroker()
     val activityTracker = CurrentActivityTracker(ApplicationProvider.getApplicationContext<Application>())
     val activityController = Robolectric.buildActivity(ComponentActivity::class.java).setup()
+    val profileService = FakeProfileService(profile)
     val flowService = FlowService(
       api = api,
       configuration = config,
@@ -405,7 +564,7 @@ class NuxieSDKTest {
       configuration = config,
       identityService = identity,
       eventService = eventService,
-      profileService = FakeProfileService(profile),
+      profileService = profileService,
       segmentService = segmentService,
       featureService = featureService,
       flowService = flowService,
@@ -416,9 +575,24 @@ class NuxieSDKTest {
     )
 
     sdk.setPrivateField("configuration", config)
+    sdk.setPrivateField("identityService", identity)
+    sdk.setPrivateField("sessionService", sessionService)
+    sdk.setPrivateField("api", api)
     sdk.setPrivateField("eventService", eventService)
+    sdk.setPrivateField("profileService", profileService)
     sdk.setPrivateField("featureInfo", FeatureInfo())
     sdk.setPrivateField("featureService", featureService)
+    sdk.setPrivateField(
+      "purchaseSyncService",
+      PurchaseSyncService(
+        api = api,
+        identityService = identity,
+        featureService = featureService,
+        eventService = eventService,
+      )
+    )
+    sdk.setPrivateField("flowService", flowService)
+    sdk.setPrivateField("segmentService", segmentService)
     sdk.setPrivateField("journeyService", journeyService)
     sdk.setPrivateField("triggerBroker", broker)
     sdk.setPrivateField("scope", scope)
@@ -427,7 +601,9 @@ class NuxieSDKTest {
     return Harness(
       sdk = sdk,
       scope = scope,
+      identity = identity,
       api = api,
+      featureService = featureService,
       broker = broker,
       journeyService = journeyService,
       closeActivity = { activityController.pause().stop().destroy() },
