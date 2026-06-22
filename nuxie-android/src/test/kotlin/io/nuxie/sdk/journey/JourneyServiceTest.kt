@@ -1201,7 +1201,7 @@ class JourneyServiceTest {
           trigger = InteractionTrigger.Press,
           actions = listOf(
             InteractionAction.OpenLink(
-              url = JsonPrimitive("https://nuxie.io/pricing"),
+              url = JsonPrimitive("https://nuxie.ai/pricing"),
               target = "_blank",
             )
           ),
@@ -1248,7 +1248,7 @@ class JourneyServiceTest {
       assertEquals(started.journey.id, callback.journeyId)
       assertEquals("camp_1", callback.campaignId)
       assertEquals("screen_1", callback.screenId)
-      assertEquals("https://nuxie.io/pricing", callback.url)
+      assertEquals("https://nuxie.ai/pricing", callback.url)
       assertEquals("_blank", callback.target)
     } finally {
       harness.close()

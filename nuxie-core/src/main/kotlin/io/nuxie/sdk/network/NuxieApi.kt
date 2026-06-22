@@ -43,7 +43,7 @@ import java.util.concurrent.TimeUnit
 
 class NuxieApi(
   private val apiKey: String,
-  baseUrl: String = "https://i.nuxie.io",
+  baseUrl: String = "https://i.nuxie.ai",
   private val useGzipCompression: Boolean = false,
   private val json: Json = Json {
     ignoreUnknownKeys = true
