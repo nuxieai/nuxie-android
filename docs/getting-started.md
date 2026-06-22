@@ -41,7 +41,7 @@ class App : Application() {
     val configuration = NuxieConfiguration(apiKey = "YOUR_API_KEY").apply {
       logLevel = LogLevel.DEBUG
       // environment = Environment.STAGING
-      // setApiEndpoint("https://staging-i.nuxie.io")
+      // setApiEndpoint("https://staging-i.nuxie.ai")
     }
 
     NuxieSDK.shared().setup(this, configuration)

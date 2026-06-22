@@ -16,14 +16,14 @@ val config = NuxieConfiguration(apiKey = "YOUR_API_KEY")
 | --- | --- | --- |
 | `apiKey` | required | API key for backend auth. |
 | `environment` | `Environment.PRODUCTION` | Production/staging/development/custom endpoint family. |
-| `apiEndpoint` | `https://i.nuxie.io` | Use `setApiEndpoint(...)` to override directly. |
+| `apiEndpoint` | `https://i.nuxie.ai` | Use `setApiEndpoint(...)` to override directly. |
 
 `Environment` defaults:
 
-- `PRODUCTION`: `https://i.nuxie.io`
-- `STAGING`: `https://staging-i.nuxie.io`
-- `DEVELOPMENT`: `https://dev-i.nuxie.io`
-- `CUSTOM`: `https://i.nuxie.io` (override with `setApiEndpoint(...)`)
+- `PRODUCTION`: `https://i.nuxie.ai`
+- `STAGING`: `https://staging-i.nuxie.ai`
+- `DEVELOPMENT`: `https://dev-i.nuxie.ai`
+- `CUSTOM`: `https://i.nuxie.ai` (override with `setApiEndpoint(...)`)
 
 ## Logging
 

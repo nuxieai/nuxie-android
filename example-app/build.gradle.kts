@@ -6,7 +6,7 @@ plugins {
 fun quote(value: String): String = "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
 
 val demoApiKey = (project.findProperty("NUXIE_EXAMPLE_API_KEY") as? String) ?: ""
-val demoApiEndpoint = (project.findProperty("NUXIE_EXAMPLE_API_ENDPOINT") as? String) ?: "https://i.nuxie.io"
+val demoApiEndpoint = (project.findProperty("NUXIE_EXAMPLE_API_ENDPOINT") as? String) ?: "https://i.nuxie.ai"
 
 android {
   namespace = "io.nuxie.example"

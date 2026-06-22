@@ -53,7 +53,7 @@ class App : Application() {
     val config = NuxieConfiguration(apiKey = "YOUR_API_KEY").apply {
       logLevel = LogLevel.DEBUG
       // Optional: environment = Environment.STAGING
-      // Optional: setApiEndpoint("https://i.nuxie.io")
+      // Optional: setApiEndpoint("https://i.nuxie.ai")
     }
 
     NuxieSDK.shared().setup(this, config)
@@ -266,7 +266,7 @@ Optional properties:
 ```sh
 ./gradlew :example-app:installDebug \
   -PNUXIE_EXAMPLE_API_KEY=YOUR_KEY \
-  -PNUXIE_EXAMPLE_API_ENDPOINT=https://i.nuxie.io
+  -PNUXIE_EXAMPLE_API_ENDPOINT=https://i.nuxie.ai
 ```
 
 ## Documentation
