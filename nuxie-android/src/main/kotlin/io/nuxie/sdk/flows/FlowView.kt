@@ -28,9 +28,11 @@ import io.nuxie.sdk.R
 import io.nuxie.sdk.events.SystemEventNames
 import io.nuxie.sdk.logging.NuxieLogger
 import io.nuxie.sdk.purchases.NuxiePurchaseDelegate
+import io.nuxie.sdk.purchases.OfferAwareNuxiePurchaseDelegate
 import io.nuxie.sdk.purchases.PlayStorePurchase
 import io.nuxie.sdk.purchases.PurchaseOutcome
 import io.nuxie.sdk.purchases.PurchaseResult
+import io.nuxie.sdk.purchases.PurchaseOffer
 import io.nuxie.sdk.purchases.RestoreResult
 import io.nuxie.sdk.util.toJsonObject
 import kotlinx.coroutines.CoroutineScope
@@ -971,7 +973,19 @@ class FlowView(context: Context) : FrameLayout(context) {
 
     val s = scope ?: return
     s.launch(Dispatchers.Main) {
-      val outcome = runCatching { delegate.purchaseOutcomeCompat(productId) }.getOrElse {
+      val offer = flow?.products
+        ?.firstOrNull { it.id == productId }
+        ?.offer
+        ?.let {
+          PurchaseOffer(
+            id = it.id,
+            type = it.type,
+            price = it.price,
+            periodCount = it.periodCount,
+            offerToken = it.offerToken,
+          )
+        }
+      val outcome = runCatching { delegate.purchaseOutcomeCompat(productId, offer) }.getOrElse {
         sendImmediateBridgeResult(
           type = "purchase_error",
           payload = buildJsonObject { put("error", JsonPrimitive(it.message ?: "purchase_failed")) },
@@ -1781,7 +1795,15 @@ class FlowView(context: Context) : FrameLayout(context) {
   }
 }
 
-internal suspend fun NuxiePurchaseDelegate.purchaseOutcomeCompat(productId: String): PurchaseOutcome {
+internal suspend fun NuxiePurchaseDelegate.purchaseOutcomeCompat(
+  productId: String,
+  offer: PurchaseOffer? = null,
+): PurchaseOutcome {
+  if (offer != null) {
+    val offerDelegate = this as? OfferAwareNuxiePurchaseDelegate
+      ?: error("purchase delegate does not support Google Play offers")
+    return offerDelegate.purchaseOutcome(productId, offer)
+  }
   return try {
     purchaseOutcome(productId)
   } catch (_: AbstractMethodError) {
@@ -1791,11 +1813,16 @@ internal suspend fun NuxiePurchaseDelegate.purchaseOutcomeCompat(productId: Stri
   }
 }
 
-private suspend fun NuxiePurchaseDelegate.legacyPurchaseOutcome(productId: String): PurchaseOutcome {
-  return PurchaseOutcome(
-    result = purchase(productId),
-    productId = productId,
-  )
+private suspend fun NuxiePurchaseDelegate.legacyPurchaseOutcome(
+  productId: String,
+): PurchaseOutcome {
+  return try {
+    purchaseOutcome(productId)
+  } catch (_: AbstractMethodError) {
+    PurchaseOutcome(result = purchase(productId), productId = productId)
+  } catch (_: NoSuchMethodError) {
+    PurchaseOutcome(result = purchase(productId), productId = productId)
+  }
 }
 
 internal fun PlayStorePurchase.withKnownProductId(productId: String): PlayStorePurchase {

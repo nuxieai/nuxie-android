@@ -99,13 +99,73 @@ class FlowStore(
 
   private suspend fun enrichFlow(remoteFlow: RemoteFlow): Flow {
     val productIds = extractProductIds(remoteFlow)
+    val selectedOfferIds = extractProductOfferIds(remoteFlow)
     val products = if (productIds.isEmpty()) {
       emptyList()
     } else {
-      productService.fetchProducts(productIds)
+      productService.fetchProducts(productIds).map { product ->
+        val selectedOffer = selectedOfferIds[product.id]?.let { offerId ->
+          product.offers.firstOrNull { it.id == offerId }
+        }
+        product.copy(
+          price = selectedOffer?.basePrice ?: product.price,
+          period = selectedOffer?.basePeriod ?: product.period,
+          offer = selectedOffer,
+        )
+      }
     }
 
     return Flow(remoteFlow = remoteFlow, products = products)
+  }
+
+  private fun extractProductOfferIds(remoteFlow: RemoteFlow): Map<String, String> {
+    val selections = linkedMapOf<String, String>()
+    val instances = remoteFlow.viewModelInstances.orEmpty()
+    val viewModelsById = remoteFlow.viewModels.associateBy { it.id }
+    for (instance in instances) {
+      val defaults = viewModelsById[instance.viewModelId]?.properties
+        ?.mapNotNull { (name, property) ->
+          property.defaultValue?.let { name to it }
+        }
+        ?.toMap()
+        .orEmpty()
+      collectProductOfferIds(JsonObject(defaults + instance.values), selections)
+    }
+    val instanceViewModelIds = instances.mapTo(mutableSetOf()) { it.viewModelId }
+    for (viewModel in remoteFlow.viewModels) {
+      if (viewModel.id in instanceViewModelIds) continue
+      val defaults = viewModel.properties.mapNotNull { (name, property) ->
+        property.defaultValue?.let { name to it }
+      }.toMap()
+      collectProductOfferIds(JsonObject(defaults), selections)
+    }
+    return selections
+  }
+
+  private fun collectProductOfferIds(
+    value: JsonElement,
+    selections: MutableMap<String, String>,
+  ) {
+    when (value) {
+      is JsonObject -> {
+        val productId = (value["productId"] as? JsonPrimitive)
+          ?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
+        val offerId = (value["offerId"] as? JsonPrimitive)
+          ?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
+        if (productId != null && offerId != null) {
+          val existing = selections[productId]
+          if (existing != null && existing != offerId) {
+            throw FlowProductFetchException(
+              "Flow binds product $productId to conflicting offers $existing and $offerId"
+            )
+          }
+          selections[productId] = offerId
+        }
+        value.values.forEach { collectProductOfferIds(it, selections) }
+      }
+      is JsonArray -> value.forEach { collectProductOfferIds(it, selections) }
+      else -> Unit
+    }
   }
 
   private fun extractProductIds(remoteFlow: RemoteFlow): Set<String> {

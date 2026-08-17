@@ -178,6 +178,187 @@ class GooglePlayBillingProductServiceTest {
   }
 
   @Test
+  fun fetchProducts_exposes_the_store_eligible_offer_and_purchase_token() = runTest {
+    val subscription = PlayBillingProductDetailsSnapshot(
+      productId = "pro_monthly",
+      productType = PlayStoreProductType.SUBSCRIPTION,
+      name = "Nuxie Pro",
+      title = "Nuxie Pro (Nuxie)",
+      subscriptionOffers = listOf(
+        PlayBillingSubscriptionOfferSnapshot(
+          basePlanId = "monthly",
+          offerId = "exit-discount",
+          offerToken = "eligible-token",
+          pricingPhases = listOf(
+            pricingPhase(
+              formattedPrice = "\$1.99",
+              priceAmountMicros = 1_990_000,
+              billingPeriod = "P1M",
+              recurrenceMode = ProductDetails.RecurrenceMode.FINITE_RECURRING,
+              billingCycleCount = 3,
+            ),
+            pricingPhase(
+              formattedPrice = "\$9.99",
+              priceAmountMicros = 9_990_000,
+              billingPeriod = "P1M",
+              recurrenceMode = ProductDetails.RecurrenceMode.INFINITE_RECURRING,
+            ),
+          ),
+        ),
+      ),
+    )
+    val service = GooglePlayBillingProductService(
+      FakeBillingClient(
+        productsByType = mapOf(
+          PlayStoreProductType.SUBSCRIPTION to listOf(subscription),
+        ),
+      ),
+    )
+
+    val product = service.fetchProducts(setOf("pro_monthly")).single()
+
+    assertEquals("\$9.99", product.price)
+    assertEquals("exit-discount", product.offer?.id)
+    assertEquals("\$1.99", product.offer?.price)
+    assertEquals(3, product.offer?.periodCount)
+    assertEquals("\$1.99 for 3 months", product.offer?.label)
+    assertEquals("eligible-token", product.offer?.offerToken)
+  }
+
+  @Test
+  fun fetchProducts_pairs_offer_with_renewal_phase_from_the_same_base_plan() = runTest {
+    val subscription = PlayBillingProductDetailsSnapshot(
+      productId = "pro",
+      productType = PlayStoreProductType.SUBSCRIPTION,
+      name = "Pro",
+      title = "Pro",
+      subscriptionOffers = listOf(
+        PlayBillingSubscriptionOfferSnapshot(
+          basePlanId = "annual",
+          offerId = null,
+          pricingPhases = listOf(pricingPhase("\$99.99", 99_990_000, "P1Y", ProductDetails.RecurrenceMode.INFINITE_RECURRING)),
+        ),
+        PlayBillingSubscriptionOfferSnapshot(
+          basePlanId = "monthly",
+          offerId = "monthly-discount",
+          offerToken = "monthly-token",
+          pricingPhases = listOf(
+            pricingPhase("\$1.99", 1_990_000, "P1M", ProductDetails.RecurrenceMode.FINITE_RECURRING, 3),
+            pricingPhase("\$9.99", 9_990_000, "P1M", ProductDetails.RecurrenceMode.INFINITE_RECURRING),
+          ),
+        ),
+      ),
+    )
+    val service = GooglePlayBillingProductService(FakeBillingClient(productsByType = mapOf(PlayStoreProductType.SUBSCRIPTION to listOf(subscription))))
+
+    val product = service.fetchProducts(setOf("pro")).single()
+
+    assertEquals("\$9.99", product.price)
+    assertEquals(ProductPeriod.MONTH, product.period)
+    assertEquals("monthly-token", product.offer?.offerToken)
+  }
+
+  @Test
+  fun fetchProducts_multiplies_billing_period_magnitude_by_cycles() = runTest {
+    val subscription = PlayBillingProductDetailsSnapshot(
+      productId = "pro",
+      productType = PlayStoreProductType.SUBSCRIPTION,
+      name = "Pro",
+      title = "Pro",
+      subscriptionOffers = listOf(
+        PlayBillingSubscriptionOfferSnapshot(
+          basePlanId = "monthly",
+          offerId = "six-month-discount",
+          offerToken = "token",
+          pricingPhases = listOf(
+            pricingPhase("\$4.99", 4_990_000, "P3M", ProductDetails.RecurrenceMode.FINITE_RECURRING, 2),
+            pricingPhase("\$9.99", 9_990_000, "P1M", ProductDetails.RecurrenceMode.INFINITE_RECURRING),
+          ),
+        ),
+      ),
+    )
+    val service = GooglePlayBillingProductService(FakeBillingClient(productsByType = mapOf(PlayStoreProductType.SUBSCRIPTION to listOf(subscription))))
+
+    val offer = service.fetchProducts(setOf("pro")).single().offer
+
+    assertEquals(6, offer?.periodCount)
+    assertEquals("\$4.99 for 6 months", offer?.label)
+  }
+
+  @Test
+  fun fetchProducts_exposes_only_a_real_discounted_one_time_offer() = runTest {
+    val details = PlayBillingProductDetailsSnapshot(
+      productId = "coins",
+      productType = PlayStoreProductType.ONE_TIME,
+      name = "Coins",
+      title = "Coins",
+      oneTimeOffers = listOf(
+        PlayBillingOneTimeOfferSnapshot(
+          formattedPrice = "\$4.99",
+          priceAmountMicros = 4_990_000,
+          purchaseOptionId = "buy",
+          offerToken = "base-token",
+        ),
+        PlayBillingOneTimeOfferSnapshot(
+          formattedPrice = "\$1.99",
+          priceAmountMicros = 1_990_000,
+          offerId = "promo-offer",
+          purchaseOptionId = "buy-promo",
+          offerToken = "one-time-token",
+          fullPriceMicros = 4_990_000,
+        ),
+      ),
+    )
+    val service = GooglePlayBillingProductService(FakeBillingClient(productsByType = mapOf(PlayStoreProductType.ONE_TIME to listOf(details))))
+
+    val product = service.fetchProducts(setOf("coins")).single()
+    val offer = product.offer
+
+    assertEquals("\$4.99", product.price)
+    assertEquals("promo-offer", offer?.id)
+    assertEquals("one-time-token", offer?.offerToken)
+  }
+
+  @Test
+  fun fetchProducts_does_not_render_a_base_purchase_option_as_an_offer() = runTest {
+    val details = oneTimeDetails("coins", "Coins", "\$1.99")
+    val service = GooglePlayBillingProductService(FakeBillingClient(productsByType = mapOf(PlayStoreProductType.ONE_TIME to listOf(details))))
+
+    val product = service.fetchProducts(setOf("coins")).single()
+
+    assertEquals(null, product.offer)
+    assertEquals(emptyList<Any>(), product.offers)
+  }
+
+  @Test
+  fun fetchProducts_keeps_day_offer_units_exact() = runTest {
+    val subscription = PlayBillingProductDetailsSnapshot(
+      productId = "pro",
+      productType = PlayStoreProductType.SUBSCRIPTION,
+      name = "Pro",
+      title = "Pro",
+      subscriptionOffers = listOf(
+        PlayBillingSubscriptionOfferSnapshot(
+          basePlanId = "monthly",
+          offerId = "three-day-discount",
+          offerToken = "token",
+          pricingPhases = listOf(
+            pricingPhase("\$0.99", 990_000, "P3D", ProductDetails.RecurrenceMode.FINITE_RECURRING),
+            pricingPhase("\$9.99", 9_990_000, "P1M", ProductDetails.RecurrenceMode.INFINITE_RECURRING),
+          ),
+        ),
+      ),
+    )
+    val service = GooglePlayBillingProductService(FakeBillingClient(productsByType = mapOf(PlayStoreProductType.SUBSCRIPTION to listOf(subscription))))
+
+    val offer = service.fetchProducts(setOf("pro")).single().offer
+
+    assertEquals(ProductPeriod.DAY, offer?.period)
+    assertEquals(3, offer?.periodCount)
+    assertEquals("\$0.99 for 3 days", offer?.label)
+  }
+
+  @Test
   fun fetchProducts_dedupes_and_trims_product_ids_before_querying() = runTest {
     val subscription = subscriptionDetails(
       productId = "pro_annual",
@@ -389,12 +570,14 @@ class GooglePlayBillingProductServiceTest {
     priceAmountMicros: Long,
     billingPeriod: String,
     recurrenceMode: Int,
+    billingCycleCount: Int = 1,
   ): PlayBillingPricingPhaseSnapshot {
     return PlayBillingPricingPhaseSnapshot(
       formattedPrice = formattedPrice,
       priceAmountMicros = priceAmountMicros,
       billingPeriod = billingPeriod,
       recurrenceMode = recurrenceMode,
+      billingCycleCount = billingCycleCount,
     )
   }
 }

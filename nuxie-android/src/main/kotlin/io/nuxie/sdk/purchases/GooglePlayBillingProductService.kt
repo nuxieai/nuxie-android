@@ -3,6 +3,7 @@ package io.nuxie.sdk.purchases
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.ProductDetails
 import io.nuxie.sdk.flows.FlowProduct
+import io.nuxie.sdk.flows.FlowProductOffer
 import io.nuxie.sdk.flows.FlowProductFetchException
 import io.nuxie.sdk.flows.FlowProductService
 import io.nuxie.sdk.flows.ProductPeriod
@@ -163,29 +164,109 @@ internal fun PlayBillingProductDetailsSnapshot.toFlowProduct(): FlowProduct? {
   val productName = name.ifBlank { title.ifBlank { productId } }
   return when (productType) {
     PlayStoreProductType.SUBSCRIPTION -> {
-      val phase = subscriptionOffers
+      val offerAndBases = subscriptionOffers
         .asSequence()
-        .flatMap { it.pricingPhases.asSequence() }
-        .selectDisplayPhase()
+        .filter { !it.offerId.isNullOrBlank() }
+        .mapNotNull { offer ->
+          val basePhase = offer.pricingPhases.asSequence().selectDisplayPhase()
+            ?: return@mapNotNull null
+          val flowOffer = offer.toFlowProductOffer(basePhase) ?: return@mapNotNull null
+          basePhase to flowOffer
+        }
+        .toList()
+      val basePhase = offerAndBases.firstOrNull()?.first ?: subscriptionOffers
+        .asSequence()
+        .mapNotNull { it.pricingPhases.asSequence().selectDisplayPhase() }
+        .firstOrNull()
         ?: return null
+      val eligibleOffers = offerAndBases.map { it.second }
 
       FlowProduct(
         id = productId,
         name = productName,
-        price = phase.formattedPrice,
-        period = phase.billingPeriod.toProductPeriod(),
+        price = basePhase.formattedPrice,
+        period = basePhase.billingPeriod.toProductPeriod(),
+        offer = eligibleOffers.firstOrNull(),
+        offers = eligibleOffers,
       )
     }
     PlayStoreProductType.ONE_TIME -> {
-      val offer = oneTimeOffers.firstOrNull() ?: return null
+      val baseOption = oneTimeOffers.firstOrNull { it.offerId.isNullOrBlank() }
+        ?: oneTimeOffers.maxByOrNull { it.fullPriceMicros ?: it.priceAmountMicros }
+        ?: return null
+      val eligibleOffers = oneTimeOffers.mapNotNull { option ->
+        val offerId = option.offerId?.trim()?.takeIf(String::isNotEmpty)
+          ?: return@mapNotNull null
+        val offerToken = option.offerToken?.trim()?.takeIf(String::isNotEmpty)
+          ?: return@mapNotNull null
+        val fullPrice = option.fullPriceMicros ?: baseOption.priceAmountMicros
+        if (option.priceAmountMicros >= fullPrice) return@mapNotNull null
+        val pairedBaseOption = oneTimeOffers.firstOrNull { candidate ->
+          candidate.offerId.isNullOrBlank() &&
+            candidate.purchaseOptionId == option.purchaseOptionId
+        } ?: oneTimeOffers.firstOrNull { candidate ->
+          candidate.offerId.isNullOrBlank() && candidate.priceAmountMicros == fullPrice
+        } ?: baseOption
+        FlowProductOffer(
+          id = offerId,
+          type = "developerDetermined",
+          price = option.formattedPrice,
+          period = null,
+          periodCount = 1,
+          label = option.formattedPrice,
+          offerToken = offerToken,
+          basePrice = pairedBaseOption.formattedPrice,
+        )
+      }
       FlowProduct(
         id = productId,
         name = productName,
-        price = offer.formattedPrice,
+        price = baseOption.formattedPrice,
         period = null,
+        offer = eligibleOffers.firstOrNull(),
+        offers = eligibleOffers,
       )
     }
   }
+}
+
+private fun PlayBillingSubscriptionOfferSnapshot.toFlowProductOffer(
+  basePhase: PlayBillingPricingPhaseSnapshot,
+): FlowProductOffer? {
+  val offerId = offerId?.trim()?.takeIf(String::isNotEmpty) ?: return null
+  val offerPhase = pricingPhases.firstOrNull { phase ->
+    phase !== basePhase &&
+      (phase.recurrenceMode != ProductDetails.RecurrenceMode.INFINITE_RECURRING ||
+        phase.priceAmountMicros < basePhase.priceAmountMicros)
+  } ?: return null
+  val parsedPeriod = offerPhase.billingPeriod.toProductPeriodAndCount()
+  val period = parsedPeriod?.first
+  val periodCount = (parsedPeriod?.second ?: 1) * offerPhase.billingCycleCount.coerceAtLeast(1)
+  val duration = period.toDurationLabel(periodCount)
+
+  return FlowProductOffer(
+    id = offerId,
+    type = "developerDetermined",
+    price = offerPhase.formattedPrice,
+    period = period,
+    periodCount = periodCount,
+    label = "${offerPhase.formattedPrice} for $duration",
+    offerToken = offerToken,
+    basePrice = basePhase.formattedPrice,
+    basePeriod = basePhase.billingPeriod.toProductPeriod(),
+  )
+}
+
+private fun ProductPeriod?.toDurationLabel(count: Int): String {
+  val unit = when (this) {
+    ProductPeriod.DAY -> "day"
+    ProductPeriod.WEEK -> "week"
+    ProductPeriod.MONTH -> "month"
+    ProductPeriod.YEAR -> "year"
+    ProductPeriod.LIFETIME -> "lifetime"
+    null -> "period"
+  }
+  return if (count == 1) "1 $unit" else "$count ${unit}s"
 }
 
 private fun Sequence<PlayBillingPricingPhaseSnapshot>.selectDisplayPhase(): PlayBillingPricingPhaseSnapshot? {
@@ -198,11 +279,18 @@ private fun Sequence<PlayBillingPricingPhaseSnapshot>.selectDisplayPhase(): Play
 }
 
 private fun String.toProductPeriod(): ProductPeriod? {
-  return when {
-    matches(Regex("""P\d+W""")) -> ProductPeriod.WEEK
-    matches(Regex("""P\d+M""")) -> ProductPeriod.MONTH
-    matches(Regex("""P\d+Y""")) -> ProductPeriod.YEAR
-    matches(Regex("""P\d+D""")) -> ProductPeriod.WEEK
-    else -> null
+  return toProductPeriodAndCount()?.first
+}
+
+private fun String.toProductPeriodAndCount(): Pair<ProductPeriod, Int>? {
+  val match = Regex("""^P(\d+)([DWMY])$""").matchEntire(this) ?: return null
+  val count = match.groupValues[1].toIntOrNull()?.coerceAtLeast(1) ?: return null
+  val period = when (match.groupValues[2]) {
+    "W" -> ProductPeriod.WEEK
+    "M" -> ProductPeriod.MONTH
+    "Y" -> ProductPeriod.YEAR
+    "D" -> ProductPeriod.DAY
+    else -> return null
   }
+  return period to count
 }

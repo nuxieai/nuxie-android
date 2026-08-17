@@ -35,11 +35,17 @@ internal data class PlayBillingProductDetailsSnapshot(
 internal data class PlayBillingOneTimeOfferSnapshot(
   val formattedPrice: String,
   val priceAmountMicros: Long,
+  val offerId: String? = null,
+  val purchaseOptionId: String? = null,
+  val offerToken: String? = null,
+  val fullPriceMicros: Long? = null,
+  val priceCurrencyCode: String? = null,
 )
 
 internal data class PlayBillingSubscriptionOfferSnapshot(
   val basePlanId: String?,
   val offerId: String?,
+  val offerToken: String = "",
   val pricingPhases: List<PlayBillingPricingPhaseSnapshot>,
 )
 
@@ -48,6 +54,7 @@ internal data class PlayBillingPricingPhaseSnapshot(
   val priceAmountMicros: Long,
   val billingPeriod: String,
   val recurrenceMode: Int,
+  val billingCycleCount: Int = 1,
 )
 
 internal interface PlayBillingClient {
@@ -303,6 +310,11 @@ private fun ProductDetails.oneTimeOffersSnapshot(): List<PlayBillingOneTimeOffer
     PlayBillingOneTimeOfferSnapshot(
       formattedPrice = offer.formattedPrice,
       priceAmountMicros = offer.priceAmountMicros,
+      offerId = offer.offerId,
+      purchaseOptionId = offer.purchaseOptionId,
+      offerToken = offer.offerToken,
+      fullPriceMicros = offer.fullPriceMicros,
+      priceCurrencyCode = offer.priceCurrencyCode,
     )
   }
 }
@@ -312,12 +324,14 @@ private fun ProductDetails.subscriptionOffersSnapshot(): List<PlayBillingSubscri
     PlayBillingSubscriptionOfferSnapshot(
       basePlanId = offer.basePlanId,
       offerId = offer.offerId,
+      offerToken = offer.offerToken,
       pricingPhases = offer.pricingPhases.pricingPhaseList.map { phase ->
         PlayBillingPricingPhaseSnapshot(
           formattedPrice = phase.formattedPrice,
           priceAmountMicros = phase.priceAmountMicros,
           billingPeriod = phase.billingPeriod,
           recurrenceMode = phase.recurrenceMode,
+          billingCycleCount = phase.billingCycleCount,
         )
       },
     )

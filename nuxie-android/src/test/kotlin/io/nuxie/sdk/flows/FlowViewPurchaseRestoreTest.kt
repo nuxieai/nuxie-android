@@ -3,7 +3,9 @@ package io.nuxie.sdk.flows
 import android.os.Looper
 import androidx.activity.ComponentActivity
 import io.nuxie.sdk.purchases.NuxiePurchaseDelegate
+import io.nuxie.sdk.purchases.OfferAwareNuxiePurchaseDelegate
 import io.nuxie.sdk.purchases.PlayStorePurchase
+import io.nuxie.sdk.purchases.PurchaseOffer
 import io.nuxie.sdk.purchases.PurchaseResult
 import io.nuxie.sdk.purchases.RestoreResult
 import kotlinx.coroutines.CoroutineScope
@@ -24,6 +26,54 @@ import java.nio.file.Files
 
 @RunWith(RobolectricTestRunner::class)
 class FlowViewPurchaseRestoreTest {
+  @Test
+  fun purchaseOutcomeCompat_passes_the_selected_offer_to_the_delegate() = runBlocking {
+    var receivedOffer: PurchaseOffer? = null
+    val delegate = object : OfferAwareNuxiePurchaseDelegate {
+      override suspend fun purchase(productId: String): PurchaseResult = PurchaseResult.Success
+      override suspend fun purchaseOutcome(productId: String, offer: PurchaseOffer) =
+        io.nuxie.sdk.purchases.PurchaseOutcome(
+          result = PurchaseResult.Success.also { receivedOffer = offer },
+          productId = productId,
+        )
+      override suspend fun restore(): RestoreResult = RestoreResult.NoPurchases
+    }
+    val offer = PurchaseOffer(
+      id = "exit-discount",
+      type = "developerDetermined",
+      price = "\$1.99",
+      periodCount = 3,
+      offerToken = "eligible-token",
+    )
+
+    val outcome = delegate.purchaseOutcomeCompat("pro_monthly", offer)
+
+    assertEquals(offer, receivedOffer)
+    assertEquals(PurchaseResult.Success, outcome.result)
+  }
+
+  @Test
+  fun purchaseOutcomeCompat_preservesLegacyOutcomeReceiptEvidence() = runBlocking {
+    val purchase = PlayStorePurchase(
+      purchaseToken = "receipt-token",
+      productIds = listOf("pro_monthly"),
+    )
+    val delegate = object : NuxiePurchaseDelegate {
+      override suspend fun purchase(productId: String): PurchaseResult = PurchaseResult.Success
+      override suspend fun purchaseOutcome(productId: String) =
+        io.nuxie.sdk.purchases.PurchaseOutcome(
+          result = PurchaseResult.Success,
+          productId = productId,
+          playStorePurchase = purchase,
+        )
+      override suspend fun restore(): RestoreResult = RestoreResult.NoPurchases
+    }
+
+    val outcome = delegate.purchaseOutcomeCompat("pro_monthly")
+
+    assertEquals(purchase, outcome.playStorePurchase)
+  }
+
   @Test
   fun purchaseOutcomeCompat_fallsBackToPurchaseForLegacyDelegates() = runBlocking {
     var purchaseCalls = 0

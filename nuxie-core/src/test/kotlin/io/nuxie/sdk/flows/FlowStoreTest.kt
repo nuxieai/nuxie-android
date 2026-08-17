@@ -531,4 +531,171 @@ class FlowStoreTest {
     assertEquals(listOf(setOf("pro_monthly")), productService.requests)
     assertEquals("pro_monthly", flow.products.single().id)
   }
+
+  @Test
+  fun flow_applies_the_selected_offers_own_renewal_terms() = runTest {
+    val monthlyOffer = FlowProductOffer(
+      id = "monthly-offer",
+      type = "developerDetermined",
+      price = "\$1.99",
+      period = ProductPeriod.MONTH,
+      periodCount = 1,
+      label = "\$1.99 for 1 month",
+      offerToken = "monthly-token",
+      basePrice = "\$9.99",
+      basePeriod = ProductPeriod.MONTH,
+    )
+    val annualOffer = FlowProductOffer(
+      id = "annual-offer",
+      type = "developerDetermined",
+      price = "\$19.99",
+      period = ProductPeriod.YEAR,
+      periodCount = 1,
+      label = "\$19.99 for 1 year",
+      offerToken = "annual-token",
+      basePrice = "\$99.99",
+      basePeriod = ProductPeriod.YEAR,
+    )
+    val productService = FakeProductService(
+      mapOf(
+        "pro" to FlowProduct(
+          id = "pro",
+          name = "Pro",
+          price = "\$9.99",
+          period = ProductPeriod.MONTH,
+          offer = monthlyOffer,
+          offers = listOf(monthlyOffer, annualOffer),
+        )
+      )
+    )
+    val remoteFlow = sampleRemoteFlow(
+      id = "flow_1",
+      viewModels = listOf(
+        paywallViewModel(
+          mapOf(
+            "productId" to ViewModelProperty(type = ViewModelPropertyType.STRING),
+            "offerId" to ViewModelProperty(type = ViewModelPropertyType.STRING),
+          )
+        )
+      ),
+      viewModelInstances = listOf(
+        ViewModelInstance(
+          viewModelId = "vm_paywall",
+          instanceId = "paywall_1",
+          values = mapOf(
+            "productId" to JsonPrimitive("pro"),
+            "offerId" to JsonPrimitive("annual-offer"),
+          ),
+        )
+      ),
+    )
+
+    val flow = FlowStore(FakeApi { remoteFlow }, productService).flow("flow_1")
+    val product = flow.products.single()
+
+    assertEquals("annual-offer", product.offer?.id)
+    assertEquals("annual-token", product.offer?.offerToken)
+    assertEquals("\$99.99", product.price)
+    assertEquals(ProductPeriod.YEAR, product.period)
+  }
+
+  @Test
+  fun flow_rejects_conflicting_offer_bindings_for_the_same_product() = runTest {
+    val remoteFlow = sampleRemoteFlow(
+      id = "flow_1",
+      viewModels = listOf(
+        paywallViewModel(
+          mapOf(
+            "productId" to ViewModelProperty(type = ViewModelPropertyType.STRING),
+            "offerId" to ViewModelProperty(type = ViewModelPropertyType.STRING),
+          )
+        )
+      ),
+      viewModelInstances = listOf(
+        ViewModelInstance(
+          viewModelId = "vm_paywall",
+          instanceId = "paywall_1",
+          values = mapOf(
+            "productId" to JsonPrimitive("pro"),
+            "offerId" to JsonPrimitive("monthly-offer"),
+          ),
+        ),
+        ViewModelInstance(
+          viewModelId = "vm_paywall",
+          instanceId = "paywall_2",
+          values = mapOf(
+            "productId" to JsonPrimitive("pro"),
+            "offerId" to JsonPrimitive("annual-offer"),
+          ),
+        ),
+      ),
+    )
+
+    try {
+      FlowStore(FakeApi { remoteFlow }, FakeProductService()).flow("flow_1")
+      fail("expected FlowProductFetchException")
+    } catch (_: FlowProductFetchException) {
+      // Expected: the runtime cannot safely choose between moment-bound offers.
+    }
+  }
+
+  @Test
+  fun flow_combines_defaults_with_sparse_instance_offer_bindings() = runTest {
+    val selectedOffer = FlowProductOffer(
+      id = "annual-offer",
+      type = "developerDetermined",
+      price = "\$19.99",
+      period = ProductPeriod.YEAR,
+      periodCount = 1,
+      label = "\$19.99 for 1 year",
+      offerToken = "annual-token",
+    )
+    val productService = FakeProductService(
+      mapOf(
+        "pro" to FlowProduct(
+          id = "pro",
+          name = "Pro",
+          price = "\$99.99",
+          offers = listOf(selectedOffer),
+        )
+      )
+    )
+    val cases = listOf(
+      mapOf("productId" to JsonPrimitive("pro")) to
+        mapOf("offerId" to JsonPrimitive("annual-offer")),
+      mapOf("offerId" to JsonPrimitive("annual-offer")) to
+        mapOf("productId" to JsonPrimitive("pro")),
+    )
+
+    for ((defaults, instanceValues) in cases) {
+      val remoteFlow = sampleRemoteFlow(
+        id = "flow_${defaults.keys.single()}",
+        viewModels = listOf(
+          paywallViewModel(
+            mapOf(
+              "productId" to ViewModelProperty(
+                type = ViewModelPropertyType.STRING,
+                defaultValue = defaults["productId"],
+              ),
+              "offerId" to ViewModelProperty(
+                type = ViewModelPropertyType.STRING,
+                defaultValue = defaults["offerId"],
+              ),
+            )
+          )
+        ),
+        viewModelInstances = listOf(
+          ViewModelInstance(
+            viewModelId = "vm_paywall",
+            instanceId = "paywall_1",
+            values = instanceValues,
+          )
+        ),
+      )
+
+      val flow = FlowStore(FakeApi { remoteFlow }, productService).flow(remoteFlow.id)
+
+      assertEquals("annual-offer", flow.products.single().offer?.id)
+    }
+  }
 }

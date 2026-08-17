@@ -20,9 +20,24 @@ data class FlowProduct(
   val name: String,
   val price: String,
   val period: ProductPeriod? = null,
+  val offer: FlowProductOffer? = null,
+  val offers: List<FlowProductOffer> = listOfNotNull(offer),
+)
+
+data class FlowProductOffer(
+  val id: String,
+  val type: String,
+  val price: String,
+  val period: ProductPeriod?,
+  val periodCount: Int,
+  val label: String,
+  val offerToken: String,
+  val basePrice: String? = null,
+  val basePeriod: ProductPeriod? = null,
 )
 
 enum class ProductPeriod {
+  DAY,
   WEEK,
   MONTH,
   YEAR,
@@ -35,4 +50,3 @@ sealed class CloseReason {
   data object Timeout : CloseReason()
   data class Error(val throwable: Throwable) : CloseReason()
 }
-

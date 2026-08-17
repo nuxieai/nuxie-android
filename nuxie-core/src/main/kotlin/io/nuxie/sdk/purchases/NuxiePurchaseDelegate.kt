@@ -19,6 +19,22 @@ interface NuxiePurchaseDelegate {
   suspend fun restore(): RestoreResult
 }
 
+/**
+ * Explicit capability for delegates that can launch Google Play with an exact offer token.
+ * The outcome contract keeps Play purchase evidence attached to the offer-aware path.
+ */
+interface OfferAwareNuxiePurchaseDelegate : NuxiePurchaseDelegate {
+  suspend fun purchaseOutcome(productId: String, offer: PurchaseOffer): PurchaseOutcome
+}
+
+data class PurchaseOffer(
+  val id: String,
+  val type: String,
+  val price: String,
+  val periodCount: Int,
+  val offerToken: String,
+)
+
 sealed class PurchaseResult {
   data object Success : PurchaseResult()
   data object Cancelled : PurchaseResult()
