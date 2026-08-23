@@ -6,7 +6,9 @@
 - Use the locked vocabulary exclusively: Experience, Journey, trigger, and
   Feature. Never introduce legacy alternatives for these nouns or verbs.
 - Runtime dependencies are limited to Kotlin coroutines and
-  `kotlinx-serialization-json`.
+  `kotlinx-serialization-json`. No `java.time` anywhere in SDK sources —
+  it would force host apps below minSdk 26 into core-library desugaring.
+  Timestamps are epoch millis (`Long`).
 - Kotlin sources use the `ai.nuxie.sdk` package root.
 - The public surface is guarded by `./gradlew apiCheck`. Regenerate its
   baseline for an intentional API change with `./gradlew apiDump`.

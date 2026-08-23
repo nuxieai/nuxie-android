@@ -19,8 +19,10 @@ public final class ai/nuxie/sdk/Nuxie {
 public final class ai/nuxie/sdk/NuxieConfiguration {
 	public fun <init> (Ljava/lang/String;)V
 	public final fun getApiKey ()Ljava/lang/String;
+	public final fun getBeforeSend ()Lkotlin/jvm/functions/Function1;
 	public final fun getEnvironment ()Lai/nuxie/sdk/NuxieEnvironment;
 	public final fun getLogLevel ()Lai/nuxie/sdk/LogLevel;
+	public final fun setBeforeSend (Lkotlin/jvm/functions/Function1;)V
 	public final fun setEnvironment (Lai/nuxie/sdk/NuxieEnvironment;)V
 	public final fun setLogLevel (Lai/nuxie/sdk/LogLevel;)V
 }
@@ -31,5 +33,15 @@ public final class ai/nuxie/sdk/NuxieEnvironment : java/lang/Enum {
 	public static fun getEntries ()Lkotlin/enums/EnumEntries;
 	public static fun valueOf (Ljava/lang/String;)Lai/nuxie/sdk/NuxieEnvironment;
 	public static fun values ()[Lai/nuxie/sdk/NuxieEnvironment;
+}
+
+public final class ai/nuxie/sdk/NuxieEvent {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;J)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;JILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getDistinctId ()Ljava/lang/String;
+	public final fun getId ()Ljava/lang/String;
+	public final fun getName ()Ljava/lang/String;
+	public final fun getProperties ()Ljava/util/Map;
+	public final fun getTimestampMillis ()J
 }
 
