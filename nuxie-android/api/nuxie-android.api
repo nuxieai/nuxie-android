@@ -1,0 +1,35 @@
+public final class ai/nuxie/sdk/LogLevel : java/lang/Enum {
+	public static final field DEBUG Lai/nuxie/sdk/LogLevel;
+	public static final field ERROR Lai/nuxie/sdk/LogLevel;
+	public static final field INFO Lai/nuxie/sdk/LogLevel;
+	public static final field NONE Lai/nuxie/sdk/LogLevel;
+	public static final field WARN Lai/nuxie/sdk/LogLevel;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lai/nuxie/sdk/LogLevel;
+	public static fun values ()[Lai/nuxie/sdk/LogLevel;
+}
+
+public final class ai/nuxie/sdk/Nuxie {
+	public static final field INSTANCE Lai/nuxie/sdk/Nuxie;
+	public final fun getVersion ()Ljava/lang/String;
+	public final fun isSetup ()Z
+	public final fun setup (Landroid/content/Context;Lai/nuxie/sdk/NuxieConfiguration;)V
+}
+
+public final class ai/nuxie/sdk/NuxieConfiguration {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun getApiKey ()Ljava/lang/String;
+	public final fun getEnvironment ()Lai/nuxie/sdk/NuxieEnvironment;
+	public final fun getLogLevel ()Lai/nuxie/sdk/LogLevel;
+	public final fun setEnvironment (Lai/nuxie/sdk/NuxieEnvironment;)V
+	public final fun setLogLevel (Lai/nuxie/sdk/LogLevel;)V
+}
+
+public final class ai/nuxie/sdk/NuxieEnvironment : java/lang/Enum {
+	public static final field DEVELOPMENT Lai/nuxie/sdk/NuxieEnvironment;
+	public static final field PRODUCTION Lai/nuxie/sdk/NuxieEnvironment;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lai/nuxie/sdk/NuxieEnvironment;
+	public static fun values ()[Lai/nuxie/sdk/NuxieEnvironment;
+}
+

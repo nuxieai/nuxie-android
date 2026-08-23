@@ -1,22 +1,15 @@
 plugins {
-  id("com.android.library")
-  id("org.jetbrains.kotlin.android")
-  id("com.google.devtools.ksp")
+  alias(libs.plugins.android.library)
+  alias(libs.plugins.kotlin.android)
 }
 
 android {
-  namespace = "io.nuxie.sdk"
+  namespace = "ai.nuxie.sdk"
   compileSdk = 35
+  buildToolsVersion = "34.0.0"
 
   defaultConfig {
-    minSdk = 21
-    consumerProguardFiles("consumer-rules.pro")
-  }
-
-  buildTypes {
-    release {
-      isMinifyEnabled = false
-    }
+    minSdk = 23
   }
 
   compileOptions {
@@ -30,25 +23,12 @@ android {
 
   testOptions {
     unitTests.isReturnDefaultValues = true
-    unitTests.isIncludeAndroidResources = true
   }
 }
 
 dependencies {
-  api(project(":nuxie-core"))
+  implementation(libs.kotlinx.coroutines.android)
+  implementation(libs.kotlinx.serialization.json)
 
-  implementation("androidx.activity:activity-ktx:1.9.3")
-  implementation("androidx.annotation:annotation:1.8.2")
-  implementation("androidx.core:core-ktx:1.13.1")
-  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-  implementation("androidx.room:room-runtime:2.6.1")
-  implementation("androidx.room:room-ktx:2.6.1")
-  implementation("com.android.billingclient:billing:8.0.0")
-  ksp("androidx.room:room-compiler:2.6.1")
-
-  testImplementation("junit:junit:4.13.2")
-  testImplementation("androidx.test:core:1.6.1")
-  testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
-  testImplementation("org.robolectric:robolectric:4.16.1")
-  testImplementation("androidx.room:room-testing:2.6.1")
+  testImplementation(libs.junit)
 }

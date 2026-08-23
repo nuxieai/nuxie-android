@@ -1,12 +1,6 @@
 pluginManagement {
   repositories {
-    google {
-      content {
-        includeGroupByRegex("com\\.android.*")
-        includeGroupByRegex("com\\.google.*")
-        includeGroupByRegex("androidx.*")
-      }
-    }
+    google()
     mavenCentral()
     gradlePluginPortal()
   }
@@ -20,8 +14,7 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "nuxie-android"
+rootProject.name = "nuxie-android-sdk"
 
-include(":nuxie-core")
 include(":nuxie-android")
 include(":example-app")

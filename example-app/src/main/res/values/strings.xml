@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-  <string name="app_name">Nuxie SDK Example</string>
+  <string name="app_name">Nuxie Example</string>
+  <string name="nuxie_api_key" translatable="false">replace-with-your-api-key</string>
+  <string name="setup_status">Nuxie SDK %1$s is set up.</string>
 </resources>

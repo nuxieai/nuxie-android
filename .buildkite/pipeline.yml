@@ -9,8 +9,9 @@ steps:
       export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
       export ANDROID_SDK_ROOT="$ANDROID_HOME"
       export PATH="$JAVA_HOME/bin:$PATH"
-      ./gradlew test
+      ./gradlew :nuxie-android:test :nuxie-android:apiCheck :nuxie-android:lint
       ./gradlew :example-app:assembleDebug
+      scripts/verify-fixtures.sh
     agents:
       queue: nuxie-pr
       nuxie-platform: macos
