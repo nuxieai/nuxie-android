@@ -39,6 +39,7 @@ object Nuxie {
                 apiKey = configuration.apiKey,
                 environment = configuration.environment,
                 logLevel = configuration.logLevel,
+                beforeSend = configuration.beforeSend,
             ),
         )
     }
@@ -52,5 +53,6 @@ object Nuxie {
         val apiKey: String,
         val environment: NuxieEnvironment,
         val logLevel: LogLevel,
+        val beforeSend: ((NuxieEvent) -> NuxieEvent?)?,
     )
 }
