@@ -1,0 +1,33 @@
+{
+  "sourceRepo": "nuxieai/nuxie-ios",
+  "sourceCommit": "4faebcb4a417ee819fab3e33e8f8725c57acf04f",
+  "files": {
+    "README.md": "f1d8431fba31bea6049e7ba476fb4d8caa59d6bde6b97d79b5dfbf3b0c15dd72",
+    "encodings/trigger-result.json": "a968d7ce15dc794dbb4eed05c28eaa687fe3cf1a5f8a3aa5cd55c8ebd544c41d",
+    "events/atomic-purchase-sync.json": "00ad8a8acfcc8b5531de8312a6ad9e13cae2ec6fc386a4b3263fde3d574f0764",
+    "events/batch-item-encoding.json": "2eff88659c755cc7029030ff6162dc4af95c4a37ff1ac46897aa73deb91ae37c",
+    "events/down-facts/converted.json": "8ee7c244f411ca46cd740126a605eb18c72690500df20df1056b9175c316afda",
+    "events/experience-events.json": "8e44d7adc8c6ac7e52365e53285c8fb25e6ee676c2d7e444b2ad9acc5801ace4",
+    "experience-release-descriptor/envelope.json": "26f8d9f824a6581448de8d9bcbdf70b14b7a54d66c6c05c5b59f6473e041508a",
+    "experience-release-descriptor/expected-identity.json": "8c26bd6a014907a91ab7a25094551efb87bd1c28b5a245bc397def2bf970d32f",
+    "experience-release-descriptor/segment-trigger.json": "7774fbbb36e5c43671a201afa9dc30be0864c7de036671cfc21d767625b072fb",
+    "experience-release-descriptor/supported-capabilities.json": "51dc97cf78a132d69e8ef2423210b8b311b094d98cd2e5c94e70b541c9be4a65",
+    "experience-release-descriptor/trusted-public-keys.json": "8611364f0c6a6181f4e31e25c5531c8dc2f2b51c41d79688d41e6b5bc663af46",
+    "experience-release-profile-v1/profile.json": "60ec2ec5fc84546d3d9ee78099c1b903d13b45a2bc500a3bcb731da00f96a409",
+    "golden-journey/basic.json": "a3ead9496a7c05faf2bd54507b13b1fd7fd7760a3a7c26a9bf476679d5e0b83b",
+    "ir/eval-vectors.json": "f1a5a7a0f0cfaea29d62999cddf5082dade701ae07a9d3e523dc671e999e3d7d",
+    "ir/response-field-conformance.json": "4b7bce196877d89947116ec5dcc6368ed5946119df2f77f223b6ec2eb400e4eb",
+    "journeys/conformance/either-vocabulary.json": "373dffb2ed610370291ea9c1fa979d46ed61066535c3271fd1c295250a8d780d",
+    "journeys/effects/round-trip.json": "edd07b36683b2ee7ffe369dd30d6221212ebb364e2e610c51a608ea944ad7bea",
+    "journeys/experiment-resolution/cross-plane.json": "91ef97d88f04b2d975a633671be411e352187fb3197a97dd2028c3a8303570de",
+    "journeys/ghost/superseded.json": "386adb8f318fdd04624fdbe69acedcfade08b0b183d73472de71f6ba6de10820",
+    "journeys/handler-host-dispatch/lifecycle.json": "5ebf00eb123b41f7c995ebbc9ff43adf2ba55390d5c83d61e99d1e691ebf9bc2",
+    "journeys/handoff/claim.json": "51fe5bd912be358911d339d86dd5b4faa216c424d9e64da159e319b59eb9dc7f",
+    "journeys/parking/emission.json": "3918462923572de58b79a724a25ec97f0706be148e6fc44383010ef2d94ce579",
+    "journeys/seizure-race/device-handoff-wins.json": "57bdb18f6122a0d4a3de7b1ebd130807383d1ae680bd09a003ccb3413cf94fa8",
+    "journeys/takeover/claimable.json": "8da78cf90be6b9a527f24a7f4fb1e9ed8292eca9edd6ee8a2c40eba71da0f89d",
+    "journeys/time-window/cross-plane.json": "5896275d61a52cc150fb34eb131331566f810dff621464e9b7b4c53ab94f80e4",
+    "journeys/transitions/basic.json": "4460073a4055be574650c503a58dc05ddfa210844a49e0ce2dc4b2c5e9e1b06e",
+    "segments/seed-mirror/server-mode.json": "67cb883affd73d4bcd179c89a654318b976e34eaf26a632da6a234ef7364b389"
+  }
+}
