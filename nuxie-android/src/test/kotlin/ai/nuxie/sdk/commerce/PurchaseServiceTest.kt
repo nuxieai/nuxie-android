@@ -13,6 +13,7 @@ import com.android.billingclient.api.BillingResult
 import java.security.MessageDigest
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -89,7 +90,8 @@ class PurchaseServiceTest {
 
     @Test
     fun permanentVerificationFailureRevokesOptimisticAccess() = runTest {
-        val fixture = fixture(this)
+        val sharedStore = RecordingEvidenceStore()
+        val fixture = fixture(this, store = sharedStore)
         fixture.synchronizer = {
             assertTrue(fixture.core.featureInfo.isAllowed("pro"))
             PurchaseSyncOutcome.Rejected(permanent = true)
@@ -108,7 +110,28 @@ class PurchaseServiceTest {
         assertEquals(PurchaseResult.Purchased, purchase.await())
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         assertTrue(fixture.store.load().getValue("rejected-token").permanentlyRejected)
+
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase(
+                "rejected-token",
+                obfuscatedAccountId = accountHash(fixture.core.identity.distinctId()),
+            ),
+        )
+        fixture.service.recover()
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
+
+        val restarted = fixture(this, store = sharedStore)
+        restarted.core.features.hydrateProfile(
+            restarted.core.identity.distinctId(),
+            Json.parseToJsonElement(
+                """{"features":[{"id":"pro","type":"boolean","unlimited":false}]}""",
+            ).jsonObject,
+        )
+        assertTrue(restarted.core.featureInfo.isAllowed("pro"))
+        restarted.service.recover()
+        assertFalse(restarted.core.featureInfo.isAllowed("pro"))
+        restarted.close()
     }
 
     @Test
@@ -154,6 +177,294 @@ class PurchaseServiceTest {
         assertFalse("consume" in actions)
         assertFalse(ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED in actions)
         fixture.close()
+    }
+
+    @Test
+    fun unsolicitedTokenWithoutBindingSyncsButGrantsOnlyForAMatchingCustomer() = runTest {
+        val unmatched = fixture(this)
+        unmatched.service.rememberProduct(
+            product(grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN))),
+        )
+        unmatched.synchronizer = {
+            assertFalse(unmatched.core.featureInfo.isAllowed("pro"))
+            accepted(it.distinctId)
+        }
+        unmatched.service.onPurchasesUpdated(
+            okUpdate(playPurchase("unmatched", obfuscatedAccountId = accountHash("someone-else"))),
+        )
+
+        val unmatchedEvidence = unmatched.store.load().getValue("unmatched")
+        assertEquals(unmatched.core.identity.distinctId(), unmatchedEvidence.distinctId)
+        assertTrue(unmatchedEvidence.synced)
+        assertFalse(unmatchedEvidence.customerMatched)
+
+        val matching = fixture(this)
+        matching.service.rememberProduct(
+            product(grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN))),
+        )
+        matching.synchronizer = {
+            assertTrue(matching.core.featureInfo.isAllowed("pro"))
+            accepted(it.distinctId)
+        }
+        matching.service.onPurchasesUpdated(
+            okUpdate(
+                playPurchase(
+                    "matching",
+                    obfuscatedAccountId = accountHash(matching.core.identity.distinctId()),
+                ),
+            ),
+        )
+
+        assertTrue(matching.store.load().getValue("matching").synced)
+        assertTrue(matching.core.featureInfo.isAllowed("pro"))
+        unmatched.close()
+        matching.close()
+    }
+
+    @Test
+    fun recoveryAdoptsLegacyBlankOwnerEvidenceForSyncWithoutOptimisticGrant() = runTest {
+        val fixture = fixture(this)
+        fixture.store.upsert(
+            PurchaseEvidence(
+                purchaseToken = "legacy-blank-owner",
+                packageName = "com.example.app",
+                storeProductIds = listOf("play-pro"),
+                purchaseState = StoredPurchaseState.PURCHASED,
+                distinctId = "",
+                acknowledged = false,
+                firstSeenMillis = 1L,
+                localFeatureGrants = listOf(
+                    StoredLocalPurchaseGrant("pro", FeatureType.BOOLEAN.name, unlimited = false),
+                ),
+                customerMatched = false,
+            ),
+        )
+        fixture.synchronizer = {
+            assertEquals(fixture.core.identity.distinctId(), it.distinctId)
+            assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+            accepted(it.distinctId)
+        }
+
+        fixture.service.recover()
+
+        val recovered = fixture.store.load().getValue("legacy-blank-owner")
+        assertTrue(recovered.synced)
+        assertEquals(fixture.core.identity.distinctId(), recovered.distinctId)
+        assertFalse(recovered.customerMatched)
+        fixture.close()
+    }
+
+    @Test
+    fun recoveryDoesNotGrantEvidenceWhoseRequiredSignatureWasNeverVerified() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(
+            PurchaseEvidence(
+                purchaseToken = "unverified-token",
+                packageName = "com.example.app",
+                storeProductIds = listOf("play-pro"),
+                purchaseState = StoredPurchaseState.PURCHASED,
+                distinctId = owner,
+                acknowledged = false,
+                firstSeenMillis = 1L,
+                localFeatureGrants = listOf(
+                    StoredLocalPurchaseGrant("pro", FeatureType.BOOLEAN.name, unlimited = false),
+                ),
+                catalogResolved = true,
+                signatureVerificationRequired = true,
+                signatureVerified = false,
+                customerMatched = true,
+            ),
+        )
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("unverified-token", obfuscatedAccountId = accountHash(owner)),
+        )
+
+        fixture.service.recover()
+
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun legacyEvidenceUsesStoredCatalogKeyToRequireVerificationDuringRecovery() = runTest {
+        val fixture = fixture(this)
+        fixture.service.rememberProduct(product(licensingPublicKey = "configured-key"))
+        fixture.store.upsert(
+            PurchaseEvidence(
+                purchaseToken = "legacy-unverified",
+                packageName = "com.example.app",
+                storeProductIds = listOf("play-pro"),
+                purchaseState = StoredPurchaseState.PURCHASED,
+                distinctId = fixture.core.identity.distinctId(),
+                acknowledged = false,
+                firstSeenMillis = 1L,
+                localFeatureGrants = listOf(
+                    StoredLocalPurchaseGrant("pro", FeatureType.BOOLEAN.name, unlimited = false),
+                ),
+                catalogResolved = true,
+            ),
+        )
+        fixture.billing.failQueries = true
+        fixture.synchronizer = {
+            assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+            accepted(it.distinctId)
+        }
+
+        fixture.service.recover()
+
+        assertTrue(fixture.store.load().getValue("legacy-unverified").synced)
+        fixture.close()
+    }
+
+    @Test
+    fun appManagedModeCannotBeUpgradedByAnOldManagedBindingForANewToken() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, mode = PurchaseHandlingMode.APP_MANAGED, actions = actions)
+        fixture.store.upsertBinding(
+            product().bindingFor(fixture.core.identity.distinctId(), nuxieManaged = true),
+        )
+
+        fixture.service.onPurchasesUpdated(
+            okUpdate(
+                playPurchase(
+                    "new-app-managed-token",
+                    obfuscatedAccountId = accountHash(fixture.core.identity.distinctId()),
+                ),
+            ),
+        )
+
+        assertFalse(fixture.store.load().getValue("new-app-managed-token").nuxieManaged)
+        assertFalse("ack" in actions)
+        fixture.close()
+    }
+
+    @Test
+    fun unmatchedTokenCannotInheritManagedModeFromAnInFlightCheckout() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, mode = PurchaseHandlingMode.NUXIE_MANAGED, actions = actions)
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(playPurchase("prior-token"))
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+        fixture.settings.handlingMode = PurchaseHandlingMode.APP_MANAGED
+
+        fixture.service.onPurchasesUpdated(
+            okUpdate(playPurchase("prior-token").forCheckout(fixture)),
+        )
+
+        assertFalse(fixture.store.load().getValue("prior-token").nuxieManaged)
+        assertFalse("ack" in actions)
+        fixture.service.onPurchasesUpdated(
+            okUpdate(
+                playPurchase(
+                    "new-token",
+                    state = StoredPurchaseState.PENDING,
+                ).forCheckout(fixture),
+            ),
+        )
+        assertEquals(PurchaseResult.Pending, checkout.await())
+        fixture.close()
+    }
+
+    @Test
+    fun managedCompletionRetriesUseTheirOwnExponentialBackoff() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(
+            this,
+            actions = actions,
+            initialRetryDelayMillis = 10,
+            maxRetryDelayMillis = 1_000,
+        )
+        fixture.billing.acknowledgeCodes += listOf(
+            BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE,
+            BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE,
+            BillingClient.BillingResponseCode.OK,
+        )
+        fixture.store.upsertBinding(product().bindingFor(fixture.core.identity.distinctId()))
+
+        fixture.service.onPurchasesUpdated(
+            okUpdate(
+                playPurchase(
+                    "completion-backoff",
+                    obfuscatedAccountId = accountHash(fixture.core.identity.distinctId()),
+                ),
+            ),
+        )
+        assertEquals(1, actions.count { it == "ack" })
+
+        advanceTimeBy(19)
+        runCurrent()
+        assertEquals(1, actions.count { it == "ack" })
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(2, actions.count { it == "ack" })
+
+        advanceTimeBy(39)
+        runCurrent()
+        assertEquals(2, actions.count { it == "ack" })
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(3, actions.count { it == "ack" })
+        assertTrue(fixture.store.load().getValue("completion-backoff").acknowledged)
+        assertEquals(3, fixture.store.load().getValue("completion-backoff").completionAttempts)
+        fixture.close()
+    }
+
+    @Test
+    fun recoveryDoesNotBypassAPendingManagedCompletionBackoff() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(
+            this,
+            actions = actions,
+            initialRetryDelayMillis = 10,
+            maxRetryDelayMillis = 1_000,
+        )
+        val owner = fixture.core.identity.distinctId()
+        fixture.billing.acknowledgeCodes += listOf(
+            BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE,
+            BillingClient.BillingResponseCode.OK,
+        )
+        fixture.store.upsert(
+            PurchaseEvidence(
+                purchaseToken = "recovery-completion",
+                packageName = "com.example.app",
+                storeProductIds = listOf("play-pro"),
+                purchaseState = StoredPurchaseState.PURCHASED,
+                distinctId = owner,
+                acknowledged = false,
+                synced = true,
+                firstSeenMillis = 1L,
+                catalogResolved = true,
+                syncedEventEmitted = true,
+                nuxieManaged = true,
+            ),
+        )
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("recovery-completion", obfuscatedAccountId = accountHash(owner)),
+        )
+
+        fixture.service.recover()
+
+        assertEquals(1, actions.count { it == "ack" })
+        assertFalse(fixture.store.load().getValue("recovery-completion").acknowledged)
+        advanceTimeBy(20)
+        runCurrent()
+        assertEquals(2, actions.count { it == "ack" })
+        assertTrue(fixture.store.load().getValue("recovery-completion").acknowledged)
+        fixture.close()
+    }
+
+    @Test
+    fun explicitVerificationFailureIsPermanentButAmbiguousFailureIsTransient() {
+        val permanent = Json.parseToJsonElement(
+            """{"success":false,"error":"verification failed"}""",
+        ).jsonObject
+        val ambiguous = Json.parseToJsonElement(
+            """{"success":false,"reason":"try_again"}""",
+        ).jsonObject
+
+        assertTrue(isPermanentPurchaseRejection(permanent))
+        assertFalse(isPermanentPurchaseRejection(ambiguous))
     }
 
     @Test
@@ -296,14 +607,15 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun unknownAccountPurchaseIsNotAttributedToTheCurrentCustomer() = runTest {
+    fun unknownAccountPurchaseSyncsForCurrentCustomerWithoutOptimisticGrant() = runTest {
         val fixture = fixture(this)
 
         fixture.service.onPurchasesUpdated(
             okUpdate(playPurchase("other-customer", obfuscatedAccountId = accountHash("someone-else"))),
         )
 
-        assertEquals("", fixture.store.load().getValue("other-customer").distinctId)
+        assertEquals(fixture.core.identity.distinctId(), fixture.store.load().getValue("other-customer").distinctId)
+        assertTrue(fixture.store.load().getValue("other-customer").synced)
         fixture.close()
     }
 
@@ -312,6 +624,8 @@ class PurchaseServiceTest {
         mode: PurchaseHandlingMode = PurchaseHandlingMode.NUXIE_MANAGED,
         store: RecordingEvidenceStore = RecordingEvidenceStore(),
         actions: MutableList<String> = mutableListOf(),
+        initialRetryDelayMillis: Long = 60_000,
+        maxRetryDelayMillis: Long = 60_000,
     ): Fixture {
         val core = NuxieCore(
             context = RuntimeEnvironment.getApplication(),
@@ -334,7 +648,8 @@ class PurchaseServiceTest {
             emit = { name, _ -> actions += name },
             settings = settings,
             scope = scope.backgroundScope,
-            initialRetryDelayMillis = 60_000,
+            initialRetryDelayMillis = initialRetryDelayMillis,
+            maxRetryDelayMillis = maxRetryDelayMillis,
         )
         fixture = Fixture(core, billing, store, service, settings) { accepted(core.identity.distinctId()) }
         return fixture
@@ -354,6 +669,7 @@ class PurchaseServiceTest {
     private class RecordingEvidenceStore : PurchaseEvidenceStore {
         private val entries = linkedMapOf<String, PurchaseEvidence>()
         private val bindings = linkedMapOf<String, StoredPurchaseBinding>()
+        private val mappings = linkedMapOf<String, StoredProductMapping>()
         var actions: MutableList<String> = mutableListOf()
         override fun load(): Map<String, PurchaseEvidence> = entries.toMap()
         override fun upsert(evidence: PurchaseEvidence): Boolean {
@@ -366,12 +682,19 @@ class PurchaseServiceTest {
             bindings["${binding.obfuscatedAccountId}:${binding.storeProductId}"] = binding
             return true
         }
+        override fun loadProductMappings(): List<StoredProductMapping> = mappings.values.toList()
+        override fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
+            mappings[mapping.storeProductId] = mapping
+            return true
+        }
     }
 
     private class FakeBilling(private val actions: MutableList<String>) : PlayBillingGateway {
         val active = mutableMapOf<String, List<PlayPurchase>>()
         val queries = mutableListOf<String>()
         var launched: CheckoutRequest? = null
+        val acknowledgeCodes = mutableListOf<Int>()
+        var failQueries = false
 
         override suspend fun launch(activity: Activity, request: CheckoutRequest): BillingResult {
             launched = request
@@ -380,12 +703,21 @@ class PurchaseServiceTest {
 
         override suspend fun queryActive(productType: String): ActivePurchasesResult {
             queries += productType
+            if (failQueries) {
+                return ActivePurchasesResult.Failed(
+                    BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE,
+                    "offline",
+                )
+            }
             return ActivePurchasesResult.Success(active[productType].orEmpty())
         }
 
         override suspend fun acknowledge(purchaseToken: String): BillingResult {
             actions += "ack"
-            return billingResult(BillingClient.BillingResponseCode.OK)
+            return billingResult(
+                if (acknowledgeCodes.isEmpty()) BillingClient.BillingResponseCode.OK
+                else acknowledgeCodes.removeAt(0),
+            )
         }
 
         override suspend fun consume(purchaseToken: String): BillingResult {
@@ -403,6 +735,7 @@ class PurchaseServiceTest {
         subscription: Boolean = false,
         consumable: Boolean = false,
         grants: List<LocalPurchaseGrant> = emptyList(),
+        licensingPublicKey: String? = null,
     ) = StoreProduct(
         productId = "nuxie-pro",
         storeProductId = "play-pro",
@@ -415,6 +748,7 @@ class PurchaseServiceTest {
         productType = if (subscription) BillingClient.ProductType.SUBS else BillingClient.ProductType.INAPP,
         consumable = consumable,
         localFeatureGrants = grants,
+        licensingPublicKey = licensingPublicKey,
         purchaseContext = PurchaseContext("experience-1", "v1"),
     )
 

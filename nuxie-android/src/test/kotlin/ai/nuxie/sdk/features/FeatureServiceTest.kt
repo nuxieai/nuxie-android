@@ -99,6 +99,85 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun cachedAccessUsesRevokedThenLocalPurchaseThenRealTimeThenProfileOrdering() = runBlocking {
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = "customer",
+                            featureId = "wallet",
+                            requiredBalance = 1.0,
+                            allowed = false,
+                            balance = "0",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        val core = core(transport)
+        core.features.hydrateProfile(
+            core.identity.distinctId(),
+            Json.parseToJsonElement(
+                profile("""[{"id":"exports","type":"metered","balance":1,"unlimited":false}]"""),
+            ).jsonObject,
+        )
+        assertTrue(core.features.getCached("exports", null)!!.allowed)
+
+        core.features.check("exports")
+        assertFalse(core.features.getCached("exports", null)!!.allowed)
+
+        val grant = listOf(LocalPurchaseGrant("exports", FeatureType.METERED, unlimited = true))
+        core.features.applyLocalPurchase(grant, "local-token")
+        core.features.check("exports")
+        assertTrue(core.features.getCached("exports", null)!!.allowed)
+        assertTrue(core.features.checkWithCache("exports").allowed)
+
+        core.features.removeLocalPurchase("local-token")
+        core.features.applyLocalPurchase(grant, "other-token")
+        assertFalse(core.features.getCached("exports", null)!!.allowed)
+        core.stop()
+    }
+
+    @Test
+    fun profileFetchStartedBeforePurchaseDoesNotEraseTheNewerOptimisticGrant() = runBlocking {
+        val fetchStarted = CountDownLatch(1)
+        val releaseFetch = CountDownLatch(1)
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/profile") {
+                    fetchStarted.countDown()
+                    assertTrue(releaseFetch.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        profile(
+                            """[{"id":"exports","type":"metered","balance":0,"unlimited":false}]""",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, "{}".encodeToByteArray())
+                }
+            }
+        }
+        val core = core(transport)
+
+        val refresh = async(Dispatchers.Default) { core.profile.refreshAndWait() }
+        assertTrue(fetchStarted.await(5, TimeUnit.SECONDS))
+        core.features.applyLocalPurchase(
+            listOf(LocalPurchaseGrant("exports", FeatureType.METERED, unlimited = true)),
+            "mid-fetch-token",
+        )
+        releaseFetch.countDown()
+
+        assertTrue(refresh.await())
+        assertTrue(core.features.getCached("exports", null)!!.allowed)
+        core.stop()
+    }
+
+    @Test
     fun purchaseResponseReconcilesItsGrantWithoutReplacingUnrelatedProfileFeatures() = runBlocking {
         val core = core(FakeTransport())
         val customer = core.identity.distinctId()

@@ -16,6 +16,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 internal class PurchaseSettings(
     delegate: NuxiePurchaseDelegate?,
@@ -32,6 +35,26 @@ internal sealed interface PurchaseSyncOutcome {
 
 internal fun interface PurchaseSynchronizer {
     fun sync(evidence: PurchaseEvidence): PurchaseSyncOutcome
+}
+
+internal fun isPermanentPurchaseRejection(body: JsonObject): Boolean {
+    if ((body["permanent"] as? JsonPrimitive)?.contentOrNull?.toBooleanStrictOrNull() == true) return true
+    if ((body["retryable"] as? JsonPrimitive)?.contentOrNull?.toBooleanStrictOrNull() == false) return true
+    val explicitReasons = setOf(
+        "verification_failed",
+        "verification_failure",
+        "purchase_verification_failed",
+        "invalid_purchase",
+        "invalid_purchase_token",
+        "invalid_receipt",
+        "invalid_signature",
+        "permanent",
+    )
+    // UNIV-2632 will finalize the exact permanent-reason vocabulary.
+    return listOf("reason", "code", "error")
+        .mapNotNull { key -> (body[key] as? JsonPrimitive)?.contentOrNull }
+        .map { value -> value.trim().lowercase().replace('-', '_').replace(' ', '_') }
+        .any { it in explicitReasons }
 }
 
 /** Owns checkout correlation, durable evidence, reconciliation, and managed completion. */
@@ -60,7 +83,8 @@ internal class PurchaseService(
     private val products = ConcurrentHashMap<String, StoreProduct>()
     private val inFlight = ConcurrentHashMap<String, InFlightPurchase>()
     private val processing = Mutex()
-    private val retryJobs = ConcurrentHashMap<String, Job>()
+    private val syncRetryJobs = ConcurrentHashMap<String, Job>()
+    private val completionRetryJobs = ConcurrentHashMap<String, Job>()
 
     suspend fun purchase(
         activity: Activity,
@@ -188,14 +212,37 @@ internal class PurchaseService(
             active.forEach { processPurchase(it) }
             val activeTokens = active.mapTo(mutableSetOf()) { it.purchaseToken }
             if (allQueriesSucceeded) revokeMissingOptimistic(activeTokens)
-            evidenceStore.load().values
+            val bindings = evidenceStore.loadBindings()
+            val mappings = evidenceStore.loadProductMappings()
+            val evidenceRecords = evidenceStore.load().values.mapNotNull { storedEvidence ->
+                var normalized = storedEvidence
+                if (normalized.distinctId.isBlank()) {
+                    normalized = normalized.copy(
+                        distinctId = distinctId(),
+                        customerMatched = false,
+                    )
+                }
+                if (!normalized.signatureVerificationRequired &&
+                    hasConfiguredLicensingKey(normalized, bindings, mappings)
+                ) {
+                    normalized = normalized.copy(signatureVerificationRequired = true)
+                }
+                if (normalized != storedEvidence && !evidenceStore.upsert(normalized)) null else normalized
+            }
+            evidenceRecords
                 .filter {
-                    it.distinctId.isNotBlank() && !it.permanentlyRejected &&
+                    it.permanentlyRejected &&
+                        it.purchaseState == StoredPurchaseState.PURCHASED
+                }
+                .forEach { revokeEvidence(it) }
+            evidenceRecords
+                .filter {
+                    !it.permanentlyRejected &&
                         it.purchaseState == StoredPurchaseState.PURCHASED &&
                         (!it.synced || !it.syncedEventEmitted || it.needsManagedCompletion())
                 }
                 .forEach { evidence ->
-                    if (!evidence.synced && evidence.distinctId == distinctId()) {
+                    if (!evidence.synced && evidence.canGrantTo(distinctId())) {
                         val noLongerActive = allQueriesSucceeded && evidence.purchaseToken !in activeTokens
                         if (noLongerActive) {
                             features.removeLocalPurchase(evidence.purchaseToken)
@@ -234,13 +281,23 @@ internal class PurchaseService(
         val catalogBinding = exactBinding ?: bindings.firstOrNull { it.storeProductId in purchase.products }
         val catalogMapping = mappings.firstOrNull { it.storeProductId in purchase.products }
         val currentOwner = distinctId()
-        val owner = existing?.distinctId?.takeIf(String::isNotBlank)
+        val matchedOwner = existing?.distinctId?.takeIf { existing.customerMatched && it.isNotBlank() }
             ?: exactBinding?.distinctId
             ?: currentOwner.takeIf { purchase.obfuscatedAccountId == sha256(it) }
             ?: matchingFlight?.owner?.takeIf {
                 purchase.obfuscatedAccountId == matchingFlight.obfuscatedAccountId
             }
-        val durableOwner = owner.orEmpty()
+        val durableOwner = existing?.distinctId?.takeIf(String::isNotBlank) ?: matchedOwner ?: currentOwner
+        val licensingPublicKey = product?.licensingPublicKey ?: catalogBinding?.licensingPublicKey
+            ?: catalogMapping?.licensingPublicKey
+        val signatureVerificationRequired = existing?.signatureVerificationRequired == true ||
+            licensingPublicKey != null
+        val signatureVerified = existing?.signatureVerified == true ||
+            (licensingPublicKey != null && PlayPurchaseSignatureVerifier.verify(
+                licensingPublicKey,
+                purchase.originalJson,
+                purchase.signature,
+            ))
         val evidence = PurchaseEvidence(
             purchaseToken = purchase.purchaseToken,
             packageName = purchase.packageName,
@@ -253,7 +310,7 @@ internal class PurchaseService(
                 ?: catalogBinding?.offerId ?: catalogMapping?.offerId,
             purchaseState = purchase.state,
             obfuscatedAccountId = purchase.obfuscatedAccountId ?: existing?.obfuscatedAccountId
-                ?: owner?.let(::sha256),
+                ?: sha256(durableOwner),
             distinctId = durableOwner,
             context = existing?.context ?: product?.toStoredContext()
                 ?: catalogBinding?.context ?: catalogMapping?.context,
@@ -262,6 +319,7 @@ internal class PurchaseService(
             synced = existing?.synced == true,
             permanentlyRejected = existing?.permanentlyRejected == true,
             syncAttempts = existing?.syncAttempts ?: 0,
+            completionAttempts = existing?.completionAttempts ?: 0,
             firstSeenMillis = existing?.firstSeenMillis ?: nowMillis(),
             consumable = existing?.consumable ?: product?.consumable
                 ?: catalogBinding?.consumable ?: catalogMapping?.consumable ?: false,
@@ -274,40 +332,35 @@ internal class PurchaseService(
             completionEmitted = existing?.completionEmitted == true,
             syncedEventEmitted = existing?.syncedEventEmitted == true,
             syncedCustomerId = existing?.syncedCustomerId,
-            nuxieManaged = existing?.nuxieManaged?.takeIf { existing.distinctId.isNotBlank() }
-                ?: matchingFlight?.nuxieManaged
-                ?: exactBinding?.nuxieManaged
+            nuxieManaged = existing?.nuxieManaged
+                ?: matchingFlight?.nuxieManaged?.takeIf { isCheckoutOutcome }
                 ?: (settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED),
+            customerMatched = existing?.customerMatched == true || matchedOwner != null,
+            signatureVerificationRequired = signatureVerificationRequired,
+            signatureVerified = signatureVerified,
         )
         // D2: evidence is durable before grants, facts, sync, acknowledge, or consume.
         if (!evidenceStore.upsert(evidence)) {
             complete(purchase, PurchaseResult.Failed(IllegalStateException("Could not persist purchase evidence.")))
             return
         }
-        // D5: preserve unknown-owner evidence, but never grant or report it as
-        // the currently active customer. A later matching binding can adopt it.
-        if (owner == null) return
-
         if (purchase.state == StoredPurchaseState.PENDING) {
             complete(purchase, PurchaseResult.Pending)
             return
         }
-        val licensingPublicKey = product?.licensingPublicKey ?: catalogBinding?.licensingPublicKey
-            ?: catalogMapping?.licensingPublicKey
-        if (licensingPublicKey != null && !PlayPurchaseSignatureVerifier.verify(
-                licensingPublicKey,
-                purchase.originalJson,
-                purchase.signature,
-            )
-        ) {
-            features.removeLocalPurchase(purchase.purchaseToken)
+        if (evidence.permanentlyRejected) {
+            revokeEvidence(evidence)
+            return
+        }
+        if (evidence.signatureVerificationRequired && !evidence.signatureVerified) {
+            revokeEvidence(evidence)
             evidenceStore.upsert(evidence.copy(permanentlyRejected = true))
             complete(purchase, PurchaseResult.Failed(SecurityException("Play purchase signature is invalid.")))
             return
         }
 
         var currentEvidence = evidence
-        if (owner == distinctId()) {
+        if (evidence.canGrantTo(distinctId())) {
             features.applyLocalPurchase(evidence.localFeatureGrants.toFeatureGrants(), purchase.purchaseToken)
             if (isCheckoutOutcome && !evidence.completionEmitted) {
                 emitPurchaseCompleted(evidence)
@@ -329,11 +382,9 @@ internal class PurchaseService(
             is PurchaseSyncOutcome.Rejected -> {
                 if (outcome.permanent) {
                     evidenceStore.upsert(attempted.copy(permanentlyRejected = true))
-                    if (attempted.distinctId == distinctId()) {
-                        features.removeLocalPurchase(attempted.purchaseToken)
-                    }
+                    revokeEvidence(attempted)
                 } else {
-                    scheduleRetry(attempted.purchaseToken, attempted.syncAttempts)
+                    scheduleSyncRetry(attempted.purchaseToken, attempted.syncAttempts)
                 }
             }
             is PurchaseSyncOutcome.Accepted -> {
@@ -371,23 +422,49 @@ internal class PurchaseService(
 
     private suspend fun completeManaged(evidence: PurchaseEvidence) {
         if (!evidence.needsManagedCompletion()) return
-        val completion = if (evidence.consumable) {
+        if (completionRetryJobs[evidence.purchaseToken]?.isActive == true) return
+        val attempted = evidence.copy(completionAttempts = evidence.completionAttempts + 1)
+        if (!evidenceStore.upsert(attempted)) return
+        val completion = if (attempted.consumable) {
             billing.consume(evidence.purchaseToken)
         } else {
             billing.acknowledge(evidence.purchaseToken)
         }
         if (completion.responseCode == BillingClient.BillingResponseCode.OK) {
             evidenceStore.upsert(
-                if (evidence.consumable) evidence.copy(consumed = true)
-                else evidence.copy(acknowledged = true),
+                if (attempted.consumable) attempted.copy(consumed = true)
+                else attempted.copy(acknowledged = true),
             )
         } else {
-            scheduleRetry(evidence.purchaseToken, evidence.syncAttempts)
+            scheduleCompletionRetry(evidence.purchaseToken, attempted.completionAttempts)
         }
     }
 
     private fun PurchaseEvidence.needsManagedCompletion(): Boolean =
         nuxieManaged && catalogResolved && !acknowledged && !consumed
+
+    private fun PurchaseEvidence.canGrantTo(currentDistinctId: String): Boolean =
+        customerMatched && distinctId == currentDistinctId &&
+            (!signatureVerificationRequired || signatureVerified)
+
+    private fun hasConfiguredLicensingKey(
+        evidence: PurchaseEvidence,
+        bindings: List<StoredPurchaseBinding>,
+        mappings: List<StoredProductMapping>,
+    ): Boolean = bindings.any {
+        it.licensingPublicKey != null && it.storeProductId in evidence.storeProductIds
+    } || mappings.any {
+        it.licensingPublicKey != null && it.storeProductId in evidence.storeProductIds
+    }
+
+    private suspend fun revokeEvidence(evidence: PurchaseEvidence) {
+        if (!evidence.customerMatched || evidence.distinctId != distinctId()) return
+        features.applyLocalPurchase(
+            evidence.localFeatureGrants.toFeatureGrants(),
+            evidence.purchaseToken,
+        )
+        features.removeLocalPurchase(evidence.purchaseToken)
+    }
 
     private suspend fun revokeMissingOptimistic(activeTokens: Set<String>) {
         evidenceStore.load().values
@@ -399,29 +476,39 @@ internal class PurchaseService(
             .forEach { features.removeLocalPurchase(it.purchaseToken) }
     }
 
-    private fun scheduleRetry(token: String, attempt: Int) {
-        if (retryJobs[token]?.isActive == true) return
-        val delayMillis = (initialRetryDelayMillis * (1L shl attempt.coerceAtMost(16)))
-            .coerceAtMost(maxRetryDelayMillis)
-        retryJobs[token] = scope.launch {
-            delay(delayMillis)
-            retryJobs.remove(token)
+    private fun scheduleSyncRetry(token: String, attempt: Int) {
+        if (syncRetryJobs[token]?.isActive == true) return
+        syncRetryJobs[token] = scope.launch {
+            delay(retryDelay(attempt))
+            syncRetryJobs.remove(token)
             evidenceStore.load()[token]
-                ?.takeIf {
-                    !it.permanentlyRejected &&
-                        (!it.synced || !it.syncedEventEmitted || it.needsManagedCompletion())
-                }
+                ?.takeIf { !it.permanentlyRejected && !it.synced }
                 ?.let {
                     processing.withLock {
-                        if (it.synced) {
-                            completeManaged(emitPurchaseSyncedIfNeeded(it))
-                        } else {
-                            syncEvidence(it)
-                        }
+                        syncEvidence(it)
                     }
                 }
         }
     }
+
+    private fun scheduleCompletionRetry(token: String, attempt: Int) {
+        if (completionRetryJobs[token]?.isActive == true) return
+        completionRetryJobs[token] = scope.launch {
+            delay(retryDelay(attempt))
+            completionRetryJobs.remove(token)
+            evidenceStore.load()[token]
+                ?.takeIf { !it.permanentlyRejected && it.synced && it.needsManagedCompletion() }
+                ?.let {
+                    processing.withLock {
+                        completeManaged(emitPurchaseSyncedIfNeeded(it))
+                    }
+                }
+        }
+    }
+
+    private fun retryDelay(attempt: Int): Long =
+        (initialRetryDelayMillis * (1L shl attempt.coerceAtMost(16)))
+            .coerceAtMost(maxRetryDelayMillis)
 
     private fun emitPurchaseCompleted(evidence: PurchaseEvidence) {
         val properties = linkedMapOf<String, Any?>(

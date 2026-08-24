@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.commerce
 
+import ai.nuxie.sdk.NuxieEnvironment
 import android.util.Base64
 import java.nio.file.Files
 import java.security.KeyPairGenerator
@@ -25,7 +26,10 @@ class PurchaseEvidenceStoreTest {
                 distinctId = "customer-1",
                 acknowledged = false,
                 syncAttempts = 1,
+                completionAttempts = 2,
                 firstSeenMillis = 123L,
+                signatureVerificationRequired = true,
+                signatureVerified = true,
             )
             assertTrue(FilePurchaseEvidenceStore(directory).upsert(evidence))
             assertTrue(FilePurchaseEvidenceStore(directory).upsert(evidence.copy(acknowledged = true)))
@@ -36,6 +40,42 @@ class PurchaseEvidenceStoreTest {
             )
         } finally {
             directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun authorityScopedDirectoryDoesNotReplayEvidenceAcrossEnvironments() {
+        val filesDirectory = Files.createTempDirectory("nuxie-commerce-authority").toFile()
+        val apiKey = "pk_secret_authority"
+        try {
+            val development = purchaseEvidenceDirectory(
+                filesDirectory,
+                apiKey,
+                NuxieEnvironment.DEVELOPMENT,
+            )
+            val production = purchaseEvidenceDirectory(
+                filesDirectory,
+                apiKey,
+                NuxieEnvironment.PRODUCTION,
+            )
+            val evidence = PurchaseEvidence(
+                purchaseToken = "token-1",
+                packageName = "com.example.app",
+                storeProductIds = listOf("pro"),
+                purchaseState = StoredPurchaseState.PURCHASED,
+                distinctId = "customer-1",
+                acknowledged = false,
+                firstSeenMillis = 123L,
+            )
+
+            assertTrue(FilePurchaseEvidenceStore(development).upsert(evidence))
+
+            assertTrue(FilePurchaseEvidenceStore(production).load().isEmpty())
+            assertFalse(development.absolutePath.contains(apiKey))
+            assertFalse(production.absolutePath.contains(apiKey))
+            assertTrue(development != production)
+        } finally {
+            filesDirectory.deleteRecursively()
         }
     }
 
