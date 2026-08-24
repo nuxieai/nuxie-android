@@ -23,6 +23,8 @@ import ai.nuxie.sdk.commerce.PurchaseService
 import ai.nuxie.sdk.commerce.PurchaseSettings
 import ai.nuxie.sdk.commerce.PurchaseSyncOutcome
 import ai.nuxie.sdk.commerce.PurchaseSynchronizer
+import ai.nuxie.sdk.commerce.isPermanentPurchaseRejection
+import ai.nuxie.sdk.commerce.purchaseEvidenceDirectory
 import ai.nuxie.sdk.experiences.ExperienceTrustRoots
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
 import ai.nuxie.sdk.identity.IdentityService
@@ -154,7 +156,9 @@ internal class NuxieCore(
     val purchases: PurchaseService = PurchaseService(
         billing = billing,
         evidenceStore = overrides.purchaseEvidenceStore
-            ?: FilePurchaseEvidenceStore(java.io.File(appContext.filesDir, "nuxie-commerce")),
+            ?: FilePurchaseEvidenceStore(
+                purchaseEvidenceDirectory(appContext.filesDir, apiKey, environment),
+            ),
         synchronizer = PurchaseSynchronizer { evidence ->
             try {
                 val response = api.postPurchase(
@@ -169,7 +173,7 @@ internal class NuxieCore(
                     ),
                 )
                 if (response.success) PurchaseSyncOutcome.Accepted(response)
-                else PurchaseSyncOutcome.Rejected(permanent = false)
+                else PurchaseSyncOutcome.Rejected(isPermanentPurchaseRejection(response.body))
             } catch (rejected: NuxieApi.PurchaseRejectedException) {
                 PurchaseSyncOutcome.Rejected(rejected.permanent)
             } catch (_: Exception) {
@@ -224,7 +228,10 @@ internal class NuxieCore(
             journeyCatalog.applyProfile(distinctId, body)
             scope.launch { journeys.applyDownFacts(body, distinctId) }
         },
-        applyFeatureProfile = features::hydrateProfile,
+        applyFeatureProfile = { distinctId, body, purchaseRevision ->
+            features.hydrateProfile(distinctId, body, purchaseRevision)
+        },
+        captureFeaturePurchaseRevision = features::capturePurchaseRevision,
         scope = scope,
         localeProvider = { null },  // locale override arrives with setLocaleIdentifier
         nowMillis = nowMillis,

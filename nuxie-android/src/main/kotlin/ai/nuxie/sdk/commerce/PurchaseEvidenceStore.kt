@@ -1,7 +1,9 @@
 package ai.nuxie.sdk.commerce
 
+import ai.nuxie.sdk.NuxieEnvironment
 import android.util.Log
 import java.io.File
+import java.security.MessageDigest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -15,6 +17,18 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.longOrNull
 
 internal enum class StoredPurchaseState { PENDING, PURCHASED }
+
+internal fun purchaseEvidenceDirectory(
+    filesDirectory: File,
+    apiKey: String,
+    environment: NuxieEnvironment,
+): File {
+    val authority = "$apiKey\u0000${environment.name}"
+    val opaqueScope = MessageDigest.getInstance("SHA-256")
+        .digest(authority.encodeToByteArray())
+        .joinToString("") { "%02x".format(it) }
+    return File(File(filesDirectory, "nuxie-commerce"), opaqueScope)
+}
 
 internal data class StoredPurchaseContext(
     val placementId: String? = null,
@@ -73,6 +87,7 @@ internal data class PurchaseEvidence(
     val synced: Boolean = false,
     val permanentlyRejected: Boolean = false,
     val syncAttempts: Int = 0,
+    val completionAttempts: Int = 0,
     val firstSeenMillis: Long,
     val consumable: Boolean = false,
     val localFeatureGrants: List<StoredLocalPurchaseGrant> = emptyList(),
@@ -81,6 +96,9 @@ internal data class PurchaseEvidence(
     val syncedEventEmitted: Boolean = false,
     val syncedCustomerId: String? = null,
     val nuxieManaged: Boolean = false,
+    val customerMatched: Boolean = true,
+    val signatureVerificationRequired: Boolean = false,
+    val signatureVerified: Boolean = false,
 )
 
 internal interface PurchaseEvidenceStore {
@@ -211,6 +229,7 @@ internal class FilePurchaseEvidenceStore(
             put("synced", JsonPrimitive(evidence.synced))
             put("permanentlyRejected", JsonPrimitive(evidence.permanentlyRejected))
             put("syncAttempts", JsonPrimitive(evidence.syncAttempts))
+            put("completionAttempts", JsonPrimitive(evidence.completionAttempts))
             put("firstSeenMillis", JsonPrimitive(evidence.firstSeenMillis))
             put("consumable", JsonPrimitive(evidence.consumable))
             put("localFeatureGrants", JsonArray(evidence.localFeatureGrants.map { grant ->
@@ -225,6 +244,9 @@ internal class FilePurchaseEvidenceStore(
             put("syncedEventEmitted", JsonPrimitive(evidence.syncedEventEmitted))
             evidence.syncedCustomerId?.let { put("syncedCustomerId", JsonPrimitive(it)) }
             put("nuxieManaged", JsonPrimitive(evidence.nuxieManaged))
+            put("customerMatched", JsonPrimitive(evidence.customerMatched))
+            put("signatureVerificationRequired", JsonPrimitive(evidence.signatureVerificationRequired))
+            put("signatureVerified", JsonPrimitive(evidence.signatureVerified))
         },
     )
 
@@ -248,6 +270,7 @@ internal class FilePurchaseEvidenceStore(
             synced = raw.boolean("synced"),
             permanentlyRejected = raw.boolean("permanentlyRejected"),
             syncAttempts = (raw["syncAttempts"] as? JsonPrimitive)?.intOrNull ?: 0,
+            completionAttempts = (raw["completionAttempts"] as? JsonPrimitive)?.intOrNull ?: 0,
             firstSeenMillis = (raw["firstSeenMillis"] as? JsonPrimitive)?.longOrNull ?: return null,
             consumable = raw.boolean("consumable"),
             localFeatureGrants = (raw["localFeatureGrants"] as? JsonArray).orEmpty().mapNotNull {
@@ -263,6 +286,10 @@ internal class FilePurchaseEvidenceStore(
             syncedEventEmitted = raw.boolean("syncedEventEmitted"),
             syncedCustomerId = raw.string("syncedCustomerId"),
             nuxieManaged = raw.boolean("nuxieManaged"),
+            customerMatched = (raw["customerMatched"] as? JsonPrimitive)?.booleanOrNull
+                ?: raw.string("distinctId").orEmpty().isNotBlank(),
+            signatureVerificationRequired = raw.boolean("signatureVerificationRequired"),
+            signatureVerified = raw.boolean("signatureVerified"),
         )
     }.getOrNull()
 

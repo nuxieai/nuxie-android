@@ -24,6 +24,10 @@ internal class FeatureService(
         val cachedAtMillis: Long,
         val opaqueRequiredBalance: Double? = null,
     )
+    private data class PurchaseProjection(
+        val grants: Map<String, FeatureAccess>,
+        val committedRevision: Long,
+    )
 
     private companion object {
         /** A null requiredBalance means "one unit" everywhere. */
@@ -35,8 +39,9 @@ internal class FeatureService(
     private var durableAccess: Map<String, FeatureAccess> = emptyMap()
     private var durableEntities: Map<String, Map<String, FeatureAccess>> = emptyMap()
     private val realTimeCache = mutableMapOf<CacheKey, TimedAccess>()
-    private val localPurchases = mutableMapOf<String, Map<String, FeatureAccess>>()
-    private val revokedPurchases = mutableMapOf<String, Map<String, FeatureAccess>>()
+    private val localPurchases = mutableMapOf<String, PurchaseProjection>()
+    private val revokedPurchases = mutableMapOf<String, PurchaseProjection>()
+    private var purchaseMutationRevision = 0L
     private var scopeGeneration = 0L
     private var nextSeq = 0L
     private val committedSeq = mutableMapOf<CacheKey, Long>()
@@ -64,6 +69,7 @@ internal class FeatureService(
         forceRefresh: Boolean = false,
     ): FeatureAccess {
         if (!forceRefresh) {
+            getPurchaseCached(featureId, requiredBalance, entityId)?.let { return it }
             getExactOpaqueCached(featureId, requiredBalance, entityId)?.let { return it }
             getCached(featureId, requiredBalance, entityId)?.let { cached ->
                 if (cached.type == FeatureType.BOOLEAN) return cached
@@ -73,6 +79,17 @@ internal class FeatureService(
             }
         }
         return performCheck(featureId, requiredBalance, entityId)
+    }
+
+    private suspend fun getPurchaseCached(
+        featureId: String,
+        requiredBalance: Double?,
+        entityId: String?,
+    ): FeatureAccess? {
+        synchronizeCustomerScopeIfNeeded()
+        return synchronized(lock) {
+            purchaseAccess(featureId, entityId)?.forRequiredBalance(requiredBalance)
+        }
     }
 
     suspend fun clearCache() {
@@ -101,7 +118,13 @@ internal class FeatureService(
     }
 
     /** Called by ProfileService whenever its raw profile body is applied. */
-    suspend fun hydrateProfile(distinctId: String, body: JsonObject) {
+    fun capturePurchaseRevision(): Long = synchronized(lock) { purchaseMutationRevision }
+
+    suspend fun hydrateProfile(
+        distinctId: String,
+        body: JsonObject,
+        snapshotPurchaseRevision: Long = capturePurchaseRevision(),
+    ) {
         val hydrationGeneration = synchronized(lock) { scopeGeneration }
         if (identity.distinctId() != distinctId) return
         val parsed = parseProfileFeatures(body)
@@ -113,14 +136,18 @@ internal class FeatureService(
             // A fresh server snapshot is authoritative over earlier optimistic
             // access and revocation tombstones for the Features it contains.
             val reconciled = parsed.first.keys
-            localPurchases.toMap().forEach { (transactionId, grants) ->
-                localPurchases[transactionId] = grants - reconciled
+            localPurchases.toMap().forEach { (transactionId, projection) ->
+                if (projection.committedRevision <= snapshotPurchaseRevision) {
+                    localPurchases[transactionId] = projection.copy(grants = projection.grants - reconciled)
+                }
             }
-            revokedPurchases.toMap().forEach { (transactionId, grants) ->
-                revokedPurchases[transactionId] = grants - reconciled
+            revokedPurchases.toMap().forEach { (transactionId, projection) ->
+                if (projection.committedRevision <= snapshotPurchaseRevision) {
+                    revokedPurchases[transactionId] = projection.copy(grants = projection.grants - reconciled)
+                }
             }
-            localPurchases.entries.removeAll { it.value.isEmpty() }
-            revokedPurchases.entries.removeAll { it.value.isEmpty() }
+            localPurchases.entries.removeAll { it.value.grants.isEmpty() }
+            revokedPurchases.entries.removeAll { it.value.grants.isEmpty() }
         }
         publishCurrent(ready = true, expectedGeneration = hydrationGeneration)
     }
@@ -145,7 +172,8 @@ internal class FeatureService(
                 realTimeCache.keys.removeAll { it.featureId == featureId }
             }
             revokedPurchases.remove(transactionId)
-            localPurchases[transactionId] = optimistic
+            purchaseMutationRevision += 1
+            localPurchases[transactionId] = PurchaseProjection(optimistic, purchaseMutationRevision)
         }
         publishCurrent()
     }
@@ -154,9 +182,13 @@ internal class FeatureService(
         synchronizeCustomerScopeIfNeeded()
         synchronized(lock) {
             val removed = localPurchases.remove(transactionId) ?: return
-            revokedPurchases[transactionId] = removed.mapValues { (_, access) ->
+            purchaseMutationRevision += 1
+            // iOS checks revokedPurchaseCache before localPurchaseCache,
+            // realTimeCache, and durable profile access (FeatureService.swift).
+            val tombstones = removed.grants.mapValues { (_, access) ->
                 FeatureAccess(false, false, access.balance, access.type)
             }
+            revokedPurchases[transactionId] = PurchaseProjection(tombstones, purchaseMutationRevision)
         }
         publishCurrent()
     }
@@ -168,6 +200,7 @@ internal class FeatureService(
         val updates = parsePurchaseFeatures(body)
         synchronized(lock) {
             if (identity.distinctId() != distinctId || scopeGeneration != hydrationGeneration) return
+            purchaseMutationRevision += 1
             localPurchases.remove(transactionId)
             revokedPurchases.remove(transactionId)
             updates.keys.forEach { featureId ->
@@ -187,15 +220,16 @@ internal class FeatureService(
         return synchronized(lock) {
             val key = CacheKey(featureId, entityId)
             val projection = purchaseAccess(featureId, entityId)
-            when (val cached = realTimeCache[key]?.takeIf(::isFresh)) {
-                null -> (projection ?: entityAccess(featureId, entityId))
-                    ?.forRequiredBalance(requiredBalance)
-                else -> if (cached.opaqueRequiredBalance == null) {
-                    cached.access.forRequiredBalance(requiredBalance)
-                } else if (cached.opaqueRequiredBalance == (requiredBalance ?: DEFAULT_REQUIRED_BALANCE)) {
-                    cached.access
-                } else {
-                    null
+            projection?.forRequiredBalance(requiredBalance) ?: run {
+                when (val cached = realTimeCache[key]?.takeIf(::isFresh)) {
+                    null -> entityAccess(featureId, entityId)?.forRequiredBalance(requiredBalance)
+                    else -> if (cached.opaqueRequiredBalance == null) {
+                        cached.access.forRequiredBalance(requiredBalance)
+                    } else if (cached.opaqueRequiredBalance == (requiredBalance ?: DEFAULT_REQUIRED_BALANCE)) {
+                        cached.access
+                    } else {
+                        null
+                    }
                 }
             }
         }
@@ -223,6 +257,8 @@ internal class FeatureService(
         requiredBalance: Double?,
         entityId: String?,
     ): FeatureAccess {
+        // D9 first-spend reconciliation is deferred until Android has a
+        // useFeature/spend interface and its server contract (UNIV-2632).
         synchronizeCustomerScopeIfNeeded()
         val distinctId = identity.distinctId()
         val key = CacheKey(featureId, entityId)
@@ -293,15 +329,15 @@ internal class FeatureService(
 
     private fun mergePurchaseAccess(base: Map<String, FeatureAccess>): Map<String, FeatureAccess> {
         var merged = base
-        revokedPurchases.values.forEach { merged = merged + it }
-        localPurchases.values.forEach { merged = merged + it }
+        localPurchases.values.forEach { merged = merged + it.grants }
+        revokedPurchases.values.forEach { merged = merged + it.grants }
         return merged
     }
 
     private fun purchaseAccess(featureId: String, entityId: String?): FeatureAccess? {
         if (entityId != null) return null
-        localPurchases.values.mapNotNull { it[featureId] }.lastOrNull()?.let { return it }
-        return revokedPurchases.values.mapNotNull { it[featureId] }.lastOrNull()
+        revokedPurchases.values.mapNotNull { it.grants[featureId] }.lastOrNull()?.let { return it }
+        return localPurchases.values.mapNotNull { it.grants[featureId] }.lastOrNull()
     }
 
     private fun entityAccess(featureId: String, entityId: String?): FeatureAccess? = when (entityId) {
