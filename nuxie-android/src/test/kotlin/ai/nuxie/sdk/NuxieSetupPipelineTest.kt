@@ -3,6 +3,7 @@ package ai.nuxie.sdk
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.events.SQLiteEventStore
 import kotlinx.coroutines.runBlocking
+import ai.nuxie.sdk.testsupport.FakeTransport
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -13,9 +14,15 @@ import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 class NuxieSetupPipelineTest {
+    @org.junit.Before
+    fun installFakeTransport() {
+        Nuxie.overridesForTesting = NuxieCore.Overrides(transport = FakeTransport())
+    }
+
     @After
     fun tearDown() {
         Nuxie.resetForTesting()
+        Nuxie.overridesForTesting = null
     }
 
     @Test

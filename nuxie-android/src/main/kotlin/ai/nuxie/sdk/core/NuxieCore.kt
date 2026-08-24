@@ -12,6 +12,8 @@ import ai.nuxie.sdk.identity.IdentityService
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.HttpUrlConnectionTransport
 import ai.nuxie.sdk.network.NuxieApi
+import ai.nuxie.sdk.profile.ProfileService
+import ai.nuxie.sdk.segments.SegmentService
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.session.SessionService
 import android.app.Application
@@ -70,6 +72,19 @@ internal class NuxieCore(
 
     val delivery = EventDeliveryWorker(store, api, scope, nowMillis = nowMillis)
 
+    val segments = SegmentService(appContext)
+
+    val profile = ProfileService(
+        context = appContext,
+        api = api,
+        identity = identity,
+        segments = segments,
+        applyUserProperties = { properties -> identity.setUserProperties(properties) },
+        scope = scope,
+        localeProvider = { null },  // locale override arrives with setLocaleIdentifier
+        nowMillis = nowMillis,
+    )
+
     val contextBuilder = NuxieContextBuilder(appContext, environment, logLevel, identity)
 
     val eventLog = EventLog(
@@ -100,6 +115,8 @@ internal class NuxieCore(
     fun start() {
         // Every committed capture nudges the delivery threshold check.
         eventLog.subscribeCommitted { delivery.kick() }
+        userTransitions.addObserver(profile.transitionObserver)
+        profile.requestRefresh()
         lifecycleTracker.trackAppLaunchEvents()
         if (registerLifecycle) {
             (appContext as? Application)?.registerActivityLifecycleCallbacks(lifecycleCoordinator)
@@ -109,6 +126,7 @@ internal class NuxieCore(
     /** Cancel workers and release the store. Testing teardown only for now. */
     fun stop() {
         kotlinx.coroutines.runBlocking {
+            runCatching { profile.close() }
             runCatching { delivery.close() }
             runCatching { eventLog.close() }
         }

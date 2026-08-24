@@ -21,7 +21,14 @@ internal fun interface HttpTransport {
     class Response(
         val statusCode: Int,
         val body: ByteArray,
-    )
+        headers: Map<String, String> = emptyMap(),
+    ) {
+        /** Case-insensitive header map (HTTP header names are case-insensitive). */
+        val headers: Map<String, String> =
+            headers.entries.associate { (name, value) -> name.lowercase() to value }
+
+        fun header(name: String): String? = headers[name.lowercase()]
+    }
 
     @Throws(IOException::class)
     fun execute(request: Request): Response
@@ -47,7 +54,11 @@ internal class HttpUrlConnectionTransport(
             val statusCode = connection.responseCode
             val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream
             val body = stream?.use { it.readBounded(maxResponseBytes) } ?: ByteArray(0)
-            return HttpTransport.Response(statusCode, body)
+            val headers = connection.headerFields
+                .filterKeys { it != null }
+                .mapKeys { (name, _) -> name!! }
+                .mapValues { (_, values) -> values.lastOrNull().orEmpty() }
+            return HttpTransport.Response(statusCode, body, headers)
         } finally {
             connection.disconnect()
         }
