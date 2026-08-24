@@ -2,7 +2,7 @@
   "note": "Local staging pin. The release pipeline replaces this with an immutable artifact URL + sha256 per ABI, mirroring the iOS Runtime/artifact.json.",
   "sourceRepo": "nuxieai/nuxie-runtime",
   "sourceBranch": "android/vulkan-capi",
-  "sourceCommit": "46a806b8",
+  "sourceCommit": "8f943817",
   "features": [
     "android-vulkan",
     "scripting"
