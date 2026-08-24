@@ -80,6 +80,7 @@ public final class ai/nuxie/sdk/Nuxie {
 	public static final field INSTANCE Lai/nuxie/sdk/Nuxie;
 	public final fun getAnonymousId ()Ljava/lang/String;
 	public final fun getDistinctId ()Ljava/lang/String;
+	public final fun getFeatures ()Lai/nuxie/sdk/features/FeatureInfo;
 	public final fun getVersion ()Ljava/lang/String;
 	public final fun identify (Ljava/lang/String;Ljava/util/Map;Ljava/util/Map;)V
 	public static synthetic fun identify$default (Lai/nuxie/sdk/Nuxie;Ljava/lang/String;Ljava/util/Map;Ljava/util/Map;ILjava/lang/Object;)V
@@ -99,9 +100,11 @@ public final class ai/nuxie/sdk/NuxieConfiguration {
 	public final fun getApiKey ()Ljava/lang/String;
 	public final fun getBeforeSend ()Lkotlin/jvm/functions/Function1;
 	public final fun getEnvironment ()Lai/nuxie/sdk/NuxieEnvironment;
+	public final fun getFeatureCacheTTL ()J
 	public final fun getLogLevel ()Lai/nuxie/sdk/LogLevel;
 	public final fun setBeforeSend (Lkotlin/jvm/functions/Function1;)V
 	public final fun setEnvironment (Lai/nuxie/sdk/NuxieEnvironment;)V
+	public final fun setFeatureCacheTTL (J)V
 	public final fun setLogLevel (Lai/nuxie/sdk/LogLevel;)V
 }
 
@@ -296,5 +299,60 @@ public final class ai/nuxie/sdk/TriggerUpdate$Journey : ai/nuxie/sdk/TriggerUpda
 	public final fun getUpdate ()Lai/nuxie/sdk/JourneyUpdate;
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/features/FeatureAccess {
+	public fun <init> (ZZLjava/lang/Double;Lai/nuxie/sdk/features/FeatureType;)V
+	public final fun component1 ()Z
+	public final fun component2 ()Z
+	public final fun component3 ()Ljava/lang/Double;
+	public final fun component4 ()Lai/nuxie/sdk/features/FeatureType;
+	public final fun copy (ZZLjava/lang/Double;Lai/nuxie/sdk/features/FeatureType;)Lai/nuxie/sdk/features/FeatureAccess;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/features/FeatureAccess;ZZLjava/lang/Double;Lai/nuxie/sdk/features/FeatureType;ILjava/lang/Object;)Lai/nuxie/sdk/features/FeatureAccess;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAllowed ()Z
+	public final fun getBalance ()Ljava/lang/Double;
+	public final fun getType ()Lai/nuxie/sdk/features/FeatureType;
+	public final fun getUnlimited ()Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/features/FeatureCheckPolicy : java/lang/Enum {
+	public static final field CACHE_FIRST Lai/nuxie/sdk/features/FeatureCheckPolicy;
+	public static final field REMOTE Lai/nuxie/sdk/features/FeatureCheckPolicy;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lai/nuxie/sdk/features/FeatureCheckPolicy;
+	public static fun values ()[Lai/nuxie/sdk/features/FeatureCheckPolicy;
+}
+
+public final class ai/nuxie/sdk/features/FeatureInfo {
+	public fun <init> ()V
+	public final fun awaitReady (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun balance (Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Double;
+	public static synthetic fun balance$default (Lai/nuxie/sdk/features/FeatureInfo;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Ljava/lang/Double;
+	public final fun getAll ()Lkotlinx/coroutines/flow/StateFlow;
+	public final fun getState ()Lkotlinx/coroutines/flow/StateFlow;
+	public final fun isAllowed (Ljava/lang/String;)Z
+}
+
+public abstract interface class ai/nuxie/sdk/features/FeatureInfo$State {
+}
+
+public final class ai/nuxie/sdk/features/FeatureInfo$State$Ready : ai/nuxie/sdk/features/FeatureInfo$State {
+	public static final field INSTANCE Lai/nuxie/sdk/features/FeatureInfo$State$Ready;
+}
+
+public final class ai/nuxie/sdk/features/FeatureInfo$State$Unknown : ai/nuxie/sdk/features/FeatureInfo$State {
+	public static final field INSTANCE Lai/nuxie/sdk/features/FeatureInfo$State$Unknown;
+}
+
+public final class ai/nuxie/sdk/features/FeatureType : java/lang/Enum {
+	public static final field BOOLEAN Lai/nuxie/sdk/features/FeatureType;
+	public static final field CREDIT_SYSTEM Lai/nuxie/sdk/features/FeatureType;
+	public static final field METERED Lai/nuxie/sdk/features/FeatureType;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lai/nuxie/sdk/features/FeatureType;
+	public static fun values ()[Lai/nuxie/sdk/features/FeatureType;
 }
 

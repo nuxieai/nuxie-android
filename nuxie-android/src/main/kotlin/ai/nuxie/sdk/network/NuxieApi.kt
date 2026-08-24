@@ -2,8 +2,12 @@ package ai.nuxie.sdk.network
 
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.SdkVersion
+import ai.nuxie.sdk.features.FeatureType
 import java.io.IOException
 import java.net.URL
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 
 /**
  * The API client, ported from the iOS `NuxieApi`: all POST, gzip request
@@ -34,6 +38,14 @@ internal class NuxieApi(
         class Modified(val bodyText: String, val validator: ProfileCacheValidator?) : ProfileFetchResult
         object NotModified : ProfileFetchResult
     }
+
+    /** The server-authoritative response returned by POST /entitled. */
+    class FeatureCheckResult(
+        val allowed: Boolean,
+        val unlimited: Boolean,
+        val balance: Double?,
+        val type: FeatureType,
+    )
 
     /**
      * POST /profile with an optional If-None-Match conditional (iOS parity:
@@ -153,6 +165,58 @@ internal class NuxieApi(
         val text = response.body.decodeToString()
         StrictJsonValidator.requireNoDuplicateKeys(text)
         return text
+    }
+
+    /** POST /entitled using the iOS FeatureCheckRequest body shape. */
+    fun checkFeature(
+        customerId: String,
+        featureId: String,
+        requiredBalance: Double?,
+        entityId: String?,
+    ): FeatureCheckResult {
+        val body = buildString {
+            append("{\"apiKey\":")
+            append(jsonString(apiKey))
+            append(",\"customerId\":")
+            append(jsonString(customerId))
+            append(",\"featureId\":")
+            append(jsonString(featureId))
+            requiredBalance?.let { append(",\"requiredBalance\":").append(it) }
+            entityId?.let { append(",\"entityId\":").append(jsonString(it)) }
+            append('}')
+        }.encodeToByteArray()
+        val response = transport.execute(
+            HttpTransport.Request(
+                url = URL("$baseUrl/entitled"),
+                headers = mapOf(
+                    "Content-Type" to "application/json",
+                    "Accept-Encoding" to "gzip",
+                    "User-Agent" to "Nuxie-Android-SDK/${SdkVersion.VALUE}",
+                ),
+                body = body,
+            ),
+        )
+        if (response.statusCode !in 200..299) {
+            throw RequestRejectedException(response.statusCode, "/entitled")
+        }
+        val text = response.body.decodeToString()
+        StrictJsonValidator.requireNoDuplicateKeys(text)
+        val parsed = Json.parseToJsonElement(text).jsonObject
+        val type = (parsed["type"] as? JsonPrimitive)?.content?.toFeatureType()
+            ?: throw IOException("/entitled response has an invalid feature type")
+        val allowed = (parsed["allowed"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull()
+            ?: throw IOException("/entitled response is missing allowed")
+        val unlimited = (parsed["unlimited"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull()
+            ?: throw IOException("/entitled response is missing unlimited")
+        val balance = (parsed["balance"] as? JsonPrimitive)?.content?.toDoubleOrNull()
+        return FeatureCheckResult(allowed, unlimited, balance, type)
+    }
+
+    private fun String.toFeatureType(): FeatureType? = when (this) {
+        "boolean" -> FeatureType.BOOLEAN
+        "metered" -> FeatureType.METERED
+        "creditSystem" -> FeatureType.CREDIT_SYSTEM
+        else -> null
     }
 
     private fun jsonString(value: String): String = buildString {

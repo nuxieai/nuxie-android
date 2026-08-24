@@ -2,6 +2,7 @@ package ai.nuxie.sdk
 
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.events.SystemEventNames
+import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import android.content.Context
 import android.util.Log
@@ -20,11 +21,17 @@ object Nuxie {
     @Volatile
     private var setupState: SetupState? = null
 
+    private val featureInfoInstance = FeatureInfo()
+
     val isSetup: Boolean
         get() = setupState != null
 
     val version: String
         get() = SdkVersion.VALUE
+
+    /** Reactive Feature access for the current customer. */
+    val features: FeatureInfo
+        get() = core?.featureInfo ?: featureInfoInstance
 
     @Synchronized
     fun setup(context: Context, configuration: NuxieConfiguration) {
@@ -44,6 +51,8 @@ object Nuxie {
             environment = configuration.environment,
             logLevel = configuration.logLevel,
             beforeSend = configuration.beforeSend,
+            featureInfo = featureInfoInstance,
+            featureCacheTtlMillis = configuration.featureCacheTTL,
             overrides = overridesForTesting ?: NuxieCore.Overrides(),
         )
         setupState = SetupState(logLevel = configuration.logLevel, core = core)
@@ -211,6 +220,7 @@ object Nuxie {
     internal fun resetForTesting() {
         setupState?.core?.let { runCatching { it.stop() } }
         setupState = null
+        featureInfoInstance.reset()
     }
 
     private class SetupState(

@@ -67,4 +67,34 @@ class NuxieApiTest {
                 .startsWith("""{"apiKey":"pk\"quote\\slash""""),
         )
     }
+
+    @Test
+    fun featureCheckUsesTheIosEntitledWireShape() {
+        val transport = RecordingTransport()
+        val api = NuxieApi("pk_test_key", NuxieEnvironment.DEVELOPMENT, transport)
+        transport.apply {
+            // The response is supplied by a second transport because this
+            // tiny recording helper intentionally defaults to an empty body.
+        }
+        val responding = object : HttpTransport {
+            var request: HttpTransport.Request? = null
+            override fun execute(request: HttpTransport.Request): HttpTransport.Response {
+                this.request = request
+                return HttpTransport.Response(
+                    200,
+                    """{"allowed":true,"unlimited":false,"balance":3,"type":"metered"}"""
+                        .encodeToByteArray(),
+                )
+            }
+        }
+        val checked = NuxieApi("pk_test_key", NuxieEnvironment.DEVELOPMENT, responding)
+            .checkFeature("customer-1", "exports", 2.0, "project-1")
+
+        assertTrue(checked.allowed)
+        assertEquals("https://dev-i.nuxie.ai/entitled", responding.request!!.url.toString())
+        assertEquals(
+            """{"apiKey":"pk_test_key","customerId":"customer-1","featureId":"exports","requiredBalance":2.0,"entityId":"project-1"}""",
+            responding.request!!.body.decodeToString(),
+        )
+    }
 }
