@@ -57,7 +57,9 @@ class BatchItemEncodingConformanceTest {
             )
             expect["anon_distinct_id"]?.let { expectedWire["\$anon_distinct_id"] = it }
             expect["value"]?.let { expectedWire["value"] = it }
-            expect["entity_id"]?.let { expectedWire["entity_id"] = it }
+            // Fixture expectation labels are normalized; the wire key is camel-cased
+            // like the iOS reference encoder.
+            expect["entity_id"]?.let { expectedWire["entityId"] = it }
 
             assertEquals(
                 "[${vector.name}] complete canonical batch item",
