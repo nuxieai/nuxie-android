@@ -82,7 +82,7 @@ class NuxieApiTest {
                 this.request = request
                 return HttpTransport.Response(
                     200,
-                    """{"allowed":true,"unlimited":false,"balance":3,"type":"metered"}"""
+                    """{"customerId":"customer-1","featureId":"exports","requiredBalance":2,"code":"allowed","allowed":true,"unlimited":false,"balance":3,"type":"metered"}"""
                         .encodeToByteArray(),
                 )
             }
@@ -91,6 +91,11 @@ class NuxieApiTest {
             .checkFeature("customer-1", "exports", 2.0, "project-1")
 
         assertTrue(checked.allowed)
+        assertEquals("customer-1", checked.customerId)
+        assertEquals("exports", checked.featureId)
+        assertEquals(2.0, checked.requiredBalance, 0.0)
+        assertEquals("allowed", checked.code)
+        assertEquals(3.0, checked.balance!!, 0.0)
         assertEquals("https://dev-i.nuxie.ai/entitled", responding.request!!.url.toString())
         assertEquals(
             """{"apiKey":"pk_test_key","customerId":"customer-1","featureId":"exports","requiredBalance":2.0,"entityId":"project-1"}""",
