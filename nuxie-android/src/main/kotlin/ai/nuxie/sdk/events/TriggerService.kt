@@ -153,14 +153,12 @@ internal class TriggerService(
         journeyResults.filterIsInstance<JourneyTriggerResult.Started>().forEach { result ->
             broker.emit(eventId, TriggerUpdate.Decision(TriggerDecision.JourneyStarted(result.ref)))
         }
+        journeyResults.filterIsInstance<JourneyTriggerResult.Suppressed>().forEach { result ->
+            broker.emit(eventId, TriggerUpdate.Decision(TriggerDecision.Suppressed(result.reason)))
+        }
         if (!journeyStarted) {
-            val failed = journeyResults.filterIsInstance<JourneyTriggerResult.Failed>().firstOrNull()
-            if (failed != null) {
+            journeyResults.filterIsInstance<JourneyTriggerResult.Failed>().firstOrNull()?.let { failed ->
                 broker.emit(eventId, TriggerUpdate.Error(failed.error))
-            } else {
-                journeyResults.filterIsInstance<JourneyTriggerResult.Suppressed>().forEach { result ->
-                    broker.emit(eventId, TriggerUpdate.Decision(TriggerDecision.Suppressed(result.reason)))
-                }
             }
         } else {
             journeyResults.filterIsInstance<JourneyTriggerResult.Failed>().forEach { result ->
