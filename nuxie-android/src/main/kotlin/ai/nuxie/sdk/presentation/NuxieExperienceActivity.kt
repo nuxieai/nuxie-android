@@ -47,7 +47,8 @@ internal class NuxieExperienceActivity : Activity() {
 
         val lane = NuxieRuntimeLane()
         this.lane = lane
-        val host = ExperienceSurfaceHost(this, lane)
+        val clearColor = intent.getIntExtra(EXTRA_CLEAR_COLOR, 0xFF000000.toInt())
+        val host = ExperienceSurfaceHost(this, lane, clearColor)
         this.host = host
         host.loadArtboard(rivBytes, artboardName) { loaded ->
             if (!loaded) runOnUiThread { finish() }
@@ -67,5 +68,6 @@ internal class NuxieExperienceActivity : Activity() {
         /** Internal tracer extras; not public API. */
         const val EXTRA_RIV_PATH = "ai.nuxie.sdk.internal.RIV_PATH"
         const val EXTRA_ARTBOARD_NAME = "ai.nuxie.sdk.internal.ARTBOARD_NAME"
+        const val EXTRA_CLEAR_COLOR = "ai.nuxie.sdk.internal.CLEAR_COLOR"
     }
 }

@@ -1,5 +1,5 @@
 // JNI shim: adapts the engine's portable C ABI (nux_capi) plus the Android
-// WebGPU presentation extension to ai.nuxie.sdk.runtime.NuxieRuntimeBridge.
+// Vulkan presentation extension to ai.nuxie.sdk.runtime.NuxieRuntimeBridge.
 //
 // Rules (iOS adapter parity):
 // - Handles cross as jlong; 0 means failure. The Kotlin lane owns lifetime.
@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <jni.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -235,41 +236,34 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStep(
   return (jint)status;
 }
 
-// The engine borrows the ANativeWindow, so the shim must hold the
-// acquired reference for the renderer's lifetime and release it on free
-// and on surface recreation. The renderer handle handed to Kotlin wraps
-// both.
-struct NuxieRendererHost {
-  struct NuxAndroidRenderer *renderer;
-  ANativeWindow *window;
-};
+JNIEXPORT jlong JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererNewAndroidVulkan(
+    JNIEnv *env, jobject self, jint pixel_width, jint pixel_height) {
+  (void)env;
+  (void)self;
+  if (pixel_width <= 0 || pixel_height <= 0) return 0;
+  struct NuxAndroidVulkanRenderer *renderer = NULL;
+  struct NuxCapiResult *result = NULL;
+  NuxStatus status = nux_renderer_new_android_vulkan(
+      (uint32_t)pixel_width, (uint32_t)pixel_height, &renderer, &result);
+  log_and_free_result("renderer_new_android_vulkan", status, result);
+  return status == NUX_STATUS_OK ? as_handle(renderer) : 0;
+}
 
 JNIEXPORT jlong JNICALL
-Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererNewAndroidWgpu(
-    JNIEnv *env, jobject self, jobject surface, jint pixel_width,
-    jint pixel_height) {
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeWindowAcquire(
+    JNIEnv *env, jobject self, jobject surface) {
   (void)self;
-  if (surface == NULL || pixel_width <= 0 || pixel_height <= 0) return 0;
-  ANativeWindow *window = ANativeWindow_fromSurface(env, surface);
-  if (window == NULL) return 0;
-  struct NuxAndroidRenderer *renderer = NULL;
-  struct NuxCapiResult *result = NULL;
-  NuxStatus status = nux_renderer_new_android_wgpu(
-      window, (uint32_t)pixel_width, (uint32_t)pixel_height, &renderer, &result);
-  free_result(result);
-  if (status != NUX_STATUS_OK) {
-    ANativeWindow_release(window);
-    return 0;
-  }
-  struct NuxieRendererHost *host = malloc(sizeof(*host));
-  if (host == NULL) {
-    nux_renderer_android_wgpu_free(renderer);
-    ANativeWindow_release(window);
-    return 0;
-  }
-  host->renderer = renderer;
-  host->window = window;
-  return as_handle(host);
+  if (surface == NULL) return 0;
+  return as_handle(ANativeWindow_fromSurface(env, surface));
+}
+
+JNIEXPORT void JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeWindowRelease(
+    JNIEnv *env, jobject self, jlong window) {
+  (void)env;
+  (void)self;
+  if (window != 0) ANativeWindow_release((ANativeWindow *)from_handle(window));
 }
 
 JNIEXPORT jint JNICALL
@@ -279,64 +273,112 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererResize(
   (void)env;
   (void)self;
   if (renderer == 0) return (jint)NUX_STATUS_NULL_ARGUMENT;
-  struct NuxieRendererHost *host = from_handle(renderer);
+  if (pixel_width <= 0 || pixel_height <= 0) {
+    return (jint)NUX_STATUS_INVALID_ARGUMENT;
+  }
   struct NuxCapiResult *result = NULL;
-  NuxStatus status = nux_renderer_android_wgpu_resize(
-      host->renderer, (uint32_t)pixel_width, (uint32_t)pixel_height, &result);
-  free_result(result);
+  NuxStatus status = nux_renderer_android_vulkan_resize(
+      (struct NuxAndroidVulkanRenderer *)from_handle(renderer),
+      (uint32_t)pixel_width, (uint32_t)pixel_height, &result);
+  log_and_free_result("renderer_android_vulkan_resize", status, result);
   return (jint)status;
 }
 
-JNIEXPORT jint JNICALL
-Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererRecreateSurface(
-    JNIEnv *env, jobject self, jlong renderer, jobject surface) {
-  (void)self;
-  if (renderer == 0 || surface == NULL) return (jint)NUX_STATUS_NULL_ARGUMENT;
-  struct NuxieRendererHost *host = from_handle(renderer);
-  ANativeWindow *window = ANativeWindow_fromSurface(env, surface);
-  if (window == NULL) return (jint)NUX_STATUS_INVALID_ARGUMENT;
-  struct NuxCapiResult *result = NULL;
-  NuxStatus status = nux_renderer_android_wgpu_recreate_surface(
-      host->renderer, window, &result);
-  free_result(result);
-  if (status != NUX_STATUS_OK) {
-    ANativeWindow_release(window);
-    return (jint)status;
+static jint blit_android_vulkan_frame(
+    ANativeWindow *window, const struct NuxAndroidVulkanFrame *frame) {
+  const uint32_t width = nux_android_vulkan_frame_width(frame);
+  const uint32_t height = nux_android_vulkan_frame_height(frame);
+  const uint32_t source_stride =
+      nux_android_vulkan_frame_row_stride_bytes(frame);
+  const size_t source_len = nux_android_vulkan_frame_len(frame);
+  const uint8_t *source = nux_android_vulkan_frame_data(frame);
+
+  if (width == 0 || height == 0 || width > INT32_MAX || height > INT32_MAX) {
+    return -((jint)NUX_STATUS_INVALID_ARGUMENT);
   }
-  // The engine now borrows the new window; drop our reference to the old.
-  ANativeWindow_release(host->window);
-  host->window = window;
-  return (jint)status;
+  const size_t row_bytes = (size_t)width * 4u;
+  if (source == NULL || source_stride < row_bytes ||
+      height > SIZE_MAX / source_stride ||
+      source_len < (size_t)height * source_stride ||
+      nux_android_vulkan_frame_pixel_format(frame) !=
+          NUX_ANDROID_VULKAN_PIXEL_FORMAT_RGBA8_PREMULTIPLIED) {
+    return -((jint)NUX_STATUS_RUNTIME_ERROR);
+  }
+
+  // Setting geometry on every frame is acceptable for this tracer. The
+  // window cache can be added when presentation performance is refined.
+  if (ANativeWindow_setBuffersGeometry(window, (int32_t)width,
+                                       (int32_t)height,
+                                       WINDOW_FORMAT_RGBA_8888) != 0) {
+    return -((jint)NUX_STATUS_RUNTIME_ERROR);
+  }
+
+  ANativeWindow_Buffer buffer;
+  if (ANativeWindow_lock(window, &buffer, NULL) != 0) {
+    return -((jint)NUX_STATUS_RUNTIME_ERROR);
+  }
+
+  jint outcome = 1;
+  if (buffer.bits == NULL || buffer.width < (int32_t)width ||
+      buffer.height < (int32_t)height || buffer.stride < (int32_t)width) {
+    outcome = -((jint)NUX_STATUS_RUNTIME_ERROR);
+  } else {
+    const size_t destination_stride = (size_t)buffer.stride * 4u;
+    uint8_t *destination = (uint8_t *)buffer.bits;
+    for (uint32_t row = 0; row < height; row++) {
+      memcpy(destination + (size_t)row * destination_stride,
+             source + (size_t)row * source_stride, row_bytes);
+    }
+  }
+
+  if (ANativeWindow_unlockAndPost(window) != 0) {
+    outcome = -((jint)NUX_STATUS_RUNTIME_ERROR);
+  }
+  return outcome;
 }
 
 JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererRenderPlayer(
-    JNIEnv *env, jobject self, jlong renderer, jlong player, jint clear_color,
-    jboolean fit_contain_center) {
+    JNIEnv *env, jobject self, jlong renderer, jlong player, jlong window,
+    jint clear_color, jboolean fit_contain_center) {
   (void)env;
   (void)self;
-  if (renderer == 0 || player == 0) return -((jint)NUX_STATUS_NULL_ARGUMENT);
-  uint32_t disposition = 0;
+  if (renderer == 0 || player == 0 || window == 0) {
+    return -((jint)NUX_STATUS_NULL_ARGUMENT);
+  }
+  struct NuxAndroidVulkanFrame *frame = NULL;
   struct NuxCapiResult *result = NULL;
-  NuxStatus status = nux_renderer_android_wgpu_render_player(
-      ((struct NuxieRendererHost *)from_handle(renderer))->renderer,
+  NuxStatus status = nux_renderer_android_vulkan_render_player(
+      (struct NuxAndroidVulkanRenderer *)from_handle(renderer),
       (struct NuxPlayer *)from_handle(player), (uint32_t)clear_color,
-      fit_contain_center == JNI_TRUE ? 1u : 0u, &disposition, &result);
-  log_and_free_result("render_player", status, result);
-  if (status != NUX_STATUS_OK) return -((jint)status);
-  return (jint)disposition;
+      fit_contain_center == JNI_TRUE
+          ? NUX_ANDROID_VULKAN_RENDERER_FIT_CONTAIN_CENTER
+          : NUX_ANDROID_VULKAN_RENDERER_FIT_NONE,
+      &frame, &result);
+  log_and_free_result("renderer_android_vulkan_render_player", status, result);
+  if (status != NUX_STATUS_OK || frame == NULL) {
+    if (frame != NULL) nux_android_vulkan_frame_free(frame);
+    return -((jint)(status == NUX_STATUS_OK ? NUX_STATUS_RUNTIME_ERROR : status));
+  }
+
+  jint outcome = blit_android_vulkan_frame(
+      (ANativeWindow *)from_handle(window), frame);
+  nux_android_vulkan_frame_free(frame);
+  return outcome;
 }
 
 JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererResetPlayerDomain(
-    JNIEnv *env, jobject self, jlong player) {
+    JNIEnv *env, jobject self, jlong renderer, jlong player) {
   (void)env;
   (void)self;
-  if (player == 0) return (jint)NUX_STATUS_NULL_ARGUMENT;
+  if (renderer == 0 || player == 0) return (jint)NUX_STATUS_NULL_ARGUMENT;
   struct NuxCapiResult *result = NULL;
-  NuxStatus status = nux_renderer_android_wgpu_reset_player_domain(
+  NuxStatus status = nux_renderer_android_vulkan_reset_player_domain(
+      (const struct NuxAndroidVulkanRenderer *)from_handle(renderer),
       (struct NuxPlayer *)from_handle(player), &result);
-  free_result(result);
+  log_and_free_result("renderer_android_vulkan_reset_player_domain", status,
+                      result);
   return (jint)status;
 }
 
@@ -346,10 +388,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererFree(
   (void)env;
   (void)self;
   if (renderer != 0) {
-    struct NuxieRendererHost *host = from_handle(renderer);
-    nux_renderer_android_wgpu_free(host->renderer);
-    ANativeWindow_release(host->window);
-    free(host);
+    nux_renderer_android_vulkan_free(
+        (struct NuxAndroidVulkanRenderer *)from_handle(renderer));
   }
 }
 
