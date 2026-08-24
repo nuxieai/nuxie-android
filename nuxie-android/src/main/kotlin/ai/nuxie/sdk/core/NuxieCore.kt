@@ -10,7 +10,13 @@ import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.EventDeliveryWorker
 import ai.nuxie.sdk.events.TriggerBroker
 import ai.nuxie.sdk.events.TriggerService
+import ai.nuxie.sdk.experiences.ExperienceTrustRoots
+import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
 import ai.nuxie.sdk.identity.IdentityService
+import ai.nuxie.sdk.journey.JourneyLedger
+import ai.nuxie.sdk.journey.JourneyReleaseCatalog
+import ai.nuxie.sdk.journey.JourneyService
+import ai.nuxie.sdk.journey.JourneyStore
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.HttpUrlConnectionTransport
 import ai.nuxie.sdk.network.NuxieApi
@@ -18,12 +24,15 @@ import ai.nuxie.sdk.profile.ProfileService
 import ai.nuxie.sdk.segments.SegmentService
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.session.SessionService
+import ai.nuxie.sdk.runtime.NuxieRuntimeBridge
+import ai.nuxie.sdk.experiences.SupportedRuntime
 import android.app.Application
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 /**
  * Constructor-injected composition root (iOS `NuxieCore` parity): concrete
@@ -79,12 +88,38 @@ internal class NuxieCore(
 
     val segments = SegmentService(appContext)
 
+    val contextBuilder = NuxieContextBuilder(appContext, environment, logLevel, identity)
+
+    val eventLog = EventLog(
+        store = store,
+        contextBuilder = contextBuilder,
+        identity = identity,
+        beforeSend = beforeSend,
+        scope = scope,
+        nowMillis = nowMillis,
+        sessionIdProvider = { sessions.getSessionId() },
+    )
+
+    private val journeyCatalog = JourneyReleaseCatalog(
+        trustedKeys = ExperienceTrustRoots.keys(environment),
+        highWater = ReleaseHighWaterStore(appContext),
+        supportedRuntime = ::journeySupportedRuntime,
+    )
+
+    val journeys = JourneyService(
+        store = JourneyStore(appContext.filesDir),
+        ledger = JourneyLedger(eventLog),
+        releases = journeyCatalog,
+        nowMillis = nowMillis,
+        initialDistinctId = identity.distinctId(),
+    )
+
     val triggers by lazy {
         TriggerService(
         eventLog = eventLog,
         api = api,
         broker = TriggerBroker(),
-        journeys = overrides.journeys ?: TriggerService.NoJourneys,
+        journeys = overrides.journeys ?: journeys,
         features = overrides.features ?: TriggerService.NoFeatureAuthority,
             presenter = overrides.presenter ?: TriggerService.PresentationUnavailable,
             nowMillis = nowMillis,
@@ -97,21 +132,13 @@ internal class NuxieCore(
         identity = identity,
         segments = segments,
         applyUserProperties = { properties -> identity.setUserProperties(properties) },
+        applyJourneyProfile = { distinctId, body ->
+            journeyCatalog.applyProfile(body)
+            scope.launch { journeys.applyDownFacts(body, distinctId) }
+        },
         scope = scope,
         localeProvider = { null },  // locale override arrives with setLocaleIdentifier
         nowMillis = nowMillis,
-    )
-
-    val contextBuilder = NuxieContextBuilder(appContext, environment, logLevel, identity)
-
-    val eventLog = EventLog(
-        store = store,
-        contextBuilder = contextBuilder,
-        identity = identity,
-        beforeSend = beforeSend,
-        scope = scope,
-        nowMillis = nowMillis,
-        sessionIdProvider = { sessions.getSessionId() },
     )
 
     val lifecycleTracker = AppLifecycleTracker(
@@ -164,6 +191,24 @@ internal class NuxieCore(
             @Suppress("DEPRECATION")
             info.versionCode.toLong()
         }
+
+    /** Runtime absence closes the Journey enrollment front door. */
+    private fun journeySupportedRuntime(): SupportedRuntime? {
+        if (!NuxieRuntimeBridge.isAvailable) return null
+        // The native-runtime metadata bridge is not consumed until presentation
+        // lands. This conservative placeholder still lets the verifier reject
+        // every requirement it cannot prove rather than guessing compatibility.
+        return SupportedRuntime(
+            currentSdkVersion = ai.nuxie.sdk.SdkVersion.VALUE,
+            supportedRuntimeRevisions = emptySet(),
+            supportedLuauRevisions = emptyMap(),
+            sceneFormatMajor = 0,
+            sceneFormatMinor = 0,
+            timezoneDataRevision = "",
+            timezoneDataSha256 = "",
+            supportedCapabilities = emptySet(),
+        )
+    }
 
     private companion object {
         const val LIFECYCLE_PREFERENCES = "nuxie_lifecycle"

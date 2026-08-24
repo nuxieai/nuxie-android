@@ -41,6 +41,7 @@ internal class ProfileService(
     private val identity: IdentityProvider,
     private val segments: SegmentService,
     private val applyUserProperties: (Map<String, Any?>) -> Unit,
+    private val applyJourneyProfile: (distinctId: String, body: JsonObject) -> Unit = { _, _ -> },
     scope: CoroutineScope,
     private val localeProvider: () -> String?,
     private val nowMillis: () -> Long = System::currentTimeMillis,
@@ -210,6 +211,7 @@ internal class ProfileService(
             cached.distinctId,
             cached.body["segmentMemberships"] as? JsonObject,
         )
+        applyJourneyProfile(cached.distinctId, cached.body)
     }
 
     private fun clearCache(distinctId: String) {
