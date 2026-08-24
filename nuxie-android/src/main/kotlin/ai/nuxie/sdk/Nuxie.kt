@@ -1,13 +1,15 @@
 package ai.nuxie.sdk
 
+import ai.nuxie.sdk.core.NuxieCore
 import android.content.Context
 import android.util.Log
 
 /**
  * Entry point for the greenfield Nuxie Android SDK.
  *
- * This scaffold intentionally provides setup state only. Runtime and product
- * subsystems arrive in subsequent work.
+ * Setup constructs the internal composition root (event log, lifecycle
+ * capture). The trigger, Features, presentation, and commerce surfaces arrive
+ * in subsequent PRs on the locked contract.
  */
 object Nuxie {
     private const val LOG_TAG = "Nuxie"
@@ -25,7 +27,7 @@ object Nuxie {
     fun setup(context: Context, configuration: NuxieConfiguration) {
         val existingState = setupState
         if (existingState != null) {
-            if (existingState.configuration.logLevel >= LogLevel.WARN) {
+            if (existingState.logLevel >= LogLevel.WARN) {
                 Log.w(LOG_TAG, "Nuxie is already set up; ignoring the repeated setup call.")
             }
             return
@@ -33,26 +35,27 @@ object Nuxie {
 
         require(configuration.apiKey.isNotBlank()) { "apiKey must not be blank." }
 
-        setupState = SetupState(
-            applicationContext = context.applicationContext ?: context,
-            configuration = ConfigurationSnapshot(
-                apiKey = configuration.apiKey,
-                environment = configuration.environment,
-                logLevel = configuration.logLevel,
-                beforeSend = configuration.beforeSend,
-            ),
+        val core = NuxieCore(
+            context = context,
+            apiKey = configuration.apiKey,
+            environment = configuration.environment,
+            logLevel = configuration.logLevel,
+            beforeSend = configuration.beforeSend,
         )
+        setupState = SetupState(logLevel = configuration.logLevel, core = core)
+        core.start()
     }
 
-    private data class SetupState(
-        val applicationContext: Context,
-        val configuration: ConfigurationSnapshot,
-    )
+    internal val core: NuxieCore?
+        get() = setupState?.core
 
-    private data class ConfigurationSnapshot(
-        val apiKey: String,
-        val environment: NuxieEnvironment,
+    /** Testing seam: tear down the singleton between tests. Not public API. */
+    internal fun resetForTesting() {
+        setupState = null
+    }
+
+    private class SetupState(
         val logLevel: LogLevel,
-        val beforeSend: ((NuxieEvent) -> NuxieEvent?)?,
+        val core: NuxieCore,
     )
 }
