@@ -194,6 +194,63 @@ class TriggerServiceTest {
     }
 
     @Test
+    fun mixedJourneyOutcomesEmitEveryStartAndNoTerminalError() = runBlocking {
+        // A Failed admission alongside a durable enrollment must not
+        // terminally complete the stream before (or after) the Started
+        // update: the enrollment happened and the caller must see it.
+        val router = TriggerService.JourneyRouter { _ ->
+            listOf(
+                TriggerService.JourneyTriggerResult.Failed(
+                    ai.nuxie.sdk.TriggerError(
+                        ai.nuxie.sdk.TriggerErrorCode.TRIGGER_FAILED,
+                        "one admission failed",
+                    ),
+                ),
+                TriggerService.JourneyTriggerResult.Started(
+                    ExperienceRef("exp-1", "v1", "j-1"),
+                ),
+            )
+        }
+        val core = core(transportWithGate(null), journeys = router)
+        val updates = collect(core, "moment")
+        assertEquals(
+            listOf<TriggerUpdate>(
+                TriggerUpdate.Decision(
+                    TriggerDecision.JourneyStarted(ExperienceRef("exp-1", "v1", "j-1")),
+                ),
+            ),
+            updates,
+        )
+        core.stop()
+    }
+
+    @Test
+    fun allFailedJourneyOutcomesEmitOneTerminalError() = runBlocking {
+        val router = TriggerService.JourneyRouter { _ ->
+            listOf(
+                TriggerService.JourneyTriggerResult.Failed(
+                    ai.nuxie.sdk.TriggerError(
+                        ai.nuxie.sdk.TriggerErrorCode.TRIGGER_FAILED,
+                        "first",
+                    ),
+                ),
+                TriggerService.JourneyTriggerResult.Failed(
+                    ai.nuxie.sdk.TriggerError(
+                        ai.nuxie.sdk.TriggerErrorCode.TRIGGER_FAILED,
+                        "second",
+                    ),
+                ),
+            )
+        }
+        val core = core(transportWithGate(null), journeys = router)
+        val updates = collect(core, "moment")
+        val error = (updates.single() as TriggerUpdate.Error).error
+        assertEquals(ai.nuxie.sdk.TriggerErrorCode.TRIGGER_FAILED, error.code)
+        assertEquals("first", error.message)
+        core.stop()
+    }
+
+    @Test
     fun suppressionWithoutGateOrJourneyIsTerminal() = runBlocking {
         val router = TriggerService.JourneyRouter { _ ->
             listOf(
