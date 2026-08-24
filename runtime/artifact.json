@@ -2,8 +2,13 @@
   "note": "Local staging pin. The release pipeline replaces this with an immutable artifact URL + sha256 per ABI, mirroring the iOS Runtime/artifact.json.",
   "sourceRepo": "nuxieai/nuxie-runtime",
   "sourceBranch": "android/wgpu-surface-capi",
-  "sourceCommit": "84f6b989",
-  "features": ["android-wgpu"],
+  "sourceCommit": "3fd0514261",
+  "features": [
+    "android-wgpu"
+  ],
   "scriptingGate": "luaur-common 0.1.8 lacks Android libc bindings (clock/CLOCKS_PER_SEC); scripting excluded until patched",
-  "abis": ["arm64-v8a", "x86_64"]
+  "abis": [
+    "arm64-v8a",
+    "x86_64"
+  ]
 }
