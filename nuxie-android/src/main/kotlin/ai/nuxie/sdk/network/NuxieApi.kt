@@ -41,6 +41,10 @@ internal class NuxieApi(
 
     /** The server-authoritative response returned by POST /entitled. */
     class FeatureCheckResult(
+        val customerId: String,
+        val featureId: String,
+        val requiredBalance: Double,
+        val code: String,
         val allowed: Boolean,
         val unlimited: Boolean,
         val balance: Double?,
@@ -202,6 +206,10 @@ internal class NuxieApi(
         val text = response.body.decodeToString()
         StrictJsonValidator.requireNoDuplicateKeys(text)
         val parsed = Json.parseToJsonElement(text).jsonObject
+        val customerId = parsed.requiredString("customerId", "/entitled response")
+        val responseFeatureId = parsed.requiredString("featureId", "/entitled response")
+        val requiredResponseBalance = parsed.requiredDouble("requiredBalance", "/entitled response")
+        val code = parsed.requiredString("code", "/entitled response")
         val type = (parsed["type"] as? JsonPrimitive)?.content?.toFeatureType()
             ?: throw IOException("/entitled response has an invalid feature type")
         val allowed = (parsed["allowed"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull()
@@ -209,8 +217,25 @@ internal class NuxieApi(
         val unlimited = (parsed["unlimited"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull()
             ?: throw IOException("/entitled response is missing unlimited")
         val balance = (parsed["balance"] as? JsonPrimitive)?.content?.toDoubleOrNull()
-        return FeatureCheckResult(allowed, unlimited, balance, type)
+        return FeatureCheckResult(
+            customerId,
+            responseFeatureId,
+            requiredResponseBalance,
+            code,
+            allowed,
+            unlimited,
+            balance,
+            type,
+        )
     }
+
+    private fun kotlinx.serialization.json.JsonObject.requiredString(key: String, context: String): String =
+        (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            ?: throw IOException("$context is missing $key")
+
+    private fun kotlinx.serialization.json.JsonObject.requiredDouble(key: String, context: String): Double =
+        (this[key] as? JsonPrimitive)?.content?.toDoubleOrNull()
+            ?: throw IOException("$context is missing $key")
 
     private fun String.toFeatureType(): FeatureType? = when (this) {
         "boolean" -> FeatureType.BOOLEAN

@@ -20,13 +20,20 @@ internal class FeatureService(
     private val nowMillis: () -> Long = System::currentTimeMillis,
 ) {
     private data class CacheKey(val featureId: String, val entityId: String?)
-    private data class TimedAccess(val access: FeatureAccess, val cachedAtMillis: Long)
+    private data class TimedAccess(
+        val access: FeatureAccess,
+        val cachedAtMillis: Long,
+        val opaqueRequiredBalance: Double? = null,
+    )
 
     private val lock = Any()
     private var cacheDistinctId = identity.distinctId()
     private var durableAccess: Map<String, FeatureAccess> = emptyMap()
     private var durableEntities: Map<String, Map<String, FeatureAccess>> = emptyMap()
     private val realTimeCache = mutableMapOf<CacheKey, TimedAccess>()
+    private var scopeGeneration = 0L
+    private var nextSeq = 0L
+    private val committedSeq = mutableMapOf<CacheKey, Long>()
 
     suspend fun getCached(featureId: String, entityId: String?): FeatureAccess? =
         getCached(featureId, requiredBalance = null, entityId = entityId)
@@ -54,6 +61,7 @@ internal class FeatureService(
         forceRefresh: Boolean = false,
     ): FeatureAccess {
         if (!forceRefresh) {
+            getExactOpaqueCached(featureId, requiredBalance, entityId)?.let { return it }
             getCached(featureId, requiredBalance, entityId)?.let { cached ->
                 if (cached.type == FeatureType.BOOLEAN) return cached
                 if (cached.unlimited || (cached.balance ?: 0.0) >= (requiredBalance ?: 1.0)) {
@@ -81,21 +89,24 @@ internal class FeatureService(
             durableAccess = emptyMap()
             durableEntities = emptyMap()
             realTimeCache.clear()
+            committedSeq.clear()
+            scopeGeneration += 1
         }
         featureInfo.reset()
     }
 
     /** Called by ProfileService whenever its raw profile body is applied. */
     suspend fun hydrateProfile(distinctId: String, body: JsonObject) {
+        val hydrationGeneration = synchronized(lock) { scopeGeneration }
         if (identity.distinctId() != distinctId) return
         val parsed = parseProfileFeatures(body)
         synchronized(lock) {
-            if (identity.distinctId() != distinctId) return
+            if (identity.distinctId() != distinctId || scopeGeneration != hydrationGeneration) return
             cacheDistinctId = distinctId
             durableAccess = parsed.first
             durableEntities = parsed.second
         }
-        publishCurrent(ready = true)
+        publishCurrent(ready = true, expectedGeneration = hydrationGeneration)
     }
 
     suspend fun syncFeatureInfo() = publishCurrent(ready = true)
@@ -108,8 +119,30 @@ internal class FeatureService(
         synchronizeCustomerScopeIfNeeded()
         return synchronized(lock) {
             val key = CacheKey(featureId, entityId)
-            realTimeCache[key]?.takeIf(::isFresh)?.access?.forRequiredBalance(requiredBalance)
-                ?: entityAccess(featureId, entityId)?.forRequiredBalance(requiredBalance)
+            when (val cached = realTimeCache[key]?.takeIf(::isFresh)) {
+                null -> entityAccess(featureId, entityId)?.forRequiredBalance(requiredBalance)
+                else -> if (cached.opaqueRequiredBalance == null) {
+                    cached.access.forRequiredBalance(requiredBalance)
+                } else if (cached.opaqueRequiredBalance == requiredBalance) {
+                    cached.access
+                } else {
+                    null
+                }
+            }
+        }
+    }
+
+    private suspend fun getExactOpaqueCached(
+        featureId: String,
+        requiredBalance: Double?,
+        entityId: String?,
+    ): FeatureAccess? {
+        synchronizeCustomerScopeIfNeeded()
+        return synchronized(lock) {
+            realTimeCache[CacheKey(featureId, entityId)]
+                ?.takeIf(::isFresh)
+                ?.takeIf { it.opaqueRequiredBalance == requiredBalance && it.opaqueRequiredBalance != null }
+                ?.access
         }
     }
 
@@ -120,16 +153,25 @@ internal class FeatureService(
     ): FeatureAccess {
         synchronizeCustomerScopeIfNeeded()
         val distinctId = identity.distinctId()
-        val result = api.checkFeature(distinctId, featureId, requiredBalance, entityId)
-        if (identity.distinctId() != distinctId) throw kotlinx.coroutines.CancellationException()
-
-        val access = FeatureAccess(result.allowed, result.unlimited, result.balance, result.type)
-        synchronized(lock) {
-            if (cacheDistinctId != distinctId) throw kotlinx.coroutines.CancellationException()
-            realTimeCache[CacheKey(featureId, entityId)] = TimedAccess(access, nowMillis())
+        val key = CacheKey(featureId, entityId)
+        val (requestGeneration, seq) = synchronized(lock) {
+            scopeGeneration to nextSeq++
         }
-        featureInfo.update(featureId, access, entityId)
-        return access
+        val result = api.checkFeature(distinctId, featureId, requiredBalance, entityId)
+        synchronized(lock) {
+            if (scopeGeneration != requestGeneration || cacheDistinctId != distinctId) {
+                throw kotlinx.coroutines.CancellationException()
+            }
+            if (seq <= (committedSeq[key] ?: Long.MIN_VALUE)) {
+                throw kotlinx.coroutines.CancellationException()
+            }
+            val opaqueRequiredBalance = result.requiredBalance.takeIf { result.featureId != featureId }
+            val access = authoritativeAccess(result, featureId)
+            realTimeCache[key] = TimedAccess(access, nowMillis(), opaqueRequiredBalance)
+            committedSeq[key] = seq
+            featureInfo.update(featureId, access, entityId)
+            return access
+        }
     }
 
     private suspend fun synchronizeCustomerScopeIfNeeded() {
@@ -140,27 +182,44 @@ internal class FeatureService(
                 durableAccess = emptyMap()
                 durableEntities = emptyMap()
                 realTimeCache.clear()
+                committedSeq.clear()
+                scopeGeneration += 1
                 true
             }
         }
         if (changed) featureInfo.reset()
     }
 
-    private suspend fun publishCurrent(ready: Boolean = false) {
-        val current = synchronized(lock) {
+    private suspend fun publishCurrent(ready: Boolean = false, expectedGeneration: Long? = null) {
+        synchronized(lock) {
+            if (expectedGeneration != null && scopeGeneration != expectedGeneration) return
             val fresh = realTimeCache
                 .filter { (key, timed) -> key.entityId == null && isFresh(timed) }
                 .mapValues { it.value.access }
                 .mapKeys { it.key.featureId }
-            (durableAccess + fresh) to durableEntities
+            featureInfo.update(durableAccess + fresh, durableEntities, ready)
         }
-        featureInfo.update(current.first, current.second, ready)
     }
 
     private fun entityAccess(featureId: String, entityId: String?): FeatureAccess? = when (entityId) {
         null -> durableAccess[featureId]
-        else -> durableEntities[featureId]?.get(entityId)
-            ?: durableAccess[featureId]?.let { FeatureAccess(false, false, null, it.type) }
+        else -> durableEntities[featureId]?.let { entities ->
+            entities[entityId] ?: durableAccess[featureId]?.let { FeatureAccess(false, false, null, it.type) }
+        } ?: durableAccess[featureId]
+    }
+
+    private fun authoritativeAccess(
+        result: NuxieApi.FeatureCheckResult,
+        requestedFeatureId: String,
+    ): FeatureAccess = if (result.featureId == requestedFeatureId) {
+        FeatureAccess(result.allowed, result.unlimited, result.balance, result.type)
+    } else {
+        FeatureAccess(
+            allowed = result.allowed,
+            unlimited = result.unlimited,
+            balance = if (result.balance == 0.0) 0.0 else null,
+            type = FeatureType.METERED,
+        )
     }
 
     private fun isFresh(timed: TimedAccess): Boolean = nowMillis() - timed.cachedAtMillis < cacheTtlMillis

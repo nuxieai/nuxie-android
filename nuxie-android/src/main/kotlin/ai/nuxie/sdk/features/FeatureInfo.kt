@@ -46,28 +46,37 @@ class FeatureInfo {
         entities: Map<String, Map<String, FeatureAccess>>,
         ready: Boolean = false,
     ) {
-        entityAccess = entities
-        mutableAll.value = features
-        if (ready) mutableState.value = State.Ready
+        synchronized(this) {
+            entityAccess = entities
+            mutableAll.value = features
+            if (ready) mutableState.value = State.Ready
+        }
     }
 
     internal fun update(featureId: String, access: FeatureAccess, entityId: String?) {
-        if (entityId == null) {
-            mutableAll.value = mutableAll.value + (featureId to access)
-        } else {
-            entityAccess = entityAccess + (
-                featureId to (entityAccess[featureId].orEmpty() + (entityId to access))
-            )
+        synchronized(this) {
+            if (entityId == null) {
+                mutableAll.value = mutableAll.value + (featureId to access)
+            } else {
+                entityAccess = entityAccess + (
+                    featureId to (entityAccess[featureId].orEmpty() + (entityId to access))
+                )
+            }
         }
     }
 
     internal fun clear() {
-        entityAccess = emptyMap()
-        mutableAll.value = emptyMap()
+        synchronized(this) {
+            entityAccess = emptyMap()
+            mutableAll.value = emptyMap()
+        }
     }
 
     internal fun reset() {
-        clear()
-        mutableState.value = State.Unknown
+        synchronized(this) {
+            entityAccess = emptyMap()
+            mutableAll.value = emptyMap()
+            mutableState.value = State.Unknown
+        }
     }
 }
