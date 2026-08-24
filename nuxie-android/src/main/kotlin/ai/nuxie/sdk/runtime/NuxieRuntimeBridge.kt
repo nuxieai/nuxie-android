@@ -43,6 +43,9 @@ internal object NuxieRuntimeBridge {
     /** nux_artboard_instance_new_named -> artboard handle (0 = failure). */
     external fun nativeArtboardInstanceNewNamed(file: Long, artboardName: String): Long
 
+    /** nux_artboard_instance_new at index 0 (the default artboard). */
+    external fun nativeArtboardInstanceNewDefault(file: Long): Long
+
     external fun nativeArtboardInstanceFree(artboard: Long)
 
     /** nux_player_new_default over an artboard -> player handle (0 = failure). */

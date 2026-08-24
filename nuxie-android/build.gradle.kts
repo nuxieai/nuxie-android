@@ -10,6 +10,7 @@ android {
 
   defaultConfig {
     minSdk = 23
+    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
   compileOptions {
@@ -22,6 +23,7 @@ android {
   }
 
   testOptions {
+    targetSdk = 35
     unitTests.isReturnDefaultValues = true
     unitTests.isIncludeAndroidResources = true
   }
@@ -57,6 +59,9 @@ dependencies {
 
   testImplementation(libs.junit)
   testImplementation(libs.robolectric)
+
+  androidTestImplementation(libs.androidx.test.runner)
+  androidTestImplementation(libs.junit)
 }
 
 // The cross-SDK conformance fixtures live at the repository root; register

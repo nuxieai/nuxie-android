@@ -8,7 +8,10 @@ set(NUXIE_PREBUILT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../runtime/prebuilt
 
 add_library(nux_capi SHARED IMPORTED)
 set_target_properties(nux_capi PROPERTIES
-    IMPORTED_LOCATION "${NUXIE_PREBUILT_DIR}/jniLibs/${ANDROID_ABI}/libnux_capi.so")
+    IMPORTED_LOCATION "${NUXIE_PREBUILT_DIR}/jniLibs/${ANDROID_ABI}/libnux_capi.so"
+    # The Rust cdylib carries no SONAME; without this the shim records the
+    # absolute host path as DT_NEEDED and dlopen fails on device.
+    IMPORTED_NO_SONAME TRUE)
 
 add_library(nuxie_runtime_android SHARED nuxie_runtime_android.c)
 target_include_directories(nuxie_runtime_android PRIVATE "${NUXIE_PREBUILT_DIR}/include")

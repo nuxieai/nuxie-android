@@ -7,14 +7,59 @@
 // - This shim performs no allocation-free trickery: owned results are freed
 //   before returning.
 
+#include <android/log.h>
 #include <android/native_window_jni.h>
 #include <jni.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "nux_capi.generated.h"
+
+// Android discards stderr, but Rust panic messages print there. Pump the
+// process's stderr into logcat so contained panics are diagnosable.
+static void *stderr_pump(void *arg) {
+  int fd = (int)(intptr_t)arg;
+  char line[512];
+  size_t used = 0;
+  for (;;) {
+    char chunk[128];
+    ssize_t n = read(fd, chunk, sizeof(chunk));
+    if (n <= 0) break;
+    for (ssize_t i = 0; i < n; i++) {
+      if (chunk[i] == '\n' || used == sizeof(line) - 1) {
+        line[used] = '\0';
+        if (used > 0) {
+          __android_log_print(ANDROID_LOG_WARN, "Nuxie", "stderr: %s", line);
+        }
+        used = 0;
+        if (chunk[i] == '\n') continue;
+      }
+      line[used++] = chunk[i];
+    }
+  }
+  return NULL;
+}
+
+__attribute__((constructor)) static void redirect_stderr_to_logcat(void) {
+  int fds[2];
+  if (pipe(fds) != 0) return;
+  if (dup2(fds[1], STDERR_FILENO) < 0) {
+    close(fds[0]);
+    close(fds[1]);
+    return;
+  }
+  close(fds[1]);
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, stderr_pump, (void *)(intptr_t)fds[0]) == 0) {
+    pthread_detach(thread);
+  } else {
+    close(fds[0]);
+  }
+}
 
 static jlong as_handle(void *pointer) { return (jlong)(intptr_t)pointer; }
 static void *from_handle(jlong handle) { return (void *)(intptr_t)handle; }
@@ -23,6 +68,30 @@ static void free_result(struct NuxCapiResult *result) {
   if (result != NULL) {
     nux_capi_result_free(result);
   }
+}
+
+// Log the engine's diagnostic (code + message) for a failed call, then free
+// the owned result. Statuses alone are not actionable from logcat.
+static void log_and_free_result(const char *operation, NuxStatus status,
+                                struct NuxCapiResult *result) {
+  if (status != NUX_STATUS_OK) {
+    struct NuxCapiDiagnosticView view;
+    memset(&view, 0, sizeof(view));
+    view.struct_size = (uint32_t)sizeof(view);
+    if (result != NULL &&
+        nux_capi_result_diagnostic(result, &view) == NUX_STATUS_OK) {
+      __android_log_print(ANDROID_LOG_WARN, "Nuxie",
+                          "%s failed: status=%d code=%.*s message=%.*s",
+                          operation, (int)status, (int)view.code.len,
+                          view.code.data ? view.code.data : "",
+                          (int)view.message.len,
+                          view.message.data ? view.message.data : "");
+    } else {
+      __android_log_print(ANDROID_LOG_WARN, "Nuxie", "%s failed: status=%d",
+                          operation, (int)status);
+    }
+  }
+  free_result(result);
 }
 
 JNIEXPORT jlong JNICALL
@@ -59,6 +128,18 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeArtboardInstanceNewNamed(
   NuxStatus status = nux_artboard_instance_new_named(
       (const struct NuxFile *)from_handle(file), view, &instance);
   (*env)->ReleaseStringUTFChars(env, artboard_name, name);
+  return status == NUX_STATUS_OK ? as_handle(instance) : 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeArtboardInstanceNewDefault(
+    JNIEnv *env, jobject self, jlong file) {
+  (void)env;
+  (void)self;
+  if (file == 0) return 0;
+  struct NuxArtboardInstance *instance = NULL;
+  NuxStatus status = nux_artboard_instance_new(
+      (const struct NuxFile *)from_handle(file), 0, &instance);
   return status == NUX_STATUS_OK ? as_handle(instance) : 0;
 }
 
@@ -196,7 +277,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererRenderPlayer(
       (struct NuxAndroidRenderer *)from_handle(renderer),
       (struct NuxPlayer *)from_handle(player), (uint32_t)clear_color,
       fit_contain_center == JNI_TRUE ? 1u : 0u, &disposition, &result);
-  free_result(result);
+  log_and_free_result("render_player", status, result);
   if (status != NUX_STATUS_OK) return -((jint)status);
   return (jint)disposition;
 }
