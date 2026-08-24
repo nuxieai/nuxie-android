@@ -48,6 +48,9 @@ internal object FixtureRunner {
         }
     }
 
+    /** Exposed for suites that read fixture files directly. */
+    fun fixturesRoot(): java.io.File = fixtureRoot().toFile()
+
     private fun fixtureRoot(): Path {
         var directory: Path? = Path.of("").toAbsolutePath().normalize()
         while (directory != null) {
