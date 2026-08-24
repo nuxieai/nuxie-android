@@ -138,7 +138,7 @@ internal class NuxieCore(
                 featureId: String,
                 requiredBalance: Double?,
                 entityId: String?,
-            ): Boolean? = features.getCached(featureId, entityId)
+            ): Boolean? = features.getCached(featureId, requiredBalance, entityId)
                 ?.let { access ->
                     access.allowed && (
                         access.unlimited || access.type == FeatureType.BOOLEAN ||
