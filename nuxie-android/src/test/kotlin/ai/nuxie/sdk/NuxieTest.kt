@@ -1,5 +1,7 @@
 package ai.nuxie.sdk
 
+import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.testsupport.FakeTransport
 import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -11,9 +13,15 @@ import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 class NuxieTest {
+    @org.junit.Before
+    fun installFakeTransport() {
+        Nuxie.overridesForTesting = NuxieCore.Overrides(transport = FakeTransport())
+    }
+
     @After
     fun tearDown() {
         Nuxie.resetForTesting()
+        Nuxie.overridesForTesting = null
     }
 
     @Test

@@ -2,6 +2,8 @@ package ai.nuxie.sdk
 
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonPrimitive
+import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.testsupport.FakeTransport
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -18,6 +20,7 @@ import org.robolectric.RuntimeEnvironment
 class NuxieIdentityFacadeTest {
     @Before
     fun setUp() {
+        Nuxie.overridesForTesting = NuxieCore.Overrides(transport = FakeTransport())
         Nuxie.setup(
             RuntimeEnvironment.getApplication(),
             NuxieConfiguration("pk_test_identity"),
@@ -27,6 +30,7 @@ class NuxieIdentityFacadeTest {
     @After
     fun tearDown() {
         Nuxie.resetForTesting()
+        Nuxie.overridesForTesting = null
     }
 
     private fun pendingNames(): List<String> = runBlocking {

@@ -43,6 +43,7 @@ object Nuxie {
             environment = configuration.environment,
             logLevel = configuration.logLevel,
             beforeSend = configuration.beforeSend,
+            overrides = overridesForTesting ?: NuxieCore.Overrides(),
         )
         setupState = SetupState(logLevel = configuration.logLevel, core = core)
         core.start()
@@ -134,6 +135,9 @@ object Nuxie {
 
     internal val core: NuxieCore?
         get() = setupState?.core
+
+    /** Testing seam: inject core overrides for the next setup. Not public API. */
+    internal var overridesForTesting: NuxieCore.Overrides? = null
 
     /** Testing seam: tear down the singleton between tests. Not public API. */
     internal fun resetForTesting() {
