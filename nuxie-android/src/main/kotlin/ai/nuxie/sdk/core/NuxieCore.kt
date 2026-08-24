@@ -7,7 +7,11 @@ import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.SQLiteEventStore
+import ai.nuxie.sdk.events.EventDeliveryWorker
 import ai.nuxie.sdk.identity.IdentityService
+import ai.nuxie.sdk.network.HttpTransport
+import ai.nuxie.sdk.network.HttpUrlConnectionTransport
+import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.session.SessionService
 import android.app.Application
@@ -15,6 +19,7 @@ import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 
 /**
  * Constructor-injected composition root (iOS `NuxieCore` parity): concrete
@@ -38,6 +43,7 @@ internal class NuxieCore(
         val nowMillis: (() -> Long)? = null,
         val appVersion: (() -> String)? = null,
         val registerLifecycle: Boolean = true,
+        val transport: HttpTransport? = null,
     )
 
     private val appContext = context.applicationContext ?: context
@@ -55,6 +61,14 @@ internal class NuxieCore(
     val userTransitions: UserTransitionCoordinator by lazy {
         UserTransitionCoordinator(store, scope)
     }
+
+    val api = NuxieApi(
+        apiKey = apiKey,
+        environment = environment,
+        transport = overrides.transport ?: HttpUrlConnectionTransport(),
+    )
+
+    val delivery = EventDeliveryWorker(store, api, scope, nowMillis = nowMillis)
 
     val contextBuilder = NuxieContextBuilder(appContext, environment, logLevel, identity)
 
@@ -75,14 +89,30 @@ internal class NuxieCore(
         emit = { name, properties -> eventLog.capture(name, properties) },
     )
 
-    private val lifecycleCoordinator = NuxieLifecycleCoordinator(lifecycleTracker, sessions, scope)
+    private val lifecycleCoordinator = NuxieLifecycleCoordinator(
+        lifecycleTracker,
+        sessions,
+        scope,
+        onBackground = { delivery.flushAll() },
+    )
 
     /** Called once from Nuxie.setup after construction. */
     fun start() {
+        // Every committed capture nudges the delivery threshold check.
+        eventLog.subscribeCommitted { delivery.kick() }
         lifecycleTracker.trackAppLaunchEvents()
         if (registerLifecycle) {
             (appContext as? Application)?.registerActivityLifecycleCallbacks(lifecycleCoordinator)
         }
+    }
+
+    /** Cancel workers and release the store. Testing teardown only for now. */
+    fun stop() {
+        kotlinx.coroutines.runBlocking {
+            runCatching { delivery.close() }
+            runCatching { eventLog.close() }
+        }
+        scope.cancel()
     }
 
     private fun defaultAppVersion(): String = runCatching {

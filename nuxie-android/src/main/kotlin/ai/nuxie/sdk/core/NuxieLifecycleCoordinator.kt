@@ -21,6 +21,8 @@ internal class NuxieLifecycleCoordinator(
     private val tracker: AppLifecycleTracker,
     private val sessions: ai.nuxie.sdk.session.SessionService,
     scope: CoroutineScope,
+    /** Best-effort work on entering background (e.g. a delivery flush). */
+    private val onBackground: (suspend () -> Unit)? = null,
 ) : Application.ActivityLifecycleCallbacks {
     private enum class Transition { FOREGROUND, BACKGROUND }
 
@@ -39,6 +41,9 @@ internal class NuxieLifecycleCoordinator(
                     Transition.BACKGROUND -> {
                         sessions.onAppDidEnterBackground()
                         tracker.trackAppBackgrounded()
+                        // Android-specific best effort: push pending events out
+                        // before the process is likely frozen or killed.
+                        onBackground?.invoke()
                     }
                 }
             }
