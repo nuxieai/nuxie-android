@@ -10,6 +10,9 @@ import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.EventDeliveryWorker
 import ai.nuxie.sdk.events.TriggerBroker
 import ai.nuxie.sdk.events.TriggerService
+import ai.nuxie.sdk.features.FeatureInfo
+import ai.nuxie.sdk.features.FeatureService
+import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.experiences.ExperienceTrustRoots
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
 import ai.nuxie.sdk.identity.IdentityService
@@ -46,6 +49,8 @@ internal class NuxieCore(
     val environment: NuxieEnvironment,
     val logLevel: LogLevel,
     beforeSend: ((NuxieEvent) -> NuxieEvent?)?,
+    val featureInfo: FeatureInfo = FeatureInfo(),
+    featureCacheTtlMillis: Long = 5L * 60L * 1000L,
     overrides: Overrides = Overrides(),
 ) {
     private val registerLifecycle = overrides.registerLifecycle
@@ -114,13 +119,39 @@ internal class NuxieCore(
         initialDistinctId = identity.distinctId(),
     )
 
+    val features = FeatureService(
+        api = api,
+        identity = identity,
+        featureInfo = featureInfo,
+        cacheTtlMillis = featureCacheTtlMillis,
+        nowMillis = nowMillis,
+    )
+
     val triggers by lazy {
         TriggerService(
         eventLog = eventLog,
         api = api,
         broker = TriggerBroker(),
         journeys = overrides.journeys ?: journeys,
-        features = overrides.features ?: TriggerService.NoFeatureAuthority,
+        features = overrides.features ?: object : TriggerService.FeatureGate {
+            override suspend fun cachedAccess(
+                featureId: String,
+                requiredBalance: Double?,
+                entityId: String?,
+            ): Boolean? = features.getCached(featureId, entityId)
+                ?.let { access ->
+                    access.allowed && (
+                        access.unlimited || access.type == FeatureType.BOOLEAN ||
+                            (access.balance ?: 0.0) >= (requiredBalance ?: 1.0)
+                        )
+                }
+
+            override suspend fun checkAccess(
+                featureId: String,
+                requiredBalance: Double?,
+                entityId: String?,
+            ): Boolean = features.checkWithCache(featureId, requiredBalance, entityId).allowed
+        },
             presenter = overrides.presenter ?: TriggerService.PresentationUnavailable,
             nowMillis = nowMillis,
         )
@@ -136,6 +167,7 @@ internal class NuxieCore(
             journeyCatalog.applyProfile(distinctId, body)
             scope.launch { journeys.applyDownFacts(body, distinctId) }
         },
+        applyFeatureProfile = features::hydrateProfile,
         scope = scope,
         localeProvider = { null },  // locale override arrives with setLocaleIdentifier
         nowMillis = nowMillis,
@@ -159,6 +191,9 @@ internal class NuxieCore(
     fun start() {
         // Every committed capture nudges the delivery threshold check.
         eventLog.subscribeCommitted { delivery.kick() }
+        userTransitions.addObserver(UserTransitionCoordinator.Observer { _, from, to ->
+            features.handleUserChange(from, to)
+        })
         userTransitions.addObserver(profile.transitionObserver)
         profile.requestRefresh()
         lifecycleTracker.trackAppLaunchEvents()
