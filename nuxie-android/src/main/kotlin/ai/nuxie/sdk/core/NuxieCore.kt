@@ -139,12 +139,12 @@ internal class NuxieCore(
                 requiredBalance: Double?,
                 entityId: String?,
             ): Boolean? = features.getCached(featureId, requiredBalance, entityId)
-                ?.let { access ->
-                    access.allowed && (
-                        access.unlimited || access.type == FeatureType.BOOLEAN ||
-                            (access.balance ?: 0.0) >= (requiredBalance ?: 1.0)
-                        )
-                }
+                // getCached already resolved requiredBalance semantics for
+                // every entry kind (forRequiredBalance for regular entries,
+                // exact-match serving for opaque snapshots whose balance is
+                // intentionally null); re-deriving from balance here would
+                // deny allowed opaque grants.
+                ?.allowed
 
             override suspend fun checkAccess(
                 featureId: String,
