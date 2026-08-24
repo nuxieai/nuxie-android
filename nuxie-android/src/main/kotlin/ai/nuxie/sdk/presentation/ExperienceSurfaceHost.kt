@@ -137,11 +137,13 @@ internal class ExperienceSurfaceHost(
         // detach marker; a FIFO marker alone would let already-queued
         // frames render to the dead surface after we return.
         val detached = CountDownLatch(1)
-        lane.enqueue {
+        val accepted = lane.enqueue {
             attached = false
             detached.countDown()
         }
-        if (!detached.await(SURFACE_DETACH_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+        // A shut-down lane runs nothing anymore, so there is no pending
+        // render to drain and nothing to wait for.
+        if (accepted && !detached.await(SURFACE_DETACH_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
             Log.w(LOG_TAG, "Runtime lane did not confirm surface detach in time")
         }
     }
