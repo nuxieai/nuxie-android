@@ -8,6 +8,7 @@ import ai.nuxie.sdk.TriggerError
 import ai.nuxie.sdk.TriggerErrorCode
 import ai.nuxie.sdk.TriggerUpdate
 import ai.nuxie.sdk.network.NuxieApi
+import ai.nuxie.sdk.journey.JourneyDownFactRouter
 import android.util.Log
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
@@ -90,7 +91,9 @@ internal class TriggerService(
         val gatePlan = runCatching {
             val responseText = api.postEvent(BatchItemWireEncoder.encode(stored))
             eventLog.markDeliveredViaDecisionLane(eventId)
-            GatePlan.fromEventResponse(Json.parseToJsonElement(responseText).jsonObject)
+            val response = Json.parseToJsonElement(responseText).jsonObject
+            (journeys as? JourneyDownFactRouter)?.applyDownFacts(response, stored.distinctId)
+            GatePlan.fromEventResponse(response)
         }.getOrElse { failure ->
             Log.w(LOG_TAG, "Decision lane request failed", failure)
             handler(

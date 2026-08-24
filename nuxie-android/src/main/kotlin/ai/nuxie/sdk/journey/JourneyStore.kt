@@ -1,0 +1,184 @@
+package ai.nuxie.sdk.journey
+
+import java.io.File
+import java.security.MessageDigest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+
+/**
+ * Per-user file persistence for Journey runs and the bounded completion/down-fact
+ * receipts that inform future admissions. Every write is an atomic replacement.
+ */
+internal class JourneyStore(
+    filesDir: File,
+    private val json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = false },
+) {
+    private val root = File(filesDir, "nuxie/journeys")
+
+    init {
+        root.mkdirs()
+    }
+
+    @Synchronized
+    fun save(run: JourneyRun) {
+        val directory = runsDirectory(run.distinctId)
+        directory.mkdirs()
+        atomicWrite(File(directory, "${run.id}.json"), encodeRun(run).toString())
+    }
+
+    @Synchronized
+    fun load(distinctId: String, journeyId: String): JourneyRun? {
+        val file = File(runsDirectory(distinctId), "$journeyId.json")
+        return decodeRun(file)
+    }
+
+    @Synchronized
+    fun loadActive(distinctId: String): List<JourneyRun> = runsDirectory(distinctId)
+        .listFiles()
+        ?.asSequence()
+        ?.filter { it.extension == "json" }
+        ?.mapNotNull(::decodeRun)
+        ?.filter { it.state == JourneyRunState.ACTIVE }
+        ?.sortedBy { it.id }
+        ?.toList()
+        ?: emptyList()
+
+    @Synchronized
+    fun recordCompletion(distinctId: String, completion: JourneyCompletion) {
+        val completions = completions(distinctId, completion.experienceId)
+            .plus(completion)
+            .takeLast(MAX_COMPLETIONS_PER_EXPERIENCE)
+        val directory = completionsDirectory(distinctId)
+        directory.mkdirs()
+        atomicWrite(
+            File(directory, "${safeFileName(completion.experienceId)}.json"),
+            JsonArray(completions.map(::encodeCompletion)).toString(),
+        )
+    }
+
+    @Synchronized
+    fun hasCompleted(distinctId: String, experienceId: String): Boolean =
+        completions(distinctId, experienceId).isNotEmpty()
+
+    @Synchronized
+    fun lastCompletionAtMillis(distinctId: String, experienceId: String): Long? =
+        completions(distinctId, experienceId).maxOfOrNull { it.completedAtMillis }
+
+    /** Returns true exactly once for each server fact id and persists that receipt. */
+    @Synchronized
+    fun recordDownFactIfNew(distinctId: String, factId: String): Boolean {
+        val file = File(receiptsDirectory(distinctId), "down-facts.json")
+        val receipts = decodeStringSet(file)
+        if (factId in receipts) return false
+        receiptsDirectory(distinctId).mkdirs()
+        atomicWrite(file, JsonArray((receipts + factId).sorted().map(::JsonPrimitive)).toString())
+        return true
+    }
+
+    @Synchronized
+    fun hasDownFact(distinctId: String, factId: String): Boolean =
+        factId in decodeStringSet(File(receiptsDirectory(distinctId), "down-facts.json"))
+
+    private fun decodeRun(file: File): JourneyRun? = runCatching {
+        val value = json.parseToJsonElement(file.readText()).jsonObject
+        JourneyRun(
+            id = value.string("id") ?: return null,
+            distinctId = value.string("distinct_id") ?: return null,
+            experienceId = value.string("experience_id") ?: return null,
+            experienceVersion = value.string("experience_version") ?: return null,
+            epoch = value.long("epoch") ?: return null,
+            plane = value.string("plane")?.let(JourneyPlane::valueOf) ?: return null,
+            settingsSnapshot = value["settings_snapshot"] as? JsonObject ?: return null,
+            state = value.string("state")?.let(JourneyRunState::valueOf) ?: return null,
+            resumePoint = (value["resume_point"] as? JsonObject)?.let { point ->
+                JourneyResumePoint(
+                    nodeId = point.string("node_id") ?: return null,
+                    checkpointAtMillis = point.long("checkpoint_at") ?: return null,
+                )
+            },
+            isGhost = value["is_ghost"]?.let { (it as? JsonPrimitive)?.content == "true" } ?: false,
+            terminalReason = value.string("terminal_reason"),
+        )
+    }.getOrNull()
+
+    private fun completions(distinctId: String, experienceId: String): List<JourneyCompletion> {
+        val file = File(completionsDirectory(distinctId), "${safeFileName(experienceId)}.json")
+        return runCatching {
+            (json.parseToJsonElement(file.readText()) as JsonArray).mapNotNull { element ->
+                val value = element as? JsonObject ?: return@mapNotNull null
+                val id = value.string("experience_id") ?: return@mapNotNull null
+                val completedAt = value.long("completed_at") ?: return@mapNotNull null
+                JourneyCompletion(id, completedAt)
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun decodeStringSet(file: File): Set<String> = runCatching {
+        (json.parseToJsonElement(file.readText()) as JsonArray)
+            .mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+            .toSet()
+    }.getOrDefault(emptySet())
+
+    private fun runsDirectory(distinctId: String): File = File(File(root, "runs"), safeFileName(distinctId))
+    private fun completionsDirectory(distinctId: String): File = File(File(root, "completions"), safeFileName(distinctId))
+    private fun receiptsDirectory(distinctId: String): File = File(File(root, "receipts"), safeFileName(distinctId))
+
+    /** Collision-free filesystem scope for arbitrary distinct and Experience ids. */
+    private fun safeFileName(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.encodeToByteArray())
+        .joinToString("") { "%02x".format(it) }
+
+    private fun atomicWrite(destination: File, content: String) {
+        destination.parentFile?.mkdirs()
+        // Same-directory rename maps to the platform's atomic replacement
+        // primitive on Android's filesystems and is available from minSdk 23.
+        val temporary = File(destination.parentFile, ".${destination.name}.new")
+        temporary.outputStream().use { stream -> stream.write(content.encodeToByteArray()) }
+        try {
+            check(temporary.renameTo(destination)) { "Could not replace ${destination.name}" }
+        } catch (failure: Throwable) {
+            temporary.delete()
+            throw failure
+        }
+    }
+
+    private fun encodeRun(run: JourneyRun): JsonObject = buildJsonObject {
+        put("id", JsonPrimitive(run.id))
+        put("distinct_id", JsonPrimitive(run.distinctId))
+        put("experience_id", JsonPrimitive(run.experienceId))
+        put("experience_version", JsonPrimitive(run.experienceVersion))
+        put("epoch", JsonPrimitive(run.epoch))
+        put("plane", JsonPrimitive(run.plane.name))
+        put("settings_snapshot", run.settingsSnapshot)
+        put("state", JsonPrimitive(run.state.name))
+        put("resume_point", run.resumePoint?.let { point ->
+            buildJsonObject {
+                put("node_id", JsonPrimitive(point.nodeId))
+                put("checkpoint_at", JsonPrimitive(point.checkpointAtMillis))
+            }
+        } ?: JsonNull)
+        put("is_ghost", JsonPrimitive(run.isGhost))
+        put("terminal_reason", run.terminalReason?.let(::JsonPrimitive) ?: JsonNull)
+    }
+
+    private fun encodeCompletion(completion: JourneyCompletion): JsonObject = buildJsonObject {
+        put("experience_id", JsonPrimitive(completion.experienceId))
+        put("completed_at", JsonPrimitive(completion.completedAtMillis))
+    }
+
+    private fun JsonObject.string(key: String): String? =
+        (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+
+    private fun JsonObject.long(key: String): Long? =
+        (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toLongOrNull()
+
+    private companion object {
+        const val MAX_COMPLETIONS_PER_EXPERIENCE = 10
+    }
+}

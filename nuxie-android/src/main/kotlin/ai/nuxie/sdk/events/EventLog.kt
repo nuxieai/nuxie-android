@@ -50,6 +50,7 @@ internal class EventLog(
             val properties: Map<String, Any?>?,
             val done: CompletableDeferred<StoredEvent?>,
         ) : Command
+        data class CommitServerFact(val event: StoredEvent, val done: CompletableDeferred<Boolean>) : Command
         data class Barrier(val done: CompletableDeferred<Unit>) : Command
     }
 
@@ -69,6 +70,7 @@ internal class EventLog(
                         .getOrNull()
                     command.done.complete(stored)
                 }
+                is Command.CommitServerFact -> command.done.complete(commitServerFactNow(command.event))
                 is Command.Barrier -> command.done.complete(Unit)
             }
         }
@@ -137,6 +139,13 @@ internal class EventLog(
         runCatching { store.markDelivered(listOf(eventId)) }
     }
 
+    /** Commits a server fact once, delivers it locally, and never uploads it. */
+    suspend fun commitServerFact(event: StoredEvent): Boolean {
+        val done = CompletableDeferred<Boolean>()
+        if (commands.trySend(Command.CommitServerFact(event, done)).isFailure) return false
+        return done.await()
+    }
+
     private suspend fun process(name: String, commandProperties: Map<String, Any?>?): StoredEvent? {
         var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties ?: emptyMap())
         if (!sanitized.containsKey(SESSION_ID_PROPERTY)) {
@@ -170,6 +179,20 @@ internal class EventLog(
             }
         }
         return stored
+    }
+
+    private suspend fun commitServerFactNow(event: StoredEvent): Boolean {
+        if (runCatching { store.insertPending(event) }.isFailure) return false
+        // Server provenance means this receipt is immediately delivered and
+        // therefore excluded from the outbound queue.
+        runCatching { store.markDelivered(listOf(event.id)) }
+        subscribers.forEach { subscriber ->
+            if (subscriber.predicate(event)) {
+                runCatching { subscriber.handler.onCommitted(event) }
+                    .onFailure { Log.w(LOG_TAG, "Committed-event subscriber failed", it) }
+            }
+        }
+        return true
     }
 
     private fun applyBeforeSend(original: NuxieEvent): NuxieEvent? {
