@@ -1,1 +1,0 @@
-/Users/levi/dev/nuxie-dev/.claude/worktrees/composer-options-placement-dd7d14/sdks/nuxie-android/nuxie-android/build/intermediates/cxx/Debug/26b713l4/obj/x86_64
