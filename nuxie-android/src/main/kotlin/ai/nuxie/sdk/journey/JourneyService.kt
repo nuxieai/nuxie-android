@@ -2,10 +2,14 @@ package ai.nuxie.sdk.journey
 
 import ai.nuxie.sdk.ExperienceRef
 import ai.nuxie.sdk.SuppressReason
+import ai.nuxie.sdk.TriggerError
+import ai.nuxie.sdk.TriggerErrorCode
 import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.TimeBasedEpochGenerator
 import ai.nuxie.sdk.events.TriggerService
 import ai.nuxie.sdk.util.IsoDates
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -27,6 +31,9 @@ internal class JourneyService(
 ) : TriggerService.JourneyRouter, JourneyDownFactRouter {
     private val admissions = mutableSetOf<AdmissionKey>()
     private val restoredRunIds = mutableSetOf<String>()
+    // E1 has few concurrent run operations; one lock keeps each run's
+    // load-mutate-save sequence coherent until per-run locking is warranted.
+    private val runLock = Mutex()
 
     init {
         // Load the current user's persisted live runs on startup. Direct
@@ -37,37 +44,63 @@ internal class JourneyService(
         }
     }
 
-    override suspend fun handleEventForTrigger(event: StoredEvent): List<TriggerService.JourneyTriggerResult> =
-        releases.releasesFor(event.name).map { release -> enroll(event, release) }
-
-    fun transition(distinctId: String, journeyId: String, fromNode: String?, toNode: String, region: String = "device-main") {
-        val run = store.load(distinctId, journeyId) ?: return
-        if (run.state == JourneyRunState.ACTIVE && !run.isGhost) ledger.transition(run, fromNode, toNode, region)
+    override suspend fun handleEventForTrigger(event: StoredEvent): List<TriggerService.JourneyTriggerResult> {
+        val results = mutableListOf<TriggerService.JourneyTriggerResult>()
+        for (release in releases.releasesFor(event.distinctId, event.name)) {
+            results += enroll(event, release)
+        }
+        return results
     }
 
-    fun milestone(distinctId: String, journeyId: String, milestoneId: String) {
-        val run = store.load(distinctId, journeyId) ?: return
-        if (run.state == JourneyRunState.ACTIVE && !run.isGhost) ledger.milestone(run, milestoneId)
-    }
-
-    fun requestEffect(distinctId: String, journeyId: String, nodeId: String, attempt: Long, effect: String, payload: JsonObject): String? {
-        val run = store.load(distinctId, journeyId) ?: return null
-        return if (run.state == JourneyRunState.ACTIVE && !run.isGhost) {
-            ledger.effectRequested(run, nodeId, attempt, effect, payload)
-        } else {
-            null
+    suspend fun transition(
+        distinctId: String,
+        journeyId: String,
+        fromNode: String?,
+        toNode: String,
+        region: String = "device-main",
+    ) {
+        runLock.withLock {
+            val run = store.load(distinctId, journeyId) ?: return
+            if (run.state == JourneyRunState.ACTIVE && !run.isGhost) ledger.transition(run, fromNode, toNode, region)
         }
     }
 
-    fun exit(distinctId: String, journeyId: String, reason: String) {
-        val run = store.load(distinctId, journeyId) ?: return
-        if (run.state != JourneyRunState.ACTIVE) return
-        val terminal = run.copy(state = JourneyRunState.TERMINAL, terminalReason = reason)
-        store.save(terminal)
-        if (!run.isGhost) {
-            ledger.exited(run, reason, nowMillis())
-            if (reason != "cancelled" && reason != "error") {
-                store.recordCompletion(distinctId, JourneyCompletion(run.experienceId, nowMillis()))
+    suspend fun milestone(distinctId: String, journeyId: String, milestoneId: String) {
+        runLock.withLock {
+            val run = store.load(distinctId, journeyId) ?: return
+            if (run.state == JourneyRunState.ACTIVE && !run.isGhost) ledger.milestone(run, milestoneId)
+        }
+    }
+
+    suspend fun requestEffect(
+        distinctId: String,
+        journeyId: String,
+        nodeId: String,
+        attempt: Long,
+        effect: String,
+        payload: JsonObject,
+    ): String? {
+        return runLock.withLock {
+            val run = store.load(distinctId, journeyId) ?: return null
+            if (run.state == JourneyRunState.ACTIVE && !run.isGhost) {
+                ledger.effectRequested(run, nodeId, attempt, effect, payload)
+            } else {
+                null
+            }
+        }
+    }
+
+    suspend fun exit(distinctId: String, journeyId: String, reason: String) {
+        runLock.withLock {
+            val run = store.load(distinctId, journeyId) ?: return
+            if (run.state != JourneyRunState.ACTIVE) return
+            val terminal = run.copy(state = JourneyRunState.TERMINAL, terminalReason = reason)
+            store.save(terminal)
+            if (!run.isGhost) {
+                ledger.exited(run, reason, nowMillis())
+                if (reason != "cancelled" && reason != "error") {
+                    store.recordCompletion(distinctId, JourneyCompletion(run.experienceId, nowMillis()))
+                }
             }
         }
     }
@@ -79,21 +112,31 @@ internal class JourneyService(
             val id = fact.string("id") ?: return@forEach
             val name = fact.string("event") ?: return@forEach
             val properties = fact["properties"] as? JsonObject ?: return@forEach
-            if (name !in DOWN_FACT_NAMES || store.hasDownFact(distinctId, id)) return@forEach
+            if (name !in DOWN_FACT_NAMES) return@forEach
             // Server facts carry their server-authored time, as epoch millis
             // or ISO-8601; substituting receipt time would skew the ledger.
             val timestamp = fact.long("timestamp")
                 ?: fact.string("timestamp")?.let(IsoDates::parseMillis)
                 ?: nowMillis()
-            val event = StoredEvent(id, name, properties, timestamp, distinctId)
-            if (ledger.serverFact(event)) {
-                store.recordDownFactIfNew(distinctId, id)
-                routeDownFact(distinctId, name, properties)
+            val serverProperties = buildJsonObject {
+                properties.forEach { (key, value) -> put(key, value) }
+                put("\$server_fact_id", JsonPrimitive(id))
+                put("\$nuxie_event_origin", JsonPrimitive("server"))
+            }
+            val event = StoredEvent(id, name, serverProperties, timestamp, distinctId)
+            if (name == JourneyEventNames.SUPERSEDED || name == JourneyEventNames.CONVERTED) {
+                runLock.withLock {
+                    if (ledger.serverFact(event)) {
+                        routeDownFact(distinctId, name, serverProperties)
+                    }
+                }
+            } else if (ledger.serverFact(event)) {
+                routeDownFact(distinctId, name, serverProperties)
             }
         }
     }
 
-    private fun enroll(event: StoredEvent, release: AdmittedJourneyRelease): TriggerService.JourneyTriggerResult {
+    private suspend fun enroll(event: StoredEvent, release: AdmittedJourneyRelease): TriggerService.JourneyTriggerResult {
         val key = AdmissionKey(event.distinctId, release.experienceId)
         synchronized(admissions) {
             if (!admissions.add(key)) return TriggerService.JourneyTriggerResult.Suppressed(SuppressReason.ALREADY_ACTIVE)
@@ -116,10 +159,16 @@ internal class JourneyService(
                 settingsSnapshot = release.settingsTemplate.withAnchor(now),
                 state = JourneyRunState.ACTIVE,
             )
-            // Persist before emitting so restart recovery has a run for every
-            // locally visible enrollment fact.
-            store.save(run)
-            ledger.enrolled(run, event.id)
+            // The enrollment fact is a synchronous durability boundary. Do
+            // not admit or persist a run if committing it failed.
+            if (ledger.enrolled(run, event.id) == null) {
+                return TriggerService.JourneyTriggerResult.Failed(
+                    TriggerError(TriggerErrorCode.TRIGGER_FAILED, "Journey enrollment capture failed"),
+                )
+            }
+            // Persist after the synchronous enrollment fact so a crash cannot
+            // leave server admission without its local run snapshot.
+            runLock.withLock { store.save(run) }
             return TriggerService.JourneyTriggerResult.Started(
                 ExperienceRef(run.experienceId, run.experienceVersion, run.id),
             )
@@ -136,10 +185,24 @@ internal class JourneyService(
     }
 
     private fun routeDownFact(distinctId: String, name: String, properties: JsonObject) {
-        if (name != JourneyEventNames.SUPERSEDED) return
-        val journeyId = properties.string("journey_id") ?: return
-        val run = store.load(distinctId, journeyId) ?: return
-        if (!run.isGhost) store.save(run.copy(isGhost = true))
+        when (name) {
+            JourneyEventNames.SUPERSEDED -> {
+                val journeyId = properties.string("journey_id") ?: return
+                val run = store.load(distinctId, journeyId) ?: return
+                if (!run.isGhost) store.save(run.copy(isGhost = true))
+            }
+            JourneyEventNames.CONVERTED -> {
+                val journeyId = properties.string("journey_id") ?: return
+                val convertedAt = properties.long("at") ?: properties.string("at")?.let(IsoDates::parseMillis) ?: return
+                val run = store.load(distinctId, journeyId) ?: return
+                if (run.convertedAtMillis == null || convertedAt < run.convertedAtMillis) {
+                    store.save(run.copy(convertedAtMillis = convertedAt))
+                }
+            }
+            JourneyEventNames.EFFECT_COMPLETED -> {
+                // Effect-completed routing belongs to the deferred execution slice.
+            }
+        }
     }
 
     private fun JsonObject.withAnchor(now: Long): JsonObject = buildJsonObject {

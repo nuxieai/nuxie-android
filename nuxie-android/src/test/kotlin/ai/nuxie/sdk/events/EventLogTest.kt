@@ -31,8 +31,14 @@ class EventLogTest {
     private class RecordingStore : EventStore {
         val pending = mutableListOf<StoredEvent>()
         val stableDrops = mutableListOf<String>()
+        val delivered = mutableListOf<StoredEvent>()
 
         override suspend fun insertPending(event: StoredEvent) { pending.add(event) }
+        override suspend fun insertDeliveredIfAbsent(event: StoredEvent): Boolean {
+            if (pending.any { it.id == event.id } || delivered.any { it.id == event.id }) return false
+            delivered.add(event)
+            return true
+        }
         override suspend fun markDelivered(ids: List<String>) = Unit
         override suspend fun hasEvent(name: String, distinctId: String, sinceMillis: Long?) = false
         override suspend fun countEvents(

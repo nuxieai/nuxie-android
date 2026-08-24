@@ -71,6 +71,11 @@ class JourneyConformanceTest {
         override suspend fun insertPending(event: StoredEvent) {
             check(events.putIfAbsent(event.id, event) == null) { "duplicate event" }
         }
+        override suspend fun insertDeliveredIfAbsent(event: StoredEvent): Boolean {
+            if (events.putIfAbsent(event.id, event) != null) return false
+            delivered += event.id
+            return true
+        }
         override suspend fun markDelivered(ids: List<String>) { delivered += ids }
         override suspend fun hasEvent(name: String, distinctId: String, sinceMillis: Long?) = false
         override suspend fun countEvents(name: String, distinctId: String, sinceMillis: Long?, untilMillis: Long?) = 0
@@ -115,7 +120,7 @@ class JourneyConformanceTest {
             captured,
             log,
             runStore,
-            JourneyService(runStore, JourneyLedger(log), JourneyReleaseProvider { emptyList() }, { now }),
+            JourneyService(runStore, JourneyLedger(log), JourneyReleaseProvider { _, _ -> emptyList() }, { now }),
         )
     }
 
@@ -224,7 +229,8 @@ class JourneyConformanceTest {
                 )
             }
 
-            // Route-once: replaying the same body commits nothing new.
+            // Route-once is the event store's atomic server-fact insert:
+            // replaying the body commits and routes nothing new.
             val countBefore = h.captured.events.size
             h.service.applyDownFacts(body, distinctId)
             h.log.awaitBarrier()

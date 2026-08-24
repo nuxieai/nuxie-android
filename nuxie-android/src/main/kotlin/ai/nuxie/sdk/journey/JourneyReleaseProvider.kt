@@ -27,7 +27,7 @@ internal sealed class JourneyReentry {
 
 /** Seam between profile-backed release admission and Journey enrollment. */
 internal fun interface JourneyReleaseProvider {
-    fun releasesFor(triggerEventName: String): List<AdmittedJourneyRelease>
+    fun releasesFor(distinctId: String, triggerEventName: String): List<AdmittedJourneyRelease>
 }
 
 /**
@@ -38,39 +38,46 @@ internal class JourneyReleaseCatalog(
     private val trustedKeys: Map<String, ByteArray>,
     private val highWater: ReleaseHighWaterStore,
     private val supportedRuntime: () -> SupportedRuntime?,
+    private val authenticate: (ExperienceReleaseProfile.Entry, SupportedRuntime) -> AuthenticatedRelease? = { entry, runtime ->
+        runCatching {
+            ExperienceReleaseVerifier.authenticate(
+                envelopeBytes = entry.envelopeBytes,
+                trustedKeys = trustedKeys,
+                expectedIdentity = entry.locator,
+                supportedRuntime = runtime,
+                replayPolicy = ReplayPolicy.Active(highWater.floor(entry.locator.streamKey)),
+            )
+        }.getOrNull()
+    },
 ) : JourneyReleaseProvider {
     private val lock = Any()
-    private var byTrigger = emptyMap<String, List<AdmittedJourneyRelease>>()
+    private var releasesByDistinctId = emptyMap<String, Map<String, List<AdmittedJourneyRelease>>>()
 
-    fun applyProfile(body: JsonObject) {
+    fun applyProfile(distinctId: String, body: JsonObject) {
         val runtime = supportedRuntime() ?: run {
-            synchronized(lock) { byTrigger = emptyMap() }
+            synchronized(lock) { releasesByDistinctId = emptyMap() }
             return
         }
         val profile = ExperienceReleaseProfile.fromProfileBody(body) ?: run {
-            synchronized(lock) { byTrigger = emptyMap() }
+            synchronized(lock) { releasesByDistinctId = emptyMap() }
             return
         }
         val releases = profile.active.mapNotNull { entry ->
-            val authenticated = runCatching {
-                ExperienceReleaseVerifier.authenticate(
-                    envelopeBytes = entry.envelopeBytes,
-                    trustedKeys = trustedKeys,
-                    expectedIdentity = entry.locator,
-                    supportedRuntime = runtime,
-                    replayPolicy = ReplayPolicy.Active(highWater.floor(entry.locator.streamKey)),
-                )
-            }.getOrNull() ?: return@mapNotNull null
+            val authenticated = authenticate(entry, runtime) ?: return@mapNotNull null
             authenticated.publishedAtSeqToPromote?.let {
                 highWater.promote(authenticated.identity.streamKey, it)
             }
             admitted(authenticated)
         }
-        synchronized(lock) { byTrigger = releases.groupBy { it.triggerEventName } }
+        synchronized(lock) {
+            // A device serves one identity at a time: applying a profile
+            // replaces this user's releases and drops the prior user's map.
+            releasesByDistinctId = mapOf(distinctId to releases.groupBy { it.triggerEventName })
+        }
     }
 
-    override fun releasesFor(triggerEventName: String): List<AdmittedJourneyRelease> =
-        synchronized(lock) { byTrigger[triggerEventName].orEmpty() }
+    override fun releasesFor(distinctId: String, triggerEventName: String): List<AdmittedJourneyRelease> =
+        synchronized(lock) { releasesByDistinctId[distinctId]?.get(triggerEventName).orEmpty() }
 
     private fun admitted(release: AuthenticatedRelease): AdmittedJourneyRelease? {
         val enrollment = release.descriptor["enrollment"] as? JsonObject ?: return null

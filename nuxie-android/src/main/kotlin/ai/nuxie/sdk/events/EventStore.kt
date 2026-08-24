@@ -4,6 +4,14 @@ package ai.nuxie.sdk.events
 internal interface EventStore {
     suspend fun insertPending(event: StoredEvent)
 
+    /**
+     * Inserts a server-authored fact directly into local history. The fact is
+     * born delivered, so it can never enter the outbound pending queue.
+     *
+     * @return true only when this event id was inserted for the first time.
+     */
+    suspend fun insertDeliveredIfAbsent(event: StoredEvent): Boolean
+
     suspend fun markDelivered(ids: List<String>)
 
     suspend fun hasEvent(name: String, distinctId: String, sinceMillis: Long? = null): Boolean

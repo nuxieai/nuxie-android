@@ -12,8 +12,8 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 
 /**
- * Per-user file persistence for Journey runs and the bounded completion/down-fact
- * receipts that inform future admissions. Every write is an atomic replacement.
+ * Per-user file persistence for Journey runs and bounded completion receipts
+ * that inform future admissions. Every write is an atomic replacement.
  */
 internal class JourneyStore(
     filesDir: File,
@@ -70,21 +70,6 @@ internal class JourneyStore(
     fun lastCompletionAtMillis(distinctId: String, experienceId: String): Long? =
         completions(distinctId, experienceId).maxOfOrNull { it.completedAtMillis }
 
-    /** Returns true exactly once for each server fact id and persists that receipt. */
-    @Synchronized
-    fun recordDownFactIfNew(distinctId: String, factId: String): Boolean {
-        val file = File(receiptsDirectory(distinctId), "down-facts.json")
-        val receipts = decodeStringSet(file)
-        if (factId in receipts) return false
-        receiptsDirectory(distinctId).mkdirs()
-        atomicWrite(file, JsonArray((receipts + factId).sorted().map(::JsonPrimitive)).toString())
-        return true
-    }
-
-    @Synchronized
-    fun hasDownFact(distinctId: String, factId: String): Boolean =
-        factId in decodeStringSet(File(receiptsDirectory(distinctId), "down-facts.json"))
-
     private fun decodeRun(file: File): JourneyRun? = runCatching {
         val value = json.parseToJsonElement(file.readText()).jsonObject
         JourneyRun(
@@ -103,6 +88,7 @@ internal class JourneyStore(
                 )
             },
             isGhost = value["is_ghost"]?.let { (it as? JsonPrimitive)?.content == "true" } ?: false,
+            convertedAtMillis = value.long("converted_at"),
             terminalReason = value.string("terminal_reason"),
         )
     }.getOrNull()
@@ -119,15 +105,8 @@ internal class JourneyStore(
         }.getOrDefault(emptyList())
     }
 
-    private fun decodeStringSet(file: File): Set<String> = runCatching {
-        (json.parseToJsonElement(file.readText()) as JsonArray)
-            .mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
-            .toSet()
-    }.getOrDefault(emptySet())
-
     private fun runsDirectory(distinctId: String): File = File(File(root, "runs"), safeFileName(distinctId))
     private fun completionsDirectory(distinctId: String): File = File(File(root, "completions"), safeFileName(distinctId))
-    private fun receiptsDirectory(distinctId: String): File = File(File(root, "receipts"), safeFileName(distinctId))
 
     /** Collision-free filesystem scope for arbitrary distinct and Experience ids. */
     private fun safeFileName(value: String): String = MessageDigest.getInstance("SHA-256")
@@ -164,6 +143,7 @@ internal class JourneyStore(
             }
         } ?: JsonNull)
         put("is_ghost", JsonPrimitive(run.isGhost))
+        put("converted_at", run.convertedAtMillis?.let(::JsonPrimitive) ?: JsonNull)
         put("terminal_reason", run.terminalReason?.let(::JsonPrimitive) ?: JsonNull)
     }
 

@@ -42,6 +42,27 @@ internal class SQLiteEventStore(
         Unit
     }
 
+    override suspend fun insertDeliveredIfAbsent(event: StoredEvent): Boolean = onWriter { database ->
+        database.immediateTransaction {
+            database.prepare(
+                """
+                INSERT OR IGNORE INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state)
+                VALUES (?, ?, ?, ?, ?, ?, ?);
+                """.trimIndent(),
+            ).use { statement ->
+                statement.bindText(1, event.id)
+                statement.bindText(2, event.name)
+                statement.bindBlob(3, event.encodedProperties())
+                statement.bindLong(4, event.timestampMillis)
+                statement.bindText(5, event.distinctId)
+                event.sessionId?.let { statement.bindText(6, it) } ?: statement.bindNull(6)
+                statement.bindLong(7, DELIVERY_DELIVERED)
+                statement.step()
+            }
+            database.queryLong("SELECT changes();") == 1L
+        }
+    }
+
     override suspend fun markDelivered(ids: List<String>) {
         if (ids.isEmpty()) return
         onWriter { database ->

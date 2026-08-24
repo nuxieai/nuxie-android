@@ -14,6 +14,7 @@ internal data class JourneyRun(
     val state: JourneyRunState,
     val resumePoint: JourneyResumePoint? = null,
     val isGhost: Boolean = false,
+    val convertedAtMillis: Long? = null,
     val terminalReason: String? = null,
 )
 

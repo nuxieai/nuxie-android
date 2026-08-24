@@ -133,7 +133,7 @@ internal class NuxieCore(
         segments = segments,
         applyUserProperties = { properties -> identity.setUserProperties(properties) },
         applyJourneyProfile = { distinctId, body ->
-            journeyCatalog.applyProfile(body)
+            journeyCatalog.applyProfile(distinctId, body)
             scope.launch { journeys.applyDownFacts(body, distinctId) }
         },
         scope = scope,
