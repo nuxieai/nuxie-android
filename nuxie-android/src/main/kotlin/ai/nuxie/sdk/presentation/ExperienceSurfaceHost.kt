@@ -7,6 +7,8 @@ import android.util.Log
 import android.view.Choreographer
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * SurfaceView host driving the engine's Android WebGPU renderer: Kotlin owns
@@ -88,7 +90,10 @@ internal class ExperienceSurfaceHost(
         val height = frame.height().coerceAtLeast(1)
         val surface = holder.surface
         lane.enqueue {
-            attached = true
+            // Attach only once the engine actually presents to this
+            // surface; a failed create/recreate must keep the frame gate
+            // closed or later frames would render through a renderer that
+            // still borrows the destroyed previous window.
             if (renderer == 0L) {
                 renderer = NuxieRuntimeBridge.nativeRendererNewAndroidWgpu(
                     surface, width, height,
@@ -98,8 +103,13 @@ internal class ExperienceSurfaceHost(
                     return@enqueue
                 }
             } else {
-                NuxieRuntimeBridge.nativeRendererRecreateSurface(renderer, surface)
+                val status = NuxieRuntimeBridge.nativeRendererRecreateSurface(renderer, surface)
+                if (status != 0) {
+                    Log.w(LOG_TAG, "Surface recreation failed with status $status")
+                    return@enqueue
+                }
             }
+            attached = true
         }
         running = true
         lastFrameNanos = 0L
@@ -122,8 +132,18 @@ internal class ExperienceSurfaceHost(
         running = false
         Choreographer.getInstance().removeFrameCallback(this)
         // Session state (player/artboard) survives; only presentation stops.
-        // The marker gates queued render/resize jobs off the dead surface.
-        lane.enqueue { attached = false }
+        // The Surface contract requires rendering to have stopped before
+        // this callback returns, so block until the lane drains past the
+        // detach marker; a FIFO marker alone would let already-queued
+        // frames render to the dead surface after we return.
+        val detached = CountDownLatch(1)
+        lane.enqueue {
+            attached = false
+            detached.countDown()
+        }
+        if (!detached.await(SURFACE_DETACH_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            Log.w(LOG_TAG, "Runtime lane did not confirm surface detach in time")
+        }
     }
 
     override fun doFrame(frameTimeNanos: Long) {
@@ -175,5 +195,12 @@ internal class ExperienceSurfaceHost(
     private companion object {
         const val LOG_TAG = "Nuxie"
         const val CLEAR_COLOR_OPAQUE_BLACK = 0xFF000000.toInt()
+
+        /**
+         * Bound on the surfaceDestroyed drain. A frame takes milliseconds;
+         * this only trips if the runtime lane is wedged, and then leaking
+         * one frame to a dead surface beats deadlocking the main thread.
+         */
+        const val SURFACE_DETACH_TIMEOUT_MS = 1_000L
     }
 }
