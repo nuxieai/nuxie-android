@@ -23,6 +23,8 @@ internal class NuxieLifecycleCoordinator(
     scope: CoroutineScope,
     /** Best-effort work on entering background (e.g. a delivery flush). */
     private val onBackground: (suspend () -> Unit)? = null,
+    /** Recovery work when the app returns to the foreground. */
+    private val onForeground: (suspend () -> Unit)? = null,
 ) : Application.ActivityLifecycleCallbacks {
     private enum class Transition { FOREGROUND, BACKGROUND }
 
@@ -37,6 +39,7 @@ internal class NuxieLifecycleCoordinator(
                     Transition.FOREGROUND -> {
                         sessions.onAppBecameActive()
                         tracker.trackAppForegrounded()
+                        onForeground?.invoke()
                     }
                     Transition.BACKGROUND -> {
                         sessions.onAppDidEnterBackground()

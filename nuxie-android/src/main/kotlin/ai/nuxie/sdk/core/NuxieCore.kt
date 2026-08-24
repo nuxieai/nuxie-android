@@ -13,6 +13,16 @@ import ai.nuxie.sdk.events.TriggerService
 import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureService
 import ai.nuxie.sdk.features.FeatureType
+import ai.nuxie.sdk.commerce.FilePurchaseEvidenceStore
+import ai.nuxie.sdk.commerce.GooglePlayBillingClientAdapter
+import ai.nuxie.sdk.commerce.NuxiePurchaseDelegate
+import ai.nuxie.sdk.commerce.PlayBillingConnection
+import ai.nuxie.sdk.commerce.PurchaseEvidenceStore
+import ai.nuxie.sdk.commerce.PurchaseHandlingMode
+import ai.nuxie.sdk.commerce.PurchaseService
+import ai.nuxie.sdk.commerce.PurchaseSettings
+import ai.nuxie.sdk.commerce.PurchaseSyncOutcome
+import ai.nuxie.sdk.commerce.PurchaseSynchronizer
 import ai.nuxie.sdk.experiences.ExperienceTrustRoots
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
 import ai.nuxie.sdk.identity.IdentityService
@@ -51,6 +61,8 @@ internal class NuxieCore(
     beforeSend: ((NuxieEvent) -> NuxieEvent?)?,
     val featureInfo: FeatureInfo = FeatureInfo(),
     featureCacheTtlMillis: Long = 5L * 60L * 1000L,
+    purchaseDelegate: NuxiePurchaseDelegate? = null,
+    purchaseHandlingMode: PurchaseHandlingMode = PurchaseHandlingMode.NUXIE_MANAGED,
     overrides: Overrides = Overrides(),
 ) {
     private val registerLifecycle = overrides.registerLifecycle
@@ -65,6 +77,7 @@ internal class NuxieCore(
         val journeys: TriggerService.JourneyRouter? = null,
         val features: TriggerService.FeatureGate? = null,
         val presenter: TriggerService.ExperiencePresenter? = null,
+        val purchaseEvidenceStore: PurchaseEvidenceStore? = null,
     )
 
     private val appContext = context.applicationContext ?: context
@@ -127,6 +140,50 @@ internal class NuxieCore(
         nowMillis = nowMillis,
     )
 
+    val purchaseSettings = PurchaseSettings(purchaseDelegate, purchaseHandlingMode)
+
+    private lateinit var purchaseService: PurchaseService
+
+    private val billing = PlayBillingConnection(
+        factory = GooglePlayBillingClientAdapter.factory(appContext),
+        scope = scope,
+        onPurchasesUpdated = { update -> scope.launch { purchaseService.onPurchasesUpdated(update) } },
+        onConnected = { purchaseService.recover() },
+    )
+
+    val purchases: PurchaseService = PurchaseService(
+        billing = billing,
+        evidenceStore = overrides.purchaseEvidenceStore
+            ?: FilePurchaseEvidenceStore(java.io.File(appContext.filesDir, "nuxie-commerce")),
+        synchronizer = PurchaseSynchronizer { evidence ->
+            try {
+                val response = api.postPurchase(
+                    NuxieApi.PlayPurchaseReport(
+                        packageName = evidence.packageName,
+                        productId = evidence.storeProductIds.firstOrNull().orEmpty(),
+                        purchaseToken = evidence.purchaseToken,
+                        basePlanId = evidence.basePlanId,
+                        offerId = evidence.offerId,
+                        obfuscatedAccountId = evidence.obfuscatedAccountId,
+                        distinctId = evidence.distinctId,
+                    ),
+                )
+                if (response.success) PurchaseSyncOutcome.Accepted(response)
+                else PurchaseSyncOutcome.Rejected(permanent = false)
+            } catch (rejected: NuxieApi.PurchaseRejectedException) {
+                PurchaseSyncOutcome.Rejected(rejected.permanent)
+            } catch (_: Exception) {
+                PurchaseSyncOutcome.Rejected(permanent = false)
+            }
+        },
+        features = features,
+        distinctId = identity::distinctId,
+        emit = eventLog::capture,
+        settings = purchaseSettings,
+        scope = scope,
+        nowMillis = nowMillis,
+    ).also { purchaseService = it }
+
     val triggers by lazy {
         TriggerService(
         eventLog = eventLog,
@@ -185,6 +242,12 @@ internal class NuxieCore(
         sessions,
         scope,
         onBackground = { delivery.flushAll() },
+        onForeground = {
+            // Profile reconciliation is the server-authoritative refund and
+            // revocation lane; purchase recovery handles still-active Play evidence.
+            profile.requestRefresh()
+            purchases.recover()
+        },
     )
 
     /** Called once from Nuxie.setup after construction. */
@@ -193,10 +256,12 @@ internal class NuxieCore(
         eventLog.subscribeCommitted { delivery.kick() }
         userTransitions.addObserver(UserTransitionCoordinator.Observer { _, from, to ->
             features.handleUserChange(from, to)
+            purchases.recover()
         })
         userTransitions.addObserver(profile.transitionObserver)
         profile.requestRefresh()
         lifecycleTracker.trackAppLaunchEvents()
+        billing.connect()
         if (registerLifecycle) {
             (appContext as? Application)?.registerActivityLifecycleCallbacks(lifecycleCoordinator)
         }
@@ -204,6 +269,7 @@ internal class NuxieCore(
 
     /** Cancel workers and release the store. Testing teardown only for now. */
     fun stop() {
+        billing.close()
         kotlinx.coroutines.runBlocking {
             runCatching { profile.close() }
             runCatching { delivery.close() }

@@ -30,6 +30,27 @@ internal class NuxieApi(
     class RequestRejectedException(val statusCode: Int, endpoint: String) :
         IOException("$endpoint rejected with status $statusCode")
 
+    class PurchaseRejectedException(
+        val statusCode: Int,
+        val permanent: Boolean,
+    ) : IOException("/purchase rejected with status $statusCode")
+
+    data class PlayPurchaseReport(
+        val packageName: String,
+        val productId: String,
+        val purchaseToken: String,
+        val basePlanId: String?,
+        val offerId: String?,
+        val obfuscatedAccountId: String?,
+        val distinctId: String,
+    )
+
+    data class PurchaseResponse(
+        val body: kotlinx.serialization.json.JsonObject,
+        val success: Boolean,
+        val customerId: String?,
+    )
+
     /** Opaque conditional-fetch validator (the response ETag, scoped to /profile). */
     class ProfileCacheValidator(val rawValue: String)
 
@@ -227,6 +248,51 @@ internal class NuxieApi(
             balance,
             type,
         )
+    }
+
+    /**
+     * Submit Play evidence for server-authoritative verification. UNIV-2632
+     * supplies the server-side Play Developer API arm served by this contract.
+     */
+    fun postPurchase(report: PlayPurchaseReport): PurchaseResponse {
+        val body = buildString {
+            append("{\"apiKey\":").append(jsonString(apiKey))
+            append(",\"type\":\"playstore\"")
+            append(",\"packageName\":").append(jsonString(report.packageName))
+            append(",\"productId\":").append(jsonString(report.productId))
+            append(",\"purchaseToken\":").append(jsonString(report.purchaseToken))
+            report.basePlanId?.let { append(",\"basePlanId\":").append(jsonString(it)) }
+            report.offerId?.let { append(",\"offerId\":").append(jsonString(it)) }
+            report.obfuscatedAccountId?.let {
+                append(",\"obfuscatedAccountId\":").append(jsonString(it))
+            }
+            append(",\"distinctId\":").append(jsonString(report.distinctId))
+            append('}')
+        }.encodeToByteArray()
+        val response = transport.execute(
+            HttpTransport.Request(
+                url = URL("$baseUrl/purchase"),
+                headers = mapOf(
+                    "Content-Type" to "application/json",
+                    "Accept-Encoding" to "gzip",
+                    "User-Agent" to "Nuxie-Android-SDK/${SdkVersion.VALUE}",
+                ),
+                body = body,
+            ),
+        )
+        if (response.statusCode !in 200..299) {
+            val permanent = response.statusCode in 400..499 && response.statusCode !in setOf(408, 429)
+            throw PurchaseRejectedException(response.statusCode, permanent)
+        }
+        val text = response.body.decodeToString().ifBlank { "{}" }
+        StrictJsonValidator.requireNoDuplicateKeys(text)
+        val parsed = Json.parseToJsonElement(text).jsonObject
+        val success = (parsed["success"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull()
+            ?: throw IOException("/purchase response is missing success")
+        val customerId = ((parsed["customer_id"] ?: parsed["customerId"]) as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+        return PurchaseResponse(parsed, success, customerId)
     }
 
     private fun kotlinx.serialization.json.JsonObject.requiredString(key: String, context: String): String =

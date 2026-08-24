@@ -1,0 +1,385 @@
+package ai.nuxie.sdk.commerce
+
+import android.util.Log
+import java.io.File
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.longOrNull
+
+internal enum class StoredPurchaseState { PENDING, PURCHASED }
+
+internal data class StoredPurchaseContext(
+    val placementId: String? = null,
+    val experienceId: String? = null,
+    val experienceVersion: String? = null,
+)
+
+internal data class StoredLocalPurchaseGrant(
+    val featureId: String,
+    val type: String,
+    val unlimited: Boolean,
+)
+
+/** Durable signed-catalog mapping plus the customer account used for checkout. */
+internal data class StoredPurchaseBinding(
+    val obfuscatedAccountId: String,
+    val distinctId: String,
+    val storeProductId: String,
+    val nuxieProductId: String,
+    val basePlanId: String? = null,
+    val offerId: String? = null,
+    val productType: String,
+    val consumable: Boolean,
+    val context: StoredPurchaseContext? = null,
+    val localFeatureGrants: List<StoredLocalPurchaseGrant> = emptyList(),
+    val licensingPublicKey: String? = null,
+    val nuxieManaged: Boolean,
+)
+
+internal data class StoredProductMapping(
+    val storeProductId: String,
+    val nuxieProductId: String,
+    val basePlanId: String? = null,
+    val offerId: String? = null,
+    val productType: String,
+    val consumable: Boolean,
+    val context: StoredPurchaseContext? = null,
+    val localFeatureGrants: List<StoredLocalPurchaseGrant> = emptyList(),
+    val licensingPublicKey: String? = null,
+)
+
+/** Minimal Play evidence retained until /purchase and managed completion succeed. */
+internal data class PurchaseEvidence(
+    val purchaseToken: String,
+    val packageName: String,
+    val storeProductIds: List<String>,
+    val nuxieProductId: String? = null,
+    val basePlanId: String? = null,
+    val offerId: String? = null,
+    val purchaseState: StoredPurchaseState,
+    val obfuscatedAccountId: String? = null,
+    val distinctId: String,
+    val context: StoredPurchaseContext? = null,
+    val acknowledged: Boolean,
+    val consumed: Boolean = false,
+    val synced: Boolean = false,
+    val permanentlyRejected: Boolean = false,
+    val syncAttempts: Int = 0,
+    val firstSeenMillis: Long,
+    val consumable: Boolean = false,
+    val localFeatureGrants: List<StoredLocalPurchaseGrant> = emptyList(),
+    val catalogResolved: Boolean = false,
+    val completionEmitted: Boolean = false,
+    val syncedEventEmitted: Boolean = false,
+    val syncedCustomerId: String? = null,
+    val nuxieManaged: Boolean = false,
+)
+
+internal interface PurchaseEvidenceStore {
+    fun load(): Map<String, PurchaseEvidence>
+    fun upsert(evidence: PurchaseEvidence): Boolean
+    fun loadBindings(): List<StoredPurchaseBinding> = emptyList()
+    fun upsertBinding(binding: StoredPurchaseBinding): Boolean = true
+    fun loadProductMappings(): List<StoredProductMapping> = emptyList()
+    fun upsertProductMapping(mapping: StoredProductMapping): Boolean = true
+}
+
+/** Scope-private atomic JSON store. Purchase tokens are keys, never logs or preferences. */
+internal class FilePurchaseEvidenceStore(
+    directory: File,
+) : PurchaseEvidenceStore {
+    private val file = File(directory, "purchase-evidence.json")
+    private val bindingsFile = File(directory, "purchase-bindings.json")
+    private val catalogFile = File(directory, "purchase-catalog.json")
+    private val lock = Any()
+    private val json = Json { ignoreUnknownKeys = true }
+
+    init {
+        directory.mkdirs()
+    }
+
+    override fun load(): Map<String, PurchaseEvidence> = synchronized(lock) { loadUnlocked() }
+
+    override fun upsert(evidence: PurchaseEvidence): Boolean = synchronized(lock) {
+        val entries = loadUnlocked().toMutableMap()
+        entries[evidence.purchaseToken] = evidence
+        saveUnlocked(entries)
+    }
+
+    override fun loadBindings(): List<StoredPurchaseBinding> = synchronized(lock) {
+        runCatching {
+            if (!bindingsFile.exists()) emptyList() else {
+                json.parseToJsonElement(bindingsFile.readText()).jsonArray.mapNotNull {
+                    decodeBinding(it as? JsonObject ?: return@mapNotNull null)
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    override fun upsertBinding(binding: StoredPurchaseBinding): Boolean = synchronized(lock) {
+        val entries = loadBindingsUnlocked().associateByTo(linkedMapOf()) {
+            "${it.obfuscatedAccountId}:${it.storeProductId}"
+        }
+        entries["${binding.obfuscatedAccountId}:${binding.storeProductId}"] = binding
+        runCatching {
+            val temporary = File(bindingsFile.parentFile, "${bindingsFile.name}.tmp")
+            val encoded = JsonArray(entries.values.map(::encodeBinding))
+            temporary.writeText(json.encodeToString(JsonArray.serializer(), encoded))
+            if (!temporary.renameTo(bindingsFile)) error("Could not publish purchase bindings")
+            true
+        }.onFailure { Log.w("NuxieCommerce", "Could not persist purchase binding.", it) }
+            .getOrDefault(false)
+    }
+
+    override fun loadProductMappings(): List<StoredProductMapping> = synchronized(lock) {
+        loadMappingsUnlocked()
+    }
+
+    override fun upsertProductMapping(mapping: StoredProductMapping): Boolean = synchronized(lock) {
+        val entries = loadMappingsUnlocked().associateByTo(linkedMapOf()) { it.storeProductId }
+        entries[mapping.storeProductId] = mapping
+        saveArray(catalogFile, entries.values.map(::encodeMapping), "catalog mapping")
+    }
+
+    private fun loadBindingsUnlocked(): List<StoredPurchaseBinding> = runCatching {
+        if (!bindingsFile.exists()) emptyList() else {
+            json.parseToJsonElement(bindingsFile.readText()).jsonArray.mapNotNull {
+                decodeBinding(it as? JsonObject ?: return@mapNotNull null)
+            }
+        }
+    }.getOrDefault(emptyList())
+
+    private fun loadMappingsUnlocked(): List<StoredProductMapping> = runCatching {
+        if (!catalogFile.exists()) emptyList() else {
+            json.parseToJsonElement(catalogFile.readText()).jsonArray.mapNotNull {
+                decodeMapping(it as? JsonObject ?: return@mapNotNull null)
+            }
+        }
+    }.getOrDefault(emptyList())
+
+    private fun saveArray(target: File, values: List<JsonObject>, description: String): Boolean = runCatching {
+        val temporary = File(target.parentFile, "${target.name}.tmp")
+        temporary.writeText(json.encodeToString(JsonArray.serializer(), JsonArray(values)))
+        if (!temporary.renameTo(target)) error("Could not publish purchase $description")
+        true
+    }.onFailure { Log.w("NuxieCommerce", "Could not persist purchase $description.", it) }
+        .getOrDefault(false)
+
+    private fun loadUnlocked(): Map<String, PurchaseEvidence> = runCatching {
+        if (!file.exists()) emptyMap() else json.parseToJsonElement(file.readText()).jsonObject
+            .mapNotNull { (token, raw) -> decodeEvidence(raw.jsonObject)?.let { token to it } }
+            .toMap()
+    }.getOrDefault(emptyMap())
+
+    private fun saveUnlocked(entries: Map<String, PurchaseEvidence>): Boolean = runCatching {
+        val temporary = File(file.parentFile, "${file.name}.tmp")
+        val encoded = JsonObject(entries.mapValues { encodeEvidence(it.value) })
+        temporary.writeText(json.encodeToString(JsonObject.serializer(), encoded))
+        if (!temporary.renameTo(file)) error("Could not publish purchase evidence")
+        true
+    }.onFailure { Log.w("NuxieCommerce", "Could not persist purchase evidence.", it) }
+        .getOrDefault(false)
+
+    private fun encodeEvidence(evidence: PurchaseEvidence): JsonObject = JsonObject(
+        buildMap {
+            put("purchaseToken", JsonPrimitive(evidence.purchaseToken))
+            put("packageName", JsonPrimitive(evidence.packageName))
+            put("storeProductIds", JsonArray(evidence.storeProductIds.map(::JsonPrimitive)))
+            evidence.nuxieProductId?.let { put("nuxieProductId", JsonPrimitive(it)) }
+            evidence.basePlanId?.let { put("basePlanId", JsonPrimitive(it)) }
+            evidence.offerId?.let { put("offerId", JsonPrimitive(it)) }
+            put("purchaseState", JsonPrimitive(evidence.purchaseState.name))
+            evidence.obfuscatedAccountId?.let { put("obfuscatedAccountId", JsonPrimitive(it)) }
+            put("distinctId", JsonPrimitive(evidence.distinctId))
+            evidence.context?.let { context ->
+                put("context", JsonObject(buildMap {
+                    context.placementId?.let { put("placementId", JsonPrimitive(it)) }
+                    context.experienceId?.let { put("experienceId", JsonPrimitive(it)) }
+                    context.experienceVersion?.let { put("experienceVersion", JsonPrimitive(it)) }
+                }))
+            }
+            put("acknowledged", JsonPrimitive(evidence.acknowledged))
+            put("consumed", JsonPrimitive(evidence.consumed))
+            put("synced", JsonPrimitive(evidence.synced))
+            put("permanentlyRejected", JsonPrimitive(evidence.permanentlyRejected))
+            put("syncAttempts", JsonPrimitive(evidence.syncAttempts))
+            put("firstSeenMillis", JsonPrimitive(evidence.firstSeenMillis))
+            put("consumable", JsonPrimitive(evidence.consumable))
+            put("localFeatureGrants", JsonArray(evidence.localFeatureGrants.map { grant ->
+                JsonObject(mapOf(
+                    "featureId" to JsonPrimitive(grant.featureId),
+                    "type" to JsonPrimitive(grant.type),
+                    "unlimited" to JsonPrimitive(grant.unlimited),
+                ))
+            }))
+            put("catalogResolved", JsonPrimitive(evidence.catalogResolved))
+            put("completionEmitted", JsonPrimitive(evidence.completionEmitted))
+            put("syncedEventEmitted", JsonPrimitive(evidence.syncedEventEmitted))
+            evidence.syncedCustomerId?.let { put("syncedCustomerId", JsonPrimitive(it)) }
+            put("nuxieManaged", JsonPrimitive(evidence.nuxieManaged))
+        },
+    )
+
+    private fun decodeEvidence(raw: JsonObject): PurchaseEvidence? = runCatching {
+        PurchaseEvidence(
+            purchaseToken = raw.string("purchaseToken") ?: return null,
+            packageName = raw.string("packageName") ?: return null,
+            storeProductIds = raw["storeProductIds"]?.jsonArray.orEmpty()
+                .mapNotNull { (it as? JsonPrimitive)?.contentOrNull },
+            nuxieProductId = raw.string("nuxieProductId"),
+            basePlanId = raw.string("basePlanId"),
+            offerId = raw.string("offerId"),
+            purchaseState = StoredPurchaseState.valueOf(raw.string("purchaseState") ?: return null),
+            obfuscatedAccountId = raw.string("obfuscatedAccountId"),
+            distinctId = raw.string("distinctId") ?: return null,
+            context = (raw["context"] as? JsonObject)?.let {
+                StoredPurchaseContext(it.string("placementId"), it.string("experienceId"), it.string("experienceVersion"))
+            },
+            acknowledged = raw.boolean("acknowledged"),
+            consumed = raw.boolean("consumed"),
+            synced = raw.boolean("synced"),
+            permanentlyRejected = raw.boolean("permanentlyRejected"),
+            syncAttempts = (raw["syncAttempts"] as? JsonPrimitive)?.intOrNull ?: 0,
+            firstSeenMillis = (raw["firstSeenMillis"] as? JsonPrimitive)?.longOrNull ?: return null,
+            consumable = raw.boolean("consumable"),
+            localFeatureGrants = (raw["localFeatureGrants"] as? JsonArray).orEmpty().mapNotNull {
+                val grant = it as? JsonObject ?: return@mapNotNull null
+                StoredLocalPurchaseGrant(
+                    grant.string("featureId") ?: return@mapNotNull null,
+                    grant.string("type") ?: return@mapNotNull null,
+                    grant.boolean("unlimited"),
+                )
+            },
+            catalogResolved = raw.boolean("catalogResolved"),
+            completionEmitted = raw.boolean("completionEmitted"),
+            syncedEventEmitted = raw.boolean("syncedEventEmitted"),
+            syncedCustomerId = raw.string("syncedCustomerId"),
+            nuxieManaged = raw.boolean("nuxieManaged"),
+        )
+    }.getOrNull()
+
+    private fun encodeBinding(binding: StoredPurchaseBinding): JsonObject = JsonObject(
+        buildMap {
+            put("obfuscatedAccountId", JsonPrimitive(binding.obfuscatedAccountId))
+            put("distinctId", JsonPrimitive(binding.distinctId))
+            put("storeProductId", JsonPrimitive(binding.storeProductId))
+            put("nuxieProductId", JsonPrimitive(binding.nuxieProductId))
+            binding.basePlanId?.let { put("basePlanId", JsonPrimitive(it)) }
+            binding.offerId?.let { put("offerId", JsonPrimitive(it)) }
+            put("productType", JsonPrimitive(binding.productType))
+            put("consumable", JsonPrimitive(binding.consumable))
+            binding.context?.let { context ->
+                put("context", JsonObject(buildMap {
+                    context.placementId?.let { put("placementId", JsonPrimitive(it)) }
+                    context.experienceId?.let { put("experienceId", JsonPrimitive(it)) }
+                    context.experienceVersion?.let { put("experienceVersion", JsonPrimitive(it)) }
+                }))
+            }
+            put("localFeatureGrants", JsonArray(binding.localFeatureGrants.map { grant ->
+                JsonObject(mapOf(
+                    "featureId" to JsonPrimitive(grant.featureId),
+                    "type" to JsonPrimitive(grant.type),
+                    "unlimited" to JsonPrimitive(grant.unlimited),
+                ))
+            }))
+            binding.licensingPublicKey?.let { put("licensingPublicKey", JsonPrimitive(it)) }
+            put("nuxieManaged", JsonPrimitive(binding.nuxieManaged))
+        },
+    )
+
+    private fun decodeBinding(raw: JsonObject): StoredPurchaseBinding? = runCatching {
+        StoredPurchaseBinding(
+            obfuscatedAccountId = raw.string("obfuscatedAccountId") ?: return null,
+            distinctId = raw.string("distinctId") ?: return null,
+            storeProductId = raw.string("storeProductId") ?: return null,
+            nuxieProductId = raw.string("nuxieProductId") ?: return null,
+            basePlanId = raw.string("basePlanId"),
+            offerId = raw.string("offerId"),
+            productType = raw.string("productType") ?: return null,
+            consumable = raw.boolean("consumable"),
+            context = (raw["context"] as? JsonObject)?.let {
+                StoredPurchaseContext(it.string("placementId"), it.string("experienceId"), it.string("experienceVersion"))
+            },
+            localFeatureGrants = (raw["localFeatureGrants"] as? JsonArray).orEmpty().mapNotNull {
+                val grant = it as? JsonObject ?: return@mapNotNull null
+                StoredLocalPurchaseGrant(
+                    grant.string("featureId") ?: return@mapNotNull null,
+                    grant.string("type") ?: return@mapNotNull null,
+                    grant.boolean("unlimited"),
+                )
+            },
+            licensingPublicKey = raw.string("licensingPublicKey"),
+            nuxieManaged = raw.boolean("nuxieManaged"),
+        )
+    }.getOrNull()
+
+    private fun encodeMapping(mapping: StoredProductMapping): JsonObject = encodeBinding(
+        StoredPurchaseBinding(
+            obfuscatedAccountId = "",
+            distinctId = "",
+            storeProductId = mapping.storeProductId,
+            nuxieProductId = mapping.nuxieProductId,
+            basePlanId = mapping.basePlanId,
+            offerId = mapping.offerId,
+            productType = mapping.productType,
+            consumable = mapping.consumable,
+            context = mapping.context,
+            localFeatureGrants = mapping.localFeatureGrants,
+            licensingPublicKey = mapping.licensingPublicKey,
+            nuxieManaged = false,
+        ),
+    )
+
+    private fun decodeMapping(raw: JsonObject): StoredProductMapping? = decodeBinding(raw)?.let {
+        StoredProductMapping(
+            storeProductId = it.storeProductId,
+            nuxieProductId = it.nuxieProductId,
+            basePlanId = it.basePlanId,
+            offerId = it.offerId,
+            productType = it.productType,
+            consumable = it.consumable,
+            context = it.context,
+            localFeatureGrants = it.localFeatureGrants,
+            licensingPublicKey = it.licensingPublicKey,
+        )
+    }
+
+    private fun JsonObject.string(key: String): String? =
+        (this[key] as? JsonPrimitive)?.contentOrNull
+
+    private fun JsonObject.boolean(key: String): Boolean =
+        (this[key] as? JsonPrimitive)?.booleanOrNull ?: false
+}
+
+internal class InMemoryPurchaseEvidenceStore : PurchaseEvidenceStore {
+    private val entries = linkedMapOf<String, PurchaseEvidence>()
+    private val bindings = linkedMapOf<String, StoredPurchaseBinding>()
+    private val mappings = linkedMapOf<String, StoredProductMapping>()
+    override fun load(): Map<String, PurchaseEvidence> = synchronized(entries) { entries.toMap() }
+    override fun upsert(evidence: PurchaseEvidence): Boolean = synchronized(entries) {
+        entries[evidence.purchaseToken] = evidence
+        true
+    }
+    override fun loadBindings(): List<StoredPurchaseBinding> = synchronized(bindings) {
+        bindings.values.toList()
+    }
+    override fun upsertBinding(binding: StoredPurchaseBinding): Boolean = synchronized(bindings) {
+        bindings["${binding.obfuscatedAccountId}:${binding.storeProductId}"] = binding
+        true
+    }
+    override fun loadProductMappings(): List<StoredProductMapping> = synchronized(mappings) {
+        mappings.values.toList()
+    }
+    override fun upsertProductMapping(mapping: StoredProductMapping): Boolean = synchronized(mappings) {
+        mappings[mapping.storeProductId] = mapping
+        true
+    }
+}
