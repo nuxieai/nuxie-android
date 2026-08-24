@@ -128,6 +128,17 @@ class SQLiteEventStoreTest {
     }
 
     @Test
+    fun deliveredInsertIsAtomicIdempotentAndNeverAppearsInThePendingBatch() = runBlocking {
+        val eventStore = SQLiteEventStore(context).also { store = it }
+        val event = storedEvent(id = "server-fact", timestampMillis = 1_000)
+
+        assertTrue(eventStore.insertDeliveredIfAbsent(event))
+        assertFalse(eventStore.insertDeliveredIfAbsent(event))
+        assertEquals(emptyList<StoredEvent>(), eventStore.pendingBatch(10))
+        assertTrue(eventStore.hasEvent(event.name, event.distinctId))
+    }
+
+    @Test
     fun migratesAnEmptyDatabaseToVersionTwoWithTheExactSchema() = runBlocking {
         val eventStore = SQLiteEventStore(context).also { store = it }
 

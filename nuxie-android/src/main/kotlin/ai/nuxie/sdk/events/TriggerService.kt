@@ -38,6 +38,7 @@ internal class TriggerService(
     internal sealed interface JourneyTriggerResult {
         class Started(val ref: ExperienceRef) : JourneyTriggerResult
         class Suppressed(val reason: SuppressReason) : JourneyTriggerResult
+        class Failed(val error: TriggerError) : JourneyTriggerResult
     }
 
     internal fun interface JourneyRouter {
@@ -151,6 +152,7 @@ internal class TriggerService(
                     broker.emit(eventId, TriggerUpdate.Decision(TriggerDecision.JourneyStarted(result.ref)))
                 is JourneyTriggerResult.Suppressed ->
                     broker.emit(eventId, TriggerUpdate.Decision(TriggerDecision.Suppressed(result.reason)))
+                is JourneyTriggerResult.Failed -> broker.emit(eventId, TriggerUpdate.Error(result.error))
             }
             emittedJourneyDecision = true
         }

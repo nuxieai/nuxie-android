@@ -7,7 +7,7 @@ import kotlinx.serialization.json.JsonObject
 
 /** Emits the five device-authored Journey facts through the durable EventLog. */
 internal class JourneyLedger(private val eventLog: EventLog) {
-    fun enrolled(run: JourneyRun, triggerRef: String) = capture(
+    suspend fun enrolled(run: JourneyRun, triggerRef: String): StoredEvent? = eventLog.captureForTrigger(
         JourneyEventNames.ENROLLED,
         mapOf(
             "journey_id" to run.id,

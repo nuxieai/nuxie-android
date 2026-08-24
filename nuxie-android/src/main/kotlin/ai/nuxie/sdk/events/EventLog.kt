@@ -182,10 +182,8 @@ internal class EventLog(
     }
 
     private suspend fun commitServerFactNow(event: StoredEvent): Boolean {
-        if (runCatching { store.insertPending(event) }.isFailure) return false
-        // Server provenance means this receipt is immediately delivered and
-        // therefore excluded from the outbound queue.
-        runCatching { store.markDelivered(listOf(event.id)) }
+        val inserted = runCatching { store.insertDeliveredIfAbsent(event) }.getOrElse { return false }
+        if (!inserted) return false
         subscribers.forEach { subscriber ->
             if (subscriber.predicate(event)) {
                 runCatching { subscriber.handler.onCommitted(event) }

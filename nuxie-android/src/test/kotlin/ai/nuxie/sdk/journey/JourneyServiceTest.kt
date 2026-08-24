@@ -6,11 +6,18 @@ import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.StoredEvent
+import ai.nuxie.sdk.experiences.AuthenticatedRelease
+import ai.nuxie.sdk.experiences.ExperienceReleaseIdentity
+import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
+import ai.nuxie.sdk.experiences.SupportedRuntime
 import ai.nuxie.sdk.identity.IdentityProvider
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -42,8 +49,22 @@ class JourneyServiceTest {
     private class Store : EventStore {
         val events = linkedMapOf<String, StoredEvent>()
         val delivered = mutableSetOf<String>()
+        var failNextPendingInsert = false
+        var serverFactInsertStarted: CompletableDeferred<Unit>? = null
+        var serverFactInsertGate: CompletableDeferred<Unit>? = null
         override suspend fun insertPending(event: StoredEvent) {
+            if (failNextPendingInsert) {
+                failNextPendingInsert = false
+                error("pending insert failed")
+            }
             check(events.putIfAbsent(event.id, event) == null) { "duplicate event" }
+        }
+        override suspend fun insertDeliveredIfAbsent(event: StoredEvent): Boolean {
+            serverFactInsertStarted?.complete(Unit)
+            serverFactInsertGate?.await()
+            if (events.putIfAbsent(event.id, event) != null) return false
+            delivered += event.id
+            return true
         }
         override suspend fun markDelivered(ids: List<String>) { delivered += ids }
         override suspend fun hasEvent(name: String, distinctId: String, sinceMillis: Long?) = false
@@ -88,7 +109,12 @@ class JourneyServiceTest {
             root,
             eventStore,
             eventLog,
-            JourneyService(JourneyStore(root), JourneyLedger(eventLog), JourneyReleaseProvider { name -> if (name == "opened") listOf(release) else emptyList() }, { now }),
+            JourneyService(
+                JourneyStore(root),
+                JourneyLedger(eventLog),
+                JourneyReleaseProvider { _, name -> if (name == "opened") listOf(release) else emptyList() },
+                { now },
+            ),
         )
     }
 
@@ -146,6 +172,20 @@ class JourneyServiceTest {
     }
 
     @Test
+    fun failedEnrollmentFactDoesNotPersistOrAdmitAndCanRetry() = runBlocking {
+        val h = harness()
+        try {
+            h.store.failNextPendingInsert = true
+            val event = StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1")
+
+            val failed = h.service.handleEventForTrigger(event).single()
+            assertTrue(failed is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Failed)
+            assertTrue(JourneyStore(h.root).loadActive("customer-1").isEmpty())
+            assertTrue(h.service.handleEventForTrigger(event).single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started)
+        } finally { h.root.deleteRecursively() }
+    }
+
+    @Test
     fun downFactsCommitOnceNeverUploadAndSupersedeGhostsTheRun() = runBlocking {
         val h = harness()
         try {
@@ -158,14 +198,149 @@ class JourneyServiceTest {
                 put("timestamp", JsonPrimitive(1L))
                 put("properties", buildJsonObject { put("journey_id", JsonPrimitive(journeyId)) })
             }
-            val body = buildJsonObject { put("facts", JsonArray(listOf(fact, fact))) }
+            val body = buildJsonObject { put("facts", JsonArray(listOf(fact))) }
+            val committed = mutableListOf<StoredEvent>()
+            h.log.subscribeCommitted({ it.id == "fact-1" }) { committed += it }
+            h.service.applyDownFacts(body, "customer-1")
             h.service.applyDownFacts(body, "customer-1")
             h.service.exit("customer-1", journeyId, "completed")
             h.log.awaitBarrier()
             assertTrue(JourneyStore(h.root).load("customer-1", journeyId)!!.isGhost)
             assertEquals(1, h.store.events.values.count { it.id == "fact-1" })
             assertTrue("server fact must never upload", "fact-1" in h.store.delivered)
+            assertEquals("fact routes only after its first atomic commit", 1, committed.size)
+            assertEquals("fact-1", h.store.events.getValue("fact-1").properties.stringValue("\$server_fact_id"))
+            assertEquals("server", h.store.events.getValue("fact-1").properties.stringValue("\$nuxie_event_origin"))
             assertNull(h.store.events.values.firstOrNull { it.name == JourneyEventNames.EXITED && it.properties["journey_id"]?.toString()?.contains(journeyId) == true })
         } finally { h.root.deleteRecursively() }
     }
+
+    @Test
+    fun convertedFactsPersistTheEarliestServerAuthoredAt() = runBlocking {
+        val h = harness()
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = started.ref.journeyId!!
+            fun fact(id: String, at: Long) = buildJsonObject {
+                put("id", JsonPrimitive(id))
+                put("event", JsonPrimitive(JourneyEventNames.CONVERTED))
+                put("timestamp", JsonPrimitive(now))
+                put("properties", buildJsonObject {
+                    put("journey_id", JsonPrimitive(journeyId))
+                    put("at", JsonPrimitive(at))
+                })
+            }
+
+            h.service.applyDownFacts(buildJsonObject { put("facts", JsonArray(listOf(fact("later", 50L), fact("earlier", 10L)))) }, "customer-1")
+
+            assertEquals(10L, JourneyStore(h.root).load("customer-1", journeyId)!!.convertedAtMillis)
+        } finally { h.root.deleteRecursively() }
+    }
+
+    @Test
+    fun supersedeCommitAndExitAreSerializedSoAGhostNeverEmitsAnExit() = runBlocking {
+        val h = harness()
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = started.ref.journeyId!!
+            val superseded = buildJsonObject {
+                put("id", JsonPrimitive("superseded-race"))
+                put("event", JsonPrimitive(JourneyEventNames.SUPERSEDED))
+                put("timestamp", JsonPrimitive(now))
+                put("properties", buildJsonObject { put("journey_id", JsonPrimitive(journeyId)) })
+            }
+
+            val insertStarted = CompletableDeferred<Unit>()
+            val releaseInsert = CompletableDeferred<Unit>()
+            h.store.serverFactInsertStarted = insertStarted
+            h.store.serverFactInsertGate = releaseInsert
+            val route = async(Dispatchers.Default) {
+                h.service.applyDownFacts(buildJsonObject { put("facts", JsonArray(listOf(superseded))) }, "customer-1")
+            }
+            insertStarted.await()
+            val exiting = async(Dispatchers.Default) { h.service.exit("customer-1", journeyId, "completed") }
+            releaseInsert.complete(Unit)
+            awaitAll(route, exiting)
+            h.log.awaitBarrier()
+
+            assertTrue(JourneyStore(h.root).load("customer-1", journeyId)!!.isGhost)
+            assertTrue(h.store.events.values.none { it.name == JourneyEventNames.EXITED })
+        } finally { h.root.deleteRecursively() }
+    }
+
+    @Test
+    fun catalogReleasesAreScopedToTheProfileDistinctId() {
+        val identity = ExperienceReleaseIdentity(
+            appId = "app", environment = "development", experienceId = "experience-1",
+            experienceVersionId = "version-1", buildId = "build-1", versionNumber = 1,
+            publishedAt = "2026-01-01T00:00:00.000Z", publishedAtSeq = 1,
+        )
+        val release = AuthenticatedRelease(
+            keyId = "test", descriptorSha256 = "sha", identity = identity,
+            descriptorBytes = ByteArray(0),
+            descriptor = buildJsonObject {
+                put("enrollment", buildJsonObject {
+                    put("trigger", buildJsonObject {
+                        put("type", JsonPrimitive("event"))
+                        put("eventName", JsonPrimitive("opened"))
+                    })
+                })
+                put("lifecycle", buildJsonObject {
+                    put("reentry", buildJsonObject { put("type", JsonPrimitive("every_time")) })
+                    put("exitPolicy", JsonPrimitive("manual"))
+                })
+            },
+            publishedAtSeqToPromote = null,
+        )
+        val catalog = JourneyReleaseCatalog(
+            trustedKeys = emptyMap(),
+            highWater = ReleaseHighWaterStore(RuntimeEnvironment.getApplication()),
+            supportedRuntime = { supportedRuntime() },
+            authenticate = { _, _ -> release },
+        )
+        val profile = buildJsonObject {
+            put("releases", buildJsonObject {
+                put("delivery", buildJsonObject {
+                    put("renderBaseUrl", JsonPrimitive("https://example.test/renders/"))
+                    put("assetBaseUrl", JsonPrimitive("https://example.test/assets/"))
+                })
+                put("active", JsonArray(listOf(buildJsonObject {
+                    put("locator", buildJsonObject {
+                        put("appId", JsonPrimitive(identity.appId))
+                        put("environment", JsonPrimitive(identity.environment))
+                        put("experienceId", JsonPrimitive(identity.experienceId))
+                        put("experienceVersionId", JsonPrimitive(identity.experienceVersionId))
+                        put("buildId", JsonPrimitive(identity.buildId))
+                        put("versionNumber", JsonPrimitive(identity.versionNumber))
+                        put("publishedAt", JsonPrimitive(identity.publishedAt))
+                        put("publishedAtSeq", JsonPrimitive(identity.publishedAtSeq))
+                    })
+                    put("descriptorSha256", JsonPrimitive("sha"))
+                    put("envelopeBytesBase64", JsonPrimitive("eA=="))
+                })))
+                put("pinned", JsonArray(emptyList()))
+            })
+        }
+
+        catalog.applyProfile("user-a", profile)
+        assertEquals(1, catalog.releasesFor("user-a", "opened").size)
+        assertTrue(catalog.releasesFor("user-b", "opened").isEmpty())
+
+        catalog.applyProfile("user-b", profile)
+        assertTrue(catalog.releasesFor("user-a", "opened").isEmpty())
+        assertEquals(1, catalog.releasesFor("user-b", "opened").size)
+    }
+
+    private fun supportedRuntime() = SupportedRuntime(
+        currentSdkVersion = "1.0.0", supportedRuntimeRevisions = emptySet(), supportedLuauRevisions = emptyMap(),
+        sceneFormatMajor = 0, sceneFormatMinor = 0, timezoneDataRevision = "", timezoneDataSha256 = "",
+        supportedCapabilities = emptySet(),
+    )
+
+    private fun JsonObject.stringValue(key: String): String? =
+        (this[key] as? JsonPrimitive)?.content
 }
