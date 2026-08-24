@@ -150,20 +150,22 @@ internal class TriggerService(
         // reach the caller, so Started updates go out first and a Failed is
         // only terminal when nothing enrolled (an Error completes the
         // broker, which would otherwise drop later results).
+        val failedResults = journeyResults.filterIsInstance<JourneyTriggerResult.Failed>()
         journeyResults.filterIsInstance<JourneyTriggerResult.Started>().forEach { result ->
             broker.emit(eventId, TriggerUpdate.Decision(TriggerDecision.JourneyStarted(result.ref)))
+        }
+        if (!journeyStarted && failedResults.isNotEmpty()) {
+            // Failure has priority when nothing enrolled: with no gate, a
+            // Suppressed emitted first would be terminal and swallow the
+            // error, reporting NoMatch-like success for a failed admission.
+            broker.emit(eventId, TriggerUpdate.Error(failedResults.first().error))
+            return
         }
         journeyResults.filterIsInstance<JourneyTriggerResult.Suppressed>().forEach { result ->
             broker.emit(eventId, TriggerUpdate.Decision(TriggerDecision.Suppressed(result.reason)))
         }
-        if (!journeyStarted) {
-            journeyResults.filterIsInstance<JourneyTriggerResult.Failed>().firstOrNull()?.let { failed ->
-                broker.emit(eventId, TriggerUpdate.Error(failed.error))
-            }
-        } else {
-            journeyResults.filterIsInstance<JourneyTriggerResult.Failed>().forEach { result ->
-                Log.w(LOG_TAG, "Journey admission failed alongside a successful enrollment: ${result.error.message}")
-            }
+        failedResults.forEach { result ->
+            Log.w(LOG_TAG, "Journey admission failed alongside a successful enrollment: ${result.error.message}")
         }
 
         if (gatePlan == null && emittedJourneyDecision) return
