@@ -3,6 +3,7 @@ package ai.nuxie.sdk.presentation
 import ai.nuxie.sdk.runtime.NuxieRuntimeBridge
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import android.content.Context
+import android.graphics.PixelFormat
 import android.util.Log
 import android.view.Choreographer
 import android.view.SurfaceHolder
@@ -11,11 +12,11 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * SurfaceView host driving the engine's Android WebGPU renderer: Kotlin owns
- * the frame clock (Choreographer) and issues one render per frame per the
- * iOS frame-ownership contract; the engine has no independent loop. Session
- * and surface lifetimes are separate: surface destroy/recreate preserves the
- * player and re-wraps the window.
+ * SurfaceView host driving the engine's headless Android Vulkan renderer:
+ * Kotlin owns the frame clock (Choreographer) and issues one render per frame
+ * per the iOS frame-ownership contract; the engine has no independent loop.
+ * Session and surface lifetimes are separate: surface destroy/recreate
+ * preserves the renderer and player and only reacquires the window.
  *
  * Tracer scope: continuous rendering while the surface is visible. The
  * needsFrame/wake/idle settle contract refines with the presentation
@@ -24,9 +25,11 @@ import java.util.concurrent.TimeUnit
 internal class ExperienceSurfaceHost(
     context: Context,
     private val lane: NuxieRuntimeLane,
+    private val clearColor: Int = CLEAR_COLOR_OPAQUE_BLACK,
 ) : SurfaceView(context), SurfaceHolder.Callback, Choreographer.FrameCallback {
     /** Native handles; touched only on the runtime lane. */
     private var renderer = 0L
+    private var window = 0L
     private var player = 0L
     private var file = 0L
     private var artboard = 0L
@@ -44,6 +47,7 @@ internal class ExperienceSurfaceHost(
     private var lastFrameNanos = 0L
 
     init {
+        holder.setFormat(PixelFormat.TRANSLUCENT)
         holder.addCallback(this)
     }
 
@@ -90,24 +94,21 @@ internal class ExperienceSurfaceHost(
         val height = frame.height().coerceAtLeast(1)
         val surface = holder.surface
         lane.enqueue {
-            // Attach only once the engine actually presents to this
-            // surface; a failed create/recreate must keep the frame gate
-            // closed or later frames would render through a renderer that
-            // still borrows the destroyed previous window.
+            // Attach only once both the headless renderer and this surface's
+            // window exist; a failed create/acquire keeps the frame gate shut.
             if (renderer == 0L) {
-                renderer = NuxieRuntimeBridge.nativeRendererNewAndroidWgpu(
-                    surface, width, height,
+                renderer = NuxieRuntimeBridge.nativeRendererNewAndroidVulkan(
+                    width, height,
                 )
                 if (renderer == 0L) {
-                    Log.w(LOG_TAG, "Android WebGPU renderer creation failed")
+                    Log.w(LOG_TAG, "Android Vulkan renderer creation failed")
                     return@enqueue
                 }
-            } else {
-                val status = NuxieRuntimeBridge.nativeRendererRecreateSurface(renderer, surface)
-                if (status != 0) {
-                    Log.w(LOG_TAG, "Surface recreation failed with status $status")
-                    return@enqueue
-                }
+            }
+            window = NuxieRuntimeBridge.nativeWindowAcquire(surface)
+            if (window == 0L) {
+                Log.w(LOG_TAG, "Native window acquisition failed")
+                return@enqueue
             }
             attached = true
         }
@@ -139,6 +140,10 @@ internal class ExperienceSurfaceHost(
         val detached = CountDownLatch(1)
         val accepted = lane.enqueue {
             attached = false
+            if (window != 0L) {
+                NuxieRuntimeBridge.nativeWindowRelease(window)
+                window = 0L
+            }
             detached.countDown()
         }
         // A rejected marker means the lane is shutting down, but orderly
@@ -166,7 +171,7 @@ internal class ExperienceSurfaceHost(
             if (!attached || renderer == 0L || player == 0L) return@enqueue
             NuxieRuntimeBridge.nativePlayerStep(player, elapsedSeconds)
             val disposition = NuxieRuntimeBridge.nativeRendererRenderPlayer(
-                renderer, player, CLEAR_COLOR_OPAQUE_BLACK, true,
+                renderer, player, window, clearColor, true,
             )
             if (disposition < 0) {
                 Log.w(LOG_TAG, "render_player failed with status ${-disposition}")
@@ -180,8 +185,15 @@ internal class ExperienceSurfaceHost(
         running = false
         Choreographer.getInstance().removeFrameCallback(this)
         lane.enqueue {
+            attached = false
+            if (window != 0L) {
+                NuxieRuntimeBridge.nativeWindowRelease(window)
+                window = 0L
+            }
             if (player != 0L) {
-                NuxieRuntimeBridge.nativeRendererResetPlayerDomain(player)
+                if (renderer != 0L) {
+                    NuxieRuntimeBridge.nativeRendererResetPlayerDomain(renderer, player)
+                }
                 NuxieRuntimeBridge.nativePlayerFree(player)
                 player = 0L
             }

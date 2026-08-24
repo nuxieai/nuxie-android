@@ -4,7 +4,8 @@ import android.util.Log
 
 /**
  * JNI binding surface over the engine's portable C ABI (`nux_capi`) plus the
- * Android WebGPU presentation extension (`nux_renderer_*_android_wgpu`).
+ * headless Android Vulkan presentation extension
+ * (`nux_renderer_*_android_vulkan`).
  *
  * The handle-based, owned-result contract mirrors the iOS adapter: every
  * `native*` call returns a status or an owned handle the caller must free,
@@ -59,34 +60,37 @@ internal object NuxieRuntimeBridge {
     /** nux_player_step: advance by elapsed seconds; returns a status code. */
     external fun nativePlayerStep(player: Long, elapsedSeconds: Double): Int
 
-    // MARK: Android WebGPU presentation extension
+    // MARK: Android Vulkan presentation extension
 
     /**
-     * nux_renderer_new_android_wgpu over an ANativeWindow obtained from the
-     * given android.view.Surface -> renderer handle (0 = failure).
+     * nux_renderer_new_android_vulkan at the requested pixel extent ->
+     * renderer handle (0 = failure).
      */
-    external fun nativeRendererNewAndroidWgpu(
-        surface: android.view.Surface,
+    external fun nativeRendererNewAndroidVulkan(
         pixelWidth: Int,
         pixelHeight: Int,
     ): Long
 
     external fun nativeRendererResize(renderer: Long, pixelWidth: Int, pixelHeight: Int): Int
 
-    external fun nativeRendererRecreateSurface(renderer: Long, surface: android.view.Surface): Int
+    /** Acquire an ANativeWindow reference from a Surface (0 = failure). */
+    external fun nativeWindowAcquire(surface: android.view.Surface): Long
+
+    external fun nativeWindowRelease(window: Long)
 
     /**
-     * nux_renderer_android_wgpu_render_player. Returns the presentation
-     * disposition (1 presented, 2 skipped, 3 outdated) or a negative status.
+     * Renders a headless Vulkan frame and blits it into [window]. Returns 1
+     * when presented or a negative status on failure.
      */
     external fun nativeRendererRenderPlayer(
         renderer: Long,
         player: Long,
+        window: Long,
         clearColor: Int,
         fitContainCenter: Boolean,
     ): Int
 
-    external fun nativeRendererResetPlayerDomain(player: Long): Int
+    external fun nativeRendererResetPlayerDomain(renderer: Long, player: Long): Int
 
     external fun nativeRendererFree(renderer: Long)
 

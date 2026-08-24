@@ -16,3 +16,5 @@ local.properties
 runtime/prebuilt/
 .cxx/
 */.cxx/
+.kotlin/
+*.hprof

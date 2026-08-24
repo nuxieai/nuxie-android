@@ -20,6 +20,19 @@ import org.junit.Test
  * connectedAndroidTest; requires the prebuilt engine in the AAR.
  */
 class RenderSmokeTest {
+    private companion object {
+        /** Opaque magenta: never present on the launcher or system chrome. */
+        const val SENTINEL_CLEAR = 0xFFFF00FF.toInt()
+
+        /**
+         * The fit-contain artboard covers most of the sampled center region,
+         * so the sentinel background is a minority; a healthy margin of
+         * exact-sentinel samples still only ever comes from engine frames.
+         */
+        const val SENTINEL_MIN_SAMPLES = 100
+
+    }
+
     @Test
     fun fixtureRivRendersNonBlankFrames() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -47,40 +60,67 @@ class RenderSmokeTest {
             val intent = Intent(context, NuxieExperienceActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 putExtra(NuxieExperienceActivity.EXTRA_RIV_PATH, rivFile.absolutePath)
+                // Sentinel background: the launcher showing through a
+                // translucent activity can never be mistaken for engine
+                // output (an earlier revision passed on exactly that).
+                putExtra(NuxieExperienceActivity.EXTRA_CLEAR_COLOR, SENTINEL_CLEAR)
             }
             context.startActivity(intent)
             activity = monitor.waitForActivityWithTimeout(15_000)
             assertTrue("Experience activity must launch", activity != null)
 
-            // Let the frame loop run.
-            SystemClock.sleep(3_000)
-            assertTrue(
-                "Experience activity must still be presenting (load failure finishes it)",
-                !activity!!.isFinishing && !activity.isDestroyed,
-            )
-
-            val screenshot: Bitmap = instrumentation.uiAutomation.takeScreenshot()
-            assertTrue("Screenshot must capture", screenshot.width > 0)
-
-            // Non-blank proof: count pixels that differ from the clear color
-            // (opaque black) in the center region.
+            // The first frame can take several seconds on cold Vulkan
+            // drivers (pipeline compilation, notably on emulators), so poll
+            // for rendered content with a deadline instead of a fixed sleep.
+            var screenshot: Bitmap? = null
+            var sentinelCount = 0
+            var sampleCount = 0
             var lit = 0
-            val colors = HashSet<Int>()
-            // Dense sampling: sparse grids miss anti-aliased vector content
-            // (text glyphs) and read a real frame as a flat fill.
-            for (x in screenshot.width / 4 until screenshot.width * 3 / 4 step 4) {
-                for (y in screenshot.height / 4 until screenshot.height * 3 / 4 step 4) {
-                    val pixel = screenshot.getPixel(x, y)
-                    colors.add(pixel)
-                    if (pixel != 0xFF000000.toInt()) lit++
+            var colors = HashSet<Int>()
+            val deadline = SystemClock.elapsedRealtime() + 30_000
+            while (SystemClock.elapsedRealtime() < deadline) {
+                assertTrue(
+                    "Experience activity must still be presenting (load failure finishes it)",
+                    !activity!!.isFinishing && !activity.isDestroyed,
+                )
+                val shot: Bitmap = instrumentation.uiAutomation.takeScreenshot()
+                assertTrue("Screenshot must capture", shot.width > 0)
+                // Non-blank proof: count pixels that differ from the clear
+                // color (opaque black) in the center region. Dense sampling:
+                // sparse grids miss anti-aliased vector content (text
+                // glyphs) and read a real frame as a flat fill.
+                var sentinel = 0
+                var samples = 0
+                var shotLit = 0
+                val shotColors = HashSet<Int>()
+                for (x in shot.width / 4 until shot.width * 3 / 4 step 4) {
+                    for (y in shot.height / 4 until shot.height * 3 / 4 step 4) {
+                        val pixel = shot.getPixel(x, y)
+                        samples++
+                        shotColors.add(pixel)
+                        if (pixel == SENTINEL_CLEAR) sentinel++ else shotLit++
+                    }
                 }
+                screenshot = shot
+                sentinelCount = sentinel
+                sampleCount = samples
+                lit = shotLit
+                colors = shotColors
+                // Engine frames show the sentinel background around the
+                // fit-contain artboard plus real content pixels; the
+                // launcher shows neither.
+                if (sentinel >= SENTINEL_MIN_SAMPLES && shotLit > 10 && shotColors.size >= 4) break
+                SystemClock.sleep(500)
             }
-            assertTrue("Rendered frame must contain non-clear pixels (lit=$lit)", lit > 10)
+            checkNotNull(screenshot)
+            assertTrue(
+                "Engine frames must reach the screen: the sentinel clear color was never observed " +
+                    "(sentinel=$sentinelCount of $sampleCount samples)",
+                sentinelCount >= SENTINEL_MIN_SAMPLES,
+            )
+            assertTrue("Rendered frame must contain content pixels (lit=$lit)", lit > 10)
             assertTrue(
                 "Rendered frame must show real content, not a flat fill (colors=${colors.size})",
-                // Bar chosen from observed failure modes: a blank frame is 1
-                // color, clear + flat panel is 2; the rendered fixture shows
-                // black, panel gray, white text, and anti-aliased blends.
                 colors.size >= 4,
             )
 

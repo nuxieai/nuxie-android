@@ -1,10 +1,10 @@
 {
   "note": "Local staging pin. The release pipeline replaces this with an immutable artifact URL + sha256 per ABI, mirroring the iOS Runtime/artifact.json.",
   "sourceRepo": "nuxieai/nuxie-runtime",
-  "sourceBranch": "android/wgpu-surface-capi",
-  "sourceCommit": "9a5ae141",
+  "sourceBranch": "android/vulkan-capi",
+  "sourceCommit": "46a806b8",
   "features": [
-    "android-wgpu",
+    "android-vulkan",
     "scripting"
   ],
   "abis": [
