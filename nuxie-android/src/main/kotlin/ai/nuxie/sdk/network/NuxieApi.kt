@@ -123,6 +123,38 @@ internal class NuxieApi(
         }
     }
 
+    /**
+     * POST /event: the synchronous decision lane. The body is the batch-item
+     * projection of the captured event (same encoder, same lift rules) plus
+     * apiKey. Returns the duplicate-key-validated response body text.
+     */
+    fun postEvent(encodedBatchItem: String): String {
+        require(encodedBatchItem.startsWith("{")) { "postEvent expects an encoded batch item." }
+        val body = buildString {
+            append("{\"apiKey\":")
+            append(jsonString(apiKey))
+            append(',')
+            append(encodedBatchItem, 1, encodedBatchItem.length)
+        }.encodeToByteArray()
+        val response = transport.execute(
+            HttpTransport.Request(
+                url = URL("$baseUrl/event"),
+                headers = mapOf(
+                    "Content-Type" to "application/json",
+                    "Accept-Encoding" to "gzip",
+                    "User-Agent" to "Nuxie-Android-SDK/${SdkVersion.VALUE}",
+                ),
+                body = body,
+            ),
+        )
+        if (response.statusCode !in 200..299) {
+            throw RequestRejectedException(response.statusCode, "/event")
+        }
+        val text = response.body.decodeToString()
+        StrictJsonValidator.requireNoDuplicateKeys(text)
+        return text
+    }
+
     private fun jsonString(value: String): String = buildString {
         append('"')
         value.forEach { character ->
