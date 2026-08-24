@@ -44,7 +44,7 @@ class BatchItemWireEncoderTest {
 
         assertFalse(wire.containsKey("\$anon_distinct_id"))
         assertFalse(wire.containsKey("value"))
-        assertFalse(wire.containsKey("entity_id"))
+        assertFalse(wire.containsKey("entityId"))
         assertEquals(stored.properties, wire["properties"])
     }
 
@@ -66,5 +66,25 @@ class BatchItemWireEncoderTest {
                 "\"timestamp\":\"2026-07-19T12:00:00.000Z\"}",
             BatchItemWireEncoder.encode(stored),
         )
+    }
+
+    @Test
+    fun callerSuppliedJsonElementsWithNonJsonNumbersAreRejected() {
+        try {
+            StoredEvent.from(
+                NuxieEvent(
+                    id = "event-id",
+                    name = "bad_number",
+                    distinctId = "user-1",
+                    properties = mapOf(
+                        "bad" to kotlinx.serialization.json.JsonPrimitive(Double.NaN),
+                    ),
+                    timestampMillis = 1_784_462_400_000L,
+                ),
+            )
+            org.junit.Assert.fail("Expected NaN JSON primitive to be rejected")
+        } catch (expected: IllegalArgumentException) {
+            // NaN must never reach canonical storage or the wire.
+        }
     }
 }

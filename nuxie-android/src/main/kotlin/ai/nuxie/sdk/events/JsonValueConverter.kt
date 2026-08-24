@@ -14,7 +14,7 @@ internal object JsonValueConverter {
 
     private fun fromAny(value: Any?): JsonElement = when (value) {
         null -> JsonNull
-        is JsonElement -> value
+        is JsonElement -> value.requireValidJson()
         is Boolean -> JsonPrimitive(value)
         is String -> JsonPrimitive(value)
         is Char -> JsonPrimitive(value.toString())
@@ -53,6 +53,29 @@ internal object JsonValueConverter {
     }
 
     private fun unsigned(value: String): JsonElement = Json.parseToJsonElement(value)
+
+    /**
+     * Caller-supplied JsonElements can smuggle non-JSON text such as
+     * JsonPrimitive(Double.NaN); validate every leaf so canonical output is
+     * always strict JSON.
+     */
+    private fun JsonElement.requireValidJson(): JsonElement {
+        when (this) {
+            is JsonObject -> values.forEach { it.requireValidJson() }
+            is JsonArray -> forEach { it.requireValidJson() }
+            is JsonPrimitive -> if (!isString && this != JsonNull) {
+                val text = content
+                val isLiteral = text == "true" || text == "false" || text == "null"
+                require(isLiteral || strictNumberPattern.matches(text)) {
+                    "Event property JSON primitives must be strict JSON values: $text"
+                }
+            }
+            else -> Unit
+        }
+        return this
+    }
+
+    private val strictNumberPattern = Regex("-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?")
 
     private fun Float.requireFinite(): Float {
         require(isFinite()) { "Event property numbers must be finite." }
