@@ -253,6 +253,29 @@ class TriggerServiceTest {
     }
 
     @Test
+    fun suppressedPlusFailedWithoutStartReportsTheFailure() = runBlocking {
+        val router = TriggerService.JourneyRouter { _ ->
+            listOf(
+                TriggerService.JourneyTriggerResult.Suppressed(
+                    ai.nuxie.sdk.SuppressReason.ALREADY_ACTIVE,
+                ),
+                TriggerService.JourneyTriggerResult.Failed(
+                    ai.nuxie.sdk.TriggerError(
+                        ai.nuxie.sdk.TriggerErrorCode.TRIGGER_FAILED,
+                        "admission failed",
+                    ),
+                ),
+            )
+        }
+        val core = core(transportWithGate(null), journeys = router)
+        val updates = collect(core, "moment")
+        val error = (updates.single() as TriggerUpdate.Error).error
+        assertEquals(ai.nuxie.sdk.TriggerErrorCode.TRIGGER_FAILED, error.code)
+        assertEquals("admission failed", error.message)
+        core.stop()
+    }
+
+    @Test
     fun allFailedJourneyOutcomesEmitOneTerminalError() = runBlocking {
         val router = TriggerService.JourneyRouter { _ ->
             listOf(
