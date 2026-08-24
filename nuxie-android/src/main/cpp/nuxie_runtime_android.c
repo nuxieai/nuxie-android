@@ -28,11 +28,16 @@ static void *stderr_pump(void *arg) {
   int fd = (int)(intptr_t)arg;
   char line[512];
   size_t used = 0;
+  int read_failed = 0;
   for (;;) {
     char chunk[128];
     ssize_t n = read(fd, chunk, sizeof(chunk));
     if (n < 0 && errno == EINTR) continue;
-    if (n <= 0) break;
+    if (n < 0) {
+      read_failed = 1;
+      break;
+    }
+    if (n == 0) break;
     for (ssize_t i = 0; i < n; i++) {
       if (chunk[i] == '\n' || used == sizeof(line) - 1) {
         line[used] = '\0';
@@ -45,13 +50,18 @@ static void *stderr_pump(void *arg) {
       line[used++] = chunk[i];
     }
   }
-  // Terminal pump failure: stderr still points at the pipe, and with no
-  // reader every writer would eventually block on a full pipe. Point
-  // stderr at /dev/null before abandoning it.
-  int devnull = open("/dev/null", O_WRONLY);
-  if (devnull >= 0) {
-    dup2(devnull, STDERR_FILENO);
-    close(devnull);
+  // EOF means every write end is gone: the host replaced stderr with its
+  // own target, so leave it alone. A read error means stderr may still be
+  // our pipe with no reader, where writers would eventually block on a
+  // full pipe; point stderr at /dev/null before abandoning it. If open
+  // hands back fd 2 itself, /dev/null is already installed as stderr and
+  // must stay open.
+  if (read_failed) {
+    int devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0 && devnull != STDERR_FILENO) {
+      dup2(devnull, STDERR_FILENO);
+      close(devnull);
+    }
   }
   close(fd);
   return NULL;
