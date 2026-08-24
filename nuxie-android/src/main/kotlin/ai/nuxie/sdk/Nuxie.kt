@@ -5,6 +5,7 @@ import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.launch
 
 /**
  * Entry point for the greenfield Nuxie Android SDK.
@@ -47,6 +48,73 @@ object Nuxie {
         )
         setupState = SetupState(logLevel = configuration.logLevel, core = core)
         core.start()
+    }
+
+    // MARK: Trigger
+
+    /**
+     * Name the moment. The remotely published Experiences decide what
+     * happens; [handler] receives progressive updates through the terminal
+     * outcome. Fire-and-forget when [handler] is null.
+     */
+    fun trigger(
+        event: String,
+        properties: Map<String, Any?>? = null,
+        handler: ((TriggerUpdate) -> Unit)? = null,
+    ) {
+        val core = core ?: run {
+            handler?.invoke(
+                TriggerUpdate.Error(
+                    TriggerError(TriggerErrorCode.NOT_CONFIGURED, "Call Nuxie.setup first."),
+                ),
+            )
+            return
+        }
+        core.scope.launch {
+            core.triggers.trigger(event, properties, handler ?: {})
+        }
+    }
+
+    /**
+     * Trigger and await the terminal outcome. [progress] observes every
+     * update on the way there.
+     */
+    suspend fun triggerAndWait(
+        event: String,
+        properties: Map<String, Any?>? = null,
+        progress: ((TriggerUpdate) -> Unit)? = null,
+    ): TriggerResult {
+        val core = core
+            ?: return TriggerResult.Error(
+                TriggerError(TriggerErrorCode.NOT_CONFIGURED, "Call Nuxie.setup first."),
+            )
+        val done = kotlinx.coroutines.CompletableDeferred<TriggerResult>()
+        core.scope.launch {
+            core.triggers.trigger(event, properties) { update ->
+                progress?.invoke(update)
+                val terminal: TriggerResult? = when (update) {
+                    is TriggerUpdate.Error -> TriggerResult.Error(update.error)
+                    is TriggerUpdate.Decision -> when (update.decision) {
+                        is TriggerDecision.AllowedImmediate -> TriggerResult.Allowed
+                        is TriggerDecision.DeniedImmediate -> TriggerResult.Denied
+                        is TriggerDecision.NoMatch -> TriggerResult.NoMatch
+                        // Suppression and gate-terminal presentation resolve as
+                        // the sequence fallback (iOS parity).
+                        is TriggerDecision.Suppressed -> TriggerResult.NoMatch
+                        is TriggerDecision.ExperienceShown -> TriggerResult.NoMatch
+                        else -> null
+                    }
+                    is TriggerUpdate.FeatureAccess -> when (update.update) {
+                        is FeatureAccessUpdate.Allowed -> TriggerResult.Allowed
+                        is FeatureAccessUpdate.Denied -> TriggerResult.Denied
+                        is FeatureAccessUpdate.Pending -> null
+                    }
+                    is TriggerUpdate.Journey -> TriggerResult.JourneyCompleted(update.update)
+                }
+                terminal?.let { done.complete(it) }
+            }
+        }
+        return done.await()
     }
 
     // MARK: Identity

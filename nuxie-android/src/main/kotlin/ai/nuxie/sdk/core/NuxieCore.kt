@@ -8,6 +8,8 @@ import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.EventDeliveryWorker
+import ai.nuxie.sdk.events.TriggerBroker
+import ai.nuxie.sdk.events.TriggerService
 import ai.nuxie.sdk.identity.IdentityService
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.HttpUrlConnectionTransport
@@ -46,6 +48,9 @@ internal class NuxieCore(
         val appVersion: (() -> String)? = null,
         val registerLifecycle: Boolean = true,
         val transport: HttpTransport? = null,
+        val journeys: TriggerService.JourneyRouter? = null,
+        val features: TriggerService.FeatureGate? = null,
+        val presenter: TriggerService.ExperiencePresenter? = null,
     )
 
     private val appContext = context.applicationContext ?: context
@@ -73,6 +78,18 @@ internal class NuxieCore(
     val delivery = EventDeliveryWorker(store, api, scope, nowMillis = nowMillis)
 
     val segments = SegmentService(appContext)
+
+    val triggers by lazy {
+        TriggerService(
+        eventLog = eventLog,
+        api = api,
+        broker = TriggerBroker(),
+        journeys = overrides.journeys ?: TriggerService.NoJourneys,
+        features = overrides.features ?: TriggerService.NoFeatureAuthority,
+            presenter = overrides.presenter ?: TriggerService.PresentationUnavailable,
+            nowMillis = nowMillis,
+        )
+    }
 
     val profile = ProfileService(
         context = appContext,

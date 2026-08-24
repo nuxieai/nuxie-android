@@ -45,6 +45,11 @@ internal class EventLog(
 
     private sealed interface Command {
         data class Capture(val name: String, val properties: Map<String, Any?>?) : Command
+        data class CaptureForTrigger(
+            val name: String,
+            val properties: Map<String, Any?>?,
+            val done: CompletableDeferred<StoredEvent?>,
+        ) : Command
         data class Barrier(val done: CompletableDeferred<Unit>) : Command
     }
 
@@ -56,8 +61,14 @@ internal class EventLog(
     private val worker = scope.launch {
         for (command in commands) {
             when (command) {
-                is Command.Capture -> runCatching { process(command) }
+                is Command.Capture -> runCatching { process(command.name, command.properties) }
                     .onFailure { Log.w(LOG_TAG, "Event capture failed", it) }
+                is Command.CaptureForTrigger -> {
+                    val stored = runCatching { process(command.name, command.properties) }
+                        .onFailure { Log.w(LOG_TAG, "Trigger capture failed", it) }
+                        .getOrNull()
+                    command.done.complete(stored)
+                }
                 is Command.Barrier -> command.done.complete(Unit)
             }
         }
@@ -102,8 +113,32 @@ internal class EventLog(
         store.close()
     }
 
-    private suspend fun process(command: Command.Capture) {
-        var sanitized = EventSanitizer.sanitizeDataTypes(command.properties ?: emptyMap())
+    /**
+     * Decision-lane capture: persist + announce like every capture, then hand
+     * the stored event back so the trigger service can run the synchronous
+     * /event round trip in capture order.
+     */
+    suspend fun captureForTrigger(name: String, properties: Map<String, Any?>?): StoredEvent? {
+        if (name.isEmpty()) {
+            Log.w(LOG_TAG, "Event name cannot be empty")
+            return null
+        }
+        val done = CompletableDeferred<StoredEvent?>()
+        if (commands.trySend(Command.CaptureForTrigger(name, properties, done)).isFailure) return null
+        return done.await()
+    }
+
+    /**
+     * The decision lane delivered this event synchronously via /event; mark
+     * it so batch delivery does not redundantly resend (the idempotency key
+     * would dedupe server-side, but skipping the resend is cheaper).
+     */
+    suspend fun markDeliveredViaDecisionLane(eventId: String) {
+        runCatching { store.markDelivered(listOf(eventId)) }
+    }
+
+    private suspend fun process(name: String, commandProperties: Map<String, Any?>?): StoredEvent? {
+        var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties ?: emptyMap())
         if (!sanitized.containsKey(SESSION_ID_PROPERTY)) {
             sessionIdProvider?.invoke()?.let { sessionId ->
                 sanitized = sanitized + (SESSION_ID_PROPERTY to sessionId)
@@ -111,7 +146,7 @@ internal class EventLog(
         }
         val enriched = contextBuilder.buildEnrichedProperties(sanitized)
         val original = NuxieEvent(
-            name = command.name,
+            name = name,
             distinctId = identity.distinctId(),
             properties = enriched,
             timestampMillis = nowMillis(),
@@ -122,8 +157,8 @@ internal class EventLog(
             // Terminal beforeSend drop: record it so recovery never resurrects
             // the id (iOS commits a stable capture with a nil event).
             store.recordStableDrop(original.id, original.timestampMillis)
-            Log.d(LOG_TAG, "Event '${command.name}' terminally dropped by beforeSend hook")
-            return
+            Log.d(LOG_TAG, "Event '$name' terminally dropped by beforeSend hook")
+            return null
         }
 
         val stored = StoredEvent.from(transformed)
@@ -134,6 +169,7 @@ internal class EventLog(
                     .onFailure { Log.w(LOG_TAG, "Committed-event subscriber failed", it) }
             }
         }
+        return stored
     }
 
     private fun applyBeforeSend(original: NuxieEvent): NuxieEvent? {
