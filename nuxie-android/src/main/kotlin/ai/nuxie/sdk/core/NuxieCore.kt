@@ -7,8 +7,9 @@ import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.SQLiteEventStore
-import ai.nuxie.sdk.identity.AnonymousIdentityStub
-import ai.nuxie.sdk.identity.IdentityProvider
+import ai.nuxie.sdk.identity.IdentityService
+import ai.nuxie.sdk.identity.UserTransitionCoordinator
+import ai.nuxie.sdk.session.SessionService
 import android.app.Application
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
@@ -33,7 +34,7 @@ internal class NuxieCore(
 
     internal class Overrides(
         val store: EventStore? = null,
-        val identity: IdentityProvider? = null,
+        val identity: IdentityService? = null,
         val nowMillis: (() -> Long)? = null,
         val appVersion: (() -> String)? = null,
         val registerLifecycle: Boolean = true,
@@ -43,11 +44,17 @@ internal class NuxieCore(
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    val identity: IdentityProvider = overrides.identity ?: AnonymousIdentityStub(appContext)
+    val identity: IdentityService = overrides.identity ?: IdentityService(appContext)
 
     private val nowMillis: () -> Long = overrides.nowMillis ?: System::currentTimeMillis
 
+    val sessions = SessionService(nowMillis)
+
     val store: EventStore = overrides.store ?: SQLiteEventStore(appContext)
+
+    val userTransitions: UserTransitionCoordinator by lazy {
+        UserTransitionCoordinator(store, scope)
+    }
 
     val contextBuilder = NuxieContextBuilder(appContext, environment, logLevel, identity)
 
@@ -58,6 +65,7 @@ internal class NuxieCore(
         beforeSend = beforeSend,
         scope = scope,
         nowMillis = nowMillis,
+        sessionIdProvider = { sessions.getSessionId() },
     )
 
     val lifecycleTracker = AppLifecycleTracker(
@@ -67,7 +75,7 @@ internal class NuxieCore(
         emit = { name, properties -> eventLog.capture(name, properties) },
     )
 
-    private val lifecycleCoordinator = NuxieLifecycleCoordinator(lifecycleTracker, scope)
+    private val lifecycleCoordinator = NuxieLifecycleCoordinator(lifecycleTracker, sessions, scope)
 
     /** Called once from Nuxie.setup after construction. */
     fun start() {

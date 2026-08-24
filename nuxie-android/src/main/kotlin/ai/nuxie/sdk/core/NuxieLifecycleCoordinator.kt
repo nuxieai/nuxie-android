@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
  */
 internal class NuxieLifecycleCoordinator(
     private val tracker: AppLifecycleTracker,
+    private val sessions: ai.nuxie.sdk.session.SessionService,
     scope: CoroutineScope,
 ) : Application.ActivityLifecycleCallbacks {
     private enum class Transition { FOREGROUND, BACKGROUND }
@@ -31,8 +32,14 @@ internal class NuxieLifecycleCoordinator(
         scope.launch {
             for (transition in transitions) {
                 when (transition) {
-                    Transition.FOREGROUND -> tracker.trackAppForegrounded()
-                    Transition.BACKGROUND -> tracker.trackAppBackgrounded()
+                    Transition.FOREGROUND -> {
+                        sessions.onAppBecameActive()
+                        tracker.trackAppForegrounded()
+                    }
+                    Transition.BACKGROUND -> {
+                        sessions.onAppDidEnterBackground()
+                        tracker.trackAppBackgrounded()
+                    }
                 }
             }
         }

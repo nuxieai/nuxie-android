@@ -31,6 +31,8 @@ internal class EventLog(
     private val beforeSend: ((NuxieEvent) -> NuxieEvent?)?,
     scope: CoroutineScope,
     private val nowMillis: () -> Long = System::currentTimeMillis,
+    /** Stamps \$session_id and touches the session; null until sessions exist. */
+    private val sessionIdProvider: (() -> String?)? = null,
 ) {
     internal fun interface CommittedSubscription {
         suspend fun onCommitted(event: StoredEvent)
@@ -101,7 +103,12 @@ internal class EventLog(
     }
 
     private suspend fun process(command: Command.Capture) {
-        val sanitized = EventSanitizer.sanitizeDataTypes(command.properties ?: emptyMap())
+        var sanitized = EventSanitizer.sanitizeDataTypes(command.properties ?: emptyMap())
+        if (!sanitized.containsKey(SESSION_ID_PROPERTY)) {
+            sessionIdProvider?.invoke()?.let { sessionId ->
+                sanitized = sanitized + (SESSION_ID_PROPERTY to sessionId)
+            }
+        }
         val enriched = contextBuilder.buildEnrichedProperties(sanitized)
         val original = NuxieEvent(
             name = command.name,
@@ -144,5 +151,6 @@ internal class EventLog(
 
     private companion object {
         const val LOG_TAG = "Nuxie"
+        const val SESSION_ID_PROPERTY = "\$session_id"
     }
 }
