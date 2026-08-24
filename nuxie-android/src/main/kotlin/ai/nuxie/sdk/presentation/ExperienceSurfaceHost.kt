@@ -29,6 +29,14 @@ internal class ExperienceSurfaceHost(
     private var file = 0L
     private var artboard = 0L
 
+    /**
+     * Lane-confined surface attachment. Jobs already queued when the
+     * platform destroys the surface must not touch the abandoned window;
+     * a destroy marker enqueued from the UI thread gates them in FIFO
+     * order.
+     */
+    private var attached = false
+
     @Volatile
     private var running = false
     private var lastFrameNanos = 0L
@@ -78,17 +86,19 @@ internal class ExperienceSurfaceHost(
         val frame = holder.surfaceFrame
         val width = frame.width().coerceAtLeast(1)
         val height = frame.height().coerceAtLeast(1)
+        val surface = holder.surface
         lane.enqueue {
+            attached = true
             if (renderer == 0L) {
                 renderer = NuxieRuntimeBridge.nativeRendererNewAndroidWgpu(
-                    holder.surface, width, height,
+                    surface, width, height,
                 )
                 if (renderer == 0L) {
                     Log.w(LOG_TAG, "Android WebGPU renderer creation failed")
                     return@enqueue
                 }
             } else {
-                NuxieRuntimeBridge.nativeRendererRecreateSurface(renderer, holder.surface)
+                NuxieRuntimeBridge.nativeRendererRecreateSurface(renderer, surface)
             }
         }
         running = true
@@ -98,7 +108,7 @@ internal class ExperienceSurfaceHost(
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         lane.enqueue {
-            if (renderer != 0L) {
+            if (attached && renderer != 0L) {
                 NuxieRuntimeBridge.nativeRendererResize(
                     renderer,
                     width.coerceAtLeast(1),
@@ -112,6 +122,8 @@ internal class ExperienceSurfaceHost(
         running = false
         Choreographer.getInstance().removeFrameCallback(this)
         // Session state (player/artboard) survives; only presentation stops.
+        // The marker gates queued render/resize jobs off the dead surface.
+        lane.enqueue { attached = false }
     }
 
     override fun doFrame(frameTimeNanos: Long) {
@@ -123,7 +135,7 @@ internal class ExperienceSurfaceHost(
         }
         lastFrameNanos = frameTimeNanos
         lane.enqueue {
-            if (renderer == 0L || player == 0L) return@enqueue
+            if (!attached || renderer == 0L || player == 0L) return@enqueue
             NuxieRuntimeBridge.nativePlayerStep(player, elapsedSeconds)
             val disposition = NuxieRuntimeBridge.nativeRendererRenderPlayer(
                 renderer, player, CLEAR_COLOR_OPAQUE_BLACK, true,

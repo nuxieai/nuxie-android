@@ -9,11 +9,14 @@
 
 #include <android/log.h>
 #include <android/native_window_jni.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <jni.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -28,6 +31,7 @@ static void *stderr_pump(void *arg) {
   for (;;) {
     char chunk[128];
     ssize_t n = read(fd, chunk, sizeof(chunk));
+    if (n < 0 && errno == EINTR) continue;
     if (n <= 0) break;
     for (ssize_t i = 0; i < n; i++) {
       if (chunk[i] == '\n' || used == sizeof(line) - 1) {
@@ -41,24 +45,38 @@ static void *stderr_pump(void *arg) {
       line[used++] = chunk[i];
     }
   }
+  // Terminal pump failure: stderr still points at the pipe, and with no
+  // reader every writer would eventually block on a full pipe. Point
+  // stderr at /dev/null before abandoning it.
+  int devnull = open("/dev/null", O_WRONLY);
+  if (devnull >= 0) {
+    dup2(devnull, STDERR_FILENO);
+    close(devnull);
+  }
+  close(fd);
   return NULL;
 }
 
 __attribute__((constructor)) static void redirect_stderr_to_logcat(void) {
   int fds[2];
   if (pipe(fds) != 0) return;
-  if (dup2(fds[1], STDERR_FILENO) < 0) {
+  if (fds[0] <= STDERR_FILENO || fds[1] <= STDERR_FILENO) {
+    // A stdio fd was closed in this process; redirecting would clobber
+    // our own pipe end. Leave stderr alone.
     close(fds[0]);
     close(fds[1]);
     return;
   }
-  close(fds[1]);
   pthread_t thread;
-  if (pthread_create(&thread, NULL, stderr_pump, (void *)(intptr_t)fds[0]) == 0) {
-    pthread_detach(thread);
-  } else {
+  if (pthread_create(&thread, NULL, stderr_pump, (void *)(intptr_t)fds[0]) != 0) {
     close(fds[0]);
+    close(fds[1]);
+    return;
   }
+  pthread_detach(thread);
+  // The pump is guaranteed to be draining before any write can land.
+  dup2(fds[1], STDERR_FILENO);
+  close(fds[1]);
 }
 
 static jlong as_handle(void *pointer) { return (jlong)(intptr_t)pointer; }
@@ -207,6 +225,15 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStep(
   return (jint)status;
 }
 
+// The engine borrows the ANativeWindow, so the shim must hold the
+// acquired reference for the renderer's lifetime and release it on free
+// and on surface recreation. The renderer handle handed to Kotlin wraps
+// both.
+struct NuxieRendererHost {
+  struct NuxAndroidRenderer *renderer;
+  ANativeWindow *window;
+};
+
 JNIEXPORT jlong JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererNewAndroidWgpu(
     JNIEnv *env, jobject self, jobject surface, jint pixel_width,
@@ -221,15 +248,18 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererNewAndroidWgpu(
       window, (uint32_t)pixel_width, (uint32_t)pixel_height, &renderer, &result);
   free_result(result);
   if (status != NUX_STATUS_OK) {
-    // The renderer did not take ownership of the window reference.
     ANativeWindow_release(window);
     return 0;
   }
-  // NOTE: the acquired ANativeWindow reference is intentionally retained for
-  // the renderer's lifetime; nativeRendererFree releases it via the paired
-  // window handle stored Kotlin-side (the bridge frees the renderer first and
-  // then the platform Surface owns the underlying window).
-  return as_handle(renderer);
+  struct NuxieRendererHost *host = malloc(sizeof(*host));
+  if (host == NULL) {
+    nux_renderer_android_wgpu_free(renderer);
+    ANativeWindow_release(window);
+    return 0;
+  }
+  host->renderer = renderer;
+  host->window = window;
+  return as_handle(host);
 }
 
 JNIEXPORT jint JNICALL
@@ -239,10 +269,10 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererResize(
   (void)env;
   (void)self;
   if (renderer == 0) return (jint)NUX_STATUS_NULL_ARGUMENT;
+  struct NuxieRendererHost *host = from_handle(renderer);
   struct NuxCapiResult *result = NULL;
   NuxStatus status = nux_renderer_android_wgpu_resize(
-      (struct NuxAndroidRenderer *)from_handle(renderer), (uint32_t)pixel_width,
-      (uint32_t)pixel_height, &result);
+      host->renderer, (uint32_t)pixel_width, (uint32_t)pixel_height, &result);
   free_result(result);
   return (jint)status;
 }
@@ -252,15 +282,20 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererRecreateSurface(
     JNIEnv *env, jobject self, jlong renderer, jobject surface) {
   (void)self;
   if (renderer == 0 || surface == NULL) return (jint)NUX_STATUS_NULL_ARGUMENT;
+  struct NuxieRendererHost *host = from_handle(renderer);
   ANativeWindow *window = ANativeWindow_fromSurface(env, surface);
   if (window == NULL) return (jint)NUX_STATUS_INVALID_ARGUMENT;
   struct NuxCapiResult *result = NULL;
   NuxStatus status = nux_renderer_android_wgpu_recreate_surface(
-      (struct NuxAndroidRenderer *)from_handle(renderer), window, &result);
+      host->renderer, window, &result);
   free_result(result);
   if (status != NUX_STATUS_OK) {
     ANativeWindow_release(window);
+    return (jint)status;
   }
+  // The engine now borrows the new window; drop our reference to the old.
+  ANativeWindow_release(host->window);
+  host->window = window;
   return (jint)status;
 }
 
@@ -274,7 +309,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererRenderPlayer(
   uint32_t disposition = 0;
   struct NuxCapiResult *result = NULL;
   NuxStatus status = nux_renderer_android_wgpu_render_player(
-      (struct NuxAndroidRenderer *)from_handle(renderer),
+      ((struct NuxieRendererHost *)from_handle(renderer))->renderer,
       (struct NuxPlayer *)from_handle(player), (uint32_t)clear_color,
       fit_contain_center == JNI_TRUE ? 1u : 0u, &disposition, &result);
   log_and_free_result("render_player", status, result);
@@ -301,7 +336,10 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererFree(
   (void)env;
   (void)self;
   if (renderer != 0) {
-    nux_renderer_android_wgpu_free((struct NuxAndroidRenderer *)from_handle(renderer));
+    struct NuxieRendererHost *host = from_handle(renderer);
+    nux_renderer_android_wgpu_free(host->renderer);
+    ANativeWindow_release(host->window);
+    free(host);
   }
 }
 

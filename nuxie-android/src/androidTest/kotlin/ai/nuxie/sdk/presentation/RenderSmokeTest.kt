@@ -43,15 +43,15 @@ class RenderSmokeTest {
         instrumentation.addMonitor(monitor)
         val application = context.applicationContext as Application
 
-        val intent = Intent(context, NuxieExperienceActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            putExtra(NuxieExperienceActivity.EXTRA_RIV_PATH, rivFile.absolutePath)
-        }
-        context.startActivity(intent)
-        activity = monitor.waitForActivityWithTimeout(15_000)
-        assertTrue("Experience activity must launch", activity != null)
-
         try {
+            val intent = Intent(context, NuxieExperienceActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra(NuxieExperienceActivity.EXTRA_RIV_PATH, rivFile.absolutePath)
+            }
+            context.startActivity(intent)
+            activity = monitor.waitForActivityWithTimeout(15_000)
+            assertTrue("Experience activity must launch", activity != null)
+
             // Let the frame loop run.
             SystemClock.sleep(3_000)
             assertTrue(
