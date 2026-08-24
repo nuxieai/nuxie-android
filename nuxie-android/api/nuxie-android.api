@@ -301,6 +301,91 @@ public final class ai/nuxie/sdk/TriggerUpdate$Journey : ai/nuxie/sdk/TriggerUpda
 	public fun toString ()Ljava/lang/String;
 }
 
+public abstract interface class ai/nuxie/sdk/commerce/NuxiePurchaseDelegate {
+	public abstract fun purchase (Lai/nuxie/sdk/commerce/StoreProduct;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public abstract fun restorePurchases (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+}
+
+public final class ai/nuxie/sdk/commerce/PurchaseHandlingMode : java/lang/Enum {
+	public static final field APP_MANAGED Lai/nuxie/sdk/commerce/PurchaseHandlingMode;
+	public static final field NUXIE_MANAGED Lai/nuxie/sdk/commerce/PurchaseHandlingMode;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lai/nuxie/sdk/commerce/PurchaseHandlingMode;
+	public static fun values ()[Lai/nuxie/sdk/commerce/PurchaseHandlingMode;
+}
+
+public abstract interface class ai/nuxie/sdk/commerce/PurchaseResult {
+}
+
+public final class ai/nuxie/sdk/commerce/PurchaseResult$Cancelled : ai/nuxie/sdk/commerce/PurchaseResult {
+	public static final field INSTANCE Lai/nuxie/sdk/commerce/PurchaseResult$Cancelled;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/commerce/PurchaseResult$Failed : ai/nuxie/sdk/commerce/PurchaseResult {
+	public fun <init> (Ljava/lang/Throwable;)V
+	public final fun component1 ()Ljava/lang/Throwable;
+	public final fun copy (Ljava/lang/Throwable;)Lai/nuxie/sdk/commerce/PurchaseResult$Failed;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/commerce/PurchaseResult$Failed;Ljava/lang/Throwable;ILjava/lang/Object;)Lai/nuxie/sdk/commerce/PurchaseResult$Failed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCause ()Ljava/lang/Throwable;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/commerce/PurchaseResult$Pending : ai/nuxie/sdk/commerce/PurchaseResult {
+	public static final field INSTANCE Lai/nuxie/sdk/commerce/PurchaseResult$Pending;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/commerce/PurchaseResult$Purchased : ai/nuxie/sdk/commerce/PurchaseResult {
+	public static final field INSTANCE Lai/nuxie/sdk/commerce/PurchaseResult$Purchased;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public abstract interface class ai/nuxie/sdk/commerce/RestoreResult {
+}
+
+public final class ai/nuxie/sdk/commerce/RestoreResult$Failed : ai/nuxie/sdk/commerce/RestoreResult {
+	public fun <init> (Ljava/lang/Throwable;)V
+	public final fun component1 ()Ljava/lang/Throwable;
+	public final fun copy (Ljava/lang/Throwable;)Lai/nuxie/sdk/commerce/RestoreResult$Failed;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/commerce/RestoreResult$Failed;Ljava/lang/Throwable;ILjava/lang/Object;)Lai/nuxie/sdk/commerce/RestoreResult$Failed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCause ()Ljava/lang/Throwable;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/commerce/RestoreResult$NoPurchases : ai/nuxie/sdk/commerce/RestoreResult {
+	public static final field INSTANCE Lai/nuxie/sdk/commerce/RestoreResult$NoPurchases;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/commerce/RestoreResult$Restored : ai/nuxie/sdk/commerce/RestoreResult {
+	public static final field INSTANCE Lai/nuxie/sdk/commerce/RestoreResult$Restored;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/commerce/StoreProduct {
+	public final fun getBasePlanId ()Ljava/lang/String;
+	public final fun getOfferId ()Ljava/lang/String;
+	public final fun getPlacementId ()Ljava/lang/String;
+	public final fun getProductId ()Ljava/lang/String;
+	public final fun getRawProduct ()Lcom/android/billingclient/api/ProductDetails;
+	public final fun getStoreProductId ()Ljava/lang/String;
+}
+
 public final class ai/nuxie/sdk/features/FeatureAccess {
 	public fun <init> (ZZLjava/lang/Double;Lai/nuxie/sdk/features/FeatureType;)V
 	public final fun component1 ()Z

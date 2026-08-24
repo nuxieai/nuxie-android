@@ -1,0 +1,167 @@
+package ai.nuxie.sdk.commerce
+
+import com.android.billingclient.api.BillingClient
+import com.android.billingclient.api.ProductDetails
+
+internal sealed interface OfferSelection {
+    data object None : OfferSelection
+    data object Automatic : OfferSelection
+    data class Exact(val offerId: String) : OfferSelection
+}
+
+internal data class CatalogProductRequest(
+    val productId: String,
+    val storeProductId: String,
+    @BillingClient.ProductType val productType: String,
+    val basePlanId: String? = null,
+    val offerSelection: OfferSelection = OfferSelection.None,
+    val placementId: String? = null,
+    val isOfferPersonalized: Boolean = false,
+)
+
+internal data class ProductQuery(
+    val productId: String,
+    @BillingClient.ProductType val productType: String,
+)
+
+internal fun interface ProductDetailsQuery {
+    suspend fun query(products: List<ProductQuery>): ProductDetailsQueryResult
+}
+
+internal sealed interface ProductDetailsQueryResult {
+    data class Success(val products: List<PlayProductDetails>) : ProductDetailsQueryResult
+    data class Failed(val responseCode: Int, val debugMessage: String) : ProductDetailsQueryResult
+}
+
+internal data class PlayProductDetails(
+    val productId: String,
+    @BillingClient.ProductType val productType: String,
+    val rawProduct: ProductDetails?,
+    val subscriptionOffers: List<PlaySubscriptionOffer>,
+    val oneTimePurchaseOfferToken: String? = null,
+)
+
+internal data class PlaySubscriptionOffer(
+    val basePlanId: String,
+    val offerId: String?,
+    val offerToken: String,
+    val offerTags: List<String>,
+    val pricingPhases: List<PlayPricingPhase>,
+)
+
+internal data class PlayPricingPhase(
+    val priceAmountMicros: Long,
+    val billingPeriod: String,
+    val billingCycleCount: Int,
+    val recurrenceMode: PlayRecurrenceMode,
+)
+
+internal enum class PlayRecurrenceMode {
+    FINITE,
+    INFINITE,
+    NON_RECURRING,
+}
+
+internal class ProductResolutionException(message: String) : IllegalStateException(message)
+
+internal class ProductResolver(
+    private val productDetailsQuery: ProductDetailsQuery,
+) {
+    suspend fun resolve(requests: List<CatalogProductRequest>): List<StoreProduct> {
+        if (requests.isEmpty()) return emptyList()
+
+        val queryProducts = requests
+            .map { ProductQuery(it.storeProductId, it.productType) }
+            .distinct()
+        val details = when (val result = productDetailsQuery.query(queryProducts)) {
+            is ProductDetailsQueryResult.Success -> result.products.associateBy {
+                it.productId to it.productType
+            }
+            is ProductDetailsQueryResult.Failed -> throw ProductResolutionException(
+                "Play product query failed (${result.responseCode}): ${result.debugMessage}",
+            )
+        }
+
+        return requests.mapNotNull { request ->
+            details[request.storeProductId to request.productType]?.let { product ->
+                resolve(request, product)
+            }
+        }
+    }
+
+    private fun resolve(
+        request: CatalogProductRequest,
+        product: PlayProductDetails,
+    ): StoreProduct? {
+        if (request.productType != BillingClient.ProductType.SUBS) {
+            return StoreProduct(
+                productId = request.productId,
+                storeProductId = request.storeProductId,
+                basePlanId = null,
+                offerId = null,
+                placementId = request.placementId,
+                rawProduct = product.rawProduct,
+                offerToken = product.oneTimePurchaseOfferToken,
+                isOfferPersonalized = request.isOfferPersonalized,
+            )
+        }
+
+        val basePlanId = request.basePlanId ?: return null
+        val basePlan = product.subscriptionOffers.firstOrNull {
+            it.basePlanId == basePlanId && it.offerId == null
+        } ?: return null
+        val selected = when (request.offerSelection) {
+            OfferSelection.None -> basePlan
+            OfferSelection.Automatic -> selectAutomatic(
+                product.subscriptionOffers.filter { it.basePlanId == basePlanId },
+            ) ?: basePlan
+            is OfferSelection.Exact -> product.subscriptionOffers.firstOrNull {
+                it.basePlanId == basePlanId &&
+                    it.offerId == request.offerSelection.offerId &&
+                    it.introductoryPhases.size <= 1
+            } ?: basePlan
+        }
+        return StoreProduct(
+            productId = request.productId,
+            storeProductId = request.storeProductId,
+            basePlanId = selected.basePlanId,
+            offerId = selected.offerId,
+            placementId = request.placementId,
+            rawProduct = product.rawProduct,
+            offerToken = selected.offerToken,
+            isOfferPersonalized = request.isOfferPersonalized,
+        )
+    }
+
+    private val PlaySubscriptionOffer.introductoryPhases: List<PlayPricingPhase>
+        get() = pricingPhases.filter { it.recurrenceMode != PlayRecurrenceMode.INFINITE }
+
+    private fun selectAutomatic(offers: List<PlaySubscriptionOffer>): PlaySubscriptionOffer? {
+        val eligible = offers.filter {
+            it.offerId != null &&
+                IGNORE_OFFER_TAG !in it.offerTags &&
+                it.introductoryPhases.size == 1
+        }
+        val freeTrials = eligible.filter { it.introductoryPhases.single().priceAmountMicros == 0L }
+        if (freeTrials.isNotEmpty()) {
+            return freeTrials.maxByOrNull {
+                val phase = it.introductoryPhases.single()
+                billingPeriodDays(phase.billingPeriod) * phase.billingCycleCount.coerceAtLeast(1)
+            }
+        }
+        return eligible
+            .filter { it.introductoryPhases.single().priceAmountMicros > 0L }
+            .minByOrNull { it.introductoryPhases.single().priceAmountMicros }
+    }
+
+    private fun billingPeriodDays(period: String): Long {
+        val match = ISO_PERIOD.matchEntire(period) ?: return 0L
+        fun value(group: Int): Long = match.groupValues[group].toLongOrNull() ?: 0L
+        return value(1) * 365L + value(2) * 30L + value(3) * 7L + value(4)
+    }
+
+    private companion object {
+        const val IGNORE_OFFER_TAG = "nuxie-ignore-offer"
+        val ISO_PERIOD = Regex("P(?:(\\d+)Y)?(?:(\\d+)M)?(?:(\\d+)W)?(?:(\\d+)D)?")
+    }
+}
