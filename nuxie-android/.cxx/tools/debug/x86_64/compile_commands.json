@@ -1,7 +1,0 @@
-[
-{
-  "directory": "/Users/levi/dev/nuxie-dev/.claude/worktrees/composer-options-placement-dd7d14/sdks/nuxie-android/nuxie-android/.cxx/Debug/26b713l4/x86_64",
-  "command": "/opt/homebrew/share/android-commandlinetools/ndk/26.1.10909125/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang --target=x86_64-none-linux-android23 --sysroot=/opt/homebrew/share/android-commandlinetools/ndk/26.1.10909125/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -Dnuxie_runtime_android_EXPORTS -I/Users/levi/dev/nuxie-dev/.claude/worktrees/composer-options-placement-dd7d14/sdks/nuxie-android/nuxie-android/src/main/cpp/../../../../runtime/prebuilt/include -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -o CMakeFiles/nuxie_runtime_android.dir/nuxie_runtime_android.c.o -c /Users/levi/dev/nuxie-dev/.claude/worktrees/composer-options-placement-dd7d14/sdks/nuxie-android/nuxie-android/src/main/cpp/nuxie_runtime_android.c",
-  "file": "/Users/levi/dev/nuxie-dev/.claude/worktrees/composer-options-placement-dd7d14/sdks/nuxie-android/nuxie-android/src/main/cpp/nuxie_runtime_android.c"
-}
-]
