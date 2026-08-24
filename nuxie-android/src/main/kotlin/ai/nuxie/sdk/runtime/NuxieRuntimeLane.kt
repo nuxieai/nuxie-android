@@ -3,6 +3,7 @@ package ai.nuxie.sdk.runtime
 import android.util.Log
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -56,6 +57,20 @@ internal class NuxieRuntimeLane {
     /** Run remaining work, then stop the lane. */
     fun shutdown() {
         executor.shutdown()
+    }
+
+    /**
+     * After [shutdown], wait for already-accepted work to drain. Returns
+     * true once the lane has fully terminated; false on timeout or if the
+     * lane was never shut down.
+     */
+    fun awaitQuiescence(timeoutMs: Long): Boolean {
+        return try {
+            executor.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
     }
 
     private companion object {

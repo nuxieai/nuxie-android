@@ -141,9 +141,15 @@ internal class ExperienceSurfaceHost(
             attached = false
             detached.countDown()
         }
-        // A shut-down lane runs nothing anymore, so there is no pending
-        // render to drain and nothing to wait for.
-        if (accepted && !detached.await(SURFACE_DETACH_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+        // A rejected marker means the lane is shutting down, but orderly
+        // shutdown still drains frames accepted before it; wait for full
+        // termination instead so none of them can touch the dead surface.
+        val drained = if (accepted) {
+            detached.await(SURFACE_DETACH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } else {
+            lane.awaitQuiescence(SURFACE_DETACH_TIMEOUT_MS)
+        }
+        if (!drained) {
             Log.w(LOG_TAG, "Runtime lane did not confirm surface detach in time")
         }
     }
