@@ -7,14 +7,21 @@ import com.android.billingclient.api.ProductDetailsResponseListener
 import com.android.billingclient.api.Purchase
 import com.android.billingclient.api.PurchasesUpdatedListener
 import com.android.billingclient.api.QueryProductDetailsParams
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class PlayBillingConnectionTest {
     @Test
     fun clientIsLazyAndRegistersOneGlobalPurchaseListener() {
@@ -55,36 +62,105 @@ class PlayBillingConnectionTest {
     }
 
     @Test
-    fun disconnectRetriesWithExponentialBackoff() {
-        val delays = mutableListOf<Long>()
+    fun transientSetupFailuresCoalesceAndRetryWithCappedExponentialBackoff() = runTest {
         val factory = FakeBillingClientFactory()
         val connection = PlayBillingConnection(
             factory = factory,
-            scope = testScope(),
+            scope = this,
             initialRetryDelayMillis = 100,
-            maxRetryDelayMillis = 1_000,
-            sleepMillis = { delays += it },
+            maxRetryDelayMillis = 250,
         )
         connection.connect()
 
-        factory.client.connectionListener!!.onBillingServiceDisconnected()
-        factory.client.connectionListener!!.onBillingServiceDisconnected()
+        factory.client.finishSetup(BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE)
+        factory.client.finishSetup(BillingClient.BillingResponseCode.NETWORK_ERROR)
+        advanceTimeBy(99)
+        runCurrent()
+        assertEquals(1, factory.client.startCount)
 
-        assertEquals(listOf(100L, 200L), delays)
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(2, factory.client.startCount)
+
+        factory.client.finishSetup(BillingClient.BillingResponseCode.ERROR)
+        advanceTimeBy(199)
+        runCurrent()
+        assertEquals(2, factory.client.startCount)
+
+        advanceTimeBy(1)
+        runCurrent()
         assertEquals(3, factory.client.startCount)
+
+        factory.client.finishSetup(BillingClient.BillingResponseCode.SERVICE_DISCONNECTED)
+        advanceTimeBy(250)
+        runCurrent()
+        assertEquals(4, factory.client.startCount)
+
+        factory.client.finishSetup(BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE)
+        advanceTimeBy(250)
+        runCurrent()
+        assertEquals(5, factory.client.startCount)
+
+        connection.close()
+    }
+
+    @Test
+    fun terminalSetupFailureCompletesAllWaitersAndOnlyLaterCallReconnects() = runTest {
+        val factory = FakeBillingClientFactory()
+        val connection = PlayBillingConnection(
+            factory = factory,
+            scope = this,
+            initialRetryDelayMillis = 100,
+        )
+        val query = listOf(ProductQuery("product", BillingClient.ProductType.INAPP))
+        val first = async { runCatching { connection.query(query) } }
+        val second = async { runCatching { connection.query(query) } }
+        runCurrent()
+
+        assertEquals(1, factory.createdCount)
+        assertEquals(1, factory.client.startCount)
+        factory.client.finishSetup(BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE)
+        factory.client.finishSetup(
+            BillingClient.BillingResponseCode.DEVELOPER_ERROR,
+            "invalid setup",
+        )
+        runCurrent()
+
+        val firstFailure = first.await().exceptionOrNull()
+        val secondFailure = second.await().exceptionOrNull()
+        assertTrue(firstFailure is BillingUnavailableException)
+        assertTrue(secondFailure is BillingUnavailableException)
+        assertEquals(
+            BillingClient.BillingResponseCode.DEVELOPER_ERROR,
+            (firstFailure as BillingUnavailableException).responseCode,
+        )
+        assertEquals("invalid setup", firstFailure.debugMessage)
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertEquals(1, factory.createdCount)
+
+        val later = async { runCatching { connection.query(query) } }
+        runCurrent()
+        assertEquals(2, factory.createdCount)
+        assertEquals(1, factory.client.startCount)
+
+        later.cancel()
+        connection.close()
     }
 
     private fun testScope() = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
 
     private class FakeBillingClientFactory : BillingClientAdapterFactory {
-        val client = FakeBillingClientAdapter()
-        var createdCount = 0
+        private val clients = mutableListOf<FakeBillingClientAdapter>()
+        val client: FakeBillingClientAdapter
+            get() = clients.last()
+        val createdCount: Int
+            get() = clients.size
         var purchaseListener: PurchasesUpdatedListener? = null
 
         override fun create(listener: PurchasesUpdatedListener): BillingClientAdapter {
-            createdCount += 1
             purchaseListener = listener
-            return client
+            return FakeBillingClientAdapter().also(clients::add)
         }
     }
 
@@ -96,6 +172,18 @@ class PlayBillingConnectionTest {
         override fun startConnection(listener: BillingClientStateListener) {
             startCount += 1
             connectionListener = listener
+        }
+
+        fun finishSetup(
+            @BillingClient.BillingResponseCode responseCode: Int,
+            debugMessage: String = "setup result",
+        ) {
+            connectionListener!!.onBillingSetupFinished(
+                BillingResult.newBuilder()
+                    .setResponseCode(responseCode)
+                    .setDebugMessage(debugMessage)
+                    .build(),
+            )
         }
 
         override fun endConnection() = Unit

@@ -41,13 +41,17 @@ internal data class PurchaseUpdate(
     val purchases: List<Purchase>?,
 )
 
+internal class BillingUnavailableException(
+    @BillingClient.BillingResponseCode val responseCode: Int,
+    val debugMessage: String,
+) : IllegalStateException("Play Billing unavailable ($responseCode): $debugMessage")
+
 internal class PlayBillingConnection(
     private val factory: BillingClientAdapterFactory,
     private val scope: CoroutineScope,
     private val onPurchasesUpdated: (PurchaseUpdate) -> Unit = {},
     private val initialRetryDelayMillis: Long = 1_000,
     private val maxRetryDelayMillis: Long = 60_000,
-    private val sleepMillis: suspend (Long) -> Unit = { delay(it) },
 ) : ProductDetailsQuery {
     private val lock = Any()
     private var client: BillingClientAdapter? = null
@@ -56,6 +60,7 @@ internal class PlayBillingConnection(
     private var retryAttempt = 0
     private var reconnectJob: Job? = null
     private var ready = CompletableDeferred<Unit>()
+    private var terminalFailure = false
 
     @Volatile
     var lastUpdate: PurchaseUpdate? = null
@@ -75,9 +80,20 @@ internal class PlayBillingConnection(
                 if (closed) return
                 if (result.responseCode == BillingClient.BillingResponseCode.OK) {
                     retryAttempt = 0
+                    terminalFailure = false
                     ready.complete(Unit)
-                } else {
+                } else if (result.responseCode.isTransientSetupFailure()) {
                     scheduleReconnectLocked()
+                } else {
+                    terminalFailure = true
+                    retryAttempt = 0
+                    reconnectJob?.cancel()
+                    reconnectJob = null
+                    client?.endConnection()
+                    client = null
+                    ready.completeExceptionally(
+                        BillingUnavailableException(result.responseCode, result.debugMessage),
+                    )
                 }
             }
         }
@@ -86,6 +102,7 @@ internal class PlayBillingConnection(
             synchronized(lock) {
                 connecting = false
                 if (closed) return
+                if (terminalFailure) return
                 if (ready.isCompleted) ready = CompletableDeferred()
                 scheduleReconnectLocked()
             }
@@ -95,7 +112,9 @@ internal class PlayBillingConnection(
     fun connect() {
         synchronized(lock) {
             if (closed || connecting || reconnectJob?.isActive == true) return
+            terminalFailure = false
             val billingClient = client ?: factory.create(purchaseListener).also { client = it }
+            if (ready.isCompleted) ready = CompletableDeferred()
             if (billingClient.isReady) {
                 retryAttempt = 0
                 ready.complete(Unit)
@@ -143,6 +162,13 @@ internal class PlayBillingConnection(
                     continuation.resume(
                         ProductDetailsQueryResult.Success(
                             queryResult.productDetailsList.map(::projectProductDetails),
+                            queryResult.unfetchedProductList.map { unfetched ->
+                                PlayUnfetchedProduct(
+                                    productId = unfetched.productId,
+                                    productType = unfetched.productType,
+                                    statusCode = unfetched.statusCode,
+                                )
+                            },
                         ),
                     )
                 }
@@ -165,7 +191,7 @@ internal class PlayBillingConnection(
         val delayMillis = retryDelay(retryAttempt)
         retryAttempt += 1
         reconnectJob = scope.launch {
-            sleepMillis(delayMillis)
+            delay(delayMillis)
             synchronized(lock) { reconnectJob = null }
             connect()
         }
@@ -180,6 +206,10 @@ internal class PlayBillingConnection(
         return result.coerceAtMost(maxRetryDelayMillis)
     }
 
+    // ProductDetails and its nested Billing value types are final and have no
+    // public JVM constructors, so a complete valid graph cannot be built in a
+    // local test. Keep this direct native projection at the device boundary;
+    // resolver tests instead cover the projected PlayProductDetails contract.
     private fun projectProductDetails(details: ProductDetails) = PlayProductDetails(
         productId = details.productId,
         productType = details.productType,
@@ -209,6 +239,15 @@ internal class PlayBillingConnection(
 
     private companion object {
         const val LOG_TAG = "NuxieCommerce"
+
+        fun Int.isTransientSetupFailure(): Boolean = when (this) {
+            BillingClient.BillingResponseCode.SERVICE_DISCONNECTED,
+            BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE,
+            BillingClient.BillingResponseCode.NETWORK_ERROR,
+            BillingClient.BillingResponseCode.ERROR,
+            -> true
+            else -> false
+        }
     }
 }
 
