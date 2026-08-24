@@ -12,6 +12,30 @@ import org.junit.Test
 
 class ProductResolverTest {
     @Test
+    fun resolutionCachesTheSignedCatalogMappingForLaterRecovery() = runBlocking {
+        val store = InMemoryPurchaseEvidenceStore()
+        val resolver = ProductResolver(
+            FakeProductDetailsQuery(
+                products = listOf(
+                    PlayProductDetails(
+                        productId = "play-pro",
+                        productType = BillingClient.ProductType.SUBS,
+                        rawProduct = null,
+                        subscriptionOffers = listOf(
+                            offer(basePlanId = "annual", offerId = null, token = "annual-base"),
+                        ),
+                    ),
+                ),
+            ),
+            store,
+        )
+
+        resolver.resolve(listOf(request(OfferSelection.None)))
+
+        assertEquals("nuxie-pro", store.loadProductMappings().single().nuxieProductId)
+    }
+
+    @Test
     fun noneSelectsTheConfiguredBasePlan() = runBlocking {
         val query = FakeProductDetailsQuery(
             products = listOf(
@@ -26,7 +50,7 @@ class ProductResolverTest {
                 ),
             ),
         )
-        val resolver = ProductResolver(query)
+        val resolver = resolver(query)
 
         val product = resolver.resolve(
             listOf(
@@ -214,7 +238,7 @@ class ProductResolverTest {
     @Test
     fun selectedPlanOfferTokenAndPersonalizationStayTogether() = runBlocking {
         val rawProduct = nativeProductDetailsIdentity()
-        val resolver = ProductResolver(
+        val resolver = resolver(
             FakeProductDetailsQuery(
                 products = listOf(
                     PlayProductDetails(
@@ -262,7 +286,7 @@ class ProductResolverTest {
     @Test
     fun productMissingFromQueryResultFailsResolution() = runBlocking {
         val failure = resolutionFailure {
-            ProductResolver(FakeProductDetailsQuery()).resolve(
+            resolver(FakeProductDetailsQuery()).resolve(
                 listOf(request(OfferSelection.None)),
             )
         }
@@ -275,7 +299,7 @@ class ProductResolverTest {
     @Test
     fun unfetchedProductFailsResolutionWithPlayReasonCode() = runBlocking {
         val failure = resolutionFailure {
-            ProductResolver(
+            resolver(
                 FakeProductDetailsQuery(
                     unfetchedProducts = listOf(
                         PlayUnfetchedProduct(
@@ -307,7 +331,7 @@ class ProductResolverTest {
     @Test
     fun resolutionFailureNamesEveryUnresolvableProduct() = runBlocking {
         val failure = resolutionFailure {
-            ProductResolver(
+            resolver(
                 FakeProductDetailsQuery(
                     products = listOf(
                         PlayProductDetails(
@@ -354,7 +378,7 @@ class ProductResolverTest {
 
     @Test
     fun oneTimeProductKeepsTheNativeOfferToken() = runBlocking {
-        val resolver = ProductResolver(
+        val resolver = resolver(
             FakeProductDetailsQuery(
                 listOf(
                     PlayProductDetails(
@@ -384,7 +408,7 @@ class ProductResolverTest {
     }
 
     private fun resolverWith(vararg offers: PlaySubscriptionOffer): ProductResolver =
-        ProductResolver(
+        resolver(
             FakeProductDetailsQuery(
                 products = listOf(
                     PlayProductDetails(
@@ -396,6 +420,11 @@ class ProductResolverTest {
                 ),
             ),
         )
+
+    private fun resolver(query: ProductDetailsQuery): ProductResolver = ProductResolver(
+        query,
+        InMemoryPurchaseEvidenceStore(),
+    )
 
     private fun request(selection: OfferSelection) = CatalogProductRequest(
         productId = "nuxie-pro",

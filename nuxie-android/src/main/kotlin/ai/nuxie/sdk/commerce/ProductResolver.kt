@@ -2,6 +2,7 @@ package ai.nuxie.sdk.commerce
 
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.ProductDetails
+import ai.nuxie.sdk.features.LocalPurchaseGrant
 
 internal sealed interface OfferSelection {
     data object None : OfferSelection
@@ -17,6 +18,11 @@ internal data class CatalogProductRequest(
     val offerSelection: OfferSelection = OfferSelection.None,
     val placementId: String? = null,
     val isOfferPersonalized: Boolean = false,
+    val consumable: Boolean = false,
+    val localFeatureGrants: List<LocalPurchaseGrant> = emptyList(),
+    val licensingPublicKey: String? = null,
+    val experienceId: String? = null,
+    val experienceVersion: String? = null,
 )
 
 internal data class ProductQuery(
@@ -76,6 +82,7 @@ internal class ProductResolutionException(message: String) : IllegalStateExcepti
 
 internal class ProductResolver(
     private val productDetailsQuery: ProductDetailsQuery,
+    private val purchaseStore: PurchaseEvidenceStore,
 ) {
     suspend fun resolve(requests: List<CatalogProductRequest>): List<StoreProduct> {
         if (requests.isEmpty()) return emptyList()
@@ -132,6 +139,9 @@ internal class ProductResolver(
                 "Unable to resolve Play products: ${failures.joinToString("; ")}",
             )
         }
+        if (resolvedProducts.any { !purchaseStore.upsertProductMapping(it.toStoredMapping()) }) {
+            throw ProductResolutionException("Unable to cache resolved Play product mappings.")
+        }
 
         return resolvedProducts
     }
@@ -150,6 +160,11 @@ internal class ProductResolver(
                 rawProduct = product.rawProduct,
                 offerToken = product.oneTimePurchaseOfferToken,
                 isOfferPersonalized = request.isOfferPersonalized,
+                productType = request.productType,
+                consumable = request.consumable,
+                localFeatureGrants = request.localFeatureGrants,
+                licensingPublicKey = request.licensingPublicKey,
+                purchaseContext = PurchaseContext(request.experienceId, request.experienceVersion),
             )
         }
 
@@ -177,11 +192,34 @@ internal class ProductResolver(
             rawProduct = product.rawProduct,
             offerToken = selected.offerToken,
             isOfferPersonalized = request.isOfferPersonalized,
+            productType = request.productType,
+            consumable = false,
+            localFeatureGrants = request.localFeatureGrants,
+            licensingPublicKey = request.licensingPublicKey,
+            purchaseContext = PurchaseContext(request.experienceId, request.experienceVersion),
         )
     }
 
     private fun CatalogProductRequest.failureDescription(reason: String): String =
         "$productId ($storeProductId, $productType): $reason"
+
+    private fun StoreProduct.toStoredMapping() = StoredProductMapping(
+        storeProductId = storeProductId,
+        nuxieProductId = productId,
+        basePlanId = basePlanId,
+        offerId = offerId,
+        productType = productType,
+        consumable = consumable,
+        context = StoredPurchaseContext(
+            placementId,
+            purchaseContext?.experienceId,
+            purchaseContext?.experienceVersion,
+        ),
+        localFeatureGrants = localFeatureGrants.map {
+            StoredLocalPurchaseGrant(it.featureId, it.type.name, it.unlimited)
+        },
+        licensingPublicKey = licensingPublicKey,
+    )
 
     private val PlaySubscriptionOffer.introductoryPhases: List<PlayPricingPhase>
         get() = pricingPhases.filter { it.recurrenceMode != PlayRecurrenceMode.INFINITE }

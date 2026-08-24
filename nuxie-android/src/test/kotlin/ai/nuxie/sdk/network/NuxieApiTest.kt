@@ -2,6 +2,7 @@ package ai.nuxie.sdk.network
 
 import ai.nuxie.sdk.NuxieEnvironment
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -101,5 +102,63 @@ class NuxieApiTest {
             """{"apiKey":"pk_test_key","customerId":"customer-1","featureId":"exports","requiredBalance":2.0,"entityId":"project-1"}""",
             responding.request!!.body.decodeToString(),
         )
+    }
+
+    @Test
+    fun playPurchaseUsesExactCamelCaseWireBody() {
+        val transport = object : HttpTransport {
+            lateinit var request: HttpTransport.Request
+            override fun execute(request: HttpTransport.Request): HttpTransport.Response {
+                this.request = request
+                return HttpTransport.Response(
+                    200,
+                    """{"success":true,"customer_id":"customer-1","features":[]}""".encodeToByteArray(),
+                )
+            }
+        }
+
+        val response = NuxieApi("pk_test_key", NuxieEnvironment.DEVELOPMENT, transport).postPurchase(
+            NuxieApi.PlayPurchaseReport(
+                packageName = "com.example.app",
+                productId = "pro",
+                purchaseToken = "token-1",
+                basePlanId = "annual",
+                offerId = "launch",
+                obfuscatedAccountId = "account-hash",
+                distinctId = "customer-1",
+            ),
+        )
+
+        assertEquals("https://dev-i.nuxie.ai/purchase", transport.request.url.toString())
+        assertTrue(response.success)
+        assertEquals("customer-1", response.customerId)
+        assertEquals(
+            """{"apiKey":"pk_test_key","type":"playstore","packageName":"com.example.app","productId":"pro","purchaseToken":"token-1","basePlanId":"annual","offerId":"launch","obfuscatedAccountId":"account-hash","distinctId":"customer-1"}""",
+            transport.request.body.decodeToString(),
+        )
+    }
+
+    @Test
+    fun playPurchasePreservesARejectedSuccessFlagOnA2xxResponse() {
+        val transport = object : HttpTransport {
+            override fun execute(request: HttpTransport.Request) = HttpTransport.Response(
+                200,
+                """{"success":false,"error":"verification failed"}""".encodeToByteArray(),
+            )
+        }
+
+        val response = NuxieApi("pk_test_key", NuxieEnvironment.DEVELOPMENT, transport).postPurchase(
+            NuxieApi.PlayPurchaseReport(
+                packageName = "com.example.app",
+                productId = "pro",
+                purchaseToken = "token-1",
+                basePlanId = null,
+                offerId = null,
+                obfuscatedAccountId = null,
+                distinctId = "customer-1",
+            ),
+        )
+
+        assertFalse(response.success)
     }
 }

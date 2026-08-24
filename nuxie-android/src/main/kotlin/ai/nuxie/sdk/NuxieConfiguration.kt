@@ -1,5 +1,8 @@
 package ai.nuxie.sdk
 
+import ai.nuxie.sdk.commerce.NuxiePurchaseDelegate
+import ai.nuxie.sdk.commerce.PurchaseHandlingMode
+
 /** Configuration captured when [Nuxie.setup] initializes the SDK. */
 class NuxieConfiguration(val apiKey: String) {
     var environment: NuxieEnvironment = NuxieEnvironment.PRODUCTION
@@ -15,6 +18,10 @@ class NuxieConfiguration(val apiKey: String) {
      * invoked until the capture pipeline is introduced.
      */
     var beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null
+
+    var purchaseHandlingMode: PurchaseHandlingMode = PurchaseHandlingMode.NUXIE_MANAGED
+
+    var purchaseDelegate: NuxiePurchaseDelegate? = null
 }
 
 enum class NuxieEnvironment {

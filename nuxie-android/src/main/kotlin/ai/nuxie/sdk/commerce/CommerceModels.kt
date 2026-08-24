@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.commerce
 
+import ai.nuxie.sdk.features.LocalPurchaseGrant
 import com.android.billingclient.api.ProductDetails
 
 /** The exact Nuxie Product, Placement, and live Play details retained for checkout. */
@@ -12,7 +13,31 @@ class StoreProduct internal constructor(
     val rawProduct: ProductDetails?,
     internal val offerToken: String?,
     internal val isOfferPersonalized: Boolean,
+    internal val productType: String,
+    internal val consumable: Boolean = false,
+    internal val localFeatureGrants: List<LocalPurchaseGrant> = emptyList(),
+    internal val licensingPublicKey: String? = null,
+    internal val purchaseContext: PurchaseContext? = null,
 )
+
+/** A configured Play subscription upgrade or downgrade. */
+data class SubscriptionReplacement(
+    val oldPurchaseToken: String,
+    val replacementMode: ReplacementMode,
+)
+
+/** Play's supported subscription replacement policies. Nuxie never guesses one. */
+enum class ReplacementMode {
+    WITH_TIME_PRORATION,
+    CHARGE_PRORATED_PRICE,
+    WITHOUT_PRORATION,
+    CHARGE_FULL_PRICE,
+    DEFERRED,
+}
+
+/** Checkout found an active subscription but no replacement policy was configured. */
+class SubscriptionReplacementRequiredException internal constructor() :
+    IllegalStateException("An active subscription requires an explicit SubscriptionReplacement.")
 
 /** The result of launching checkout for the [StoreProduct] shown to the customer. */
 sealed interface PurchaseResult {
@@ -41,3 +66,8 @@ interface NuxiePurchaseDelegate {
 
     suspend fun restorePurchases(): RestoreResult
 }
+
+internal data class PurchaseContext(
+    val experienceId: String?,
+    val experienceVersion: String?,
+)

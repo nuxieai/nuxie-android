@@ -1,8 +1,12 @@
 package ai.nuxie.sdk.commerce
 
+import android.app.Activity
 import android.content.Context
 import android.util.Log
+import com.android.billingclient.api.AcknowledgePurchaseParams
+import com.android.billingclient.api.AcknowledgePurchaseResponseListener
 import com.android.billingclient.api.BillingClient
+import com.android.billingclient.api.BillingFlowParams
 import com.android.billingclient.api.BillingClientStateListener
 import com.android.billingclient.api.BillingResult
 import com.android.billingclient.api.PendingPurchasesParams
@@ -10,7 +14,11 @@ import com.android.billingclient.api.ProductDetails
 import com.android.billingclient.api.ProductDetailsResponseListener
 import com.android.billingclient.api.Purchase
 import com.android.billingclient.api.PurchasesUpdatedListener
+import com.android.billingclient.api.PurchasesResponseListener
+import com.android.billingclient.api.QueryPurchasesParams
 import com.android.billingclient.api.QueryProductDetailsParams
+import com.android.billingclient.api.ConsumeParams
+import com.android.billingclient.api.ConsumeResponseListener
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -30,6 +38,14 @@ internal interface BillingClientAdapter {
         params: QueryProductDetailsParams,
         listener: ProductDetailsResponseListener,
     )
+
+    fun launchBillingFlow(activity: Activity, params: BillingFlowParams): BillingResult
+
+    fun queryPurchasesAsync(params: QueryPurchasesParams, listener: PurchasesResponseListener)
+
+    fun acknowledgePurchase(params: AcknowledgePurchaseParams, listener: AcknowledgePurchaseResponseListener)
+
+    fun consumeAsync(params: ConsumeParams, listener: ConsumeResponseListener)
 }
 
 internal fun interface BillingClientAdapterFactory {
@@ -38,8 +54,37 @@ internal fun interface BillingClientAdapterFactory {
 
 internal data class PurchaseUpdate(
     val billingResult: BillingResult,
-    val purchases: List<Purchase>?,
+    val purchases: List<PlayPurchase>?,
 )
+
+internal data class PlayPurchase(
+    val purchaseToken: String,
+    val packageName: String,
+    val products: List<String>,
+    val state: StoredPurchaseState,
+    val acknowledged: Boolean,
+    val obfuscatedAccountId: String?,
+    val originalJson: String,
+    val signature: String,
+)
+
+internal data class CheckoutRequest(
+    val product: StoreProduct,
+    val obfuscatedAccountId: String,
+    val replacement: SubscriptionReplacement?,
+)
+
+internal sealed interface ActivePurchasesResult {
+    data class Success(val purchases: List<PlayPurchase>) : ActivePurchasesResult
+    data class Failed(val responseCode: Int, val debugMessage: String) : ActivePurchasesResult
+}
+
+internal interface PlayBillingGateway {
+    suspend fun launch(activity: Activity, request: CheckoutRequest): BillingResult
+    suspend fun queryActive(@BillingClient.ProductType productType: String): ActivePurchasesResult
+    suspend fun acknowledge(purchaseToken: String): BillingResult
+    suspend fun consume(purchaseToken: String): BillingResult
+}
 
 internal class BillingUnavailableException(
     @BillingClient.BillingResponseCode val responseCode: Int,
@@ -50,9 +95,10 @@ internal class PlayBillingConnection(
     private val factory: BillingClientAdapterFactory,
     private val scope: CoroutineScope,
     private val onPurchasesUpdated: (PurchaseUpdate) -> Unit = {},
+    private val onConnected: suspend () -> Unit = {},
     private val initialRetryDelayMillis: Long = 1_000,
     private val maxRetryDelayMillis: Long = 60_000,
-) : ProductDetailsQuery {
+) : ProductDetailsQuery, PlayBillingGateway {
     private val lock = Any()
     private var client: BillingClientAdapter? = null
     private var connecting = false
@@ -67,7 +113,7 @@ internal class PlayBillingConnection(
         private set
 
     private val purchaseListener = PurchasesUpdatedListener { result, purchases ->
-        val update = PurchaseUpdate(result, purchases)
+        val update = PurchaseUpdate(result, purchases?.map(::projectPurchase))
         lastUpdate = update
         Log.d(LOG_TAG, "Received Play purchase update (${result.responseCode}).")
         onPurchasesUpdated(update)
@@ -82,6 +128,7 @@ internal class PlayBillingConnection(
                     retryAttempt = 0
                     terminalFailure = false
                     ready.complete(Unit)
+                    scope.launch { onConnected() }
                 } else if (result.responseCode.isTransientSetupFailure()) {
                     scheduleReconnectLocked()
                 } else {
@@ -176,6 +223,71 @@ internal class PlayBillingConnection(
         }
     }
 
+    @Suppress("DEPRECATION")
+    override suspend fun launch(activity: Activity, request: CheckoutRequest): BillingResult {
+        val rawProduct = request.product.rawProduct ?: return billingResult(
+            BillingClient.BillingResponseCode.DEVELOPER_ERROR,
+            "StoreProduct has no live ProductDetails.",
+        )
+        val productParams = BillingFlowParams.ProductDetailsParams.newBuilder()
+            .setProductDetails(rawProduct)
+            .apply { request.product.offerToken?.let(::setOfferToken) }
+            .build()
+        val params = BillingFlowParams.newBuilder()
+            .setProductDetailsParamsList(listOf(productParams))
+            .setObfuscatedAccountId(request.obfuscatedAccountId)
+            .setIsOfferPersonalized(request.product.isOfferPersonalized)
+            .apply {
+                request.replacement?.let { replacement ->
+                    setSubscriptionUpdateParams(
+                        BillingFlowParams.SubscriptionUpdateParams.newBuilder()
+                            .setOldPurchaseToken(replacement.oldPurchaseToken)
+                            .setSubscriptionReplacementMode(replacement.replacementMode.playValue)
+                            .build(),
+                    )
+                }
+            }
+            .build()
+        return awaitClient().launchBillingFlow(activity, params)
+    }
+
+    override suspend fun queryActive(productType: String): ActivePurchasesResult {
+        val params = QueryPurchasesParams.newBuilder().setProductType(productType).build()
+        val billingClient = awaitClient()
+        return suspendCancellableCoroutine { continuation ->
+            billingClient.queryPurchasesAsync(params) { result, purchases ->
+                if (!continuation.isActive) return@queryPurchasesAsync
+                continuation.resume(
+                    if (result.responseCode == BillingClient.BillingResponseCode.OK) {
+                        ActivePurchasesResult.Success(purchases.map(::projectPurchase))
+                    } else {
+                        ActivePurchasesResult.Failed(result.responseCode, result.debugMessage)
+                    },
+                )
+            }
+        }
+    }
+
+    override suspend fun acknowledge(purchaseToken: String): BillingResult {
+        val params = AcknowledgePurchaseParams.newBuilder().setPurchaseToken(purchaseToken).build()
+        val billingClient = awaitClient()
+        return suspendCancellableCoroutine { continuation ->
+            billingClient.acknowledgePurchase(params) { result ->
+                if (continuation.isActive) continuation.resume(result)
+            }
+        }
+    }
+
+    override suspend fun consume(purchaseToken: String): BillingResult {
+        val params = ConsumeParams.newBuilder().setPurchaseToken(purchaseToken).build()
+        val billingClient = awaitClient()
+        return suspendCancellableCoroutine { continuation ->
+            billingClient.consumeAsync(params) { result, _ ->
+                if (continuation.isActive) continuation.resume(result)
+            }
+        }
+    }
+
     private suspend fun awaitClient(): BillingClientAdapter {
         connect()
         val signal = synchronized(lock) { ready }
@@ -237,6 +349,38 @@ internal class PlayBillingConnection(
         },
     )
 
+    private fun projectPurchase(purchase: Purchase): PlayPurchase = PlayPurchase(
+        purchaseToken = purchase.purchaseToken,
+        packageName = purchase.packageName,
+        products = purchase.products,
+        state = if (purchase.purchaseState == Purchase.PurchaseState.PURCHASED) {
+            StoredPurchaseState.PURCHASED
+        } else {
+            StoredPurchaseState.PENDING
+        },
+        acknowledged = purchase.isAcknowledged,
+        obfuscatedAccountId = purchase.accountIdentifiers?.obfuscatedAccountId,
+        originalJson = purchase.originalJson,
+        signature = purchase.signature,
+    )
+
+    private fun billingResult(responseCode: Int, message: String): BillingResult =
+        BillingResult.newBuilder().setResponseCode(responseCode).setDebugMessage(message).build()
+
+    private val ReplacementMode.playValue: Int
+        get() = when (this) {
+            ReplacementMode.WITH_TIME_PRORATION ->
+                BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.WITH_TIME_PRORATION
+            ReplacementMode.CHARGE_PRORATED_PRICE ->
+                BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.CHARGE_PRORATED_PRICE
+            ReplacementMode.WITHOUT_PRORATION ->
+                BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.WITHOUT_PRORATION
+            ReplacementMode.CHARGE_FULL_PRICE ->
+                BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.CHARGE_FULL_PRICE
+            ReplacementMode.DEFERRED ->
+                BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.DEFERRED
+        }
+
     private companion object {
         const val LOG_TAG = "NuxieCommerce"
 
@@ -270,6 +414,24 @@ internal class GooglePlayBillingClientAdapter private constructor(
         listener: ProductDetailsResponseListener,
     ) {
         client.queryProductDetailsAsync(params, listener)
+    }
+
+    override fun launchBillingFlow(activity: Activity, params: BillingFlowParams): BillingResult =
+        client.launchBillingFlow(activity, params)
+
+    override fun queryPurchasesAsync(params: QueryPurchasesParams, listener: PurchasesResponseListener) {
+        client.queryPurchasesAsync(params, listener)
+    }
+
+    override fun acknowledgePurchase(
+        params: AcknowledgePurchaseParams,
+        listener: AcknowledgePurchaseResponseListener,
+    ) {
+        client.acknowledgePurchase(params, listener)
+    }
+
+    override fun consumeAsync(params: ConsumeParams, listener: ConsumeResponseListener) {
+        client.consumeAsync(params, listener)
     }
 
     companion object {

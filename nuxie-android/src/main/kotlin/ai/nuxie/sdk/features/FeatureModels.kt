@@ -20,3 +20,10 @@ enum class FeatureCheckPolicy {
     CACHE_FIRST,
     REMOTE,
 }
+
+/** Immutable server-catalog mapping used for optimistic purchase access. */
+internal data class LocalPurchaseGrant(
+    val featureId: String,
+    val type: FeatureType,
+    val unlimited: Boolean = false,
+)

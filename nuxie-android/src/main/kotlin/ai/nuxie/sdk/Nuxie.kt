@@ -4,6 +4,13 @@ import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
+import ai.nuxie.sdk.commerce.NuxiePurchaseDelegate
+import ai.nuxie.sdk.commerce.PurchaseHandlingMode
+import ai.nuxie.sdk.commerce.PurchaseResult
+import ai.nuxie.sdk.commerce.RestoreResult
+import ai.nuxie.sdk.commerce.StoreProduct
+import ai.nuxie.sdk.commerce.SubscriptionReplacement
+import android.app.Activity
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.launch
@@ -53,6 +60,8 @@ object Nuxie {
             beforeSend = configuration.beforeSend,
             featureInfo = featureInfoInstance,
             featureCacheTtlMillis = configuration.featureCacheTTL,
+            purchaseDelegate = configuration.purchaseDelegate,
+            purchaseHandlingMode = configuration.purchaseHandlingMode,
             overrides = overridesForTesting ?: NuxieCore.Overrides(),
         )
         setupState = SetupState(logLevel = configuration.logLevel, core = core)
@@ -209,6 +218,28 @@ object Nuxie {
 
     val isIdentified: Boolean
         get() = core?.identity?.isIdentified ?: false
+
+    // MARK: Commerce
+
+    /** Launch checkout for the exact StoreProduct that was shown. */
+    suspend fun purchase(
+        activity: Activity,
+        product: StoreProduct,
+        replacement: SubscriptionReplacement? = null,
+    ): PurchaseResult = core?.purchases?.purchase(activity, product, replacement)
+        ?: PurchaseResult.Failed(IllegalStateException("Call Nuxie.setup first."))
+
+    /** Restore Play's currently active subscriptions and one-time purchases. */
+    suspend fun restorePurchases(): RestoreResult = core?.purchases?.restorePurchases()
+        ?: RestoreResult.Failed(IllegalStateException("Call Nuxie.setup first."))
+
+    fun setPurchaseDelegate(delegate: NuxiePurchaseDelegate?) {
+        core?.purchaseSettings?.delegate = delegate
+    }
+
+    fun setPurchaseHandlingMode(mode: PurchaseHandlingMode) {
+        core?.purchaseSettings?.handlingMode = mode
+    }
 
     internal val core: NuxieCore?
         get() = setupState?.core

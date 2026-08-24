@@ -65,6 +65,87 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun optimisticPurchaseProjectsOnlyBooleanAndUnlimitedAndRevokesAboveProfile() = runBlocking {
+        val core = core(FakeTransport())
+        val customer = core.identity.distinctId()
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement(
+                profile(
+                    """[{"id":"pro","type":"boolean","unlimited":false},{"id":"exports","type":"metered","balance":0,"unlimited":false}]""",
+                ),
+            ).jsonObject,
+        )
+
+        core.features.applyLocalPurchase(
+            listOf(
+                LocalPurchaseGrant("pro", FeatureType.BOOLEAN),
+                LocalPurchaseGrant("exports", FeatureType.METERED),
+                LocalPurchaseGrant("unlimited-exports", FeatureType.METERED, unlimited = true),
+                LocalPurchaseGrant("credits", FeatureType.CREDIT_SYSTEM),
+            ),
+            "token-1",
+        )
+
+        assertTrue(core.featureInfo.isAllowed("pro"))
+        assertFalse(core.featureInfo.isAllowed("exports"))
+        assertTrue(core.featureInfo.isAllowed("unlimited-exports"))
+        assertFalse(core.featureInfo.isAllowed("credits"))
+
+        core.features.removeLocalPurchase("token-1")
+        assertFalse(core.featureInfo.isAllowed("pro"))
+        assertFalse(core.featureInfo.isAllowed("unlimited-exports"))
+        core.stop()
+    }
+
+    @Test
+    fun purchaseResponseReconcilesItsGrantWithoutReplacingUnrelatedProfileFeatures() = runBlocking {
+        val core = core(FakeTransport())
+        val customer = core.identity.distinctId()
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement(
+                profile("""[{"id":"existing","type":"boolean","unlimited":false}]"""),
+            ).jsonObject,
+        )
+        core.features.applyLocalPurchase(
+            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+            "token-1",
+        )
+
+        core.features.updateFromPurchase(
+            customer,
+            Json.parseToJsonElement(
+                """{"success":true,"features":[{"id":"internal-pro","ext_id":"pro","type":"boolean","allowed":true,"unlimited":false,"balance":null}]}""",
+            ).jsonObject,
+            "token-1",
+        )
+
+        assertTrue(core.featureInfo.isAllowed("existing"))
+        assertTrue(core.featureInfo.isAllowed("pro"))
+        core.features.removeLocalPurchase("token-1")
+        assertTrue(core.featureInfo.isAllowed("pro"))
+        core.stop()
+    }
+
+    @Test
+    fun userChangeDropsOptimisticPurchaseProjection() = runBlocking {
+        val core = core(FakeTransport())
+        val oldId = core.identity.distinctId()
+        core.features.applyLocalPurchase(
+            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+            "token-1",
+        )
+        assertTrue(core.featureInfo.isAllowed("pro"))
+
+        core.identity.setDistinctId("customer-2")
+        core.features.handleUserChange(oldId, "customer-2")
+
+        assertFalse(core.featureInfo.isAllowed("pro"))
+        core.stop()
+    }
+
+    @Test
     fun userChangeResetsReadinessUntilTheNewProfileHydrates() = runBlocking {
         val core = core(FakeTransport())
         val oldId = core.identity.distinctId()

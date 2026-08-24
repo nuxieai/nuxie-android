@@ -9,8 +9,7 @@ import kotlinx.serialization.json.jsonObject
 
 /**
  * Profile-backed Feature access and the short-lived results of real-time
- * checks. Purchase projections and their revision protocol deliberately do
- * not live here; commerce owns those layers when it lands.
+ * checks, with customer-scoped optimistic purchase projections above them.
  */
 internal class FeatureService(
     private val api: NuxieApi,
@@ -36,6 +35,8 @@ internal class FeatureService(
     private var durableAccess: Map<String, FeatureAccess> = emptyMap()
     private var durableEntities: Map<String, Map<String, FeatureAccess>> = emptyMap()
     private val realTimeCache = mutableMapOf<CacheKey, TimedAccess>()
+    private val localPurchases = mutableMapOf<String, Map<String, FeatureAccess>>()
+    private val revokedPurchases = mutableMapOf<String, Map<String, FeatureAccess>>()
     private var scopeGeneration = 0L
     private var nextSeq = 0L
     private val committedSeq = mutableMapOf<CacheKey, Long>()
@@ -46,10 +47,7 @@ internal class FeatureService(
     suspend fun getAllCached(): Map<String, FeatureAccess> {
         synchronizeCustomerScopeIfNeeded()
         return synchronized(lock) {
-            durableAccess + realTimeCache
-                .filter { (key, timed) -> key.entityId == null && isFresh(timed) }
-                .mapValues { it.value.access }
-                .mapKeys { it.key.featureId }
+            mergedGlobalAccess()
         }
     }
 
@@ -94,6 +92,8 @@ internal class FeatureService(
             durableAccess = emptyMap()
             durableEntities = emptyMap()
             realTimeCache.clear()
+            localPurchases.clear()
+            revokedPurchases.clear()
             committedSeq.clear()
             scopeGeneration += 1
         }
@@ -110,11 +110,73 @@ internal class FeatureService(
             cacheDistinctId = distinctId
             durableAccess = parsed.first
             durableEntities = parsed.second
+            // A fresh server snapshot is authoritative over earlier optimistic
+            // access and revocation tombstones for the Features it contains.
+            val reconciled = parsed.first.keys
+            localPurchases.toMap().forEach { (transactionId, grants) ->
+                localPurchases[transactionId] = grants - reconciled
+            }
+            revokedPurchases.toMap().forEach { (transactionId, grants) ->
+                revokedPurchases[transactionId] = grants - reconciled
+            }
+            localPurchases.entries.removeAll { it.value.isEmpty() }
+            revokedPurchases.entries.removeAll { it.value.isEmpty() }
         }
         publishCurrent(ready = true, expectedGeneration = hydrationGeneration)
     }
 
     suspend fun syncFeatureInfo() = publishCurrent(ready = true)
+
+    suspend fun applyLocalPurchase(grants: List<LocalPurchaseGrant>, transactionId: String) {
+        synchronizeCustomerScopeIfNeeded()
+        val optimistic = grants.filter { it.type == FeatureType.BOOLEAN || it.unlimited }
+            .associate { grant ->
+                grant.featureId to FeatureAccess(
+                    allowed = true,
+                    unlimited = grant.unlimited,
+                    balance = null,
+                    type = grant.type,
+                )
+            }
+        if (optimistic.isEmpty()) return
+        synchronized(lock) {
+            if (localPurchases.containsKey(transactionId)) return
+            optimistic.keys.forEach { featureId ->
+                realTimeCache.keys.removeAll { it.featureId == featureId }
+            }
+            revokedPurchases.remove(transactionId)
+            localPurchases[transactionId] = optimistic
+        }
+        publishCurrent()
+    }
+
+    suspend fun removeLocalPurchase(transactionId: String) {
+        synchronizeCustomerScopeIfNeeded()
+        synchronized(lock) {
+            val removed = localPurchases.remove(transactionId) ?: return
+            revokedPurchases[transactionId] = removed.mapValues { (_, access) ->
+                FeatureAccess(false, false, access.balance, access.type)
+            }
+        }
+        publishCurrent()
+    }
+
+    /** Merge the incremental Feature grants returned by /purchase. */
+    suspend fun updateFromPurchase(distinctId: String, body: JsonObject, transactionId: String) {
+        val hydrationGeneration = synchronized(lock) { scopeGeneration }
+        if (identity.distinctId() != distinctId) return
+        val updates = parsePurchaseFeatures(body)
+        synchronized(lock) {
+            if (identity.distinctId() != distinctId || scopeGeneration != hydrationGeneration) return
+            localPurchases.remove(transactionId)
+            revokedPurchases.remove(transactionId)
+            updates.keys.forEach { featureId ->
+                realTimeCache.keys.removeAll { it.featureId == featureId }
+            }
+            durableAccess = durableAccess + updates
+        }
+        publishCurrent(ready = true, expectedGeneration = hydrationGeneration)
+    }
 
     suspend fun getCached(
         featureId: String,
@@ -124,8 +186,10 @@ internal class FeatureService(
         synchronizeCustomerScopeIfNeeded()
         return synchronized(lock) {
             val key = CacheKey(featureId, entityId)
+            val projection = purchaseAccess(featureId, entityId)
             when (val cached = realTimeCache[key]?.takeIf(::isFresh)) {
-                null -> entityAccess(featureId, entityId)?.forRequiredBalance(requiredBalance)
+                null -> (projection ?: entityAccess(featureId, entityId))
+                    ?.forRequiredBalance(requiredBalance)
                 else -> if (cached.opaqueRequiredBalance == null) {
                     cached.access.forRequiredBalance(requiredBalance)
                 } else if (cached.opaqueRequiredBalance == (requiredBalance ?: DEFAULT_REQUIRED_BALANCE)) {
@@ -198,6 +262,8 @@ internal class FeatureService(
                 durableAccess = emptyMap()
                 durableEntities = emptyMap()
                 realTimeCache.clear()
+                localPurchases.clear()
+                revokedPurchases.clear()
                 committedSeq.clear()
                 scopeGeneration += 1
                 true
@@ -213,8 +279,29 @@ internal class FeatureService(
                 .filter { (key, timed) -> key.entityId == null && isFresh(timed) }
                 .mapValues { it.value.access }
                 .mapKeys { it.key.featureId }
-            featureInfo.update(durableAccess + fresh, durableEntities, ready)
+            featureInfo.update(mergePurchaseAccess(durableAccess + fresh), durableEntities, ready)
         }
+    }
+
+    private fun mergedGlobalAccess(): Map<String, FeatureAccess> {
+        val fresh = realTimeCache
+            .filter { (key, timed) -> key.entityId == null && isFresh(timed) }
+            .mapValues { it.value.access }
+            .mapKeys { it.key.featureId }
+        return mergePurchaseAccess(durableAccess + fresh)
+    }
+
+    private fun mergePurchaseAccess(base: Map<String, FeatureAccess>): Map<String, FeatureAccess> {
+        var merged = base
+        revokedPurchases.values.forEach { merged = merged + it }
+        localPurchases.values.forEach { merged = merged + it }
+        return merged
+    }
+
+    private fun purchaseAccess(featureId: String, entityId: String?): FeatureAccess? {
+        if (entityId != null) return null
+        localPurchases.values.mapNotNull { it[featureId] }.lastOrNull()?.let { return it }
+        return revokedPurchases.values.mapNotNull { it[featureId] }.lastOrNull()
     }
 
     private fun entityAccess(featureId: String, entityId: String?): FeatureAccess? = when (entityId) {
@@ -270,6 +357,24 @@ internal class FeatureService(
             }
         }
         return all to entities
+    }
+
+    private fun parsePurchaseFeatures(body: JsonObject): Map<String, FeatureAccess> {
+        val features = body["features"] as? JsonArray ?: return emptyMap()
+        return features.mapNotNull { element ->
+            val feature = element as? JsonObject ?: return@mapNotNull null
+            val id = feature.string("ext_id")?.takeIf(String::isNotBlank)
+                ?: feature.string("id")
+                ?: return@mapNotNull null
+            val type = feature.string("type")?.toFeatureType() ?: return@mapNotNull null
+            val allowed = feature.boolean("allowed") ?: return@mapNotNull null
+            id to FeatureAccess(
+                allowed = allowed,
+                unlimited = feature.boolean("unlimited") ?: false,
+                balance = feature.double("balance"),
+                type = type,
+            )
+        }.toMap()
     }
 
     private fun profileAccess(type: FeatureType, unlimited: Boolean, balance: Double?): FeatureAccess =

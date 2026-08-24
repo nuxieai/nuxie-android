@@ -86,8 +86,13 @@ public final class ai/nuxie/sdk/Nuxie {
 	public static synthetic fun identify$default (Lai/nuxie/sdk/Nuxie;Ljava/lang/String;Ljava/util/Map;Ljava/util/Map;ILjava/lang/Object;)V
 	public final fun isIdentified ()Z
 	public final fun isSetup ()Z
+	public final fun purchase (Landroid/app/Activity;Lai/nuxie/sdk/commerce/StoreProduct;Lai/nuxie/sdk/commerce/SubscriptionReplacement;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public static synthetic fun purchase$default (Lai/nuxie/sdk/Nuxie;Landroid/app/Activity;Lai/nuxie/sdk/commerce/StoreProduct;Lai/nuxie/sdk/commerce/SubscriptionReplacement;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 	public final fun reset (Z)V
 	public static synthetic fun reset$default (Lai/nuxie/sdk/Nuxie;ZILjava/lang/Object;)V
+	public final fun restorePurchases (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun setPurchaseDelegate (Lai/nuxie/sdk/commerce/NuxiePurchaseDelegate;)V
+	public final fun setPurchaseHandlingMode (Lai/nuxie/sdk/commerce/PurchaseHandlingMode;)V
 	public final fun setup (Landroid/content/Context;Lai/nuxie/sdk/NuxieConfiguration;)V
 	public final fun trigger (Ljava/lang/String;Ljava/util/Map;Lkotlin/jvm/functions/Function1;)V
 	public static synthetic fun trigger$default (Lai/nuxie/sdk/Nuxie;Ljava/lang/String;Ljava/util/Map;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)V
@@ -102,10 +107,14 @@ public final class ai/nuxie/sdk/NuxieConfiguration {
 	public final fun getEnvironment ()Lai/nuxie/sdk/NuxieEnvironment;
 	public final fun getFeatureCacheTTL ()J
 	public final fun getLogLevel ()Lai/nuxie/sdk/LogLevel;
+	public final fun getPurchaseDelegate ()Lai/nuxie/sdk/commerce/NuxiePurchaseDelegate;
+	public final fun getPurchaseHandlingMode ()Lai/nuxie/sdk/commerce/PurchaseHandlingMode;
 	public final fun setBeforeSend (Lkotlin/jvm/functions/Function1;)V
 	public final fun setEnvironment (Lai/nuxie/sdk/NuxieEnvironment;)V
 	public final fun setFeatureCacheTTL (J)V
 	public final fun setLogLevel (Lai/nuxie/sdk/LogLevel;)V
+	public final fun setPurchaseDelegate (Lai/nuxie/sdk/commerce/NuxiePurchaseDelegate;)V
+	public final fun setPurchaseHandlingMode (Lai/nuxie/sdk/commerce/PurchaseHandlingMode;)V
 }
 
 public final class ai/nuxie/sdk/NuxieEnvironment : java/lang/Enum {
@@ -349,6 +358,17 @@ public final class ai/nuxie/sdk/commerce/PurchaseResult$Purchased : ai/nuxie/sdk
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class ai/nuxie/sdk/commerce/ReplacementMode : java/lang/Enum {
+	public static final field CHARGE_FULL_PRICE Lai/nuxie/sdk/commerce/ReplacementMode;
+	public static final field CHARGE_PRORATED_PRICE Lai/nuxie/sdk/commerce/ReplacementMode;
+	public static final field DEFERRED Lai/nuxie/sdk/commerce/ReplacementMode;
+	public static final field WITHOUT_PRORATION Lai/nuxie/sdk/commerce/ReplacementMode;
+	public static final field WITH_TIME_PRORATION Lai/nuxie/sdk/commerce/ReplacementMode;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lai/nuxie/sdk/commerce/ReplacementMode;
+	public static fun values ()[Lai/nuxie/sdk/commerce/ReplacementMode;
+}
+
 public abstract interface class ai/nuxie/sdk/commerce/RestoreResult {
 }
 
@@ -384,6 +404,22 @@ public final class ai/nuxie/sdk/commerce/StoreProduct {
 	public final fun getProductId ()Ljava/lang/String;
 	public final fun getRawProduct ()Lcom/android/billingclient/api/ProductDetails;
 	public final fun getStoreProductId ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/commerce/SubscriptionReplacement {
+	public fun <init> (Ljava/lang/String;Lai/nuxie/sdk/commerce/ReplacementMode;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Lai/nuxie/sdk/commerce/ReplacementMode;
+	public final fun copy (Ljava/lang/String;Lai/nuxie/sdk/commerce/ReplacementMode;)Lai/nuxie/sdk/commerce/SubscriptionReplacement;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/commerce/SubscriptionReplacement;Ljava/lang/String;Lai/nuxie/sdk/commerce/ReplacementMode;ILjava/lang/Object;)Lai/nuxie/sdk/commerce/SubscriptionReplacement;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getOldPurchaseToken ()Ljava/lang/String;
+	public final fun getReplacementMode ()Lai/nuxie/sdk/commerce/ReplacementMode;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/commerce/SubscriptionReplacementRequiredException : java/lang/IllegalStateException {
 }
 
 public final class ai/nuxie/sdk/features/FeatureAccess {
