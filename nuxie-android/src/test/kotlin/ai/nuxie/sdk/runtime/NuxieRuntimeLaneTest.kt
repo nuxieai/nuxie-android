@@ -47,14 +47,24 @@ class NuxieRuntimeLaneTest {
     @Test
     fun `awaitQuiescence times out while accepted work is still running`() {
         val lane = NuxieRuntimeLane()
+        val started = CountDownLatch(1)
         val release = CountDownLatch(1)
-        assertTrue(lane.enqueue { release.await(5, TimeUnit.SECONDS) })
-        lane.shutdown()
-        assertFalse(
-            "quiescence must not be reported while work is in flight",
-            lane.awaitQuiescence(timeoutMs = 50),
+        assertTrue(
+            lane.enqueue {
+                started.countDown()
+                release.await(30, TimeUnit.SECONDS)
+            },
         )
-        release.countDown()
+        lane.shutdown()
+        try {
+            assertTrue("the accepted task must be running", started.await(2, TimeUnit.SECONDS))
+            assertFalse(
+                "quiescence must not be reported while work is in flight",
+                lane.awaitQuiescence(timeoutMs = 50),
+            )
+        } finally {
+            release.countDown()
+        }
         assertTrue(lane.awaitQuiescence(timeoutMs = 2_000))
     }
 }
