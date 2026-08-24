@@ -225,6 +225,34 @@ class TriggerServiceTest {
     }
 
     @Test
+    fun startedAndSuppressedOutcomesBothReachTheCaller() = runBlocking {
+        val router = TriggerService.JourneyRouter { _ ->
+            listOf(
+                TriggerService.JourneyTriggerResult.Suppressed(
+                    ai.nuxie.sdk.SuppressReason.ALREADY_ACTIVE,
+                ),
+                TriggerService.JourneyTriggerResult.Started(
+                    ExperienceRef("exp-1", "v1", "j-1"),
+                ),
+            )
+        }
+        val core = core(transportWithGate(null), journeys = router)
+        val updates = collect(core, "moment")
+        assertEquals(
+            listOf<TriggerUpdate>(
+                TriggerUpdate.Decision(
+                    TriggerDecision.JourneyStarted(ExperienceRef("exp-1", "v1", "j-1")),
+                ),
+                TriggerUpdate.Decision(
+                    TriggerDecision.Suppressed(ai.nuxie.sdk.SuppressReason.ALREADY_ACTIVE),
+                ),
+            ),
+            updates,
+        )
+        core.stop()
+    }
+
+    @Test
     fun allFailedJourneyOutcomesEmitOneTerminalError() = runBlocking {
         val router = TriggerService.JourneyRouter { _ ->
             listOf(
