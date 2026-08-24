@@ -26,6 +26,11 @@ internal class FeatureService(
         val opaqueRequiredBalance: Double? = null,
     )
 
+    private companion object {
+        /** A null requiredBalance means "one unit" everywhere. */
+        const val DEFAULT_REQUIRED_BALANCE = 1.0
+    }
+
     private val lock = Any()
     private var cacheDistinctId = identity.distinctId()
     private var durableAccess: Map<String, FeatureAccess> = emptyMap()
@@ -111,7 +116,7 @@ internal class FeatureService(
 
     suspend fun syncFeatureInfo() = publishCurrent(ready = true)
 
-    private suspend fun getCached(
+    suspend fun getCached(
         featureId: String,
         requiredBalance: Double?,
         entityId: String?,
@@ -123,7 +128,7 @@ internal class FeatureService(
                 null -> entityAccess(featureId, entityId)?.forRequiredBalance(requiredBalance)
                 else -> if (cached.opaqueRequiredBalance == null) {
                     cached.access.forRequiredBalance(requiredBalance)
-                } else if (cached.opaqueRequiredBalance == requiredBalance) {
+                } else if (cached.opaqueRequiredBalance == (requiredBalance ?: DEFAULT_REQUIRED_BALANCE)) {
                     cached.access
                 } else {
                     null
@@ -141,7 +146,10 @@ internal class FeatureService(
         return synchronized(lock) {
             realTimeCache[CacheKey(featureId, entityId)]
                 ?.takeIf(::isFresh)
-                ?.takeIf { it.opaqueRequiredBalance == requiredBalance && it.opaqueRequiredBalance != null }
+                ?.takeIf {
+                    it.opaqueRequiredBalance != null &&
+                        it.opaqueRequiredBalance == (requiredBalance ?: DEFAULT_REQUIRED_BALANCE)
+                }
                 ?.access
         }
     }
@@ -158,6 +166,11 @@ internal class FeatureService(
             scopeGeneration to nextSeq++
         }
         val result = api.checkFeature(distinctId, featureId, requiredBalance, entityId)
+        // Identity flips synchronously but handleUserChange (which bumps the
+        // generation) is queued behind it, so the live identity must be
+        // checked too or an old request completing in that gap publishes the
+        // prior customer's access.
+        if (identity.distinctId() != distinctId) throw kotlinx.coroutines.CancellationException()
         synchronized(lock) {
             if (scopeGeneration != requestGeneration || cacheDistinctId != distinctId) {
                 throw kotlinx.coroutines.CancellationException()
