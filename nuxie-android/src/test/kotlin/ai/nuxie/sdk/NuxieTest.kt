@@ -1,35 +1,44 @@
 package ai.nuxie.sdk
 
-import android.content.Context
-import android.content.ContextWrapper
+import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 
+@RunWith(RobolectricTestRunner::class)
 class NuxieTest {
-    @Test
-    fun setupValidatesTheInitialKeyAndOnlyInitializesOnce() {
-        assertFalse(Nuxie.isSetup)
+    @After
+    fun tearDown() {
+        Nuxie.resetForTesting()
+    }
 
+    @Test
+    fun setupRejectsABlankKeyWithoutInitializing() {
+        assertFalse(Nuxie.isSetup)
         assertThrows(IllegalArgumentException::class.java) {
-            Nuxie.setup(TestContext(), NuxieConfiguration("   "))
+            Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("   "))
         }
         assertFalse(Nuxie.isSetup)
-
-        Nuxie.setup(TestContext(), NuxieConfiguration("pk_test_first"))
-        assertTrue(Nuxie.isSetup)
-
-        Nuxie.setup(UnusedContext(), NuxieConfiguration("   "))
-        assertTrue(Nuxie.isSetup)
     }
 
-    private class TestContext : ContextWrapper(null) {
-        override fun getApplicationContext(): Context = this
+    @Test
+    fun setupInitializesOnceAndIgnoresRepeatedCalls() {
+        Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_first"))
+        assertTrue(Nuxie.isSetup)
+        val core = Nuxie.core
+
+        // A repeated call is a warning no-op — even with an invalid key.
+        Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("   "))
+        assertTrue(Nuxie.isSetup)
+        assertTrue(core === Nuxie.core)
     }
 
-    private class UnusedContext : ContextWrapper(null) {
-        override fun getApplicationContext(): Context =
-            error("A repeated setup call must not read its context.")
+    @Test
+    fun versionIsExposed() {
+        assertTrue(Nuxie.version.isNotBlank())
     }
 }
