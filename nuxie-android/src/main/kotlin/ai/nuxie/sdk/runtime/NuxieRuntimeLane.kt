@@ -36,14 +36,20 @@ internal class NuxieRuntimeLane {
         }
     }
 
-    /** Fire-and-forget on the lane (frame ticks). */
-    fun enqueue(block: () -> Unit) {
-        try {
+    /**
+     * Fire-and-forget on the lane (frame ticks). Returns false when the
+     * lane is already shut down and the task will never run, so callers
+     * waiting on a completion signal from the task can skip the wait.
+     */
+    fun enqueue(block: () -> Unit): Boolean {
+        return try {
             executor.execute {
                 runCatching(block).onFailure { Log.w(LOG_TAG, "Runtime lane task failed", it) }
             }
+            true
         } catch (_: RejectedExecutionException) {
             Log.w(LOG_TAG, "Runtime lane task rejected after shutdown")
+            false
         }
     }
 
