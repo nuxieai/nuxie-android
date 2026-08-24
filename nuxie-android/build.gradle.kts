@@ -54,14 +54,15 @@ android {
 
 dependencies {
   implementation(libs.androidx.sqlite.framework)
-  // The plain billing artifact (not billing-ktx): the KTX granule ships
-  // Kotlin 2.2 metadata this repo's pinned compiler cannot read, and the
-  // commerce layer bridges callbacks itself anyway.
-  implementation(libs.google.play.billing)
+  // StoreProduct exposes ProductDetails, so Billing is part of consumers'
+  // compile classpath. Use the plain artifact: billing-ktx ships Kotlin 2.2
+  // metadata this repo's pinned compiler cannot read.
+  api(libs.google.play.billing)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.serialization.json)
 
   testImplementation(libs.junit)
+  testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.robolectric)
 
   androidTestImplementation(libs.androidx.test.runner)

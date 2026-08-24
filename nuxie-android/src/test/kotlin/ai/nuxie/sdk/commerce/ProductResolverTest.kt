@@ -6,6 +6,8 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class ProductResolverTest {
@@ -244,14 +246,110 @@ class ProductResolverTest {
     }
 
     @Test
-    fun subscriptionWithoutExplicitBasePlanDoesNotChooseTheFirstPlan() = runBlocking {
-        val products = resolverWith(
-            offer(basePlanId = "monthly", offerId = null, token = "monthly-base"),
-        ).resolve(
-            listOf(request(OfferSelection.None).copy(basePlanId = null)),
-        )
+    fun subscriptionWithoutExplicitBasePlanFailsResolution() = runBlocking {
+        val failure = resolutionFailure {
+            resolverWith(
+                offer(basePlanId = "monthly", offerId = null, token = "monthly-base"),
+            ).resolve(
+                listOf(request(OfferSelection.None).copy(basePlanId = null)),
+            )
+        }
 
-        assertEquals(emptyList<StoreProduct>(), products)
+        assertTrue(failure.message.orEmpty().contains("nuxie-pro"))
+        assertTrue(failure.message.orEmpty().contains("no configured base plan"))
+    }
+
+    @Test
+    fun productMissingFromQueryResultFailsResolution() = runBlocking {
+        val failure = resolutionFailure {
+            ProductResolver(FakeProductDetailsQuery()).resolve(
+                listOf(request(OfferSelection.None)),
+            )
+        }
+
+        assertTrue(failure.message.orEmpty().contains("nuxie-pro"))
+        assertTrue(failure.message.orEmpty().contains("play-pro"))
+        assertTrue(failure.message.orEmpty().contains("missing from Play query result"))
+    }
+
+    @Test
+    fun unfetchedProductFailsResolutionWithPlayReasonCode() = runBlocking {
+        val failure = resolutionFailure {
+            ProductResolver(
+                FakeProductDetailsQuery(
+                    unfetchedProducts = listOf(
+                        PlayUnfetchedProduct(
+                            productId = "play-pro",
+                            productType = BillingClient.ProductType.SUBS,
+                            statusCode = 7,
+                        ),
+                    ),
+                ),
+            ).resolve(listOf(request(OfferSelection.None)))
+        }
+
+        assertTrue(failure.message.orEmpty().contains("nuxie-pro"))
+        assertTrue(failure.message.orEmpty().contains("unfetched by Play (status code 7)"))
+    }
+
+    @Test
+    fun configuredBasePlanMissingFromProductDetailsFailsResolution() = runBlocking {
+        val failure = resolutionFailure {
+            resolverWith(
+                offer(basePlanId = "monthly", offerId = null, token = "monthly-base"),
+            ).resolve(listOf(request(OfferSelection.None)))
+        }
+
+        assertTrue(failure.message.orEmpty().contains("nuxie-pro"))
+        assertTrue(failure.message.orEmpty().contains("base plan 'annual' is absent"))
+    }
+
+    @Test
+    fun resolutionFailureNamesEveryUnresolvableProduct() = runBlocking {
+        val failure = resolutionFailure {
+            ProductResolver(
+                FakeProductDetailsQuery(
+                    products = listOf(
+                        PlayProductDetails(
+                            productId = "missing-plan-store",
+                            productType = BillingClient.ProductType.SUBS,
+                            rawProduct = null,
+                            subscriptionOffers = emptyList(),
+                        ),
+                    ),
+                    unfetchedProducts = listOf(
+                        PlayUnfetchedProduct(
+                            productId = "unfetched-store",
+                            productType = BillingClient.ProductType.INAPP,
+                            statusCode = 5,
+                        ),
+                    ),
+                ),
+            ).resolve(
+                listOf(
+                    CatalogProductRequest(
+                        productId = "missing-product",
+                        storeProductId = "missing-store",
+                        productType = BillingClient.ProductType.INAPP,
+                    ),
+                    CatalogProductRequest(
+                        productId = "unfetched-product",
+                        storeProductId = "unfetched-store",
+                        productType = BillingClient.ProductType.INAPP,
+                    ),
+                    CatalogProductRequest(
+                        productId = "missing-plan-product",
+                        storeProductId = "missing-plan-store",
+                        productType = BillingClient.ProductType.SUBS,
+                        basePlanId = "annual",
+                    ),
+                ),
+            )
+        }
+
+        assertTrue(failure.message.orEmpty().contains("missing-product"))
+        assertTrue(failure.message.orEmpty().contains("unfetched-product"))
+        assertTrue(failure.message.orEmpty().contains("missing-plan-product"))
     }
 
     @Test
@@ -348,10 +446,20 @@ class ProductResolverTest {
             .invoke(singleton, ProductDetails::class.java) as ProductDetails
     }
 
+    private suspend fun resolutionFailure(block: suspend () -> Unit): ProductResolutionException =
+        try {
+            block()
+            fail("Expected ProductResolutionException")
+            error("unreachable")
+        } catch (failure: ProductResolutionException) {
+            failure
+        }
+
     private class FakeProductDetailsQuery(
-        private val products: List<PlayProductDetails>,
+        private val products: List<PlayProductDetails> = emptyList(),
+        private val unfetchedProducts: List<PlayUnfetchedProduct> = emptyList(),
     ) : ProductDetailsQuery {
         override suspend fun query(products: List<ProductQuery>): ProductDetailsQueryResult =
-            ProductDetailsQueryResult.Success(this.products)
+            ProductDetailsQueryResult.Success(this.products, unfetchedProducts)
     }
 }

@@ -29,9 +29,19 @@ internal fun interface ProductDetailsQuery {
 }
 
 internal sealed interface ProductDetailsQueryResult {
-    data class Success(val products: List<PlayProductDetails>) : ProductDetailsQueryResult
+    data class Success(
+        val products: List<PlayProductDetails>,
+        val unfetchedProducts: List<PlayUnfetchedProduct> = emptyList(),
+    ) : ProductDetailsQueryResult
+
     data class Failed(val responseCode: Int, val debugMessage: String) : ProductDetailsQueryResult
 }
+
+internal data class PlayUnfetchedProduct(
+    val productId: String,
+    @BillingClient.ProductType val productType: String,
+    val statusCode: Int,
+)
 
 internal data class PlayProductDetails(
     val productId: String,
@@ -73,26 +83,63 @@ internal class ProductResolver(
         val queryProducts = requests
             .map { ProductQuery(it.storeProductId, it.productType) }
             .distinct()
-        val details = when (val result = productDetailsQuery.query(queryProducts)) {
-            is ProductDetailsQueryResult.Success -> result.products.associateBy {
-                it.productId to it.productType
-            }
+        val queryResult = when (val result = productDetailsQuery.query(queryProducts)) {
+            is ProductDetailsQueryResult.Success -> result
             is ProductDetailsQueryResult.Failed -> throw ProductResolutionException(
                 "Play product query failed (${result.responseCode}): ${result.debugMessage}",
             )
         }
+        val details = queryResult.products.associateBy { it.productId to it.productType }
+        val unfetchedProducts = queryResult.unfetchedProducts.associateBy {
+            it.productId to it.productType
+        }
+        val resolvedProducts = mutableListOf<StoreProduct>()
+        val failures = mutableListOf<String>()
 
-        return requests.mapNotNull { request ->
-            details[request.storeProductId to request.productType]?.let { product ->
-                resolve(request, product)
+        requests.forEach { request ->
+            val key = request.storeProductId to request.productType
+            val product = details[key]
+            when {
+                product == null -> {
+                    val unfetched = unfetchedProducts[key]
+                    val reason = if (unfetched == null) {
+                        "missing from Play query result"
+                    } else {
+                        "unfetched by Play (status code ${unfetched.statusCode})"
+                    }
+                    failures += request.failureDescription(reason)
+                }
+
+                request.productType == BillingClient.ProductType.SUBS && request.basePlanId == null -> {
+                    failures += request.failureDescription("subscription has no configured base plan")
+                }
+
+                request.productType == BillingClient.ProductType.SUBS &&
+                    product.subscriptionOffers.none {
+                        it.basePlanId == request.basePlanId && it.offerId == null
+                    } -> {
+                    failures += request.failureDescription(
+                        "configured base plan '${request.basePlanId}' is absent from ProductDetails",
+                    )
+                }
+
+                else -> resolvedProducts += resolve(request, product)
             }
         }
+
+        if (failures.isNotEmpty()) {
+            throw ProductResolutionException(
+                "Unable to resolve Play products: ${failures.joinToString("; ")}",
+            )
+        }
+
+        return resolvedProducts
     }
 
     private fun resolve(
         request: CatalogProductRequest,
         product: PlayProductDetails,
-    ): StoreProduct? {
+    ): StoreProduct {
         if (request.productType != BillingClient.ProductType.SUBS) {
             return StoreProduct(
                 productId = request.productId,
@@ -106,10 +153,10 @@ internal class ProductResolver(
             )
         }
 
-        val basePlanId = request.basePlanId ?: return null
+        val basePlanId = checkNotNull(request.basePlanId)
         val basePlan = product.subscriptionOffers.firstOrNull {
             it.basePlanId == basePlanId && it.offerId == null
-        } ?: return null
+        } ?: error("Base plan availability is validated before resolution.")
         val selected = when (request.offerSelection) {
             OfferSelection.None -> basePlan
             OfferSelection.Automatic -> selectAutomatic(
@@ -132,6 +179,9 @@ internal class ProductResolver(
             isOfferPersonalized = request.isOfferPersonalized,
         )
     }
+
+    private fun CatalogProductRequest.failureDescription(reason: String): String =
+        "$productId ($storeProductId, $productType): $reason"
 
     private val PlaySubscriptionOffer.introductoryPhases: List<PlayPricingPhase>
         get() = pricingPhases.filter { it.recurrenceMode != PlayRecurrenceMode.INFINITE }
