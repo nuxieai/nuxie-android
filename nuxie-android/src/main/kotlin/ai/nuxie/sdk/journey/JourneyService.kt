@@ -189,7 +189,13 @@ internal class JourneyService(
             JourneyEventNames.SUPERSEDED -> {
                 val journeyId = properties.string("journey_id") ?: return
                 val run = store.load(distinctId, journeyId) ?: return
-                if (!run.isGhost) store.save(run.copy(isGhost = true))
+                // iOS parity: only a live run enters ghost play-out. A
+                // supersede arriving after the run already ended terminally
+                // is a late fact and a no-op; the server reconciles the
+                // already-committed exit on its side.
+                if (run.state == JourneyRunState.ACTIVE && !run.isGhost) {
+                    store.save(run.copy(isGhost = true))
+                }
             }
             JourneyEventNames.CONVERTED -> {
                 val journeyId = properties.string("journey_id") ?: return

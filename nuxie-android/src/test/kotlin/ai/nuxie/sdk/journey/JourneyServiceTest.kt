@@ -273,6 +273,40 @@ class JourneyServiceTest {
     }
 
     @Test
+    fun supersedeArrivingAfterATerminalExitIsANoOp() = runBlocking {
+        // iOS parity (applySupersededDownFactIfNeeded guards on a live run):
+        // when the exit durably commits before the supersede fact arrives,
+        // the exit stands, the late supersede does not ghost the terminal
+        // run, and the server reconciles the committed exit on its side.
+        val h = harness()
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = started.ref.journeyId!!
+
+            h.service.exit("customer-1", journeyId, "completed")
+            h.log.awaitBarrier()
+            assertTrue(h.store.events.values.any { it.name == JourneyEventNames.EXITED })
+
+            val superseded = buildJsonObject {
+                put("id", JsonPrimitive("superseded-late"))
+                put("event", JsonPrimitive(JourneyEventNames.SUPERSEDED))
+                put("timestamp", JsonPrimitive(now))
+                put("properties", buildJsonObject { put("journey_id", JsonPrimitive(journeyId)) })
+            }
+            h.service.applyDownFacts(buildJsonObject { put("facts", JsonArray(listOf(superseded))) }, "customer-1")
+            h.log.awaitBarrier()
+
+            val run = JourneyStore(h.root).load("customer-1", journeyId)!!
+            assertEquals(JourneyRunState.TERMINAL, run.state)
+            assertTrue("a late supersede must not ghost a terminal run", !run.isGhost)
+            // The fact itself still commits once for the durable ledger.
+            assertTrue("superseded-late" in h.store.events)
+        } finally { h.root.deleteRecursively() }
+    }
+
+    @Test
     fun catalogReleasesAreScopedToTheProfileDistinctId() {
         val identity = ExperienceReleaseIdentity(
             appId = "app", environment = "development", experienceId = "experience-1",

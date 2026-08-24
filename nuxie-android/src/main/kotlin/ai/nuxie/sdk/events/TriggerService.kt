@@ -145,16 +145,27 @@ internal class TriggerService(
         val journeyResults = runCatching { journeys.handleEventForTrigger(stored) }
             .getOrElse { emptyList() }
         journeyStarted = journeyResults.any { it is JourneyTriggerResult.Started }
-        var emittedJourneyDecision = false
-        journeyResults.forEach { result ->
-            when (result) {
-                is JourneyTriggerResult.Started ->
-                    broker.emit(eventId, TriggerUpdate.Decision(TriggerDecision.JourneyStarted(result.ref)))
-                is JourneyTriggerResult.Suppressed ->
+        val emittedJourneyDecision = journeyResults.isNotEmpty()
+        // Aggregate mixed admission outcomes: every durable enrollment must
+        // reach the caller, so Started updates go out first and a Failed is
+        // only terminal when nothing enrolled (an Error completes the
+        // broker, which would otherwise drop later results).
+        journeyResults.filterIsInstance<JourneyTriggerResult.Started>().forEach { result ->
+            broker.emit(eventId, TriggerUpdate.Decision(TriggerDecision.JourneyStarted(result.ref)))
+        }
+        if (!journeyStarted) {
+            val failed = journeyResults.filterIsInstance<JourneyTriggerResult.Failed>().firstOrNull()
+            if (failed != null) {
+                broker.emit(eventId, TriggerUpdate.Error(failed.error))
+            } else {
+                journeyResults.filterIsInstance<JourneyTriggerResult.Suppressed>().forEach { result ->
                     broker.emit(eventId, TriggerUpdate.Decision(TriggerDecision.Suppressed(result.reason)))
-                is JourneyTriggerResult.Failed -> broker.emit(eventId, TriggerUpdate.Error(result.error))
+                }
             }
-            emittedJourneyDecision = true
+        } else {
+            journeyResults.filterIsInstance<JourneyTriggerResult.Failed>().forEach { result ->
+                Log.w(LOG_TAG, "Journey admission failed alongside a successful enrollment: ${result.error.message}")
+            }
         }
 
         if (gatePlan == null && emittedJourneyDecision) return
