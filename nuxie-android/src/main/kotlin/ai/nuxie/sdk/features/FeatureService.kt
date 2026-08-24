@@ -166,12 +166,15 @@ internal class FeatureService(
             scopeGeneration to nextSeq++
         }
         val result = api.checkFeature(distinctId, featureId, requiredBalance, entityId)
-        // Identity flips synchronously but handleUserChange (which bumps the
-        // generation) is queued behind it, so the live identity must be
-        // checked too or an old request completing in that gap publishes the
-        // prior customer's access.
-        if (identity.distinctId() != distinctId) throw kotlinx.coroutines.CancellationException()
         synchronized(lock) {
+            // Identity flips synchronously while handleUserChange (which
+            // bumps the generation) is queued behind it, so the live
+            // identity is re-read inside the commit lock; a flip landing
+            // after this check is cleaned up by the queued handleUserChange
+            // reset, bounding any stale publication to that queue delay.
+            if (identity.distinctId() != distinctId) {
+                throw kotlinx.coroutines.CancellationException()
+            }
             if (scopeGeneration != requestGeneration || cacheDistinctId != distinctId) {
                 throw kotlinx.coroutines.CancellationException()
             }
