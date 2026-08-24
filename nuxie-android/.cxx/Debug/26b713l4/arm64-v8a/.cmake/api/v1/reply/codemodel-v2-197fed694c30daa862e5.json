@@ -1,0 +1,60 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"jsonFile" : "directory-.-Debug-f5ebdc15457944623624.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6.0"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "nuxie_runtime_android",
+					"targetIndexes" : 
+					[
+						0
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "nuxie_runtime_android::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-nuxie_runtime_android-Debug-5407ba85abd2319b78b7.json",
+					"name" : "nuxie_runtime_android",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/Users/levi/dev/nuxie-dev/.claude/worktrees/composer-options-placement-dd7d14/sdks/nuxie-android/nuxie-android/.cxx/Debug/26b713l4/arm64-v8a",
+		"source" : "/Users/levi/dev/nuxie-dev/.claude/worktrees/composer-options-placement-dd7d14/sdks/nuxie-android/nuxie-android/src/main/cpp"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

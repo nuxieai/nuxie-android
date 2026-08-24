@@ -1,0 +1,3 @@
+# ninja log v5
+0	35	1787548345573717199	CMakeFiles/nuxie_runtime_android.dir/nuxie_runtime_android.c.o	f7c30221c67c0856
+35	70	1787548345608773458	/Users/levi/dev/nuxie-dev/.claude/worktrees/composer-options-placement-dd7d14/sdks/nuxie-android/nuxie-android/build/intermediates/cxx/Debug/26b713l4/obj/arm64-v8a/libnuxie_runtime_android.so	3ebf23ee63da5e77
