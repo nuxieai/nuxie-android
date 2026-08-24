@@ -137,6 +137,7 @@ object Nuxie {
 
     /** Testing seam: tear down the singleton between tests. Not public API. */
     internal fun resetForTesting() {
+        setupState?.core?.let { runCatching { it.stop() } }
         setupState = null
     }
 
