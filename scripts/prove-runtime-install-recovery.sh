@@ -25,8 +25,9 @@ rsync -a \
 
 write_pin() {
   local checksum="${1}"
-  printf '{\n  "release": "proof-release",\n  "url": "file:///does-not-exist",\n  "checksum": "%s"\n}\n' \
-    "${checksum}" > "${WORKSPACE}/runtime/artifact.json"
+  local url="${2:-file:///does-not-exist}"
+  printf '{\n  "release": "proof-release",\n  "url": "%s",\n  "checksum": "%s"\n}\n' \
+    "${url}" "${checksum}" > "${WORKSPACE}/runtime/artifact.json"
 }
 
 write_artifact_set() {
@@ -124,13 +125,27 @@ prove_local_live_tree_survives_interrupted_stage() {
   [[ ! -e "${backup}" ]]
 }
 
+assert_malformed_pin_preserved_state() {
+  local live="${1}"
+  local backup="${2}"
+  local temporary="${3}"
+  local expected_message="${4}"
+
+  grep -q "${expected_message}" "${LOG_FILE}"
+  grep -q '^intact-live:' "${live}/jniLibs/arm64-v8a/libnux_capi.so"
+  grep -q '^intact-backup:' "${backup}/jniLibs/arm64-v8a/libnux_capi.so"
+  grep -q '^intact temporary tree$' "${temporary}/sentinel"
+}
+
 prove_malformed_pin_changes_nothing() {
   local runtime="${WORKSPACE}/runtime"
   local live="${runtime}/prebuilt"
   local backup="${runtime}/.prebuilt-malformed-pin.backup"
   local temporary="${runtime}/.prebuilt-malformed-pin.tmp"
   local malformed_checksum='not-a-lowercase-sha256'
+  local malformed_url='not a valid absolute URL'
 
+  # Case 1: malformed checksum fails before any destructive step.
   reset_install_state
   write_pin "${malformed_checksum}"
   write_artifact_set "${live}" 'intact-live'
@@ -139,14 +154,28 @@ prove_malformed_pin_changes_nothing() {
   printf 'intact temporary tree\n' > "${temporary}/sentinel"
 
   if run_fetch; then
-    printf 'Expected the malformed pin to fail.\n' >&2
+    printf 'Expected the malformed checksum pin to fail.\n' >&2
     return 1
   fi
+  assert_malformed_pin_preserved_state "${live}" "${backup}" "${temporary}" \
+    'checksum must be a lowercase SHA-256 digest'
 
-  grep -q 'checksum must be a lowercase SHA-256 digest' "${LOG_FILE}"
-  grep -q '^intact-live:' "${live}/jniLibs/arm64-v8a/libnux_capi.so"
-  grep -q '^intact-backup:' "${backup}/jniLibs/arm64-v8a/libnux_capi.so"
-  grep -q '^intact temporary tree$' "${temporary}/sentinel"
+  # Case 2: a valid checksum with a malformed URL also fails before any
+  # destructive step; a live tree and backup that fail pin validation must
+  # both survive untouched, and no recovery/pruning may run.
+  reset_install_state
+  write_pin "${PIN_CHECKSUM}" "${malformed_url}"
+  write_artifact_set "${live}" 'intact-live' 'f000000000000000000000000000000000000000000000000000000000000000'
+  write_artifact_set "${backup}" 'intact-backup' 'f000000000000000000000000000000000000000000000000000000000000000'
+  mkdir -p -- "${temporary}"
+  printf 'intact temporary tree\n' > "${temporary}/sentinel"
+
+  if run_fetch; then
+    printf 'Expected the malformed URL pin to fail.\n' >&2
+    return 1
+  fi
+  assert_malformed_pin_preserved_state "${live}" "${backup}" "${temporary}" \
+    'url must be a valid absolute URL'
 }
 
 case "${CASE}" in
