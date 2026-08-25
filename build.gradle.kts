@@ -93,13 +93,23 @@ fun runtimeInstallSiblings(suffix: String): List<Path> =
       .sortedBy { it.fileName.toString() }
   }
 
-fun recoverRuntimeInstall() {
+fun recoverRuntimeInstall(expectedArchiveChecksum: String?, maximumBytes: Long) {
   val prebuiltPath = runtimePrebuilt.toPath()
   val backups = runtimeInstallSiblings(".backup")
   if (backups.isNotEmpty()) {
-    if (Files.exists(prebuiltPath)) {
+    // Never prune the last good tree on the strength of a directory merely
+    // existing: a corrupted or tampered live tree would otherwise destroy
+    // the only recoverable copy. Validate first; an invalid live tree is
+    // discarded and the newest backup restored instead.
+    val liveValid = Files.exists(prebuiltPath) && expectedArchiveChecksum != null &&
+      cachedRuntimeValidationFailure(prebuiltPath, expectedArchiveChecksum, maximumBytes) == null
+    if (liveValid) {
       backups.forEach(::deleteRecursively)
     } else {
+      if (Files.exists(prebuiltPath)) {
+        deleteRecursively(prebuiltPath)
+        logger.lifecycle("Discarded an invalid runtime/prebuilt/ tree in favor of its backup.")
+      }
       val recovery = backups.maxWith(
         compareBy<Path>({ Files.getLastModifiedTime(it).toMillis() }, { it.fileName.toString() }),
       )
@@ -215,11 +225,11 @@ val runtimeFetch by tasks.registering {
   // the task's content-integrity freshness check instead.
 
   doLast {
-    recoverRuntimeInstall()
-
     val budget = readJsonObject(runtimeSizeBudget)
     val maximumBytes = (budget["maximumBytes"] as? Number)?.toLong()?.takeIf { it > 0L }
       ?: throw GradleException("runtime/size-budget.json must contain a positive 'maximumBytes' number.")
+    val pinForRecovery = readJsonObject(runtimeArtifactPin)
+    recoverRuntimeInstall(pinForRecovery["checksum"] as? String, maximumBytes)
 
     when (val localSelection = providers.environmentVariable("NUXIE_RUNTIME_USE_LOCAL").orNull) {
       "1" -> {
