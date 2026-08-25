@@ -240,6 +240,10 @@ internal class ExperienceSurfaceHost(
             if (!attached) return@enqueue
             val renderer = renderer ?: return@enqueue
             val player = player ?: return@enqueue
+            // Invariant: attached is set only after a successful window
+            // acquire and cleared in the same lane task that closes the
+            // window, so attached implies a live window; this null-check is
+            // a type-level guard, never a reachable behavior change.
             val window = window ?: return@enqueue
             player.step(elapsedSeconds)
             val disposition = renderer.renderAndPresent(player, window, clearColor, true)
