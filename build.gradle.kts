@@ -1,3 +1,4 @@
+import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import java.net.URI
 import java.nio.file.AtomicMoveNotSupportedException
@@ -31,7 +32,6 @@ val runtimeDirectory = layout.projectDirectory.dir("runtime").asFile
 val runtimeArtifactPin = runtimeDirectory.resolve("artifact.json")
 val runtimeSizeBudget = runtimeDirectory.resolve("size-budget.json")
 val runtimePrebuilt = runtimeDirectory.resolve("prebuilt")
-val runtimeChecksumManifest = runtimePrebuilt.resolve(".artifact-checksum")
 val requiredRuntimeArtifacts = setOf(
   "include/nux_capi.generated.h",
   "jniLibs/arm64-v8a/libc++_shared.so",
@@ -71,12 +71,44 @@ fun deleteRecursively(path: Path) {
   }
 }
 
-fun moveDirectory(source: Path, destination: Path) {
+fun atomicMoveDirectory(source: Path, destination: Path) {
   try {
     Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE)
-  } catch (_: AtomicMoveNotSupportedException) {
-    Files.move(source, destination)
+  } catch (error: AtomicMoveNotSupportedException) {
+    throw GradleException(
+      "Runtime installation requires atomic sibling-directory renames, but ${source.parent} does not support them.",
+      error,
+    )
   }
+}
+
+fun runtimeInstallSiblings(suffix: String): List<Path> =
+  Files.list(runtimeDirectory.toPath()).use { paths ->
+    paths
+      .filter { path ->
+        val name = path.fileName.toString()
+        name.startsWith(".prebuilt-") && name.endsWith(suffix)
+      }
+      .toList()
+      .sortedBy { it.fileName.toString() }
+  }
+
+fun recoverRuntimeInstall() {
+  val prebuiltPath = runtimePrebuilt.toPath()
+  val backups = runtimeInstallSiblings(".backup")
+  if (backups.isNotEmpty()) {
+    if (Files.exists(prebuiltPath)) {
+      backups.forEach(::deleteRecursively)
+    } else {
+      val recovery = backups.maxWith(
+        compareBy<Path>({ Files.getLastModifiedTime(it).toMillis() }, { it.fileName.toString() }),
+      )
+      atomicMoveDirectory(recovery, prebuiltPath)
+      backups.filter { it != recovery }.forEach(::deleteRecursively)
+      logger.lifecycle("Recovered runtime/prebuilt/ from an interrupted installation.")
+    }
+  }
+  runtimeInstallSiblings(".tmp").forEach(::deleteRecursively)
 }
 
 fun runtimeArtifactFiles(directory: Path): Set<String> {
@@ -99,6 +131,9 @@ fun runtimeArtifactSize(directory: Path): Long = requiredRuntimeArtifacts.sumOf 
   Files.size(artifact)
 }
 
+fun runtimeArtifactDigests(directory: Path): Map<String, String> =
+  requiredRuntimeArtifacts.sorted().associateWith { relativePath -> sha256(directory.resolve(relativePath)) }
+
 fun verifyArtifactSet(directory: Path, maximumBytes: Long) {
   val actualFiles = runtimeArtifactFiles(directory)
   if (actualFiles != requiredRuntimeArtifacts) {
@@ -119,6 +154,56 @@ fun verifyArtifactSet(directory: Path, maximumBytes: Long) {
   }
 }
 
+fun writeChecksumManifest(directory: Path, archiveChecksum: String) {
+  val manifest = linkedMapOf(
+    "archiveChecksum" to archiveChecksum,
+    "files" to runtimeArtifactDigests(directory),
+  )
+  Files.writeString(
+    directory.resolve(".artifact-checksum"),
+    JsonOutput.prettyPrint(JsonOutput.toJson(manifest)) + "\n",
+  )
+}
+
+fun cachedRuntimeValidationFailure(
+  directory: Path,
+  expectedArchiveChecksum: String,
+  maximumBytes: Long,
+): String? {
+  if (!Files.isDirectory(directory)) return "runtime/prebuilt/ is missing"
+  val manifestFile = directory.resolve(".artifact-checksum").toFile()
+  if (!manifestFile.isFile) return "the checksum manifest is missing"
+
+  val manifest = runCatching { readJsonObject(manifestFile) }
+    .getOrElse { return "the checksum manifest is invalid: ${it.message}" }
+  if (manifest["archiveChecksum"] != expectedArchiveChecksum) {
+    return "the archive checksum pin changed"
+  }
+
+  val recordedFiles = manifest["files"] as? Map<*, *>
+    ?: return "the checksum manifest has no per-file digests"
+  if (recordedFiles.keys != requiredRuntimeArtifacts) {
+    return "the checksum manifest does not describe the complete runtime artifact set"
+  }
+  val invalidDigest = recordedFiles.entries.firstOrNull { (path, digest) ->
+    path !is String || digest !is String || !digest.matches(Regex("[0-9a-f]{64}"))
+  }
+  if (invalidDigest != null) return "the checksum manifest contains an invalid per-file digest"
+
+  runCatching { verifyArtifactSet(directory, maximumBytes) }
+    .exceptionOrNull()
+    ?.let { return it.message ?: "the runtime artifact set is invalid" }
+
+  for (relativePath in requiredRuntimeArtifacts.sorted()) {
+    val expectedDigest = recordedFiles[relativePath] as String
+    val actualDigest = sha256(directory.resolve(relativePath))
+    if (actualDigest != expectedDigest) {
+      return "digest mismatch for $relativePath (expected $expectedDigest, got $actualDigest)"
+    }
+  }
+  return null
+}
+
 val runtimeFetch by tasks.registering {
   group = "runtime"
   description = "Fetches and verifies the pinned Nuxie runtime artifact."
@@ -127,17 +212,25 @@ val runtimeFetch by tasks.registering {
   // Deliberately do not declare prebuilt/ as a Gradle output: Gradle creates
   // declared output directories before task actions, which would leave an
   // empty prebuilt/ after a checksum failure. The local checksum manifest is
-  // the task's cheap freshness check instead.
+  // the task's content-integrity freshness check instead.
 
   doLast {
+    recoverRuntimeInstall()
+
+    val budget = readJsonObject(runtimeSizeBudget)
+    val maximumBytes = (budget["maximumBytes"] as? Number)?.toLong()?.takeIf { it > 0L }
+      ?: throw GradleException("runtime/size-budget.json must contain a positive 'maximumBytes' number.")
+
     when (val localSelection = providers.environmentVariable("NUXIE_RUNTIME_USE_LOCAL").orNull) {
       "1" -> {
-        if (!runtimePrebuilt.isDirectory) {
-          throw GradleException(
-            "NUXIE_RUNTIME_USE_LOCAL=1 requires runtime/prebuilt/. " +
-              "Run scripts/stage-runtime.sh <path-to-nuxie-runtime-checkout> first.",
-          )
-        }
+        runCatching { verifyArtifactSet(runtimePrebuilt.toPath(), maximumBytes) }
+          .getOrElse { error ->
+            throw GradleException(
+              "NUXIE_RUNTIME_USE_LOCAL=1 requires a complete runtime/prebuilt/ artifact set. " +
+                "Run scripts/stage-runtime.sh <path-to-nuxie-runtime-checkout> first. ${error.message}",
+              error,
+            )
+          }
         logger.lifecycle("Using locally staged Nuxie runtime from runtime/prebuilt/.")
         return@doLast
       }
@@ -153,18 +246,18 @@ val runtimeFetch by tasks.registering {
       throw GradleException("runtime/artifact.json checksum must be a lowercase SHA-256 digest.")
     }
 
-    val budget = readJsonObject(runtimeSizeBudget)
-    val maximumBytes = (budget["maximumBytes"] as? Number)?.toLong()?.takeIf { it > 0L }
-      ?: throw GradleException("runtime/size-budget.json must contain a positive 'maximumBytes' number.")
-
-    val recordedChecksum = runtimeChecksumManifest.takeIf(File::isFile)?.readText()?.trim()
-    if (recordedChecksum == expectedChecksum) {
-      verifyArtifactSet(runtimePrebuilt.toPath(), maximumBytes)
+    val reuseFailure = cachedRuntimeValidationFailure(
+      runtimePrebuilt.toPath(),
+      expectedChecksum,
+      maximumBytes,
+    )
+    if (reuseFailure == null) {
       logger.lifecycle("Using verified Nuxie runtime $release from runtime/prebuilt/.")
       return@doLast
     }
+    logger.lifecycle("Cached Nuxie runtime cannot be reused ($reuseFailure); refetching $release.")
 
-    val token = UUID.randomUUID().toString()
+    val token = "${System.currentTimeMillis()}-${UUID.randomUUID()}"
     val downloadedZip = runtimeDirectory.resolve(".runtime-$token.zip").toPath()
     val extractedDirectory = runtimeDirectory.resolve(".prebuilt-$token.tmp").toPath()
     val backupDirectory = runtimeDirectory.resolve(".prebuilt-$token.backup").toPath()
@@ -215,15 +308,15 @@ val runtimeFetch by tasks.registering {
       }
 
       verifyArtifactSet(extractedDirectory, maximumBytes)
-      Files.writeString(extractedDirectory.resolve(".artifact-checksum"), "$expectedChecksum\n")
+      writeChecksumManifest(extractedDirectory, expectedChecksum)
 
       val prebuiltPath = runtimePrebuilt.toPath()
-      if (Files.exists(prebuiltPath)) moveDirectory(prebuiltPath, backupDirectory)
+      if (Files.exists(prebuiltPath)) atomicMoveDirectory(prebuiltPath, backupDirectory)
       try {
-        moveDirectory(extractedDirectory, prebuiltPath)
+        atomicMoveDirectory(extractedDirectory, prebuiltPath)
       } catch (error: Exception) {
         if (Files.exists(backupDirectory) && !Files.exists(prebuiltPath)) {
-          moveDirectory(backupDirectory, prebuiltPath)
+          atomicMoveDirectory(backupDirectory, prebuiltPath)
         }
         throw error
       }
@@ -231,6 +324,12 @@ val runtimeFetch by tasks.registering {
       logger.lifecycle(
         "Verified and extracted Nuxie runtime $release " +
           "(${runtimeArtifactSize(prebuiltPath)} / $maximumBytes bytes).",
+      )
+    } catch (error: Exception) {
+      throw GradleException(
+        "Cached Nuxie runtime failed integrity validation ($reuseFailure), and the verified refetch of " +
+          "$release failed: ${error.message}. Refusing to use unverified runtime contents.",
+        error,
       )
     } finally {
       Files.deleteIfExists(downloadedZip)
@@ -242,13 +341,120 @@ val runtimeFetch by tasks.registering {
   }
 }
 
+fun stripSourceComments(source: String): String {
+  val stripped = StringBuilder(source.length)
+  var index = 0
+  var lineComment = false
+  var blockCommentDepth = 0
+  var quote: Char? = null
+  var tripleQuoted = false
+  var escaped = false
+
+  fun appendCommentCharacter(character: Char) {
+    stripped.append(if (character == '\n' || character == '\r') character else ' ')
+  }
+
+  while (index < source.length) {
+    val character = source[index]
+    val next = source.getOrNull(index + 1)
+
+    if (lineComment) {
+      appendCommentCharacter(character)
+      if (character == '\n') lineComment = false
+      index += 1
+      continue
+    }
+
+    if (blockCommentDepth > 0) {
+      if (character == '/' && next == '*') {
+        stripped.append("  ")
+        blockCommentDepth += 1
+        index += 2
+      } else if (character == '*' && next == '/') {
+        stripped.append("  ")
+        blockCommentDepth -= 1
+        index += 2
+      } else {
+        appendCommentCharacter(character)
+        index += 1
+      }
+      continue
+    }
+
+    if (tripleQuoted) {
+      if (source.startsWith("\"\"\"", index)) {
+        stripped.append("\"\"\"")
+        tripleQuoted = false
+        index += 3
+      } else {
+        stripped.append(character)
+        index += 1
+      }
+      continue
+    }
+
+    if (quote != null) {
+      stripped.append(character)
+      if (escaped) {
+        escaped = false
+      } else if (character == '\\') {
+        escaped = true
+      } else if (character == quote) {
+        quote = null
+      }
+      index += 1
+      continue
+    }
+
+    when {
+      character == '/' && next == '/' -> {
+        stripped.append("  ")
+        lineComment = true
+        index += 2
+      }
+      character == '/' && next == '*' -> {
+        stripped.append("  ")
+        blockCommentDepth = 1
+        index += 2
+      }
+      source.startsWith("\"\"\"", index) -> {
+        stripped.append("\"\"\"")
+        tripleQuoted = true
+        index += 3
+      }
+      character == '\"' || character == '\'' -> {
+        stripped.append(character)
+        quote = character
+        index += 1
+      }
+      else -> {
+        stripped.append(character)
+        index += 1
+      }
+    }
+  }
+  return stripped.toString()
+}
+
 val runtimeBoundary by tasks.registering {
   group = "verification"
-  description = "Checks that direct NuxieRuntimeBridge callers stay inside the runtime boundary."
-  val sources = fileTree("nuxie-android/src") {
+  description =
+    "Checks source-level runtime boundary references; intentionally does not inspect reflection or compiled bytecode."
+  val kotlinJavaSources = fileTree("nuxie-android") {
+    include("**/*.kt", "**/*.java")
+    exclude("build/**", ".gradle/**")
+  }
+  val generatedKotlinJavaSources = fileTree("nuxie-android/build/generated") {
     include("**/*.kt", "**/*.java")
   }
-  inputs.files(sources)
+  val cppSources = fileTree("nuxie-android/src/main/cpp") {
+    include("**/*.c", "**/*.cc", "**/*.cpp", "**/*.cxx", "**/*.h", "**/*.hh", "**/*.hpp", "**/*.hxx")
+  }
+  val sources = files(kotlinJavaSources, generatedKotlinJavaSources, cppSources)
+  inputs.files(kotlinJavaSources, cppSources)
+  // AGP shares build/generated/ between source and resource producers. Read
+  // generated Kotlin/Java at execution time rather than claiming the shared
+  // tree as an input; this task has no outputs and therefore always executes.
 
   doLast {
     // Presentation is the current surface host. Shrinking this allowlist is
@@ -258,22 +464,81 @@ val runtimeBoundary by tasks.registering {
       "ai.nuxie.sdk.presentation",
     )
     val packagePattern = Regex("(?m)^\\s*package\\s+([A-Za-z0-9_.]+)")
-    val referencePattern = Regex("\\bNuxieRuntimeBridge\\b")
-    val violations = sources.files.sortedBy { it.relativeTo(rootDir).path }.mapNotNull { source ->
-      val text = source.readText()
-      if (!referencePattern.containsMatchIn(text)) return@mapNotNull null
-      val packageName = packagePattern.find(text)?.groupValues?.get(1).orEmpty()
-      val allowed = allowedPackages.any { packageName == it || packageName.startsWith("$it.") }
-      if (allowed) return@mapNotNull null
-      val lines = text.lineSequence().mapIndexedNotNull { index, line ->
-        (index + 1).takeIf { referencePattern.containsMatchIn(line) }
-      }.toList()
-      "${source.relativeTo(rootDir)}:${lines.joinToString()} (package '$packageName')"
+    val simpleBridgePattern = Regex("(?<![A-Za-z0-9_.])NuxieRuntimeBridge\\b")
+    val qualifiedBridgePattern = Regex("\\bai\\.nuxie\\.sdk\\.runtime\\.NuxieRuntimeBridge\\b")
+    val bridgeImportPattern = Regex(
+      "(?m)^\\s*import\\s+ai\\.nuxie\\.sdk\\.runtime\\.NuxieRuntimeBridge(?:\\s+as\\s+[A-Za-z0-9_]+)?\\s*$",
+    )
+    val bridgeTypeAliasPattern = Regex(
+      "\\btypealias\\s+[A-Za-z_][A-Za-z0-9_]*(?:\\s*<[^>]+>)?\\s*=\\s*" +
+        "(?:ai\\.nuxie\\.sdk\\.runtime\\.)?NuxieRuntimeBridge\\b",
+    )
+    val bridgeImportAliasPattern = Regex(
+      "(?m)^\\s*import\\s+ai\\.nuxie\\.sdk\\.runtime\\.NuxieRuntimeBridge\\s+as\\s+" +
+        "([A-Za-z_][A-Za-z0-9_]*)\\s*$",
+    )
+    val cSymbolPattern = Regex("\\bnux_[A-Za-z0-9_]+\\b")
+    val runtimeShim = file("nuxie-android/src/main/cpp/nuxie_runtime_android.c").canonicalFile
+
+    val violations = buildList {
+      for (source in sources.files.sortedBy { it.relativeTo(rootDir).path }) {
+        val text = stripSourceComments(source.readText())
+        val relativePath = source.relativeTo(rootDir)
+        val extension = source.extension.lowercase()
+
+        if (extension in setOf("c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx")) {
+          if (source.canonicalFile != runtimeShim) {
+            val lines = text.lineSequence().mapIndexedNotNull { index, line ->
+              (index + 1).takeIf { cSymbolPattern.containsMatchIn(line) }
+            }.toList()
+            if (lines.isNotEmpty()) add("$relativePath:${lines.joinToString()} (nux_* outside the JNI shim)")
+          }
+          continue
+        }
+
+        val importedBridgeAliases = bridgeImportAliasPattern.findAll(text)
+          .map { it.groupValues[1] }
+          .toSet()
+        val aliasedBridgeTypeAliasPattern = importedBridgeAliases.takeIf { it.isNotEmpty() }?.let { aliases ->
+          Regex(
+            "\\btypealias\\s+[A-Za-z_][A-Za-z0-9_]*(?:\\s*<[^>]+>)?\\s*=\\s*(?:" +
+              aliases.joinToString("|") { Regex.escape(it) } + ")\\b",
+          )
+        }
+        val typeAliasMatches = buildList {
+          addAll(bridgeTypeAliasPattern.findAll(text).toList())
+          if (aliasedBridgeTypeAliasPattern != null) {
+            addAll(aliasedBridgeTypeAliasPattern.findAll(text).toList())
+          }
+        }
+        val typeAliasLines = typeAliasMatches
+          .map { match -> text.take(match.range.first).count { it == '\n' } + 1 }
+          .distinct()
+          .sorted()
+        if (typeAliasLines.isNotEmpty()) {
+          add("$relativePath:${typeAliasLines.joinToString()} (typealias re-exports NuxieRuntimeBridge)")
+        }
+
+        val packageName = packagePattern.find(text)?.groupValues?.get(1).orEmpty()
+        val allowed = allowedPackages.any { packageName == it || packageName.startsWith("$it.") }
+        if (allowed) continue
+
+        val bridgeLines = text.lineSequence().mapIndexedNotNull { index, line ->
+          (index + 1).takeIf {
+            simpleBridgePattern.containsMatchIn(line) ||
+              qualifiedBridgePattern.containsMatchIn(line) ||
+              bridgeImportPattern.containsMatchIn(line)
+          }
+        }.toList()
+        if (bridgeLines.isNotEmpty()) {
+          add("$relativePath:${bridgeLines.joinToString()} (package '$packageName')")
+        }
+      }
     }
 
     if (violations.isNotEmpty()) {
       throw GradleException(
-        "Direct NuxieRuntimeBridge references are outside the runtime boundary:\n" +
+        "Direct runtime references are outside the runtime boundary:\n" +
           violations.joinToString("\n") { "  $it" },
       )
     }
@@ -288,16 +553,27 @@ project(":runtime") {
   }
   tasks.register("boundary") {
     group = "verification"
-    description = "Checks that direct NuxieRuntimeBridge callers stay inside the runtime boundary."
+    description =
+      "Checks source-level runtime boundary references; intentionally does not inspect reflection or compiled bytecode."
     dependsOn(runtimeBoundary)
   }
 }
 
 project(":nuxie-android") {
+  tasks.matching {
+    val taskName = name.lowercase()
+    taskName.startsWith("generate") || taskName.startsWith("ksp") || taskName.startsWith("kapt") ||
+      taskName.startsWith("databinding")
+  }.configureEach {
+    val sourceGenerator = this
+    runtimeBoundary.configure { mustRunAfter(sourceGenerator) }
+  }
   tasks.matching { it.name == "preBuild" }.configureEach {
     dependsOn(project(":runtime").tasks.named("fetch"))
   }
-  tasks.matching { it.name == "check" }.configureEach {
+  // The documented PR gate always runs lint, and the boundary is a static
+  // source rule, so lint is the narrowest lifecycle task that cannot omit it.
+  tasks.matching { it.name == "lint" }.configureEach {
     dependsOn(project(":runtime").tasks.named("boundary"))
   }
 }
