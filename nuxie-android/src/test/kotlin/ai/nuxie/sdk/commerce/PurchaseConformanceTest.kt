@@ -33,8 +33,7 @@ import org.robolectric.RuntimeEnvironment
 /**
  * Drives the atomic purchase-sync fixture through the Android purchase
  * pipeline; reading and comparing the fixture shape alone proves nothing.
- * `post_use_access` and `ordinary_usage_fallback` describe the first-spend
- * gate deferred to UNIV-2649 and are intentionally not exercised here.
+ * The first-spend fields are exercised through [PurchaseFeatureUseTest].
  */
 @RunWith(RobolectricTestRunner::class)
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -104,6 +103,7 @@ class PurchaseConformanceTest {
         var evidenceAtCapture: PurchaseEvidence? = null
         var completionsAtCapture: Int? = null
         val service = PurchaseService(
+            purchaseStorageScope = "test-fixture",
             billing = billing,
             evidenceStore = store,
             synchronizer = NuxieApiPurchaseSynchronizer(core.api),

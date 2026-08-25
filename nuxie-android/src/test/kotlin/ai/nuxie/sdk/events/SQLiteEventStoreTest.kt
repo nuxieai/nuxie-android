@@ -60,6 +60,7 @@ class SQLiteEventStoreTest {
     fun stableDropsAreIdempotentAndSurviveReopeningTheStore() = runBlocking {
         var eventStore = SQLiteEventStore(context).also { store = it }
         assertTrue(eventStore.recordStableDrop("stable-event", 1_000))
+        assertTrue(eventStore.hasStableOutcome("stable-event"))
         eventStore.close()
 
         eventStore = SQLiteEventStore(context).also { store = it }

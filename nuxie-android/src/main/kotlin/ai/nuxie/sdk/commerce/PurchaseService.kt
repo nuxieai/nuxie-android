@@ -3,6 +3,7 @@ package ai.nuxie.sdk.commerce
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.features.FeatureService
 import ai.nuxie.sdk.features.FeatureType
+import ai.nuxie.sdk.features.FeatureUsageResult
 import ai.nuxie.sdk.features.LocalPurchaseGrant
 import ai.nuxie.sdk.network.NuxieApi
 import android.app.Activity
@@ -34,7 +35,7 @@ internal sealed interface PurchaseSyncOutcome {
 }
 
 internal fun interface PurchaseSynchronizer {
-    fun sync(evidence: PurchaseEvidence): PurchaseSyncOutcome
+    suspend fun sync(evidence: PurchaseEvidence): PurchaseSyncOutcome
 }
 
 /**
@@ -46,7 +47,7 @@ internal fun interface PurchaseSynchronizer {
 internal class NuxieApiPurchaseSynchronizer(
     private val api: NuxieApi,
 ) : PurchaseSynchronizer {
-    override fun sync(evidence: PurchaseEvidence): PurchaseSyncOutcome = try {
+    override suspend fun sync(evidence: PurchaseEvidence): PurchaseSyncOutcome = try {
         val response = api.postPurchase(
             NuxieApi.PlayPurchaseReport(
                 packageName = evidence.packageName,
@@ -100,6 +101,14 @@ internal class PurchaseService(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val initialRetryDelayMillis: Long = 1_000,
     private val maxRetryDelayMillis: Long = 60_000,
+    private val api: NuxieApi? = null,
+    private val purchaseStorageScope: String,
+    private val capturePurchaseSynced: suspend (
+        name: String,
+        properties: Map<String, Any?>,
+        eventId: String,
+        distinctId: String,
+    ) -> Boolean = { _, _, _, _ -> false },
 ) {
     private data class InFlightPurchase(
         val result: CompletableDeferred<PurchaseResult>,
@@ -110,11 +119,210 @@ internal class PurchaseService(
         val nuxieManaged: Boolean,
     )
 
+    private sealed interface UsageCoordination {
+        data class AwaitSync(val result: CompletableDeferred<Boolean>) : UsageCoordination
+        data class AwaitClaim(val released: CompletableDeferred<Unit>) : UsageCoordination
+        data object Claimed : UsageCoordination
+    }
+
     private val products = ConcurrentHashMap<String, StoreProduct>()
     private val inFlight = ConcurrentHashMap<String, InFlightPurchase>()
     private val processing = Mutex()
     private val syncRetryJobs = ConcurrentHashMap<String, Job>()
     private val completionRetryJobs = ConcurrentHashMap<String, Job>()
+    private val usageCoordinationLock = Any()
+    private val syncOperations = mutableMapOf<String, CompletableDeferred<Boolean>>()
+    private val purchaseUsageClaims = mutableSetOf<String>()
+    private val purchaseUsageWaiters = mutableMapOf<String, MutableList<CompletableDeferred<Unit>>>()
+
+    suspend fun useFeatureWithPendingPurchase(
+        distinctId: String,
+        featureId: String,
+        amount: Double,
+        entityId: String?,
+        metadata: Map<String, Any?>?,
+    ): FeatureUsageResult? {
+        val usageApi = api ?: return null
+        if (!amount.isFinite() || amount <= 0.0) return null
+        while (true) {
+            if (this.distinctId() != distinctId) throw kotlinx.coroutines.CancellationException()
+            val candidates = eligibleEvidence(distinctId, featureId)
+            if (candidates.size != 1) return null
+            val evidence = candidates.single()
+            when (val coordination = coordinateUsage(evidence.purchaseToken)) {
+                is UsageCoordination.AwaitSync -> {
+                    val synced = coordination.result.await()
+                    if (this.distinctId() != distinctId) throw kotlinx.coroutines.CancellationException()
+                    if (synced) return null
+                    continue
+                }
+                is UsageCoordination.AwaitClaim -> {
+                    coordination.released.await()
+                    continue
+                }
+                UsageCoordination.Claimed -> Unit
+            }
+
+            try {
+                val claimedCandidates = eligibleEvidence(distinctId, featureId)
+                if (claimedCandidates.size != 1 ||
+                    claimedCandidates.single().purchaseToken != evidence.purchaseToken
+                ) {
+                    return null
+                }
+                val eventId = purchaseUsageEventId(evidence, featureId, amount, entityId)
+                val response = usageApi.useFeatureWithPurchase(
+                    NuxieApi.PurchaseBackedFeatureUseReport(
+                        customerId = distinctId,
+                        featureId = featureId,
+                        requiredBalance = amount,
+                        eventData = NuxieApi.FeatureUseEventData(amount, metadata),
+                        entityId = entityId,
+                        purchase = NuxieApi.PlayPurchaseUseReport(
+                            packageName = evidence.packageName,
+                            productId = evidence.storeProductIds.first(),
+                            purchaseToken = evidence.purchaseToken,
+                            basePlanId = evidence.basePlanId,
+                            offerId = evidence.offerId,
+                            obfuscatedAccountId = evidence.obfuscatedAccountId,
+                            distinctId = distinctId,
+                            eventId = eventId,
+                        ),
+                    ),
+                )
+                if (response.customerId != distinctId) {
+                    throw IllegalStateException("Atomic Feature-use response customer did not match the purchase owner.")
+                }
+                val properties = mapOf(
+                    "transaction_id" to evidence.purchaseToken,
+                    "original_transaction_id" to evidence.purchaseToken,
+                    "product_id" to evidence.storeProductIds.first(),
+                    "customer_id" to distinctId,
+                )
+                if (!capturePurchaseSynced(
+                        SystemEventNames.PURCHASE_SYNCED,
+                        properties,
+                        purchaseSyncedEventId(evidence),
+                        distinctId,
+                    )
+                ) {
+                    throw IllegalStateException("Could not durably capture the purchase synchronization event.")
+                }
+                val current = evidenceStore.load()[evidence.purchaseToken]
+                val accepted = current?.copy(
+                    synced = true,
+                    syncedCustomerId = distinctId,
+                    syncedEventEmitted = true,
+                    backendSyncedAtMillis = nowMillis(),
+                )
+                if (current == null || !current.matchesAtomicUsePayload(evidence, distinctId) ||
+                    accepted == null || !evidenceStore.upsert(accepted)
+                ) {
+                    throw IllegalStateException("Could not persist accepted purchase evidence.")
+                }
+                releasePurchaseUsageClaim(evidence.purchaseToken)
+                completeManaged(accepted)
+                if (this.distinctId() != distinctId) throw kotlinx.coroutines.CancellationException()
+                val access = features.applyAuthoritativeUse(
+                    response,
+                    requestedFeatureId = featureId,
+                    distinctId = distinctId,
+                    entityId = entityId,
+                )
+                return FeatureUsageResult(
+                    success = true,
+                    featureId = featureId,
+                    amountUsed = amount,
+                    message = null,
+                    usage = null,
+                    authoritativeAccess = access,
+                )
+            } finally {
+                releasePurchaseUsageClaim(evidence.purchaseToken)
+            }
+        }
+    }
+
+    private fun eligibleEvidence(distinctId: String, featureId: String): List<PurchaseEvidence> =
+        evidenceStore.load().values.filter { evidence ->
+            evidence.authorityScope == purchaseStorageScope &&
+                evidence.ownerDistinctId == distinctId &&
+                evidence.purchaseState == StoredPurchaseState.PURCHASED &&
+                !evidence.revoked &&
+                !evidence.permanentlyRejected &&
+                !evidence.synced &&
+                evidence.backendSyncedAtMillis == null &&
+                evidence.purchaseToken.isNotBlank() &&
+                evidence.packageName.isNotBlank() &&
+                evidence.storeProductIds.firstOrNull()?.isNotBlank() == true &&
+                (!evidence.signatureVerificationRequired || evidence.signatureVerified) &&
+                evidence.nuxieManaged &&
+                evidence.localFeatureGrants.any { it.featureId == featureId }
+        }
+
+    private fun PurchaseEvidence.matchesAtomicUsePayload(
+        sent: PurchaseEvidence,
+        expectedOwner: String,
+    ): Boolean =
+        authorityScope == purchaseStorageScope &&
+            ownerDistinctId == expectedOwner &&
+            purchaseToken == sent.purchaseToken &&
+            packageName == sent.packageName &&
+            storeProductIds.firstOrNull() == sent.storeProductIds.firstOrNull() &&
+            basePlanId == sent.basePlanId &&
+            offerId == sent.offerId &&
+            obfuscatedAccountId == sent.obfuscatedAccountId
+
+    private fun coordinateUsage(purchaseToken: String): UsageCoordination =
+        synchronized(usageCoordinationLock) {
+            syncOperations[purchaseToken]?.let { return@synchronized UsageCoordination.AwaitSync(it) }
+            if (purchaseToken in purchaseUsageClaims) {
+                val waiter = CompletableDeferred<Unit>()
+                purchaseUsageWaiters.getOrPut(purchaseToken, ::mutableListOf).add(waiter)
+                UsageCoordination.AwaitClaim(waiter)
+            } else {
+                purchaseUsageClaims.add(purchaseToken)
+                UsageCoordination.Claimed
+            }
+        }
+
+    private fun releasePurchaseUsageClaim(purchaseToken: String) {
+        val waiters = synchronized(usageCoordinationLock) {
+            if (!purchaseUsageClaims.remove(purchaseToken)) return
+            purchaseUsageWaiters.remove(purchaseToken).orEmpty()
+        }
+        waiters.forEach { it.complete(Unit) }
+    }
+
+    private fun purchaseUsageEventId(
+        evidence: PurchaseEvidence,
+        featureId: String,
+        amount: Double,
+        entityId: String?,
+    ): String = stableEventId(
+        "purchase-use:",
+        listOf(
+            purchaseStorageScope,
+            evidence.purchaseToken,
+            featureId,
+            entityId.orEmpty(),
+            java.lang.Double.doubleToRawLongBits(amount).toString(),
+        ),
+    )
+
+    private fun purchaseSyncedEventId(evidence: PurchaseEvidence): String = stableEventId(
+        "purchase-synced:",
+        listOf(
+            purchaseStorageScope,
+            SystemEventNames.PURCHASE_SYNCED,
+            evidence.ownerDistinctId.orEmpty(),
+            evidence.purchaseToken,
+        ),
+    )
+
+    private fun stableEventId(prefix: String, components: List<String>): String = prefix + sha256(
+        components.joinToString("\u001f"),
+    )
 
     suspend fun purchase(
         activity: Activity,
@@ -263,6 +471,7 @@ internal class PurchaseService(
             evidenceRecords
                 .filter {
                     !it.permanentlyRejected &&
+                        !it.revoked &&
                         it.purchaseState == StoredPurchaseState.PURCHASED &&
                         (!it.synced || !it.syncedEventEmitted || it.needsManagedCompletion())
                 }
@@ -367,6 +576,9 @@ internal class PurchaseService(
                 ?: (settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED),
             signatureVerificationRequired = signatureVerificationRequired,
             signatureVerified = signatureVerified,
+            authorityScope = purchaseStorageScope,
+            revoked = false,
+            backendSyncedAtMillis = existing?.backendSyncedAtMillis,
         )
         // D2: evidence is durable before grants, facts, sync, acknowledge, or consume.
         if (!evidenceStore.upsert(evidence)) {
@@ -389,7 +601,8 @@ internal class PurchaseService(
         }
         if (evidence.signatureVerificationRequired && !evidence.signatureVerified) {
             revokeEvidence(evidence)
-            evidenceStore.upsert(evidence.copy(permanentlyRejected = true))
+            val current = evidenceStore.load()[evidence.purchaseToken] ?: evidence
+            evidenceStore.upsert(current.copy(permanentlyRejected = true, revoked = true))
             complete(purchase, PurchaseResult.Failed(SecurityException("Play purchase signature is invalid.")))
             return
         }
@@ -412,18 +625,49 @@ internal class PurchaseService(
         }
     }
 
-    private suspend fun syncEvidence(original: PurchaseEvidence) {
+    private suspend fun syncEvidence(original: PurchaseEvidence): Boolean {
+        val operation: CompletableDeferred<Boolean>
+        val ownsOperation: Boolean
+        synchronized(usageCoordinationLock) {
+            if (original.purchaseToken in purchaseUsageClaims) return false
+            val existing = syncOperations[original.purchaseToken]
+            if (existing != null) {
+                operation = existing
+                ownsOperation = false
+            } else {
+                operation = CompletableDeferred()
+                syncOperations[original.purchaseToken] = operation
+                ownsOperation = true
+            }
+        }
+        if (!ownsOperation) return operation.await()
+        val synced = try {
+            performSyncEvidence(original)
+        } catch (_: Exception) {
+            false
+        }
+        operation.complete(synced)
+        synchronized(usageCoordinationLock) {
+            if (syncOperations[original.purchaseToken] === operation) {
+                syncOperations.remove(original.purchaseToken)
+            }
+        }
+        return synced
+    }
+
+    private suspend fun performSyncEvidence(original: PurchaseEvidence): Boolean {
         val attempted = original.copy(syncAttempts = original.syncAttempts + 1)
-        if (!evidenceStore.upsert(attempted)) return
+        if (!evidenceStore.upsert(attempted)) return false
         when (val outcome = runCatching { synchronizer.sync(attempted) }
             .getOrElse { PurchaseSyncOutcome.Rejected(permanent = false) }) {
             is PurchaseSyncOutcome.Rejected -> {
                 if (outcome.permanent) {
-                    evidenceStore.upsert(attempted.copy(permanentlyRejected = true))
+                    evidenceStore.upsert(attempted.copy(permanentlyRejected = true, revoked = true))
                     revokeEvidence(attempted)
                 } else {
                     scheduleSyncRetry(attempted.purchaseToken, attempted.syncAttempts)
                 }
+                return false
             }
             is PurchaseSyncOutcome.Accepted -> {
                 val provenOwner = currentProvenOwner(attempted)
@@ -432,8 +676,9 @@ internal class PurchaseService(
                     synced = true,
                     syncedCustomerId = outcome.response.customerId,
                     acceptedResponseBody = outcome.response.body,
+                    backendSyncedAtMillis = nowMillis(),
                 )
-                if (!evidenceStore.upsert(accepted)) return
+                if (!evidenceStore.upsert(accepted)) return false
                 val projectionOwner = provenOwner ?: accepted.syncAttributionDistinctId
                 if (projectionOwner == distinctId()) {
                     features.updateFromPurchase(
@@ -443,6 +688,7 @@ internal class PurchaseService(
                     )
                 }
                 completeManaged(emitPurchaseSyncedIfNeeded(accepted))
+                return true
             }
         }
     }
@@ -510,6 +756,8 @@ internal class PurchaseService(
     }
 
     private suspend fun revokeEvidence(evidence: PurchaseEvidence) {
+        val current = evidenceStore.load()[evidence.purchaseToken] ?: evidence
+        evidenceStore.upsert(current.copy(revoked = true))
         if (evidence.ownerDistinctId != distinctId()) return
         features.applyLocalPurchase(
             evidence.localFeatureGrants.toFeatureGrants(),
@@ -534,7 +782,7 @@ internal class PurchaseService(
             delay(retryDelay(attempt))
             syncRetryJobs.remove(token)
             evidenceStore.load()[token]
-                ?.takeIf { !it.permanentlyRejected && !it.synced }
+                ?.takeIf { !it.permanentlyRejected && !it.revoked && !it.synced }
                 ?.let {
                     processing.withLock {
                         syncEvidence(it)

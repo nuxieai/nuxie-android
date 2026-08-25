@@ -65,6 +65,25 @@ class FeatureInfo {
         }
     }
 
+    internal fun setBalance(featureId: String, balance: Double, entityId: String?) {
+        synchronized(this) {
+            val current = if (entityId == null) mutableAll.value[featureId]
+            else entityAccess[featureId]?.get(entityId)
+            if (current == null) return
+            val updated = current.copy(
+                allowed = current.unlimited || balance >= 1.0,
+                balance = balance,
+            )
+            if (entityId == null) {
+                mutableAll.value = mutableAll.value + (featureId to updated)
+            } else {
+                entityAccess = entityAccess + (
+                    featureId to (entityAccess[featureId].orEmpty() + (entityId to updated))
+                )
+            }
+        }
+    }
+
     internal fun clear() {
         synchronized(this) {
             entityAccess = emptyMap()

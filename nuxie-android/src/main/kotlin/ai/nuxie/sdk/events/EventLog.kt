@@ -50,6 +50,13 @@ internal class EventLog(
             val properties: Map<String, Any?>?,
             val done: CompletableDeferred<StoredEvent?>,
         ) : Command
+        data class CaptureIdempotently(
+            val name: String,
+            val properties: Map<String, Any?>,
+            val eventId: String,
+            val distinctId: String,
+            val done: CompletableDeferred<Boolean>,
+        ) : Command
         data class CommitServerFact(val event: StoredEvent, val done: CompletableDeferred<Boolean>) : Command
         data class Barrier(val done: CompletableDeferred<Unit>) : Command
     }
@@ -69,6 +76,18 @@ internal class EventLog(
                         .onFailure { Log.w(LOG_TAG, "Trigger capture failed", it) }
                         .getOrNull()
                     command.done.complete(stored)
+                }
+                is Command.CaptureIdempotently -> {
+                    val captured = runCatching {
+                        processIdempotently(
+                            command.name,
+                            command.properties,
+                            command.eventId,
+                            command.distinctId,
+                        )
+                    }.onFailure { Log.w(LOG_TAG, "Idempotent event capture failed", it) }
+                        .getOrDefault(false)
+                    command.done.complete(captured)
                 }
                 is Command.CommitServerFact -> command.done.complete(commitServerFactNow(command.event))
                 is Command.Barrier -> command.done.complete(Unit)
@@ -130,6 +149,20 @@ internal class EventLog(
         return done.await()
     }
 
+    /** Durably capture a stable-id event once, returning true for inserts and duplicates. */
+    suspend fun captureIdempotently(
+        name: String,
+        properties: Map<String, Any?>,
+        eventId: String,
+        distinctId: String,
+    ): Boolean {
+        if (name.isEmpty() || eventId.isEmpty() || distinctId.isEmpty()) return false
+        val done = CompletableDeferred<Boolean>()
+        val command = Command.CaptureIdempotently(name, properties, eventId, distinctId, done)
+        if (commands.trySend(command).isFailure) return false
+        return done.await()
+    }
+
     /**
      * The decision lane delivered this event synchronously via /event; mark
      * it so batch delivery does not redundantly resend (the idempotency key
@@ -179,6 +212,45 @@ internal class EventLog(
             }
         }
         return stored
+    }
+
+    private suspend fun processIdempotently(
+        name: String,
+        commandProperties: Map<String, Any?>,
+        eventId: String,
+        distinctId: String,
+    ): Boolean {
+        if (store.hasStableOutcome(eventId)) return true
+        var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties)
+        if (!sanitized.containsKey(SESSION_ID_PROPERTY)) {
+            sessionIdProvider?.invoke()?.let { sessionId ->
+                sanitized = sanitized + (SESSION_ID_PROPERTY to sessionId)
+            }
+        }
+        val original = NuxieEvent(
+            id = eventId,
+            name = name,
+            distinctId = distinctId,
+            properties = contextBuilder.buildEnrichedProperties(sanitized),
+            timestampMillis = nowMillis(),
+        )
+        val transformed = applyBeforeSend(original)
+        if (transformed == null) {
+            store.recordStableDrop(original.id, original.timestampMillis)
+            Log.d(LOG_TAG, "Event '$name' terminally dropped by beforeSend hook")
+            return true
+        }
+        val stored = StoredEvent.from(transformed)
+        val inserted = store.insertPendingIfAbsent(stored)
+        if (inserted) {
+            subscribers.forEach { subscriber ->
+                if (subscriber.predicate(stored)) {
+                    runCatching { subscriber.handler.onCommitted(stored) }
+                        .onFailure { Log.w(LOG_TAG, "Committed-event subscriber failed", it) }
+                }
+            }
+        }
+        return true
     }
 
     private suspend fun commitServerFactNow(event: StoredEvent): Boolean {

@@ -12,6 +12,7 @@ import ai.nuxie.sdk.events.TriggerBroker
 import ai.nuxie.sdk.events.TriggerService
 import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureService
+import ai.nuxie.sdk.features.FeatureUsageService
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.commerce.FilePurchaseEvidenceStore
 import ai.nuxie.sdk.commerce.GooglePlayBillingClientAdapter
@@ -23,6 +24,7 @@ import ai.nuxie.sdk.commerce.PurchaseHandlingMode
 import ai.nuxie.sdk.commerce.PurchaseService
 import ai.nuxie.sdk.commerce.PurchaseSettings
 import ai.nuxie.sdk.commerce.purchaseEvidenceDirectory
+import ai.nuxie.sdk.commerce.purchaseAuthorityScope
 import ai.nuxie.sdk.experiences.ExperienceTrustRoots
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
 import ai.nuxie.sdk.identity.IdentityService
@@ -177,7 +179,18 @@ internal class NuxieCore(
         settings = purchaseSettings,
         scope = scope,
         nowMillis = nowMillis,
+        api = api,
+        purchaseStorageScope = purchaseAuthorityScope(apiKey, environment),
+        capturePurchaseSynced = eventLog::captureIdempotently,
     ).also { purchaseService = it }
+
+    val featureUsage = FeatureUsageService(
+        api = api,
+        purchases = purchases,
+        identity = identity,
+        featureInfo = featureInfo,
+        scope = scope,
+    )
 
     private val reportPresentationOutcome: suspend (PresentationOutcome) -> Unit = { outcome ->
         outcome.ref.journeyId?.let { journeyId ->

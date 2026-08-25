@@ -161,4 +161,53 @@ class NuxieApiTest {
 
         assertFalse(response.success)
     }
+
+    @Test
+    fun purchaseBackedFeatureUseCarriesThePlayEvidenceAndStableEventIdentity() {
+        val transport = object : HttpTransport {
+            lateinit var request: HttpTransport.Request
+            override fun execute(request: HttpTransport.Request): HttpTransport.Response {
+                this.request = request
+                return HttpTransport.Response(
+                    200,
+                    """{"customerId":"customer-1","featureId":"credits","code":"entitled","allowed":true,"unlimited":false,"balance":3.5,"type":"creditSystem"}"""
+                        .encodeToByteArray(),
+                )
+            }
+        }
+        val api = NuxieApi("pk_test_key", NuxieEnvironment.DEVELOPMENT, transport)
+
+        val response = api.useFeatureWithPurchase(
+            NuxieApi.PurchaseBackedFeatureUseReport(
+                customerId = "customer-1",
+                featureId = "credits",
+                requiredBalance = 2.5,
+                eventData = NuxieApi.FeatureUseEventData(
+                    value = 2.5,
+                    properties = mapOf("source" to "export"),
+                ),
+                entityId = "workspace-1",
+                purchase = NuxieApi.PlayPurchaseUseReport(
+                    packageName = "com.example.app",
+                    productId = "credit-pack",
+                    purchaseToken = "token-1",
+                    basePlanId = "annual",
+                    offerId = "launch",
+                    obfuscatedAccountId = "account-hash",
+                    distinctId = "customer-1",
+                    eventId = "purchase-use:stable",
+                ),
+            ),
+        )
+
+        assertEquals("https://dev-i.nuxie.ai/entitled", transport.request.url.toString())
+        assertEquals("customer-1", response.customerId)
+        assertEquals("credits", response.featureId)
+        assertEquals(2.5, response.requiredBalance, 0.0)
+        assertEquals(3.5, response.balance!!, 0.0)
+        assertEquals(
+            """{"apiKey":"pk_test_key","customerId":"customer-1","featureId":"credits","requiredBalance":2.5,"eventData":{"value":2.5,"properties":{"source":"export"}},"entityId":"workspace-1","purchase":{"type":"playstore","packageName":"com.example.app","productId":"credit-pack","purchaseToken":"token-1","basePlanId":"annual","offerId":"launch","obfuscatedAccountId":"account-hash","distinctId":"customer-1","eventId":"purchase-use:stable"}}""",
+            transport.request.body.decodeToString(),
+        )
+    }
 }
