@@ -1,8 +1,13 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
-import ai.nuxie.sdk.runtime.NuxieRuntimeBridge
+import ai.nuxie.sdk.runtime.NuxieAndroidVulkanRenderer
+import ai.nuxie.sdk.runtime.NuxieRuntime
+import ai.nuxie.sdk.runtime.NuxieRuntimeArtboard
+import ai.nuxie.sdk.runtime.NuxieRuntimeFile
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
+import ai.nuxie.sdk.runtime.NuxieRuntimePlayer
+import ai.nuxie.sdk.runtime.NuxieRuntimeWindow
 import android.content.Context
 import android.graphics.PixelFormat
 import android.util.Log
@@ -30,18 +35,19 @@ internal class ExperienceSurfaceHost(
     private val lane: NuxieRuntimeLane,
     private val clearColor: Int = CLEAR_COLOR_OPAQUE_BLACK,
     private val listener: Listener? = null,
+    private val runtime: NuxieRuntime = NuxieRuntime.shared,
 ) : SurfaceView(context), SurfaceHolder.Callback, Choreographer.FrameCallback {
     interface Listener {
         fun onFirstFrame()
         fun onFailure(error: ExperiencePresentationException)
     }
 
-    /** Native handles; touched only on the runtime lane. */
-    private var renderer = 0L
-    private var window = 0L
-    private var player = 0L
-    private var file = 0L
-    private var artboard = 0L
+    /** Owned runtime wrappers; created, touched, and closed only on the runtime lane. */
+    private var renderer: NuxieAndroidVulkanRenderer? = null
+    private var window: NuxieRuntimeWindow? = null
+    private var player: NuxieRuntimePlayer? = null
+    private var file: NuxieRuntimeFile? = null
+    private var artboard: NuxieRuntimeArtboard? = null
 
     /**
      * Lane-confined surface attachment. Jobs already queued when the
@@ -74,9 +80,9 @@ internal class ExperienceSurfaceHost(
     ) {
         lane.enqueue {
             file = if (descriptor == null) {
-                NuxieRuntimeBridge.fileNew(rivBytes)
+                runtime.importFile(rivBytes)
             } else {
-                val inspectedCatalog = NuxieRuntimeBridge.inspectFileAssets(rivBytes)
+                val inspectedCatalog = runtime.inspectFileAssets(rivBytes)
                 if (inspectedCatalog == null) {
                     reportFailure(
                         ExperiencePresentationException.Reason.PREPARATION_FAILED,
@@ -101,13 +107,14 @@ internal class ExperienceSurfaceHost(
                     onLoaded?.invoke(false)
                     return@enqueue
                 }
-                NuxieRuntimeBridge.fileNew(
+                runtime.importFile(
                     bytes = rivBytes,
                     expectedAssets = import.expectedAssets,
                     externalAssets = import.externalAssets,
                 )
             }
-            if (file == 0L) {
+            val loadedFile = file
+            if (loadedFile == null) {
                 Log.w(LOG_TAG, "Runtime rejected the riv bytes")
                 reportFailure(
                     ExperiencePresentationException.Reason.PREPARATION_FAILED,
@@ -117,11 +124,12 @@ internal class ExperienceSurfaceHost(
                 return@enqueue
             }
             artboard = if (artboardName != null) {
-                NuxieRuntimeBridge.nativeArtboardInstanceNewNamed(file, artboardName)
+                loadedFile.newArtboard(artboardName)
             } else {
-                NuxieRuntimeBridge.nativeArtboardInstanceNewDefault(file)
+                loadedFile.newArtboard()
             }
-            if (artboard == 0L) {
+            val loadedArtboard = artboard
+            if (loadedArtboard == null) {
                 Log.w(LOG_TAG, "Artboard unavailable")
                 reportFailure(
                     ExperiencePresentationException.Reason.HOST_FAILED,
@@ -130,8 +138,8 @@ internal class ExperienceSurfaceHost(
                 onLoaded?.invoke(false)
                 return@enqueue
             }
-            player = NuxieRuntimeBridge.nativePlayerNewDefault(artboard)
-            if (player == 0L) {
+            player = loadedArtboard.newPlayer()
+            if (player == null) {
                 Log.w(LOG_TAG, "Player creation failed")
                 reportFailure(
                     ExperiencePresentationException.Reason.HOST_FAILED,
@@ -152,11 +160,11 @@ internal class ExperienceSurfaceHost(
         lane.enqueue {
             // Attach only once both the headless renderer and this surface's
             // window exist; a failed create/acquire keeps the frame gate shut.
-            if (renderer == 0L) {
-                renderer = NuxieRuntimeBridge.nativeRendererNewAndroidVulkan(
+            if (renderer == null) {
+                renderer = runtime.newAndroidVulkanRenderer(
                     width, height,
                 )
-                if (renderer == 0L) {
+                if (renderer == null) {
                     Log.w(LOG_TAG, "Android Vulkan renderer creation failed")
                     reportFailure(
                         ExperiencePresentationException.Reason.HOST_FAILED,
@@ -165,8 +173,8 @@ internal class ExperienceSurfaceHost(
                     return@enqueue
                 }
             }
-            window = NuxieRuntimeBridge.nativeWindowAcquire(surface)
-            if (window == 0L) {
+            window = runtime.acquireWindow(surface)
+            if (window == null) {
                 Log.w(LOG_TAG, "Native window acquisition failed")
                 reportFailure(
                     ExperiencePresentationException.Reason.HOST_FAILED,
@@ -183,9 +191,8 @@ internal class ExperienceSurfaceHost(
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         lane.enqueue {
-            if (attached && renderer != 0L) {
-                NuxieRuntimeBridge.nativeRendererResize(
-                    renderer,
+            if (attached) {
+                renderer?.resize(
                     width.coerceAtLeast(1),
                     height.coerceAtLeast(1),
                 )
@@ -204,10 +211,8 @@ internal class ExperienceSurfaceHost(
         val detached = CountDownLatch(1)
         val accepted = lane.enqueue {
             attached = false
-            if (window != 0L) {
-                NuxieRuntimeBridge.nativeWindowRelease(window)
-                window = 0L
-            }
+            window?.close()
+            window = null
             detached.countDown()
         }
         // A rejected marker means the lane is shutting down, but orderly
@@ -232,11 +237,12 @@ internal class ExperienceSurfaceHost(
         }
         lastFrameNanos = frameTimeNanos
         lane.enqueue {
-            if (!attached || renderer == 0L || player == 0L) return@enqueue
-            NuxieRuntimeBridge.nativePlayerStep(player, elapsedSeconds)
-            val disposition = NuxieRuntimeBridge.nativeRendererRenderPlayer(
-                renderer, player, window, clearColor, true,
-            )
+            if (!attached) return@enqueue
+            val renderer = renderer ?: return@enqueue
+            val player = player ?: return@enqueue
+            val window = window ?: return@enqueue
+            player.step(elapsedSeconds)
+            val disposition = renderer.renderAndPresent(player, window, clearColor, true)
             if (disposition < 0) {
                 Log.w(LOG_TAG, "render_player failed with status ${-disposition}")
                 reportFailure(
@@ -256,29 +262,19 @@ internal class ExperienceSurfaceHost(
         Choreographer.getInstance().removeFrameCallback(this)
         lane.enqueue {
             attached = false
-            if (window != 0L) {
-                NuxieRuntimeBridge.nativeWindowRelease(window)
-                window = 0L
+            window?.close()
+            window = null
+            player?.let { loadedPlayer ->
+                renderer?.resetPlayerDomain(loadedPlayer)
+                loadedPlayer.close()
             }
-            if (player != 0L) {
-                if (renderer != 0L) {
-                    NuxieRuntimeBridge.nativeRendererResetPlayerDomain(renderer, player)
-                }
-                NuxieRuntimeBridge.nativePlayerFree(player)
-                player = 0L
-            }
-            if (artboard != 0L) {
-                NuxieRuntimeBridge.nativeArtboardInstanceFree(artboard)
-                artboard = 0L
-            }
-            if (file != 0L) {
-                NuxieRuntimeBridge.nativeFileFree(file)
-                file = 0L
-            }
-            if (renderer != 0L) {
-                NuxieRuntimeBridge.nativeRendererFree(renderer)
-                renderer = 0L
-            }
+            player = null
+            artboard?.close()
+            artboard = null
+            file?.close()
+            file = null
+            renderer?.close()
+            renderer = null
         }
     }
 

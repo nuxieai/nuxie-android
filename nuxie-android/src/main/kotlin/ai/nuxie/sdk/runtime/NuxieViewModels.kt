@@ -112,6 +112,65 @@ internal data class NativeCallResult<out T>(val status: Int, val value: T?)
 
 /** Injectable raw seam; production delegates to [NuxieRuntimeBridge]. */
 internal interface NuxieTypedRuntimeNative {
+    val isAvailable: Boolean get() = error("isAvailable is not implemented")
+
+    fun runtimeInfo(): String = error("runtimeInfo is not implemented")
+
+    fun inspectFileAssets(bytes: ByteArray): List<ExpectedFileAsset>? =
+        error("inspectFileAssets is not implemented")
+
+    fun newFile(
+        bytes: ByteArray,
+        expectedAssets: List<ExpectedFileAsset>,
+        externalAssets: Map<Int, ByteArray>,
+        imageDecoder: NuxImageDecoder,
+    ): Long = error("newFile is not implemented")
+
+    fun freeFile(handle: Long): Unit = error("freeFile is not implemented")
+
+    fun newDefaultArtboard(fileHandle: Long): Long =
+        error("newDefaultArtboard is not implemented")
+
+    fun newNamedArtboard(fileHandle: Long, name: String): Long =
+        error("newNamedArtboard is not implemented")
+
+    fun freeArtboard(handle: Long): Unit = error("freeArtboard is not implemented")
+
+    fun newDefaultPlayer(artboardHandle: Long): Long =
+        error("newDefaultPlayer is not implemented")
+
+    fun newNamedStateMachinePlayer(artboardHandle: Long, name: String): Long =
+        error("newNamedStateMachinePlayer is not implemented")
+
+    fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int =
+        error("stepPlayerFrame is not implemented")
+
+    fun freePlayer(handle: Long): Unit = error("freePlayer is not implemented")
+
+    fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long =
+        error("newAndroidVulkanRenderer is not implemented")
+
+    fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int =
+        error("resizeRenderer is not implemented")
+
+    fun renderAndPresent(
+        rendererHandle: Long,
+        playerHandle: Long,
+        windowHandle: Long,
+        clearColor: Int,
+        fitContainCenter: Boolean,
+    ): Int = error("renderAndPresent is not implemented")
+
+    fun resetPlayerDomain(rendererHandle: Long, playerHandle: Long): Int =
+        error("resetPlayerDomain is not implemented")
+
+    fun freeRenderer(handle: Long): Unit = error("freeRenderer is not implemented")
+
+    fun acquireWindow(surface: android.view.Surface): Long =
+        error("acquireWindow is not implemented")
+
+    fun releaseWindow(handle: Long): Unit = error("releaseWindow is not implemented")
+
     fun viewModelCatalog(fileHandle: Long): NativeCallResult<NativeViewModelCatalog> =
         error("viewModelCatalog is not implemented")
 
@@ -141,6 +200,81 @@ internal interface NuxieTypedRuntimeNative {
 }
 
 internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
+    override val isAvailable: Boolean get() = NuxieRuntimeBridge.isAvailable
+
+    override fun runtimeInfo(): String = NuxieRuntimeBridge.nativeRuntimeInfo()
+
+    override fun inspectFileAssets(bytes: ByteArray): List<ExpectedFileAsset>? =
+        NuxieRuntimeBridge.inspectFileAssets(bytes)
+
+    override fun newFile(
+        bytes: ByteArray,
+        expectedAssets: List<ExpectedFileAsset>,
+        externalAssets: Map<Int, ByteArray>,
+        imageDecoder: NuxImageDecoder,
+    ): Long = NuxieRuntimeBridge.fileNew(bytes, expectedAssets, externalAssets, imageDecoder)
+
+    override fun freeFile(handle: Long) {
+        NuxieRuntimeBridge.nativeFileFree(handle)
+    }
+
+    override fun newDefaultArtboard(fileHandle: Long): Long =
+        NuxieRuntimeBridge.nativeArtboardInstanceNewDefault(fileHandle)
+
+    override fun newNamedArtboard(fileHandle: Long, name: String): Long =
+        NuxieRuntimeBridge.nativeArtboardInstanceNewNamed(fileHandle, name)
+
+    override fun freeArtboard(handle: Long) {
+        NuxieRuntimeBridge.nativeArtboardInstanceFree(handle)
+    }
+
+    override fun newDefaultPlayer(artboardHandle: Long): Long =
+        NuxieRuntimeBridge.nativePlayerNewDefault(artboardHandle)
+
+    override fun newNamedStateMachinePlayer(artboardHandle: Long, name: String): Long =
+        NuxieRuntimeBridge.nativePlayerNewStateMachineNamed(artboardHandle, name)
+
+    override fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int =
+        NuxieRuntimeBridge.nativePlayerStep(playerHandle, elapsedSeconds)
+
+    override fun freePlayer(handle: Long) {
+        NuxieRuntimeBridge.nativePlayerFree(handle)
+    }
+
+    override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long =
+        NuxieRuntimeBridge.nativeRendererNewAndroidVulkan(pixelWidth, pixelHeight)
+
+    override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int =
+        NuxieRuntimeBridge.nativeRendererResize(handle, pixelWidth, pixelHeight)
+
+    override fun renderAndPresent(
+        rendererHandle: Long,
+        playerHandle: Long,
+        windowHandle: Long,
+        clearColor: Int,
+        fitContainCenter: Boolean,
+    ): Int = NuxieRuntimeBridge.nativeRendererRenderPlayer(
+        rendererHandle,
+        playerHandle,
+        windowHandle,
+        clearColor,
+        fitContainCenter,
+    )
+
+    override fun resetPlayerDomain(rendererHandle: Long, playerHandle: Long): Int =
+        NuxieRuntimeBridge.nativeRendererResetPlayerDomain(rendererHandle, playerHandle)
+
+    override fun freeRenderer(handle: Long) {
+        NuxieRuntimeBridge.nativeRendererFree(handle)
+    }
+
+    override fun acquireWindow(surface: android.view.Surface): Long =
+        NuxieRuntimeBridge.nativeWindowAcquire(surface)
+
+    override fun releaseWindow(handle: Long) {
+        NuxieRuntimeBridge.nativeWindowRelease(handle)
+    }
+
     override fun viewModelCatalog(fileHandle: Long): NativeCallResult<NativeViewModelCatalog> {
         val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
         val catalog = NuxieRuntimeBridge.nativeFileViewModelCatalog(fileHandle, status)

@@ -1,0 +1,208 @@
+package ai.nuxie.sdk.runtime
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class NuxieOwnedRuntimeTest {
+    @Test
+    fun `typed entry point exposes availability info catalog and configured import`() {
+        val native = RecordingNative()
+        val runtime = NuxieRuntime(native)
+        val decoder = NuxImageDecoder { _, _, _ -> null }
+        val asset = ExpectedFileAsset(
+            ordinal = 0,
+            kind = FileAssetKind.IMAGE,
+            authoredId = 42,
+            name = "hero",
+            fileExtension = "png",
+            isEmbedded = false,
+            hasContentsRecord = true,
+            requiredProviderFlags = 1,
+        )
+        native.inspectedAssets = listOf(asset)
+
+        assertTrue(runtime.isAvailable)
+        assertEquals("{\"sourceRevision\":\"abc\"}", runtime.info())
+        assertEquals(listOf(asset), runtime.inspectFileAssets(byteArrayOf(9)))
+        checkNotNull(runtime.importFile(
+            bytes = byteArrayOf(1),
+            expectedAssets = listOf(asset),
+            externalAssets = mapOf(0 to byteArrayOf(2)),
+            imageDecoder = decoder,
+        ))
+
+        assertEquals(listOf(asset), native.importedExpectedAssets)
+        assertEquals(setOf(0), native.importedExternalAssets.keys)
+        assertSame(decoder, native.importedImageDecoder)
+    }
+
+    @Test
+    fun `file close frees once and rejects artboard creation after close`() {
+        val native = RecordingNative()
+        val runtime = NuxieRuntime(native)
+        val file = checkNotNull(runtime.importFile(byteArrayOf(1, 2, 3)))
+
+        file.close()
+        file.close()
+
+        assertEquals(listOf(10L), native.freedFiles)
+        assertThrows(IllegalStateException::class.java) {
+            file.newArtboard()
+        }
+        assertEquals(0, native.defaultArtboardCreations)
+    }
+
+    @Test
+    fun `artboard close frees once and rejects player creation after close`() {
+        val native = RecordingNative()
+        val file = checkNotNull(NuxieRuntime(native).importFile(byteArrayOf(1)))
+        val artboard = checkNotNull(file.newArtboard("Main"))
+
+        artboard.close()
+        artboard.close()
+
+        assertEquals(listOf(20L), native.freedArtboards)
+        assertThrows(IllegalStateException::class.java) {
+            artboard.newPlayer()
+        }
+        assertEquals(0, native.defaultPlayerCreations)
+    }
+
+    @Test
+    fun `player close frees once and rejects frame steps after close`() {
+        val native = RecordingNative()
+        val file = checkNotNull(NuxieRuntime(native).importFile(byteArrayOf(1)))
+        val artboard = checkNotNull(file.newArtboard())
+        val player = checkNotNull(artboard.newPlayer("Idle"))
+
+        assertEquals(7, player.step(0.016))
+        player.close()
+        player.close()
+
+        assertEquals(listOf(30L), native.freedPlayers)
+        assertThrows(IllegalStateException::class.java) {
+            player.step(0.032)
+        }
+        assertEquals(listOf(0.016), native.frameSteps)
+    }
+
+    @Test
+    fun `renderer and window free once and reject rendering after close`() {
+        val native = RecordingNative()
+        val runtime = NuxieRuntime(native)
+        val file = checkNotNull(runtime.importFile(byteArrayOf(1)))
+        val artboard = checkNotNull(file.newArtboard())
+        val player = checkNotNull(artboard.newPlayer())
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(100, 200))
+        val window = NuxieRuntimeWindow(40L, native)
+
+        assertEquals(5, renderer.resize(300, 400))
+        assertEquals(1, renderer.renderAndPresent(player, window, 0xFF000000.toInt(), true))
+        assertEquals(6, renderer.resetPlayerDomain(player))
+
+        window.close()
+        window.close()
+        assertEquals(listOf(40L), native.releasedWindows)
+        assertThrows(IllegalStateException::class.java) {
+            renderer.renderAndPresent(player, window, 0, true)
+        }
+
+        renderer.close()
+        renderer.close()
+        assertEquals(listOf(50L), native.freedRenderers)
+        assertThrows(IllegalStateException::class.java) {
+            renderer.resize(1, 1)
+        }
+    }
+
+    private class RecordingNative : NuxieTypedRuntimeNative {
+        override val isAvailable = true
+        var inspectedAssets: List<ExpectedFileAsset>? = emptyList()
+        var importedExpectedAssets = emptyList<ExpectedFileAsset>()
+        var importedExternalAssets = emptyMap<Int, ByteArray>()
+        var importedImageDecoder: NuxImageDecoder? = null
+        val freedFiles = mutableListOf<Long>()
+        val freedArtboards = mutableListOf<Long>()
+        val freedPlayers = mutableListOf<Long>()
+        val frameSteps = mutableListOf<Double>()
+        val freedRenderers = mutableListOf<Long>()
+        val releasedWindows = mutableListOf<Long>()
+        var defaultArtboardCreations = 0
+        var defaultPlayerCreations = 0
+
+        override fun newFile(
+            bytes: ByteArray,
+            expectedAssets: List<ExpectedFileAsset>,
+            externalAssets: Map<Int, ByteArray>,
+            imageDecoder: NuxImageDecoder,
+        ): Long {
+            importedExpectedAssets = expectedAssets
+            importedExternalAssets = externalAssets
+            importedImageDecoder = imageDecoder
+            return 10L
+        }
+
+        override fun runtimeInfo(): String = "{\"sourceRevision\":\"abc\"}"
+
+        override fun inspectFileAssets(bytes: ByteArray): List<ExpectedFileAsset>? = inspectedAssets
+
+        override fun freeFile(handle: Long) {
+            freedFiles += handle
+        }
+
+        override fun newDefaultArtboard(fileHandle: Long): Long {
+            defaultArtboardCreations += 1
+            return 20L
+        }
+
+        override fun newNamedArtboard(fileHandle: Long, name: String): Long = 20L
+
+        override fun freeArtboard(handle: Long) {
+            freedArtboards += handle
+        }
+
+        override fun newDefaultPlayer(artboardHandle: Long): Long {
+            defaultPlayerCreations += 1
+            return 30L
+        }
+
+        override fun newNamedStateMachinePlayer(
+            artboardHandle: Long,
+            name: String,
+        ): Long = 30L
+
+        override fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int {
+            frameSteps += elapsedSeconds
+            return 7
+        }
+
+        override fun freePlayer(handle: Long) {
+            freedPlayers += handle
+        }
+
+        override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long = 50L
+
+        override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int = 5
+
+        override fun renderAndPresent(
+            rendererHandle: Long,
+            playerHandle: Long,
+            windowHandle: Long,
+            clearColor: Int,
+            fitContainCenter: Boolean,
+        ): Int = 1
+
+        override fun resetPlayerDomain(rendererHandle: Long, playerHandle: Long): Int = 6
+
+        override fun freeRenderer(handle: Long) {
+            freedRenderers += handle
+        }
+
+        override fun releaseWindow(handle: Long) {
+            releasedWindows += handle
+        }
+    }
+}
