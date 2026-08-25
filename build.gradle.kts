@@ -93,29 +93,33 @@ fun runtimeInstallSiblings(suffix: String): List<Path> =
       .sortedBy { it.fileName.toString() }
   }
 
-fun recoverRuntimeInstall(expectedArchiveChecksum: String?, maximumBytes: Long) {
+fun recoverRuntimeInstall(validationFailure: (Path) -> String?) {
   val prebuiltPath = runtimePrebuilt.toPath()
   val backups = runtimeInstallSiblings(".backup")
   if (backups.isNotEmpty()) {
     // Never prune the last good tree on the strength of a directory merely
     // existing: a corrupted or tampered live tree would otherwise destroy
     // the only recoverable copy. Validate first; an invalid live tree is
-    // discarded and the newest backup restored instead.
-    val liveValid = Files.exists(prebuiltPath) && expectedArchiveChecksum != null &&
-      cachedRuntimeValidationFailure(prebuiltPath, expectedArchiveChecksum, maximumBytes) == null
+    // discarded and the newest valid backup restored instead.
+    val liveValid = validationFailure(prebuiltPath) == null
     if (liveValid) {
       backups.forEach(::deleteRecursively)
     } else {
-      if (Files.exists(prebuiltPath)) {
-        deleteRecursively(prebuiltPath)
-        logger.lifecycle("Discarded an invalid runtime/prebuilt/ tree in favor of its backup.")
+      val recovery = backups
+        .sortedWith(
+          compareByDescending<Path> { Files.getLastModifiedTime(it).toMillis() }
+            .thenByDescending { it.fileName.toString() },
+        )
+        .firstOrNull { backup -> validationFailure(backup) == null }
+      if (recovery != null) {
+        if (Files.exists(prebuiltPath)) {
+          deleteRecursively(prebuiltPath)
+          logger.lifecycle("Discarded an invalid runtime/prebuilt/ tree in favor of its backup.")
+        }
+        atomicMoveDirectory(recovery, prebuiltPath)
+        backups.filter { it != recovery }.forEach(::deleteRecursively)
+        logger.lifecycle("Recovered runtime/prebuilt/ from an interrupted installation.")
       }
-      val recovery = backups.maxWith(
-        compareBy<Path>({ Files.getLastModifiedTime(it).toMillis() }, { it.fileName.toString() }),
-      )
-      atomicMoveDirectory(recovery, prebuiltPath)
-      backups.filter { it != recovery }.forEach(::deleteRecursively)
-      logger.lifecycle("Recovered runtime/prebuilt/ from an interrupted installation.")
     }
   }
   runtimeInstallSiblings(".tmp").forEach(::deleteRecursively)
@@ -228,11 +232,14 @@ val runtimeFetch by tasks.registering {
     val budget = readJsonObject(runtimeSizeBudget)
     val maximumBytes = (budget["maximumBytes"] as? Number)?.toLong()?.takeIf { it > 0L }
       ?: throw GradleException("runtime/size-budget.json must contain a positive 'maximumBytes' number.")
-    val pinForRecovery = readJsonObject(runtimeArtifactPin)
-    recoverRuntimeInstall(pinForRecovery["checksum"] as? String, maximumBytes)
 
     when (val localSelection = providers.environmentVariable("NUXIE_RUNTIME_USE_LOCAL").orNull) {
       "1" -> {
+        recoverRuntimeInstall { candidate ->
+          runCatching { verifyArtifactSet(candidate, maximumBytes) }
+            .exceptionOrNull()
+            ?.let { error -> error.message ?: "the runtime artifact set is invalid" }
+        }
         runCatching { verifyArtifactSet(runtimePrebuilt.toPath(), maximumBytes) }
           .getOrElse { error ->
             throw GradleException(
@@ -254,6 +261,10 @@ val runtimeFetch by tasks.registering {
     val expectedChecksum = requiredString(pin, "checksum", runtimeArtifactPin)
     if (!expectedChecksum.matches(Regex("[0-9a-f]{64}"))) {
       throw GradleException("runtime/artifact.json checksum must be a lowercase SHA-256 digest.")
+    }
+
+    recoverRuntimeInstall { candidate ->
+      cachedRuntimeValidationFailure(candidate, expectedChecksum, maximumBytes)
     }
 
     val reuseFailure = cachedRuntimeValidationFailure(
