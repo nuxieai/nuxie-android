@@ -54,19 +54,38 @@ internal data class NuxieViewModelCatalog(
         val name: String?,
     )
 
-    internal fun propertyAtPath(rootSchemaIndex: Int, path: String): Property? {
+    internal fun propertyAtPath(rootSchemaIndex: Int, path: String): Property {
+        val directMatches = properties.filter {
+            it.schemaIndex == rootSchemaIndex && it.name == path
+        }
+        require(directMatches.size <= 1) {
+            "Ambiguous view-model property '$path' in schema $rootSchemaIndex"
+        }
+        directMatches.singleOrNull()?.let { return it }
+
         val segments = path.split('/')
-        if (segments.isEmpty() || segments.any(String::isEmpty)) return null
+        require(segments.isNotEmpty() && segments.none(String::isEmpty)) {
+            "Invalid view-model property path '$path'"
+        }
         var schemaIndex = rootSchemaIndex
         segments.forEachIndexed { offset, name ->
-            val property = properties.firstOrNull {
+            val matches = properties.filter {
                 it.schemaIndex == schemaIndex && it.name == name
-            } ?: return null
+            }
+            require(matches.size == 1) {
+                val reason = if (matches.isEmpty()) "Unknown" else "Ambiguous"
+                "$reason view-model property path '$path' at segment '$name'"
+            }
+            val property = matches.single()
             if (offset == segments.lastIndex) return property
-            if (property.kind != NuxieViewModelPropertyKind.VIEW_MODEL) return null
-            schemaIndex = property.referencedSchemaIndex ?: return null
+            require(property.kind == NuxieViewModelPropertyKind.VIEW_MODEL) {
+                "View-model property path '$path' cannot descend through '$name'"
+            }
+            schemaIndex = requireNotNull(property.referencedSchemaIndex) {
+                "View-model property '$name' has no referenced schema"
+            }
         }
-        return null
+        error("Invalid view-model property path '$path'")
     }
 }
 
@@ -294,8 +313,7 @@ internal class NuxieRuntimeViewModels(
                 "free view model after failed bind",
                 freeStatus,
             )
-            cleanupFailure.addSuppressed(bindFailure)
-            throw cleanupFailure
+            bindFailure.addSuppressed(cleanupFailure)
         }
         throw bindFailure
     }
@@ -407,7 +425,6 @@ internal class NuxieBoundViewModel(
         kind: NuxieViewModelPropertyKind,
     ): NuxieViewModelCatalog.Property {
         val property = catalog.propertyAtPath(rootSchemaIndex, path)
-        require(property != null) { "Unknown view-model property path '$path'" }
         require(property.kind == kind) {
             "View-model property '$path' is ${property.kind}, not $kind"
         }

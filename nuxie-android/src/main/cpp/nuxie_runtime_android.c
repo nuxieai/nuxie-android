@@ -123,6 +123,14 @@ static void log_and_free_result(const char *operation, NuxStatus status,
   free_result(result);
 }
 
+static void log_cleanup_failure(const char *operation, NuxStatus status) {
+  if (status != NUX_STATUS_OK) {
+    __android_log_print(ANDROID_LOG_WARN, "Nuxie",
+                        "%s cleanup failed: status=%d", operation,
+                        (int)status);
+  }
+}
+
 struct asset_payload {
   uint8_t *data;
   size_t len;
@@ -300,8 +308,89 @@ decode_image_failed:
   return NUX_ASSET_CALLBACK_STATUS_FAILED;
 }
 
+static int is_valid_utf8(const char *data, size_t len) {
+  if (data == NULL) return len == 0;
+  const uint8_t *bytes = (const uint8_t *)data;
+  size_t index = 0;
+  while (index < len) {
+    uint8_t first = bytes[index];
+    if (first <= 0x7f) {
+      index++;
+      continue;
+    }
+    if (first >= 0xc2 && first <= 0xdf) {
+      if (len - index < 2 || bytes[index + 1] < 0x80 ||
+          bytes[index + 1] > 0xbf) {
+        return 0;
+      }
+      index += 2;
+      continue;
+    }
+    if (first == 0xe0) {
+      if (len - index < 3 || bytes[index + 1] < 0xa0 ||
+          bytes[index + 1] > 0xbf || bytes[index + 2] < 0x80 ||
+          bytes[index + 2] > 0xbf) {
+        return 0;
+      }
+      index += 3;
+      continue;
+    }
+    if ((first >= 0xe1 && first <= 0xec) ||
+        (first >= 0xee && first <= 0xef)) {
+      if (len - index < 3 || bytes[index + 1] < 0x80 ||
+          bytes[index + 1] > 0xbf || bytes[index + 2] < 0x80 ||
+          bytes[index + 2] > 0xbf) {
+        return 0;
+      }
+      index += 3;
+      continue;
+    }
+    if (first == 0xed) {
+      if (len - index < 3 || bytes[index + 1] < 0x80 ||
+          bytes[index + 1] > 0x9f || bytes[index + 2] < 0x80 ||
+          bytes[index + 2] > 0xbf) {
+        return 0;
+      }
+      index += 3;
+      continue;
+    }
+    if (first == 0xf0) {
+      if (len - index < 4 || bytes[index + 1] < 0x90 ||
+          bytes[index + 1] > 0xbf || bytes[index + 2] < 0x80 ||
+          bytes[index + 2] > 0xbf || bytes[index + 3] < 0x80 ||
+          bytes[index + 3] > 0xbf) {
+        return 0;
+      }
+      index += 4;
+      continue;
+    }
+    if (first >= 0xf1 && first <= 0xf3) {
+      if (len - index < 4 || bytes[index + 1] < 0x80 ||
+          bytes[index + 1] > 0xbf || bytes[index + 2] < 0x80 ||
+          bytes[index + 2] > 0xbf || bytes[index + 3] < 0x80 ||
+          bytes[index + 3] > 0xbf) {
+        return 0;
+      }
+      index += 4;
+      continue;
+    }
+    if (first == 0xf4) {
+      if (len - index < 4 || bytes[index + 1] < 0x80 ||
+          bytes[index + 1] > 0x8f || bytes[index + 2] < 0x80 ||
+          bytes[index + 2] > 0xbf || bytes[index + 3] < 0x80 ||
+          bytes[index + 3] > 0xbf) {
+        return 0;
+      }
+      index += 4;
+      continue;
+    }
+    return 0;
+  }
+  return 1;
+}
+
 static jstring new_string_view(JNIEnv *env, struct NuxStringView view) {
-  if ((view.data == NULL && view.len != 0) || view.len > INT32_MAX) return NULL;
+  if (view.len > INT32_MAX || !is_valid_utf8(view.data, view.len)) return NULL;
   jclass string_class = NULL;
   jstring charset = NULL;
   jstring value = NULL;
@@ -893,8 +982,14 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileViewModelCatalog(
     struct NuxViewModelSchemaView view;
     memset(&view, 0, sizeof(view));
     view.struct_size = (uint32_t)sizeof(view);
-    if (nux_view_model_catalog_schema(catalog, index, &view) != NUX_STATUS_OK ||
-        view.schema_index > INT64_MAX || view.first_property > INT64_MAX ||
+    NuxStatus accessor_status =
+        nux_view_model_catalog_schema(catalog, index, &view);
+    if (accessor_status != NUX_STATUS_OK) {
+      status = accessor_status;
+      failed = 1;
+      break;
+    }
+    if (view.schema_index > INT64_MAX || view.first_property > INT64_MAX ||
         view.property_count > INT64_MAX ||
         view.first_authored_instance > INT64_MAX ||
         view.authored_instance_count > INT64_MAX ||
@@ -931,8 +1026,14 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileViewModelCatalog(
     struct NuxViewModelPropertyView view;
     memset(&view, 0, sizeof(view));
     view.struct_size = (uint32_t)sizeof(view);
-    if (nux_view_model_catalog_property(catalog, index, &view) != NUX_STATUS_OK ||
-        view.schema_index > INT64_MAX || view.property_index > INT64_MAX ||
+    NuxStatus accessor_status =
+        nux_view_model_catalog_property(catalog, index, &view);
+    if (accessor_status != NUX_STATUS_OK) {
+      status = accessor_status;
+      failed = 1;
+      break;
+    }
+    if (view.schema_index > INT64_MAX || view.property_index > INT64_MAX ||
         (view.referenced_schema_index != SIZE_MAX &&
          view.referenced_schema_index > INT64_MAX) ||
         view.enum_label_count > INT32_MAX ||
@@ -956,9 +1057,10 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileViewModelCatalog(
     for (size_t offset = 0; offset < view.enum_label_count; offset++) {
       struct NuxStringView label_view;
       memset(&label_view, 0, sizeof(label_view));
-      if (nux_view_model_catalog_enum_label(
-              catalog, view.first_enum_label + offset, &label_view) !=
-          NUX_STATUS_OK) {
+      accessor_status = nux_view_model_catalog_enum_label(
+          catalog, view.first_enum_label + offset, &label_view);
+      if (accessor_status != NUX_STATUS_OK) {
+        status = accessor_status;
         failed = 1;
         break;
       }
@@ -997,9 +1099,14 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileViewModelCatalog(
     struct NuxViewModelAuthoredInstanceView view;
     memset(&view, 0, sizeof(view));
     view.struct_size = (uint32_t)sizeof(view);
-    if (nux_view_model_catalog_authored_instance(catalog, index, &view) !=
-            NUX_STATUS_OK ||
-        view.schema_index > INT64_MAX || view.instance_index > INT64_MAX ||
+    NuxStatus accessor_status =
+        nux_view_model_catalog_authored_instance(catalog, index, &view);
+    if (accessor_status != NUX_STATUS_OK) {
+      status = accessor_status;
+      failed = 1;
+      break;
+    }
+    if (view.schema_index > INT64_MAX || view.instance_index > INT64_MAX ||
         (view.name.data == NULL && view.name.len != 0)) {
       failed = 1;
       break;
@@ -1034,10 +1141,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileViewModelCatalog(
 view_model_catalog_cleanup:
   if (catalog != NULL) {
     NuxStatus free_status = nux_view_model_catalog_free(catalog);
-    if (free_status != NUX_STATUS_OK) {
-      failed = 1;
-      status = free_status;
-    }
+    log_cleanup_failure("view_model_catalog_free", free_status);
   }
   if (authored != NULL) (*env)->DeleteLocalRef(env, authored);
   if (properties != NULL) (*env)->DeleteLocalRef(env, properties);
@@ -1228,7 +1332,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
           info.message.data != NULL ? info.message.data : "");
     }
     NuxStatus free_status = nux_view_model_mutation_result_free(result);
-    if (status == NUX_STATUS_OK && free_status != NUX_STATUS_OK) status = free_status;
+    log_cleanup_failure("view_model_mutation_result_free", free_status);
   } else if (status == NUX_STATUS_OK) {
     status = NUX_STATUS_RUNTIME_ERROR;
   }
@@ -1439,9 +1543,15 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     goto typed_step_cleanup;
   }
   NuxStatus result_status = NUX_STATUS_RUNTIME_ERROR;
-  if (nux_player_step_result_status(step_result, &result_status) !=
-          NUX_STATUS_OK ||
-      result_status != call_status) {
+  NuxStatus accessor_status =
+      nux_player_step_result_status(step_result, &result_status);
+  if (accessor_status != NUX_STATUS_OK) {
+    reported_status = accessor_status;
+    failed = 1;
+    goto typed_step_cleanup;
+  }
+  if (result_status != call_status) {
+    reported_status = NUX_STATUS_RUNTIME_ERROR;
     failed = 1;
     goto typed_step_cleanup;
   }
@@ -1466,8 +1576,14 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
   struct NuxPlayerStepInfo info;
   memset(&info, 0, sizeof(info));
   info.struct_size = (uint32_t)sizeof(info);
-  if (nux_player_step_result_info(step_result, &info) != NUX_STATUS_OK ||
-      info.event_count > INT32_MAX || info.view_model_change_count > INT32_MAX) {
+  accessor_status = nux_player_step_result_info(step_result, &info);
+  if (accessor_status != NUX_STATUS_OK) {
+    reported_status = accessor_status;
+    failed = 1;
+    goto typed_step_cleanup;
+  }
+  if (info.event_count > INT32_MAX ||
+      info.view_model_change_count > INT32_MAX) {
     failed = 1;
     goto typed_step_cleanup;
   }
@@ -1535,9 +1651,15 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     struct NuxPlayerEventView view;
     memset(&view, 0, sizeof(view));
     view.struct_size = (uint32_t)sizeof(view);
-    if (nux_player_step_result_event(step_result, event_index, &view) !=
-            NUX_STATUS_OK ||
-        view.event_local_index > INT64_MAX || view.property_count > INT32_MAX) {
+    accessor_status =
+        nux_player_step_result_event(step_result, event_index, &view);
+    if (accessor_status != NUX_STATUS_OK) {
+      reported_status = accessor_status;
+      failed = 1;
+      break;
+    }
+    if (view.event_local_index > INT64_MAX ||
+        view.property_count > INT32_MAX) {
       failed = 1;
       break;
     }
@@ -1566,15 +1688,44 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
       struct NuxPlayerEventPropertyView property;
       memset(&property, 0, sizeof(property));
       property.struct_size = (uint32_t)sizeof(property);
-      if (nux_player_step_result_event_property(
-              step_result, event_index, property_index, &property) !=
-              NUX_STATUS_OK ||
-          property.kind > NUX_PLAYER_EVENT_PROPERTY_KIND_TRIGGER) {
+      accessor_status = nux_player_step_result_event_property(
+          step_result, event_index, property_index, &property);
+      if (accessor_status != NUX_STATUS_OK) {
+        reported_status = accessor_status;
+        failed = 1;
+        break;
+      }
+      if (property.kind > NUX_PLAYER_EVENT_PROPERTY_KIND_TRIGGER) {
         failed = 1;
         break;
       }
       jstring property_name = new_string_view(env, property.name);
-      jbyteArray bytes = new_byte_view(env, property.string_value);
+      struct NuxByteView string_value;
+      memset(&string_value, 0, sizeof(string_value));
+      jfloat number_value = 0.0f;
+      jboolean bool_value = JNI_FALSE;
+      jint color_value = 0;
+      jlong integer_value = 0;
+      switch (property.kind) {
+        case NUX_PLAYER_EVENT_PROPERTY_KIND_NUMBER:
+          number_value = (jfloat)property.number_value;
+          break;
+        case NUX_PLAYER_EVENT_PROPERTY_KIND_BOOL:
+          bool_value = property.bool_value ? JNI_TRUE : JNI_FALSE;
+          break;
+        case NUX_PLAYER_EVENT_PROPERTY_KIND_STRING:
+          string_value = property.string_value;
+          break;
+        case NUX_PLAYER_EVENT_PROPERTY_KIND_COLOR:
+          color_value = (jint)property.color_value;
+          break;
+        case NUX_PLAYER_EVENT_PROPERTY_KIND_ENUM:
+          integer_value = (jlong)property.integer_value;
+          break;
+        case NUX_PLAYER_EVENT_PROPERTY_KIND_TRIGGER:
+          break;
+      }
+      jbyteArray bytes = new_byte_view(env, string_value);
       if (property_name == NULL || bytes == NULL) {
         if (bytes != NULL) (*env)->DeleteLocalRef(env, bytes);
         if (property_name != NULL) (*env)->DeleteLocalRef(env, property_name);
@@ -1583,9 +1734,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
       }
       jobject property_item = (*env)->NewObject(
           env, property_class, property_constructor, property_name,
-          (jint)property.kind, (jfloat)property.number_value,
-          (jboolean)(property.bool_value ? JNI_TRUE : JNI_FALSE), bytes,
-          (jint)property.color_value, (jlong)property.integer_value);
+          (jint)property.kind, number_value, bool_value, bytes, color_value,
+          integer_value);
       if (clear_jni_exception(env) || property_item == NULL) {
         failed = 1;
       } else {
@@ -1630,9 +1780,14 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     struct NuxViewModelChangeView view;
     memset(&view, 0, sizeof(view));
     view.struct_size = (uint32_t)sizeof(view);
-    if (nux_player_step_result_view_model_change(
-            step_result, change_index, &view) != NUX_STATUS_OK ||
-        view.origin > NUX_VIEW_MODEL_CHANGE_ORIGIN_RUNTIME ||
+    accessor_status = nux_player_step_result_view_model_change(
+        step_result, change_index, &view);
+    if (accessor_status != NUX_STATUS_OK) {
+      reported_status = accessor_status;
+      failed = 1;
+      break;
+    }
+    if (view.origin > NUX_VIEW_MODEL_CHANGE_ORIGIN_RUNTIME ||
         view.property_index > INT64_MAX || view.list_item_count > INT32_MAX ||
         (view.kind == NUX_VIEW_MODEL_VALUE_KIND_BOOL && view.bool_value > 1u)) {
       failed = 1;
@@ -1659,9 +1814,10 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     for (size_t item_index = 0; item_index < view.list_item_count;
          item_index++) {
       uint64_t identity = 0;
-      if (nux_player_step_result_view_model_change_list_item(
-              step_result, change_index, item_index, &identity) !=
-          NUX_STATUS_OK) {
+      accessor_status = nux_player_step_result_view_model_change_list_item(
+          step_result, change_index, item_index, &identity);
+      if (accessor_status != NUX_STATUS_OK) {
+        reported_status = accessor_status;
         failed = 1;
         break;
       }
@@ -1705,10 +1861,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
 typed_step_cleanup:
   if (step_result != NULL) {
     NuxStatus free_status = nux_player_step_result_free(step_result);
-    if (free_status != NUX_STATUS_OK) {
-      failed = 1;
-      if (reported_status == NUX_STATUS_OK) reported_status = free_status;
-    }
+    log_cleanup_failure("player_step_result_free", free_status);
   }
   if (changes != NULL) (*env)->DeleteLocalRef(env, changes);
   if (events != NULL) (*env)->DeleteLocalRef(env, events);
