@@ -12,11 +12,20 @@ import kotlinx.serialization.json.JsonPrimitive
  * admission needs no additional network round trip.
  */
 internal class ExperienceReleaseProfile(
-    val renderBaseUrl: String,
-    val assetBaseUrl: String,
+    val delivery: Delivery,
     val active: List<Entry>,
     val pinned: List<Entry>,
 ) {
+    constructor(
+        renderBaseUrl: String,
+        assetBaseUrl: String,
+        active: List<Entry>,
+        pinned: List<Entry>,
+    ) : this(Delivery(renderBaseUrl, assetBaseUrl), active, pinned)
+
+    val renderBaseUrl: String get() = delivery.renderBaseUrl
+    val assetBaseUrl: String get() = delivery.assetBaseUrl
+
     class Entry(
         val locator: ExperienceReleaseIdentity,
         val descriptorSha256: String,
@@ -54,10 +63,20 @@ internal class ExperienceReleaseProfile(
 
             val active = entries("active") ?: return null
             val pinned = entries("pinned") ?: return null
-            return ExperienceReleaseProfile(renderBaseUrl, assetBaseUrl, active, pinned)
+            return ExperienceReleaseProfile(
+                delivery = Delivery(renderBaseUrl, assetBaseUrl),
+                active = active,
+                pinned = pinned,
+            )
         }
 
         private fun JsonObject.string(key: String): String? =
             (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
     }
 }
+
+/** Authenticated profile authority for the two artifact URL classes. */
+internal data class Delivery(
+    val renderBaseUrl: String,
+    val assetBaseUrl: String,
+)
