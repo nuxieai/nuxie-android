@@ -143,7 +143,9 @@ internal object AndroidImageDecoder : NuxImageDecoder {
         }
     }
 
-    private fun premultiply(channel: Int, alpha: Int): Int =
+    // Round-half-up premultiplication; proven directly by unit tests since
+    // low-alpha bitmap round-trips are not bit-exact across decoders.
+    internal fun premultiply(channel: Int, alpha: Int): Int =
         ((channel and 0xff) * alpha + 127) / 255
 
     private const val RGBA_BYTES_PER_PIXEL = 4L
