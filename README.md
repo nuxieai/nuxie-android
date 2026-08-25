@@ -15,6 +15,13 @@ implementation. The specification lives in the `nuxie-dev` repository at
 - Android minSdk 23
 - Kotlin
 
+## Runtime artifact
+
+A fresh clone builds normally; Gradle fetches and SHA-256 verifies the pinned
+runtime release when needed. For local runtime development, stage a checkout
+with `scripts/stage-runtime.sh <path-to-nuxie-runtime-checkout>` and build with
+`NUXIE_RUNTIME_USE_LOCAL=1`.
+
 ## Setup
 
 ```kotlin

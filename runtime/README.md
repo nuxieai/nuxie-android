@@ -1,4 +1,5 @@
 # Runtime
 
-The shared engine artifact pin lands with UNIV-1182. This scaffold does not
-include the engine artifact.
+`artifact.json` pins the published shared engine archive and its SHA-256.
+Gradle verifies and extracts that archive into the gitignored `prebuilt/`
+directory, subject to `size-budget.json`.

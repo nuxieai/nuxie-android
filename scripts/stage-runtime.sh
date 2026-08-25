@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stage the prebuilt Nuxie engine (nux_capi) from a built nuxie-runtime
-# checkout into runtime/prebuilt/ for local development. The release pipeline
-# replaces this with a pinned artifact download (runtime/artifact.json).
+# checkout into runtime/prebuilt/ for local development. Normal builds fetch
+# the pinned release in runtime/artifact.json instead.
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
@@ -12,6 +12,9 @@ fi
 SRC="$(cd -- "$1" && pwd -P)"
 DEST="${REPO_ROOT}/runtime/prebuilt"
 mkdir -p "${DEST}/jniLibs/arm64-v8a" "${DEST}/jniLibs/x86_64" "${DEST}/include"
+# A locally staged engine must never be mistaken for the verified release on
+# the next build where NUXIE_RUNTIME_USE_LOCAL is unset.
+rm -f -- "${DEST}/.artifact-checksum"
 cp "${SRC}/target/aarch64-linux-android/release/libnux_capi.so" "${DEST}/jniLibs/arm64-v8a/"
 cp "${SRC}/target/x86_64-linux-android/release/libnux_capi.so" "${DEST}/jniLibs/x86_64/"
 cp "${SRC}/crates/nux-capi/include/nux_capi.generated.h" "${DEST}/include/"

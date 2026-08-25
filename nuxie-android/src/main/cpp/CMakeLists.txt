@@ -1,6 +1,7 @@
 # JNI shim over the prebuilt Nuxie engine (nux_capi). The engine .so and its
-# generated header are staged per-ABI under runtime/prebuilt/ by
-# scripts/stage-runtime.sh; this build only compiles the thin adapter.
+# generated header are fetched from the pin (or explicitly staged for local
+# runtime work) under runtime/prebuilt/; this build only compiles the thin
+# adapter.
 cmake_minimum_required(VERSION 3.22.1)
 project(nuxie_runtime_android C)
 
