@@ -4,6 +4,15 @@ package ai.nuxie.sdk.events
 internal interface EventStore {
     suspend fun insertPending(event: StoredEvent)
 
+    /** Inserts a pending event only when its stable id is not already present. */
+    suspend fun insertPendingIfAbsent(event: StoredEvent): Boolean {
+        insertPending(event)
+        return true
+    }
+
+    /** True when this stable id was already captured as an event or terminal drop. */
+    suspend fun hasStableOutcome(eventId: String): Boolean = false
+
     /**
      * Inserts a server-authored fact directly into local history. The fact is
      * born delivered, so it can never enter the outbound pending queue.

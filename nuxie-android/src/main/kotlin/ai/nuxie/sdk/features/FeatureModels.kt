@@ -8,6 +8,22 @@ data class FeatureAccess(
     val type: FeatureType,
 )
 
+/** Server-confirmed result of reporting metered Feature use. */
+data class FeatureUsageResult(
+    val success: Boolean,
+    val featureId: String,
+    val amountUsed: Double,
+    val message: String?,
+    val usage: UsageInfo?,
+    val authoritativeAccess: FeatureAccess? = null,
+) {
+    data class UsageInfo(
+        val current: Double,
+        val limit: Double?,
+        val remaining: Double?,
+    )
+}
+
 /** The access accounting model used by a Feature. */
 enum class FeatureType {
     BOOLEAN,

@@ -719,6 +719,7 @@ class PurchaseServiceTest {
         val settings = PurchaseSettings(null, mode)
         lateinit var fixture: Fixture
         val service = PurchaseService(
+            purchaseStorageScope = "test-fixture",
             billing = billing,
             evidenceStore = store,
             synchronizer = PurchaseSynchronizer { fixture.synchronizer(it) },

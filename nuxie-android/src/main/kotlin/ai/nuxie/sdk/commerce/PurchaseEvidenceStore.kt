@@ -23,12 +23,13 @@ internal fun purchaseEvidenceDirectory(
     apiKey: String,
     environment: NuxieEnvironment,
 ): File {
-    val authority = "$apiKey\u0000${environment.name}"
-    val opaqueScope = MessageDigest.getInstance("SHA-256")
-        .digest(authority.encodeToByteArray())
-        .joinToString("") { "%02x".format(it) }
-    return File(File(filesDirectory, "nuxie-commerce"), opaqueScope)
+    return File(File(filesDirectory, "nuxie-commerce"), purchaseAuthorityScope(apiKey, environment))
 }
+
+internal fun purchaseAuthorityScope(apiKey: String, environment: NuxieEnvironment): String =
+    MessageDigest.getInstance("SHA-256")
+        .digest("$apiKey\u0000${environment.name}".encodeToByteArray())
+        .joinToString("") { "%02x".format(it) }
 
 internal data class StoredPurchaseContext(
     val placementId: String? = null,
@@ -100,6 +101,9 @@ internal data class PurchaseEvidence(
     val nuxieManaged: Boolean = false,
     val signatureVerificationRequired: Boolean = false,
     val signatureVerified: Boolean = false,
+    val authorityScope: String? = null,
+    val revoked: Boolean = false,
+    val backendSyncedAtMillis: Long? = null,
 )
 
 internal interface PurchaseEvidenceStore {
@@ -249,6 +253,9 @@ internal class FilePurchaseEvidenceStore(
             put("nuxieManaged", JsonPrimitive(evidence.nuxieManaged))
             put("signatureVerificationRequired", JsonPrimitive(evidence.signatureVerificationRequired))
             put("signatureVerified", JsonPrimitive(evidence.signatureVerified))
+            evidence.authorityScope?.let { put("authorityScope", JsonPrimitive(it)) }
+            put("revoked", JsonPrimitive(evidence.revoked))
+            evidence.backendSyncedAtMillis?.let { put("backendSyncedAtMillis", JsonPrimitive(it)) }
         },
     )
 
@@ -292,6 +299,9 @@ internal class FilePurchaseEvidenceStore(
             nuxieManaged = raw.boolean("nuxieManaged"),
             signatureVerificationRequired = raw.boolean("signatureVerificationRequired"),
             signatureVerified = raw.boolean("signatureVerified"),
+            authorityScope = raw.string("authorityScope"),
+            revoked = raw.boolean("revoked"),
+            backendSyncedAtMillis = (raw["backendSyncedAtMillis"] as? JsonPrimitive)?.longOrNull,
         )
     }.getOrNull()
 

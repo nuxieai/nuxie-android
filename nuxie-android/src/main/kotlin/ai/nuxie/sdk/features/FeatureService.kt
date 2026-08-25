@@ -63,6 +63,29 @@ internal class FeatureService(
         entityId: String? = null,
     ): FeatureAccess = performCheck(featureId, requiredBalance, entityId)
 
+    /** Apply the server-authoritative post-use state returned by an atomic command. */
+    suspend fun applyAuthoritativeUse(
+        result: NuxieApi.FeatureCheckResult,
+        requestedFeatureId: String,
+        distinctId: String,
+        entityId: String?,
+    ): FeatureAccess {
+        synchronizeCustomerScopeIfNeeded()
+        if (identity.distinctId() != distinctId || result.customerId != distinctId) {
+            throw kotlinx.coroutines.CancellationException()
+        }
+        val access = authoritativeAccess(result, requestedFeatureId)
+        synchronized(lock) {
+            if (identity.distinctId() != distinctId || cacheDistinctId != distinctId) {
+                throw kotlinx.coroutines.CancellationException()
+            }
+            val key = CacheKey(requestedFeatureId, entityId)
+            realTimeCache[key] = TimedAccess(access, nowMillis())
+            featureInfo.update(requestedFeatureId, access, entityId)
+        }
+        return access
+    }
+
     suspend fun checkWithCache(
         featureId: String,
         requiredBalance: Double? = null,

@@ -34,6 +34,15 @@ class EventLogTest {
         val delivered = mutableListOf<StoredEvent>()
 
         override suspend fun insertPending(event: StoredEvent) { pending.add(event) }
+        override suspend fun insertPendingIfAbsent(event: StoredEvent): Boolean {
+            if (pending.any { it.id == event.id } || delivered.any { it.id == event.id } ||
+                event.id in stableDrops
+            ) return false
+            pending.add(event)
+            return true
+        }
+        override suspend fun hasStableOutcome(eventId: String): Boolean =
+            pending.any { it.id == eventId } || delivered.any { it.id == eventId } || eventId in stableDrops
         override suspend fun insertDeliveredIfAbsent(event: StoredEvent): Boolean {
             if (pending.any { it.id == event.id } || delivered.any { it.id == event.id }) return false
             delivered.add(event)
@@ -54,6 +63,7 @@ class EventLogTest {
         override suspend fun reassignEvents(from: String, to: String) = 0
         override suspend fun deleteOldestDeliveredEvents(keeping: Int) = 0
         override suspend fun recordStableDrop(eventId: String, recordedAtMillis: Long): Boolean {
+            if (eventId in stableDrops) return false
             stableDrops.add(eventId)
             return true
         }
@@ -112,6 +122,38 @@ class EventLogTest {
             observed,
         )
         assertEquals(listOf("one", "two", "three"), store.pending.map { it.name })
+    }
+
+    @Test
+    fun stableIdCaptureIsDurableAndIdempotent() = runBlocking {
+        val store = RecordingStore()
+        val eventLog = log(store)
+        var announcements = 0
+        eventLog.subscribeCommitted { announcements += 1 }
+
+        assertTrue(eventLog.captureIdempotently("\$purchase_synced", emptyMap(), "stable-id", "owner-1"))
+        assertTrue(eventLog.captureIdempotently("\$purchase_synced", emptyMap(), "stable-id", "owner-1"))
+
+        assertEquals(listOf("stable-id"), store.pending.map { it.id })
+        assertEquals("owner-1", store.pending.single().distinctId)
+        assertEquals(1, announcements)
+    }
+
+    @Test
+    fun stableIdBeforeSendDropIsTerminalAndIdempotent() = runBlocking {
+        val store = RecordingStore()
+        var hookCalls = 0
+        val eventLog = log(store) {
+            hookCalls += 1
+            if (hookCalls == 1) null else error("Stable outcome must bypass beforeSend")
+        }
+
+        assertTrue(eventLog.captureIdempotently("\$purchase_synced", emptyMap(), "stable-id", "owner-1"))
+        assertTrue(eventLog.captureIdempotently("\$purchase_synced", emptyMap(), "stable-id", "owner-1"))
+
+        assertEquals(listOf("stable-id"), store.stableDrops)
+        assertTrue(store.pending.isEmpty())
+        assertEquals(1, hookCalls)
     }
 
     @Test

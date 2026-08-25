@@ -99,6 +99,10 @@ public final class ai/nuxie/sdk/Nuxie {
 	public static synthetic fun trigger$default (Lai/nuxie/sdk/Nuxie;Ljava/lang/String;Ljava/util/Map;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)V
 	public final fun triggerAndWait (Ljava/lang/String;Ljava/util/Map;Lkotlin/jvm/functions/Function1;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public static synthetic fun triggerAndWait$default (Lai/nuxie/sdk/Nuxie;Ljava/lang/String;Ljava/util/Map;Lkotlin/jvm/functions/Function1;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
+	public final fun useFeature (Ljava/lang/String;DLjava/lang/String;Ljava/util/Map;)V
+	public static synthetic fun useFeature$default (Lai/nuxie/sdk/Nuxie;Ljava/lang/String;DLjava/lang/String;Ljava/util/Map;ILjava/lang/Object;)V
+	public final fun useFeatureAndWait (Ljava/lang/String;DLjava/lang/String;ZLjava/util/Map;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public static synthetic fun useFeatureAndWait$default (Lai/nuxie/sdk/Nuxie;Ljava/lang/String;DLjava/lang/String;ZLjava/util/Map;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 }
 
 public final class ai/nuxie/sdk/NuxieConfiguration {
@@ -476,5 +480,42 @@ public final class ai/nuxie/sdk/features/FeatureType : java/lang/Enum {
 	public static fun getEntries ()Lkotlin/enums/EnumEntries;
 	public static fun valueOf (Ljava/lang/String;)Lai/nuxie/sdk/features/FeatureType;
 	public static fun values ()[Lai/nuxie/sdk/features/FeatureType;
+}
+
+public final class ai/nuxie/sdk/features/FeatureUsageResult {
+	public fun <init> (ZLjava/lang/String;DLjava/lang/String;Lai/nuxie/sdk/features/FeatureUsageResult$UsageInfo;Lai/nuxie/sdk/features/FeatureAccess;)V
+	public synthetic fun <init> (ZLjava/lang/String;DLjava/lang/String;Lai/nuxie/sdk/features/FeatureUsageResult$UsageInfo;Lai/nuxie/sdk/features/FeatureAccess;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Z
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()D
+	public final fun component4 ()Ljava/lang/String;
+	public final fun component5 ()Lai/nuxie/sdk/features/FeatureUsageResult$UsageInfo;
+	public final fun component6 ()Lai/nuxie/sdk/features/FeatureAccess;
+	public final fun copy (ZLjava/lang/String;DLjava/lang/String;Lai/nuxie/sdk/features/FeatureUsageResult$UsageInfo;Lai/nuxie/sdk/features/FeatureAccess;)Lai/nuxie/sdk/features/FeatureUsageResult;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/features/FeatureUsageResult;ZLjava/lang/String;DLjava/lang/String;Lai/nuxie/sdk/features/FeatureUsageResult$UsageInfo;Lai/nuxie/sdk/features/FeatureAccess;ILjava/lang/Object;)Lai/nuxie/sdk/features/FeatureUsageResult;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAmountUsed ()D
+	public final fun getAuthoritativeAccess ()Lai/nuxie/sdk/features/FeatureAccess;
+	public final fun getFeatureId ()Ljava/lang/String;
+	public final fun getMessage ()Ljava/lang/String;
+	public final fun getSuccess ()Z
+	public final fun getUsage ()Lai/nuxie/sdk/features/FeatureUsageResult$UsageInfo;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/features/FeatureUsageResult$UsageInfo {
+	public fun <init> (DLjava/lang/Double;Ljava/lang/Double;)V
+	public final fun component1 ()D
+	public final fun component2 ()Ljava/lang/Double;
+	public final fun component3 ()Ljava/lang/Double;
+	public final fun copy (DLjava/lang/Double;Ljava/lang/Double;)Lai/nuxie/sdk/features/FeatureUsageResult$UsageInfo;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/features/FeatureUsageResult$UsageInfo;DLjava/lang/Double;Ljava/lang/Double;ILjava/lang/Object;)Lai/nuxie/sdk/features/FeatureUsageResult$UsageInfo;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCurrent ()D
+	public final fun getLimit ()Ljava/lang/Double;
+	public final fun getRemaining ()Ljava/lang/Double;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
 }
 

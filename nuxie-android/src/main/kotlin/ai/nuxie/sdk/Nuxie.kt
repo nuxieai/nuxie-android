@@ -3,6 +3,7 @@ package ai.nuxie.sdk
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.features.FeatureInfo
+import ai.nuxie.sdk.features.FeatureUsageResult
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.commerce.NuxiePurchaseDelegate
 import ai.nuxie.sdk.commerce.PurchaseHandlingMode
@@ -133,6 +134,34 @@ object Nuxie {
             }
         }
         return done.await()
+    }
+
+    // MARK: Feature use
+
+    /** Report metered Feature use without waiting for server confirmation. */
+    fun useFeature(
+        featureId: String,
+        amount: Double = 1.0,
+        entityId: String? = null,
+        metadata: Map<String, Any?>? = null,
+    ) {
+        val core = core ?: run {
+            Log.w(LOG_TAG, "useFeature called before SDK setup")
+            return
+        }
+        core.featureUsage.useFeature(featureId, amount, entityId, metadata)
+    }
+
+    /** Report metered Feature use and await the server-authoritative result. */
+    suspend fun useFeatureAndWait(
+        featureId: String,
+        amount: Double = 1.0,
+        entityId: String? = null,
+        setUsage: Boolean = false,
+        metadata: Map<String, Any?>? = null,
+    ): FeatureUsageResult {
+        val core = core ?: throw IllegalStateException("Call Nuxie.setup first.")
+        return core.featureUsage.useFeatureAndWait(featureId, amount, entityId, setUsage, metadata)
     }
 
     // MARK: Identity

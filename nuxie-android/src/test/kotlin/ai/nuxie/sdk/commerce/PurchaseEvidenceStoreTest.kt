@@ -36,6 +36,9 @@ class PurchaseEvidenceStoreTest {
                 ).jsonObject,
                 signatureVerificationRequired = true,
                 signatureVerified = true,
+                authorityScope = "authority-scope",
+                revoked = true,
+                backendSyncedAtMillis = 456L,
             )
             assertTrue(FilePurchaseEvidenceStore(directory).upsert(evidence))
             assertTrue(FilePurchaseEvidenceStore(directory).upsert(evidence.copy(acknowledged = true)))
