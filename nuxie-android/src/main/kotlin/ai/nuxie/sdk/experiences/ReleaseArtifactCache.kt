@@ -13,7 +13,6 @@ import java.net.URL
 import java.nio.channels.FileLock
 import java.nio.channels.OverlappingFileLockException
 import java.security.MessageDigest
-import java.util.concurrent.atomic.AtomicBoolean
 
 /** A retryable artifact acquisition failure tied to one authenticated key. */
 internal class ReleaseArtifactAcquisitionException(
@@ -65,23 +64,22 @@ internal class ReleaseArtifactCache(
     ) : IOException(message, cause)
 
     /** Protects a complete release set from pruning until the returned lease is closed. */
-    fun protect(digests: Collection<String>): Closeable {
+    fun protect(digests: Collection<String>): CacheProtectionLease {
         val uniqueDigests = digests.toSet()
         val filesystemProtection = protectionRegistry.register(uniqueDigests)
         synchronized(cacheScope.lock) {
             uniqueDigests.forEach { digest ->
-                cacheScope.protectedDigestCounts[digest] =
-                    (cacheScope.protectedDigestCounts[digest] ?: 0) + 1
+                cacheScope.protectedDigestOwners.getOrPut(digest, ::mutableSetOf) +=
+                    filesystemProtection.ownerId
             }
         }
-        val closed = AtomicBoolean(false)
-        return Closeable {
-            if (!closed.compareAndSet(false, true)) return@Closeable
+        return CacheProtectionLease(filesystemProtection.ownerId) {
             synchronized(cacheScope.lock) {
                 uniqueDigests.forEach { digest ->
-                    val remaining = (cacheScope.protectedDigestCounts[digest] ?: 0) - 1
-                    if (remaining <= 0) cacheScope.protectedDigestCounts.remove(digest)
-                    else cacheScope.protectedDigestCounts[digest] = remaining
+                    cacheScope.protectedDigestOwners[digest]?.let { owners ->
+                        owners -= filesystemProtection.ownerId
+                        if (owners.isEmpty()) cacheScope.protectedDigestOwners.remove(digest)
+                    }
                 }
             }
             filesystemProtection.close()
@@ -107,6 +105,7 @@ internal class ReleaseArtifactCache(
         maxBytes: Long,
         signedBaseUrl: String,
         expectedContentType: String? = null,
+        protection: CacheProtectionLease? = null,
     ): File {
         val baseUrl = validatedBaseUrl(key, signedBaseUrl)
         val sourceUrl = composeUrl(key, baseUrl)
@@ -123,7 +122,7 @@ internal class ReleaseArtifactCache(
             }
             try {
                 synchronized(digestLock.monitor) {
-                    verifiedCachedFile(key, sha256, expectedSizeBytes)
+                    verifiedCachedFile(key, sha256, expectedSizeBytes, protection?.ownerId)
                         ?: downloadAndPublish(
                             key = key,
                             sha256 = sha256,
@@ -162,7 +161,7 @@ internal class ReleaseArtifactCache(
         synchronized(cacheScope.lock) { cacheScope.digestLocks.size }
 
     internal fun protectionCount(sha256: String): Int =
-        synchronized(cacheScope.lock) { cacheScope.protectedDigestCounts[sha256] ?: 0 }
+        synchronized(cacheScope.lock) { cacheScope.protectedDigestOwners[sha256]?.size ?: 0 }
 
     private fun downloadAndPublish(
         key: String,
@@ -315,18 +314,19 @@ internal class ReleaseArtifactCache(
         key: String,
         sha256: String,
         expectedSizeBytes: Long,
+        protectionOwnerId: String? = null,
     ): File? {
         val file = fileFor(sha256)
         if (!file.isFile) return null
         if (file.length() != expectedSizeBytes) {
-            if (isProtected(sha256)) {
-                fail(
-                    key,
-                    Reason.SIZE_MISMATCH,
-                    "protected cache entry size does not match this release declaration",
-                )
-            }
-            if (!file.delete()) fail(key, Reason.CACHE_IO, "could not remove invalid cache entry")
+            deleteInvalidCachedFile(
+                key = key,
+                sha256 = sha256,
+                file = file,
+                protectionOwnerId = protectionOwnerId,
+                protectedReason = Reason.SIZE_MISMATCH,
+                protectedMessage = "protected cache entry size does not match this release declaration",
+            )
             return null
         }
         val matchesDigest = runCatching {
@@ -342,18 +342,35 @@ internal class ReleaseArtifactCache(
             }
         }.getOrDefault(false)
         if (!matchesDigest) {
-            if (isProtected(sha256)) {
-                fail(
-                    key,
-                    Reason.DIGEST_MISMATCH,
-                    "protected cache entry digest does not match its content address",
-                )
-            }
-            if (!file.delete()) fail(key, Reason.CACHE_IO, "could not remove invalid cache entry")
+            deleteInvalidCachedFile(
+                key = key,
+                sha256 = sha256,
+                file = file,
+                protectionOwnerId = protectionOwnerId,
+                protectedReason = Reason.DIGEST_MISMATCH,
+                protectedMessage = "protected cache entry digest does not match its content address",
+            )
             return null
         }
         file.setLastModified(System.currentTimeMillis())
         return file
+    }
+
+    /** Keeps the foreign-owner check atomic with deletion against lease registration. */
+    private fun deleteInvalidCachedFile(
+        key: String,
+        sha256: String,
+        file: File,
+        protectionOwnerId: String?,
+        protectedReason: Reason,
+        protectedMessage: String,
+    ) {
+        filesystemLock.withLock {
+            if (isProtectedByAnother(sha256, protectionOwnerId)) {
+                fail(key, protectedReason, protectedMessage)
+            }
+            if (!file.delete()) fail(key, Reason.CACHE_IO, "could not remove invalid cache entry")
+        }
     }
 
     private fun validateContentType(key: String, expected: String?, actual: String?) {
@@ -418,7 +435,7 @@ internal class ReleaseArtifactCache(
 
     private fun pruneLocked() {
         sweepTemporaryFilesLocked()
-        val protectedDigests = cacheScope.protectedDigestCounts.keys.toSet() +
+        val protectedDigests = cacheScope.protectedDigestOwners.keys.toSet() +
             protectionRegistry.protectedDigests()
         val entries = baseDir.listFiles() ?: return
         val files = entries.filter { isDigest(it.name) }
@@ -439,10 +456,10 @@ internal class ReleaseArtifactCache(
         }
     }
 
-    private fun isProtected(sha256: String): Boolean =
+    private fun isProtectedByAnother(sha256: String, ownerId: String?): Boolean =
         synchronized(cacheScope.lock) {
-            cacheScope.protectedDigestCounts.containsKey(sha256)
-        } || sha256 in protectionRegistry.protectedDigests()
+            cacheScope.protectedDigestOwners[sha256].orEmpty().any { it != ownerId }
+        } || sha256 in protectionRegistry.protectedDigests(excludingOwnerId = ownerId)
 
     /**
      * Creation, reference changes, and removal all hold [CacheScope.lock]. A
@@ -544,7 +561,7 @@ internal class ReleaseArtifactCache(
     private class CacheScope {
         val lock = Any()
         val digestLocks = mutableMapOf<String, DigestLock>()
-        val protectedDigestCounts = mutableMapOf<String, Int>()
+        val protectedDigestOwners = mutableMapOf<String, MutableSet<String>>()
         val liveTemporaryOwnership = mutableMapOf<String, TemporaryOwnership>()
     }
 

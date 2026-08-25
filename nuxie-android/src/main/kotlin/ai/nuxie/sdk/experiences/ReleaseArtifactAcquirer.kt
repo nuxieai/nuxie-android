@@ -141,6 +141,7 @@ internal class ReleaseArtifactAcquirer(
                         maxBytes = minOf(item.sizeBytes, item.role.maximumBytes),
                         signedBaseUrl = deliveryOrigin(item.role, delivery),
                         expectedContentType = item.contentType,
+                        protection = protection,
                     )
                     normalized.keys.forEach { key -> files[key] = file }
                 } catch (error: ReleaseArtifactAcquisitionException) {

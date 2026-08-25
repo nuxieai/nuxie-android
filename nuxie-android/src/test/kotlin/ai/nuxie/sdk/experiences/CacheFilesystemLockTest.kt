@@ -58,6 +58,18 @@ class CacheFilesystemLockTest {
     }
 
     @Test
+    fun targetLockScopesAreDroppedAfterTheirLastCallerReleases() {
+        val lock = CacheFilesystemLock(temporaryFolder.newFolder("released-targets"))
+        val retainedBefore = retainedScopeCount()
+
+        repeat(100) { target ->
+            lock.withTargetLock("target-$target") {}
+        }
+
+        assertEquals(retainedBefore, retainedScopeCount())
+    }
+
+    @Test
     fun deadProcessProtectionMarkerIsReclaimed() {
         val lock = CacheFilesystemLock(temporaryFolder.newFolder("stale-marker"))
         val deadOwner = CacheProtectionRegistry(
@@ -77,5 +89,13 @@ class CacheFilesystemLockTest {
         assertEquals(emptySet<String>(), reclaimer.protectedDigests())
         assertEquals(0, lock.protectionDirectory.listFiles()?.size ?: 0)
         protection.close()
+    }
+
+    private fun retainedScopeCount(): Int {
+        val type = CacheFilesystemLock::class.java
+        val scopesLock = type.getDeclaredField("scopesLock").apply { isAccessible = true }.get(null)!!
+        val scopes = type.getDeclaredField("scopes").apply { isAccessible = true }.get(null)
+            as Map<*, *>
+        return synchronized(scopesLock) { scopes.size }
     }
 }

@@ -81,6 +81,39 @@ class ReleaseArtifactAcquirerTest {
     }
 
     @Test
+    fun sameAcquirerRepairsCorruptCachedObjectWithVerifiedBytes() = runTest {
+        val rivBytes = "repairable-riv".encodeToByteArray()
+        val riv = artifact(
+            key = "renders/sha256/${sha256(rivBytes)}.riv",
+            bytes = rivBytes,
+            contentType = "application/vnd.rive",
+        )
+        var requestCount = 0
+        val cache = ReleaseArtifactCache(
+            context = RuntimeEnvironment.getApplication(),
+            transport = HttpTransport {
+                requestCount += 1
+                HttpTransport.Response(
+                    statusCode = 200,
+                    body = rivBytes,
+                    headers = mapOf("Content-Type" to "application/vnd.rive"),
+                )
+            },
+            cacheDirectory = temporaryFolder.newFolder("repair-corrupt-cache"),
+        )
+        val acquirer = ReleaseArtifactAcquirer(cache)
+        val cachedFile = acquirer.acquire(release(riv), delivery()).use { acquired ->
+            acquired.rivFile
+        }
+        cachedFile.writeBytes(ByteArray(rivBytes.size) { 0x7f })
+
+        acquirer.acquire(release(riv), delivery()).use { repaired ->
+            assertEquals(2, requestCount)
+            assertArrayEquals(rivBytes, repaired.rivFile.readBytes())
+        }
+    }
+
+    @Test
     fun digestMismatchIsTypedAndLeavesNoCacheFile() = runTest {
         val received = "corrupt-riv".encodeToByteArray()
         val expected = "expected-riv".encodeToByteArray()
