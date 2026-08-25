@@ -171,6 +171,7 @@ internal class PurchaseService(
                     return null
                 }
                 val eventId = purchaseUsageEventId(evidence, featureId, amount, entityId)
+                val featureScope = features.captureAuthoritativeUseScope(distinctId)
                 val response = usageApi.useFeatureWithPurchase(
                     NuxieApi.PurchaseBackedFeatureUseReport(
                         customerId = distinctId,
@@ -228,6 +229,7 @@ internal class PurchaseService(
                     requestedFeatureId = featureId,
                     distinctId = distinctId,
                     entityId = entityId,
+                    expectedScope = featureScope,
                 )
                 return FeatureUsageResult(
                     success = true,
@@ -256,7 +258,6 @@ internal class PurchaseService(
                 evidence.packageName.isNotBlank() &&
                 evidence.storeProductIds.firstOrNull()?.isNotBlank() == true &&
                 (!evidence.signatureVerificationRequired || evidence.signatureVerified) &&
-                evidence.nuxieManaged &&
                 evidence.localFeatureGrants.any { it.featureId == featureId }
         }
 

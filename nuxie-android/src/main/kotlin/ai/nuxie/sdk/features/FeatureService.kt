@@ -16,8 +16,14 @@ internal class FeatureService(
     private val identity: IdentityProvider,
     private val featureInfo: FeatureInfo,
     private val cacheTtlMillis: Long,
+    private val revocationStore: DurableFeatureRevocationStore,
     private val nowMillis: () -> Long = System::currentTimeMillis,
 ) {
+    internal data class AuthoritativeUseScope(
+        val distinctId: String,
+        val generation: Long,
+    )
+
     private data class CacheKey(val featureId: String, val entityId: String?)
     private data class TimedAccess(
         val access: FeatureAccess,
@@ -63,27 +69,83 @@ internal class FeatureService(
         entityId: String? = null,
     ): FeatureAccess = performCheck(featureId, requiredBalance, entityId)
 
+    /** Capture the customer scope before starting an authoritative use request. */
+    suspend fun captureAuthoritativeUseScope(distinctId: String): AuthoritativeUseScope {
+        synchronizeCustomerScopeIfNeeded()
+        return synchronized(lock) {
+            if (identity.distinctId() != distinctId || cacheDistinctId != distinctId) {
+                throw kotlinx.coroutines.CancellationException()
+            }
+            AuthoritativeUseScope(distinctId, scopeGeneration)
+        }
+    }
+
     /** Apply the server-authoritative post-use state returned by an atomic command. */
     suspend fun applyAuthoritativeUse(
         result: NuxieApi.FeatureCheckResult,
         requestedFeatureId: String,
         distinctId: String,
         entityId: String?,
+        expectedScope: AuthoritativeUseScope,
     ): FeatureAccess {
         synchronizeCustomerScopeIfNeeded()
-        if (identity.distinctId() != distinctId || result.customerId != distinctId) {
+        if (identity.distinctId() != distinctId || result.customerId != distinctId ||
+            expectedScope.distinctId != distinctId
+        ) {
             throw kotlinx.coroutines.CancellationException()
         }
-        val access = authoritativeAccess(result, requestedFeatureId)
-        synchronized(lock) {
-            if (identity.distinctId() != distinctId || cacheDistinctId != distinctId) {
+        return synchronized(lock) {
+            if (identity.distinctId() != distinctId || cacheDistinctId != distinctId ||
+                scopeGeneration != expectedScope.generation
+            ) {
                 throw kotlinx.coroutines.CancellationException()
             }
-            val key = CacheKey(requestedFeatureId, entityId)
-            realTimeCache[key] = TimedAccess(access, nowMillis())
-            featureInfo.update(requestedFeatureId, access, entityId)
+
+            val affectedFeatureIds = linkedSetOf(requestedFeatureId, result.featureId)
+            affectedFeatureIds.forEach { purchaseMutationRevision += 1 }
+            val seq = nextSeq++
+            val requestedAccess = authoritativeAccess(result, requestedFeatureId)
+            val balanceSourceAccess = resultAccess(result)
+            val publishedAccess = affectedFeatureIds.associateWith { featureId ->
+                if (featureId == requestedFeatureId) requestedAccess else balanceSourceAccess
+            }
+            val allowedFeatureIds = publishedAccess
+                .filterValues { it.allowed }
+                .keys
+
+            reconcileLocalPurchases(affectedFeatureIds)
+            affectedFeatureIds.forEach { featureId ->
+                committedSeq[CacheKey(featureId, entityId)] = seq
+            }
+            if (allowedFeatureIds.isNotEmpty() &&
+                !revocationStore.retireRevokedGrants(distinctId, allowedFeatureIds)
+            ) {
+                return@synchronized requestedAccess
+            }
+            if (identity.distinctId() != distinctId || cacheDistinctId != distinctId ||
+                scopeGeneration != expectedScope.generation
+            ) {
+                throw kotlinx.coroutines.CancellationException()
+            }
+            if (allowedFeatureIds.isNotEmpty()) {
+                reconcileRevokedPurchases(allowedFeatureIds)
+            }
+
+            val cachedAt = nowMillis()
+            affectedFeatureIds.forEach { featureId ->
+                val access = publishedAccess.getValue(featureId)
+                val key = CacheKey(featureId, entityId)
+                realTimeCache[key] = TimedAccess(
+                    access = access,
+                    cachedAtMillis = cachedAt,
+                    opaqueRequiredBalance = result.requiredBalance.takeIf {
+                        featureId == requestedFeatureId && result.featureId != requestedFeatureId
+                    },
+                )
+                featureInfo.update(featureId, access, entityId)
+            }
+            requestedAccess
         }
-        return access
     }
 
     suspend fun checkWithCache(
@@ -381,6 +443,20 @@ internal class FeatureService(
         return localPurchases.values.mapNotNull { it.grants[featureId] }.lastOrNull()
     }
 
+    private fun reconcileLocalPurchases(featureIds: Set<String>) {
+        localPurchases.toMap().forEach { (transactionId, projection) ->
+            localPurchases[transactionId] = projection.copy(grants = projection.grants - featureIds)
+        }
+        localPurchases.entries.removeAll { it.value.grants.isEmpty() }
+    }
+
+    private fun reconcileRevokedPurchases(featureIds: Set<String>) {
+        revokedPurchases.toMap().forEach { (transactionId, projection) ->
+            revokedPurchases[transactionId] = projection.copy(grants = projection.grants - featureIds)
+        }
+        revokedPurchases.entries.removeAll { it.value.grants.isEmpty() }
+    }
+
     private fun entityAccess(featureId: String, entityId: String?): FeatureAccess? = when (entityId) {
         null -> durableGlobalAccess()[featureId]
         else -> durableEntities[featureId]?.let { entities ->
@@ -402,6 +478,10 @@ internal class FeatureService(
             type = FeatureType.METERED,
         )
     }
+
+    private fun resultAccess(result: NuxieApi.FeatureCheckResult): FeatureAccess =
+        FeatureAccess(result.allowed, result.unlimited, result.balance, result.type)
+            .forRequiredBalance(requiredBalance = null)
 
     private fun isFresh(timed: TimedAccess): Boolean = nowMillis() - timed.cachedAtMillis < cacheTtlMillis
 

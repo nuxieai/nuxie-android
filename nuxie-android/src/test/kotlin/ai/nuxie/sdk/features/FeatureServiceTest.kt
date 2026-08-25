@@ -2,10 +2,17 @@ package ai.nuxie.sdk.features
 
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
+import ai.nuxie.sdk.commerce.InMemoryPurchaseEvidenceStore
+import ai.nuxie.sdk.commerce.PurchaseEvidence
+import ai.nuxie.sdk.commerce.PurchaseEvidenceStore
+import ai.nuxie.sdk.commerce.StoredLocalPurchaseGrant
+import ai.nuxie.sdk.commerce.StoredPurchaseState
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.network.HttpTransport
+import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.testsupport.FakeTransport
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -45,6 +52,253 @@ class FeatureServiceTest {
         balance: String = "5",
         type: String = "metered",
     ): String = """{"customerId":"$customerId","featureId":"$featureId","requiredBalance":$requiredBalance,"code":"allowed","allowed":$allowed,"unlimited":$unlimited,"balance":$balance,"type":"$type"}"""
+
+    private fun authoritativeResult(
+        customerId: String,
+        featureId: String,
+        requiredBalance: Double = 1.0,
+        allowed: Boolean = true,
+        unlimited: Boolean = false,
+        balance: Double? = 1.0,
+        type: FeatureType = FeatureType.METERED,
+    ) = NuxieApi.FeatureCheckResult(
+        customerId = customerId,
+        featureId = featureId,
+        requiredBalance = requiredBalance,
+        code = "allowed",
+        allowed = allowed,
+        unlimited = unlimited,
+        balance = balance,
+        type = type,
+    )
+
+    @Test
+    fun authoritativeUseUpdatesRequestedAndBalanceSourceCachesAndFeatureInfo() = runBlocking {
+        val core = core(FakeTransport())
+        val customer = core.identity.distinctId()
+        val scope = core.features.captureAuthoritativeUseScope(customer)
+
+        core.features.applyAuthoritativeUse(
+            result = authoritativeResult(
+                customerId = customer,
+                featureId = "credit-wallet",
+                requiredBalance = 2.0,
+                allowed = false,
+                balance = 8.0,
+                type = FeatureType.CREDIT_SYSTEM,
+            ),
+            requestedFeatureId = "exports",
+            distinctId = customer,
+            entityId = null,
+            expectedScope = scope,
+        )
+
+        val requested = core.features.getCached("exports", requiredBalance = 2.0, entityId = null)
+        val balanceSource = core.features.getCached("credit-wallet", null)
+        assertFalse(requested!!.allowed)
+        assertEquals(null, requested.balance)
+        assertEquals(FeatureType.METERED, requested.type)
+        assertTrue(balanceSource!!.allowed)
+        assertEquals(8.0, balanceSource.balance!!, 0.0)
+        assertEquals(FeatureType.CREDIT_SYSTEM, balanceSource.type)
+        assertFalse(core.featureInfo.all.value.getValue("exports").allowed)
+        assertTrue(core.featureInfo.all.value.getValue("credit-wallet").allowed)
+        core.stop()
+    }
+
+    @Test
+    fun authoritativeAllowRetiresDurableAndCachedRevocationsForAffectedFeature() = runBlocking {
+        val store = InMemoryPurchaseEvidenceStore()
+        val core = NuxieCore(
+            context = RuntimeEnvironment.getApplication(),
+            apiKey = "pk_test_features_revocation",
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(
+                transport = FakeTransport(),
+                registerLifecycle = false,
+                purchaseEvidenceStore = store,
+            ),
+        )
+        val customer = core.identity.distinctId()
+        val scope = core.features.captureAuthoritativeUseScope(customer)
+        store.upsert(revokedEvidence(customer, "restored"))
+        val grant = listOf(LocalPurchaseGrant("restored", FeatureType.BOOLEAN))
+        core.features.applyLocalPurchase(grant, "revoked-token")
+        core.features.removePurchase("revoked-token")
+        assertFalse(core.features.getCached("restored", null)!!.allowed)
+
+        core.features.applyAuthoritativeUse(
+            result = authoritativeResult(
+                customerId = customer,
+                featureId = "restored",
+                unlimited = true,
+                balance = null,
+                type = FeatureType.BOOLEAN,
+            ),
+            requestedFeatureId = "restored",
+            distinctId = customer,
+            entityId = null,
+            expectedScope = scope,
+        )
+
+        assertTrue(core.features.getCached("restored", null)!!.allowed)
+        assertTrue(core.featureInfo.isAllowed("restored"))
+        assertTrue(store.load().getValue("revoked-token").localFeatureGrants.isEmpty())
+        core.stop()
+    }
+
+    @Test
+    fun authoritativeUseRevisionGuardsRejectOlderInFlightCheckWrites() = runBlocking {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checkStarted.countDown()
+                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "exports",
+                            requiredBalance = 1.0,
+                            allowed = false,
+                            balance = "0",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+        val customer = core.identity.distinctId()
+        val olderCheck = async(Dispatchers.Default) { runCatching { core.features.check("exports") } }
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+        val scope = core.features.captureAuthoritativeUseScope(customer)
+
+        core.features.applyAuthoritativeUse(
+            result = authoritativeResult(customer, "exports", balance = 5.0),
+            requestedFeatureId = "exports",
+            distinctId = customer,
+            entityId = null,
+            expectedScope = scope,
+        )
+        releaseCheck.countDown()
+
+        assertTrue(olderCheck.await().exceptionOrNull() is CancellationException)
+        assertEquals(5.0, core.features.getCached("exports", null)!!.balance!!, 0.0)
+        core.stop()
+    }
+
+    @Test
+    fun authoritativeUseScopeGenerationRejectsReturnToOriginalIdentity() = runBlocking {
+        val core = core(FakeTransport())
+        val customer = core.identity.distinctId()
+        val staleScope = core.features.captureAuthoritativeUseScope(customer)
+
+        core.identity.setDistinctId("customer-b")
+        core.features.handleUserChange(customer, "customer-b")
+        core.identity.setDistinctId(customer)
+        core.features.handleUserChange("customer-b", customer)
+
+        val result = runCatching {
+            core.features.applyAuthoritativeUse(
+                result = authoritativeResult(customer, "exports", balance = 5.0),
+                requestedFeatureId = "exports",
+                distinctId = customer,
+                entityId = null,
+                expectedScope = staleScope,
+            )
+        }
+
+        assertTrue(result.exceptionOrNull() is CancellationException)
+        assertEquals(null, core.features.getCached("exports", null))
+        core.stop()
+    }
+
+    @Test
+    fun authoritativeUseRetirementFailureStillFencesOlderInFlightCheck() = runBlocking {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checkStarted.countDown()
+                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "exports",
+                            requiredBalance = 1.0,
+                            allowed = false,
+                            balance = "0",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = NuxieCore(
+            context = RuntimeEnvironment.getApplication(),
+            apiKey = "pk_test_features_retirement_failure",
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(
+                transport = transport,
+                registerLifecycle = false,
+                purchaseEvidenceStore = FailingRevocationStore,
+            ),
+        )
+        val customer = core.identity.distinctId()
+        val olderCheck = async(Dispatchers.Default) { runCatching { core.features.check("exports") } }
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+        val scope = core.features.captureAuthoritativeUseScope(customer)
+
+        core.features.applyAuthoritativeUse(
+            result = authoritativeResult(customer, "exports", balance = 5.0),
+            requestedFeatureId = "exports",
+            distinctId = customer,
+            entityId = null,
+            expectedScope = scope,
+        )
+        releaseCheck.countDown()
+
+        assertTrue(olderCheck.await().exceptionOrNull() is CancellationException)
+        assertEquals(null, core.features.getCached("exports", null))
+        core.stop()
+    }
+
+    private fun revokedEvidence(distinctId: String, featureId: String) = PurchaseEvidence(
+        purchaseToken = "revoked-token",
+        packageName = "com.example.app",
+        storeProductIds = listOf("play-product"),
+        purchaseState = StoredPurchaseState.PURCHASED,
+        syncAttributionDistinctId = distinctId,
+        ownerDistinctId = distinctId,
+        acknowledged = true,
+        firstSeenMillis = now,
+        localFeatureGrants = listOf(
+            StoredLocalPurchaseGrant(featureId, FeatureType.BOOLEAN.name, false),
+        ),
+        catalogResolved = true,
+        nuxieManaged = true,
+        authorityScope = "scope-a",
+        revoked = true,
+    )
+
+    private object FailingRevocationStore : PurchaseEvidenceStore {
+        override fun load(): Map<String, PurchaseEvidence> = emptyMap()
+        override fun upsert(evidence: PurchaseEvidence): Boolean = true
+        override fun retireRevokedGrants(distinctId: String, featureIds: Set<String>): Boolean = false
+    }
 
     @Test
     fun profileHydrationMakesFeatureInfoReadyAndPopulatesTheCache() = runBlocking {

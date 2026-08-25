@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.commerce
 
 import ai.nuxie.sdk.NuxieEnvironment
+import ai.nuxie.sdk.features.DurableFeatureRevocationStore
 import android.util.Log
 import java.io.File
 import java.security.MessageDigest
@@ -106,9 +107,17 @@ internal data class PurchaseEvidence(
     val backendSyncedAtMillis: Long? = null,
 )
 
-internal interface PurchaseEvidenceStore {
+internal interface PurchaseEvidenceStore : DurableFeatureRevocationStore {
     fun load(): Map<String, PurchaseEvidence>
     fun upsert(evidence: PurchaseEvidence): Boolean
+    override fun retireRevokedGrants(distinctId: String, featureIds: Set<String>): Boolean =
+        load().values
+            .filter { it.revoked && it.ownerDistinctId == distinctId }
+            .all { evidence ->
+                val retained = evidence.localFeatureGrants.filterNot { it.featureId in featureIds }
+                retained.size == evidence.localFeatureGrants.size ||
+                    upsert(evidence.copy(localFeatureGrants = retained))
+            }
     fun loadBindings(): List<StoredPurchaseBinding> = emptyList()
     fun upsertBinding(binding: StoredPurchaseBinding): Boolean = true
     fun loadProductMappings(): List<StoredProductMapping> = emptyList()
@@ -135,6 +144,20 @@ internal class FilePurchaseEvidenceStore(
         val entries = loadUnlocked().toMutableMap()
         entries[evidence.purchaseToken] = evidence
         saveUnlocked(entries)
+    }
+
+    override fun retireRevokedGrants(distinctId: String, featureIds: Set<String>): Boolean = synchronized(lock) {
+        val entries = loadUnlocked().toMutableMap()
+        var changed = false
+        entries.toMap().forEach { (token, evidence) ->
+            if (!evidence.revoked || evidence.ownerDistinctId != distinctId) return@forEach
+            val retained = evidence.localFeatureGrants.filterNot { it.featureId in featureIds }
+            if (retained.size != evidence.localFeatureGrants.size) {
+                entries[token] = evidence.copy(localFeatureGrants = retained)
+                changed = true
+            }
+        }
+        !changed || saveUnlocked(entries)
     }
 
     override fun loadBindings(): List<StoredPurchaseBinding> = synchronized(lock) {
@@ -407,6 +430,19 @@ internal class InMemoryPurchaseEvidenceStore : PurchaseEvidenceStore {
         entries[evidence.purchaseToken] = evidence
         true
     }
+    override fun retireRevokedGrants(distinctId: String, featureIds: Set<String>): Boolean =
+        synchronized(entries) {
+            entries.toMap().forEach { (token, evidence) ->
+                if (evidence.revoked && evidence.ownerDistinctId == distinctId) {
+                    entries[token] = evidence.copy(
+                        localFeatureGrants = evidence.localFeatureGrants.filterNot {
+                            it.featureId in featureIds
+                        },
+                    )
+                }
+            }
+            true
+        }
     override fun loadBindings(): List<StoredPurchaseBinding> = synchronized(bindings) {
         bindings.values.toList()
     }
