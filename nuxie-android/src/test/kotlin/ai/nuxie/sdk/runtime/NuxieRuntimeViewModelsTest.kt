@@ -43,7 +43,7 @@ class NuxieRuntimeViewModelsTest {
     }
 
     @Test
-    fun `native status and failed-bind cleanup status remain observable`() = runBlocking {
+    fun `native status remains primary when failed-bind cleanup also fails`() = runBlocking {
         val native = SessionNative()
         val lane = NuxieRuntimeLane()
         val runtime = NuxieRuntimeViewModels(lane, 10, 20, 30, native)
@@ -59,11 +59,11 @@ class NuxieRuntimeViewModelsTest {
             val catalog = runtime.viewModelCatalog()
             native.bindStatus = 9
             native.freeStatus = 7
-            val cleanupFailure = assertThrows(NuxieRuntimeCallException::class.java) {
+            val bindFailure = assertThrows(NuxieRuntimeCallException::class.java) {
                 runBlocking { runtime.bindViewModelToPlayer(catalog, 0, 0) }
             }
-            assertEquals(7, cleanupFailure.status)
-            assertEquals(9, (cleanupFailure.suppressed.single() as NuxieRuntimeCallException).status)
+            assertEquals(9, bindFailure.status)
+            assertEquals(7, (bindFailure.suppressed.single() as NuxieRuntimeCallException).status)
         } finally {
             lane.shutdown()
         }

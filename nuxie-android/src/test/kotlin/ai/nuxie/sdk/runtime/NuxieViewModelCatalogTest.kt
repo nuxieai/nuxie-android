@@ -3,6 +3,8 @@ package ai.nuxie.sdk.runtime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -56,4 +58,75 @@ class NuxieViewModelCatalogTest {
         assertEquals(1, catalog.properties[1].referencedSchemaIndex)
         assertEquals("Default checkout", catalog.authoredInstances.single().name)
     }
+
+    @Test
+    fun `exact root property name containing slash wins before path traversal`() {
+        val direct = property(0, 0, "address/city", NuxieViewModelPropertyKind.STRING)
+        val catalog = NuxieViewModelCatalog(
+            schemas = emptyList(),
+            properties = listOf(
+                direct,
+                property(0, 1, "address", NuxieViewModelPropertyKind.VIEW_MODEL, 1),
+                property(1, 0, "city", NuxieViewModelPropertyKind.STRING),
+            ),
+            authoredInstances = emptyList(),
+        )
+
+        assertSame(direct, catalog.propertyAtPath(0, "address/city"))
+    }
+
+    @Test
+    fun `duplicate exact root property names are rejected as ambiguous`() {
+        val catalog = NuxieViewModelCatalog(
+            schemas = emptyList(),
+            properties = listOf(
+                property(0, 0, "status", NuxieViewModelPropertyKind.STRING),
+                property(0, 1, "status", NuxieViewModelPropertyKind.STRING),
+            ),
+            authoredInstances = emptyList(),
+        )
+
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            catalog.propertyAtPath(0, "status")
+        }
+        assertEquals("Ambiguous view-model property 'status' in schema 0", error.message)
+    }
+
+    @Test
+    fun `duplicate intermediate property names are rejected as ambiguous`() {
+        val catalog = NuxieViewModelCatalog(
+            schemas = emptyList(),
+            properties = listOf(
+                property(0, 0, "address", NuxieViewModelPropertyKind.VIEW_MODEL, 1),
+                property(1, 0, "location", NuxieViewModelPropertyKind.VIEW_MODEL, 2),
+                property(1, 1, "location", NuxieViewModelPropertyKind.VIEW_MODEL, 3),
+                property(2, 0, "city", NuxieViewModelPropertyKind.STRING),
+                property(3, 0, "city", NuxieViewModelPropertyKind.STRING),
+            ),
+            authoredInstances = emptyList(),
+        )
+
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            catalog.propertyAtPath(0, "address/location/city")
+        }
+        assertEquals(
+            "Ambiguous view-model property path 'address/location/city' at segment 'location'",
+            error.message,
+        )
+    }
+
+    private fun property(
+        schemaIndex: Int,
+        index: Int,
+        name: String,
+        kind: NuxieViewModelPropertyKind,
+        referencedSchemaIndex: Int? = null,
+    ) = NuxieViewModelCatalog.Property(
+        schemaIndex,
+        index,
+        name,
+        kind,
+        referencedSchemaIndex,
+        emptyList(),
+    )
 }
