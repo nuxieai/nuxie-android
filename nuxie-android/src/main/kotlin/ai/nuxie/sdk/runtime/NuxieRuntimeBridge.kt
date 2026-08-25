@@ -110,6 +110,12 @@ internal object NuxieRuntimeBridge {
 
     external fun nativeFileFree(file: Long)
 
+    /** Copies `nux_file_view_model_catalog` into JVM-owned construction shapes. */
+    external fun nativeFileViewModelCatalog(
+        file: Long,
+        statusOut: IntArray,
+    ): NativeViewModelCatalog?
+
     /** nux_artboard_instance_new_named -> artboard handle (0 = failure). */
     external fun nativeArtboardInstanceNewNamed(file: Long, artboardName: String): Long
 
@@ -117,6 +123,29 @@ internal object NuxieRuntimeBridge {
     external fun nativeArtboardInstanceNewDefault(file: Long): Long
 
     external fun nativeArtboardInstanceFree(artboard: Long)
+
+    external fun nativeViewModelInstanceNew(
+        file: Long,
+        schemaIndex: Int,
+        authoredInstanceIndex: Int,
+        statusOut: IntArray,
+    ): Long
+
+    external fun nativeViewModelInstanceNewDefault(artboard: Long, statusOut: IntArray): Long
+
+    external fun nativeArtboardInstanceBindViewModel(artboard: Long, viewModel: Long): Int
+
+    external fun nativeViewModelMutate(
+        viewModel: Long,
+        kind: Int,
+        path: ByteArray,
+        bytesValue: ByteArray,
+        numberValue: Float,
+        integerValue: Long,
+        boolValue: Boolean,
+    ): Int
+
+    external fun nativeViewModelInstanceFree(viewModel: Long): Int
 
     /** nux_player_new_default over an artboard -> player handle (0 = failure). */
     external fun nativePlayerNewDefault(artboard: Long): Long
@@ -128,6 +157,17 @@ internal object NuxieRuntimeBridge {
 
     /** nux_player_step: advance by elapsed seconds; returns a status code. */
     external fun nativePlayerStep(player: Long, elapsedSeconds: Double): Int
+
+    external fun nativePlayerStepTyped(
+        player: Long,
+        inputKinds: IntArray,
+        inputNames: Array<ByteArray>,
+        inputBoolValues: BooleanArray,
+        inputNumberValues: FloatArray,
+        elapsedSeconds: Float,
+        correlationId: Long,
+        statusOut: IntArray,
+    ): NativePlayerStepOutcome?
 
     // MARK: Android Vulkan presentation extension
 
