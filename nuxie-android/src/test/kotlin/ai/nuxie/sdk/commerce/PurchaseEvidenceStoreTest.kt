@@ -5,6 +5,8 @@ import android.util.Base64
 import java.nio.file.Files
 import java.security.KeyPairGenerator
 import java.security.Signature
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -29,6 +31,9 @@ class PurchaseEvidenceStoreTest {
                 syncAttempts = 1,
                 completionAttempts = 2,
                 firstSeenMillis = 123L,
+                acceptedResponseBody = Json.parseToJsonElement(
+                    """{"success":true,"features":[{"id":"pro","type":"boolean","allowed":true}]}""",
+                ).jsonObject,
                 signatureVerificationRequired = true,
                 signatureVerified = true,
             )

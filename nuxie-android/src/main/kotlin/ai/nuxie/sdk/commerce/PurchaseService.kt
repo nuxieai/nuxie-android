@@ -37,6 +37,36 @@ internal fun interface PurchaseSynchronizer {
     fun sync(evidence: PurchaseEvidence): PurchaseSyncOutcome
 }
 
+/**
+ * Sends durable Play evidence through the production `/purchase` decoding
+ * boundary. Retries preserve the purchase token and report identity; the
+ * stable purchase-USE event-id half of the fixture lands with
+ * [UNIV-2649](https://universe.basis.dev/issue/UNIV-2649).
+ */
+internal class NuxieApiPurchaseSynchronizer(
+    private val api: NuxieApi,
+) : PurchaseSynchronizer {
+    override fun sync(evidence: PurchaseEvidence): PurchaseSyncOutcome = try {
+        val response = api.postPurchase(
+            NuxieApi.PlayPurchaseReport(
+                packageName = evidence.packageName,
+                productId = evidence.storeProductIds.firstOrNull().orEmpty(),
+                purchaseToken = evidence.purchaseToken,
+                basePlanId = evidence.basePlanId,
+                offerId = evidence.offerId,
+                obfuscatedAccountId = evidence.obfuscatedAccountId,
+                distinctId = evidence.syncAttributionDistinctId,
+            ),
+        )
+        if (response.success) PurchaseSyncOutcome.Accepted(response)
+        else PurchaseSyncOutcome.Rejected(isPermanentPurchaseRejection(response.body))
+    } catch (rejected: NuxieApi.PurchaseRejectedException) {
+        PurchaseSyncOutcome.Rejected(rejected.permanent)
+    } catch (_: Exception) {
+        PurchaseSyncOutcome.Rejected(permanent = false)
+    }
+}
+
 internal fun isPermanentPurchaseRejection(body: JsonObject): Boolean {
     if ((body["permanent"] as? JsonPrimitive)?.contentOrNull?.toBooleanStrictOrNull() == true) return true
     if ((body["retryable"] as? JsonPrimitive)?.contentOrNull?.toBooleanStrictOrNull() == false) return true
@@ -240,7 +270,7 @@ internal class PurchaseService(
                     if (!evidence.synced && evidence.canGrantTo(distinctId())) {
                         val noLongerActive = allQueriesSucceeded && evidence.purchaseToken !in activeTokens
                         if (noLongerActive) {
-                            features.removeLocalPurchase(evidence.purchaseToken)
+                            features.removePurchase(evidence.purchaseToken)
                         } else {
                             features.applyLocalPurchase(
                                 evidence.localFeatureGrants.toFeatureGrants(),
@@ -331,6 +361,7 @@ internal class PurchaseService(
             completionEmitted = existing?.completionEmitted == true,
             syncedEventEmitted = existing?.syncedEventEmitted == true,
             syncedCustomerId = existing?.syncedCustomerId,
+            acceptedResponseBody = existing?.acceptedResponseBody,
             nuxieManaged = existing?.nuxieManaged
                 ?: matchingFlight?.nuxieManaged?.takeIf { isCheckoutOutcome }
                 ?: (settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED),
@@ -346,7 +377,7 @@ internal class PurchaseService(
             existing?.ownerDistinctId != ownerDistinctId &&
             (existing?.ownerDistinctId ?: existing?.syncAttributionDistinctId) == currentOwner
         ) {
-            features.removeLocalPurchase(evidence.purchaseToken)
+            features.removePurchase(evidence.purchaseToken)
         }
         if (purchase.state == StoredPurchaseState.PENDING) {
             complete(purchase, PurchaseResult.Pending)
@@ -366,6 +397,9 @@ internal class PurchaseService(
         var currentEvidence = evidence
         if (evidence.canGrantTo(distinctId())) {
             features.applyLocalPurchase(evidence.localFeatureGrants.toFeatureGrants(), purchase.purchaseToken)
+            evidence.acceptedResponseBody?.let { body ->
+                features.updateFromPurchase(evidence.ownerDistinctId!!, body, purchase.purchaseToken)
+            }
             if (isCheckoutOutcome && !evidence.completionEmitted) {
                 emitPurchaseCompleted(evidence)
                 currentEvidence = evidence.copy(completionEmitted = true)
@@ -392,14 +426,18 @@ internal class PurchaseService(
                 }
             }
             is PurchaseSyncOutcome.Accepted -> {
+                val provenOwner = currentProvenOwner(attempted)
                 val accepted = attempted.copy(
+                    ownerDistinctId = provenOwner ?: attempted.ownerDistinctId,
                     synced = true,
                     syncedCustomerId = outcome.response.customerId,
+                    acceptedResponseBody = outcome.response.body,
                 )
                 if (!evidenceStore.upsert(accepted)) return
-                if (accepted.syncAttributionDistinctId == distinctId()) {
+                val projectionOwner = provenOwner ?: accepted.syncAttributionDistinctId
+                if (projectionOwner == distinctId()) {
                     features.updateFromPurchase(
-                        accepted.syncAttributionDistinctId,
+                        projectionOwner,
                         outcome.response.body,
                         accepted.purchaseToken,
                     )
@@ -407,6 +445,16 @@ internal class PurchaseService(
                 completeManaged(emitPurchaseSyncedIfNeeded(accepted))
             }
         }
+    }
+
+    private fun currentProvenOwner(evidence: PurchaseEvidence): String? {
+        val boundOwner = evidence.obfuscatedAccountId?.let { accountId ->
+            evidenceStore.loadBindings().firstOrNull { binding ->
+                binding.obfuscatedAccountId == accountId &&
+                    binding.storeProductId in evidence.storeProductIds
+            }?.distinctId
+        }
+        return boundOwner ?: evidenceStore.load()[evidence.purchaseToken]?.ownerDistinctId
     }
 
     private fun emitPurchaseSyncedIfNeeded(evidence: PurchaseEvidence): PurchaseEvidence {
@@ -467,7 +515,7 @@ internal class PurchaseService(
             evidence.localFeatureGrants.toFeatureGrants(),
             evidence.purchaseToken,
         )
-        features.removeLocalPurchase(evidence.purchaseToken)
+        features.removePurchase(evidence.purchaseToken)
     }
 
     private suspend fun revokeMissingOptimistic(activeTokens: Set<String>) {
@@ -477,7 +525,7 @@ internal class PurchaseService(
                     it.purchaseState == StoredPurchaseState.PURCHASED &&
                     it.purchaseToken !in activeTokens
             }
-            .forEach { features.removeLocalPurchase(it.purchaseToken) }
+            .forEach { features.removePurchase(it.purchaseToken) }
     }
 
     private fun scheduleSyncRetry(token: String, attempt: Int) {

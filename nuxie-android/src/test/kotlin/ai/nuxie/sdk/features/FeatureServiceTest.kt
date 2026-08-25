@@ -92,7 +92,7 @@ class FeatureServiceTest {
         assertTrue(core.featureInfo.isAllowed("unlimited-exports"))
         assertFalse(core.featureInfo.isAllowed("credits"))
 
-        core.features.removeLocalPurchase("token-1")
+        core.features.removePurchase("token-1")
         assertFalse(core.featureInfo.isAllowed("pro"))
         assertFalse(core.featureInfo.isAllowed("unlimited-exports"))
         core.stop()
@@ -136,7 +136,7 @@ class FeatureServiceTest {
         assertTrue(core.features.getCached("exports", null)!!.allowed)
         assertTrue(core.features.checkWithCache("exports").allowed)
 
-        core.features.removeLocalPurchase("local-token")
+        core.features.removePurchase("local-token")
         core.features.applyLocalPurchase(grant, "other-token")
         assertFalse(core.features.getCached("exports", null)!!.allowed)
         core.stop()
@@ -320,7 +320,7 @@ class FeatureServiceTest {
             core.features.checkWithCache("pro", forceRefresh = true)
         }
         assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
-        core.features.removeLocalPurchase("mid-check-token")
+        core.features.removePurchase("mid-check-token")
         releaseCheck.countDown()
 
         assertFalse(check.await().allowed)
@@ -353,8 +353,9 @@ class FeatureServiceTest {
 
         assertTrue(core.featureInfo.isAllowed("existing"))
         assertTrue(core.featureInfo.isAllowed("pro"))
-        core.features.removeLocalPurchase("token-1")
-        assertTrue(core.featureInfo.isAllowed("pro"))
+        core.features.removePurchase("token-1")
+        assertTrue(core.featureInfo.isAllowed("existing"))
+        assertFalse(core.featureInfo.isAllowed("pro"))
         core.stop()
     }
 

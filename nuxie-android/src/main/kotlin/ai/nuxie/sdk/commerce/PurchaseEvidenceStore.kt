@@ -96,6 +96,7 @@ internal data class PurchaseEvidence(
     val completionEmitted: Boolean = false,
     val syncedEventEmitted: Boolean = false,
     val syncedCustomerId: String? = null,
+    val acceptedResponseBody: JsonObject? = null,
     val nuxieManaged: Boolean = false,
     val signatureVerificationRequired: Boolean = false,
     val signatureVerified: Boolean = false,
@@ -244,6 +245,7 @@ internal class FilePurchaseEvidenceStore(
             put("completionEmitted", JsonPrimitive(evidence.completionEmitted))
             put("syncedEventEmitted", JsonPrimitive(evidence.syncedEventEmitted))
             evidence.syncedCustomerId?.let { put("syncedCustomerId", JsonPrimitive(it)) }
+            evidence.acceptedResponseBody?.let { put("acceptedResponseBody", it) }
             put("nuxieManaged", JsonPrimitive(evidence.nuxieManaged))
             put("signatureVerificationRequired", JsonPrimitive(evidence.signatureVerificationRequired))
             put("signatureVerified", JsonPrimitive(evidence.signatureVerified))
@@ -286,6 +288,7 @@ internal class FilePurchaseEvidenceStore(
             completionEmitted = raw.boolean("completionEmitted"),
             syncedEventEmitted = raw.boolean("syncedEventEmitted"),
             syncedCustomerId = raw.string("syncedCustomerId"),
+            acceptedResponseBody = raw["acceptedResponseBody"] as? JsonObject,
             nuxieManaged = raw.boolean("nuxieManaged"),
             signatureVerificationRequired = raw.boolean("signatureVerificationRequired"),
             signatureVerified = raw.boolean("signatureVerified"),
