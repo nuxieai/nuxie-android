@@ -8,7 +8,6 @@ import ai.nuxie.sdk.experiences.Delivery
 import ai.nuxie.sdk.experiences.ReleaseArtifactAcquirer
 import android.content.Context
 import android.content.Intent
-import android.util.Log
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.UUID
@@ -54,6 +53,7 @@ internal class ExperiencePresentationException(
         RUNTIME_UNAVAILABLE,
         RELEASE_NOT_FOUND,
         ACQUISITION_FAILED,
+        PREPARATION_FAILED,
         HOST_FAILED,
         FIRST_FRAME_TIMEOUT,
         SUPERSEDED,
@@ -65,21 +65,14 @@ internal data class PresentationOutcome(
     val reason: CloseReason,
 )
 
-internal enum class ExternalArtifactRole { ASSET, SCRIPT }
-
-internal sealed interface PresentationDiagnostic {
-    data class ExternalArtifactsNotSupplied(
-        val count: Int,
-        val roles: Set<ExternalArtifactRole>,
-    ) : PresentationDiagnostic
-}
-
 /** Prepared content remains service-owned; only its opaque id crosses the Activity boundary. */
 internal data class PreparedPresentation(
     val rivFile: File,
     val artboardName: String?,
     val clearColor: Int,
     val shell: PresentationShell,
+    val descriptor: JsonObject? = null,
+    val artifactsByKey: Map<String, File> = emptyMap(),
 )
 
 internal sealed interface PresentationShell {
@@ -236,7 +229,6 @@ internal class ExperiencePresentationService(
     private val runtimeAvailable: () -> Boolean,
     private val launch: (String) -> Unit,
     private val reportOutcome: suspend (PresentationOutcome) -> Unit = {},
-    private val diagnose: (PresentationDiagnostic) -> Unit = {},
     private val firstFrameTimeoutMillis: Long = FIRST_FRAME_TIMEOUT_MILLIS,
 ) {
     constructor(
@@ -255,7 +247,6 @@ internal class ExperiencePresentationService(
         runtimeAvailable = runtimeAvailable,
         launch = AndroidPresentationLauncher(context.applicationContext ?: context),
         reportOutcome = reportOutcome,
-        diagnose = ::logPresentationDiagnostic,
         firstFrameTimeoutMillis = FIRST_FRAME_TIMEOUT_MILLIS,
     )
 
@@ -302,9 +293,6 @@ internal class ExperiencePresentationService(
                     error,
                 )
             }
-            admitted.release.externalArtifactDiagnostic()?.let { diagnostic ->
-                runCatching { diagnose(diagnostic) }
-            }
             val identity = admitted.release.identity
             val ref = ExperienceRef(identity.experienceId, identity.experienceVersionId, journeyId)
             val id = UUID.randomUUID().toString()
@@ -318,6 +306,8 @@ internal class ExperiencePresentationService(
                     artboardName = admitted.release.defaultArtboardName(),
                     clearColor = admitted.release.presentationClearColor(),
                     shell = admitted.release.presentationShell(),
+                    descriptor = admitted.release.descriptor,
+                    artifactsByKey = acquired.artifactsByKey,
                 ),
                 onFirstFrame = { firstFrame(pending) },
                 onFailure = { error -> failed(pending, error) },
@@ -433,31 +423,6 @@ internal class ExperiencePresentationService(
                 },
             )
         }
-    }
-}
-
-private fun AuthenticatedRelease.externalArtifactDiagnostic(): PresentationDiagnostic? {
-    val render = descriptor["render"] as? JsonObject
-    val assetCount = (render?.get("assets") as? JsonArray)?.size ?: 0
-    val scriptCount = (descriptor["screenBehaviors"] as? JsonArray)
-        ?.count { behavior -> (behavior as? JsonObject)?.get("script") is JsonObject }
-        ?: 0
-    val count = assetCount + scriptCount
-    if (count == 0) return null
-    val roles = buildSet {
-        if (assetCount > 0) add(ExternalArtifactRole.ASSET)
-        if (scriptCount > 0) add(ExternalArtifactRole.SCRIPT)
-    }
-    return PresentationDiagnostic.ExternalArtifactsNotSupplied(count, roles)
-}
-
-private fun logPresentationDiagnostic(diagnostic: PresentationDiagnostic) {
-    when (diagnostic) {
-        is PresentationDiagnostic.ExternalArtifactsNotSupplied -> Log.w(
-            "Nuxie",
-            "Experience external artifacts are acquired but cannot be supplied to the renderer " +
-                "(count=${diagnostic.count}, roles=${diagnostic.roles.sortedBy { it.name }}; UNIV-2652)",
-        )
     }
 }
 
