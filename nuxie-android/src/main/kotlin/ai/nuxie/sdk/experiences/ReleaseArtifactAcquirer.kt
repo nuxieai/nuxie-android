@@ -36,7 +36,7 @@ internal class ReleaseArtifactAcquirer(
     ): AcquiredRelease = withContext(Dispatchers.IO) {
         val render = release.descriptor["render"] as? JsonObject
             ?: invalidDescriptor("<render>", "release render is missing")
-        val riv = artifact(render["riv"] as? JsonObject, "<riv>")
+        val riv = artifact(render["riv"] as? JsonObject, "<riv>", ArtifactRole.RIV)
         if (render.string("renderer") != "rive") {
             invalidDescriptor(riv.key, "unsupported release renderer")
         }
@@ -47,7 +47,12 @@ internal class ReleaseArtifactAcquirer(
         }
         val assets = (render["assets"] as? JsonArray)
             ?.mapIndexed { index, value ->
-                artifact(value as? JsonObject, "<asset:$index>", requiresKind = true)
+                artifact(
+                    value as? JsonObject,
+                    "<asset:$index>",
+                    ArtifactRole.ASSET,
+                    requiresKind = true,
+                )
             }
             ?: invalidDescriptor(riv.key, "release assets are missing")
         val scripts = (release.descriptor["screenBehaviors"] as? JsonArray)
@@ -57,20 +62,52 @@ internal class ReleaseArtifactAcquirer(
                 val script = behavior["script"] ?: return@mapIndexedNotNull null
                 val scriptObject = script as? JsonObject
                     ?: invalidDescriptor("<script:$index>", "invalid screen behavior script")
-                artifact(scriptObject["artifact"] as? JsonObject, "<script:$index>")
+                artifact(
+                    scriptObject["artifact"] as? JsonObject,
+                    "<script:$index>",
+                    ArtifactRole.SCRIPT,
+                )
             }
             ?: invalidDescriptor(riv.key, "release screen behaviors are missing")
-        val artifacts = listOf(riv) + assets + scripts
-        artifacts.groupBy(Artifact::key).entries.firstOrNull { it.value.size > 1 }?.let {
-            invalidDescriptor(it.key, "duplicate artifact key")
-        }
-        artifacts.forEach { item ->
-            if (item.sizeBytes > limitFor(item.key)) {
+        val references = listOf(riv) + assets + scripts
+        references.forEach { item ->
+            if (item.sizeBytes > item.role.maximumBytes) {
                 invalidDescriptor(item.key, "artifact exceeds size limit")
             }
         }
+
+        references.groupBy(Artifact::key).values.forEach { matchingKey ->
+            val first = matchingKey.first()
+            if (matchingKey.any { it.sha256 != first.sha256 || !it.hasMatchingMetadata(first) }) {
+                invalidDescriptor(first.key, "artifact key has conflicting metadata")
+            }
+        }
+        val artifacts = references.groupBy(Artifact::sha256).values.map { matchingDigest ->
+            val first = matchingDigest.first()
+            if (matchingDigest.any { !it.hasMatchingMetadata(first) }) {
+                invalidDescriptor(first.key, "artifact digest has conflicting metadata")
+            }
+            NormalizedArtifact(
+                acquisition = first,
+                keys = matchingDigest.map(Artifact::key).distinct(),
+                required = matchingDigest.any(Artifact::required),
+            )
+        }
+
+        var scriptBytes = 0L
+        references.filter { it.role == ArtifactRole.SCRIPT }
+            .distinctBy(Artifact::sha256)
+            .forEach { item ->
+                if (item.sizeBytes >
+                    ExperienceReleaseLimits.SCRIPT_ARTIFACT_AGGREGATE_BYTES - scriptBytes
+                ) {
+                    invalidDescriptor(item.key, "screen behavior scripts exceed aggregate size limit")
+                }
+                scriptBytes += item.sizeBytes
+            }
         var aggregateBytes = 0L
-        artifacts.distinctBy(Artifact::sha256).forEach { item ->
+        artifacts.forEach { normalized ->
+            val item = normalized.acquisition
             if (item.sizeBytes > ExperienceReleaseLimits.ARTIFACT_AGGREGATE_BYTES - aggregateBytes) {
                 invalidDescriptor(item.key, "release artifacts exceed aggregate size limit")
             }
@@ -78,35 +115,36 @@ internal class ReleaseArtifactAcquirer(
         }
 
         cache.validateDeliveryOrigin(riv.key, delivery.renderBaseUrl)
-        cache.validateDeliveryOrigin(
-            artifacts.firstOrNull { !it.key.startsWith("renders/") }?.key ?: riv.key,
-            delivery.assetBaseUrl,
-        )
+        references.firstOrNull { it.role != ArtifactRole.RIV }?.let { external ->
+            cache.validateDeliveryOrigin(external.key, delivery.assetBaseUrl)
+        }
 
         // Preflight every authenticated key before the first request. Optional
         // presentation semantics cannot turn an unsafe key into a safe one.
-        artifacts.forEach { item ->
+        references.forEach { item ->
             cache.validateLocation(
                 key = item.key,
-                signedBaseUrl = deliveryOrigin(item.key, delivery),
+                signedBaseUrl = deliveryOrigin(item.role, delivery),
             )
         }
 
-        val protection = cache.protect(artifacts.map { it.sha256 })
+        val protection = cache.protect(artifacts.map { it.acquisition.sha256 })
         try {
-            val files = LinkedHashMap<String, File>(artifacts.size)
-            artifacts.forEach { item ->
+            val files = LinkedHashMap<String, File>(references.size)
+            artifacts.forEach { normalized ->
+                val item = normalized.acquisition
                 try {
-                    files[item.key] = cache.acquire(
+                    val file = cache.acquire(
                         key = item.key,
                         sha256 = item.sha256,
                         expectedSizeBytes = item.sizeBytes,
-                        maxBytes = minOf(item.sizeBytes, limitFor(item.key)),
-                        signedBaseUrl = deliveryOrigin(item.key, delivery),
+                        maxBytes = minOf(item.sizeBytes, item.role.maximumBytes),
+                        signedBaseUrl = deliveryOrigin(item.role, delivery),
                         expectedContentType = item.contentType,
                     )
+                    normalized.keys.forEach { key -> files[key] = file }
                 } catch (error: ReleaseArtifactAcquisitionException) {
-                    if (item.required || !error.isSafeOptionalFailure()) throw error
+                    if (normalized.required || !error.isSafeOptionalFailure()) throw error
                 }
             }
             AcquiredRelease(
@@ -124,6 +162,7 @@ internal class ReleaseArtifactAcquirer(
     private fun artifact(
         value: JsonObject?,
         fallbackKey: String,
+        role: ArtifactRole,
         requiresKind: Boolean = false,
     ): Artifact {
         val key = value?.string("key") ?: fallbackKey
@@ -146,7 +185,10 @@ internal class ReleaseArtifactAcquirer(
             true
         }
         if (key == fallbackKey) invalidDescriptor(key, "invalid artifact key")
-        return Artifact(key, sha256, sizeBytes, contentType, required)
+        if (!role.accepts(key, sha256)) {
+            invalidDescriptor(key, "artifact key does not match descriptor role")
+        }
+        return Artifact(key, sha256, sizeBytes, contentType, required, role)
     }
 
     private fun JsonObject.string(key: String): String? =
@@ -162,19 +204,16 @@ internal class ReleaseArtifactAcquirer(
             message = message,
         )
 
-    private fun limitFor(key: String): Long = if (key.startsWith("renders/")) {
-        ExperienceReleaseLimits.RIV_ARTIFACT_BYTES.toLong()
-    } else {
-        ExperienceReleaseLimits.EXTERNAL_ASSET_BYTES.toLong()
-    }
-
-    private fun deliveryOrigin(key: String, delivery: Delivery): String =
-        if (key.startsWith("renders/")) delivery.renderBaseUrl else delivery.assetBaseUrl
+    private fun deliveryOrigin(role: ArtifactRole, delivery: Delivery): String =
+        if (role == ArtifactRole.RIV) delivery.renderBaseUrl else delivery.assetBaseUrl
 
     private fun ReleaseArtifactAcquisitionException.isSafeOptionalFailure(): Boolean =
         reason == ReleaseArtifactAcquisitionException.Reason.DIGEST_MISMATCH ||
             reason == ReleaseArtifactAcquisitionException.Reason.CONTENT_TYPE_MISMATCH ||
-            (reason == ReleaseArtifactAcquisitionException.Reason.HTTP_STATUS && httpStatusCode == 404)
+            reason == ReleaseArtifactAcquisitionException.Reason.SIZE_MISMATCH ||
+            reason == ReleaseArtifactAcquisitionException.Reason.TRANSPORT ||
+            (reason == ReleaseArtifactAcquisitionException.Reason.HTTP_STATUS &&
+                (httpStatusCode == 404 || httpStatusCode in 500..599))
 
     private data class Artifact(
         val key: String,
@@ -182,9 +221,38 @@ internal class ReleaseArtifactAcquirer(
         val sizeBytes: Long,
         val contentType: String,
         val required: Boolean,
+        val role: ArtifactRole,
+    ) {
+        fun hasMatchingMetadata(other: Artifact): Boolean =
+            sizeBytes == other.sizeBytes && contentType == other.contentType
+    }
+
+    private data class NormalizedArtifact(
+        val acquisition: Artifact,
+        val keys: List<String>,
+        val required: Boolean,
     )
+
+    private enum class ArtifactRole(
+        val maximumBytes: Long,
+    ) {
+        RIV(ExperienceReleaseLimits.RIV_ARTIFACT_BYTES.toLong()),
+        ASSET(ExperienceReleaseLimits.EXTERNAL_ASSET_BYTES.toLong()),
+        SCRIPT(ExperienceReleaseLimits.EXTERNAL_ASSET_BYTES.toLong()),
+        ;
+
+        fun accepts(key: String, sha256: String): Boolean = when (this) {
+            RIV -> key == "renders/sha256/$sha256.riv"
+            ASSET -> {
+                val prefix = "assets/sha256/$sha256."
+                key.startsWith(prefix) && key.removePrefix(prefix) in ASSET_EXTENSIONS
+            }
+            SCRIPT -> key == "screen-behavior/sha256/$sha256.bin"
+        }
+    }
 
     private companion object {
         val REQUIRED_RENDER_ARRAYS = listOf("screens", "transitions", "textInputs", "assets")
+        val ASSET_EXTENSIONS = setOf("png", "jpg", "webp", "ttf", "otf", "bin")
     }
 }
