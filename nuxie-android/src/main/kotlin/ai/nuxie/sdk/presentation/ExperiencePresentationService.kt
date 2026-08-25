@@ -1,0 +1,438 @@
+package ai.nuxie.sdk.presentation
+
+import ai.nuxie.sdk.ExperienceRef
+import ai.nuxie.sdk.events.SystemEventNames
+import ai.nuxie.sdk.experiences.AcquiredRelease
+import ai.nuxie.sdk.experiences.AuthenticatedRelease
+import ai.nuxie.sdk.experiences.Delivery
+import ai.nuxie.sdk.experiences.ReleaseArtifactAcquirer
+import android.content.Context
+import android.content.Intent
+import java.io.File
+import java.lang.ref.WeakReference
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+
+/** The authenticated catalog entry consumed by presentation. */
+internal data class PresentationRelease(
+    val release: AuthenticatedRelease,
+    val delivery: Delivery,
+)
+
+/** Resolves only releases that passed profile authentication and admission. */
+internal fun interface PresentationReleaseProvider {
+    fun releaseFor(experienceVersionId: String): PresentationRelease?
+}
+
+/** Kotlin analog of the iOS presentation close-reason set. */
+internal sealed interface CloseReason {
+    data object UserDismissed : CloseReason
+    data object GoalMet : CloseReason
+    data object PurchaseCompleted : CloseReason
+    data object Timeout : CloseReason
+    data class Error(val cause: Throwable) : CloseReason
+}
+
+internal class ExperiencePresentationException(
+    val reason: Reason,
+    message: String,
+    cause: Throwable? = null,
+) : Exception(message, cause) {
+    enum class Reason {
+        RUNTIME_UNAVAILABLE,
+        RELEASE_NOT_FOUND,
+        ACQUISITION_FAILED,
+        HOST_FAILED,
+        SUPERSEDED,
+    }
+}
+
+internal data class PresentationOutcome(
+    val ref: ExperienceRef,
+    val reason: CloseReason,
+)
+
+/** Prepared content remains service-owned; only its opaque id crosses the Activity boundary. */
+internal data class PreparedPresentation(
+    val rivFile: File,
+    val artboardName: String?,
+    val clearColor: Int,
+    val shell: PresentationShell,
+)
+
+internal sealed interface PresentationShell {
+    val dismissible: Boolean
+
+    data object FullScreen : PresentationShell {
+        override val dismissible: Boolean = true
+    }
+
+    data class Sheet(
+        val detent: Detent,
+        override val dismissible: Boolean,
+    ) : PresentationShell {
+        enum class Detent { MEDIUM, LARGE }
+    }
+
+    data class Drawer(
+        val edge: Edge,
+        val extentRatio: Float,
+        val cornerRadiusDp: Float,
+        override val dismissible: Boolean,
+    ) : PresentationShell {
+        enum class Edge { TOP, BOTTOM, LEADING, TRAILING }
+    }
+}
+
+/**
+ * Process-local handoff between [ExperiencePresentationService] and the one
+ * engine-owned Activity. Absence after process death is deliberate: content
+ * is never reconstructed from Intent extras.
+ */
+internal object PresentationRegistry {
+    private class Entry(
+        val content: PreparedPresentation,
+        val onFirstFrame: () -> Unit,
+        val onFailure: (Throwable) -> Unit,
+        val onDismissed: (CloseReason) -> Unit,
+    ) {
+        val terminal = AtomicBoolean(false)
+        val firstFrame = AtomicBoolean(false)
+        var activity = WeakReference<NuxieExperienceActivity>(null)
+    }
+
+    private val lock = Any()
+    private val entries = mutableMapOf<String, Entry>()
+
+    fun register(
+        id: String,
+        content: PreparedPresentation,
+        onFirstFrame: () -> Unit,
+        onFailure: (Throwable) -> Unit,
+        onDismissed: (CloseReason) -> Unit,
+    ) {
+        synchronized(lock) {
+            check(id !in entries) { "duplicate presentation id" }
+            entries[id] = Entry(content, onFirstFrame, onFailure, onDismissed)
+        }
+    }
+
+    fun resolve(id: String): PreparedPresentation? = synchronized(lock) { entries[id]?.content }
+
+    fun attach(id: String, activity: NuxieExperienceActivity): Boolean = synchronized(lock) {
+        val entry = entries[id] ?: return@synchronized false
+        entry.activity = WeakReference(activity)
+        true
+    }
+
+    fun reportFirstFrame(id: String) {
+        val callback = synchronized(lock) {
+            val entry = entries[id] ?: return
+            if (entry.terminal.get() || !entry.firstFrame.compareAndSet(false, true)) return
+            entry.onFirstFrame
+        }
+        callback()
+    }
+
+    fun reportFailure(id: String, error: Throwable) {
+        val callback = synchronized(lock) {
+            val entry = entries.remove(id) ?: return
+            if (!entry.terminal.compareAndSet(false, true)) return
+            entry.onFailure
+        }
+        callback(error)
+    }
+
+    fun reportDismissed(id: String, reason: CloseReason) {
+        val callback = synchronized(lock) {
+            val entry = entries.remove(id) ?: return
+            if (!entry.terminal.compareAndSet(false, true)) return
+            entry.onDismissed
+        }
+        callback(reason)
+    }
+
+    fun dismiss(id: String, reason: CloseReason) {
+        val activity = synchronized(lock) { entries[id]?.activity?.get() }
+        if (activity == null) {
+            reportDismissed(id, reason)
+        } else {
+            activity.finishFromService(reason)
+        }
+    }
+
+    internal fun clearForTesting() {
+        synchronized(lock) { entries.clear() }
+    }
+}
+
+/** Trigger-to-first-frame presentation authority. */
+internal class ExperiencePresentationService(
+    private val releases: PresentationReleaseProvider,
+    private val acquire: suspend (PresentationRelease) -> AcquiredRelease,
+    private val emit: (String, Map<String, Any?>) -> Unit,
+    private val scope: CoroutineScope,
+    private val runtimeAvailable: () -> Boolean,
+    private val launch: (String) -> Unit,
+    private val reportOutcome: suspend (PresentationOutcome) -> Unit = {},
+) {
+    constructor(
+        context: Context,
+        releases: PresentationReleaseProvider,
+        acquirer: ReleaseArtifactAcquirer,
+        emit: (String, Map<String, Any?>) -> Unit,
+        scope: CoroutineScope,
+        runtimeAvailable: () -> Boolean,
+        reportOutcome: suspend (PresentationOutcome) -> Unit = {},
+    ) : this(
+        releases = releases,
+        acquire = { admitted -> acquirer.acquire(admitted.release, admitted.delivery) },
+        emit = emit,
+        scope = scope,
+        runtimeAvailable = runtimeAvailable,
+        launch = AndroidPresentationLauncher(context.applicationContext ?: context),
+        reportOutcome = reportOutcome,
+    )
+
+    private data class ActivePresentation(
+        val id: String,
+        val ref: ExperienceRef,
+        val acquired: AcquiredRelease,
+        val firstFrame: CompletableDeferred<ExperienceRef>,
+        val closed: AtomicBoolean = AtomicBoolean(false),
+        val shown: AtomicBoolean = AtomicBoolean(false),
+        val finished: CompletableDeferred<Unit> = CompletableDeferred(),
+    )
+
+    private val presentationMutex = Mutex()
+    private val stateLock = Any()
+    private var current: ActivePresentation? = null
+
+    suspend fun present(experienceVersionId: String, journeyId: String? = null): ExperienceRef {
+        val active = presentationMutex.withLock {
+            if (!runtimeAvailable()) {
+                throw ExperiencePresentationException(
+                    ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE,
+                    "Experience renderer is unavailable on this device",
+                )
+            }
+
+            synchronized(stateLock) { current }?.let {
+                PresentationRegistry.dismiss(it.id, CloseReason.UserDismissed)
+                it.finished.await()
+            }
+
+            val admitted = releases.releaseFor(experienceVersionId)
+                ?: throw ExperiencePresentationException(
+                    ExperiencePresentationException.Reason.RELEASE_NOT_FOUND,
+                    "Authenticated Experience release not found: $experienceVersionId",
+                )
+            val acquired = try {
+                acquire(admitted)
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                throw ExperiencePresentationException(
+                    ExperiencePresentationException.Reason.ACQUISITION_FAILED,
+                    "Experience artifact acquisition failed: ${error.message ?: "unknown error"}",
+                    error,
+                )
+            }
+            val identity = admitted.release.identity
+            val ref = ExperienceRef(identity.experienceId, identity.experienceVersionId, journeyId)
+            val id = UUID.randomUUID().toString()
+            val pending = ActivePresentation(id, ref, acquired, CompletableDeferred())
+            synchronized(stateLock) { current = pending }
+
+            PresentationRegistry.register(
+                id = id,
+                content = PreparedPresentation(
+                    rivFile = acquired.rivFile,
+                    artboardName = admitted.release.defaultArtboardName(),
+                    clearColor = admitted.release.presentationClearColor(),
+                    shell = admitted.release.presentationShell(),
+                ),
+                onFirstFrame = { firstFrame(pending) },
+                onFailure = { error -> failed(pending, error) },
+                onDismissed = { reason -> ended(pending, reason) },
+            )
+            try {
+                launch(id)
+            } catch (error: Throwable) {
+                PresentationRegistry.reportFailure(id, error)
+            }
+            pending
+        }
+        return active.firstFrame.await()
+    }
+
+    fun dismiss(reason: CloseReason = CloseReason.UserDismissed) {
+        synchronized(stateLock) { current }?.let { PresentationRegistry.dismiss(it.id, reason) }
+    }
+
+    fun close() = dismiss(CloseReason.UserDismissed)
+
+    private fun firstFrame(active: ActivePresentation) {
+        if (active.closed.get() || !active.shown.compareAndSet(false, true)) return
+        runCatching {
+            emit(
+                SystemEventNames.EXPERIENCE_SHOWN,
+                mapOf(
+                    "journey_id" to active.ref.journeyId,
+                    "experience_id" to active.ref.experienceId,
+                    "experience_version" to active.ref.experienceVersion,
+                ),
+            )
+        }
+        active.firstFrame.complete(active.ref)
+    }
+
+    private fun failed(active: ActivePresentation, error: Throwable) {
+        if (!active.closed.compareAndSet(false, true)) return
+        clearCurrent(active)
+        active.acquired.close()
+        active.finished.complete(Unit)
+        val typed = if (error is ExperiencePresentationException) error else {
+            ExperiencePresentationException(
+                ExperiencePresentationException.Reason.HOST_FAILED,
+                "Experience presentation host failed: ${error.message ?: "unknown error"}",
+                error,
+            )
+        }
+        active.firstFrame.completeExceptionally(typed)
+        if (active.shown.get()) emitCloseFact(active.ref, CloseReason.Error(typed))
+        scope.launch { reportOutcome(PresentationOutcome(active.ref, CloseReason.Error(typed))) }
+    }
+
+    private fun ended(active: ActivePresentation, reason: CloseReason) {
+        if (!active.closed.compareAndSet(false, true)) return
+        clearCurrent(active)
+        active.acquired.close()
+        active.finished.complete(Unit)
+        if (!active.firstFrame.isCompleted) {
+            active.firstFrame.completeExceptionally(
+                ExperiencePresentationException(
+                    ExperiencePresentationException.Reason.SUPERSEDED,
+                    "Experience presentation ended before its first frame",
+                ),
+            )
+        }
+        if (active.shown.get()) emitCloseFact(active.ref, reason)
+        scope.launch { reportOutcome(PresentationOutcome(active.ref, reason)) }
+    }
+
+    private fun clearCurrent(active: ActivePresentation) {
+        synchronized(stateLock) {
+            if (current === active) current = null
+        }
+    }
+
+    private fun emitCloseFact(ref: ExperienceRef, reason: CloseReason) {
+        val properties = linkedMapOf<String, Any?>(
+            "journey_id" to ref.journeyId,
+            "experience_id" to ref.experienceId,
+            "experience_version" to ref.experienceVersion,
+        )
+        val name = when (reason) {
+            CloseReason.UserDismissed, CloseReason.GoalMet -> SystemEventNames.EXPERIENCE_DISMISSED
+            CloseReason.PurchaseCompleted -> {
+                properties["product_id"] = null
+                SystemEventNames.EXPERIENCE_PURCHASED
+            }
+            CloseReason.Timeout -> SystemEventNames.EXPERIENCE_TIMED_OUT
+            is CloseReason.Error -> {
+                properties["error_message"] = reason.cause.message
+                SystemEventNames.EXPERIENCE_ERRORED
+            }
+        }
+        runCatching { emit(name, properties) }
+    }
+
+    private class AndroidPresentationLauncher(private val context: Context) : (String) -> Unit {
+        override fun invoke(presentationId: String) {
+            context.startActivity(
+                Intent(context, NuxieExperienceActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, presentationId)
+                },
+            )
+        }
+    }
+}
+
+private fun AuthenticatedRelease.defaultArtboardName(): String? {
+    val render = descriptor["render"] as? JsonObject ?: return null
+    val firstScreen = (render["screens"] as? JsonArray)?.firstOrNull() as? JsonObject
+    return (firstScreen?.get("artboardName") as? JsonPrimitive)
+        ?.takeIf { it.isString }?.content
+}
+
+private fun AuthenticatedRelease.presentationClearColor(): Int {
+    val presentation = descriptor["presentation"] as? JsonObject ?: return OPAQUE_BLACK
+    val value = (presentation["backgroundColor"] as? JsonPrimitive)
+        ?.takeIf { it.isString }?.content ?: return OPAQUE_BLACK
+    val hex = value.removePrefix("#")
+    return runCatching {
+        when (hex.length) {
+            6 -> (0xFF000000L or hex.toLong(16)).toInt()
+            8 -> {
+                val rgba = hex.toLong(16)
+                ((rgba and 0xFF) shl 24 or (rgba ushr 8)).toInt()
+            }
+            else -> OPAQUE_BLACK
+        }
+    }.getOrDefault(OPAQUE_BLACK)
+}
+
+private fun AuthenticatedRelease.presentationShell(): PresentationShell {
+    val presentation = descriptor["presentation"] as? JsonObject
+        ?: return PresentationShell.FullScreen
+    return when (presentation.string("style")) {
+        "sheet" -> {
+            val sheet = presentation["sheet"] as? JsonObject
+                ?: return PresentationShell.FullScreen
+            PresentationShell.Sheet(
+                detent = when (sheet.string("detent")) {
+                    "medium" -> PresentationShell.Sheet.Detent.MEDIUM
+                    else -> PresentationShell.Sheet.Detent.LARGE
+                },
+                dismissible = sheet.boolean("dismissible") ?: true,
+            )
+        }
+        "drawer" -> {
+            val drawer = presentation["drawer"] as? JsonObject
+                ?: return PresentationShell.FullScreen
+            PresentationShell.Drawer(
+                edge = when (drawer.string("edge")) {
+                    "top" -> PresentationShell.Drawer.Edge.TOP
+                    "leading", "left" -> PresentationShell.Drawer.Edge.LEADING
+                    "trailing", "right" -> PresentationShell.Drawer.Edge.TRAILING
+                    else -> PresentationShell.Drawer.Edge.BOTTOM
+                },
+                extentRatio = drawer.float("extentRatio")?.coerceIn(0.1f, 1f) ?: 0.5f,
+                cornerRadiusDp = drawer.float("cornerRadius")?.coerceAtLeast(0f) ?: 0f,
+                dismissible = drawer.boolean("dismissible") ?: true,
+            )
+        }
+        else -> PresentationShell.FullScreen
+    }
+}
+
+private fun JsonObject.string(key: String): String? =
+    (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+private fun JsonObject.boolean(key: String): Boolean? =
+    (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toBooleanStrictOrNull()
+
+private fun JsonObject.float(key: String): Float? =
+    (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toFloatOrNull()
+
+private const val OPAQUE_BLACK = 0xFF000000.toInt()

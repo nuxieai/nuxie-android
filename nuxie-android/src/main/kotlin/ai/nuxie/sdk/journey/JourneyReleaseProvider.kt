@@ -6,6 +6,8 @@ import ai.nuxie.sdk.experiences.ExperienceReleaseVerifier
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
 import ai.nuxie.sdk.experiences.ReplayPolicy
 import ai.nuxie.sdk.experiences.SupportedRuntime
+import ai.nuxie.sdk.presentation.PresentationRelease
+import ai.nuxie.sdk.presentation.PresentationReleaseProvider
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -49,35 +51,49 @@ internal class JourneyReleaseCatalog(
             )
         }.getOrNull()
     },
-) : JourneyReleaseProvider {
+) : JourneyReleaseProvider, PresentationReleaseProvider {
     private val lock = Any()
     private var releasesByDistinctId = emptyMap<String, Map<String, List<AdmittedJourneyRelease>>>()
+    private var presentationReleasesByVersion = emptyMap<String, PresentationRelease>()
 
     fun applyProfile(distinctId: String, body: JsonObject) {
         val runtime = supportedRuntime() ?: run {
-            synchronized(lock) { releasesByDistinctId = emptyMap() }
+            synchronized(lock) {
+                releasesByDistinctId = emptyMap()
+                presentationReleasesByVersion = emptyMap()
+            }
             return
         }
         val profile = ExperienceReleaseProfile.fromProfileBody(body) ?: run {
-            synchronized(lock) { releasesByDistinctId = emptyMap() }
+            synchronized(lock) {
+                releasesByDistinctId = emptyMap()
+                presentationReleasesByVersion = emptyMap()
+            }
             return
         }
-        val releases = profile.active.mapNotNull { entry ->
+        val authenticated = profile.active.mapNotNull { entry ->
             val authenticated = authenticate(entry, runtime) ?: return@mapNotNull null
             authenticated.publishedAtSeqToPromote?.let {
                 highWater.promote(authenticated.identity.streamKey, it)
             }
-            admitted(authenticated)
+            authenticated
         }
+        val releases = authenticated.mapNotNull(::admitted)
         synchronized(lock) {
             // A device serves one identity at a time: applying a profile
             // replaces this user's releases and drops the prior user's map.
             releasesByDistinctId = mapOf(distinctId to releases.groupBy { it.triggerEventName })
+            presentationReleasesByVersion = authenticated.associate { release ->
+                release.identity.experienceVersionId to PresentationRelease(release, profile.delivery)
+            }
         }
     }
 
     override fun releasesFor(distinctId: String, triggerEventName: String): List<AdmittedJourneyRelease> =
         synchronized(lock) { releasesByDistinctId[distinctId]?.get(triggerEventName).orEmpty() }
+
+    override fun releaseFor(experienceVersionId: String): PresentationRelease? =
+        synchronized(lock) { presentationReleasesByVersion[experienceVersionId] }
 
     private fun admitted(release: AuthenticatedRelease): AdmittedJourneyRelease? {
         val enrollment = release.descriptor["enrollment"] as? JsonObject ?: return null

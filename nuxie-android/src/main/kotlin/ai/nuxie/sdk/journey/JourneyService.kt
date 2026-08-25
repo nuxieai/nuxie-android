@@ -8,6 +8,7 @@ import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.TimeBasedEpochGenerator
 import ai.nuxie.sdk.events.TriggerService
 import ai.nuxie.sdk.util.IsoDates
+import ai.nuxie.sdk.presentation.CloseReason
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
@@ -103,6 +104,18 @@ internal class JourneyService(
                 }
             }
         }
+    }
+
+    /** Receives the presentation-scoped close outcome for a linked Journey. */
+    suspend fun presentationEnded(distinctId: String, journeyId: String, reason: CloseReason) {
+        val exitReason = when (reason) {
+            CloseReason.UserDismissed -> "dismissed"
+            CloseReason.GoalMet -> "goal_met"
+            CloseReason.PurchaseCompleted -> "completed"
+            CloseReason.Timeout -> "completed"
+            is CloseReason.Error -> "error"
+        }
+        exit(distinctId, journeyId, exitReason)
     }
 
     override suspend fun applyDownFacts(body: JsonObject, distinctId: String) {

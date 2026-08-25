@@ -111,10 +111,9 @@ internal class TriggerService(
             GatePlan.Decision.SHOW_EXPERIENCE -> Mode.EXPERIENCE
             GatePlan.Decision.REQUIRE_FEATURE -> Mode.REQUIRE_FEATURE
         }
-        val terminalGateExperienceId = gatePlan
+        val terminalGateExperienceVersionId = gatePlan
             ?.takeIf { it.decision == GatePlan.Decision.SHOW_EXPERIENCE }
             ?.experienceVersionId
-            ?.let { "experience:$it" }
 
         // 3. Terminal semantics (iOS shouldCompleteUpdate, post-cut names).
         var journeyStarted = false
@@ -129,7 +128,7 @@ internal class TriggerService(
                     -> true
                     is TriggerDecision.Suppressed -> gatePlan == null && !journeyStarted
                     is TriggerDecision.ExperienceShown ->
-                        decision.ref.experienceId == terminalGateExperienceId
+                        decision.ref.experienceVersion == terminalGateExperienceVersionId
                     else -> false
                 }
                 is TriggerUpdate.FeatureAccess -> when (update.update) {

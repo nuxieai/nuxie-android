@@ -7,9 +7,8 @@ package ai.nuxie.sdk.events
  * properties, delivery guarantees) lives in the iOS repo's `docs/sdk-events.md`.
  *
  * The `$experience_*` names are enumerated by
- * `fixtures/events/experience-events.json`; they are emitted by the future
- * presentation service, not the capture pipeline, and are intentionally not
- * wired here yet.
+ * `fixtures/events/experience-events.json` and emitted by the presentation
+ * service rather than the capture pipeline.
  */
 internal object SystemEventNames {
     // Identity
@@ -23,6 +22,13 @@ internal object SystemEventNames {
 
     // Feature gating / metered usage (backend-ingested by name)
     const val FEATURE_USED = "\$feature_used"
+
+    // Experience presentation
+    const val EXPERIENCE_SHOWN = "\$experience_shown"
+    const val EXPERIENCE_DISMISSED = "\$experience_dismissed"
+    const val EXPERIENCE_PURCHASED = "\$experience_purchased"
+    const val EXPERIENCE_TIMED_OUT = "\$experience_timed_out"
+    const val EXPERIENCE_ERRORED = "\$experience_errored"
 
     // Screens
     const val SCREEN_SHOWN = "\$screen_shown"
