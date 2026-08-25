@@ -8,6 +8,7 @@ import ai.nuxie.sdk.experiences.Delivery
 import ai.nuxie.sdk.experiences.ReleaseArtifactAcquirer
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.UUID
@@ -15,7 +16,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
@@ -52,6 +55,7 @@ internal class ExperiencePresentationException(
         RELEASE_NOT_FOUND,
         ACQUISITION_FAILED,
         HOST_FAILED,
+        FIRST_FRAME_TIMEOUT,
         SUPERSEDED,
     }
 }
@@ -60,6 +64,15 @@ internal data class PresentationOutcome(
     val ref: ExperienceRef,
     val reason: CloseReason,
 )
+
+internal enum class ExternalArtifactRole { ASSET, SCRIPT }
+
+internal sealed interface PresentationDiagnostic {
+    data class ExternalArtifactsNotSupplied(
+        val count: Int,
+        val roles: Set<ExternalArtifactRole>,
+    ) : PresentationDiagnostic
+}
 
 /** Prepared content remains service-owned; only its opaque id crosses the Activity boundary. */
 internal data class PreparedPresentation(
@@ -134,6 +147,35 @@ internal object PresentationRegistry {
         true
     }
 
+    fun detach(id: String, activity: NuxieExperienceActivity) {
+        var dismissed: ((CloseReason) -> Unit)? = null
+        var failed: ((Throwable) -> Unit)? = null
+        var detachedReason: CloseReason? = null
+        synchronized(lock) {
+            val entry = entries[id] ?: return
+            if (entry.activity.get() === activity) {
+                val reason = activity.claimedCloseReason()
+                if (reason == null) {
+                    entry.activity = WeakReference(null)
+                } else {
+                    entries.remove(id)
+                    if (entry.terminal.compareAndSet(false, true)) {
+                        detachedReason = reason
+                        when (reason) {
+                            is CloseReason.Error -> failed = entry.onFailure
+                            else -> dismissed = entry.onDismissed
+                        }
+                    }
+                }
+            }
+        }
+        when (val reason = detachedReason) {
+            is CloseReason.Error -> failed?.invoke(reason.cause)
+            null -> Unit
+            else -> dismissed?.invoke(reason)
+        }
+    }
+
     fun reportFirstFrame(id: String) {
         val callback = synchronized(lock) {
             val entry = entries[id] ?: return
@@ -162,12 +204,22 @@ internal object PresentationRegistry {
     }
 
     fun dismiss(id: String, reason: CloseReason) {
-        val activity = synchronized(lock) { entries[id]?.activity?.get() }
-        if (activity == null) {
-            reportDismissed(id, reason)
-        } else {
-            activity.finishFromService(reason)
+        var callback: ((CloseReason) -> Unit)? = null
+        val activity = synchronized(lock) {
+            val entry = entries[id] ?: return
+            val attached = entry.activity.get()
+            if (attached == null) {
+                entries.remove(id)
+                if (entry.terminal.compareAndSet(false, true)) callback = entry.onDismissed
+                null
+            } else if (attached.claimFromService(reason)) {
+                attached
+            } else {
+                null
+            }
         }
+        callback?.invoke(reason)
+        activity?.finishAfterServiceClaim()
     }
 
     internal fun clearForTesting() {
@@ -184,6 +236,8 @@ internal class ExperiencePresentationService(
     private val runtimeAvailable: () -> Boolean,
     private val launch: (String) -> Unit,
     private val reportOutcome: suspend (PresentationOutcome) -> Unit = {},
+    private val diagnose: (PresentationDiagnostic) -> Unit = {},
+    private val firstFrameTimeoutMillis: Long = FIRST_FRAME_TIMEOUT_MILLIS,
 ) {
     constructor(
         context: Context,
@@ -201,6 +255,8 @@ internal class ExperiencePresentationService(
         runtimeAvailable = runtimeAvailable,
         launch = AndroidPresentationLauncher(context.applicationContext ?: context),
         reportOutcome = reportOutcome,
+        diagnose = ::logPresentationDiagnostic,
+        firstFrameTimeoutMillis = FIRST_FRAME_TIMEOUT_MILLIS,
     )
 
     private data class ActivePresentation(
@@ -246,6 +302,9 @@ internal class ExperiencePresentationService(
                     error,
                 )
             }
+            admitted.release.externalArtifactDiagnostic()?.let { diagnostic ->
+                runCatching { diagnose(diagnostic) }
+            }
             val identity = admitted.release.identity
             val ref = ExperienceRef(identity.experienceId, identity.experienceVersionId, journeyId)
             val id = UUID.randomUUID().toString()
@@ -271,7 +330,16 @@ internal class ExperiencePresentationService(
             }
             pending
         }
-        return active.firstFrame.await()
+        return try {
+            withTimeout(firstFrameTimeoutMillis) { active.firstFrame.await() }
+        } catch (_: TimeoutCancellationException) {
+            val timeout = ExperiencePresentationException(
+                ExperiencePresentationException.Reason.FIRST_FRAME_TIMEOUT,
+                "Experience presentation did not attach and render its first frame in time",
+            )
+            PresentationRegistry.reportFailure(active.id, timeout)
+            throw timeout
+        }
     }
 
     fun dismiss(reason: CloseReason = CloseReason.UserDismissed) {
@@ -368,6 +436,31 @@ internal class ExperiencePresentationService(
     }
 }
 
+private fun AuthenticatedRelease.externalArtifactDiagnostic(): PresentationDiagnostic? {
+    val render = descriptor["render"] as? JsonObject
+    val assetCount = (render?.get("assets") as? JsonArray)?.size ?: 0
+    val scriptCount = (descriptor["screenBehaviors"] as? JsonArray)
+        ?.count { behavior -> (behavior as? JsonObject)?.get("script") is JsonObject }
+        ?: 0
+    val count = assetCount + scriptCount
+    if (count == 0) return null
+    val roles = buildSet {
+        if (assetCount > 0) add(ExternalArtifactRole.ASSET)
+        if (scriptCount > 0) add(ExternalArtifactRole.SCRIPT)
+    }
+    return PresentationDiagnostic.ExternalArtifactsNotSupplied(count, roles)
+}
+
+private fun logPresentationDiagnostic(diagnostic: PresentationDiagnostic) {
+    when (diagnostic) {
+        is PresentationDiagnostic.ExternalArtifactsNotSupplied -> Log.w(
+            "Nuxie",
+            "Experience external artifacts are acquired but cannot be supplied to the renderer " +
+                "(count=${diagnostic.count}, roles=${diagnostic.roles.sortedBy { it.name }}; UNIV-2652)",
+        )
+    }
+}
+
 private fun AuthenticatedRelease.defaultArtboardName(): String? {
     val render = descriptor["render"] as? JsonObject ?: return null
     val firstScreen = (render["screens"] as? JsonArray)?.firstOrNull() as? JsonObject
@@ -436,3 +529,4 @@ private fun JsonObject.float(key: String): Float? =
     (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toFloatOrNull()
 
 private const val OPAQUE_BLACK = 0xFF000000.toInt()
+private const val FIRST_FRAME_TIMEOUT_MILLIS = 30_000L

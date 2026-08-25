@@ -55,7 +55,7 @@ internal class TriggerService(
 
     internal fun interface ExperiencePresenter {
         /** Present the Experience; throws when presentation is unavailable/fails. */
-        suspend fun present(experienceVersionId: String): ExperienceRef
+        suspend fun present(experienceVersionId: String, journeyId: String?): ExperienceRef
     }
 
     object NoJourneys : JourneyRouter {
@@ -68,7 +68,7 @@ internal class TriggerService(
     }
 
     object PresentationUnavailable : ExperiencePresenter {
-        override suspend fun present(experienceVersionId: String): ExperienceRef =
+        override suspend fun present(experienceVersionId: String, journeyId: String?): ExperienceRef =
             throw IllegalStateException("Experience presentation is not available yet (runtime host pending)")
     }
 
@@ -150,7 +150,8 @@ internal class TriggerService(
         // only terminal when nothing enrolled (an Error completes the
         // broker, which would otherwise drop later results).
         val failedResults = journeyResults.filterIsInstance<JourneyTriggerResult.Failed>()
-        journeyResults.filterIsInstance<JourneyTriggerResult.Started>().forEach { result ->
+        val startedResults = journeyResults.filterIsInstance<JourneyTriggerResult.Started>()
+        startedResults.forEach { result ->
             broker.emit(eventId, TriggerUpdate.Decision(TriggerDecision.JourneyStarted(result.ref)))
         }
         if (!journeyStarted && failedResults.isNotEmpty()) {
@@ -165,6 +166,26 @@ internal class TriggerService(
         }
         failedResults.forEach { result ->
             Log.w(LOG_TAG, "Journey admission failed alongside a successful enrollment: ${result.error.message}")
+        }
+        startedResults.forEach { result ->
+            val experienceVersionId = result.ref.experienceVersion
+            if (experienceVersionId == null) {
+                broker.emit(
+                    eventId,
+                    TriggerUpdate.Error(
+                        TriggerError(
+                            TriggerErrorCode.EXPERIENCE_MISSING,
+                            "Journey started without an Experience version",
+                        ),
+                    ),
+                )
+                return@forEach
+            }
+            presentExperience(
+                experienceVersionId = experienceVersionId,
+                eventId = eventId,
+                journeyId = result.ref.journeyId,
+            )
         }
 
         if (gatePlan == null && emittedJourneyDecision) return
@@ -196,7 +217,7 @@ internal class TriggerService(
             )
             return
         }
-        presentExperience(experienceVersionId, eventId)
+        presentExperience(experienceVersionId, eventId, journeyId = null)
     }
 
     private suspend fun handleRequireFeature(plan: GatePlan, eventId: String) {
@@ -232,7 +253,7 @@ internal class TriggerService(
 
         broker.emit(eventId, TriggerUpdate.FeatureAccess(FeatureAccessUpdate.Pending))
 
-        plan.experienceVersionId?.let { presentExperience(it, eventId) }
+        plan.experienceVersionId?.let { presentExperience(it, eventId, journeyId = null) }
 
         val timeoutMillis = (plan.timeoutMs ?: DEFAULT_FEATURE_TIMEOUT_MS).toLong()
         if (waitForFeatureAccess(featureId, plan.requiredBalance, plan.entityId, timeoutMillis)) {
@@ -261,8 +282,12 @@ internal class TriggerService(
         return false
     }
 
-    private suspend fun presentExperience(experienceVersionId: String, eventId: String) {
-        runCatching { presenter.present(experienceVersionId) }
+    private suspend fun presentExperience(
+        experienceVersionId: String,
+        eventId: String,
+        journeyId: String?,
+    ) {
+        runCatching { presenter.present(experienceVersionId, journeyId) }
             .onSuccess { ref ->
                 broker.emit(eventId, TriggerUpdate.Decision(TriggerDecision.ExperienceShown(ref)))
             }

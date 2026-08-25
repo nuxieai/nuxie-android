@@ -224,7 +224,9 @@ internal class ReleaseArtifactAcquirer(
         val role: ArtifactRole,
     ) {
         fun hasMatchingMetadata(other: Artifact): Boolean =
-            sizeBytes == other.sizeBytes && contentType == other.contentType
+            sizeBytes == other.sizeBytes &&
+                contentType == other.contentType &&
+                role == other.role
     }
 
     private data class NormalizedArtifact(

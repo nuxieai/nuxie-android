@@ -1,6 +1,5 @@
 package ai.nuxie.sdk.presentation
 
-import ai.nuxie.sdk.runtime.NuxieRuntimeBridge
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import android.app.Activity
 import android.os.Bundle
@@ -11,7 +10,30 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicBoolean
+
+internal class TerminalCloseClaim(
+    private val report: (CloseReason) -> Unit = {},
+) {
+    private val claimed = AtomicReference<CloseReason?>(null)
+    private val reported = AtomicBoolean(false)
+
+    val reason: CloseReason? get() = claimed.get()
+
+    fun tryClaim(reason: CloseReason): Boolean = claimed.compareAndSet(null, reason)
+
+    fun prepareForTeardown(isChangingConfigurations: Boolean) {
+        if (reason == null && isChangingConfigurations) return
+        tryClaim(CloseReason.UserDismissed)
+    }
+
+    fun reportAtTeardown(isChangingConfigurations: Boolean) {
+        prepareForTeardown(isChangingConfigurations)
+        if (reason == null) return
+        if (reported.compareAndSet(false, true)) report(requireNotNull(reason))
+    }
+}
 
 /**
  * The single engine-owned Activity hosting every signed presentation style
@@ -26,8 +48,7 @@ internal class NuxieExperienceActivity : Activity() {
     private var host: ExperienceSurfaceHost? = null
     private var lane: NuxieRuntimeLane? = null
     private var presentationId: String? = null
-    private val terminalReported = AtomicBoolean(false)
-    private var closeReason: CloseReason = CloseReason.UserDismissed
+    private val terminal = TerminalCloseClaim(::reportClaimedTerminal)
     private var dismissible = true
     private var predictiveBackCallback: android.window.OnBackInvokedCallback? = null
 
@@ -37,14 +58,7 @@ internal class NuxieExperienceActivity : Activity() {
         val presentationId = intent.getStringExtra(EXTRA_PRESENTATION_ID)
         this.presentationId = presentationId
 
-        // Cold recreation after process death: never re-present. If the
-        // process-local service survived a same-process recreation in a test,
-        // it still learns that presentation ended.
-        if (savedInstanceState != null) {
-            presentationId?.let {
-                terminalReported.set(true)
-                PresentationRegistry.reportDismissed(it, closeReason)
-            }
+        if (isColdRecreation(savedInstanceState, presentationId)) {
             finish()
             return
         }
@@ -53,7 +67,7 @@ internal class NuxieExperienceActivity : Activity() {
             finish()
             return
         }
-        if (!NuxieRuntimeBridge.isAvailable) {
+        if (!AndroidRenderCapability.isAvailable()) {
             fail(ExperiencePresentationException(
                 ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE,
                 "Experience renderer is unavailable on this device",
@@ -91,7 +105,7 @@ internal class NuxieExperienceActivity : Activity() {
             },
         )
         this.host = host
-        host.loadArtboard(rivBytes, prepared.artboardName)
+        loadPreparedRelease(host, rivBytes, prepared)
         dismissible = prepared.shell.dismissible
         setContentView(shellView(host, prepared.shell))
         registerPredictiveBack()
@@ -99,30 +113,58 @@ internal class NuxieExperienceActivity : Activity() {
 
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
-        if (dismissible) super.onBackPressed()
+        if (dismissible) finishTerminal(CloseReason.UserDismissed)
     }
 
     override fun onDestroy() {
+        terminal.prepareForTeardown(isChangingConfigurations)
+        presentationId?.let { PresentationRegistry.detach(it, this) }
         host?.release()
         lane?.shutdown()
         unregisterPredictiveBack()
-        if (terminalReported.compareAndSet(false, true)) {
-            presentationId?.let {
-                PresentationRegistry.reportDismissed(it, closeReason)
-            }
-        }
+        terminal.reportAtTeardown(isChangingConfigurations)
         super.onDestroy()
     }
 
-    internal fun finishFromService(reason: CloseReason) {
-        closeReason = reason
+    internal fun claimFromService(reason: CloseReason): Boolean = terminal.tryClaim(reason)
+
+    internal fun claimedCloseReason(): CloseReason? = terminal.reason
+
+    internal fun finishAfterServiceClaim() {
         runOnUiThread { finish() }
     }
 
     private fun fail(error: Throwable) {
-        if (!terminalReported.compareAndSet(false, true)) return
-        presentationId?.let { PresentationRegistry.reportFailure(it, error) }
+        if (!terminal.tryClaim(CloseReason.Error(error))) return
         runOnUiThread { finish() }
+    }
+
+    private fun finishTerminal(reason: CloseReason) {
+        terminal.tryClaim(reason)
+        finish()
+    }
+
+    private fun reportClaimedTerminal(reason: CloseReason) {
+        presentationId?.let { id ->
+            when (reason) {
+                is CloseReason.Error -> PresentationRegistry.reportFailure(id, reason.cause)
+                else -> PresentationRegistry.reportDismissed(id, reason)
+            }
+        }
+    }
+
+    /**
+     * Runtime attachment seam for prepared Experience content. UNIV-2652 will
+     * extend this seam once nux_capi has a portable external-asset injection
+     * interface. Until then only the riv bytes are supplied; acquired assets
+     * and scripts remain leased and presentation emits one typed diagnostic.
+     */
+    private fun loadPreparedRelease(
+        host: ExperienceSurfaceHost,
+        rivBytes: ByteArray,
+        prepared: PreparedPresentation,
+    ) {
+        host.loadArtboard(rivBytes, prepared.artboardName)
     }
 
     private fun shellView(host: ExperienceSurfaceHost, shell: PresentationShell): View {
@@ -131,7 +173,9 @@ internal class NuxieExperienceActivity : Activity() {
         val root = FrameLayout(this)
         val scrim = View(this).apply {
             setBackgroundColor(SCRIM_COLOR)
-            if (shell.dismissible) setOnClickListener { finish() }
+            if (shell.dismissible) {
+                setOnClickListener { finishTerminal(CloseReason.UserDismissed) }
+            }
         }
         root.addView(
             scrim,
@@ -199,7 +243,7 @@ internal class NuxieExperienceActivity : Activity() {
     private fun registerPredictiveBack() {
         if (android.os.Build.VERSION.SDK_INT < 33) return
         val callback = android.window.OnBackInvokedCallback {
-            if (dismissible) finish()
+            if (dismissible) finishTerminal(CloseReason.UserDismissed)
         }
         predictiveBackCallback = callback
         onBackInvokedDispatcher.registerOnBackInvokedCallback(
@@ -219,5 +263,9 @@ internal class NuxieExperienceActivity : Activity() {
         const val SCRIM_COLOR = 0x66000000
 
         const val EXTRA_PRESENTATION_ID = "ai.nuxie.sdk.internal.PRESENTATION_ID"
+
+        internal fun isColdRecreation(savedInstanceState: Bundle?, presentationId: String?): Boolean =
+            savedInstanceState != null &&
+                (presentationId == null || PresentationRegistry.resolve(presentationId) == null)
     }
 }

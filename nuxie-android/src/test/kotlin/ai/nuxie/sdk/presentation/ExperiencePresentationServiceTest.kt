@@ -16,7 +16,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.put
 import org.junit.After
@@ -73,6 +75,35 @@ class ExperiencePresentationServiceTest {
 
         service.dismiss()
         assertTrue(lease.closed.get())
+    }
+
+    @Test
+    fun declaredExternalArtifactsEmitOneTypedDiagnosticAndStillPresent() = runTest {
+        val launched = mutableListOf<String>()
+        val diagnostics = mutableListOf<PresentationDiagnostic>()
+        val service = service(
+            provider = PresentationReleaseProvider {
+                release("exp-1", it, externalAssetCount = 2, scriptCount = 1)
+            },
+            launch = launched::add,
+            diagnose = diagnostics::add,
+        )
+
+        val shown = async { service.present("v1") }
+        runCurrent()
+
+        assertEquals(
+            listOf(
+                PresentationDiagnostic.ExternalArtifactsNotSupplied(
+                    count = 3,
+                    roles = setOf(ExternalArtifactRole.ASSET, ExternalArtifactRole.SCRIPT),
+                ),
+            ),
+            diagnostics,
+        )
+        assertEquals(1, launched.size)
+        PresentationRegistry.reportFirstFrame(launched.single())
+        assertEquals("v1", shown.await().experienceVersion)
     }
 
     @Test
@@ -167,6 +198,33 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun launchThatNeverAttachesTimesOutAndReleasesRegistryAndLease() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+            firstFrameTimeoutMillis = 1_000,
+        )
+        val result = async(SupervisorJob()) { service.present("v1") }
+        runCurrent()
+
+        advanceTimeBy(1_001)
+        runCurrent()
+
+        val error = try {
+            result.await()
+            fail("missing Activity attachment should time out")
+            error("unreachable")
+        } catch (error: ExperiencePresentationException) {
+            error
+        }
+        assertEquals(ExperiencePresentationException.Reason.FIRST_FRAME_TIMEOUT, error.reason)
+        assertEquals(null, PresentationRegistry.resolve(launched.single()))
+        assertTrue(lease.closed.get())
+    }
+
+    @Test
     fun closeOutcomeKeepsJourneyLinkage() = runTest {
         val launched = mutableListOf<String>()
         val outcomes = mutableListOf<PresentationOutcome>()
@@ -221,21 +279,8 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun recreatedActivityFinishesAndReportsEndedWithoutResolvingContent() {
+    fun coldRecreatedActivityFinishesWhenProcessLocalStateIsAbsent() {
         val presentationId = "process-death"
-        var dismissed = 0
-        PresentationRegistry.register(
-            id = presentationId,
-            content = PreparedPresentation(
-                File("does-not-exist"),
-                null,
-                0,
-                PresentationShell.FullScreen,
-            ),
-            onFirstFrame = { fail("must not render") },
-            onFailure = { fail("must not create host") },
-            onDismissed = { dismissed += 1 },
-        )
         val intent = Intent(
             RuntimeEnvironment.getApplication(),
             NuxieExperienceActivity::class.java,
@@ -246,8 +291,100 @@ class ExperiencePresentationServiceTest {
             .get()
 
         assertTrue(activity.isFinishing)
-        assertEquals(1, dismissed)
         assertEquals(null, PresentationRegistry.resolve(presentationId))
+    }
+
+    @Test
+    fun savedStateWithLiveRegistryEntryIsSameProcessRecreation() {
+        val presentationId = "configuration-change"
+        PresentationRegistry.register(
+            id = presentationId,
+            content = PreparedPresentation(
+                File("does-not-exist"),
+                null,
+                0,
+                PresentationShell.FullScreen,
+            ),
+            onFirstFrame = {},
+            onFailure = {},
+            onDismissed = {},
+        )
+
+        assertFalse(
+            NuxieExperienceActivity.isColdRecreation(Bundle(), presentationId),
+        )
+        PresentationRegistry.clearForTesting()
+        assertTrue(
+            NuxieExperienceActivity.isColdRecreation(Bundle(), presentationId),
+        )
+    }
+
+    @Test
+    fun dismissalBetweenConfigurationInstancesEndsPresentation() {
+        val presentationId = "configuration-handoff"
+        val dismissed = mutableListOf<CloseReason>()
+        val oldActivity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        PresentationRegistry.register(
+            id = presentationId,
+            content = PreparedPresentation(
+                File("does-not-exist"),
+                null,
+                0,
+                PresentationShell.FullScreen,
+            ),
+            onFirstFrame = {},
+            onFailure = {},
+            onDismissed = dismissed::add,
+        )
+        assertTrue(PresentationRegistry.attach(presentationId, oldActivity))
+
+        PresentationRegistry.detach(presentationId, oldActivity)
+        PresentationRegistry.dismiss(presentationId, CloseReason.GoalMet)
+
+        assertEquals(listOf<CloseReason>(CloseReason.GoalMet), dismissed)
+        assertEquals(null, PresentationRegistry.resolve(presentationId))
+    }
+
+    @Test
+    fun claimedReasonIsPublishedAtomicallyWithConfigurationDetach() {
+        val presentationId = "configuration-terminal"
+        val dismissed = mutableListOf<CloseReason>()
+        val oldActivity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        PresentationRegistry.register(
+            id = presentationId,
+            content = PreparedPresentation(
+                File("does-not-exist"),
+                null,
+                0,
+                PresentationShell.FullScreen,
+            ),
+            onFirstFrame = {},
+            onFailure = {},
+            onDismissed = dismissed::add,
+        )
+        assertTrue(PresentationRegistry.attach(presentationId, oldActivity))
+        assertTrue(oldActivity.claimFromService(CloseReason.GoalMet))
+
+        PresentationRegistry.detach(presentationId, oldActivity)
+        PresentationRegistry.dismiss(presentationId, CloseReason.Timeout)
+
+        assertEquals(listOf<CloseReason>(CloseReason.GoalMet), dismissed)
+        assertEquals(null, PresentationRegistry.resolve(presentationId))
+    }
+
+    @Test
+    fun firstTerminalCloseReasonWinsAtomically() {
+        val reported = mutableListOf<CloseReason>()
+        val claim = TerminalCloseClaim(reported::add)
+
+        assertTrue(claim.tryClaim(CloseReason.UserDismissed))
+        assertFalse(claim.tryClaim(CloseReason.GoalMet))
+        assertEquals(CloseReason.UserDismissed, claim.reason)
+        assertEquals(emptyList<CloseReason>(), reported)
+
+        claim.reportAtTeardown(isChangingConfigurations = false)
+
+        assertEquals(listOf<CloseReason>(CloseReason.UserDismissed), reported)
     }
 
     private fun service(
@@ -263,6 +400,8 @@ class ExperiencePresentationServiceTest {
         emit: (String, Map<String, Any?>) -> Unit = { _, _ -> },
         launch: (String) -> Unit = {},
         reportOutcome: suspend (PresentationOutcome) -> Unit = {},
+        diagnose: (PresentationDiagnostic) -> Unit = {},
+        firstFrameTimeoutMillis: Long = 30_000,
     ) = ExperiencePresentationService(
         releases = provider,
         acquire = acquire,
@@ -271,6 +410,8 @@ class ExperiencePresentationServiceTest {
         runtimeAvailable = { runtimeAvailable },
         launch = launch,
         reportOutcome = reportOutcome,
+        diagnose = diagnose,
+        firstFrameTimeoutMillis = firstFrameTimeoutMillis,
     )
 
     private suspend fun expectPresentationFailure(
@@ -287,6 +428,8 @@ class ExperiencePresentationServiceTest {
         experienceId: String,
         version: String,
         presentation: JsonObject = buildJsonObject { put("backgroundColor", "#112233") },
+        externalAssetCount: Int = 0,
+        scriptCount: Int = 0,
     ): PresentationRelease {
         val identity = ExperienceReleaseIdentity(
             appId = "app",
@@ -299,7 +442,16 @@ class ExperiencePresentationServiceTest {
             publishedAtSeq = 1,
         )
         val descriptor = buildJsonObject {
-            put("render", buildJsonObject {})
+            put("render", buildJsonObject {
+                put("assets", buildJsonArray {
+                    repeat(externalAssetCount) { add(buildJsonObject {}) }
+                })
+            })
+            put("screenBehaviors", buildJsonArray {
+                repeat(scriptCount) {
+                    add(buildJsonObject { put("script", buildJsonObject {}) })
+                }
+            })
             put("presentation", presentation)
         }
         return PresentationRelease(
