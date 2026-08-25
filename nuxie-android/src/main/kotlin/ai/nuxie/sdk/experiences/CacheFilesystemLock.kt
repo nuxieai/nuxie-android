@@ -18,6 +18,17 @@ import kotlinx.serialization.json.jsonPrimitive
 
 internal data class ProcessIdentity(val processId: Int, val startTimeTicks: Long)
 
+internal class CacheProtectionLease(
+    internal val ownerId: String,
+    private val closeAction: () -> Unit,
+) : Closeable {
+    private val closed = AtomicBoolean(false)
+
+    override fun close() {
+        if (closed.compareAndSet(false, true)) closeAction()
+    }
+}
+
 /**
  * Stable cooperating cross-process lock for one cache root. The lock inode is
  * outside the cache, so pruning or replacing cache entries cannot bypass it.
@@ -46,7 +57,8 @@ internal class CacheFilesystemLock(cacheRoot: File) {
         withFileLock(File(namespace, "targets/${sha256(target)}.lock"), block)
 
     private fun <T> withFileLock(fileToLock: File, block: () -> T): T {
-        val scope = scopeFor(fileToLock)
+        val reference = retainScope(fileToLock)
+        val scope = reference.scope
         scope.local.lock()
         val outermost = scope.local.holdCount == 1
         var file: RandomAccessFile? = null
@@ -59,11 +71,15 @@ internal class CacheFilesystemLock(cacheRoot: File) {
             }
             return block()
         } finally {
-            if (outermost) {
-                fileLock?.release()
-                file?.close()
+            try {
+                if (outermost) {
+                    fileLock?.release()
+                    file?.close()
+                }
+            } finally {
+                scope.local.unlock()
+                releaseScope(reference)
             }
-            scope.local.unlock()
         }
     }
 
@@ -71,9 +87,27 @@ internal class CacheFilesystemLock(cacheRoot: File) {
         private val scopesLock = Any()
         private val scopes = mutableMapOf<String, LockScope>()
 
-        fun scopeFor(lockFile: File): LockScope {
+        /**
+         * Retention, reference changes, and removal all hold [scopesLock]. A
+         * caller retains its scope before waiting on the local lock, so zero
+         * references proves no waiter can later enter an otherwise removed scope.
+         */
+        fun retainScope(lockFile: File): ScopeReference {
             val path = runCatching { lockFile.canonicalPath }.getOrElse { lockFile.absolutePath }
-            return synchronized(scopesLock) { scopes.getOrPut(path, ::LockScope) }
+            return synchronized(scopesLock) {
+                val scope = scopes.getOrPut(path, ::LockScope)
+                scope.references += 1
+                ScopeReference(path, scope)
+            }
+        }
+
+        fun releaseScope(reference: ScopeReference) {
+            synchronized(scopesLock) {
+                reference.scope.references -= 1
+                if (reference.scope.references == 0 && scopes[reference.path] === reference.scope) {
+                    scopes.remove(reference.path)
+                }
+            }
         }
 
         fun sha256(value: String): String =
@@ -82,7 +116,12 @@ internal class CacheFilesystemLock(cacheRoot: File) {
                 .joinToString("") { "%02x".format(it) }
     }
 
-    private class LockScope(val local: ReentrantLock = ReentrantLock())
+    private class LockScope(
+        val local: ReentrantLock = ReentrantLock(),
+        var references: Int = 0,
+    )
+
+    private data class ScopeReference(val path: String, val scope: LockScope)
 }
 
 /** Cross-process lease markers with PID-reuse-safe stale-owner reclamation. */
@@ -92,14 +131,15 @@ internal class CacheProtectionRegistry(
     private val processIdentity: (Int) -> ProcessIdentity? = ::platformProcessIdentity,
     private val processExists: (Int) -> Boolean = { pid -> File("/proc/$pid").isDirectory },
 ) {
-    fun register(digests: Set<String>): Closeable {
+    fun register(digests: Set<String>): CacheProtectionLease {
+        val ownerId = UUID.randomUUID().toString().lowercase()
         val marker = filesystemLock.withLock {
             val identity = processIdentity(currentProcessId)
                 ?: throw IOException("Could not resolve cache protection process identity")
             filesystemLock.protectionDirectory.mkdirs()
             val destination = File(
                 filesystemLock.protectionDirectory,
-                "${UUID.randomUUID().toString().lowercase()}.json",
+                "$ownerId.json",
             )
             val temporary = File.createTempFile("protection-", ".tmp", filesystemLock.protectionDirectory)
             try {
@@ -107,6 +147,7 @@ internal class CacheProtectionRegistry(
                     buildJsonObject {
                         put("processId", JsonPrimitive(identity.processId))
                         put("processStartTimeTicks", JsonPrimitive(identity.startTimeTicks))
+                        put("ownerId", JsonPrimitive(ownerId))
                         put("digests", buildJsonArray {
                             digests.sorted().forEach { add(JsonPrimitive(it)) }
                         })
@@ -120,14 +161,12 @@ internal class CacheProtectionRegistry(
             }
             destination
         }
-        val closed = AtomicBoolean(false)
-        return Closeable {
-            if (!closed.compareAndSet(false, true)) return@Closeable
+        return CacheProtectionLease(ownerId) {
             filesystemLock.withLock { marker.delete() }
         }
     }
 
-    fun protectedDigests(): Set<String> = filesystemLock.withLock {
+    fun protectedDigests(excludingOwnerId: String? = null): Set<String> = filesystemLock.withLock {
         val directory = filesystemLock.protectionDirectory
         if (!directory.isDirectory) return@withLock emptySet()
         val protected = mutableSetOf<String>()
@@ -136,7 +175,7 @@ internal class CacheProtectionRegistry(
                 val marker = readMarker(markerFile)
                 if (marker == null || !isOwned(marker)) {
                     markerFile.delete()
-                } else {
+                } else if (marker.ownerId != excludingOwnerId) {
                     protected += marker.digests
                 }
             }
@@ -148,6 +187,7 @@ internal class CacheProtectionRegistry(
         Marker(
             processId = json.getValue("processId").jsonPrimitive.content.toInt(),
             processStartTimeTicks = json.getValue("processStartTimeTicks").jsonPrimitive.content.toLong(),
+            ownerId = json["ownerId"]?.jsonPrimitive?.content ?: file.nameWithoutExtension,
             digests = json.getValue("digests").jsonArray.mapTo(mutableSetOf()) {
                 it.jsonPrimitive.content
             },
@@ -165,6 +205,7 @@ internal class CacheProtectionRegistry(
     private data class Marker(
         val processId: Int,
         val processStartTimeTicks: Long,
+        val ownerId: String,
         val digests: Set<String>,
     )
 }

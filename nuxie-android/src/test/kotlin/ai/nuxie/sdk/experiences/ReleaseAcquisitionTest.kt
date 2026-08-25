@@ -204,7 +204,7 @@ class ReleaseAcquisitionTest {
     }
 
     @Test
-    fun laterReleaseWithMismatchingSizeCannotDeleteActivelyProtectedDigest() {
+    fun differentActiveLeaseWithMismatchingSizeCannotDeleteProtectedDigest() {
         val content = "leased-release".encodeToByteArray()
         val digest = sha(content)
         val cacheDirectory = temporaryFolder.newFolder("protected-mismatch")
@@ -220,19 +220,22 @@ class ReleaseAcquisitionTest {
             content.size.toLong(),
             "https://cdn.nuxie.test/",
         )
-        val protection = cache.protect(setOf(digest))
+        val firstProtection = cache.protect(setOf(digest))
+        val secondCache = ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            ScriptedTransport { error("protected mismatch must not fetch") },
+            cacheDirectory = cacheDirectory,
+        )
+        val secondProtection = secondCache.protect(setOf(digest))
         try {
             val failure = assertThrows(ReleaseArtifactAcquisitionException::class.java) {
-                ReleaseArtifactCache(
-                    RuntimeEnvironment.getApplication(),
-                    ScriptedTransport { error("protected mismatch must not fetch") },
-                    cacheDirectory = cacheDirectory,
-                ).acquire(
+                secondCache.acquire(
                     "second-release",
                     digest,
                     content.size + 1L,
                     content.size + 1L,
                     "https://cdn.nuxie.test/",
+                    protection = secondProtection,
                 )
             }
 
@@ -240,7 +243,8 @@ class ReleaseAcquisitionTest {
             assertTrue(leasedFile.exists())
             assertEquals(content.toList(), leasedFile.readBytes().toList())
         } finally {
-            protection.close()
+            secondProtection.close()
+            firstProtection.close()
         }
     }
 }
