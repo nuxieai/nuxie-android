@@ -2,13 +2,16 @@ package ai.nuxie.sdk.experiences
 
 import ai.nuxie.sdk.network.HttpTransport
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.io.RandomAccessFile
 import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runTest
@@ -146,6 +149,112 @@ class ReleaseArtifactAcquirerTest {
     }
 
     @Test
+    fun oversizedRivDeclarationIsRejectedBeforeDownload() = runTest {
+        val rivBytes = "oversized-riv".encodeToByteArray()
+        val riv = artifact(
+            key = "renders/sha256/${sha256(rivBytes)}.riv",
+            bytes = rivBytes,
+            contentType = "application/vnd.rive",
+            declaredSizeBytes = ExperienceReleaseLimits.RIV_ARTIFACT_BYTES + 1,
+        )
+        var requestCount = 0
+        val cache = ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            HttpTransport {
+                requestCount += 1
+                HttpTransport.Response(200, rivBytes)
+            },
+            cacheDirectory = temporaryFolder.newFolder("oversized-riv"),
+        )
+
+        val failure = acquisitionFailure {
+            ReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
+        }
+
+        assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+        assertEquals(0, requestCount)
+    }
+
+    @Test
+    fun oversizedExternalAssetDeclarationIsRejectedBeforeDownload() = runTest {
+        val rivBytes = "asset-limit-riv".encodeToByteArray()
+        val assetBytes = "oversized-asset".encodeToByteArray()
+        val riv = artifact(
+            key = "renders/sha256/${sha256(rivBytes)}.riv",
+            bytes = rivBytes,
+            contentType = "application/vnd.rive",
+        )
+        val asset = artifact(
+            key = "assets/sha256/${sha256(assetBytes)}.png",
+            bytes = assetBytes,
+            contentType = "image/png",
+            declaredSizeBytes = ExperienceReleaseLimits.EXTERNAL_ASSET_BYTES + 1,
+            kind = "image",
+        )
+        var requestCount = 0
+        val cache = ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            HttpTransport {
+                requestCount += 1
+                HttpTransport.Response(200, ByteArray(0))
+            },
+            cacheDirectory = temporaryFolder.newFolder("oversized-asset"),
+        )
+
+        val failure = acquisitionFailure {
+            ReleaseArtifactAcquirer(cache).acquire(
+                release(riv, assets = listOf(asset)),
+                delivery(),
+            )
+        }
+
+        assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+        assertEquals(0, requestCount)
+    }
+
+    @Test
+    fun aggregateArtifactCeilingIsRejectedBeforeDownload() = runTest {
+        val rivBytes = "aggregate-riv".encodeToByteArray()
+        val assetBytes = listOf("aggregate-a", "aggregate-b", "aggregate-c")
+            .map(String::encodeToByteArray)
+        val riv = artifact(
+            key = "renders/sha256/${sha256(rivBytes)}.riv",
+            bytes = rivBytes,
+            contentType = "application/vnd.rive",
+            declaredSizeBytes = ExperienceReleaseLimits.RIV_ARTIFACT_BYTES,
+        )
+        val assets = assetBytes.mapIndexed { index, bytes ->
+            artifact(
+                key = "assets/sha256/${sha256(bytes)}.png",
+                bytes = bytes,
+                contentType = "image/png",
+                declaredSizeBytes = if (index < 2) {
+                    ExperienceReleaseLimits.EXTERNAL_ASSET_BYTES
+                } else {
+                    1
+                },
+                kind = "image",
+            )
+        }
+        var requestCount = 0
+        val cache = ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            HttpTransport {
+                requestCount += 1
+                HttpTransport.Response(200, ByteArray(0))
+            },
+            cacheDirectory = temporaryFolder.newFolder("aggregate-limit"),
+        )
+
+        val failure = acquisitionFailure {
+            ReleaseArtifactAcquirer(cache).acquire(release(riv, assets), delivery())
+        }
+
+        assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+        assertEquals(0, requestCount)
+    }
+
+    @Test
     fun nonSuccessStatusIsTypedAndNamesTheArtifact() = runTest {
         val rivBytes = "status-riv".encodeToByteArray()
         val riv = artifact(
@@ -231,6 +340,137 @@ class ReleaseArtifactAcquirerTest {
     }
 
     @Test
+    fun screenBehaviorScriptIsAcquiredAsARequiredInput() = runTest {
+        val rivBytes = "scripted-riv".encodeToByteArray()
+        val scriptBytes = "script-bytecode".encodeToByteArray()
+        val riv = artifact(
+            key = "renders/sha256/${sha256(rivBytes)}.riv",
+            bytes = rivBytes,
+            contentType = "application/vnd.rive",
+        )
+        val script = artifact(
+            key = "screen-behavior/sha256/${sha256(scriptBytes)}.bin",
+            bytes = scriptBytes,
+            contentType = "application/octet-stream",
+        )
+        val requested = mutableListOf<URL>()
+        val cache = ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            HttpTransport { request ->
+                requested += request.url
+                when (request.url.path) {
+                    "/renders/sha256/${sha256(rivBytes)}.riv" -> HttpTransport.Response(
+                        200,
+                        rivBytes,
+                        mapOf("Content-Type" to "application/vnd.rive"),
+                    )
+                    "/assets/screen-behavior/sha256/${sha256(scriptBytes)}.bin" ->
+                        HttpTransport.Response(
+                            200,
+                            scriptBytes,
+                            mapOf("Content-Type" to "application/octet-stream"),
+                        )
+                    else -> error("Unexpected URL ${request.url}")
+                }
+            },
+            cacheDirectory = temporaryFolder.newFolder("screen-script"),
+        )
+
+        val acquired = ReleaseArtifactAcquirer(cache).acquire(
+            release(riv, scripts = listOf(script)),
+            delivery(),
+        )
+
+        assertEquals(2, acquired.artifactsByKey.size)
+        assertArrayEquals(
+            scriptBytes,
+            acquired.artifactsByKey.getValue(script.getValue("key").jsonPrimitive.content).readBytes(),
+        )
+        assertEquals(2, requested.size)
+        acquired.close()
+    }
+
+    @Test
+    fun optionalAssetNotFoundIsOmitted() = runTest {
+        val rivBytes = "optional-riv".encodeToByteArray()
+        val assetBytes = "optional-asset".encodeToByteArray()
+        val riv = artifact(
+            key = "renders/sha256/${sha256(rivBytes)}.riv",
+            bytes = rivBytes,
+            contentType = "application/vnd.rive",
+        )
+        val asset = artifact(
+            key = "assets/sha256/${sha256(assetBytes)}.png",
+            bytes = assetBytes,
+            contentType = "image/png",
+            kind = "image",
+            required = false,
+        )
+        val cache = ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            HttpTransport { request ->
+                if (request.url.path.startsWith("/renders/")) {
+                    HttpTransport.Response(
+                        200,
+                        rivBytes,
+                        mapOf("Content-Type" to "application/vnd.rive"),
+                    )
+                } else {
+                    HttpTransport.Response(404, ByteArray(0))
+                }
+            },
+            cacheDirectory = temporaryFolder.newFolder("optional-not-found"),
+        )
+
+        val acquired = ReleaseArtifactAcquirer(cache).acquire(
+            release(riv, assets = listOf(asset)),
+            delivery(),
+        )
+
+        assertEquals(setOf(riv.getValue("key").jsonPrimitive.content), acquired.artifactsByKey.keys)
+        acquired.close()
+    }
+
+    @Test
+    fun requiredAssetNotFoundFailsClosed() = runTest {
+        val rivBytes = "required-riv".encodeToByteArray()
+        val assetBytes = "required-asset".encodeToByteArray()
+        val riv = artifact(
+            key = "renders/sha256/${sha256(rivBytes)}.riv",
+            bytes = rivBytes,
+            contentType = "application/vnd.rive",
+        )
+        val asset = artifact(
+            key = "assets/sha256/${sha256(assetBytes)}.png",
+            bytes = assetBytes,
+            contentType = "image/png",
+            kind = "image",
+            required = true,
+        )
+        val cache = ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            HttpTransport { request ->
+                if (request.url.path.startsWith("/renders/")) {
+                    HttpTransport.Response(200, rivBytes, mapOf("Content-Type" to "application/vnd.rive"))
+                } else {
+                    HttpTransport.Response(404, ByteArray(0))
+                }
+            },
+            cacheDirectory = temporaryFolder.newFolder("required-not-found"),
+        )
+
+        val failure = acquisitionFailure {
+            ReleaseArtifactAcquirer(cache).acquire(
+                release(riv, assets = listOf(asset)),
+                delivery(),
+            )
+        }
+
+        assertEquals(ReleaseArtifactAcquisitionException.Reason.HTTP_STATUS, failure.reason)
+        assertEquals(asset.getValue("key").jsonPrimitive.content, failure.artifactKey)
+    }
+
+    @Test
     fun concurrentAcquisitionsOfOneDigestDownloadOnce() = runTest {
         val rivBytes = "concurrent-riv".encodeToByteArray()
         val riv = artifact(
@@ -239,26 +479,32 @@ class ReleaseArtifactAcquirerTest {
             contentType = "application/vnd.rive",
         )
         val requestStarted = CountDownLatch(1)
-        val secondRequestStarted = CountDownLatch(1)
-        val completeRequest = CountDownLatch(1)
         val requestCount = AtomicInteger()
+        lateinit var firstCache: ReleaseArtifactCache
         val transport = HttpTransport {
-                if (requestCount.incrementAndGet() == 2) secondRequestStarted.countDown()
-                requestStarted.countDown()
-                completeRequest.await(5, TimeUnit.SECONDS)
-                HttpTransport.Response(
-                    200,
-                    rivBytes,
-                    mapOf("Content-Type" to "application/vnd.rive"),
-                )
+            requestCount.incrementAndGet()
+            requestStarted.countDown()
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (firstCache.protectionCount(sha256(rivBytes)) < 2 &&
+                System.nanoTime() < deadline
+            ) {
+                Thread.yield()
             }
+            assertEquals(2, firstCache.protectionCount(sha256(rivBytes)))
+            HttpTransport.Response(
+                200,
+                rivBytes,
+                mapOf("Content-Type" to "application/vnd.rive"),
+            )
+        }
         val cacheDirectory = temporaryFolder.newFolder("concurrent")
+        firstCache = ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            transport,
+            cacheDirectory = cacheDirectory,
+        )
         val firstAcquirer = ReleaseArtifactAcquirer(
-            ReleaseArtifactCache(
-                RuntimeEnvironment.getApplication(),
-                transport,
-                cacheDirectory = cacheDirectory,
-            ),
+            firstCache,
         )
         val secondAcquirer = ReleaseArtifactAcquirer(
             ReleaseArtifactCache(
@@ -268,17 +514,15 @@ class ReleaseArtifactAcquirerTest {
             ),
         )
 
-        val first = async { firstAcquirer.acquire(release(riv), delivery()) }
-        yield()
+        val first = async(Dispatchers.IO) { firstAcquirer.acquire(release(riv), delivery()) }
         assertTrue(requestStarted.await(5, TimeUnit.SECONDS))
-        val second = async { secondAcquirer.acquire(release(riv), delivery()) }
-        secondRequestStarted.await(250, TimeUnit.MILLISECONDS)
-        completeRequest.countDown()
+        val second = async(Dispatchers.IO) { secondAcquirer.acquire(release(riv), delivery()) }
         val results = awaitAll(first, second)
 
         assertEquals(1, requestCount.get())
         assertEquals(results[0].rivFile, results[1].rivFile)
         assertArrayEquals(rivBytes, results[0].rivFile.readBytes())
+        results.forEach(AcquiredRelease::close)
     }
 
     @Test
@@ -333,6 +577,61 @@ class ReleaseArtifactAcquirerTest {
             ),
             requested,
         )
+    }
+
+    @Test
+    fun acquiredReleaseRemainsProtectedUntilItsLeaseIsClosed() = runTest {
+        val rivBytes = "12345678".encodeToByteArray()
+        val firstOutsiderBytes = "abcdefgh".encodeToByteArray()
+        val secondOutsiderBytes = "ABCDEFGH".encodeToByteArray()
+        val riv = artifact(
+            key = "renders/sha256/${sha256(rivBytes)}.riv",
+            bytes = rivBytes,
+            contentType = "application/vnd.rive",
+        )
+        val cacheDirectory = temporaryFolder.newFolder("consumption-lease")
+        val releaseCache = ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            HttpTransport {
+                HttpTransport.Response(
+                    200,
+                    rivBytes,
+                    mapOf("Content-Type" to "application/vnd.rive"),
+                )
+            },
+            maxTotalBytes = 12,
+            cacheDirectory = cacheDirectory,
+        )
+        var outsiderBytes = firstOutsiderBytes
+        val pruningCache = ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            HttpTransport { HttpTransport.Response(200, outsiderBytes) },
+            maxTotalBytes = 12,
+            cacheDirectory = cacheDirectory,
+        )
+
+        val acquired = ReleaseArtifactAcquirer(releaseCache).acquire(release(riv), delivery())
+        acquired.rivFile.setLastModified(System.currentTimeMillis() - 60_000)
+        pruningCache.acquire(
+            "outsider-one",
+            sha256(firstOutsiderBytes),
+            firstOutsiderBytes.size.toLong(),
+            firstOutsiderBytes.size.toLong(),
+            "https://cdn.nuxie.test/",
+        )
+        assertTrue(acquired.rivFile.exists())
+
+        acquired.close()
+        outsiderBytes = secondOutsiderBytes
+        pruningCache.acquire(
+            "outsider-two",
+            sha256(secondOutsiderBytes),
+            secondOutsiderBytes.size.toLong(),
+            secondOutsiderBytes.size.toLong(),
+            "https://cdn.nuxie.test/",
+        )
+
+        assertEquals(false, acquired.rivFile.exists())
     }
 
     @Test
@@ -404,6 +703,55 @@ class ReleaseArtifactAcquirerTest {
         assertEquals(2, requestCount)
         assertArrayEquals(rivBytes, acquired.rivFile.readBytes())
         assertEquals(1, cacheDirectory.list()?.size)
+    }
+
+    @Test
+    fun cacheInitializationSweepsCrashOrphanedTemporaryFiles() {
+        val cacheDirectory = temporaryFolder.newFolder("orphaned-temporary")
+        val orphan = File(cacheDirectory, "${"a".repeat(64)}-orphan.tmp")
+        orphan.writeBytes("partial".encodeToByteArray())
+        orphan.setLastModified(System.currentTimeMillis() - 120_000)
+
+        ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            HttpTransport { error("No request is expected") },
+            cacheDirectory = cacheDirectory,
+        )
+
+        assertEquals(false, orphan.exists())
+    }
+
+    @Test
+    fun lockedTemporaryIsPreservedAndCountedDuringPrune() {
+        val cacheDirectory = temporaryFolder.newFolder("locked-temporary")
+        val temporary = File(cacheDirectory, "${"b".repeat(64)}-active.tmp")
+        temporary.writeBytes("12345678".encodeToByteArray())
+        temporary.setLastModified(System.currentTimeMillis() - 120_000)
+        val owner = RandomAccessFile(temporary, "rw")
+        val ownership = owner.channel.lock()
+        try {
+            val content = "abcdefgh".encodeToByteArray()
+            val cache = ReleaseArtifactCache(
+                RuntimeEnvironment.getApplication(),
+                HttpTransport { HttpTransport.Response(200, content) },
+                maxTotalBytes = 8,
+                cacheDirectory = cacheDirectory,
+            )
+
+            val published = cache.acquire(
+                "artifact",
+                sha256(content),
+                content.size.toLong(),
+                content.size.toLong(),
+                "https://cdn.nuxie.test/",
+            )
+
+            assertTrue(temporary.exists())
+            assertEquals(false, published.exists())
+        } finally {
+            ownership.release()
+            owner.close()
+        }
     }
 
     @Test
@@ -521,12 +869,29 @@ class ReleaseArtifactAcquirerTest {
         assertTrue(acquisition.await().rivFile.exists())
     }
 
-    private fun release(riv: JsonObject, assets: List<JsonObject> = emptyList()) = AuthenticatedRelease(
+    private fun release(
+        riv: JsonObject,
+        assets: List<JsonObject> = emptyList(),
+        scripts: List<JsonObject> = emptyList(),
+    ) = AuthenticatedRelease(
         keyId = "test-key",
         descriptorSha256 = "0".repeat(64),
         identity = TEST_IDENTITY,
         descriptorBytes = ByteArray(0),
         descriptor = buildJsonObject {
+            put("screenBehaviors", buildJsonArray {
+                scripts.forEachIndexed { index, script ->
+                    add(buildJsonObject {
+                        put("screenId", JsonPrimitive("screen-$index"))
+                        put("controls", buildJsonArray { })
+                        put("script", buildJsonObject {
+                            put("protocol", JsonPrimitive("screen-actions"))
+                            put("artifact", script)
+                            put("exportedActionIds", buildJsonArray { })
+                        })
+                    })
+                }
+            })
             put("render", buildJsonObject {
                 put("renderer", JsonPrimitive("rive"))
                 put("riv", riv)
@@ -546,12 +911,16 @@ class ReleaseArtifactAcquirerTest {
         declaredSha256: String = sha256(bytes),
         declaredSizeBytes: Int = bytes.size,
         kind: String? = null,
+        required: Boolean = true,
     ) = buildJsonObject {
         put("key", JsonPrimitive(key))
         put("sha256", JsonPrimitive(declaredSha256))
         put("sizeBytes", JsonPrimitive(declaredSizeBytes))
         put("contentType", JsonPrimitive(contentType))
-        kind?.let { put("kind", JsonPrimitive(it)) }
+        kind?.let {
+            put("kind", JsonPrimitive(it))
+            put("required", JsonPrimitive(required))
+        }
     }
 
     private suspend fun acquisitionFailure(
