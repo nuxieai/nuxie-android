@@ -44,6 +44,11 @@ class PurchaseConformanceTest {
         val root = Json.parseToJsonElement(
             File(FixtureRunner.fixturesRoot(), "events/atomic-purchase-sync.json").readText(),
         ).jsonObject
+        // Pin the suite identity and version: these assertions are what stop a
+        // future incompatible fixture revision from staying green against the
+        // v2 expectations encoded below.
+        assertEquals("events/atomic-purchase-sync", root.getValue("suite").jsonPrimitive.content)
+        assertEquals(2, root.getValue("version").jsonPrimitive.int)
         val expectedEvent = root.getValue("event").jsonObject
         val expectedEventName = expectedEvent.getValue("name").jsonPrimitive.content
         val expectedPropertyNames = expectedEvent.getValue("properties").jsonArray
