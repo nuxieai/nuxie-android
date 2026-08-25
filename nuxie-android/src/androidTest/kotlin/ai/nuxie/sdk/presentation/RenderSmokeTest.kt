@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NuxieRuntime
+
 import android.app.Activity
 import android.app.Instrumentation
 import android.content.Intent
@@ -40,7 +42,7 @@ class RenderSmokeTest {
 
         assertTrue(
             "Engine library must load on the test device",
-            ai.nuxie.sdk.runtime.NuxieRuntimeBridge.isAvailable,
+            NuxieRuntime.shared.isAvailable,
         )
 
         // Stage the fixture riv from test assets into app files.

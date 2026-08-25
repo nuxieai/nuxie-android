@@ -483,11 +483,8 @@ val runtimeBoundary by tasks.registering {
   // tree as an input; this task has no outputs and therefore always executes.
 
   doLast {
-    // Presentation is the current surface host. Shrinking this allowlist is
-    // the goal as the typed runtime layer grows.
     val allowedPackages = setOf(
       "ai.nuxie.sdk.runtime",
-      "ai.nuxie.sdk.presentation",
     )
     val packagePattern = Regex("(?m)^\\s*package\\s+([A-Za-z0-9_.]+)")
     val simpleBridgePattern = Regex("(?<![A-Za-z0-9_.])NuxieRuntimeBridge\\b")

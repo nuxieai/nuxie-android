@@ -3,7 +3,7 @@ package ai.nuxie.sdk.presentation.debug
 import ai.nuxie.sdk.presentation.ExperiencePresentationException
 import ai.nuxie.sdk.presentation.ExperienceSurfaceHost
 import ai.nuxie.sdk.runtime.FileAssetKind
-import ai.nuxie.sdk.runtime.NuxieRuntimeBridge
+import ai.nuxie.sdk.runtime.NuxieRuntime
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import android.content.Context
 import android.view.View
@@ -20,6 +20,7 @@ import kotlinx.serialization.json.JsonObject
  * It is absent from release artifacts and is not an SDK integration API.
  */
 object ExperienceRenderProbe {
+    private val runtime = NuxieRuntime.shared
     /** The authored identity needed to build a synthetic image declaration. */
     data class InspectedImageAsset(
         val name: String,
@@ -32,7 +33,7 @@ object ExperienceRenderProbe {
      */
     @JvmStatic
     fun inspectImageAsset(rivBytes: ByteArray): InspectedImageAsset {
-        check(NuxieRuntimeBridge.isAvailable) {
+        check(runtime.isAvailable) {
             "Nuxie runtime library is unavailable"
         }
 
@@ -42,7 +43,7 @@ object ExperienceRenderProbe {
         var imageAsset: InspectedImageAsset? = null
         val accepted = lane.enqueue {
             runCatching {
-                val catalog = checkNotNull(NuxieRuntimeBridge.inspectFileAssets(rivBytes)) {
+                val catalog = checkNotNull(runtime.inspectFileAssets(rivBytes)) {
                     "Runtime could not inspect the Experience asset catalog"
                 }
                 val image = catalog.singleOrNull { it.kind == FileAssetKind.IMAGE }

@@ -1,6 +1,6 @@
 package ai.nuxie.sdk.presentation
 
-import ai.nuxie.sdk.runtime.NuxieRuntimeBridge
+import ai.nuxie.sdk.runtime.NuxieRuntime
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -25,8 +25,9 @@ internal class RenderCapabilityProbe(
  * The headless Vulkan renderer is created and freed on one runtime lane, once.
  */
 internal object AndroidRenderCapability {
+    private val runtime = NuxieRuntime.shared
     private val probe = RenderCapabilityProbe(
-        libraryAvailable = { NuxieRuntimeBridge.isAvailable },
+        libraryAvailable = { runtime.isAvailable },
         probeRenderer = ::probeNativeRenderer,
     )
 
@@ -38,9 +39,9 @@ internal object AndroidRenderCapability {
         val lane = NuxieRuntimeLane()
         val accepted = lane.enqueue {
             try {
-                val renderer = NuxieRuntimeBridge.nativeRendererNewAndroidVulkan(1, 1)
-                if (renderer != 0L) {
-                    NuxieRuntimeBridge.nativeRendererFree(renderer)
+                val renderer = runtime.newAndroidVulkanRenderer(1, 1)
+                if (renderer != null) {
+                    renderer.close()
                     capable.set(true)
                 }
             } finally {
