@@ -219,6 +219,13 @@ object Nuxie {
     val isIdentified: Boolean
         get() = core?.identity?.isIdentified ?: false
 
+    // MARK: Presentation
+
+    /** Dismiss the active engine-owned Experience, if any. */
+    fun dismiss() {
+        core?.presentations?.dismiss()
+    }
+
     // MARK: Commerce
 
     /** Launch checkout for the exact StoreProduct that was shown. */

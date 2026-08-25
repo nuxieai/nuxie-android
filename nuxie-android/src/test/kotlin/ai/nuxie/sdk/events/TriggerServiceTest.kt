@@ -38,6 +38,7 @@ class TriggerServiceTest {
         transport: FakeTransport,
         journeys: TriggerService.JourneyRouter? = null,
         features: TriggerService.FeatureGate? = null,
+        presenter: TriggerService.ExperiencePresenter? = null,
     ): NuxieCore = NuxieCore(
         context = RuntimeEnvironment.getApplication(),
         apiKey = "pk_test_trigger",
@@ -49,6 +50,7 @@ class TriggerServiceTest {
             registerLifecycle = false,
             journeys = journeys,
             features = features,
+            presenter = presenter,
         ),
     )
 
@@ -99,6 +101,28 @@ class TriggerServiceTest {
         val updates = collect(core, "moment")
         val error = (updates.single() as TriggerUpdate.Error).error
         assertEquals(TriggerErrorCode.EXPERIENCE_PRESENT_FAILED, error.code)
+        core.stop()
+    }
+
+    @Test
+    fun shownExperienceIsTerminalForItsGateVersion() = runBlocking {
+        val core = core(
+            transportWithGate("""{"decision":"show_flow","flowId":"version-1"}"""),
+            presenter = TriggerService.ExperiencePresenter {
+                ExperienceRef("real-experience-id", "version-1", null)
+            },
+        )
+
+        assertEquals(
+            listOf<TriggerUpdate>(
+                TriggerUpdate.Decision(
+                    TriggerDecision.ExperienceShown(
+                        ExperienceRef("real-experience-id", "version-1", null),
+                    ),
+                ),
+            ),
+            collect(core, "moment"),
+        )
         core.stop()
     }
 

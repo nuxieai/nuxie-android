@@ -26,7 +26,13 @@ internal class ExperienceSurfaceHost(
     context: Context,
     private val lane: NuxieRuntimeLane,
     private val clearColor: Int = CLEAR_COLOR_OPAQUE_BLACK,
+    private val listener: Listener? = null,
 ) : SurfaceView(context), SurfaceHolder.Callback, Choreographer.FrameCallback {
+    interface Listener {
+        fun onFirstFrame()
+        fun onFailure(message: String)
+    }
+
     /** Native handles; touched only on the runtime lane. */
     private var renderer = 0L
     private var window = 0L
@@ -65,6 +71,7 @@ internal class ExperienceSurfaceHost(
             file = NuxieRuntimeBridge.nativeFileNew(rivBytes)
             if (file == 0L) {
                 Log.w(LOG_TAG, "Runtime rejected the riv bytes")
+                listener?.onFailure("Runtime rejected the prepared Experience content")
                 onLoaded?.invoke(false)
                 return@enqueue
             }
@@ -75,12 +82,14 @@ internal class ExperienceSurfaceHost(
             }
             if (artboard == 0L) {
                 Log.w(LOG_TAG, "Artboard unavailable")
+                listener?.onFailure("Experience artboard is unavailable")
                 onLoaded?.invoke(false)
                 return@enqueue
             }
             player = NuxieRuntimeBridge.nativePlayerNewDefault(artboard)
             if (player == 0L) {
                 Log.w(LOG_TAG, "Player creation failed")
+                listener?.onFailure("Experience player creation failed")
                 onLoaded?.invoke(false)
                 return@enqueue
             }
@@ -102,12 +111,14 @@ internal class ExperienceSurfaceHost(
                 )
                 if (renderer == 0L) {
                     Log.w(LOG_TAG, "Android Vulkan renderer creation failed")
+                    listener?.onFailure("Experience renderer creation failed")
                     return@enqueue
                 }
             }
             window = NuxieRuntimeBridge.nativeWindowAcquire(surface)
             if (window == 0L) {
                 Log.w(LOG_TAG, "Native window acquisition failed")
+                listener?.onFailure("Experience surface acquisition failed")
                 return@enqueue
             }
             attached = true
@@ -175,6 +186,9 @@ internal class ExperienceSurfaceHost(
             )
             if (disposition < 0) {
                 Log.w(LOG_TAG, "render_player failed with status ${-disposition}")
+                listener?.onFailure("Experience rendering failed with status ${-disposition}")
+            } else if (disposition > 0) {
+                listener?.onFirstFrame()
             }
         }
         Choreographer.getInstance().postFrameCallback(this)

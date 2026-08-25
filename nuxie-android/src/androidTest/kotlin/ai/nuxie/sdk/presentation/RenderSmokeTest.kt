@@ -1,7 +1,6 @@
 package ai.nuxie.sdk.presentation
 
 import android.app.Activity
-import android.app.Application
 import android.app.Instrumentation
 import android.content.Intent
 import android.graphics.Bitmap
@@ -10,6 +9,7 @@ import android.os.SystemClock
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
 import java.io.FileOutputStream
+import java.util.UUID
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -54,16 +54,27 @@ class RenderSmokeTest {
             NuxieExperienceActivity::class.java.name, null, false,
         )
         instrumentation.addMonitor(monitor)
-        val application = context.applicationContext as Application
+        val presentationId = UUID.randomUUID().toString()
+        PresentationRegistry.register(
+            id = presentationId,
+            content = PreparedPresentation(
+                rivFile,
+                null,
+                SENTINEL_CLEAR,
+                PresentationShell.FullScreen,
+            ),
+            onFirstFrame = {},
+            onFailure = { throw AssertionError("Experience host failed", it) },
+            onDismissed = {},
+        )
 
         try {
             val intent = Intent(context, NuxieExperienceActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                putExtra(NuxieExperienceActivity.EXTRA_RIV_PATH, rivFile.absolutePath)
+                putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, presentationId)
                 // Sentinel background: the launcher showing through a
                 // translucent activity can never be mistaken for engine
                 // output (an earlier revision passed on exactly that).
-                putExtra(NuxieExperienceActivity.EXTRA_CLEAR_COLOR, SENTINEL_CLEAR)
             }
             context.startActivity(intent)
             activity = monitor.waitForActivityWithTimeout(15_000)
@@ -132,6 +143,7 @@ class RenderSmokeTest {
         } finally {
             activity?.finish()
             instrumentation.removeMonitor(monitor)
+            PresentationRegistry.clearForTesting()
         }
     }
 }

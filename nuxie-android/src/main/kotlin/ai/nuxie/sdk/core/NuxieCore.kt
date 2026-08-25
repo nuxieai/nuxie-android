@@ -39,6 +39,8 @@ import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.session.SessionService
 import ai.nuxie.sdk.runtime.NuxieRuntimeBridge
 import ai.nuxie.sdk.experiences.SupportedRuntime
+import ai.nuxie.sdk.experiences.ReleaseArtifactAcquirer
+import ai.nuxie.sdk.presentation.ExperiencePresentationService
 import android.app.Application
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
@@ -46,6 +48,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Constructor-injected composition root (iOS `NuxieCore` parity): concrete
@@ -96,10 +101,12 @@ internal class NuxieCore(
         UserTransitionCoordinator(store, scope)
     }
 
+    private val transport = overrides.transport ?: HttpUrlConnectionTransport()
+
     val api = NuxieApi(
         apiKey = apiKey,
         environment = environment,
-        transport = overrides.transport ?: HttpUrlConnectionTransport(),
+        transport = transport,
     )
 
     val delivery = EventDeliveryWorker(store, api, scope, nowMillis = nowMillis)
@@ -166,6 +173,20 @@ internal class NuxieCore(
         nowMillis = nowMillis,
     ).also { purchaseService = it }
 
+    val presentations = ExperiencePresentationService(
+        context = appContext,
+        releases = journeyCatalog,
+        acquirer = ReleaseArtifactAcquirer(appContext, transport),
+        emit = eventLog::capture,
+        scope = scope,
+        runtimeAvailable = { NuxieRuntimeBridge.isAvailable },
+        reportOutcome = { outcome ->
+            outcome.ref.journeyId?.let { journeyId ->
+                journeys.presentationEnded(identity.distinctId(), journeyId, outcome.reason)
+            }
+        },
+    )
+
     val triggers by lazy {
         TriggerService(
         eventLog = eventLog,
@@ -191,7 +212,9 @@ internal class NuxieCore(
                 entityId: String?,
             ): Boolean = features.checkWithCache(featureId, requiredBalance, entityId).allowed
         },
-            presenter = overrides.presenter ?: TriggerService.PresentationUnavailable,
+            presenter = overrides.presenter ?: TriggerService.ExperiencePresenter { experienceVersionId ->
+                presentations.present(experienceVersionId, journeyId = null)
+            },
             nowMillis = nowMillis,
         )
     }
@@ -255,6 +278,7 @@ internal class NuxieCore(
     /** Cancel workers and release the store. Testing teardown only for now. */
     fun stop() {
         billing.close()
+        presentations.close()
         kotlinx.coroutines.runBlocking {
             runCatching { profile.close() }
             runCatching { delivery.close() }
@@ -281,18 +305,19 @@ internal class NuxieCore(
     /** Runtime absence closes the Journey enrollment front door. */
     private fun journeySupportedRuntime(): SupportedRuntime? {
         if (!NuxieRuntimeBridge.isAvailable) return null
-        // The native-runtime metadata bridge is not consumed until presentation
-        // lands. This conservative placeholder still lets the verifier reject
-        // every requirement it cannot prove rather than guessing compatibility.
+        val sourceRevision = runCatching {
+            Json.parseToJsonElement(NuxieRuntimeBridge.nativeRuntimeInfo()).jsonObject
+                .getValue("sourceRevision").jsonPrimitive.content
+        }.getOrNull()?.takeIf { it.isNotBlank() } ?: return null
         return SupportedRuntime(
             currentSdkVersion = ai.nuxie.sdk.SdkVersion.VALUE,
-            supportedRuntimeRevisions = emptySet(),
-            supportedLuauRevisions = emptyMap(),
-            sceneFormatMajor = 0,
+            supportedRuntimeRevisions = setOf(sourceRevision),
+            supportedLuauRevisions = mapOf("rive_0_36" to setOf(3, 6)),
+            sceneFormatMajor = 7,
             sceneFormatMinor = 0,
-            timezoneDataRevision = "",
-            timezoneDataSha256 = "",
-            supportedCapabilities = emptySet(),
+            timezoneDataRevision = "2026c",
+            timezoneDataSha256 = "d4ad5c12a6be491076f333c9b4f96f60cb8ab552495bbfae0d8cdc9730ecb198",
+            supportedCapabilities = setOf("rive", "text-input"),
         )
     }
 
