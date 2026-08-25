@@ -24,6 +24,9 @@ internal object ExperienceReleaseLimits {
     const val GENERIC_STRING_BYTES = 4 * 1024
     const val KEY_ID_BYTES = 256
     const val REQUIRED_CAPABILITY_COUNT = 256
+    const val RIV_ARTIFACT_BYTES = 64 * 1024 * 1024
+    const val EXTERNAL_ASSET_BYTES = 32 * 1024 * 1024
+    const val ARTIFACT_AGGREGATE_BYTES = 128 * 1024 * 1024
 }
 
 internal data class ExperienceReleaseIdentity(

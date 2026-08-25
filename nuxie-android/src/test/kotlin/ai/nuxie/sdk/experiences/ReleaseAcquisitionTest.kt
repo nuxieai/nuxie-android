@@ -154,4 +154,26 @@ class ReleaseAcquisitionTest {
         assertEquals(null, cache.cachedFile(shaA))
         assertNotNull(cache.cachedFile(shaB))
     }
+
+    @Test
+    fun prunedDigestDoesNotRetainAnUnreferencedLock() {
+        val content = "pruned".encodeToByteArray()
+        val digest = sha(content)
+        val cache = ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            ScriptedTransport { HttpTransport.Response(200, content) },
+            maxTotalBytes = 0,
+        )
+
+        val file = cache.acquire(
+            "artifact",
+            digest,
+            content.size.toLong(),
+            content.size.toLong(),
+            "https://cdn.nuxie.test/",
+        )
+
+        assertEquals(false, file.exists())
+        assertEquals(0, cache.digestLockCount())
+    }
 }

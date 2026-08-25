@@ -4,11 +4,16 @@ import ai.nuxie.sdk.experiences.ReleaseArtifactAcquisitionException.Reason
 import ai.nuxie.sdk.network.HttpTransport
 import android.content.Context
 import android.util.Log
+import java.io.Closeable
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.io.RandomAccessFile
 import java.net.URL
+import java.nio.channels.FileLock
+import java.nio.channels.OverlappingFileLockException
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** A retryable artifact acquisition failure tied to one authenticated key. */
 internal class ReleaseArtifactAcquisitionException(
@@ -16,6 +21,7 @@ internal class ReleaseArtifactAcquisitionException(
     val reason: Reason,
     message: String,
     cause: Throwable? = null,
+    val httpStatusCode: Int? = null,
 ) : ReleaseArtifactCache.AcquisitionException(message, cause) {
     enum class Reason {
         INVALID_DESCRIPTOR,
@@ -44,6 +50,9 @@ internal class ReleaseArtifactCache(
 
     init {
         baseDir.mkdirs()
+        synchronized(cacheScope.lock) {
+            sweepTemporaryFilesLocked()
+        }
     }
 
     open class AcquisitionException(
@@ -51,8 +60,8 @@ internal class ReleaseArtifactCache(
         cause: Throwable? = null,
     ) : IOException(message, cause)
 
-    /** Protects a complete release set from pruning for the duration of [block]. */
-    fun <T> withProtection(digests: Collection<String>, block: () -> T): T {
+    /** Protects a complete release set from pruning until the returned lease is closed. */
+    fun protect(digests: Collection<String>): Closeable {
         val uniqueDigests = digests.toSet()
         synchronized(cacheScope.lock) {
             uniqueDigests.forEach { digest ->
@@ -60,9 +69,9 @@ internal class ReleaseArtifactCache(
                     (cacheScope.protectedDigestCounts[digest] ?: 0) + 1
             }
         }
-        try {
-            return block()
-        } finally {
+        val closed = AtomicBoolean(false)
+        return Closeable {
+            if (!closed.compareAndSet(false, true)) return@Closeable
             synchronized(cacheScope.lock) {
                 uniqueDigests.forEach { digest ->
                     val remaining = (cacheScope.protectedDigestCounts[digest] ?: 0) - 1
@@ -99,23 +108,31 @@ internal class ReleaseArtifactCache(
             fail(key, Reason.SIZE_OVERRUN, "artifact exceeds size limit")
         }
 
-        // Locks intentionally remain for the cache lifetime. This avoids a
-        // remove/reacquire race that could create two locks for one digest.
         val digestLock = synchronized(cacheScope.lock) {
-            cacheScope.digestLocks[sha256] ?: Any().also {
-                cacheScope.digestLocks[sha256] = it
+            cacheScope.digestLocks.getOrPut(sha256, ::DigestLock).also {
+                it.references += 1
             }
         }
-        synchronized(digestLock) {
-            verifiedCachedFile(key, sha256, expectedSizeBytes)?.let { return it }
-            return downloadAndPublish(
-                key = key,
-                sha256 = sha256,
-                expectedSizeBytes = expectedSizeBytes,
-                expectedContentType = expectedContentType,
-                baseUrl = baseUrl,
-                initialUrl = sourceUrl,
-            )
+        try {
+            synchronized(digestLock.monitor) {
+                verifiedCachedFile(key, sha256, expectedSizeBytes)?.let { return it }
+                return downloadAndPublish(
+                    key = key,
+                    sha256 = sha256,
+                    expectedSizeBytes = expectedSizeBytes,
+                    maximumBytes = minOf(expectedSizeBytes, maxBytes),
+                    expectedContentType = expectedContentType,
+                    baseUrl = baseUrl,
+                    initialUrl = sourceUrl,
+                )
+            }
+        } finally {
+            synchronized(cacheScope.lock) {
+                digestLock.references -= 1
+                if (!fileFor(sha256).isFile) {
+                    dropDigestLockIfUnreferencedLocked(sha256)
+                }
+            }
         }
     }
 
@@ -128,10 +145,17 @@ internal class ReleaseArtifactCache(
         validatedBaseUrl(key, signedBaseUrl)
     }
 
+    internal fun digestLockCount(): Int =
+        synchronized(cacheScope.lock) { cacheScope.digestLocks.size }
+
+    internal fun protectionCount(sha256: String): Int =
+        synchronized(cacheScope.lock) { cacheScope.protectedDigestCounts[sha256] ?: 0 }
+
     private fun downloadAndPublish(
         key: String,
         sha256: String,
         expectedSizeBytes: Long,
+        maximumBytes: Long,
         expectedContentType: String?,
         baseUrl: URL,
         initialUrl: URL,
@@ -173,15 +197,26 @@ internal class ReleaseArtifactCache(
                     return@use
                 }
                 if (response.statusCode !in 200..299) {
-                    fail(key, Reason.HTTP_STATUS, "artifact fetch failed: ${response.statusCode}")
+                    fail(
+                        key,
+                        Reason.HTTP_STATUS,
+                        "artifact fetch failed: ${response.statusCode}",
+                        httpStatusCode = response.statusCode,
+                    )
                 }
                 validateContentType(key, expectedContentType, response.header("content-type"))
                 response.declaredContentLength?.let { declared ->
-                    if (declared > expectedSizeBytes) {
-                        fail(key, Reason.SIZE_OVERRUN, "artifact stream exceeds declared size")
+                    if (declared > maximumBytes) {
+                        fail(key, Reason.SIZE_OVERRUN, "artifact stream exceeds size limit")
                     }
                 }
-                return publishStream(key, sha256, expectedSizeBytes, response.body)
+                return publishStream(
+                    key,
+                    sha256,
+                    expectedSizeBytes,
+                    maximumBytes,
+                    response.body,
+                )
             }
         }
     }
@@ -190,13 +225,18 @@ internal class ReleaseArtifactCache(
         key: String,
         sha256: String,
         expectedSizeBytes: Long,
+        maximumBytes: Long,
         input: InputStream,
     ): File {
         baseDir.mkdirs()
-        val temporary = try {
-            File.createTempFile("$sha256-", ".tmp", baseDir)
-        } catch (error: IOException) {
-            fail(key, Reason.CACHE_IO, "could not create artifact temporary file", error)
+        val temporary = synchronized(cacheScope.lock) {
+            try {
+                File.createTempFile("$sha256-", TEMPORARY_SUFFIX, baseDir).also {
+                    cacheScope.liveTemporaryOwnership[it.absolutePath] = ownTemporary(it)
+                }
+            } catch (error: IOException) {
+                fail(key, Reason.CACHE_IO, "could not create artifact temporary file", error)
+            }
         }
         try {
             val digest = MessageDigest.getInstance("SHA-256")
@@ -205,7 +245,7 @@ internal class ReleaseArtifactCache(
                 temporary.outputStream().buffered().use { output ->
                     val buffer = ByteArray(STREAM_BUFFER_BYTES)
                     while (true) {
-                        val remaining = expectedSizeBytes - received
+                        val remaining = maximumBytes - received
                         val requestBytes = if (remaining >= buffer.size) {
                             buffer.size
                         } else {
@@ -214,8 +254,8 @@ internal class ReleaseArtifactCache(
                         val read = input.read(buffer, 0, requestBytes)
                         if (read < 0) break
                         received += read
-                        if (received > expectedSizeBytes) {
-                            fail(key, Reason.SIZE_OVERRUN, "artifact stream exceeds declared size")
+                        if (received > maximumBytes) {
+                            fail(key, Reason.SIZE_OVERRUN, "artifact stream exceeds size limit")
                         }
                         digest.update(buffer, 0, read)
                         output.write(buffer, 0, read)
@@ -250,8 +290,11 @@ internal class ReleaseArtifactCache(
             synchronized(cacheScope.lock) { pruneLocked() }
             return destination
         } finally {
-            if (temporary.exists() && !temporary.delete()) {
-                Log.w(LOG_TAG, "Failed to remove artifact temporary file ${temporary.name}")
+            synchronized(cacheScope.lock) {
+                cacheScope.liveTemporaryOwnership.remove(temporary.absolutePath)?.close()
+                if (temporary.exists() && !temporary.delete()) {
+                    Log.w(LOG_TAG, "Failed to remove artifact temporary file ${temporary.name}")
+                }
             }
         }
     }
@@ -344,15 +387,80 @@ internal class ReleaseArtifactCache(
     }
 
     private fun pruneLocked() {
-        val files = baseDir.listFiles { file -> isDigest(file.name) } ?: return
-        var total = files.sumOf { it.length() }
+        sweepTemporaryFilesLocked()
+        val entries = baseDir.listFiles() ?: return
+        val files = entries.filter { isDigest(it.name) }
+        val temporaryBytes = entries
+            .filter { it.name.endsWith(TEMPORARY_SUFFIX) }
+            .sumOf { it.length() }
+        var total = files.sumOf { it.length() } + temporaryBytes
         if (total <= maxTotalBytes) return
         files.sortedWith(compareBy<File> { it.lastModified() }.thenBy { it.name }).forEach { file ->
             if (total <= maxTotalBytes) return
             if (cacheScope.protectedDigestCounts.containsKey(file.name)) return@forEach
             val length = file.length()
-            if (file.delete()) total -= length
+            if (file.delete()) {
+                total -= length
+                dropDigestLockIfUnreferencedLocked(file.name)
+            }
             else Log.w(LOG_TAG, "Failed to prune release artifact ${file.name}")
+        }
+    }
+
+    /**
+     * Creation, reference changes, and removal all hold [CacheScope.lock]. A
+     * caller takes its reference before waiting on the digest monitor, so zero
+     * references proves no waiter can later enter an otherwise replaced lock.
+     */
+    private fun dropDigestLockIfUnreferencedLocked(sha256: String) {
+        val digestLock = cacheScope.digestLocks[sha256] ?: return
+        if (digestLock.references == 0) cacheScope.digestLocks.remove(sha256)
+    }
+
+    private fun sweepTemporaryFilesLocked() {
+        val staleBefore = System.currentTimeMillis() - TEMPORARY_STALE_AGE_MS
+        baseDir.listFiles { file -> file.name.endsWith(TEMPORARY_SUFFIX) }
+            ?.filterNot { it.absolutePath in cacheScope.liveTemporaryOwnership }
+            ?.filter { it.lastModified() <= staleBefore }
+            ?.forEach { file ->
+                val deleted = withTemporaryClaim(file) { file.delete() }
+                if (deleted == false) {
+                    Log.w(LOG_TAG, "Failed to remove artifact temporary file ${file.name}")
+                }
+            }
+    }
+
+    /** Holds an OS-visible lock so sibling app processes recognize an active writer. */
+    private fun ownTemporary(file: File): TemporaryOwnership {
+        val randomAccessFile = RandomAccessFile(file, "rw")
+        return try {
+            TemporaryOwnership(randomAccessFile, randomAccessFile.channel.lock())
+        } catch (error: Throwable) {
+            randomAccessFile.close()
+            throw error
+        }
+    }
+
+    /** Returns null when another process (or this one) still owns the temporary. */
+    private fun <T> withTemporaryClaim(file: File, block: () -> T): T? {
+        val randomAccessFile = runCatching { RandomAccessFile(file, "rw") }.getOrNull()
+            ?: return null
+        val fileLock = try {
+            randomAccessFile.channel.tryLock()
+        } catch (_: OverlappingFileLockException) {
+            null
+        } catch (_: IOException) {
+            null
+        }
+        if (fileLock == null) {
+            randomAccessFile.close()
+            return null
+        }
+        return try {
+            block()
+        } finally {
+            fileLock.release()
+            randomAccessFile.close()
         }
     }
 
@@ -369,7 +477,14 @@ internal class ReleaseArtifactCache(
         reason: Reason,
         message: String,
         cause: Throwable? = null,
-    ): Nothing = throw ReleaseArtifactAcquisitionException(key, reason, message, cause)
+        httpStatusCode: Int? = null,
+    ): Nothing = throw ReleaseArtifactAcquisitionException(
+        key,
+        reason,
+        message,
+        cause,
+        httpStatusCode,
+    )
 
     private companion object {
         private val cacheScopesLock = Any()
@@ -378,6 +493,8 @@ internal class ReleaseArtifactCache(
         const val MAX_REDIRECTS = 5
         const val MAX_TOTAL_BYTES = 256L * 1024L * 1024L
         const val STREAM_BUFFER_BYTES = 16 * 1024
+        const val TEMPORARY_SUFFIX = ".tmp"
+        const val TEMPORARY_STALE_AGE_MS = 60_000L
 
         fun cacheScope(baseDir: File): CacheScope {
             val path = runCatching { baseDir.canonicalPath }.getOrElse { baseDir.absolutePath }
@@ -389,7 +506,23 @@ internal class ReleaseArtifactCache(
 
     private class CacheScope {
         val lock = Any()
-        val digestLocks = mutableMapOf<String, Any>()
+        val digestLocks = mutableMapOf<String, DigestLock>()
         val protectedDigestCounts = mutableMapOf<String, Int>()
+        val liveTemporaryOwnership = mutableMapOf<String, TemporaryOwnership>()
+    }
+
+    private class DigestLock(
+        val monitor: Any = Any(),
+        var references: Int = 0,
+    )
+
+    private class TemporaryOwnership(
+        private val randomAccessFile: RandomAccessFile,
+        private val fileLock: FileLock,
+    ) : Closeable {
+        override fun close() {
+            fileLock.release()
+            randomAccessFile.close()
+        }
     }
 }
