@@ -129,9 +129,7 @@ internal class ReleaseArtifactCache(
         } finally {
             synchronized(cacheScope.lock) {
                 digestLock.references -= 1
-                if (!fileFor(sha256).isFile) {
-                    dropDigestLockIfUnreferencedLocked(sha256)
-                }
+                dropDigestLockIfUnreferencedLocked(sha256)
             }
         }
     }

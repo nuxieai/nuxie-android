@@ -176,4 +176,25 @@ class ReleaseAcquisitionTest {
         assertEquals(false, file.exists())
         assertEquals(0, cache.digestLockCount())
     }
+
+    @Test
+    fun cachedDigestDoesNotRetainAnUnreferencedLock() {
+        val content = "cached".encodeToByteArray()
+        val digest = sha(content)
+        val cache = ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            ScriptedTransport { HttpTransport.Response(200, content) },
+        )
+
+        val file = cache.acquire(
+            "artifact",
+            digest,
+            content.size.toLong(),
+            content.size.toLong(),
+            "https://cdn.nuxie.test/",
+        )
+
+        assertTrue(file.exists())
+        assertEquals(0, cache.digestLockCount())
+    }
 }

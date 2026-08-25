@@ -26,6 +26,7 @@ internal object ExperienceReleaseLimits {
     const val REQUIRED_CAPABILITY_COUNT = 256
     const val RIV_ARTIFACT_BYTES = 64 * 1024 * 1024
     const val EXTERNAL_ASSET_BYTES = 32 * 1024 * 1024
+    const val SCRIPT_ARTIFACT_AGGREGATE_BYTES = 16 * 1024 * 1024
     const val ARTIFACT_AGGREGATE_BYTES = 128 * 1024 * 1024
 }
 
