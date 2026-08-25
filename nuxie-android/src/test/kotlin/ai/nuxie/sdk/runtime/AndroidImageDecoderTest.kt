@@ -30,12 +30,15 @@ class AndroidImageDecoderTest {
 
     @Test
     fun `decodes pixels in premultiplied rgba channel order`() {
+        // Distinct nonmaximal channels: a G/B swap or ABGR ordering cannot
+        // pass. Alpha stays opaque here so the bitmap round-trip is
+        // bit-exact; premultiplication rounding is proven directly below.
         val decoded = AndroidImageDecoder.decode(
             encoded = encodedBitmap(
                 width = 2,
                 height = 1,
                 colors = intArrayOf(
-                    Color.argb(0xff, 0xff, 0x00, 0x00),
+                    Color.argb(0xff, 0x11, 0x22, 0x33),
                     Color.argb(0x80, 0xff, 0x00, 0x00),
                 ),
             ),
@@ -46,11 +49,20 @@ class AndroidImageDecoderTest {
         assertNotNull(decoded)
         assertArrayEquals(
             byteArrayOf(
-                0xff.toByte(), 0x00, 0x00, 0xff.toByte(),
+                0x11, 0x22, 0x33, 0xff.toByte(),
                 0x80.toByte(), 0x00, 0x00, 0x80.toByte(),
             ),
             decoded?.pixels,
         )
+    }
+
+    @Test
+    fun `premultiplication rounds half up instead of truncating`() {
+        assertEquals(0x41, AndroidImageDecoder.premultiply(0x81, 0x80))
+        assertEquals(0x01, AndroidImageDecoder.premultiply(0x01, 0x80))
+        assertEquals(0x7f, AndroidImageDecoder.premultiply(0xfe, 0x80))
+        assertEquals(0x00, AndroidImageDecoder.premultiply(0x00, 0xff))
+        assertEquals(0xff, AndroidImageDecoder.premultiply(0xff, 0xff))
     }
 
     @Test
