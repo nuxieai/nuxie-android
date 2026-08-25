@@ -113,6 +113,8 @@ internal object ExperienceAssetImportBuilder {
         fun matches(asset: ExpectedFileAsset): Boolean {
             // The declaration identity is the Rive-uniquified "name-authoredId";
             // the iOS binding accepts exactly that form and nothing looser.
+            // Production declarations are always external on the wire, so a
+            // declaration can bind only a non-embedded catalog descriptor.
             return !asset.isEmbedded &&
                 kind == asset.kind &&
                 authoredId == asset.authoredId &&

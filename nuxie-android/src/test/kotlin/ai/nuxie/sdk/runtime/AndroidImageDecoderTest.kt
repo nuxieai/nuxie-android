@@ -1,7 +1,9 @@
 package ai.nuxie.sdk.runtime
 
 import android.graphics.Bitmap
+import android.graphics.Color
 import java.io.ByteArrayOutputStream
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -24,6 +26,31 @@ class AndroidImageDecoderTest {
         assertEquals(1, decoded?.height)
         assertEquals(8, decoded?.rowBytes)
         assertEquals(8, decoded?.pixels?.size)
+    }
+
+    @Test
+    fun `decodes pixels in premultiplied rgba channel order`() {
+        val decoded = AndroidImageDecoder.decode(
+            encoded = encodedBitmap(
+                width = 2,
+                height = 1,
+                colors = intArrayOf(
+                    Color.argb(0xff, 0xff, 0x00, 0x00),
+                    Color.argb(0x80, 0xff, 0x00, 0x00),
+                ),
+            ),
+            maximumDimension = 2,
+            maximumDecodedBytes = 8,
+        )
+
+        assertNotNull(decoded)
+        assertArrayEquals(
+            byteArrayOf(
+                0xff.toByte(), 0x00, 0x00, 0xff.toByte(),
+                0x80.toByte(), 0x00, 0x00, 0x80.toByte(),
+            ),
+            decoded?.pixels,
+        )
     }
 
     @Test
@@ -52,8 +79,12 @@ class AndroidImageDecoderTest {
         )
     }
 
-    private fun encodedBitmap(width: Int, height: Int): ByteArray {
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    private fun encodedBitmap(
+        width: Int,
+        height: Int,
+        colors: IntArray = IntArray(width * height),
+    ): ByteArray {
+        val bitmap = Bitmap.createBitmap(colors, width, height, Bitmap.Config.ARGB_8888)
         return ByteArrayOutputStream().use { output ->
             check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
             bitmap.recycle()

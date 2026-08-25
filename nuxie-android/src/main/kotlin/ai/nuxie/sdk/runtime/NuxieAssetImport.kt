@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ColorSpace
 import android.os.Build
-import java.nio.ByteBuffer
 
 /** Runtime-native kind values from `NuxFileAssetDescriptorView`. */
 internal enum class FileAssetKind(val nativeValue: Int) {
@@ -72,10 +71,15 @@ internal object AndroidImageDecoder : NuxImageDecoder {
         maximumDecodedBytes: Long,
     ): DecodedImage? {
         if (maximumDimension <= 0 || maximumDecodedBytes < 0) return null
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        val bounds = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+            inScaled = false
+        }
         BitmapFactory.decodeByteArray(encoded, 0, encoded.size, bounds)
         val width = bounds.outWidth
         val height = bounds.outHeight
+        // The bounds pass enforces the ceiling before pixel allocation from
+        // the same header used by the decoder.
         if (width <= 0 || height <= 0 ||
             width > maximumDimension || height > maximumDimension
         ) {
@@ -92,6 +96,7 @@ internal object AndroidImageDecoder : NuxImageDecoder {
         val decodeOptions = BitmapFactory.Options().apply {
             inPreferredConfig = Bitmap.Config.ARGB_8888
             inPremultiplied = true
+            inScaled = false
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)
             }
@@ -103,33 +108,28 @@ internal object AndroidImageDecoder : NuxImageDecoder {
             decodeOptions,
         ) ?: return null
         return try {
+            // Revalidate after decode as defense against decoder divergence.
             if (bitmap.width != width || bitmap.height != height ||
                 bitmap.config != Bitmap.Config.ARGB_8888
             ) {
                 return null
             }
-            val sourceRowBytes = bitmap.rowBytes
-            val sourceByteCount = sourceRowBytes.toLong() * height.toLong()
-            if (sourceRowBytes < tightRowBytes || sourceByteCount > Int.MAX_VALUE ||
-                sourceByteCount > maximumDecodedBytes
+            if (bitmap.rowBytes < tightRowBytes ||
+                bitmap.rowBytes.toLong() * height.toLong() > maximumDecodedBytes
             ) {
                 return null
             }
-            val source = ByteBuffer.allocate(sourceByteCount.toInt())
-            bitmap.copyPixelsToBuffer(source)
-            val tightlyPacked = if (sourceRowBytes == tightRowBytes.toInt()) {
-                source.array()
-            } else {
-                ByteArray(tightByteCount.toInt()).also { destination ->
-                    val sourceBytes = source.array()
-                    repeat(height) { row ->
-                        sourceBytes.copyInto(
-                            destination = destination,
-                            destinationOffset = row * tightRowBytes.toInt(),
-                            startIndex = row * sourceRowBytes,
-                            endIndex = row * sourceRowBytes + tightRowBytes.toInt(),
-                        )
-                    }
+            val row = IntArray(width)
+            val tightlyPacked = ByteArray(tightByteCount.toInt())
+            repeat(height) { y ->
+                bitmap.getPixels(row, 0, width, 0, y, width, 1)
+                row.forEachIndexed { x, color ->
+                    val alpha = color ushr 24
+                    val destination = (y * width + x) * RGBA_BYTES_PER_PIXEL.toInt()
+                    tightlyPacked[destination] = premultiply(color ushr 16, alpha).toByte()
+                    tightlyPacked[destination + 1] = premultiply(color ushr 8, alpha).toByte()
+                    tightlyPacked[destination + 2] = premultiply(color, alpha).toByte()
+                    tightlyPacked[destination + 3] = alpha.toByte()
                 }
             }
             DecodedImage(
@@ -142,6 +142,9 @@ internal object AndroidImageDecoder : NuxImageDecoder {
             bitmap.recycle()
         }
     }
+
+    private fun premultiply(channel: Int, alpha: Int): Int =
+        ((channel and 0xff) * alpha + 127) / 255
 
     private const val RGBA_BYTES_PER_PIXEL = 4L
 }
