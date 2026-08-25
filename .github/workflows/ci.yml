@@ -1,0 +1,56 @@
+# Pull requests in this repository currently land on local-gate evidence.
+# CI is a safety net, not a merge gate.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  local-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-35
+            build-tools;34.0.0
+            ndk;26.1.10909125
+            cmake;3.22.1
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Restore pinned runtime
+        uses: actions/cache@v6
+        with:
+          path: runtime/prebuilt
+          key: ${{ runner.os }}-nuxie-runtime-${{ hashFiles('runtime/artifact.json') }}
+
+      - name: Verify cross-SDK fixtures
+        run: scripts/verify-fixtures.sh
+
+      - name: Run local gate
+        run: ./gradlew :nuxie-android:test :nuxie-android:apiCheck :nuxie-android:lint :example-app:assembleDebug
