@@ -49,7 +49,7 @@ class PurchaseServiceTest {
             assertTrue(fixture.core.featureInfo.isAllowed("unlimited"))
             assertFalse(fixture.core.featureInfo.isAllowed("exports"))
             assertFalse(fixture.core.featureInfo.isAllowed("credits"))
-            accepted(evidence.distinctId)
+            accepted(evidence.syncAttributionDistinctId)
         }
         val purchase = async { fixture.service.purchase(activity(), product, null) }
         runCurrent()
@@ -187,16 +187,16 @@ class PurchaseServiceTest {
         )
         unmatched.synchronizer = {
             assertFalse(unmatched.core.featureInfo.isAllowed("pro"))
-            accepted(it.distinctId)
+            accepted(it.syncAttributionDistinctId)
         }
         unmatched.service.onPurchasesUpdated(
             okUpdate(playPurchase("unmatched", obfuscatedAccountId = accountHash("someone-else"))),
         )
 
         val unmatchedEvidence = unmatched.store.load().getValue("unmatched")
-        assertEquals(unmatched.core.identity.distinctId(), unmatchedEvidence.distinctId)
+        assertEquals(unmatched.core.identity.distinctId(), unmatchedEvidence.syncAttributionDistinctId)
         assertTrue(unmatchedEvidence.synced)
-        assertFalse(unmatchedEvidence.customerMatched)
+        assertEquals(null, unmatchedEvidence.ownerDistinctId)
 
         val matching = fixture(this)
         matching.service.rememberProduct(
@@ -204,7 +204,7 @@ class PurchaseServiceTest {
         )
         matching.synchronizer = {
             assertTrue(matching.core.featureInfo.isAllowed("pro"))
-            accepted(it.distinctId)
+            accepted(it.syncAttributionDistinctId)
         }
         matching.service.onPurchasesUpdated(
             okUpdate(
@@ -222,7 +222,38 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun recoveryAdoptsLegacyBlankOwnerEvidenceForSyncWithoutOptimisticGrant() = runTest {
+    fun exactBindingAdoptsProvisionalEvidenceForItsProvenOwner() = runTest {
+        val fixture = fixture(this)
+        val provisionalOwner = fixture.core.identity.distinctId()
+        val provenOwner = "customer-b"
+        val purchase = playPurchase(
+            "adopted-token",
+            obfuscatedAccountId = accountHash(provenOwner),
+        )
+        fixture.service.rememberProduct(
+            product(grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN))),
+        )
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+
+        fixture.service.onPurchasesUpdated(okUpdate(purchase))
+        fixture.store.upsertBinding(product().bindingFor(provenOwner))
+        fixture.service.onPurchasesUpdated(okUpdate(purchase))
+
+        val adoptedEvidence = fixture.store.load().getValue("adopted-token")
+        assertEquals(provisionalOwner, adoptedEvidence.syncAttributionDistinctId)
+        assertEquals(provenOwner, adoptedEvidence.ownerDistinctId)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+
+        fixture.core.identity.setDistinctId(provenOwner)
+        fixture.core.features.handleUserChange(provisionalOwner, provenOwner)
+        fixture.service.onPurchasesUpdated(okUpdate(purchase))
+
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun recoverySyncsProvisionallyAttributedEvidenceWithoutOptimisticGrant() = runTest {
         val fixture = fixture(this)
         fixture.store.upsert(
             PurchaseEvidence(
@@ -230,27 +261,26 @@ class PurchaseServiceTest {
                 packageName = "com.example.app",
                 storeProductIds = listOf("play-pro"),
                 purchaseState = StoredPurchaseState.PURCHASED,
-                distinctId = "",
+                syncAttributionDistinctId = fixture.core.identity.distinctId(),
                 acknowledged = false,
                 firstSeenMillis = 1L,
                 localFeatureGrants = listOf(
                     StoredLocalPurchaseGrant("pro", FeatureType.BOOLEAN.name, unlimited = false),
                 ),
-                customerMatched = false,
             ),
         )
         fixture.synchronizer = {
-            assertEquals(fixture.core.identity.distinctId(), it.distinctId)
+            assertEquals(fixture.core.identity.distinctId(), it.syncAttributionDistinctId)
             assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-            accepted(it.distinctId)
+            accepted(it.syncAttributionDistinctId)
         }
 
         fixture.service.recover()
 
         val recovered = fixture.store.load().getValue("legacy-blank-owner")
         assertTrue(recovered.synced)
-        assertEquals(fixture.core.identity.distinctId(), recovered.distinctId)
-        assertFalse(recovered.customerMatched)
+        assertEquals(fixture.core.identity.distinctId(), recovered.syncAttributionDistinctId)
+        assertEquals(null, recovered.ownerDistinctId)
         fixture.close()
     }
 
@@ -264,7 +294,8 @@ class PurchaseServiceTest {
                 packageName = "com.example.app",
                 storeProductIds = listOf("play-pro"),
                 purchaseState = StoredPurchaseState.PURCHASED,
-                distinctId = owner,
+                syncAttributionDistinctId = owner,
+                ownerDistinctId = owner,
                 acknowledged = false,
                 firstSeenMillis = 1L,
                 localFeatureGrants = listOf(
@@ -273,7 +304,6 @@ class PurchaseServiceTest {
                 catalogResolved = true,
                 signatureVerificationRequired = true,
                 signatureVerified = false,
-                customerMatched = true,
             ),
         )
         fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
@@ -296,7 +326,8 @@ class PurchaseServiceTest {
                 packageName = "com.example.app",
                 storeProductIds = listOf("play-pro"),
                 purchaseState = StoredPurchaseState.PURCHASED,
-                distinctId = fixture.core.identity.distinctId(),
+                syncAttributionDistinctId = fixture.core.identity.distinctId(),
+                ownerDistinctId = fixture.core.identity.distinctId(),
                 acknowledged = false,
                 firstSeenMillis = 1L,
                 localFeatureGrants = listOf(
@@ -308,7 +339,7 @@ class PurchaseServiceTest {
         fixture.billing.failQueries = true
         fixture.synchronizer = {
             assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-            accepted(it.distinctId)
+            accepted(it.syncAttributionDistinctId)
         }
 
         fixture.service.recover()
@@ -430,7 +461,8 @@ class PurchaseServiceTest {
                 packageName = "com.example.app",
                 storeProductIds = listOf("play-pro"),
                 purchaseState = StoredPurchaseState.PURCHASED,
-                distinctId = owner,
+                syncAttributionDistinctId = owner,
+                ownerDistinctId = owner,
                 acknowledged = false,
                 synced = true,
                 firstSeenMillis = 1L,
@@ -491,7 +523,7 @@ class PurchaseServiceTest {
         val fixture = fixture(this, actions = actions)
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.distinctId)
+            accepted(it.syncAttributionDistinctId)
         }
         val purchase = async { fixture.service.purchase(activity(), product(consumable = true), null) }
         runCurrent()
@@ -614,7 +646,10 @@ class PurchaseServiceTest {
             okUpdate(playPurchase("other-customer", obfuscatedAccountId = accountHash("someone-else"))),
         )
 
-        assertEquals(fixture.core.identity.distinctId(), fixture.store.load().getValue("other-customer").distinctId)
+        assertEquals(
+            fixture.core.identity.distinctId(),
+            fixture.store.load().getValue("other-customer").syncAttributionDistinctId,
+        )
         assertTrue(fixture.store.load().getValue("other-customer").synced)
         fixture.close()
     }

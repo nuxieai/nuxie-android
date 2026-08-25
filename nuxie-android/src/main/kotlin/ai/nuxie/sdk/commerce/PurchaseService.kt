@@ -215,17 +215,12 @@ internal class PurchaseService(
             val bindings = evidenceStore.loadBindings()
             val mappings = evidenceStore.loadProductMappings()
             val evidenceRecords = evidenceStore.load().values.mapNotNull { storedEvidence ->
-                var normalized = storedEvidence
-                if (normalized.distinctId.isBlank()) {
-                    normalized = normalized.copy(
-                        distinctId = distinctId(),
-                        customerMatched = false,
-                    )
-                }
-                if (!normalized.signatureVerificationRequired &&
-                    hasConfiguredLicensingKey(normalized, bindings, mappings)
+                val normalized = if (!storedEvidence.signatureVerificationRequired &&
+                    hasConfiguredLicensingKey(storedEvidence, bindings, mappings)
                 ) {
-                    normalized = normalized.copy(signatureVerificationRequired = true)
+                    storedEvidence.copy(signatureVerificationRequired = true)
+                } else {
+                    storedEvidence
                 }
                 if (normalized != storedEvidence && !evidenceStore.upsert(normalized)) null else normalized
             }
@@ -281,13 +276,16 @@ internal class PurchaseService(
         val catalogBinding = exactBinding ?: bindings.firstOrNull { it.storeProductId in purchase.products }
         val catalogMapping = mappings.firstOrNull { it.storeProductId in purchase.products }
         val currentOwner = distinctId()
-        val matchedOwner = existing?.distinctId?.takeIf { existing.customerMatched && it.isNotBlank() }
-            ?: exactBinding?.distinctId
+        val ownerDistinctId = exactBinding?.distinctId
             ?: currentOwner.takeIf { purchase.obfuscatedAccountId == sha256(it) }
             ?: matchingFlight?.owner?.takeIf {
                 purchase.obfuscatedAccountId == matchingFlight.obfuscatedAccountId
             }
-        val durableOwner = existing?.distinctId?.takeIf(String::isNotBlank) ?: matchedOwner ?: currentOwner
+            ?: existing?.ownerDistinctId
+        val syncAttributionDistinctId = existing?.syncAttributionDistinctId
+            ?.takeIf(String::isNotBlank)
+            ?: ownerDistinctId
+            ?: currentOwner
         val licensingPublicKey = product?.licensingPublicKey ?: catalogBinding?.licensingPublicKey
             ?: catalogMapping?.licensingPublicKey
         val signatureVerificationRequired = existing?.signatureVerificationRequired == true ||
@@ -310,8 +308,9 @@ internal class PurchaseService(
                 ?: catalogBinding?.offerId ?: catalogMapping?.offerId,
             purchaseState = purchase.state,
             obfuscatedAccountId = purchase.obfuscatedAccountId ?: existing?.obfuscatedAccountId
-                ?: sha256(durableOwner),
-            distinctId = durableOwner,
+                ?: sha256(ownerDistinctId ?: syncAttributionDistinctId),
+            syncAttributionDistinctId = syncAttributionDistinctId,
+            ownerDistinctId = ownerDistinctId,
             context = existing?.context ?: product?.toStoredContext()
                 ?: catalogBinding?.context ?: catalogMapping?.context,
             acknowledged = purchase.acknowledged || existing?.acknowledged == true,
@@ -335,7 +334,6 @@ internal class PurchaseService(
             nuxieManaged = existing?.nuxieManaged
                 ?: matchingFlight?.nuxieManaged?.takeIf { isCheckoutOutcome }
                 ?: (settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED),
-            customerMatched = existing?.customerMatched == true || matchedOwner != null,
             signatureVerificationRequired = signatureVerificationRequired,
             signatureVerified = signatureVerified,
         )
@@ -343,6 +341,12 @@ internal class PurchaseService(
         if (!evidenceStore.upsert(evidence)) {
             complete(purchase, PurchaseResult.Failed(IllegalStateException("Could not persist purchase evidence.")))
             return
+        }
+        if (ownerDistinctId != null &&
+            existing?.ownerDistinctId != ownerDistinctId &&
+            (existing?.ownerDistinctId ?: existing?.syncAttributionDistinctId) == currentOwner
+        ) {
+            features.removeLocalPurchase(evidence.purchaseToken)
         }
         if (purchase.state == StoredPurchaseState.PENDING) {
             complete(purchase, PurchaseResult.Pending)
@@ -393,9 +397,9 @@ internal class PurchaseService(
                     syncedCustomerId = outcome.response.customerId,
                 )
                 if (!evidenceStore.upsert(accepted)) return
-                if (accepted.distinctId == distinctId()) {
+                if (accepted.syncAttributionDistinctId == distinctId()) {
                     features.updateFromPurchase(
-                        accepted.distinctId,
+                        accepted.syncAttributionDistinctId,
                         outcome.response.body,
                         accepted.purchaseToken,
                     )
@@ -406,7 +410,7 @@ internal class PurchaseService(
     }
 
     private fun emitPurchaseSyncedIfNeeded(evidence: PurchaseEvidence): PurchaseEvidence {
-        if (evidence.syncedEventEmitted || evidence.distinctId != distinctId()) return evidence
+        if (evidence.syncedEventEmitted || evidence.syncAttributionDistinctId != distinctId()) return evidence
         emit(
             SystemEventNames.PURCHASE_SYNCED,
             mapOf(
@@ -444,7 +448,7 @@ internal class PurchaseService(
         nuxieManaged && catalogResolved && !acknowledged && !consumed
 
     private fun PurchaseEvidence.canGrantTo(currentDistinctId: String): Boolean =
-        customerMatched && distinctId == currentDistinctId &&
+        ownerDistinctId == currentDistinctId &&
             (!signatureVerificationRequired || signatureVerified)
 
     private fun hasConfiguredLicensingKey(
@@ -458,7 +462,7 @@ internal class PurchaseService(
     }
 
     private suspend fun revokeEvidence(evidence: PurchaseEvidence) {
-        if (!evidence.customerMatched || evidence.distinctId != distinctId()) return
+        if (evidence.ownerDistinctId != distinctId()) return
         features.applyLocalPurchase(
             evidence.localFeatureGrants.toFeatureGrants(),
             evidence.purchaseToken,
@@ -469,7 +473,7 @@ internal class PurchaseService(
     private suspend fun revokeMissingOptimistic(activeTokens: Set<String>) {
         evidenceStore.load().values
             .filter {
-                !it.synced && it.distinctId == distinctId() &&
+                !it.synced && it.ownerDistinctId == distinctId() &&
                     it.purchaseState == StoredPurchaseState.PURCHASED &&
                     it.purchaseToken !in activeTokens
             }
