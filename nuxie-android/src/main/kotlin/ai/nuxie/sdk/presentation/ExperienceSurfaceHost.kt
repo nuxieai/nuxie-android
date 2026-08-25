@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
 import ai.nuxie.sdk.runtime.NuxieRuntimeBridge
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import android.content.Context
@@ -8,8 +9,10 @@ import android.util.Log
 import android.view.Choreographer
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlinx.serialization.json.JsonObject
 
 /**
  * SurfaceView host driving the engine's headless Android Vulkan renderer:
@@ -30,7 +33,7 @@ internal class ExperienceSurfaceHost(
 ) : SurfaceView(context), SurfaceHolder.Callback, Choreographer.FrameCallback {
     interface Listener {
         fun onFirstFrame()
-        fun onFailure(message: String)
+        fun onFailure(error: ExperiencePresentationException)
     }
 
     /** Native handles; touched only on the runtime lane. */
@@ -65,13 +68,51 @@ internal class ExperienceSurfaceHost(
     fun loadArtboard(
         rivBytes: ByteArray,
         artboardName: String?,
+        descriptor: JsonObject? = null,
+        artifactsByKey: Map<String, File> = emptyMap(),
         onLoaded: ((Boolean) -> Unit)? = null,
     ) {
         lane.enqueue {
-            file = NuxieRuntimeBridge.nativeFileNew(rivBytes)
+            file = if (descriptor == null) {
+                NuxieRuntimeBridge.fileNew(rivBytes)
+            } else {
+                val inspectedCatalog = NuxieRuntimeBridge.inspectFileAssets(rivBytes)
+                if (inspectedCatalog == null) {
+                    reportFailure(
+                        ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                        "Runtime could not inspect the Experience asset catalog",
+                    )
+                    onLoaded?.invoke(false)
+                    return@enqueue
+                }
+                val import = runCatching {
+                    ExperienceAssetImportBuilder.build(
+                        descriptor = descriptor,
+                        artifactsByKey = artifactsByKey,
+                        inspectedCatalog = inspectedCatalog,
+                    )
+                }.getOrElse { error ->
+                    Log.w(LOG_TAG, "Experience asset preparation failed", error)
+                    reportFailure(
+                        ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                        "Experience asset preparation failed",
+                        error,
+                    )
+                    onLoaded?.invoke(false)
+                    return@enqueue
+                }
+                NuxieRuntimeBridge.fileNew(
+                    bytes = rivBytes,
+                    expectedAssets = import.expectedAssets,
+                    externalAssets = import.externalAssets,
+                )
+            }
             if (file == 0L) {
                 Log.w(LOG_TAG, "Runtime rejected the riv bytes")
-                listener?.onFailure("Runtime rejected the prepared Experience content")
+                reportFailure(
+                    ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                    "Runtime rejected the prepared Experience content",
+                )
                 onLoaded?.invoke(false)
                 return@enqueue
             }
@@ -82,14 +123,20 @@ internal class ExperienceSurfaceHost(
             }
             if (artboard == 0L) {
                 Log.w(LOG_TAG, "Artboard unavailable")
-                listener?.onFailure("Experience artboard is unavailable")
+                reportFailure(
+                    ExperiencePresentationException.Reason.HOST_FAILED,
+                    "Experience artboard is unavailable",
+                )
                 onLoaded?.invoke(false)
                 return@enqueue
             }
             player = NuxieRuntimeBridge.nativePlayerNewDefault(artboard)
             if (player == 0L) {
                 Log.w(LOG_TAG, "Player creation failed")
-                listener?.onFailure("Experience player creation failed")
+                reportFailure(
+                    ExperiencePresentationException.Reason.HOST_FAILED,
+                    "Experience player creation failed",
+                )
                 onLoaded?.invoke(false)
                 return@enqueue
             }
@@ -111,14 +158,20 @@ internal class ExperienceSurfaceHost(
                 )
                 if (renderer == 0L) {
                     Log.w(LOG_TAG, "Android Vulkan renderer creation failed")
-                    listener?.onFailure("Experience renderer creation failed")
+                    reportFailure(
+                        ExperiencePresentationException.Reason.HOST_FAILED,
+                        "Experience renderer creation failed",
+                    )
                     return@enqueue
                 }
             }
             window = NuxieRuntimeBridge.nativeWindowAcquire(surface)
             if (window == 0L) {
                 Log.w(LOG_TAG, "Native window acquisition failed")
-                listener?.onFailure("Experience surface acquisition failed")
+                reportFailure(
+                    ExperiencePresentationException.Reason.HOST_FAILED,
+                    "Experience surface acquisition failed",
+                )
                 return@enqueue
             }
             attached = true
@@ -186,7 +239,10 @@ internal class ExperienceSurfaceHost(
             )
             if (disposition < 0) {
                 Log.w(LOG_TAG, "render_player failed with status ${-disposition}")
-                listener?.onFailure("Experience rendering failed with status ${-disposition}")
+                reportFailure(
+                    ExperiencePresentationException.Reason.HOST_FAILED,
+                    "Experience rendering failed with status ${-disposition}",
+                )
             } else if (disposition > 0) {
                 listener?.onFirstFrame()
             }
@@ -224,6 +280,14 @@ internal class ExperienceSurfaceHost(
                 renderer = 0L
             }
         }
+    }
+
+    private fun reportFailure(
+        reason: ExperiencePresentationException.Reason,
+        message: String,
+        cause: Throwable? = null,
+    ) {
+        listener?.onFailure(ExperiencePresentationException(reason, message, cause))
     }
 
     private companion object {

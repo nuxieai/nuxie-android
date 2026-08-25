@@ -99,8 +99,8 @@ internal class NuxieExperienceActivity : Activity() {
                     PresentationRegistry.reportFirstFrame(presentationId)
                 }
 
-                override fun onFailure(message: String) {
-                    fail(IllegalStateException(message))
+                override fun onFailure(error: ExperiencePresentationException) {
+                    fail(error)
                 }
             },
         )
@@ -153,18 +153,18 @@ internal class NuxieExperienceActivity : Activity() {
         }
     }
 
-    /**
-     * Runtime attachment seam for prepared Experience content. UNIV-2652 will
-     * extend this seam once nux_capi has a portable external-asset injection
-     * interface. Until then only the riv bytes are supplied; acquired assets
-     * and scripts remain leased and presentation emits one typed diagnostic.
-     */
+    /** Runtime attachment seam for authenticated, acquired Experience content. */
     private fun loadPreparedRelease(
         host: ExperienceSurfaceHost,
         rivBytes: ByteArray,
         prepared: PreparedPresentation,
     ) {
-        host.loadArtboard(rivBytes, prepared.artboardName)
+        host.loadArtboard(
+            rivBytes = rivBytes,
+            artboardName = prepared.artboardName,
+            descriptor = prepared.descriptor,
+            artifactsByKey = prepared.artifactsByKey,
+        )
     }
 
     private fun shellView(host: ExperienceSurfaceHost, shell: PresentationShell): View {

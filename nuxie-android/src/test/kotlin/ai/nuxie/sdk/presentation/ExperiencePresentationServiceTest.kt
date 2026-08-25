@@ -78,32 +78,35 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun declaredExternalArtifactsEmitOneTypedDiagnosticAndStillPresent() = runTest {
+    fun acquiredExternalArtifactsReachPreparedPresentationWithoutDiagnosticFallback() = runTest {
         val launched = mutableListOf<String>()
-        val diagnostics = mutableListOf<PresentationDiagnostic>()
+        val lease = Lease()
+        val imageKey = "assets/sha256/${"b".repeat(64)}.png"
+        val imageFile = File.createTempFile("prepared-image-", ".png").apply {
+            writeBytes(byteArrayOf(1, 2, 3))
+            deleteOnExit()
+        }
         val service = service(
-            provider = PresentationReleaseProvider {
-                release("exp-1", it, externalAssetCount = 2, scriptCount = 1)
-            },
             launch = launched::add,
-            diagnose = diagnostics::add,
+            acquire = {
+                acquired(
+                    experienceId = "exp-1",
+                    version = "v1",
+                    lease = lease,
+                    extraArtifacts = mapOf(imageKey to imageFile),
+                )
+            },
         )
 
         val shown = async { service.present("v1") }
         runCurrent()
 
-        assertEquals(
-            listOf(
-                PresentationDiagnostic.ExternalArtifactsNotSupplied(
-                    count = 3,
-                    roles = setOf(ExternalArtifactRole.ASSET, ExternalArtifactRole.SCRIPT),
-                ),
-            ),
-            diagnostics,
-        )
-        assertEquals(1, launched.size)
+        val prepared = PresentationRegistry.resolve(launched.single())
+            ?: error("prepared presentation missing")
+        assertEquals(imageFile, prepared.artifactsByKey[imageKey])
         PresentationRegistry.reportFirstFrame(launched.single())
-        assertEquals("v1", shown.await().experienceVersion)
+        shown.await()
+        service.dismiss()
     }
 
     @Test
@@ -400,7 +403,6 @@ class ExperiencePresentationServiceTest {
         emit: (String, Map<String, Any?>) -> Unit = { _, _ -> },
         launch: (String) -> Unit = {},
         reportOutcome: suspend (PresentationOutcome) -> Unit = {},
-        diagnose: (PresentationDiagnostic) -> Unit = {},
         firstFrameTimeoutMillis: Long = 30_000,
     ) = ExperiencePresentationService(
         releases = provider,
@@ -410,7 +412,6 @@ class ExperiencePresentationServiceTest {
         runtimeAvailable = { runtimeAvailable },
         launch = launch,
         reportOutcome = reportOutcome,
-        diagnose = diagnose,
         firstFrameTimeoutMillis = firstFrameTimeoutMillis,
     )
 
@@ -428,8 +429,6 @@ class ExperiencePresentationServiceTest {
         experienceId: String,
         version: String,
         presentation: JsonObject = buildJsonObject { put("backgroundColor", "#112233") },
-        externalAssetCount: Int = 0,
-        scriptCount: Int = 0,
     ): PresentationRelease {
         val identity = ExperienceReleaseIdentity(
             appId = "app",
@@ -443,15 +442,9 @@ class ExperiencePresentationServiceTest {
         )
         val descriptor = buildJsonObject {
             put("render", buildJsonObject {
-                put("assets", buildJsonArray {
-                    repeat(externalAssetCount) { add(buildJsonObject {}) }
-                })
+                put("assets", buildJsonArray {})
             })
-            put("screenBehaviors", buildJsonArray {
-                repeat(scriptCount) {
-                    add(buildJsonObject { put("script", buildJsonObject {}) })
-                }
-            })
+            put("screenBehaviors", buildJsonArray {})
             put("presentation", presentation)
         }
         return PresentationRelease(
@@ -464,13 +457,14 @@ class ExperiencePresentationServiceTest {
         experienceId: String,
         version: String,
         lease: Lease,
+        extraArtifacts: Map<String, File> = emptyMap(),
     ): AcquiredRelease {
         val file = File.createTempFile("presentation-", ".riv").apply { writeBytes(byteArrayOf(1)) }
         return AcquiredRelease(
             identity = ExperienceReleaseIdentity(
                 "app", "development", experienceId, version, "build", 1, "now", 1,
             ),
-            artifactsByKey = mapOf("renders/main.riv" to file),
+            artifactsByKey = mapOf("renders/main.riv" to file) + extraArtifacts,
             rivFile = file,
             protection = lease,
         )

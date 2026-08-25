@@ -39,6 +39,75 @@ internal object NuxieRuntimeBridge {
     /** nux_file_new over verified release bytes -> file handle (0 = failure). */
     external fun nativeFileNew(bytes: ByteArray): Long
 
+    /** Script-inert import followed by an exact copy of the authored catalog. */
+    private external fun nativeFileInspectAssets(bytes: ByteArray): Array<NativeExpectedFileAsset>?
+
+    /** Configured product import carrying host commands, asset hooks, and exact catalog. */
+    private external fun nativeFileNewConfigured(
+        bytes: ByteArray,
+        ordinals: IntArray,
+        kinds: IntArray,
+        hasAuthoredIds: BooleanArray,
+        authoredIds: LongArray,
+        names: Array<ByteArray>,
+        fileExtensions: Array<ByteArray>,
+        embedded: BooleanArray,
+        contentsRecords: BooleanArray,
+        providerFlags: IntArray,
+        externalOrdinals: IntArray,
+        externalPayloads: Array<ByteArray>,
+        imageDecoder: NuxImageDecoder,
+    ): Long
+
+    fun inspectFileAssets(bytes: ByteArray): List<ExpectedFileAsset>? =
+        nativeFileInspectAssets(bytes)?.map { native ->
+            ExpectedFileAsset(
+                ordinal = native.ordinal,
+                kind = FileAssetKind.fromNativeValue(native.kind) ?: return null,
+                authoredId = native.authoredId.takeIf { native.hasAuthoredId },
+                name = native.name,
+                fileExtension = native.fileExtension,
+                isEmbedded = native.isEmbedded,
+                hasContentsRecord = native.hasContentsRecord,
+                requiredProviderFlags = native.requiredProviderFlags,
+            )
+        }
+
+    fun fileNew(
+        bytes: ByteArray,
+        expectedAssets: List<ExpectedFileAsset> = emptyList(),
+        externalAssets: Map<Int, ByteArray> = emptyMap(),
+        imageDecoder: NuxImageDecoder = AndroidImageDecoder,
+    ): Long {
+        if (expectedAssets.isEmpty()) {
+            return if (externalAssets.isEmpty()) nativeFileNew(bytes) else 0L
+        }
+        if (!expectedAssets.withIndex().all { (index, asset) -> asset.ordinal == index } ||
+            !externalAssets.keys.all { it in expectedAssets.indices }
+        ) {
+            return 0L
+        }
+        val external = externalAssets.toSortedMap()
+        return nativeFileNewConfigured(
+            bytes = bytes,
+            ordinals = expectedAssets.map(ExpectedFileAsset::ordinal).toIntArray(),
+            kinds = expectedAssets.map { it.kind.nativeValue }.toIntArray(),
+            hasAuthoredIds = expectedAssets.map { it.authoredId != null }.toBooleanArray(),
+            authoredIds = expectedAssets.map { it.authoredId ?: 0L }.toLongArray(),
+            names = expectedAssets.map { it.name.encodeToByteArray() }.toTypedArray(),
+            fileExtensions = expectedAssets
+                .map { it.fileExtension.encodeToByteArray() }.toTypedArray(),
+            embedded = expectedAssets.map(ExpectedFileAsset::isEmbedded).toBooleanArray(),
+            contentsRecords = expectedAssets
+                .map(ExpectedFileAsset::hasContentsRecord).toBooleanArray(),
+            providerFlags = expectedAssets
+                .map(ExpectedFileAsset::requiredProviderFlags).toIntArray(),
+            externalOrdinals = external.keys.toIntArray(),
+            externalPayloads = external.values.toTypedArray(),
+            imageDecoder = imageDecoder,
+        )
+    }
+
     external fun nativeFileFree(file: Long)
 
     /** nux_artboard_instance_new_named -> artboard handle (0 = failure). */
