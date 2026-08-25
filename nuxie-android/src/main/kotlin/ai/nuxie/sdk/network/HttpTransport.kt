@@ -1,6 +1,8 @@
 package ai.nuxie.sdk.network
 
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.Closeable
 import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
@@ -16,12 +18,15 @@ internal fun interface HttpTransport {
         val headers: Map<String, String>,
         /** Body bytes exactly as they should leave the socket (already gzipped when so declared). */
         val body: ByteArray,
+        val method: String = "POST",
+        val followRedirects: Boolean = true,
     )
 
     class Response(
         val statusCode: Int,
         val body: ByteArray,
         headers: Map<String, String> = emptyMap(),
+        val finalUrl: URL? = null,
     ) {
         /** Case-insensitive header map (HTTP header names are case-insensitive). */
         val headers: Map<String, String> =
@@ -30,37 +35,97 @@ internal fun interface HttpTransport {
         fun header(name: String): String? = headers[name.lowercase()]
     }
 
+    /** A closeable response body used by artifact acquisition without buffering it first. */
+    class StreamingResponse(
+        val statusCode: Int,
+        val body: InputStream,
+        headers: Map<String, String> = emptyMap(),
+        val finalUrl: URL,
+        val declaredContentLength: Long? = null,
+        private val closeAction: () -> Unit = {},
+    ) : Closeable {
+        val headers: Map<String, String> =
+            headers.entries.associate { (name, value) -> name.lowercase() to value }
+
+        fun header(name: String): String? = headers[name.lowercase()]
+
+        override fun close() {
+            runCatching { body.close() }
+            closeAction()
+        }
+    }
+
     @Throws(IOException::class)
     fun execute(request: Request): Response
+
+    /**
+     * Opens a streaming response. Fakes that only implement [execute] retain
+     * their existing behavior; production overrides this to avoid buffering.
+     */
+    @Throws(IOException::class)
+    fun open(request: Request): StreamingResponse {
+        val response = execute(request)
+        return StreamingResponse(
+            statusCode = response.statusCode,
+            body = ByteArrayInputStream(response.body),
+            headers = response.headers,
+            finalUrl = response.finalUrl ?: request.url,
+            declaredContentLength = response.header("content-length")?.toLongOrNull()
+                ?: response.body.size.toLong(),
+        )
+    }
 }
 
-/** HttpURLConnection POST transport with bounded response reads. */
+/** HttpURLConnection transport with bounded buffered reads and opt-in streaming. */
 internal class HttpUrlConnectionTransport(
     private val connectTimeoutMillis: Int = 30_000,
     private val readTimeoutMillis: Int = 30_000,
     private val maxResponseBytes: Long = DEFAULT_MAX_RESPONSE_BYTES,
 ) : HttpTransport {
     override fun execute(request: HttpTransport.Request): HttpTransport.Response {
+        return open(request).use { response ->
+            HttpTransport.Response(
+                statusCode = response.statusCode,
+                body = response.body.readBounded(maxResponseBytes),
+                headers = response.headers,
+                finalUrl = response.finalUrl,
+            )
+        }
+    }
+
+    override fun open(request: HttpTransport.Request): HttpTransport.StreamingResponse {
         val connection = request.url.openConnection() as HttpURLConnection
         try {
-            connection.requestMethod = "POST"
-            connection.doOutput = true
+            connection.requestMethod = request.method
+            connection.instanceFollowRedirects = request.followRedirects
+            connection.doOutput = request.body.isNotEmpty() || request.method == "POST"
             connection.connectTimeout = connectTimeoutMillis
             connection.readTimeout = readTimeoutMillis
             request.headers.forEach { (name, value) -> connection.setRequestProperty(name, value) }
-            connection.setFixedLengthStreamingMode(request.body.size)
-            connection.outputStream.use { it.write(request.body) }
+            if (connection.doOutput) {
+                connection.setFixedLengthStreamingMode(request.body.size)
+                connection.outputStream.use { it.write(request.body) }
+            }
 
             val statusCode = connection.responseCode
             val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream
-            val body = stream?.use { it.readBounded(maxResponseBytes) } ?: ByteArray(0)
             val headers = connection.headerFields
                 .filterKeys { it != null }
                 .mapKeys { (name, _) -> name!! }
                 .mapValues { (_, values) -> values.lastOrNull().orEmpty() }
-            return HttpTransport.Response(statusCode, body, headers)
-        } finally {
+            return HttpTransport.StreamingResponse(
+                statusCode = statusCode,
+                body = stream ?: ByteArrayInputStream(ByteArray(0)),
+                headers = headers,
+                finalUrl = connection.url,
+                declaredContentLength = headers.entries
+                    .firstOrNull { it.key.equals("content-length", ignoreCase = true) }
+                    ?.value?.toLongOrNull(),
+                closeAction = connection::disconnect,
+            )
+        } catch (error: Throwable) {
             connection.disconnect()
+            throw error
         }
     }
 
@@ -82,4 +147,3 @@ internal class HttpUrlConnectionTransport(
         const val DEFAULT_MAX_RESPONSE_BYTES = 25L * 1024L * 1024L
     }
 }
-
