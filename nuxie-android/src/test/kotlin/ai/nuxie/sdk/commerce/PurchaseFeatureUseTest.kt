@@ -232,9 +232,43 @@ class PurchaseFeatureUseTest {
     )
 
     @Test
-    fun appManagedEvidenceIsNotEligible() = assertDisqualified(
-        evidence(nuxieManaged = false),
-    )
+    fun appManagedEvidenceIsEligibleForAtomicGateWithoutManagedCompletion() = runTest {
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    HttpTransport.Response(
+                        200,
+                        """{"customerId":"customer-a","featureId":"credits","code":"entitled","allowed":true,"unlimited":false,"balance":1,"type":"creditSystem"}"""
+                            .encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
+                }
+            }
+        }
+        val core = core(transport)
+        val store = InMemoryPurchaseEvidenceStore().also {
+            it.upsert(evidence(nuxieManaged = false))
+        }
+        val billing = RecordingBilling()
+        val service = service(core, store, billing = billing)
+
+        assertNotNull(
+            service.useFeatureWithPendingPurchase(
+                distinctId = "customer-a",
+                featureId = "credits",
+                amount = 1.0,
+                entityId = null,
+                metadata = null,
+            ),
+        )
+
+        assertEquals(1, transport.requests.count { it.url.path == "/entitled" })
+        assertTrue(store.load().getValue("token-1").synced)
+        assertEquals(0, billing.acknowledgeCalls)
+        assertEquals(0, billing.consumeCalls)
+        core.stop()
+    }
 
     @Test
     fun pendingEvidenceIsNotEligible() = assertDisqualified(
@@ -587,6 +621,27 @@ class PurchaseFeatureUseTest {
             ActivePurchasesResult.Success(emptyList())
         override suspend fun acknowledge(purchaseToken: String): BillingResult = ok()
         override suspend fun consume(purchaseToken: String): BillingResult = ok()
+
+        private fun ok() = BillingResult.newBuilder()
+            .setResponseCode(BillingClient.BillingResponseCode.OK)
+            .build()
+    }
+
+    private class RecordingBilling : PlayBillingGateway {
+        var acknowledgeCalls = 0
+        var consumeCalls = 0
+
+        override suspend fun launch(activity: Activity, request: CheckoutRequest): BillingResult = ok()
+        override suspend fun queryActive(productType: String): ActivePurchasesResult =
+            ActivePurchasesResult.Success(emptyList())
+        override suspend fun acknowledge(purchaseToken: String): BillingResult {
+            acknowledgeCalls += 1
+            return ok()
+        }
+        override suspend fun consume(purchaseToken: String): BillingResult {
+            consumeCalls += 1
+            return ok()
+        }
 
         private fun ok() = BillingResult.newBuilder()
             .setResponseCode(BillingClient.BillingResponseCode.OK)

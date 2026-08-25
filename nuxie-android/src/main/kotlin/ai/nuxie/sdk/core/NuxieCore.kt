@@ -147,11 +147,17 @@ internal class NuxieCore(
         initialDistinctId = identity.distinctId(),
     )
 
+    private val purchaseEvidenceStore = overrides.purchaseEvidenceStore
+        ?: FilePurchaseEvidenceStore(
+            purchaseEvidenceDirectory(appContext.filesDir, apiKey, environment),
+        )
+
     val features = FeatureService(
         api = api,
         identity = identity,
         featureInfo = featureInfo,
         cacheTtlMillis = featureCacheTtlMillis,
+        revocationStore = purchaseEvidenceStore,
         nowMillis = nowMillis,
     )
 
@@ -168,10 +174,7 @@ internal class NuxieCore(
 
     val purchases: PurchaseService = PurchaseService(
         billing = billing,
-        evidenceStore = overrides.purchaseEvidenceStore
-            ?: FilePurchaseEvidenceStore(
-                purchaseEvidenceDirectory(appContext.filesDir, apiKey, environment),
-            ),
+        evidenceStore = purchaseEvidenceStore,
         synchronizer = NuxieApiPurchaseSynchronizer(api),
         features = features,
         distinctId = identity::distinctId,
