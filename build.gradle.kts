@@ -262,6 +262,11 @@ val runtimeFetch by tasks.registering {
     if (!expectedChecksum.matches(Regex("[0-9a-f]{64}"))) {
       throw GradleException("runtime/artifact.json checksum must be a lowercase SHA-256 digest.")
     }
+    // Parse the URL before recovery: every pin field must prove valid before
+    // any destructive step, or a malformed pin can consume install backups.
+    val pinnedUrl = runCatching { URI(url).toURL() }.getOrElse {
+      throw GradleException("runtime/artifact.json url must be a valid absolute URL.", it)
+    }
 
     recoverRuntimeInstall { candidate ->
       cachedRuntimeValidationFailure(candidate, expectedChecksum, maximumBytes)
@@ -285,7 +290,7 @@ val runtimeFetch by tasks.registering {
 
     try {
       logger.lifecycle("Downloading pinned Nuxie runtime $release.")
-      URI(url).toURL().openConnection().apply {
+      pinnedUrl.openConnection().apply {
         connectTimeout = 30_000
         readTimeout = 60_000
       }.getInputStream().buffered().use { input ->
