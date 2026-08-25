@@ -125,10 +125,11 @@ internal class ProfileService(
     // MARK: internals
 
     private suspend fun handleUserChange(newDistinctId: String) {
+        val featurePurchaseRevision = captureFeaturePurchaseRevision()
         val cached = synchronized(lock) { loadCached(newDistinctId) }
         if (cached != null && isFresh(cached)) {
             synchronized(lock) { resident = cached }
-            applyProfile(cached, captureFeaturePurchaseRevision())
+            applyProfile(cached, featurePurchaseRevision)
             // Fresh enough to skip an immediate network hit?
             if (nowMillis() - cached.cachedAtMillis < BACKGROUND_REFRESH_AGE_MILLIS) return
         } else if (cached != null) {
@@ -140,10 +141,11 @@ internal class ProfileService(
 
     private suspend fun loadFromDisk() {
         val distinctId = identity.distinctId()
+        val featurePurchaseRevision = captureFeaturePurchaseRevision()
         val cached = synchronized(lock) { loadCached(distinctId) }
         if (cached != null && isFresh(cached)) {
             synchronized(lock) { resident = cached }
-            applyProfile(cached, captureFeaturePurchaseRevision())
+            applyProfile(cached, featurePurchaseRevision)
         } else if (cached != null) {
             synchronized(lock) { fileFor(distinctId).delete() }
         }

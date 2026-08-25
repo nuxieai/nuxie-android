@@ -39,6 +39,7 @@ internal class FeatureService(
     private var durableAccess: Map<String, FeatureAccess> = emptyMap()
     private var durableEntities: Map<String, Map<String, FeatureAccess>> = emptyMap()
     private val realTimeCache = mutableMapOf<CacheKey, TimedAccess>()
+    private val purchaseUpdates = mutableMapOf<String, PurchaseProjection>()
     private val localPurchases = mutableMapOf<String, PurchaseProjection>()
     private val revokedPurchases = mutableMapOf<String, PurchaseProjection>()
     private var purchaseMutationRevision = 0L
@@ -109,6 +110,7 @@ internal class FeatureService(
             durableAccess = emptyMap()
             durableEntities = emptyMap()
             realTimeCache.clear()
+            purchaseUpdates.clear()
             localPurchases.clear()
             revokedPurchases.clear()
             committedSeq.clear()
@@ -133,6 +135,9 @@ internal class FeatureService(
             cacheDistinctId = distinctId
             durableAccess = parsed.first
             durableEntities = parsed.second
+            purchaseUpdates.entries.removeAll {
+                it.value.committedRevision <= snapshotPurchaseRevision
+            }
             // A fresh server snapshot is authoritative over earlier optimistic
             // access and revocation tombstones for the Features it contains.
             val reconciled = parsed.first.keys
@@ -206,7 +211,7 @@ internal class FeatureService(
             updates.keys.forEach { featureId ->
                 realTimeCache.keys.removeAll { it.featureId == featureId }
             }
-            durableAccess = durableAccess + updates
+            purchaseUpdates[transactionId] = PurchaseProjection(updates, purchaseMutationRevision)
         }
         publishCurrent(ready = true, expectedGeneration = hydrationGeneration)
     }
@@ -285,8 +290,11 @@ internal class FeatureService(
             val access = authoritativeAccess(result, featureId)
             realTimeCache[key] = TimedAccess(access, nowMillis(), opaqueRequiredBalance)
             committedSeq[key] = seq
-            featureInfo.update(featureId, access, entityId)
-            return access
+            val effectiveAccess = purchaseAccess(featureId, entityId)
+                ?.forRequiredBalance(requiredBalance)
+                ?: access
+            featureInfo.update(featureId, effectiveAccess, entityId)
+            return effectiveAccess
         }
     }
 
@@ -298,6 +306,7 @@ internal class FeatureService(
                 durableAccess = emptyMap()
                 durableEntities = emptyMap()
                 realTimeCache.clear()
+                purchaseUpdates.clear()
                 localPurchases.clear()
                 revokedPurchases.clear()
                 committedSeq.clear()
@@ -315,7 +324,7 @@ internal class FeatureService(
                 .filter { (key, timed) -> key.entityId == null && isFresh(timed) }
                 .mapValues { it.value.access }
                 .mapKeys { it.key.featureId }
-            featureInfo.update(mergePurchaseAccess(durableAccess + fresh), durableEntities, ready)
+            featureInfo.update(mergePurchaseAccess(durableGlobalAccess() + fresh), durableEntities, ready)
         }
     }
 
@@ -324,7 +333,13 @@ internal class FeatureService(
             .filter { (key, timed) -> key.entityId == null && isFresh(timed) }
             .mapValues { it.value.access }
             .mapKeys { it.key.featureId }
-        return mergePurchaseAccess(durableAccess + fresh)
+        return mergePurchaseAccess(durableGlobalAccess() + fresh)
+    }
+
+    private fun durableGlobalAccess(): Map<String, FeatureAccess> {
+        var merged = durableAccess
+        purchaseUpdates.values.forEach { merged = merged + it.grants }
+        return merged
     }
 
     private fun mergePurchaseAccess(base: Map<String, FeatureAccess>): Map<String, FeatureAccess> {
@@ -341,10 +356,11 @@ internal class FeatureService(
     }
 
     private fun entityAccess(featureId: String, entityId: String?): FeatureAccess? = when (entityId) {
-        null -> durableAccess[featureId]
+        null -> durableGlobalAccess()[featureId]
         else -> durableEntities[featureId]?.let { entities ->
-            entities[entityId] ?: durableAccess[featureId]?.let { FeatureAccess(false, false, null, it.type) }
-        } ?: durableAccess[featureId]
+            entities[entityId] ?: durableGlobalAccess()[featureId]
+                ?.let { FeatureAccess(false, false, null, it.type) }
+        } ?: durableGlobalAccess()[featureId]
     }
 
     private fun authoritativeAccess(

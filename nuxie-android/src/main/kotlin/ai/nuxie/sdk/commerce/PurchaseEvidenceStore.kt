@@ -80,7 +80,8 @@ internal data class PurchaseEvidence(
     val offerId: String? = null,
     val purchaseState: StoredPurchaseState,
     val obfuscatedAccountId: String? = null,
-    val distinctId: String,
+    val syncAttributionDistinctId: String,
+    val ownerDistinctId: String? = null,
     val context: StoredPurchaseContext? = null,
     val acknowledged: Boolean,
     val consumed: Boolean = false,
@@ -96,7 +97,6 @@ internal data class PurchaseEvidence(
     val syncedEventEmitted: Boolean = false,
     val syncedCustomerId: String? = null,
     val nuxieManaged: Boolean = false,
-    val customerMatched: Boolean = true,
     val signatureVerificationRequired: Boolean = false,
     val signatureVerified: Boolean = false,
 )
@@ -216,7 +216,8 @@ internal class FilePurchaseEvidenceStore(
             evidence.offerId?.let { put("offerId", JsonPrimitive(it)) }
             put("purchaseState", JsonPrimitive(evidence.purchaseState.name))
             evidence.obfuscatedAccountId?.let { put("obfuscatedAccountId", JsonPrimitive(it)) }
-            put("distinctId", JsonPrimitive(evidence.distinctId))
+            put("syncAttributionDistinctId", JsonPrimitive(evidence.syncAttributionDistinctId))
+            evidence.ownerDistinctId?.let { put("ownerDistinctId", JsonPrimitive(it)) }
             evidence.context?.let { context ->
                 put("context", JsonObject(buildMap {
                     context.placementId?.let { put("placementId", JsonPrimitive(it)) }
@@ -244,7 +245,6 @@ internal class FilePurchaseEvidenceStore(
             put("syncedEventEmitted", JsonPrimitive(evidence.syncedEventEmitted))
             evidence.syncedCustomerId?.let { put("syncedCustomerId", JsonPrimitive(it)) }
             put("nuxieManaged", JsonPrimitive(evidence.nuxieManaged))
-            put("customerMatched", JsonPrimitive(evidence.customerMatched))
             put("signatureVerificationRequired", JsonPrimitive(evidence.signatureVerificationRequired))
             put("signatureVerified", JsonPrimitive(evidence.signatureVerified))
         },
@@ -261,7 +261,8 @@ internal class FilePurchaseEvidenceStore(
             offerId = raw.string("offerId"),
             purchaseState = StoredPurchaseState.valueOf(raw.string("purchaseState") ?: return null),
             obfuscatedAccountId = raw.string("obfuscatedAccountId"),
-            distinctId = raw.string("distinctId") ?: return null,
+            syncAttributionDistinctId = raw.string("syncAttributionDistinctId") ?: return null,
+            ownerDistinctId = raw.string("ownerDistinctId"),
             context = (raw["context"] as? JsonObject)?.let {
                 StoredPurchaseContext(it.string("placementId"), it.string("experienceId"), it.string("experienceVersion"))
             },
@@ -286,8 +287,6 @@ internal class FilePurchaseEvidenceStore(
             syncedEventEmitted = raw.boolean("syncedEventEmitted"),
             syncedCustomerId = raw.string("syncedCustomerId"),
             nuxieManaged = raw.boolean("nuxieManaged"),
-            customerMatched = (raw["customerMatched"] as? JsonPrimitive)?.booleanOrNull
-                ?: raw.string("distinctId").orEmpty().isNotBlank(),
             signatureVerificationRequired = raw.boolean("signatureVerificationRequired"),
             signatureVerified = raw.boolean("signatureVerified"),
         )

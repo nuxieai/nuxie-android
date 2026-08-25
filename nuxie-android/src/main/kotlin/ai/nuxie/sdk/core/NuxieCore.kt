@@ -169,7 +169,7 @@ internal class NuxieCore(
                         basePlanId = evidence.basePlanId,
                         offerId = evidence.offerId,
                         obfuscatedAccountId = evidence.obfuscatedAccountId,
-                        distinctId = evidence.distinctId,
+                        distinctId = evidence.syncAttributionDistinctId,
                     ),
                 )
                 if (response.success) PurchaseSyncOutcome.Accepted(response)

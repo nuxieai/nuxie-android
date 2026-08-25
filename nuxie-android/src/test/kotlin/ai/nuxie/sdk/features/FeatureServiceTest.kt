@@ -178,6 +178,157 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun profileFetchStartedBeforePurchaseResponseDoesNotEraseTheNewerFeatureUpdate() = runBlocking {
+        val fetchStarted = CountDownLatch(1)
+        val releaseFetch = CountDownLatch(1)
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/profile") {
+                    fetchStarted.countDown()
+                    assertTrue(releaseFetch.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        profile("[]").encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, "{}".encodeToByteArray())
+                }
+            }
+        }
+        val core = core(transport)
+        val customer = core.identity.distinctId()
+
+        val refresh = async(Dispatchers.Default) { core.profile.refreshAndWait() }
+        assertTrue(fetchStarted.await(5, TimeUnit.SECONDS))
+        core.features.updateFromPurchase(
+            customer,
+            Json.parseToJsonElement(
+                """{"success":true,"features":[{"id":"internal-pro","ext_id":"pro","type":"boolean","allowed":true,"unlimited":false,"balance":null}]}""",
+            ).jsonObject,
+            "mid-fetch-token",
+        )
+        releaseFetch.countDown()
+
+        assertTrue(refresh.await())
+        assertTrue(core.features.getCached("pro", null)!!.allowed)
+        core.stop()
+    }
+
+    @Test
+    fun profileFetchStartedAfterPurchaseResponseReconcilesTheOlderFeatureUpdate() = runBlocking {
+        val core = core(
+            FakeTransport().apply {
+                respond = { request ->
+                    if (request.url.path == "/profile") {
+                        HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    } else {
+                        HttpTransport.Response(200, "{}".encodeToByteArray())
+                    }
+                }
+            },
+        )
+        val customer = core.identity.distinctId()
+        core.features.updateFromPurchase(
+            customer,
+            Json.parseToJsonElement(
+                """{"success":true,"features":[{"id":"internal-pro","ext_id":"pro","type":"boolean","allowed":true,"unlimited":false,"balance":null}]}""",
+            ).jsonObject,
+            "before-fetch-token",
+        )
+        assertTrue(core.features.getCached("pro", null)!!.allowed)
+
+        assertTrue(core.profile.refreshAndWait())
+
+        assertEquals(null, core.features.getCached("pro", null))
+        core.stop()
+    }
+
+    @Test
+    fun optimisticGrantLandingMidCheckOutranksTheCompletedResponse() = runBlocking {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checkStarted.countDown()
+                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            allowed = false,
+                            balance = "0",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+
+        val check = async(Dispatchers.Default) { core.features.check("pro") }
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+        core.features.applyLocalPurchase(
+            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+            "mid-check-token",
+        )
+        releaseCheck.countDown()
+
+        assertTrue(check.await().allowed)
+        assertTrue(core.featureInfo.isAllowed("pro"))
+        core.stop()
+    }
+
+    @Test
+    fun revocationLandingMidForcedRefreshOutranksTheCompletedResponse() = runBlocking {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checkStarted.countDown()
+                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            allowed = true,
+                            balance = "1",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+        core.features.applyLocalPurchase(
+            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+            "mid-check-token",
+        )
+
+        val check = async(Dispatchers.Default) {
+            core.features.checkWithCache("pro", forceRefresh = true)
+        }
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+        core.features.removeLocalPurchase("mid-check-token")
+        releaseCheck.countDown()
+
+        assertFalse(check.await().allowed)
+        assertFalse(core.featureInfo.isAllowed("pro"))
+        core.stop()
+    }
+
+    @Test
     fun purchaseResponseReconcilesItsGrantWithoutReplacingUnrelatedProfileFeatures() = runBlocking {
         val core = core(FakeTransport())
         val customer = core.identity.distinctId()
