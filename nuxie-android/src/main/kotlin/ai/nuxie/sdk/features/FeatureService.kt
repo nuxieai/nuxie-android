@@ -183,14 +183,17 @@ internal class FeatureService(
         publishCurrent()
     }
 
-    suspend fun removeLocalPurchase(transactionId: String) {
+    suspend fun removePurchase(transactionId: String) {
         synchronizeCustomerScopeIfNeeded()
         synchronized(lock) {
-            val removed = localPurchases.remove(transactionId) ?: return
+            val optimistic = localPurchases.remove(transactionId)?.grants.orEmpty()
+            val accepted = purchaseUpdates.remove(transactionId)?.grants.orEmpty()
+            val removed = optimistic + accepted
+            if (removed.isEmpty()) return
             purchaseMutationRevision += 1
             // iOS checks revokedPurchaseCache before localPurchaseCache,
             // realTimeCache, and durable profile access (FeatureService.swift).
-            val tombstones = removed.grants.mapValues { (_, access) ->
+            val tombstones = removed.mapValues { (_, access) ->
                 FeatureAccess(false, false, access.balance, access.type)
             }
             revokedPurchases[transactionId] = PurchaseProjection(tombstones, purchaseMutationRevision)

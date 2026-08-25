@@ -16,14 +16,12 @@ import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.commerce.FilePurchaseEvidenceStore
 import ai.nuxie.sdk.commerce.GooglePlayBillingClientAdapter
 import ai.nuxie.sdk.commerce.NuxiePurchaseDelegate
+import ai.nuxie.sdk.commerce.NuxieApiPurchaseSynchronizer
 import ai.nuxie.sdk.commerce.PlayBillingConnection
 import ai.nuxie.sdk.commerce.PurchaseEvidenceStore
 import ai.nuxie.sdk.commerce.PurchaseHandlingMode
 import ai.nuxie.sdk.commerce.PurchaseService
 import ai.nuxie.sdk.commerce.PurchaseSettings
-import ai.nuxie.sdk.commerce.PurchaseSyncOutcome
-import ai.nuxie.sdk.commerce.PurchaseSynchronizer
-import ai.nuxie.sdk.commerce.isPermanentPurchaseRejection
 import ai.nuxie.sdk.commerce.purchaseEvidenceDirectory
 import ai.nuxie.sdk.experiences.ExperienceTrustRoots
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
@@ -159,27 +157,7 @@ internal class NuxieCore(
             ?: FilePurchaseEvidenceStore(
                 purchaseEvidenceDirectory(appContext.filesDir, apiKey, environment),
             ),
-        synchronizer = PurchaseSynchronizer { evidence ->
-            try {
-                val response = api.postPurchase(
-                    NuxieApi.PlayPurchaseReport(
-                        packageName = evidence.packageName,
-                        productId = evidence.storeProductIds.firstOrNull().orEmpty(),
-                        purchaseToken = evidence.purchaseToken,
-                        basePlanId = evidence.basePlanId,
-                        offerId = evidence.offerId,
-                        obfuscatedAccountId = evidence.obfuscatedAccountId,
-                        distinctId = evidence.syncAttributionDistinctId,
-                    ),
-                )
-                if (response.success) PurchaseSyncOutcome.Accepted(response)
-                else PurchaseSyncOutcome.Rejected(isPermanentPurchaseRejection(response.body))
-            } catch (rejected: NuxieApi.PurchaseRejectedException) {
-                PurchaseSyncOutcome.Rejected(rejected.permanent)
-            } catch (_: Exception) {
-                PurchaseSyncOutcome.Rejected(permanent = false)
-            }
-        },
+        synchronizer = NuxieApiPurchaseSynchronizer(api),
         features = features,
         distinctId = identity::distinctId,
         emit = eventLog::capture,

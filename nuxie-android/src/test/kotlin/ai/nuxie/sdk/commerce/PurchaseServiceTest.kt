@@ -11,6 +11,9 @@ import android.app.Activity
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.BillingResult
 import java.security.MessageDigest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.advanceTimeBy
@@ -222,7 +225,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun exactBindingAdoptsProvisionalEvidenceForItsProvenOwner() = runTest {
+    fun acceptedProjectionIsRevokedFromProvisionalOwnerWhenExactBindingAdoptsPurchase() = runTest {
         val fixture = fixture(this)
         val provisionalOwner = fixture.core.identity.distinctId()
         val provenOwner = "customer-b"
@@ -233,9 +236,10 @@ class PurchaseServiceTest {
         fixture.service.rememberProduct(
             product(grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN))),
         )
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
 
         fixture.service.onPurchasesUpdated(okUpdate(purchase))
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
         fixture.store.upsertBinding(product().bindingFor(provenOwner))
         fixture.service.onPurchasesUpdated(okUpdate(purchase))
 
@@ -243,12 +247,52 @@ class PurchaseServiceTest {
         assertEquals(provisionalOwner, adoptedEvidence.syncAttributionDistinctId)
         assertEquals(provenOwner, adoptedEvidence.ownerDistinctId)
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        assertFalse(fixture.core.featureInfo.isAllowed("unlimited"))
 
         fixture.core.identity.setDistinctId(provenOwner)
         fixture.core.features.handleUserChange(provisionalOwner, provenOwner)
         fixture.service.onPurchasesUpdated(okUpdate(purchase))
 
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        assertTrue(fixture.core.featureInfo.isAllowed("unlimited"))
+        fixture.close()
+    }
+
+    @Test
+    fun acceptanceLandingAfterExactBindingAdoptionPublishesOnlyToProvenOwner() = runTest {
+        val fixture = fixture(this)
+        val provisionalOwner = fixture.core.identity.distinctId()
+        val provenOwner = "customer-b"
+        val purchase = playPurchase(
+            "adopted-during-sync-token",
+            obfuscatedAccountId = accountHash(provenOwner),
+        )
+        fixture.service.rememberProduct(
+            product(grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN))),
+        )
+        val syncStarted = CountDownLatch(1)
+        val releaseAcceptance = CountDownLatch(1)
+        fixture.synchronizer = {
+            syncStarted.countDown()
+            assertTrue(releaseAcceptance.await(5, TimeUnit.SECONDS))
+            accepted(provenOwner)
+        }
+
+        val update = async(Dispatchers.Default) {
+            fixture.service.onPurchasesUpdated(okUpdate(purchase))
+        }
+        assertTrue(syncStarted.await(5, TimeUnit.SECONDS))
+        fixture.store.upsertBinding(product().bindingFor(provenOwner))
+        fixture.core.identity.setDistinctId(provenOwner)
+        fixture.core.features.handleUserChange(provisionalOwner, provenOwner)
+        releaseAcceptance.countDown()
+        update.await()
+
+        val adoptedEvidence = fixture.store.load().getValue("adopted-during-sync-token")
+        assertEquals(provisionalOwner, adoptedEvidence.syncAttributionDistinctId)
+        assertEquals(provenOwner, adoptedEvidence.ownerDistinctId)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        assertTrue(fixture.core.featureInfo.isAllowed("unlimited"))
         fixture.close()
     }
 

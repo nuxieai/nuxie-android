@@ -4,7 +4,7 @@ import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.fixtures.FixtureRunner
-import ai.nuxie.sdk.network.NuxieApi
+import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.testsupport.FakeTransport
 import android.app.Activity
 import com.android.billingclient.api.BillingClient
@@ -44,8 +44,6 @@ class PurchaseConformanceTest {
         val root = Json.parseToJsonElement(
             File(FixtureRunner.fixturesRoot(), "events/atomic-purchase-sync.json").readText(),
         ).jsonObject
-        assertEquals("events/atomic-purchase-sync", root.getValue("suite").jsonPrimitive.content)
-        assertEquals(2, root.getValue("version").jsonPrimitive.int)
         val expectedEvent = root.getValue("event").jsonObject
         val expectedEventName = expectedEvent.getValue("name").jsonPrimitive.content
         val expectedPropertyNames = expectedEvent.getValue("properties").jsonArray
@@ -53,6 +51,24 @@ class PurchaseConformanceTest {
         val retry = root.getValue("retry").jsonObject
         val acceptance = root.getValue("acceptance").jsonObject
 
+        var purchaseResponseIndex = 0
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                when (request.url.path) {
+                    "/purchase" -> when (purchaseResponseIndex++) {
+                        0 -> HttpTransport.Response(503, """{"success":true}""".encodeToByteArray())
+                        1 -> HttpTransport.Response(200, "not-json".encodeToByteArray())
+                        else -> HttpTransport.Response(
+                            200,
+                            """{"success":true,"customer_id":"server-customer","features":[]}"""
+                                .encodeToByteArray(),
+                        )
+                    }
+                    "/profile" -> HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
+                    else -> HttpTransport.Response(200, ByteArray(0))
+                }
+            }
+        }
         val core = NuxieCore(
             context = RuntimeEnvironment.getApplication(),
             apiKey = "pk_test_purchase_conformance",
@@ -60,7 +76,7 @@ class PurchaseConformanceTest {
             logLevel = LogLevel.NONE,
             beforeSend = null,
             overrides = NuxieCore.Overrides(
-                transport = FakeTransport(),
+                transport = transport,
                 registerLifecycle = false,
             ),
         )
@@ -79,29 +95,13 @@ class PurchaseConformanceTest {
             signature = "",
         )
         val billing = FixtureBilling(purchase)
-        val syncAttempts = mutableListOf<String>()
         val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
         var evidenceAtCapture: PurchaseEvidence? = null
         var completionsAtCapture: Int? = null
         val service = PurchaseService(
             billing = billing,
             evidenceStore = store,
-            synchronizer = PurchaseSynchronizer { evidence ->
-                syncAttempts += evidence.purchaseToken
-                if (syncAttempts.size == 1) {
-                    PurchaseSyncOutcome.Rejected(permanent = false)
-                } else {
-                    PurchaseSyncOutcome.Accepted(
-                        NuxieApi.PurchaseResponse(
-                            body = Json.parseToJsonElement(
-                                """{"success":true,"customer_id":"server-customer","features":[]}""",
-                            ).jsonObject,
-                            success = true,
-                            customerId = "server-customer",
-                        ),
-                    )
-                }
-            },
+            synchronizer = NuxieApiPurchaseSynchronizer(core.api),
             features = core.features,
             distinctId = core.identity::distinctId,
             emit = { name, properties ->
@@ -143,13 +143,33 @@ class PurchaseConformanceTest {
         advanceTimeBy(10)
         runCurrent()
 
+        when (acceptance.getValue("boundary").jsonPrimitive.content) {
+            "decoded_2xx" -> {
+                assertFalse(store.load().getValue(token).synced)
+                assertTrue(emissions.isEmpty())
+            }
+            else -> error("Unsupported purchase acceptance boundary")
+        }
+
+        advanceTimeBy(10)
+        runCurrent()
+
         val acceptedEvidence = store.load().getValue(token)
-        assertEquals(
-            retry.getValue("request_identity").jsonPrimitive.content,
-            "stable_purchase_use_event_id",
-        )
-        assertEquals(listOf(token, token), syncAttempts)
-        assertEquals("decoded_2xx", acceptance.getValue("boundary").jsonPrimitive.content)
+        val purchaseRequests = transport.requests.filter { it.url.path == "/purchase" }
+        when (retry.getValue("request_identity").jsonPrimitive.content) {
+            "stable_purchase_use_event_id" -> {
+                assertEquals(3, purchaseRequests.size)
+                assertEquals(1, purchaseRequests.map { it.body.decodeToString() }.distinct().size)
+                assertEquals(
+                    setOf(token),
+                    purchaseRequests.map { request ->
+                        Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                            .getValue("purchaseToken").jsonPrimitive.content
+                    }.toSet(),
+                )
+            }
+            else -> error("Unsupported purchase retry identity")
+        }
         assertEquals(acceptance.getValue("command_success").jsonPrimitive.boolean, acceptedEvidence.synced)
         assertEquals(
             acceptance.getValue("emissions_per_accepted_receipt").jsonPrimitive.int,
