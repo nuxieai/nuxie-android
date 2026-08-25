@@ -28,26 +28,22 @@ android {
     unitTests.isIncludeAndroidResources = true
   }
 
-  // The engine (.so) is a pinned prebuilt staged under runtime/prebuilt/ by
-  // scripts/stage-runtime.sh (release pipeline: runtime/artifact.json). The
-  // JNI shim builds only when the prebuilts are present so contributors
-  // without the engine still build, test, and run everything non-rendering
-  // (spec section 16 decision 3: graceful degradation).
+  // The engine (.so) is fetched and verified from runtime/artifact.json by
+  // the root runtimeFetch task. scripts/stage-runtime.sh remains the explicit
+  // NUXIE_RUNTIME_USE_LOCAL=1 escape for local runtime development.
   val runtimePrebuilt = rootProject.file("runtime/prebuilt")
-  if (runtimePrebuilt.resolve("jniLibs/arm64-v8a/libnux_capi.so").exists()) {
-    externalNativeBuild {
-      cmake {
-        path = file("src/main/cpp/CMakeLists.txt")
-        version = "3.22.1"
-      }
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+      version = "3.22.1"
     }
-    sourceSets.getByName("main") {
-      jniLibs.srcDir(runtimePrebuilt.resolve("jniLibs"))
-    }
-    defaultConfig {
-      ndk {
-        abiFilters += listOf("arm64-v8a", "x86_64")
-      }
+  }
+  sourceSets.getByName("main") {
+    jniLibs.srcDir(runtimePrebuilt.resolve("jniLibs"))
+  }
+  defaultConfig {
+    ndk {
+      abiFilters += listOf("arm64-v8a", "x86_64")
     }
   }
 }

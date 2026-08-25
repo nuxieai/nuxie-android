@@ -37,7 +37,7 @@ import ai.nuxie.sdk.profile.ProfileService
 import ai.nuxie.sdk.segments.SegmentService
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.session.SessionService
-import ai.nuxie.sdk.runtime.NuxieRuntimeBridge
+import ai.nuxie.sdk.runtime.nuxieRuntimeSourceRevision
 import ai.nuxie.sdk.experiences.SupportedRuntime
 import ai.nuxie.sdk.experiences.ReleaseArtifactAcquirer
 import ai.nuxie.sdk.presentation.ExperiencePresentationService
@@ -50,9 +50,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Constructor-injected composition root (iOS `NuxieCore` parity): concrete
@@ -317,10 +314,7 @@ internal class NuxieCore(
     /** Runtime absence closes the Journey enrollment front door. */
     private fun journeySupportedRuntime(): SupportedRuntime? {
         if (!AndroidRenderCapability.isAvailable()) return null
-        val sourceRevision = runCatching {
-            Json.parseToJsonElement(NuxieRuntimeBridge.nativeRuntimeInfo()).jsonObject
-                .getValue("sourceRevision").jsonPrimitive.content
-        }.getOrNull()?.takeIf { it.isNotBlank() } ?: return null
+        val sourceRevision = nuxieRuntimeSourceRevision() ?: return null
         return SupportedRuntime(
             currentSdkVersion = ai.nuxie.sdk.SdkVersion.VALUE,
             supportedRuntimeRevisions = setOf(sourceRevision),
