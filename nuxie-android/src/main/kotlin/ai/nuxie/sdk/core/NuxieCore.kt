@@ -41,6 +41,8 @@ import ai.nuxie.sdk.runtime.NuxieRuntimeBridge
 import ai.nuxie.sdk.experiences.SupportedRuntime
 import ai.nuxie.sdk.experiences.ReleaseArtifactAcquirer
 import ai.nuxie.sdk.presentation.ExperiencePresentationService
+import ai.nuxie.sdk.presentation.AndroidRenderCapability
+import ai.nuxie.sdk.presentation.PresentationOutcome
 import android.app.Application
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
@@ -72,6 +74,12 @@ internal class NuxieCore(
 ) {
     private val registerLifecycle = overrides.registerLifecycle
 
+    internal fun interface PresentationFactory {
+        fun create(
+            reportOutcome: suspend (PresentationOutcome) -> Unit,
+        ): ExperiencePresentationService
+    }
+
     internal class Overrides(
         val store: EventStore? = null,
         val identity: IdentityService? = null,
@@ -82,6 +90,7 @@ internal class NuxieCore(
         val journeys: TriggerService.JourneyRouter? = null,
         val features: TriggerService.FeatureGate? = null,
         val presenter: TriggerService.ExperiencePresenter? = null,
+        val presentationFactory: PresentationFactory? = null,
         val purchaseEvidenceStore: PurchaseEvidenceStore? = null,
     )
 
@@ -173,19 +182,22 @@ internal class NuxieCore(
         nowMillis = nowMillis,
     ).also { purchaseService = it }
 
-    val presentations = ExperiencePresentationService(
-        context = appContext,
-        releases = journeyCatalog,
-        acquirer = ReleaseArtifactAcquirer(appContext, transport),
-        emit = eventLog::capture,
-        scope = scope,
-        runtimeAvailable = { NuxieRuntimeBridge.isAvailable },
-        reportOutcome = { outcome ->
-            outcome.ref.journeyId?.let { journeyId ->
-                journeys.presentationEnded(identity.distinctId(), journeyId, outcome.reason)
-            }
-        },
-    )
+    private val reportPresentationOutcome: suspend (PresentationOutcome) -> Unit = { outcome ->
+        outcome.ref.journeyId?.let { journeyId ->
+            journeys.presentationEnded(identity.distinctId(), journeyId, outcome.reason)
+        }
+    }
+
+    val presentations = overrides.presentationFactory?.create(reportPresentationOutcome)
+        ?: ExperiencePresentationService(
+            context = appContext,
+            releases = journeyCatalog,
+            acquirer = ReleaseArtifactAcquirer(appContext, transport),
+            emit = eventLog::capture,
+            scope = scope,
+            runtimeAvailable = AndroidRenderCapability::isAvailable,
+            reportOutcome = reportPresentationOutcome,
+        )
 
     val triggers by lazy {
         TriggerService(
@@ -212,8 +224,8 @@ internal class NuxieCore(
                 entityId: String?,
             ): Boolean = features.checkWithCache(featureId, requiredBalance, entityId).allowed
         },
-            presenter = overrides.presenter ?: TriggerService.ExperiencePresenter { experienceVersionId ->
-                presentations.present(experienceVersionId, journeyId = null)
+            presenter = overrides.presenter ?: TriggerService.ExperiencePresenter { experienceVersionId, journeyId ->
+                presentations.present(experienceVersionId, journeyId)
             },
             nowMillis = nowMillis,
         )
@@ -304,7 +316,7 @@ internal class NuxieCore(
 
     /** Runtime absence closes the Journey enrollment front door. */
     private fun journeySupportedRuntime(): SupportedRuntime? {
-        if (!NuxieRuntimeBridge.isAvailable) return null
+        if (!AndroidRenderCapability.isAvailable()) return null
         val sourceRevision = runCatching {
             Json.parseToJsonElement(NuxieRuntimeBridge.nativeRuntimeInfo()).jsonObject
                 .getValue("sourceRevision").jsonPrimitive.content

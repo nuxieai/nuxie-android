@@ -8,18 +8,43 @@ import ai.nuxie.sdk.TriggerDecision
 import ai.nuxie.sdk.TriggerErrorCode
 import ai.nuxie.sdk.TriggerUpdate
 import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.experiences.AcquiredRelease
+import ai.nuxie.sdk.experiences.AuthenticatedRelease
+import ai.nuxie.sdk.experiences.Delivery
+import ai.nuxie.sdk.experiences.ExperienceReleaseIdentity
+import ai.nuxie.sdk.journey.JourneyPlane
+import ai.nuxie.sdk.journey.JourneyRun
+import ai.nuxie.sdk.journey.JourneyRunState
+import ai.nuxie.sdk.journey.JourneyStore
 import ai.nuxie.sdk.network.HttpTransport
+import ai.nuxie.sdk.presentation.CloseReason
+import ai.nuxie.sdk.presentation.ExperiencePresentationService
+import ai.nuxie.sdk.presentation.PresentationRegistry
+import ai.nuxie.sdk.presentation.PresentationRelease
+import ai.nuxie.sdk.presentation.PresentationReleaseProvider
 import ai.nuxie.sdk.testsupport.FakeTransport
+import java.io.Closeable
+import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
+import kotlinx.serialization.json.buildJsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.junit.rules.TemporaryFolder
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 class TriggerServiceTest {
+    @get:Rule
+    val temporaryFolder = TemporaryFolder()
+
     private fun transportWithGate(gateJson: String?): FakeTransport = FakeTransport().apply {
         respond = { request ->
             when (request.url.path) {
@@ -39,6 +64,7 @@ class TriggerServiceTest {
         journeys: TriggerService.JourneyRouter? = null,
         features: TriggerService.FeatureGate? = null,
         presenter: TriggerService.ExperiencePresenter? = null,
+        presentationFactory: NuxieCore.PresentationFactory? = null,
     ): NuxieCore = NuxieCore(
         context = RuntimeEnvironment.getApplication(),
         apiKey = "pk_test_trigger",
@@ -50,7 +76,12 @@ class TriggerServiceTest {
             registerLifecycle = false,
             journeys = journeys,
             features = features,
-            presenter = presenter,
+            presenter = presenter ?: journeys?.takeIf { presentationFactory == null }?.let {
+                TriggerService.ExperiencePresenter { version, journeyId ->
+                    ExperienceRef("exp-1", version, journeyId)
+                }
+            },
+            presentationFactory = presentationFactory,
         ),
     )
 
@@ -108,7 +139,7 @@ class TriggerServiceTest {
     fun shownExperienceIsTerminalForItsGateVersion() = runBlocking {
         val core = core(
             transportWithGate("""{"decision":"show_flow","flowId":"version-1"}"""),
-            presenter = TriggerService.ExperiencePresenter {
+            presenter = TriggerService.ExperiencePresenter { _, _ ->
                 ExperienceRef("real-experience-id", "version-1", null)
             },
         )
@@ -204,16 +235,110 @@ class TriggerServiceTest {
         }
         val core = core(transportWithGate(null), journeys = router)
         val updates = collect(core, "moment")
-        // journeyStarted is emitted and the stream stays open for the journey
-        // terminal (no NoMatch fallback).
+        // Enrollment and its linked presentation are both emitted; the stream
+        // stays open for the Journey terminal (no NoMatch fallback).
         assertEquals(
             listOf<TriggerUpdate>(
                 TriggerUpdate.Decision(
                     TriggerDecision.JourneyStarted(ExperienceRef("exp-1", "v1", "j-1")),
                 ),
+                TriggerUpdate.Decision(
+                    TriggerDecision.ExperienceShown(ExperienceRef("exp-1", "v1", "j-1")),
+                ),
             ),
             updates,
         )
+        core.stop()
+    }
+
+    @Test
+    fun journeyStartPresentsThroughCoreWithItsJourneyLinkage() = runBlocking {
+        val started = ExperienceRef("exp-1", "v1", "j-1")
+        val presented = mutableListOf<Pair<String, String?>>()
+        val core = core(
+            transportWithGate(null),
+            journeys = TriggerService.JourneyRouter { _ ->
+                listOf(TriggerService.JourneyTriggerResult.Started(started))
+            },
+            presenter = TriggerService.ExperiencePresenter { version, journeyId ->
+                presented += version to journeyId
+                ExperienceRef("exp-1", version, journeyId)
+            },
+        )
+
+        assertEquals(
+            listOf(
+                TriggerUpdate.Decision(TriggerDecision.JourneyStarted(started)),
+                TriggerUpdate.Decision(TriggerDecision.ExperienceShown(started)),
+            ),
+            collect(core, "moment"),
+        )
+        assertEquals(listOf("v1" to "j-1"), presented)
+        core.stop()
+    }
+
+    @Test
+    fun journeyCloseReasonReachesJourneyServiceThroughProductionComposition() = runBlocking {
+        val journeyId = "composition-${UUID.randomUUID()}"
+        val started = ExperienceRef("exp-composed", "v-composed", journeyId)
+        val launched = mutableListOf<String>()
+        val rivFile = temporaryFolder.newFile("composed.riv").apply { writeBytes(byteArrayOf(1)) }
+        val factory = NuxieCore.PresentationFactory { reportOutcome ->
+            ExperiencePresentationService(
+                releases = PresentationReleaseProvider { presentationRelease(started) },
+                acquire = {
+                    AcquiredRelease(
+                        identity = experienceIdentity(started),
+                        artifactsByKey = mapOf("renders/composed.riv" to rivFile),
+                        rivFile = rivFile,
+                        protection = Closeable {},
+                    )
+                },
+                emit = { _, _ -> },
+                scope = CoroutineScope(Dispatchers.Unconfined),
+                runtimeAvailable = { true },
+                launch = launched::add,
+                reportOutcome = reportOutcome,
+            )
+        }
+        val core = core(
+            transportWithGate(null),
+            journeys = TriggerService.JourneyRouter { _ ->
+                listOf(TriggerService.JourneyTriggerResult.Started(started))
+            },
+            presentationFactory = factory,
+        )
+        val distinctId = core.identity.distinctId()
+        val store = JourneyStore(RuntimeEnvironment.getApplication().filesDir)
+        store.save(
+            JourneyRun(
+                id = journeyId,
+                distinctId = distinctId,
+                experienceId = started.experienceId,
+                experienceVersion = requireNotNull(started.experienceVersion),
+                epoch = 0,
+                plane = JourneyPlane.DEVICE,
+                settingsSnapshot = buildJsonObject {},
+                state = JourneyRunState.ACTIVE,
+            ),
+        )
+
+        val updates = async { collect(core, "moment") }
+        while (launched.isEmpty()) yield()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        assertEquals(
+            listOf(
+                TriggerUpdate.Decision(TriggerDecision.JourneyStarted(started)),
+                TriggerUpdate.Decision(TriggerDecision.ExperienceShown(started)),
+            ),
+            updates.await(),
+        )
+
+        PresentationRegistry.reportDismissed(launched.single(), CloseReason.GoalMet)
+
+        val ended = requireNotNull(store.load(distinctId, journeyId))
+        assertEquals(JourneyRunState.TERMINAL, ended.state)
+        assertEquals("goal_met", ended.terminalReason)
         core.stop()
     }
 
@@ -242,6 +367,9 @@ class TriggerServiceTest {
                 TriggerUpdate.Decision(
                     TriggerDecision.JourneyStarted(ExperienceRef("exp-1", "v1", "j-1")),
                 ),
+                TriggerUpdate.Decision(
+                    TriggerDecision.ExperienceShown(ExperienceRef("exp-1", "v1", "j-1")),
+                ),
             ),
             updates,
         )
@@ -269,6 +397,9 @@ class TriggerServiceTest {
                 ),
                 TriggerUpdate.Decision(
                     TriggerDecision.Suppressed(ai.nuxie.sdk.SuppressReason.ALREADY_ACTIVE),
+                ),
+                TriggerUpdate.Decision(
+                    TriggerDecision.ExperienceShown(ExperienceRef("exp-1", "v1", "j-1")),
                 ),
             ),
             updates,
@@ -346,4 +477,30 @@ class TriggerServiceTest {
         )
         core.stop()
     }
+
+    private fun presentationRelease(ref: ExperienceRef): PresentationRelease = PresentationRelease(
+        release = AuthenticatedRelease(
+            keyId = "key",
+            descriptorSha256 = "sha",
+            identity = experienceIdentity(ref),
+            descriptorBytes = ByteArray(0),
+            descriptor = buildJsonObject {
+                put("render", buildJsonObject {})
+                put("presentation", buildJsonObject {})
+            },
+            publishedAtSeqToPromote = 1,
+        ),
+        delivery = Delivery("https://render.example/", "https://assets.example/"),
+    )
+
+    private fun experienceIdentity(ref: ExperienceRef) = ExperienceReleaseIdentity(
+        appId = "app",
+        environment = "development",
+        experienceId = ref.experienceId,
+        experienceVersionId = requireNotNull(ref.experienceVersion),
+        buildId = "build",
+        versionNumber = 1,
+        publishedAt = "2026-08-24T00:00:00Z",
+        publishedAtSeq = 1,
+    )
 }

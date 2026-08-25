@@ -11,12 +11,17 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 class ReleaseAcquisitionTest {
+    @get:Rule
+    val temporaryFolder = TemporaryFolder()
+
     private fun sha(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
@@ -196,5 +201,46 @@ class ReleaseAcquisitionTest {
 
         assertTrue(file.exists())
         assertEquals(0, cache.digestLockCount())
+    }
+
+    @Test
+    fun laterReleaseWithMismatchingSizeCannotDeleteActivelyProtectedDigest() {
+        val content = "leased-release".encodeToByteArray()
+        val digest = sha(content)
+        val cacheDirectory = temporaryFolder.newFolder("protected-mismatch")
+        val cache = ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            ScriptedTransport { HttpTransport.Response(200, content) },
+            cacheDirectory = cacheDirectory,
+        )
+        val leasedFile = cache.acquire(
+            "first-release",
+            digest,
+            content.size.toLong(),
+            content.size.toLong(),
+            "https://cdn.nuxie.test/",
+        )
+        val protection = cache.protect(setOf(digest))
+        try {
+            val failure = assertThrows(ReleaseArtifactAcquisitionException::class.java) {
+                ReleaseArtifactCache(
+                    RuntimeEnvironment.getApplication(),
+                    ScriptedTransport { error("protected mismatch must not fetch") },
+                    cacheDirectory = cacheDirectory,
+                ).acquire(
+                    "second-release",
+                    digest,
+                    content.size + 1L,
+                    content.size + 1L,
+                    "https://cdn.nuxie.test/",
+                )
+            }
+
+            assertEquals(ReleaseArtifactAcquisitionException.Reason.SIZE_MISMATCH, failure.reason)
+            assertTrue(leasedFile.exists())
+            assertEquals(content.toList(), leasedFile.readBytes().toList())
+        } finally {
+            protection.close()
+        }
     }
 }

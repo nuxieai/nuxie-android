@@ -1176,6 +1176,48 @@ class ReleaseArtifactAcquirerTest {
     }
 
     @Test
+    fun oneDigestDeclaredAcrossAssetAndScriptRolesIsRejected() = runTest {
+        val rivBytes = "cross-role-riv".encodeToByteArray()
+        val sharedBytes = "cross-role-external".encodeToByteArray()
+        val digest = sha256(sharedBytes)
+        val riv = artifact(
+            key = "renders/sha256/${sha256(rivBytes)}.riv",
+            bytes = rivBytes,
+            contentType = "application/vnd.rive",
+        )
+        val asset = artifact(
+            key = "assets/sha256/$digest.bin",
+            bytes = sharedBytes,
+            contentType = "application/octet-stream",
+            kind = "data",
+        )
+        val script = artifact(
+            key = "screen-behavior/sha256/$digest.bin",
+            bytes = sharedBytes,
+            contentType = "application/octet-stream",
+        )
+        var requestCount = 0
+        val cache = ReleaseArtifactCache(
+            RuntimeEnvironment.getApplication(),
+            HttpTransport {
+                requestCount += 1
+                error("No request is expected")
+            },
+            cacheDirectory = temporaryFolder.newFolder("cross-role-digest"),
+        )
+
+        val failure = acquisitionFailure {
+            ReleaseArtifactAcquirer(cache).acquire(
+                release(riv, assets = listOf(asset), scripts = listOf(script)),
+                delivery(),
+            )
+        }
+
+        assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+        assertEquals(0, requestCount)
+    }
+
+    @Test
     fun transportFailureCanBeRetriedWithoutAStalePartialFile() = runTest {
         val rivBytes = "retry-riv".encodeToByteArray()
         val riv = artifact(

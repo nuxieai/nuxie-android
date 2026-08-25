@@ -46,12 +46,16 @@ internal class ReleaseArtifactCache(
 ) {
     private val baseDir = cacheDirectory
         ?: File((context.applicationContext ?: context).cacheDir, "nuxie/release_objects")
+    private val filesystemLock = CacheFilesystemLock(baseDir)
+    private val protectionRegistry = CacheProtectionRegistry(filesystemLock)
     private val cacheScope = cacheScope(baseDir)
 
     init {
-        baseDir.mkdirs()
-        synchronized(cacheScope.lock) {
-            sweepTemporaryFilesLocked()
+        filesystemLock.withLock {
+            baseDir.mkdirs()
+            synchronized(cacheScope.lock) {
+                sweepTemporaryFilesLocked()
+            }
         }
     }
 
@@ -63,6 +67,7 @@ internal class ReleaseArtifactCache(
     /** Protects a complete release set from pruning until the returned lease is closed. */
     fun protect(digests: Collection<String>): Closeable {
         val uniqueDigests = digests.toSet()
+        val filesystemProtection = protectionRegistry.register(uniqueDigests)
         synchronized(cacheScope.lock) {
             uniqueDigests.forEach { digest ->
                 cacheScope.protectedDigestCounts[digest] =
@@ -79,18 +84,20 @@ internal class ReleaseArtifactCache(
                     else cacheScope.protectedDigestCounts[digest] = remaining
                 }
             }
+            filesystemProtection.close()
         }
     }
 
     fun cachedFile(sha256: String): File? {
-        val file = fileFor(sha256)
-        return file.takeIf { it.isFile }?.also { it.setLastModified(System.currentTimeMillis()) }
+        return filesystemLock.withTargetLock(sha256) {
+            val file = fileFor(sha256)
+            file.takeIf { it.isFile }?.also { it.setLastModified(System.currentTimeMillis()) }
+        }
     }
 
     /**
      * Returns a verified cache entry or downloads, verifies, and atomically
-     * publishes one. An in-process per-cache-directory digest lock avoids
-     * platform-specific filesystem locking for this app-local cache; a
+     * publishes one. A cross-process target lock serializes each digest, and a
      * same-directory rename ensures readers can never observe partial bytes.
      */
     fun acquire(
@@ -108,30 +115,38 @@ internal class ReleaseArtifactCache(
             fail(key, Reason.SIZE_OVERRUN, "artifact exceeds size limit")
         }
 
-        val digestLock = synchronized(cacheScope.lock) {
-            cacheScope.digestLocks.getOrPut(sha256, ::DigestLock).also {
-                it.references += 1
+        val acquired = filesystemLock.withTargetLock(sha256) {
+            val digestLock = synchronized(cacheScope.lock) {
+                cacheScope.digestLocks.getOrPut(sha256, ::DigestLock).also {
+                    it.references += 1
+                }
+            }
+            try {
+                synchronized(digestLock.monitor) {
+                    verifiedCachedFile(key, sha256, expectedSizeBytes)
+                        ?: downloadAndPublish(
+                            key = key,
+                            sha256 = sha256,
+                            expectedSizeBytes = expectedSizeBytes,
+                            maximumBytes = minOf(expectedSizeBytes, maxBytes),
+                            expectedContentType = expectedContentType,
+                            baseUrl = baseUrl,
+                            initialUrl = sourceUrl,
+                        )
+                }
+            } finally {
+                synchronized(cacheScope.lock) {
+                    digestLock.references -= 1
+                    dropDigestLockIfUnreferencedLocked(sha256)
+                }
             }
         }
-        try {
-            synchronized(digestLock.monitor) {
-                verifiedCachedFile(key, sha256, expectedSizeBytes)?.let { return it }
-                return downloadAndPublish(
-                    key = key,
-                    sha256 = sha256,
-                    expectedSizeBytes = expectedSizeBytes,
-                    maximumBytes = minOf(expectedSizeBytes, maxBytes),
-                    expectedContentType = expectedContentType,
-                    baseUrl = baseUrl,
-                    initialUrl = sourceUrl,
-                )
-            }
-        } finally {
+        filesystemLock.withLock {
             synchronized(cacheScope.lock) {
-                digestLock.references -= 1
-                dropDigestLockIfUnreferencedLocked(sha256)
+                pruneLocked()
             }
         }
+        return acquired
     }
 
     /** Preflights a descriptor key without performing I/O. */
@@ -285,7 +300,6 @@ internal class ReleaseArtifactCache(
                 verifiedCachedFile(key, sha256, expectedSizeBytes)?.let { return it }
                 fail(key, Reason.CACHE_IO, "could not publish verified artifact")
             }
-            synchronized(cacheScope.lock) { pruneLocked() }
             return destination
         } finally {
             synchronized(cacheScope.lock) {
@@ -304,7 +318,18 @@ internal class ReleaseArtifactCache(
     ): File? {
         val file = fileFor(sha256)
         if (!file.isFile) return null
-        val matches = file.length() == expectedSizeBytes && runCatching {
+        if (file.length() != expectedSizeBytes) {
+            if (isProtected(sha256)) {
+                fail(
+                    key,
+                    Reason.SIZE_MISMATCH,
+                    "protected cache entry size does not match this release declaration",
+                )
+            }
+            if (!file.delete()) fail(key, Reason.CACHE_IO, "could not remove invalid cache entry")
+            return null
+        }
+        val matchesDigest = runCatching {
             file.inputStream().buffered().use { input ->
                 val digest = MessageDigest.getInstance("SHA-256")
                 val buffer = ByteArray(STREAM_BUFFER_BYTES)
@@ -316,7 +341,14 @@ internal class ReleaseArtifactCache(
                 digest.digest().joinToString("") { "%02x".format(it) } == sha256
             }
         }.getOrDefault(false)
-        if (!matches) {
+        if (!matchesDigest) {
+            if (isProtected(sha256)) {
+                fail(
+                    key,
+                    Reason.DIGEST_MISMATCH,
+                    "protected cache entry digest does not match its content address",
+                )
+            }
             if (!file.delete()) fail(key, Reason.CACHE_IO, "could not remove invalid cache entry")
             return null
         }
@@ -386,6 +418,8 @@ internal class ReleaseArtifactCache(
 
     private fun pruneLocked() {
         sweepTemporaryFilesLocked()
+        val protectedDigests = cacheScope.protectedDigestCounts.keys.toSet() +
+            protectionRegistry.protectedDigests()
         val entries = baseDir.listFiles() ?: return
         val files = entries.filter { isDigest(it.name) }
         val temporaryBytes = entries
@@ -395,7 +429,7 @@ internal class ReleaseArtifactCache(
         if (total <= maxTotalBytes) return
         files.sortedWith(compareBy<File> { it.lastModified() }.thenBy { it.name }).forEach { file ->
             if (total <= maxTotalBytes) return
-            if (cacheScope.protectedDigestCounts.containsKey(file.name)) return@forEach
+            if (file.name in protectedDigests) return@forEach
             val length = file.length()
             if (file.delete()) {
                 total -= length
@@ -404,6 +438,11 @@ internal class ReleaseArtifactCache(
             else Log.w(LOG_TAG, "Failed to prune release artifact ${file.name}")
         }
     }
+
+    private fun isProtected(sha256: String): Boolean =
+        synchronized(cacheScope.lock) {
+            cacheScope.protectedDigestCounts.containsKey(sha256)
+        } || sha256 in protectionRegistry.protectedDigests()
 
     /**
      * Creation, reference changes, and removal all hold [CacheScope.lock]. A
