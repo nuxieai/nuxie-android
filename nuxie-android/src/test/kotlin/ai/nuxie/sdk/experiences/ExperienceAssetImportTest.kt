@@ -3,11 +3,9 @@ package ai.nuxie.sdk.experiences
 import ai.nuxie.sdk.runtime.ExpectedFileAsset
 import ai.nuxie.sdk.runtime.FileAssetKind
 import java.io.File
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -15,11 +13,25 @@ import org.junit.Test
 
 class ExperienceAssetImportTest {
     @Test
-    fun `fixture release builds the complete expected catalog and ordinal payloads`() {
-        val descriptor = fixtureDescriptor()
-        val render = descriptor.getValue("render").jsonObject
-        val image = render.getValue("assets").let { it as JsonArray }.single().jsonObject
-        val imageKey = image.getValue("key").let { it as JsonPrimitive }.content
+    fun `synthetic release builds the complete expected catalog and ordinal payloads`() {
+        val digest = "a".repeat(64)
+        val imageKey = "assets/sha256/$digest.png"
+        val descriptor = buildJsonObject {
+            put("render", buildJsonObject {
+                put("assets", buildJsonArray {
+                    add(buildJsonObject {
+                        put("kind", "image")
+                        put("key", imageKey)
+                        put("sha256", digest)
+                        put("sizeBytes", 4)
+                        put("contentType", "image/png")
+                        put("riveAssetId", 1)
+                        put("riveUniqueName", "hero-1")
+                        put("required", true)
+                    })
+                })
+            })
+        }
         val imageBytes = byteArrayOf(1, 2, 3, 4)
         val imageFile = File.createTempFile("asset-import-image-", ".png").apply {
             writeBytes(imageBytes)
@@ -60,8 +72,24 @@ class ExperienceAssetImportTest {
     }
 
     @Test
-    fun `fixture declaration rejects embedded and noncanonical catalog identities`() {
-        val descriptor = fixtureDescriptor()
+    fun `synthetic declaration rejects embedded and noncanonical catalog identities`() {
+        val digest = "b".repeat(64)
+        val descriptor = buildJsonObject {
+            put("render", buildJsonObject {
+                put("assets", buildJsonArray {
+                    add(buildJsonObject {
+                        put("kind", "image")
+                        put("key", "assets/sha256/$digest.png")
+                        put("sha256", digest)
+                        put("sizeBytes", 4)
+                        put("contentType", "image/png")
+                        put("riveAssetId", 1)
+                        put("riveUniqueName", "hero-1")
+                        put("required", true)
+                    })
+                })
+            })
+        }
         val base = ExpectedFileAsset(
             ordinal = 0,
             kind = FileAssetKind.IMAGE,
@@ -86,9 +114,27 @@ class ExperienceAssetImportTest {
 
     @Test
     fun `bare-name declarations do not bind, matching the iOS convention`() {
+        val digest = "c".repeat(64)
+        val descriptor = buildJsonObject {
+            put("render", buildJsonObject {
+                put("assets", buildJsonArray {
+                    add(buildJsonObject {
+                        put("kind", "image")
+                        put("key", "assets/sha256/$digest.png")
+                        put("sha256", digest)
+                        put("sizeBytes", 4)
+                        put("contentType", "image/png")
+                        put("riveAssetId", 1)
+                        put("riveUniqueName", "hero")
+                        put("required", true)
+                    })
+                })
+            })
+        }
+
         assertThrows(IllegalArgumentException::class.java) {
             ExperienceAssetImportBuilder.build(
-                descriptor = rawFixtureDescriptor(),
+                descriptor = descriptor,
                 artifactsByKey = emptyMap(),
                 inspectedCatalog = listOf(
                     ExpectedFileAsset(
@@ -104,37 +150,6 @@ class ExperienceAssetImportTest {
                 ),
             )
         }
-    }
-
-    private fun fixtureDescriptor(): JsonObject {
-        // The synthetic envelope fixture predates asset binding and carries a
-        // bare riveUniqueName; the publisher and the iOS binding both use the
-        // Rive-uniquified "name-authoredId" form, so rewrite it here.
-        return withCanonicalUniqueNames(rawFixtureDescriptor())
-    }
-
-    private fun rawFixtureDescriptor(): JsonObject {
-        val fixture = File(
-            "${System.getProperty("user.dir")}/../fixtures/experience-release-descriptor/envelope.json",
-        )
-        val envelope = Json.parseToJsonElement(fixture.readText()).jsonObject
-        val encoded = envelope.getValue("descriptorBytesBase64")
-            .let { it as JsonPrimitive }.content
-        val bytes = java.util.Base64.getDecoder().decode(encoded)
-        return Json.parseToJsonElement(bytes.decodeToString()).jsonObject
-    }
-
-    private fun withCanonicalUniqueNames(descriptor: JsonObject): JsonObject {
-        val render = descriptor.getValue("render").jsonObject
-        val assets = JsonArray(
-            (render.getValue("assets") as JsonArray).map { value ->
-                val asset = value.jsonObject
-                val authoredId = (asset.getValue("riveAssetId") as JsonPrimitive).content
-                val uniqueName = (asset.getValue("riveUniqueName") as JsonPrimitive).content
-                JsonObject(asset + ("riveUniqueName" to JsonPrimitive("$uniqueName-$authoredId")))
-            },
-        )
-        return JsonObject(descriptor + ("render" to JsonObject(render + ("assets" to assets))))
     }
 
 }

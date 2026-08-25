@@ -140,6 +140,12 @@ static void retain_malloc_bytes(void *owner) { (void)owner; }
 
 static void release_malloc_bytes(void *owner) { free(owner); }
 
+static int clear_jni_exception(JNIEnv *env) {
+  if (!(*env)->ExceptionCheck(env)) return 0;
+  (*env)->ExceptionClear(env);
+  return 1;
+}
+
 static NuxAssetCallbackStatus lookup_external_asset(
     void *raw_context, const struct NuxExternalAssetRequest *request,
     struct NuxRetainedBytes *out_bytes) {
@@ -175,61 +181,70 @@ static NuxAssetCallbackStatus decode_image(
   }
   struct asset_import_context *context = raw_context;
   JNIEnv *env = context->env;
+  jclass decoder_class = NULL;
+  jobject decoded = NULL;
+  jclass decoded_class = NULL;
+  jbyteArray pixels = NULL;
+  uint8_t *owned = NULL;
   jbyteArray encoded = (*env)->NewByteArray(env, (jsize)request->encoded.len);
-  if (encoded == NULL) return NUX_ASSET_CALLBACK_STATUS_FAILED;
+  if (clear_jni_exception(env) || encoded == NULL) {
+    goto decode_image_failed;
+  }
   if (request->encoded.len != 0) {
     (*env)->SetByteArrayRegion(env, encoded, 0, (jsize)request->encoded.len,
                               (const jbyte *)request->encoded.data);
+    if (clear_jni_exception(env)) goto decode_image_failed;
   }
-  jclass decoder_class = (*env)->GetObjectClass(env, context->decoder);
-  jmethodID decode = decoder_class == NULL
-      ? NULL
-      : (*env)->GetMethodID(
-            env, decoder_class, "decode",
-            "([BIJ)Lai/nuxie/sdk/runtime/DecodedImage;");
-  jobject decoded = decode == NULL
-      ? NULL
-      : (*env)->CallObjectMethod(env, context->decoder, decode, encoded,
-                                 (jint)request->maximum_dimension,
-                                 (jlong)request->maximum_decoded_bytes);
+  decoder_class = (*env)->GetObjectClass(env, context->decoder);
+  if (clear_jni_exception(env) || decoder_class == NULL) {
+    goto decode_image_failed;
+  }
+  jmethodID decode = (*env)->GetMethodID(
+      env, decoder_class, "decode",
+      "([BIJ)Lai/nuxie/sdk/runtime/DecodedImage;");
+  if (clear_jni_exception(env) || decode == NULL) goto decode_image_failed;
+  decoded = (*env)->CallObjectMethod(
+      env, context->decoder, decode, encoded,
+      (jint)request->maximum_dimension,
+      (jlong)request->maximum_decoded_bytes);
+  if (clear_jni_exception(env) || decoded == NULL) goto decode_image_failed;
   (*env)->DeleteLocalRef(env, encoded);
-  if (decoder_class != NULL) (*env)->DeleteLocalRef(env, decoder_class);
-  if ((*env)->ExceptionCheck(env)) {
-    (*env)->ExceptionClear(env);
-    if (decoded != NULL) (*env)->DeleteLocalRef(env, decoded);
-    return NUX_ASSET_CALLBACK_STATUS_FAILED;
-  }
-  if (decoded == NULL) return NUX_ASSET_CALLBACK_STATUS_FAILED;
+  encoded = NULL;
+  (*env)->DeleteLocalRef(env, decoder_class);
+  decoder_class = NULL;
 
-  jclass decoded_class = (*env)->GetObjectClass(env, decoded);
-  jmethodID get_width = decoded_class == NULL
-      ? NULL : (*env)->GetMethodID(env, decoded_class, "getWidth", "()I");
-  jmethodID get_height = decoded_class == NULL
-      ? NULL : (*env)->GetMethodID(env, decoded_class, "getHeight", "()I");
-  jmethodID get_row_bytes = decoded_class == NULL
-      ? NULL : (*env)->GetMethodID(env, decoded_class, "getRowBytes", "()I");
-  jmethodID get_pixels = decoded_class == NULL
-      ? NULL : (*env)->GetMethodID(env, decoded_class, "getPixels", "()[B");
-  if (get_width == NULL || get_height == NULL || get_row_bytes == NULL ||
-      get_pixels == NULL) {
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-    if (decoded_class != NULL) (*env)->DeleteLocalRef(env, decoded_class);
-    (*env)->DeleteLocalRef(env, decoded);
-    return NUX_ASSET_CALLBACK_STATUS_FAILED;
+  decoded_class = (*env)->GetObjectClass(env, decoded);
+  if (clear_jni_exception(env) || decoded_class == NULL) {
+    goto decode_image_failed;
   }
+  jmethodID get_width =
+      (*env)->GetMethodID(env, decoded_class, "getWidth", "()I");
+  if (clear_jni_exception(env) || get_width == NULL) goto decode_image_failed;
+  jmethodID get_height =
+      (*env)->GetMethodID(env, decoded_class, "getHeight", "()I");
+  if (clear_jni_exception(env) || get_height == NULL) goto decode_image_failed;
+  jmethodID get_row_bytes =
+      (*env)->GetMethodID(env, decoded_class, "getRowBytes", "()I");
+  if (clear_jni_exception(env) || get_row_bytes == NULL) {
+    goto decode_image_failed;
+  }
+  jmethodID get_pixels =
+      (*env)->GetMethodID(env, decoded_class, "getPixels", "()[B");
+  if (clear_jni_exception(env) || get_pixels == NULL) goto decode_image_failed;
   jint width = (*env)->CallIntMethod(env, decoded, get_width);
+  if (clear_jni_exception(env)) goto decode_image_failed;
   jint height = (*env)->CallIntMethod(env, decoded, get_height);
+  if (clear_jni_exception(env)) goto decode_image_failed;
   jint row_bytes = (*env)->CallIntMethod(env, decoded, get_row_bytes);
-  jbyteArray pixels = (jbyteArray)(*env)->CallObjectMethod(env, decoded, get_pixels);
-  if ((*env)->ExceptionCheck(env) || pixels == NULL || width <= 0 || height <= 0 ||
+  if (clear_jni_exception(env)) goto decode_image_failed;
+  pixels =
+      (jbyteArray)(*env)->CallObjectMethod(env, decoded, get_pixels);
+  if (clear_jni_exception(env) || pixels == NULL || width <= 0 || height <= 0 ||
       row_bytes <= 0) {
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-    if (pixels != NULL) (*env)->DeleteLocalRef(env, pixels);
-    (*env)->DeleteLocalRef(env, decoded_class);
-    (*env)->DeleteLocalRef(env, decoded);
-    return NUX_ASSET_CALLBACK_STATUS_FAILED;
+    goto decode_image_failed;
   }
   jsize pixel_len = (*env)->GetArrayLength(env, pixels);
+  if (clear_jni_exception(env)) goto decode_image_failed;
   uint64_t tight_row_bytes = (uint64_t)(uint32_t)width * 4u;
   uint64_t tight_byte_count = tight_row_bytes * (uint64_t)(uint32_t)height;
   if ((uint32_t)width > request->maximum_dimension ||
@@ -237,23 +252,20 @@ static NuxAssetCallbackStatus decode_image(
       tight_row_bytes > UINT32_MAX || (uint64_t)(uint32_t)row_bytes != tight_row_bytes ||
       tight_byte_count != (uint64_t)(uint32_t)pixel_len ||
       tight_byte_count > request->maximum_decoded_bytes) {
-    (*env)->DeleteLocalRef(env, pixels);
-    (*env)->DeleteLocalRef(env, decoded_class);
-    (*env)->DeleteLocalRef(env, decoded);
-    return NUX_ASSET_CALLBACK_STATUS_FAILED;
+    goto decode_image_failed;
   }
-  uint8_t *owned = malloc(pixel_len == 0 ? 1 : (size_t)pixel_len);
+  owned = malloc(pixel_len == 0 ? 1 : (size_t)pixel_len);
   if (owned != NULL && pixel_len != 0) {
     (*env)->GetByteArrayRegion(env, pixels, 0, pixel_len, (jbyte *)owned);
+    if (clear_jni_exception(env)) goto decode_image_failed;
   }
+  if (owned == NULL) goto decode_image_failed;
   (*env)->DeleteLocalRef(env, pixels);
+  pixels = NULL;
   (*env)->DeleteLocalRef(env, decoded_class);
+  decoded_class = NULL;
   (*env)->DeleteLocalRef(env, decoded);
-  if (owned == NULL || (*env)->ExceptionCheck(env)) {
-    free(owned);
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-    return NUX_ASSET_CALLBACK_STATUS_FAILED;
-  }
+  decoded = NULL;
 
   memset(out_image, 0, sizeof(*out_image));
   out_image->struct_size = (uint32_t)sizeof(*out_image);
@@ -268,26 +280,54 @@ static NuxAssetCallbackStatus decode_image(
   out_image->pixels.retain = retain_malloc_bytes;
   out_image->pixels.release = release_malloc_bytes;
   return NUX_ASSET_CALLBACK_STATUS_OK;
+
+decode_image_failed:
+  free(owned);
+  if (pixels != NULL) (*env)->DeleteLocalRef(env, pixels);
+  if (decoded_class != NULL) (*env)->DeleteLocalRef(env, decoded_class);
+  if (decoded != NULL) (*env)->DeleteLocalRef(env, decoded);
+  if (decoder_class != NULL) (*env)->DeleteLocalRef(env, decoder_class);
+  if (encoded != NULL) (*env)->DeleteLocalRef(env, encoded);
+  return NUX_ASSET_CALLBACK_STATUS_FAILED;
 }
 
 static jstring new_string_view(JNIEnv *env, struct NuxStringView view) {
   if ((view.data == NULL && view.len != 0) || view.len > INT32_MAX) return NULL;
+  jclass string_class = NULL;
+  jstring charset = NULL;
+  jstring value = NULL;
   jbyteArray bytes = (*env)->NewByteArray(env, (jsize)view.len);
-  if (bytes == NULL) return NULL;
+  if (clear_jni_exception(env) || bytes == NULL) goto new_string_view_failed;
   if (view.len != 0) {
     (*env)->SetByteArrayRegion(env, bytes, 0, (jsize)view.len,
                               (const jbyte *)view.data);
+    if (clear_jni_exception(env)) goto new_string_view_failed;
   }
-  jclass string_class = (*env)->FindClass(env, "java/lang/String");
-  jmethodID constructor = string_class == NULL ? NULL : (*env)->GetMethodID(
+  string_class = (*env)->FindClass(env, "java/lang/String");
+  if (clear_jni_exception(env) || string_class == NULL) {
+    goto new_string_view_failed;
+  }
+  jmethodID constructor = (*env)->GetMethodID(
       env, string_class, "<init>", "([BLjava/lang/String;)V");
-  jstring charset = constructor == NULL ? NULL : (*env)->NewStringUTF(env, "UTF-8");
-  jstring value = charset == NULL ? NULL : (jstring)(*env)->NewObject(
+  if (clear_jni_exception(env) || constructor == NULL) {
+    goto new_string_view_failed;
+  }
+  charset = (*env)->NewStringUTF(env, "UTF-8");
+  if (clear_jni_exception(env) || charset == NULL) goto new_string_view_failed;
+  value = (jstring)(*env)->NewObject(
       env, string_class, constructor, bytes, charset);
-  if (charset != NULL) (*env)->DeleteLocalRef(env, charset);
-  if (string_class != NULL) (*env)->DeleteLocalRef(env, string_class);
+  if (clear_jni_exception(env) || value == NULL) goto new_string_view_failed;
+  (*env)->DeleteLocalRef(env, charset);
+  (*env)->DeleteLocalRef(env, string_class);
   (*env)->DeleteLocalRef(env, bytes);
   return value;
+
+new_string_view_failed:
+  if (value != NULL) (*env)->DeleteLocalRef(env, value);
+  if (charset != NULL) (*env)->DeleteLocalRef(env, charset);
+  if (string_class != NULL) (*env)->DeleteLocalRef(env, string_class);
+  if (bytes != NULL) (*env)->DeleteLocalRef(env, bytes);
+  return NULL;
 }
 
 JNIEXPORT jobjectArray JNICALL
@@ -296,7 +336,14 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileInspectAssets(
   (void)self;
   if (bytes == NULL) return NULL;
   jsize length = (*env)->GetArrayLength(env, bytes);
+  if (clear_jni_exception(env)) return NULL;
   jbyte *data = (*env)->GetByteArrayElements(env, bytes, NULL);
+  if (clear_jni_exception(env)) {
+    if (data != NULL) {
+      (*env)->ReleaseByteArrayElements(env, bytes, data, JNI_ABORT);
+    }
+    return NULL;
+  }
   if (data == NULL) return NULL;
   struct NuxFile *file = NULL;
   NuxStatus status = nux_file_import((const uint8_t *)data, (size_t)length, &file);
@@ -310,40 +357,77 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileInspectAssets(
   }
   jclass item_class = (*env)->FindClass(
       env, "ai/nuxie/sdk/runtime/NativeExpectedFileAsset");
-  jmethodID constructor = item_class == NULL ? NULL : (*env)->GetMethodID(
+  if (clear_jni_exception(env)) {
+    if (item_class != NULL) (*env)->DeleteLocalRef(env, item_class);
+    nux_file_free(file);
+    return NULL;
+  }
+  if (item_class == NULL) {
+    nux_file_free(file);
+    return NULL;
+  }
+  jmethodID constructor = (*env)->GetMethodID(
       env, item_class, "<init>",
       "(IIZJLjava/lang/String;Ljava/lang/String;ZZI)V");
-  jobjectArray result = constructor == NULL
-      ? NULL : (*env)->NewObjectArray(env, (jsize)count, item_class, NULL);
-  for (size_t index = 0; result != NULL && index < count; index++) {
+  if (clear_jni_exception(env) || constructor == NULL) {
+    (*env)->DeleteLocalRef(env, item_class);
+    nux_file_free(file);
+    return NULL;
+  }
+  jobjectArray result =
+      (*env)->NewObjectArray(env, (jsize)count, item_class, NULL);
+  if (clear_jni_exception(env)) {
+    if (result != NULL) (*env)->DeleteLocalRef(env, result);
+    (*env)->DeleteLocalRef(env, item_class);
+    nux_file_free(file);
+    return NULL;
+  }
+  if (result == NULL) {
+    (*env)->DeleteLocalRef(env, item_class);
+    nux_file_free(file);
+    return NULL;
+  }
+  int failed = 0;
+  for (size_t index = 0; index < count; index++) {
     struct NuxFileAssetDescriptorView view;
     memset(&view, 0, sizeof(view));
     view.struct_size = (uint32_t)sizeof(view);
     if (nux_file_asset_descriptor(file, index, &view) != NUX_STATUS_OK) {
-      result = NULL;
+      failed = 1;
       break;
     }
     jstring name = new_string_view(env, view.name);
+    if (name == NULL) {
+      failed = 1;
+      break;
+    }
     jstring extension = new_string_view(env, view.file_extension);
-    jobject item = name == NULL || extension == NULL ? NULL : (*env)->NewObject(
+    if (extension == NULL) {
+      (*env)->DeleteLocalRef(env, name);
+      failed = 1;
+      break;
+    }
+    jobject item = (*env)->NewObject(
         env, item_class, constructor, (jint)view.ordinal, (jint)view.kind,
         (jboolean)(view.has_authored_id != 0), (jlong)view.authored_id,
         name, extension, (jboolean)(view.is_embedded != 0),
         (jboolean)(view.has_contents_record != 0),
         (jint)view.required_provider_flags);
-    if (item == NULL || (*env)->ExceptionCheck(env)) {
-      result = NULL;
+    if (clear_jni_exception(env) || item == NULL) {
+      failed = 1;
     } else {
       (*env)->SetObjectArrayElement(env, result, (jsize)index, item);
+      if (clear_jni_exception(env)) failed = 1;
     }
     if (item != NULL) (*env)->DeleteLocalRef(env, item);
-    if (name != NULL) (*env)->DeleteLocalRef(env, name);
-    if (extension != NULL) (*env)->DeleteLocalRef(env, extension);
+    (*env)->DeleteLocalRef(env, name);
+    (*env)->DeleteLocalRef(env, extension);
+    if (failed) break;
   }
   nux_file_free(file);
-  if (item_class != NULL) (*env)->DeleteLocalRef(env, item_class);
-  if ((*env)->ExceptionCheck(env)) {
-    (*env)->ExceptionClear(env);
+  (*env)->DeleteLocalRef(env, item_class);
+  if (failed) {
+    (*env)->DeleteLocalRef(env, result);
     return NULL;
   }
   return result;
@@ -367,17 +451,33 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNewConfigured(
     return 0;
   }
   jsize count = (*env)->GetArrayLength(env, ordinal_array);
+  if (clear_jni_exception(env)) return 0;
   jsize external_count = (*env)->GetArrayLength(env, external_ordinal_array);
+  if (clear_jni_exception(env)) return 0;
+  jsize kind_count = (*env)->GetArrayLength(env, kind_array);
+  if (clear_jni_exception(env)) return 0;
+  jsize has_id_count = (*env)->GetArrayLength(env, has_id_array);
+  if (clear_jni_exception(env)) return 0;
+  jsize id_count = (*env)->GetArrayLength(env, id_array);
+  if (clear_jni_exception(env)) return 0;
+  jsize name_count = (*env)->GetArrayLength(env, name_array);
+  if (clear_jni_exception(env)) return 0;
+  jsize extension_count = (*env)->GetArrayLength(env, extension_array);
+  if (clear_jni_exception(env)) return 0;
+  jsize embedded_count = (*env)->GetArrayLength(env, embedded_array);
+  if (clear_jni_exception(env)) return 0;
+  jsize contents_count = (*env)->GetArrayLength(env, contents_array);
+  if (clear_jni_exception(env)) return 0;
+  jsize flags_count = (*env)->GetArrayLength(env, flags_array);
+  if (clear_jni_exception(env)) return 0;
+  jsize external_payload_count =
+      (*env)->GetArrayLength(env, external_payload_array);
+  if (clear_jni_exception(env)) return 0;
   if (count <= 0 || count > NUX_FILE_ASSET_CATALOG_HARD_MAX ||
-      (*env)->GetArrayLength(env, kind_array) != count ||
-      (*env)->GetArrayLength(env, has_id_array) != count ||
-      (*env)->GetArrayLength(env, id_array) != count ||
-      (*env)->GetArrayLength(env, name_array) != count ||
-      (*env)->GetArrayLength(env, extension_array) != count ||
-      (*env)->GetArrayLength(env, embedded_array) != count ||
-      (*env)->GetArrayLength(env, contents_array) != count ||
-      (*env)->GetArrayLength(env, flags_array) != count ||
-      (*env)->GetArrayLength(env, external_payload_array) != external_count) {
+      kind_count != count || has_id_count != count || id_count != count ||
+      name_count != count || extension_count != count ||
+      embedded_count != count || contents_count != count ||
+      flags_count != count || external_payload_count != external_count) {
     return 0;
   }
 
@@ -406,17 +506,24 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNewConfigured(
     goto cleanup_configured_import;
   }
   (*env)->GetIntArrayRegion(env, ordinal_array, 0, count, ordinals);
+  if (clear_jni_exception(env)) goto cleanup_configured_import;
   (*env)->GetIntArrayRegion(env, kind_array, 0, count, kinds);
+  if (clear_jni_exception(env)) goto cleanup_configured_import;
   (*env)->GetBooleanArrayRegion(env, has_id_array, 0, count, has_ids);
+  if (clear_jni_exception(env)) goto cleanup_configured_import;
   (*env)->GetLongArrayRegion(env, id_array, 0, count, ids);
+  if (clear_jni_exception(env)) goto cleanup_configured_import;
   (*env)->GetBooleanArrayRegion(env, embedded_array, 0, count, embedded);
+  if (clear_jni_exception(env)) goto cleanup_configured_import;
   (*env)->GetBooleanArrayRegion(env, contents_array, 0, count, contents);
+  if (clear_jni_exception(env)) goto cleanup_configured_import;
   (*env)->GetIntArrayRegion(env, flags_array, 0, count, flags);
+  if (clear_jni_exception(env)) goto cleanup_configured_import;
   if (external_count != 0) {
     (*env)->GetIntArrayRegion(env, external_ordinal_array, 0, external_count,
                              external_ordinals);
+    if (clear_jni_exception(env)) goto cleanup_configured_import;
   }
-  if ((*env)->ExceptionCheck(env)) goto cleanup_configured_import;
 
   for (jsize index = 0; index < count; index++) {
     if (ordinals[index] != index || ids[index] < 0 || ids[index] > UINT32_MAX) {
@@ -424,15 +531,34 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNewConfigured(
     }
     jbyteArray name_bytes = (jbyteArray)(*env)->GetObjectArrayElement(
         env, name_array, index);
+    if (clear_jni_exception(env)) {
+      if (name_bytes != NULL) (*env)->DeleteLocalRef(env, name_bytes);
+      goto cleanup_configured_import;
+    }
     jbyteArray extension_bytes = (jbyteArray)(*env)->GetObjectArrayElement(
         env, extension_array, index);
+    if (clear_jni_exception(env)) {
+      if (name_bytes != NULL) (*env)->DeleteLocalRef(env, name_bytes);
+      if (extension_bytes != NULL) (*env)->DeleteLocalRef(env, extension_bytes);
+      goto cleanup_configured_import;
+    }
     if (name_bytes == NULL || extension_bytes == NULL) {
       if (name_bytes != NULL) (*env)->DeleteLocalRef(env, name_bytes);
       if (extension_bytes != NULL) (*env)->DeleteLocalRef(env, extension_bytes);
       goto cleanup_configured_import;
     }
     jsize name_len = (*env)->GetArrayLength(env, name_bytes);
+    if (clear_jni_exception(env)) {
+      (*env)->DeleteLocalRef(env, name_bytes);
+      (*env)->DeleteLocalRef(env, extension_bytes);
+      goto cleanup_configured_import;
+    }
     jsize extension_len = (*env)->GetArrayLength(env, extension_bytes);
+    if (clear_jni_exception(env)) {
+      (*env)->DeleteLocalRef(env, name_bytes);
+      (*env)->DeleteLocalRef(env, extension_bytes);
+      goto cleanup_configured_import;
+    }
     names[index] = malloc(name_len == 0 ? 1 : (size_t)name_len);
     extensions[index] = malloc(extension_len == 0 ? 1 : (size_t)extension_len);
     if (names[index] == NULL || extensions[index] == NULL) {
@@ -443,14 +569,23 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNewConfigured(
     if (name_len != 0) {
       (*env)->GetByteArrayRegion(env, name_bytes, 0, name_len,
                                  (jbyte *)names[index]);
+      if (clear_jni_exception(env)) {
+        (*env)->DeleteLocalRef(env, name_bytes);
+        (*env)->DeleteLocalRef(env, extension_bytes);
+        goto cleanup_configured_import;
+      }
     }
     if (extension_len != 0) {
       (*env)->GetByteArrayRegion(env, extension_bytes, 0, extension_len,
                                  (jbyte *)extensions[index]);
+      if (clear_jni_exception(env)) {
+        (*env)->DeleteLocalRef(env, name_bytes);
+        (*env)->DeleteLocalRef(env, extension_bytes);
+        goto cleanup_configured_import;
+      }
     }
     (*env)->DeleteLocalRef(env, name_bytes);
     (*env)->DeleteLocalRef(env, extension_bytes);
-    if ((*env)->ExceptionCheck(env)) goto cleanup_configured_import;
     expected[index].struct_size = (uint32_t)sizeof(expected[index]);
     expected[index].ordinal = (size_t)ordinals[index];
     expected[index].kind = (uint32_t)kinds[index];
@@ -471,8 +606,16 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNewConfigured(
     }
     jbyteArray bytes_value = (jbyteArray)(*env)->GetObjectArrayElement(
         env, external_payload_array, index);
+    if (clear_jni_exception(env)) {
+      if (bytes_value != NULL) (*env)->DeleteLocalRef(env, bytes_value);
+      goto cleanup_configured_import;
+    }
     if (bytes_value == NULL) goto cleanup_configured_import;
     jsize payload_len = (*env)->GetArrayLength(env, bytes_value);
+    if (clear_jni_exception(env)) {
+      (*env)->DeleteLocalRef(env, bytes_value);
+      goto cleanup_configured_import;
+    }
     payloads[ordinal].data = malloc(payload_len == 0 ? 1 : (size_t)payload_len);
     if (payloads[ordinal].data == NULL) {
       (*env)->DeleteLocalRef(env, bytes_value);
@@ -481,9 +624,12 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNewConfigured(
     if (payload_len != 0) {
       (*env)->GetByteArrayRegion(env, bytes_value, 0, payload_len,
                                  (jbyte *)payloads[ordinal].data);
+      if (clear_jni_exception(env)) {
+        (*env)->DeleteLocalRef(env, bytes_value);
+        goto cleanup_configured_import;
+      }
     }
     (*env)->DeleteLocalRef(env, bytes_value);
-    if ((*env)->ExceptionCheck(env)) goto cleanup_configured_import;
     payloads[ordinal].len = (size_t)payload_len;
     payloads[ordinal].present = 1;
   }
@@ -531,8 +677,11 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNewConfigured(
   config.expected_asset_count = (size_t)count;
 
   jsize file_len = (*env)->GetArrayLength(env, bytes);
+  if (clear_jni_exception(env)) goto cleanup_configured_import;
   file_bytes = (*env)->GetByteArrayElements(env, bytes, NULL);
-  if (file_bytes == NULL) goto cleanup_configured_import;
+  if (clear_jni_exception(env) || file_bytes == NULL) {
+    goto cleanup_configured_import;
+  }
   status = nux_file_import_configured((const uint8_t *)file_bytes,
                                       (size_t)file_len, &config, &file, &result);
   log_and_free_result("file_import_configured", status, result);
@@ -547,7 +696,7 @@ cleanup_configured_import:
     nux_file_free(file);
     file = NULL;
   }
-  if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+  clear_jni_exception(env);
   if (payloads != NULL) {
     for (jsize index = 0; index < count; index++) free(payloads[index].data);
   }
