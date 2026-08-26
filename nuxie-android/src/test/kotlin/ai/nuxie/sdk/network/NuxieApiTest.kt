@@ -171,6 +171,35 @@ class NuxieApiTest {
     }
 
     @Test
+    fun playPurchaseOmitsBlankProductAndPackageIdentifiersTokenFirst() {
+        val transport = object : HttpTransport {
+            lateinit var request: HttpTransport.Request
+            override fun execute(request: HttpTransport.Request): HttpTransport.Response {
+                this.request = request
+                return HttpTransport.Response(200, """{"success":true}""".encodeToByteArray())
+            }
+        }
+
+        val response = NuxieApi("pk_test_key", NuxieEnvironment.DEVELOPMENT, transport).postPurchase(
+            NuxieApi.PlayPurchaseReport(
+                packageName = null,
+                productId = null,
+                purchaseToken = "token-1",
+                basePlanId = null,
+                offerId = null,
+                obfuscatedAccountId = null,
+                distinctId = "customer-1",
+            ),
+        )
+
+        assertTrue(response.success)
+        assertEquals(
+            """{"apiKey":"pk_test_key","type":"playstore","purchase_token":"token-1","distinct_id":"customer-1"}""",
+            transport.request.body.decodeToString(),
+        )
+    }
+
+    @Test
     fun purchaseBackedFeatureUseUsesTheStrictCanonicalPlayWire() {
         val transport = object : HttpTransport {
             lateinit var request: HttpTransport.Request

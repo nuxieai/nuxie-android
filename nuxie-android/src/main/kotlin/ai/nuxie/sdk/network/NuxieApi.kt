@@ -38,8 +38,8 @@ internal class NuxieApi(
     ) : IOException("/purchase rejected with status $statusCode")
 
     data class PlayPurchaseReport(
-        val packageName: String,
-        val productId: String,
+        val packageName: String?,
+        val productId: String?,
         val purchaseToken: String,
         val basePlanId: String?,
         val offerId: String?,
@@ -350,8 +350,8 @@ internal class NuxieApi(
             append("{\"apiKey\":").append(jsonString(apiKey))
             append(",\"type\":\"playstore\"")
             append(",\"purchase_token\":").append(jsonString(report.purchaseToken))
-            append(",\"product_id\":").append(jsonString(report.productId))
-            append(",\"package_name\":").append(jsonString(report.packageName))
+            report.productId?.let { append(",\"product_id\":").append(jsonString(it)) }
+            report.packageName?.let { append(",\"package_name\":").append(jsonString(it)) }
             report.basePlanId?.let { append(",\"base_plan_id\":").append(jsonString(it)) }
             report.offerId?.let { append(",\"offer_id\":").append(jsonString(it)) }
             report.obfuscatedAccountId?.let {

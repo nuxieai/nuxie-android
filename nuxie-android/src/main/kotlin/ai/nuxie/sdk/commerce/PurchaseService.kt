@@ -50,8 +50,8 @@ internal class NuxieApiPurchaseSynchronizer(
     override suspend fun sync(evidence: PurchaseEvidence): PurchaseSyncOutcome = try {
         val response = api.postPurchase(
             NuxieApi.PlayPurchaseReport(
-                packageName = evidence.packageName,
-                productId = evidence.storeProductIds.firstOrNull().orEmpty(),
+                packageName = evidence.packageName.takeIf(String::isNotBlank),
+                productId = evidence.storeProductIds.firstOrNull()?.takeIf(String::isNotBlank),
                 purchaseToken = evidence.purchaseToken,
                 basePlanId = evidence.basePlanId,
                 offerId = evidence.offerId,
