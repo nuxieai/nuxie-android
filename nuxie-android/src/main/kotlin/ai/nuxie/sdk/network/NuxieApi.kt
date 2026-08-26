@@ -59,7 +59,6 @@ internal class NuxieApi(
         val basePlanId: String?,
         val offerId: String?,
         val obfuscatedAccountId: String?,
-        val distinctId: String,
         val eventId: String,
     )
 
@@ -292,16 +291,15 @@ internal class NuxieApi(
             append('}')
             report.entityId?.let { append(",\"entityId\":").append(jsonString(it)) }
             append(",\"purchase\":{\"type\":\"playstore\"")
-            append(",\"packageName\":").append(jsonString(report.purchase.packageName))
-            append(",\"productId\":").append(jsonString(report.purchase.productId))
-            append(",\"purchaseToken\":").append(jsonString(report.purchase.purchaseToken))
-            report.purchase.basePlanId?.let { append(",\"basePlanId\":").append(jsonString(it)) }
-            report.purchase.offerId?.let { append(",\"offerId\":").append(jsonString(it)) }
+            append(",\"purchase_token\":").append(jsonString(report.purchase.purchaseToken))
+            append(",\"package_name\":").append(jsonString(report.purchase.packageName))
+            append(",\"product_id\":").append(jsonString(report.purchase.productId))
+            report.purchase.basePlanId?.let { append(",\"base_plan_id\":").append(jsonString(it)) }
+            report.purchase.offerId?.let { append(",\"offer_id\":").append(jsonString(it)) }
             report.purchase.obfuscatedAccountId?.let {
-                append(",\"obfuscatedAccountId\":").append(jsonString(it))
+                append(",\"obfuscated_account_id\":").append(jsonString(it))
             }
-            append(",\"distinctId\":").append(jsonString(report.purchase.distinctId))
-            append(",\"eventId\":").append(jsonString(report.purchase.eventId))
+            append(",\"event_id\":").append(jsonString(report.purchase.eventId))
             append("}}")
         }.encodeToByteArray()
         val response = transport.execute(
@@ -351,15 +349,15 @@ internal class NuxieApi(
         val body = buildString {
             append("{\"apiKey\":").append(jsonString(apiKey))
             append(",\"type\":\"playstore\"")
-            append(",\"packageName\":").append(jsonString(report.packageName))
-            append(",\"productId\":").append(jsonString(report.productId))
-            append(",\"purchaseToken\":").append(jsonString(report.purchaseToken))
-            report.basePlanId?.let { append(",\"basePlanId\":").append(jsonString(it)) }
-            report.offerId?.let { append(",\"offerId\":").append(jsonString(it)) }
+            append(",\"purchase_token\":").append(jsonString(report.purchaseToken))
+            append(",\"product_id\":").append(jsonString(report.productId))
+            append(",\"package_name\":").append(jsonString(report.packageName))
+            report.basePlanId?.let { append(",\"base_plan_id\":").append(jsonString(it)) }
+            report.offerId?.let { append(",\"offer_id\":").append(jsonString(it)) }
             report.obfuscatedAccountId?.let {
-                append(",\"obfuscatedAccountId\":").append(jsonString(it))
+                append(",\"obfuscated_account_id\":").append(jsonString(it))
             }
-            append(",\"distinctId\":").append(jsonString(report.distinctId))
+            append(",\"distinct_id\":").append(jsonString(report.distinctId))
             append('}')
         }.encodeToByteArray()
         val response = transport.execute(

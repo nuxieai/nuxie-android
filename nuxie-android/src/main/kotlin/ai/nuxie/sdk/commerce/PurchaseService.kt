@@ -186,7 +186,6 @@ internal class PurchaseService(
                             basePlanId = evidence.basePlanId,
                             offerId = evidence.offerId,
                             obfuscatedAccountId = evidence.obfuscatedAccountId,
-                            distinctId = distinctId,
                             eventId = eventId,
                         ),
                     ),

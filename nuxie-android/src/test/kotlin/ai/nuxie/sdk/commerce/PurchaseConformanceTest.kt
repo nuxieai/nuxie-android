@@ -169,7 +169,7 @@ class PurchaseConformanceTest {
                     setOf(token),
                     purchaseRequests.map { request ->
                         Json.parseToJsonElement(request.body.decodeToString()).jsonObject
-                            .getValue("purchaseToken").jsonPrimitive.content
+                            .getValue("purchase_token").jsonPrimitive.content
                     }.toSet(),
                 )
             }
