@@ -105,7 +105,7 @@ class NuxieApiTest {
     }
 
     @Test
-    fun playPurchaseUsesExactCamelCaseWireBody() {
+    fun playPurchaseUsesExactCanonicalSnakeCaseWireBody() {
         val transport = object : HttpTransport {
             lateinit var request: HttpTransport.Request
             override fun execute(request: HttpTransport.Request): HttpTransport.Response {
@@ -133,18 +133,22 @@ class NuxieApiTest {
         assertTrue(response.success)
         assertEquals("customer-1", response.customerId)
         assertEquals(
-            """{"apiKey":"pk_test_key","type":"playstore","packageName":"com.example.app","productId":"pro","purchaseToken":"token-1","basePlanId":"annual","offerId":"launch","obfuscatedAccountId":"account-hash","distinctId":"customer-1"}""",
+            """{"apiKey":"pk_test_key","type":"playstore","purchase_token":"token-1","product_id":"pro","package_name":"com.example.app","base_plan_id":"annual","offer_id":"launch","obfuscated_account_id":"account-hash","distinct_id":"customer-1"}""",
             transport.request.body.decodeToString(),
         )
     }
 
     @Test
-    fun playPurchasePreservesARejectedSuccessFlagOnA2xxResponse() {
+    fun playPurchaseOmitsNullOptionalsAndPreservesARejectedSuccessFlag() {
         val transport = object : HttpTransport {
-            override fun execute(request: HttpTransport.Request) = HttpTransport.Response(
-                200,
-                """{"success":false,"error":"verification failed"}""".encodeToByteArray(),
-            )
+            lateinit var request: HttpTransport.Request
+            override fun execute(request: HttpTransport.Request): HttpTransport.Response {
+                this.request = request
+                return HttpTransport.Response(
+                    200,
+                    """{"success":false,"error":"verification failed"}""".encodeToByteArray(),
+                )
+            }
         }
 
         val response = NuxieApi("pk_test_key", NuxieEnvironment.DEVELOPMENT, transport).postPurchase(
@@ -160,10 +164,14 @@ class NuxieApiTest {
         )
 
         assertFalse(response.success)
+        assertEquals(
+            """{"apiKey":"pk_test_key","type":"playstore","purchase_token":"token-1","product_id":"pro","package_name":"com.example.app","distinct_id":"customer-1"}""",
+            transport.request.body.decodeToString(),
+        )
     }
 
     @Test
-    fun purchaseBackedFeatureUseCarriesThePlayEvidenceAndStableEventIdentity() {
+    fun purchaseBackedFeatureUseUsesTheStrictCanonicalPlayWire() {
         val transport = object : HttpTransport {
             lateinit var request: HttpTransport.Request
             override fun execute(request: HttpTransport.Request): HttpTransport.Response {
@@ -194,7 +202,6 @@ class NuxieApiTest {
                     basePlanId = "annual",
                     offerId = "launch",
                     obfuscatedAccountId = "account-hash",
-                    distinctId = "customer-1",
                     eventId = "purchase-use:stable",
                 ),
             ),
@@ -206,7 +213,7 @@ class NuxieApiTest {
         assertEquals(2.5, response.requiredBalance, 0.0)
         assertEquals(3.5, response.balance!!, 0.0)
         assertEquals(
-            """{"apiKey":"pk_test_key","customerId":"customer-1","featureId":"credits","requiredBalance":2.5,"eventData":{"value":2.5,"properties":{"source":"export"}},"entityId":"workspace-1","purchase":{"type":"playstore","packageName":"com.example.app","productId":"credit-pack","purchaseToken":"token-1","basePlanId":"annual","offerId":"launch","obfuscatedAccountId":"account-hash","distinctId":"customer-1","eventId":"purchase-use:stable"}}""",
+            """{"apiKey":"pk_test_key","customerId":"customer-1","featureId":"credits","requiredBalance":2.5,"eventData":{"value":2.5,"properties":{"source":"export"}},"entityId":"workspace-1","purchase":{"type":"playstore","purchase_token":"token-1","package_name":"com.example.app","product_id":"credit-pack","base_plan_id":"annual","offer_id":"launch","obfuscated_account_id":"account-hash","event_id":"purchase-use:stable"}}""",
             transport.request.body.decodeToString(),
         )
     }

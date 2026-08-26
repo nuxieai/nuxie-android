@@ -110,7 +110,7 @@ class PurchaseFeatureUseTest {
         assertEquals(2, fixture.transport.requestCount())
         val eventIds = fixture.transport.requestBodies().map { body ->
             Json.parseToJsonElement(body).jsonObject.getValue("purchase").jsonObject
-                .getValue("eventId").toString().trim('"')
+                .getValue("event_id").toString().trim('"')
         }
         assertEquals(1, eventIds.distinct().size)
         fixture.core.stop()
@@ -349,8 +349,8 @@ class PurchaseFeatureUseTest {
         val body = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
         assertEquals(
             "purchase-use:" + body.getValue("purchase").jsonObject
-                .getValue("eventId").toString().trim('"').substringAfter("purchase-use:"),
-            body.getValue("purchase").jsonObject.getValue("eventId").toString().trim('"'),
+                .getValue("event_id").toString().trim('"').substringAfter("purchase-use:"),
+            body.getValue("purchase").jsonObject.getValue("event_id").toString().trim('"'),
         )
         assertEquals("export", body.getValue("eventData").jsonObject
             .getValue("properties").jsonObject.getValue("source").toString().trim('"'))
