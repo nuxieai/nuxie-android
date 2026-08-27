@@ -54,6 +54,7 @@ internal class FeatureService(
     private val localPurchases = mutableMapOf<String, PurchaseProjection>()
     private val revokedPurchases = mutableMapOf<String, PurchaseProjection>()
     private var purchaseMutationRevision = 0L
+    private val featurePurchaseMutationRevisions = mutableMapOf<String, Long>()
     private var scopeGeneration = 0L
     private val featureMutationRevisions = mutableMapOf<String, Long>()
     private val committedMutationRevisions = mutableMapOf<CacheKey, Long>()
@@ -267,12 +268,12 @@ internal class FeatureService(
         if (optimistic.isEmpty()) return
         synchronized(lock) {
             if (localPurchases.containsKey(transactionId)) return
+            val replacedRevocation = revokedPurchases.remove(transactionId)?.grants.orEmpty()
             optimistic.keys.forEach { featureId ->
                 realTimeCache.keys.removeAll { it.featureId == featureId }
             }
-            revokedPurchases.remove(transactionId)
-            purchaseMutationRevision += 1
-            localPurchases[transactionId] = PurchaseProjection(optimistic, purchaseMutationRevision)
+            val revision = advancePurchaseMutationRevision(optimistic.keys + replacedRevocation.keys)
+            localPurchases[transactionId] = PurchaseProjection(optimistic, revision)
             optimistic.keys.forEach { featureId ->
                 committedMutationRevisions[CacheKey(featureId, null)] = advanceFeatureMutationRevision(featureId)
             }
@@ -287,13 +288,13 @@ internal class FeatureService(
             val accepted = purchaseUpdates.remove(transactionId)?.grants.orEmpty()
             val removed = optimistic + accepted
             if (removed.isEmpty()) return
-            purchaseMutationRevision += 1
+            val revision = advancePurchaseMutationRevision(removed.keys)
             // iOS checks revokedPurchaseCache before localPurchaseCache,
             // realTimeCache, and durable profile access (FeatureService.swift).
             val tombstones = removed.mapValues { (_, access) ->
                 FeatureAccess(false, false, access.balance, access.type)
             }
-            revokedPurchases[transactionId] = PurchaseProjection(tombstones, purchaseMutationRevision)
+            revokedPurchases[transactionId] = PurchaseProjection(tombstones, revision)
         }
         publishCurrent()
     }
@@ -305,13 +306,14 @@ internal class FeatureService(
         val updates = parsePurchaseFeatures(body)
         synchronized(lock) {
             if (identity.distinctId() != distinctId || scopeGeneration != hydrationGeneration) return
-            purchaseMutationRevision += 1
-            localPurchases.remove(transactionId)
-            revokedPurchases.remove(transactionId)
+            val replaced = purchaseUpdates[transactionId]?.grants.orEmpty() +
+                localPurchases.remove(transactionId)?.grants.orEmpty() +
+                revokedPurchases.remove(transactionId)?.grants.orEmpty()
+            val revision = advancePurchaseMutationRevision(replaced.keys + updates.keys)
             updates.keys.forEach { featureId ->
                 realTimeCache.keys.removeAll { it.featureId == featureId }
             }
-            purchaseUpdates[transactionId] = PurchaseProjection(updates, purchaseMutationRevision)
+            purchaseUpdates[transactionId] = PurchaseProjection(updates, revision)
         }
         publishCurrent(ready = true, expectedGeneration = hydrationGeneration)
     }
@@ -529,13 +531,16 @@ internal class FeatureService(
         return revision
     }
 
-    private fun purchaseRevision(featureId: String): Long? = sequenceOf(
-        purchaseUpdates.values,
-        localPurchases.values,
-        revokedPurchases.values,
-    ).flatten()
-        .filter { featureId in it.grants }
-        .maxOfOrNull { it.committedRevision }
+    private fun advancePurchaseMutationRevision(featureIds: Set<String>): Long {
+        purchaseMutationRevision += 1
+        featureIds.forEach { featureId ->
+            featurePurchaseMutationRevisions[featureId] = purchaseMutationRevision
+        }
+        return purchaseMutationRevision
+    }
+
+    private fun purchaseRevision(featureId: String): Long? =
+        featurePurchaseMutationRevisions[featureId]
 
     private fun reconcileLocalPurchases(featureIds: Set<String>) {
         localPurchases.toMap().forEach { (transactionId, projection) ->
