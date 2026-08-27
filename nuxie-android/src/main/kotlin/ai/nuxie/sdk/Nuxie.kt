@@ -13,8 +13,14 @@ import ai.nuxie.sdk.commerce.StoreProduct
 import ai.nuxie.sdk.commerce.SubscriptionReplacement
 import android.app.Activity
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import java.lang.ref.WeakReference
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * Entry point for the greenfield Nuxie Android SDK.
@@ -30,6 +36,18 @@ object Nuxie {
     private var setupState: SetupState? = null
 
     private val featureInfoInstance = FeatureInfo()
+
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+
+    @Volatile
+    private var listenerReference = WeakReference<NuxieListener>(null)
+
+    /** Weak listener for Experience requests delivered to the host app. */
+    var listener: NuxieListener?
+        get() = listenerReference.get()
+        set(value) {
+            listenerReference = WeakReference(value)
+        }
 
     val isSetup: Boolean
         get() = setupState != null
@@ -255,6 +273,30 @@ object Nuxie {
         core?.presentations?.dismiss()
     }
 
+    /**
+     * Last-mile App Action delivery. Journey execution calls this only after
+     * its liveness fences pass; the listener is resolved on the main thread
+     * so changing or clearing it before delivery takes effect immediately.
+     */
+    internal suspend fun deliverAppAction(action: AppAction) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            listener?.onAppActionRequested(this, action)
+        } else {
+            suspendCancellableCoroutine { continuation ->
+                val posted = mainHandler.post {
+                    runCatching { listener?.onAppActionRequested(this, action) }
+                        .onSuccess { continuation.resume(Unit) }
+                        .onFailure(continuation::resumeWithException)
+                }
+                if (!posted) {
+                    continuation.resumeWithException(
+                        IllegalStateException("Could not dispatch App Action to the main thread."),
+                    )
+                }
+            }
+        }
+    }
+
     // MARK: Commerce
 
     /** Launch checkout for the exact StoreProduct that was shown. */
@@ -287,6 +329,7 @@ object Nuxie {
     internal fun resetForTesting() {
         setupState?.core?.let { runCatching { it.stop() } }
         setupState = null
+        listener = null
         featureInfoInstance.reset()
     }
 

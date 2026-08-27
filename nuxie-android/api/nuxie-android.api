@@ -1,3 +1,65 @@
+public final class ai/nuxie/sdk/AppAction {
+	public fun <init> (Ljava/lang/String;Ljava/util/Map;Lai/nuxie/sdk/ExperienceRef;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/util/Map;
+	public final fun component3 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun copy (Ljava/lang/String;Ljava/util/Map;Lai/nuxie/sdk/ExperienceRef;)Lai/nuxie/sdk/AppAction;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/AppAction;Ljava/lang/String;Ljava/util/Map;Lai/nuxie/sdk/ExperienceRef;ILjava/lang/Object;)Lai/nuxie/sdk/AppAction;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun getName ()Ljava/lang/String;
+	public final fun getPayload ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public abstract interface class ai/nuxie/sdk/AppActionValue {
+}
+
+public final class ai/nuxie/sdk/AppActionValue$Bool : ai/nuxie/sdk/AppActionValue {
+	public fun <init> (Z)V
+	public final fun component1 ()Z
+	public final fun copy (Z)Lai/nuxie/sdk/AppActionValue$Bool;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/AppActionValue$Bool;ZILjava/lang/Object;)Lai/nuxie/sdk/AppActionValue$Bool;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getValue ()Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/AppActionValue$Double : ai/nuxie/sdk/AppActionValue {
+	public fun <init> (D)V
+	public final fun component1 ()D
+	public final fun copy (D)Lai/nuxie/sdk/AppActionValue$Double;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/AppActionValue$Double;DILjava/lang/Object;)Lai/nuxie/sdk/AppActionValue$Double;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getValue ()D
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/AppActionValue$Int : ai/nuxie/sdk/AppActionValue {
+	public fun <init> (J)V
+	public final fun component1 ()J
+	public final fun copy (J)Lai/nuxie/sdk/AppActionValue$Int;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/AppActionValue$Int;JILjava/lang/Object;)Lai/nuxie/sdk/AppActionValue$Int;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getValue ()J
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/AppActionValue$String : ai/nuxie/sdk/AppActionValue {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lai/nuxie/sdk/AppActionValue$String;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/AppActionValue$String;Ljava/lang/String;ILjava/lang/Object;)Lai/nuxie/sdk/AppActionValue$String;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getValue ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class ai/nuxie/sdk/ExperienceRef {
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
 	public final fun component1 ()Ljava/lang/String;
@@ -82,6 +144,7 @@ public final class ai/nuxie/sdk/Nuxie {
 	public final fun getAnonymousId ()Ljava/lang/String;
 	public final fun getDistinctId ()Ljava/lang/String;
 	public final fun getFeatures ()Lai/nuxie/sdk/features/FeatureInfo;
+	public final fun getListener ()Lai/nuxie/sdk/NuxieListener;
 	public final fun getVersion ()Ljava/lang/String;
 	public final fun identify (Ljava/lang/String;Ljava/util/Map;Ljava/util/Map;)V
 	public static synthetic fun identify$default (Lai/nuxie/sdk/Nuxie;Ljava/lang/String;Ljava/util/Map;Ljava/util/Map;ILjava/lang/Object;)V
@@ -92,6 +155,7 @@ public final class ai/nuxie/sdk/Nuxie {
 	public final fun reset (Z)V
 	public static synthetic fun reset$default (Lai/nuxie/sdk/Nuxie;ZILjava/lang/Object;)V
 	public final fun restorePurchases (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun setListener (Lai/nuxie/sdk/NuxieListener;)V
 	public final fun setPurchaseDelegate (Lai/nuxie/sdk/commerce/NuxiePurchaseDelegate;)V
 	public final fun setPurchaseHandlingMode (Lai/nuxie/sdk/commerce/PurchaseHandlingMode;)V
 	public final fun setup (Landroid/content/Context;Lai/nuxie/sdk/NuxieConfiguration;)V
@@ -138,6 +202,10 @@ public final class ai/nuxie/sdk/NuxieEvent {
 	public final fun getName ()Ljava/lang/String;
 	public final fun getProperties ()Ljava/util/Map;
 	public final fun getTimestampMillis ()J
+}
+
+public abstract interface class ai/nuxie/sdk/NuxieListener {
+	public abstract fun onAppActionRequested (Lai/nuxie/sdk/Nuxie;Lai/nuxie/sdk/AppAction;)V
 }
 
 public final class ai/nuxie/sdk/SuppressReason : java/lang/Enum {
