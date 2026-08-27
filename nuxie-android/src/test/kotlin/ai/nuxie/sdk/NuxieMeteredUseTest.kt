@@ -11,6 +11,8 @@ import ai.nuxie.sdk.identity.IdentityService
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.testsupport.FakeTransport
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.double
@@ -25,6 +27,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(RobolectricTestRunner::class)
 class NuxieMeteredUseTest {
@@ -95,6 +99,41 @@ class NuxieMeteredUseTest {
         )
 
         Nuxie.useFeature("exports", metadata = mapOf("unsupported" to Any()))
+    }
+
+    @Test
+    fun waitingUsageNetworkCallNeverExecutesOnTheCallerThread() = runBlocking {
+        val callerThread = AtomicReference<Thread>()
+        val networkThread = AtomicReference<Thread>()
+        val transport = usageTransport().apply {
+            val baseRespond = respond
+            respond = { request ->
+                if (request.url.path == "/event") networkThread.set(Thread.currentThread())
+                baseRespond(request)
+            }
+        }
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = transport,
+            registerLifecycle = false,
+        )
+        Nuxie.setup(
+            RuntimeEnvironment.getApplication(),
+            NuxieConfiguration("pk_test_metered_thread").apply {
+                environment = NuxieEnvironment.DEVELOPMENT
+                logLevel = LogLevel.NONE
+            },
+        )
+
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "use-feature-caller")
+        }.asCoroutineDispatcher().use { callerDispatcher ->
+            withContext(callerDispatcher) {
+                callerThread.set(Thread.currentThread())
+                assertTrue(Nuxie.useFeatureAndWait("exports").success)
+            }
+        }
+
+        assertTrue(networkThread.get() !== callerThread.get())
     }
 
     @Test

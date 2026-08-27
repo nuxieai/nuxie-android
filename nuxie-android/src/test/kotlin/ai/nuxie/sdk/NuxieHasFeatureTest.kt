@@ -22,6 +22,10 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import java.io.IOException
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.withContext
 
 @RunWith(RobolectricTestRunner::class)
 class NuxieHasFeatureTest {
@@ -174,6 +178,41 @@ class NuxieHasFeatureTest {
 
         assertFalse(access.allowed)
         assertFalse(Nuxie.features.isAllowed("pro"))
+    }
+
+    @Test
+    fun remoteNetworkCallNeverExecutesOnTheCallerThread() = runBlocking {
+        val callerThread = AtomicReference<Thread>()
+        val networkThread = AtomicReference<Thread>()
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                when (request.url.path) {
+                    "/entitled" -> {
+                        networkThread.set(Thread.currentThread())
+                        HttpTransport.Response(
+                            200,
+                            """{"customerId":"${requireNotNull(Nuxie.core).identity.distinctId()}","featureId":"pro","requiredBalance":1.0,"code":"allowed","allowed":true,"unlimited":true,"balance":null,"type":"boolean"}"""
+                                .encodeToByteArray(),
+                        )
+                    }
+                    else -> HttpTransport.Response(
+                        200,
+                        """{"segments":[],"features":[]}""".encodeToByteArray(),
+                    )
+                }
+            }
+        }
+        setup(transport)
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "has-feature-caller")
+        }.asCoroutineDispatcher().use { callerDispatcher ->
+            withContext(callerDispatcher) {
+                callerThread.set(Thread.currentThread())
+                assertTrue(Nuxie.hasFeature("pro", policy = FeatureCheckPolicy.REMOTE).allowed)
+            }
+        }
+
+        assertTrue(networkThread.get() !== callerThread.get())
     }
 
     private fun setup(transport: FakeTransport) {

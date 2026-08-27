@@ -6,6 +6,8 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Profile-backed Feature access and the short-lived results of real-time
@@ -349,6 +351,42 @@ internal class FeatureService(
         }
     }
 
+    /**
+     * Returns only access committed after startup by a purchase mutation or
+     * real-time check. Durable profile access is deliberately excluded: it
+     * may predate the request that just completed.
+     */
+    private fun committedCachedAccess(
+        featureId: String,
+        requiredBalance: Double?,
+        entityId: String?,
+    ): FeatureAccess? {
+        purchaseAccess(featureId, entityId)
+            ?.forRequiredBalance(requiredBalance)
+            ?.let { return it }
+        realTimeCache[CacheKey(featureId, entityId)]
+            ?.takeIf(::isFresh)
+            ?.let { cached ->
+                val opaqueRequiredBalance = cached.opaqueRequiredBalance
+                if (opaqueRequiredBalance == null) {
+                    return cached.access.forRequiredBalance(requiredBalance)
+                }
+                val matchesRequirement =
+                    opaqueRequiredBalance == (requiredBalance ?: DEFAULT_REQUIRED_BALANCE)
+                return cached.access.copy(
+                    allowed = matchesRequirement && cached.access.allowed,
+                    unlimited = matchesRequirement && cached.access.unlimited,
+                    balance = null,
+                )
+            }
+        if (entityId == null) {
+            purchaseUpdates.values.mapNotNull { it.grants[featureId] }.lastOrNull()
+                ?.forRequiredBalance(requiredBalance)
+                ?.let { return it }
+        }
+        return null
+    }
+
     private suspend fun getExactOpaqueCached(
         featureId: String,
         requiredBalance: Double?,
@@ -381,7 +419,9 @@ internal class FeatureService(
                 advanceFeatureMutationRevision(featureId),
             )
         }
-        val result = api.checkFeature(distinctId, featureId, requiredBalance, entityId)
+        val result = withContext(Dispatchers.IO) {
+            runCatching { api.checkFeature(distinctId, featureId, requiredBalance, entityId) }
+        }.getOrThrow()
         synchronized(lock) {
             // Identity flips synchronously while handleUserChange (which
             // bumps the generation) is queued behind it, so the live
@@ -404,9 +444,7 @@ internal class FeatureService(
             if (purchaseRevision(featureId) != requestPurchaseRevision) {
                 val supersededByMutation = entityId == null
                 val effectiveAccess = if (supersededByMutation) {
-                    purchaseAccess(featureId, entityId)
-                        ?.forRequiredBalance(requiredBalance)
-                        ?: entityAccess(featureId, entityId)?.forRequiredBalance(requiredBalance)
+                    committedCachedAccess(featureId, requiredBalance, entityId)
                         ?: requestedAccess
                 } else {
                     requestedAccess
@@ -417,7 +455,7 @@ internal class FeatureService(
                 val supersededByMutation =
                     (committedMutationRevisions[key] ?: Long.MIN_VALUE) > requestMutationRevision
                 val effectiveAccess = if (supersededByMutation) {
-                    cachedAccess(featureId, requiredBalance, entityId) ?: requestedAccess
+                    committedCachedAccess(featureId, requiredBalance, entityId) ?: requestedAccess
                 } else {
                     requestedAccess
                 }
