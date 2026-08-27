@@ -93,6 +93,33 @@ class NuxieHasFeatureTest {
     }
 
     @Test
+    fun remoteReturnsRawTransitiveCreditSystemAccess() = runBlocking {
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                when (request.url.path) {
+                    "/entitled" -> HttpTransport.Response(
+                        200,
+                        """{"customerId":"${requireNotNull(Nuxie.core).identity.distinctId()}","featureId":"wallet","requiredBalance":2.0,"code":"allowed","allowed":true,"unlimited":false,"balance":5,"type":"creditSystem"}"""
+                            .encodeToByteArray(),
+                    )
+                    else -> error("Unexpected request: ${request.url.path}")
+                }
+            }
+        }
+        setup(transport)
+
+        val access = Nuxie.hasFeature(
+            featureId = "exports",
+            requiredBalance = 2.0,
+            policy = FeatureCheckPolicy.REMOTE,
+        )
+
+        assertTrue(access.allowed)
+        assertEquals(FeatureType.CREDIT_SYSTEM, access.type)
+        assertEquals(5.0, access.balance!!, 0.0)
+    }
+
+    @Test
     fun bothPoliciesPropagateFeatureRequestFailures() {
         val failure = IOException("network unavailable")
         val transport = FakeTransport().apply {
