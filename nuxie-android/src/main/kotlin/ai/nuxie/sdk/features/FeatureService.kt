@@ -422,47 +422,57 @@ internal class FeatureService(
         val result = withContext(Dispatchers.IO) {
             runCatching { api.checkFeature(distinctId, featureId, requiredBalance, entityId) }
         }.getOrThrow()
-        synchronized(lock) {
+        val serverAccess = FeatureAccess(
+            result.allowed,
+            result.unlimited,
+            result.balance,
+            result.type,
+        )
+        val requestedAccess = authoritativeAccess(result, featureId)
+        val affectedFeatureIds = linkedSetOf(featureId, result.featureId)
+        val balanceSourceAccess = resultAccess(result)
+        val publishedAccess = affectedFeatureIds.associateWith { affectedFeatureId ->
+            if (affectedFeatureId == featureId) requestedAccess else balanceSourceAccess
+        }
+        val allowedFeatureIds = publishedAccess.filterValues { it.allowed }.keys
+
+        if (allowedFeatureIds.isNotEmpty()) {
+            synchronized(lock) {
+                validateCheckScope(distinctId, requestGeneration)
+                supersededCheckAccess(
+                    featureId = featureId,
+                    requiredBalance = requiredBalance,
+                    entityId = entityId,
+                    key = key,
+                    requestPurchaseRevision = requestPurchaseRevision,
+                    requestMutationRevision = requestMutationRevision,
+                    serverAccess = serverAccess,
+                    requestedAccess = requestedAccess,
+                )?.let { return it }
+            }
+            val retiredRevocations = withContext(Dispatchers.IO) {
+                revocationStore.retireRevokedGrants(distinctId, allowedFeatureIds)
+            }
+            if (!retiredRevocations) throw kotlinx.coroutines.CancellationException()
+        }
+
+        return synchronized(lock) {
             // Identity flips synchronously while handleUserChange (which
             // bumps the generation) is queued behind it, so the live
             // identity is re-read inside the commit lock; a flip landing
             // after this check is cleaned up by the queued handleUserChange
             // reset, bounding any stale publication to that queue delay.
-            if (identity.distinctId() != distinctId) {
-                throw kotlinx.coroutines.CancellationException()
-            }
-            if (scopeGeneration != requestGeneration || cacheDistinctId != distinctId) {
-                throw kotlinx.coroutines.CancellationException()
-            }
-            val serverAccess = FeatureAccess(
-                result.allowed,
-                result.unlimited,
-                result.balance,
-                result.type,
-            )
-            val requestedAccess = authoritativeAccess(result, featureId)
-            if (purchaseRevision(featureId) != requestPurchaseRevision) {
-                val supersededByMutation = entityId == null
-                val effectiveAccess = if (supersededByMutation) {
-                    committedCachedAccess(featureId, requiredBalance, entityId)
-                        ?: requestedAccess
-                } else {
-                    requestedAccess
-                }
-                return CheckedAccess(serverAccess, effectiveAccess, supersededByMutation)
-            }
-            if (featureMutationRevisions[featureId] != requestMutationRevision) {
-                val supersededByMutation =
-                    (committedMutationRevisions[key] ?: Long.MIN_VALUE) > requestMutationRevision
-                val effectiveAccess = if (supersededByMutation) {
-                    committedCachedAccess(featureId, requiredBalance, entityId) ?: requestedAccess
-                } else {
-                    requestedAccess
-                }
-                return CheckedAccess(serverAccess, effectiveAccess, supersededByMutation)
-            }
-
-            val affectedFeatureIds = linkedSetOf(featureId, result.featureId)
+            validateCheckScope(distinctId, requestGeneration)
+            supersededCheckAccess(
+                featureId = featureId,
+                requiredBalance = requiredBalance,
+                entityId = entityId,
+                key = key,
+                requestPurchaseRevision = requestPurchaseRevision,
+                requestMutationRevision = requestMutationRevision,
+                serverAccess = serverAccess,
+                requestedAccess = requestedAccess,
+            )?.let { return@synchronized it }
             val mutationRevisions = affectedFeatureIds.associateWith { affectedFeatureId ->
                 if (affectedFeatureId == featureId) {
                     requestMutationRevision
@@ -470,18 +480,7 @@ internal class FeatureService(
                     advanceFeatureMutationRevision(affectedFeatureId)
                 }
             }
-            val balanceSourceAccess = resultAccess(result)
-            val publishedAccess = affectedFeatureIds.associateWith { affectedFeatureId ->
-                if (affectedFeatureId == featureId) requestedAccess else balanceSourceAccess
-            }
-            val allowedFeatureIds = publishedAccess.filterValues { it.allowed }.keys
-
             reconcileLocalPurchases(affectedFeatureIds)
-            if (allowedFeatureIds.isNotEmpty() &&
-                !revocationStore.retireRevokedGrants(distinctId, allowedFeatureIds)
-            ) {
-                throw kotlinx.coroutines.CancellationException()
-            }
             if (allowedFeatureIds.isNotEmpty()) reconcileRevokedPurchases(allowedFeatureIds)
 
             val cachedAt = nowMillis()
@@ -501,8 +500,41 @@ internal class FeatureService(
             val effectiveAccess = purchaseAccess(featureId, entityId)
                 ?.forRequiredBalance(requiredBalance)
                 ?: requestedAccess
-            return CheckedAccess(serverAccess, effectiveAccess, supersededByMutation = false)
+            CheckedAccess(serverAccess, effectiveAccess, supersededByMutation = false)
         }
+    }
+
+    private fun validateCheckScope(distinctId: String, requestGeneration: Long) {
+        if (identity.distinctId() != distinctId) {
+            throw kotlinx.coroutines.CancellationException()
+        }
+        if (scopeGeneration != requestGeneration || cacheDistinctId != distinctId) {
+            throw kotlinx.coroutines.CancellationException()
+        }
+    }
+
+    private fun supersededCheckAccess(
+        featureId: String,
+        requiredBalance: Double?,
+        entityId: String?,
+        key: CacheKey,
+        requestPurchaseRevision: Long?,
+        requestMutationRevision: Long,
+        serverAccess: FeatureAccess,
+        requestedAccess: FeatureAccess,
+    ): CheckedAccess? {
+        val purchaseRevisionChanged = purchaseRevision(featureId) != requestPurchaseRevision
+        val featureRevisionChanged = featureMutationRevisions[featureId] != requestMutationRevision
+        if (!purchaseRevisionChanged && !featureRevisionChanged) return null
+        val supersededByMutation =
+            (purchaseRevisionChanged && entityId == null) ||
+                (committedMutationRevisions[key] ?: Long.MIN_VALUE) > requestMutationRevision
+        val effectiveAccess = if (supersededByMutation) {
+            committedCachedAccess(featureId, requiredBalance, entityId) ?: requestedAccess
+        } else {
+            requestedAccess
+        }
+        return CheckedAccess(serverAccess, effectiveAccess, supersededByMutation)
     }
 
     private suspend fun synchronizeCustomerScopeIfNeeded() {

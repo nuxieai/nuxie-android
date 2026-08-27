@@ -12,6 +12,7 @@ import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.testsupport.FakeTransport
 import kotlinx.coroutines.async
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -25,7 +26,10 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(RobolectricTestRunner::class)
 class FeatureServiceTest {
@@ -872,6 +876,143 @@ class FeatureServiceTest {
         assertEquals(3.0, cacheFirst.await().balance!!, 0.0)
         assertFalse(core.features.getCached("exports", "remote-project")!!.allowed)
         assertFalse(core.features.getCached("exports", "cache-first-project")!!.allowed)
+        core.stop()
+    }
+
+    @Test
+    fun staleEntityResultKeepsTheNewerSameEntityCommitAfterPurchaseRevisionChanges() = runBlocking {
+        val olderCheckStarted = CountDownLatch(1)
+        val releaseOlderCheck = CountDownLatch(1)
+        val checks = AtomicInteger()
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    val balance = if (checks.incrementAndGet() == 1) {
+                        olderCheckStarted.countDown()
+                        assertTrue(releaseOlderCheck.await(5, TimeUnit.SECONDS))
+                        "1"
+                    } else {
+                        "2"
+                    }
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "exports",
+                            requiredBalance = 1.0,
+                            balance = balance,
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+        core.features.updateFromPurchase(
+            core.identity.distinctId(),
+            Json.parseToJsonElement(
+                """{"success":true,"features":[{"id":"exports","type":"metered","allowed":true,"unlimited":true,"balance":null}]}""",
+            ).jsonObject,
+            "purchase-before-checks",
+        )
+
+        val older = async(Dispatchers.Default) {
+            core.features.checkWithCache(
+                "exports",
+                entityId = "project-a",
+                forceRefresh = true,
+            )
+        }
+        assertTrue(olderCheckStarted.await(5, TimeUnit.SECONDS))
+        assertEquals(
+            2.0,
+            core.features.checkWithCache(
+                "exports",
+                entityId = "project-a",
+                forceRefresh = true,
+            ).balance!!,
+            0.0,
+        )
+        core.features.removePurchase("purchase-before-checks")
+        releaseOlderCheck.countDown()
+
+        assertEquals(2.0, older.await().balance!!, 0.0)
+        assertEquals(2.0, core.features.getCached("exports", "project-a")!!.balance!!, 0.0)
+        core.stop()
+    }
+
+    @Test
+    fun allowedCheckRetiresRevocationsOnIoWithoutHoldingTheFeatureStateLock() = runBlocking {
+        val retirementStarted = CountDownLatch(1)
+        val releaseRetirement = CountDownLatch(1)
+        val callerThread = AtomicReference<Thread>()
+        val ledgerThread = AtomicReference<Thread>()
+        val store = object : PurchaseEvidenceStore {
+            override fun load(): Map<String, PurchaseEvidence> = emptyMap()
+            override fun upsert(evidence: PurchaseEvidence): Boolean = true
+            override fun retireRevokedGrants(distinctId: String, featureIds: Set<String>): Boolean {
+                ledgerThread.set(Thread.currentThread())
+                retirementStarted.countDown()
+                assertTrue(releaseRetirement.await(5, TimeUnit.SECONDS))
+                return true
+            }
+        }
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            balance = "1",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = NuxieCore(
+            context = RuntimeEnvironment.getApplication(),
+            apiKey = "pk_test_features_retirement_io",
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(
+                transport = transport,
+                registerLifecycle = false,
+                purchaseEvidenceStore = store,
+            ),
+        )
+
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "feature-check-caller")
+        }.asCoroutineDispatcher().use { callerDispatcher ->
+            val check = async(callerDispatcher) {
+                callerThread.set(Thread.currentThread())
+                core.features.check("pro")
+            }
+            assertTrue(retirementStarted.await(5, TimeUnit.SECONDS))
+            val readCompleted = CountDownLatch(1)
+            val read = async(Dispatchers.Default) {
+                core.features.getAllCached()
+                readCompleted.countDown()
+            }
+            val featureStateLockWasFree = readCompleted.await(1, TimeUnit.SECONDS)
+            val ledgerWasOffCaller = ledgerThread.get() !== callerThread.get()
+            releaseRetirement.countDown()
+
+            assertTrue(check.await().allowed)
+            read.await()
+            assertTrue(ledgerWasOffCaller)
+            assertTrue(featureStateLockWasFree)
+        }
         core.stop()
     }
 
