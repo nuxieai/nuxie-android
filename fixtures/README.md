@@ -8,11 +8,14 @@ These language-neutral vectors pin the cross-plane experience-execution contract
 - `events/down-facts`: repeated server facts commit once, never upload, and route once to subscribers.
 - `events/experience-events`: canonical `$experience_*` names and the
   experience identity/version properties carried by presentation facts and
-  their customer/event/delegate/experiment riders.
+  their customer/event/app-action/experiment riders.
 - `events/atomic-purchase-sync`: exact `$purchase_synced` properties plus the
   stable retry identity, capture-before-retirement ordering, evidence
   retention, post-use access, and one-emission contract for atomic
   purchase-backed feature use.
+- `events/delivery-disposition`: retry/auth/split/poison classification,
+  all-or-nothing partial-ack validation, and poison-event isolation without
+  disturbing valid neighbors.
 - `golden-journey`: the minimal synchronous-enrollment journey vocabulary.
 - `journeys/handoff`: server→device mailbox claim plus device→server
   `$journey_handoff` property shape, direction, epoch 0/1 encoding,
@@ -20,6 +23,8 @@ These language-neutral vectors pin the cross-plane experience-execution contract
   and transferred terminality.
 - `journeys/parking`: background and wait-pause `$journey_parked`
   checkpoints, device-plane tagging, pending deadlines, and epoch stamping.
+- `journeys/dismissal`: exact `$journey_exited` host-attribution properties,
+  while preserving the existing ordinary-dismissal reason vocabulary.
 - `journeys/takeover`: claimable mailbox decoding, stale-checkpoint resume
   metadata, relaunch-equivalent restoration, immediate past-due scheduling,
   and original-device epoch rejection.
@@ -28,7 +33,8 @@ These language-neutral vectors pin the cross-plane experience-execution contract
 - `journeys/handler-host-dispatch`: declaration-strict screen-host routing for
   `$screen_shown`/`$screen_dismissed`, with the global Journey-host lifecycle
   fallback pinned separately from undeclared handler-only hosts.
-- `journeys/ghost`: supersede/ghost accounting suppression.
+- `journeys/ghost`: supersede/ghost accounting suppression and the explicit
+  host-dismissal exception for a still-presented ghost play-out.
 - `journeys/time-window`: identical Swift/server calendar decisions.
 - `journeys/experiment-resolution`: identical Swift/server assignment,
   fallback, freezing, and invalid-assignment decisions.
