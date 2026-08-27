@@ -1,0 +1,22 @@
+{
+  "name": "purchase-subscription-full.rs",
+  "lane": "rs",
+  "request": "purchase-subscription-full",
+  "endpoint": "/purchase",
+  "statusCode": 200,
+  "body": {
+    "customer_id": "273eac55-5075-5ef4-963c-de2a9c53d586",
+    "features": [
+      {
+        "allowed": true,
+        "balance": null,
+        "ext_id": "fixture-subscription-access",
+        "id": "feature-commerce-subscription",
+        "type": "boolean",
+        "unlimited": false
+      }
+    ],
+    "success": true
+  },
+  "bodyText": "{\"customer_id\":\"273eac55-5075-5ef4-963c-de2a9c53d586\",\"features\":[{\"allowed\":true,\"balance\":null,\"ext_id\":\"fixture-subscription-access\",\"id\":\"feature-commerce-subscription\",\"type\":\"boolean\",\"unlimited\":false}],\"success\":true}"
+}

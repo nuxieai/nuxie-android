@@ -1,0 +1,18 @@
+{
+  "name": "entitled-atomic-use-minimal.ts",
+  "lane": "ts",
+  "request": "entitled-atomic-use-minimal",
+  "endpoint": "/entitled",
+  "statusCode": 200,
+  "body": {
+    "customerId": "fixture-customer-minimal",
+    "featureId": "fixture-credits-minimal",
+    "requiredBalance": 1,
+    "code": "feature_found",
+    "allowed": true,
+    "unlimited": false,
+    "balance": 4,
+    "type": "metered"
+  },
+  "bodyText": "{\"customerId\":\"fixture-customer-minimal\",\"featureId\":\"fixture-credits-minimal\",\"requiredBalance\":1,\"code\":\"feature_found\",\"allowed\":true,\"unlimited\":false,\"balance\":4,\"type\":\"metered\"}"
+}

@@ -1,0 +1,14 @@
+{
+  "name": "purchase-invalid-token.ts",
+  "lane": "ts",
+  "request": "purchase-invalid-token",
+  "endpoint": "/purchase",
+  "statusCode": 404,
+  "body": {
+    "success": false,
+    "error": "Purchase token not found: fixture-invalid-token",
+    "code": "purchase_token_invalid",
+    "providerResponse": "{\"error\":{\"code\":404,\"message\":\"Purchase token not found: fixture-invalid-token\",\"status\":\"NOT_FOUND\",\"errors\":[{\"reason\":\"purchaseTokenNotFound\"}]}}"
+  },
+  "bodyText": "{\"success\":false,\"error\":\"Purchase token not found: fixture-invalid-token\",\"code\":\"purchase_token_invalid\",\"providerResponse\":\"{\\\"error\\\":{\\\"code\\\":404,\\\"message\\\":\\\"Purchase token not found: fixture-invalid-token\\\",\\\"status\\\":\\\"NOT_FOUND\\\",\\\"errors\\\":[{\\\"reason\\\":\\\"purchaseTokenNotFound\\\"}]}}\"}"
+}

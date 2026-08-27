@@ -1,0 +1,22 @@
+{
+  "name": "purchase-token-first.rs",
+  "lane": "rs",
+  "request": "purchase-token-first",
+  "endpoint": "/purchase",
+  "statusCode": 200,
+  "body": {
+    "customer_id": "21b7ebc6-64af-5041-aa04-7062caefacf3",
+    "features": [
+      {
+        "allowed": true,
+        "balance": 1,
+        "ext_id": "fixture-credits-token-first",
+        "id": "feature-commerce-token-first",
+        "type": "metered",
+        "unlimited": false
+      }
+    ],
+    "success": true
+  },
+  "bodyText": "{\"customer_id\":\"21b7ebc6-64af-5041-aa04-7062caefacf3\",\"features\":[{\"allowed\":true,\"balance\":1,\"ext_id\":\"fixture-credits-token-first\",\"id\":\"feature-commerce-token-first\",\"type\":\"metered\",\"unlimited\":false}],\"success\":true}"
+}
