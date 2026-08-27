@@ -49,23 +49,36 @@ internal object NuxieRuntimeBridge {
         false
     }
 
-    private fun loadHostRuntime(hostCapi: String): Boolean =
+    private fun loadHostRuntime(hostCapi: String): Boolean {
+        val capiFile = File(hostCapi).canonicalFile
+        require(capiFile.isFile) { "$HOST_CAPI_ENV is not a file: $capiFile" }
+        val hostJni = System.getProperty(HOST_JNI_PROPERTY)
+            ?.takeIf(String::isNotBlank)
+            ?.let(::File)
+            ?.canonicalFile
+            ?: error("Missing -D$HOST_JNI_PROPERTY for the host JNI adapter")
+        require(hostJni.isFile) { "Host JNI adapter is not a file: $hostJni" }
         try {
-            val capiFile = File(hostCapi).canonicalFile
-            require(capiFile.isFile) { "$HOST_CAPI_ENV is not a file: $capiFile" }
-            val hostJni = System.getProperty(HOST_JNI_PROPERTY)
-                ?.takeIf(String::isNotBlank)
-                ?.let(::File)
-                ?.canonicalFile
-                ?: error("Missing -D$HOST_JNI_PROPERTY for the host JNI adapter")
-            require(hostJni.isFile) { "Host JNI adapter is not a file: $hostJni" }
             System.load(capiFile.path)
             System.load(hostJni.path)
-            true
-        } catch (error: Throwable) {
-            System.err.println("Nuxie host runtime unavailable: ${error.message}")
-            false
+        } catch (error: UnsatisfiedLinkError) {
+            throw IllegalStateException(
+                "Host nux_capi is missing required Vulkan or scripting symbols. " +
+                    "Build it with `$HOST_BUILD_COMMAND` and set $HOST_CAPI_ENV to that library. " +
+                    "Native loader: ${error.message}",
+                error,
+            )
         }
+        val scriptingStatus = nativeHostScriptingProbe()
+        check(scriptingStatus == NUX_STATUS_OK) {
+            "Host nux_capi was built without working scripting support " +
+                "(probe status $scriptingStatus). Build it with `$HOST_BUILD_COMMAND` and set " +
+                "$HOST_CAPI_ENV to that library."
+        }
+        return true
+    }
+
+    private external fun nativeHostScriptingProbe(): Int
 
     // MARK: portable core (nux_capi)
 
@@ -246,4 +259,8 @@ internal object NuxieRuntimeBridge {
 
     /** Engine build/compatibility facts (nux_capi_runtime_info) as JSON. */
     external fun nativeRuntimeInfo(): String
+
+    private const val HOST_BUILD_COMMAND =
+        "cargo build -p nux-capi --features android-vulkan,scripting"
+    private const val NUX_STATUS_OK = 0
 }

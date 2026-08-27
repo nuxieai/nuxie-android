@@ -5,6 +5,7 @@ import ai.nuxie.sdk.runtime.NuxieRuntime
 import java.io.File
 import java.nio.file.Files
 import java.security.MessageDigest
+import java.util.Base64
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -17,6 +18,34 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 class HostRenderSmokeTest {
+    @Test
+    fun `script-dependent interpolator changes the rendered frame`() {
+        assumeHostRuntime()
+        val input = prepareScriptedInterpolatorInput()
+        val output = Files.createTempDirectory("host-render-script-output-").toFile()
+
+        val result = HostRenderHarness().run(
+            HostRenderOptions(
+                input,
+                output,
+                frameCount = 2,
+                size = HostRenderSize(100, 100),
+            ),
+        )
+        val secondFrame = File(output, "frame-1.rgba").readBytes().asPixels()
+
+        assertTrue(
+            "The script must drive the second frame to the authored black-and-magenta state",
+            secondFrame.all { pixel ->
+                pixel.contentEquals(OPAQUE_BLACK_RGBA) || pixel.contentEquals(MAGENTA_RGBA)
+            },
+        )
+        assertFalse(
+            "The script must change the rendered frame",
+            result.frames[0].sha256 == result.frames[1].sha256,
+        )
+    }
+
     @Test
     fun `real configured Experience renders content into a host CPU frame`() {
         assumeHostRuntime()
@@ -118,6 +147,41 @@ class HostRenderSmokeTest {
             JSON.encodeToString(JsonElement.serializer(), descriptor),
         )
         return input
+    }
+
+    private fun prepareScriptedInterpolatorInput(): File {
+        val rivBytes = fixtureBytes("scripted-interpolator.riv.base64")
+        val input = Files.createTempDirectory("host-render-script-input-").toFile()
+        File(input, "scene.riv").writeBytes(rivBytes)
+        val descriptor = buildJsonObject {
+            put("presentation", buildJsonObject {
+                put("backgroundColor", "#FF00FFFF")
+            })
+            put("render", buildJsonObject {
+                put("renderer", "rive")
+                put("riv", buildJsonObject { put("key", "scene.riv") })
+                put("assets", buildJsonArray {})
+                put("screens", buildJsonArray {
+                    add(buildJsonObject {
+                        put("width", 100)
+                        put("height", 100)
+                    })
+                })
+            })
+        }
+        File(input, "release-descriptor.json").writeText(
+            JSON.encodeToString(JsonElement.serializer(), descriptor),
+        )
+        return input
+    }
+
+    private fun fixtureBytes(name: String): ByteArray {
+        val resource = checkNotNull(
+            javaClass.getResourceAsStream("/hostrender/$name"),
+        ) { "Missing host render fixture: $name" }
+        return resource.bufferedReader().use { reader ->
+            Base64.getMimeDecoder().decode(reader.readText())
+        }
     }
 
     private fun assumeHostRuntime() {
