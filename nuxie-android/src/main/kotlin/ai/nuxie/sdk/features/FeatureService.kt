@@ -30,6 +30,11 @@ internal class FeatureService(
         val cachedAtMillis: Long,
         val opaqueRequiredBalance: Double? = null,
     )
+    private data class CheckedAccess(
+        val authoritative: FeatureAccess,
+        val effective: FeatureAccess,
+        val supersededByPurchase: Boolean,
+    )
     private data class PurchaseProjection(
         val grants: Map<String, FeatureAccess>,
         val committedRevision: Long,
@@ -67,7 +72,11 @@ internal class FeatureService(
         featureId: String,
         requiredBalance: Double? = null,
         entityId: String? = null,
-    ): FeatureAccess = performCheck(featureId, requiredBalance, entityId)
+    ): FeatureAccess {
+        val checked = performCheck(featureId, requiredBalance, entityId)
+        if (checked.supersededByPurchase) throw kotlinx.coroutines.CancellationException()
+        return checked.authoritative
+    }
 
     /** Capture the customer scope before starting an authoritative use request. */
     suspend fun captureAuthoritativeUseScope(distinctId: String): AuthoritativeUseScope {
@@ -164,7 +173,7 @@ internal class FeatureService(
                 }
             }
         }
-        return performCheck(featureId, requiredBalance, entityId)
+        return performCheck(featureId, requiredBalance, entityId).effective
     }
 
     private suspend fun getPurchaseCached(
@@ -349,14 +358,12 @@ internal class FeatureService(
         featureId: String,
         requiredBalance: Double?,
         entityId: String?,
-    ): FeatureAccess {
-        // D9 first-spend reconciliation is deferred until Android has a
-        // useFeature/spend interface and its server contract (UNIV-2632).
+    ): CheckedAccess {
         synchronizeCustomerScopeIfNeeded()
         val distinctId = identity.distinctId()
         val key = CacheKey(featureId, entityId)
-        val (requestGeneration, seq) = synchronized(lock) {
-            scopeGeneration to nextSeq++
+        val (requestGeneration, requestPurchaseRevision, seq) = synchronized(lock) {
+            Triple(scopeGeneration, purchaseRevision(featureId), nextSeq++)
         }
         val result = api.checkFeature(distinctId, featureId, requiredBalance, entityId)
         synchronized(lock) {
@@ -374,15 +381,49 @@ internal class FeatureService(
             if (seq <= (committedSeq[key] ?: Long.MIN_VALUE)) {
                 throw kotlinx.coroutines.CancellationException()
             }
-            val opaqueRequiredBalance = result.requiredBalance.takeIf { result.featureId != featureId }
-            val access = authoritativeAccess(result, featureId)
-            realTimeCache[key] = TimedAccess(access, nowMillis(), opaqueRequiredBalance)
-            committedSeq[key] = seq
+
+            val requestedAccess = authoritativeAccess(result, featureId)
+            if (purchaseRevision(featureId) != requestPurchaseRevision) {
+                val effectiveAccess = purchaseAccess(featureId, entityId)
+                    ?.forRequiredBalance(requiredBalance)
+                    ?: entityAccess(featureId, entityId)?.forRequiredBalance(requiredBalance)
+                    ?: requestedAccess
+                return CheckedAccess(requestedAccess, effectiveAccess, supersededByPurchase = true)
+            }
+
+            val affectedFeatureIds = linkedSetOf(featureId, result.featureId)
+            val balanceSourceAccess = resultAccess(result)
+            val publishedAccess = affectedFeatureIds.associateWith { affectedFeatureId ->
+                if (affectedFeatureId == featureId) requestedAccess else balanceSourceAccess
+            }
+            val allowedFeatureIds = publishedAccess.filterValues { it.allowed }.keys
+
+            reconcileLocalPurchases(affectedFeatureIds)
+            if (allowedFeatureIds.isNotEmpty() &&
+                !revocationStore.retireRevokedGrants(distinctId, allowedFeatureIds)
+            ) {
+                throw kotlinx.coroutines.CancellationException()
+            }
+            if (allowedFeatureIds.isNotEmpty()) reconcileRevokedPurchases(allowedFeatureIds)
+
+            val cachedAt = nowMillis()
+            affectedFeatureIds.forEach { affectedFeatureId ->
+                val access = publishedAccess.getValue(affectedFeatureId)
+                val affectedKey = CacheKey(affectedFeatureId, entityId)
+                realTimeCache[affectedKey] = TimedAccess(
+                    access = access,
+                    cachedAtMillis = cachedAt,
+                    opaqueRequiredBalance = result.requiredBalance.takeIf {
+                        affectedFeatureId == featureId && result.featureId != featureId
+                    },
+                )
+                committedSeq[affectedKey] = seq
+                featureInfo.update(affectedFeatureId, access, entityId)
+            }
             val effectiveAccess = purchaseAccess(featureId, entityId)
                 ?.forRequiredBalance(requiredBalance)
-                ?: access
-            featureInfo.update(featureId, effectiveAccess, entityId)
-            return effectiveAccess
+                ?: requestedAccess
+            return CheckedAccess(requestedAccess, effectiveAccess, supersededByPurchase = false)
         }
     }
 
@@ -442,6 +483,14 @@ internal class FeatureService(
         revokedPurchases.values.mapNotNull { it.grants[featureId] }.lastOrNull()?.let { return it }
         return localPurchases.values.mapNotNull { it.grants[featureId] }.lastOrNull()
     }
+
+    private fun purchaseRevision(featureId: String): Long? = sequenceOf(
+        purchaseUpdates.values,
+        localPurchases.values,
+        revokedPurchases.values,
+    ).flatten()
+        .filter { featureId in it.grants }
+        .maxOfOrNull { it.committedRevision }
 
     private fun reconcileLocalPurchases(featureIds: Set<String>) {
         localPurchases.toMap().forEach { (transactionId, projection) ->
