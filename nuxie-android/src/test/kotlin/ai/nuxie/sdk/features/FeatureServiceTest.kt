@@ -221,7 +221,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun authoritativeUseRetirementFailureStillFencesOlderInFlightCheck() = runBlocking {
+    fun authoritativeUseRetirementFailureDoesNotInventSupersession() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
         lateinit var core: NuxieCore
@@ -271,7 +271,7 @@ class FeatureServiceTest {
         )
         releaseCheck.countDown()
 
-        assertTrue(olderCheck.await().exceptionOrNull() is CancellationException)
+        assertFalse(olderCheck.await().getOrThrow().allowed)
         assertEquals(null, core.features.getCached("exports", null))
         core.stop()
     }
@@ -543,6 +543,182 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun remoteCheckCancelsWhenRevocationLandsMidRequest() = runBlocking {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checkStarted.countDown()
+                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            allowed = true,
+                            balance = "1",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+        core.features.applyLocalPurchase(
+            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+            "mid-check-token",
+        )
+
+        val check = async(Dispatchers.Default) { core.features.check("pro") }
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+        core.features.removePurchase("mid-check-token")
+        releaseCheck.countDown()
+
+        assertTrue(runCatching { check.await() }.exceptionOrNull() is CancellationException)
+        assertFalse(core.features.getCached("pro", null)!!.allowed)
+        core.stop()
+    }
+
+    @Test
+    fun remoteCheckCancelsWhenPurchaseUpdateLandsMidRequest() = runBlocking {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checkStarted.countDown()
+                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            allowed = false,
+                            balance = "0",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+        core.features.applyLocalPurchase(
+            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+            "mid-check-token",
+        )
+
+        val check = async(Dispatchers.Default) { core.features.check("pro") }
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+        core.features.updateFromPurchase(
+            core.identity.distinctId(),
+            Json.parseToJsonElement(
+                """{"success":true,"features":[{"id":"internal-pro","ext_id":"pro","type":"boolean","allowed":true,"unlimited":false,"balance":null}]}""",
+            ).jsonObject,
+            "mid-check-token",
+        )
+        releaseCheck.countDown()
+
+        assertTrue(runCatching { check.await() }.exceptionOrNull() is CancellationException)
+        assertTrue(core.features.getCached("pro", null)!!.allowed)
+        core.stop()
+    }
+
+    @Test
+    fun remoteCheckStillCancelsAfterProfileReconciliationRetiresTheMidRequestPurchase() = runBlocking {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checkStarted.countDown()
+                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            allowed = false,
+                            balance = "null",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+
+        val check = async(Dispatchers.Default) { core.features.check("pro") }
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+        core.features.applyLocalPurchase(
+            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+            "mid-check-token",
+        )
+        core.features.hydrateProfile(
+            core.identity.distinctId(),
+            Json.parseToJsonElement(
+                profile("""[{"id":"pro","type":"boolean","unlimited":false}]"""),
+            ).jsonObject,
+        )
+        releaseCheck.countDown()
+
+        assertTrue(runCatching { check.await() }.exceptionOrNull() is CancellationException)
+        assertTrue(core.features.getCached("pro", null)!!.allowed)
+        core.stop()
+    }
+
+    @Test
+    fun purchaseMutationForAnotherFeatureDoesNotSupersedeRemoteCheck() = runBlocking {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checkStarted.countDown()
+                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "exports",
+                            requiredBalance = 1.0,
+                            balance = "3",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+
+        val check = async(Dispatchers.Default) { core.features.check("exports") }
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+        core.features.applyLocalPurchase(
+            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+            "unrelated-token",
+        )
+        releaseCheck.countDown()
+
+        assertEquals(3.0, check.await().balance!!, 0.0)
+        assertTrue(core.features.getCached("exports", null)!!.allowed)
+        core.stop()
+    }
+
+    @Test
     fun globalPurchaseDoesNotSupersedeEntityScopedChecks() = runBlocking {
         val checksStarted = CountDownLatch(2)
         val releaseChecks = CountDownLatch(1)
@@ -577,12 +753,12 @@ class FeatureServiceTest {
         )
 
         val remote = async(Dispatchers.Default) {
-            core.features.check("exports", entityId = "requested-project")
+            core.features.check("exports", entityId = "remote-project")
         }
         val cacheFirst = async(Dispatchers.Default) {
             core.features.checkWithCache(
                 "exports",
-                entityId = "requested-project",
+                entityId = "cache-first-project",
                 forceRefresh = true,
             )
         }
@@ -595,6 +771,8 @@ class FeatureServiceTest {
 
         assertEquals(3.0, remote.await().balance!!, 0.0)
         assertEquals(3.0, cacheFirst.await().balance!!, 0.0)
+        assertFalse(core.features.getCached("exports", "remote-project")!!.allowed)
+        assertFalse(core.features.getCached("exports", "cache-first-project")!!.allowed)
         core.stop()
     }
 
@@ -845,7 +1023,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun transitiveWalletResponseKeepsNonZeroBalanceOpaqueAndPreservesZero() = runBlocking {
+    fun transitiveRemoteResponsePreservesWalletBalanceIncludingZero() = runBlocking {
         var checks = 0
         val transport = FakeTransport().apply {
             respond = { request ->
@@ -865,7 +1043,7 @@ class FeatureServiceTest {
         }
         val core = core(transport)
 
-        assertEquals(null, core.features.check("exports", requiredBalance = 2.0).balance)
+        assertEquals(5.0, core.features.check("exports", requiredBalance = 2.0).balance!!, 0.0)
         assertEquals(0.0, core.features.check("exports", requiredBalance = 2.0).balance)
         assertEquals(2, checks)
         core.stop()
