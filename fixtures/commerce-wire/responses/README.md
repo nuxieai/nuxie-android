@@ -16,6 +16,7 @@ Every response fixture has this shape:
 ```json
 {
   "name": "purchase-one-time.ts",
+  "lane": "ts",
   "request": "purchase-one-time",
   "endpoint": "/purchase",
   "statusCode": 200,
@@ -24,11 +25,16 @@ Every response fixture has this shape:
 }
 ```
 
+- For a file named `<case>.<lane>.json`, `name` must be exactly
+  `<case>.<lane>`, `request` must be exactly `<case>`, and `lane` must be
+  exactly `<lane>` (`ts` or `rs`). The Android test checks all three against
+  the filename so duplicated or swapped response files fail conformance.
 - `request` names one committed request fixture and `endpoint` must match it.
 - `bodyText` is the worker's exact UTF-8 response text. For JSON responses,
-  `body` is that text parsed as JSON. For an empty or non-JSON non-2xx
-  response, omit `body` or set it to `null`; status-based error mapping does
-  not parse the real response body either.
+  `body` is required and must equal that text parsed as JSON, regardless of
+  status code. For an empty or non-JSON non-2xx response, omit `body` or set
+  it to `null`; status-based error mapping does not parse the real response
+  body either.
 - Successful `/purchase` fixtures are parsed through `PurchaseResponse`.
 - Successful `/entitled` fixtures are parsed through `FeatureCheckResult`.
 - Non-2xx fixtures are checked through the endpoint's real rejection mapping,
