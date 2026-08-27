@@ -22,6 +22,13 @@ runtime release when needed. For local runtime development, stage a checkout
 with `scripts/stage-runtime.sh <path-to-nuxie-runtime-checkout>` and build with
 `NUXIE_RUNTIME_USE_LOCAL=1`.
 
+## Wrapper contract
+
+The [`nuxie-android/api/nuxie-android.api`](nuxie-android/api/nuxie-android.api)
+`apiCheck` dump is the Android binding wrapper contract, sibling to the
+`nuxie-ios` `api/public-api.txt`. Wrappers may bind only symbols listed in that
+allowlist.
+
 ## Setup
 
 ```kotlin
