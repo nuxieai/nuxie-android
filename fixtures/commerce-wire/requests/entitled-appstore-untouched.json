@@ -1,0 +1,1 @@
+{"name":"entitled-appstore-untouched","endpoint":"/purchase","body":{"apiKey":"pk_fixture","type":"appstore","transaction_jwt":"fixture.header.payload.signature","distinct_id":"fixture-customer-appstore"},"bodyText":"{\"apiKey\":\"pk_fixture\",\"type\":\"appstore\",\"transaction_jwt\":\"fixture.header.payload.signature\",\"distinct_id\":\"fixture-customer-appstore\"}"}
