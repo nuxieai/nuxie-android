@@ -20,6 +20,7 @@ class AppActionEncodingConformanceTest {
     @Test
     fun everyAppActionVectorResolvesAndEncodesToTheExpectedWireValue() {
         val coveredCases = mutableSetOf<String>()
+        var fixtureExercisesNullOmission = false
 
         FixtureRunner.run(
             relativePath = "encodings/app-action.json",
@@ -27,10 +28,12 @@ class AppActionEncodingConformanceTest {
         ) { vector ->
             val input = vector.body.getValue("action").jsonObject
             val experience = input.getValue("experience").jsonObject
-            val rawPayload = input["payload"]
+            val authoredPayload = input["payload"]
                 ?.takeUnless { it is JsonNull }
                 ?.jsonObject
-                ?.mapValues { (_, value) -> value.toResolvedInput() }
+            fixtureExercisesNullOmission = fixtureExercisesNullOmission ||
+                authoredPayload?.values?.any { it is JsonNull } == true
+            val rawPayload = authoredPayload?.mapValues { (_, value) -> value.toResolvedInput() }
             val payload = rawPayload?.let(AppActionValueResolver::resolvedRecord)
             payload?.values?.forEach { value ->
                 coveredCases += when (value) {
@@ -58,7 +61,61 @@ class AppActionEncodingConformanceTest {
         }
 
         assertEquals(setOf("string", "int", "double", "bool"), coveredCases)
-        assertTrue("fixture must exercise null omission", "null" !in coveredCases)
+        assertTrue("fixture must contain an authored null field to exercise omission", fixtureExercisesNullOmission)
+    }
+
+    @Test
+    fun containerFloatPromotesThroughDoubleLikeIOSFoundation() {
+        assertResolvedContainer(
+            // iOS JSONSerialization after Float(0.1) is promoted through NSNumber/Double.
+            expected = "{\"value\":0.10000000149011612}",
+            container = mapOf("value" to 0.1f),
+        )
+    }
+
+    @Test
+    fun containerDoubleUsesTheIOSFoundationRoundTripDigits() {
+        assertResolvedContainer(
+            // iOS JSONSerialization spells Double(0.1) with 17 significant digits.
+            expected = "{\"value\":0.10000000000000001}",
+            container = mapOf("value" to 0.1),
+        )
+    }
+
+    @Test
+    fun containerDoubleUsesIOSFoundationExponentSpellings() {
+        assertResolvedContainer(
+            // iOS switches below -4 and at 17, with lowercase e and a signed exponent.
+            expected = "[0.0001,1.0000000000000001e-05,10000000000000000,1e+17]",
+            container = listOf(1e-4, 1e-5, 1e16, 1e17),
+        )
+    }
+
+    @Test
+    fun containerDoublePreservesIOSFoundationNegativeZeroSpelling() {
+        assertResolvedContainer(
+            // iOS JSONSerialization preserves the sign but omits the fractional suffix.
+            expected = "[-0,0]",
+            container = listOf(-0.0, 0.0),
+        )
+    }
+
+    @Test
+    fun containerDoubleOmitsIOSFoundationIntegralSuffix() {
+        assertResolvedContainer(
+            // iOS emits integral doubles without `.0`, including below its exponent threshold.
+            expected = "[1,10000000000000000]",
+            container = listOf(1.0, 1e16),
+        )
+    }
+
+    @Test
+    fun containerDecimalUsesIOSFoundationScaleNormalization() {
+        assertResolvedContainer(
+            // iOS Decimal serialization removes insignificant scale and normalizes signed zero.
+            expected = "[1.23,1000,0]",
+            container = listOf(BigDecimal("1.2300"), BigDecimal("1000.00"), BigDecimal("-0.00")),
+        )
     }
 
     @Test
@@ -103,6 +160,12 @@ class AppActionEncodingConformanceTest {
 
     private fun JsonObject.optionalString(key: String): String? =
         getValue(key).takeUnless { it is JsonNull }?.jsonPrimitive?.content
+
+    private fun assertResolvedContainer(expected: String, container: Any) {
+        val resolved = AppActionValueResolver.resolved(container) as AppActionValue.String
+        assertEquals(expected, resolved.value)
+    }
+
     @Test
     fun `nested object payloads serialize with recursively sorted keys like the iOS reference`() {
         val resolved = AppActionValueResolver.resolved(

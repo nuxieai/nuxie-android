@@ -3,6 +3,8 @@ package ai.nuxie.sdk
 import ai.nuxie.sdk.events.CanonicalJson
 import java.math.BigDecimal
 import java.math.BigInteger
+import java.math.MathContext
+import java.math.RoundingMode
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -84,6 +86,8 @@ internal object AppActionValueResolver {
         is JsonPrimitive -> when {
             value.isString -> value
             value.content == "true" || value.content == "false" -> value
+            // JsonPrimitive erases whether a number began as Float, Double, or Decimal.
+            // Preserve its already-authored JSON token rather than guess at Foundation's type.
             STRICT_NUMBER.matches(value.content) -> value
             else -> null
         }
@@ -97,9 +101,14 @@ internal object AppActionValueResolver {
         is UShort -> strictJsonNumber(value.toString())
         is UInt -> strictJsonNumber(value.toString())
         is ULong -> strictJsonNumber(value.toString())
-        is Float -> value.takeIf(Float::isFinite)?.let(::JsonPrimitive)
-        is kotlin.Double -> value.takeIf(kotlin.Double::isFinite)?.let(::JsonPrimitive)
-        is BigDecimal -> strictJsonNumber(value.toPlainString())
+        is Float -> value.takeIf(Float::isFinite)
+            ?.toDouble()
+            ?.let(::foundationDoubleNumber)
+            ?.let(::strictJsonNumber)
+        is kotlin.Double -> value.takeIf(kotlin.Double::isFinite)
+            ?.let(::foundationDoubleNumber)
+            ?.let(::strictJsonNumber)
+        is BigDecimal -> strictJsonNumber(foundationDecimalNumber(value))
         is BigInteger -> strictJsonNumber(value.toString())
         is Number -> value.toDouble().takeIf(kotlin.Double::isFinite)
             ?.let { strictJsonNumber(value.toString()) }
@@ -134,11 +143,38 @@ internal object AppActionValueResolver {
     private fun strictJsonNumber(value: kotlin.String): JsonElement? =
         value.takeIf(STRICT_NUMBER::matches)?.let(Json::parseToJsonElement)
 
+    /** Darwin JSONSerialization's finite Double spelling: C `%.17g` round-trip precision. */
+    private fun foundationDoubleNumber(value: kotlin.Double): kotlin.String {
+        if (value == 0.0) {
+            return if (value.toRawBits() < 0) "-0" else "0"
+        }
+
+        val rounded = BigDecimal(value)
+            .round(FOUNDATION_DOUBLE_CONTEXT)
+            .stripTrailingZeros()
+        val exponent = rounded.precision() - rounded.scale() - 1
+        if (exponent >= -4 && exponent < FOUNDATION_DOUBLE_CONTEXT.precision) {
+            return rounded.toPlainString()
+        }
+
+        val digits = rounded.unscaledValue().abs().toString()
+        val mantissa = if (digits.length == 1) digits else "${digits.first()}.${digits.drop(1)}"
+        val exponentSign = if (exponent < 0) '-' else '+'
+        val exponentDigits = kotlin.math.abs(exponent).toString().padStart(2, '0')
+        val numberSign = if (rounded.signum() < 0) "-" else ""
+        return "$numberSign$mantissa" + "e$exponentSign$exponentDigits"
+    }
+
+    /** Swift Decimal/NSDecimalNumber drops authored scale before JSONSerialization writes it. */
+    private fun foundationDecimalNumber(value: BigDecimal): kotlin.String =
+        if (value.signum() == 0) "0" else value.stripTrailingZeros().toPlainString()
+
     private fun BigInteger.toLongExactOrNull(): Long? =
         takeIf { it >= MIN_SIGNED_64 && it <= MAX_SIGNED_64 }?.toLong()
 
     private val MIN_SIGNED_64 = BigInteger.valueOf(Long.MIN_VALUE)
     private val MAX_SIGNED_64 = BigInteger.valueOf(Long.MAX_VALUE)
+    private val FOUNDATION_DOUBLE_CONTEXT = MathContext(17, RoundingMode.HALF_EVEN)
     private val STRICT_NUMBER = Regex("-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?")
 }
 
