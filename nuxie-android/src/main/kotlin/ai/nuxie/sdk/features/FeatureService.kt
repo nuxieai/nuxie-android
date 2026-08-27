@@ -384,11 +384,16 @@ internal class FeatureService(
 
             val requestedAccess = authoritativeAccess(result, featureId)
             if (purchaseRevision(featureId) != requestPurchaseRevision) {
-                val effectiveAccess = purchaseAccess(featureId, entityId)
-                    ?.forRequiredBalance(requiredBalance)
-                    ?: entityAccess(featureId, entityId)?.forRequiredBalance(requiredBalance)
-                    ?: requestedAccess
-                return CheckedAccess(requestedAccess, effectiveAccess, supersededByPurchase = true)
+                val supersededByPurchase = entityId == null
+                val effectiveAccess = if (supersededByPurchase) {
+                    purchaseAccess(featureId, entityId)
+                        ?.forRequiredBalance(requiredBalance)
+                        ?: entityAccess(featureId, entityId)?.forRequiredBalance(requiredBalance)
+                        ?: requestedAccess
+                } else {
+                    requestedAccess
+                }
+                return CheckedAccess(requestedAccess, effectiveAccess, supersededByPurchase)
             }
 
             val affectedFeatureIds = linkedSetOf(featureId, result.featureId)
@@ -410,6 +415,7 @@ internal class FeatureService(
             affectedFeatureIds.forEach { affectedFeatureId ->
                 val access = publishedAccess.getValue(affectedFeatureId)
                 val affectedKey = CacheKey(affectedFeatureId, entityId)
+                val committedSequence = if (affectedFeatureId == featureId) seq else nextSeq++
                 realTimeCache[affectedKey] = TimedAccess(
                     access = access,
                     cachedAtMillis = cachedAt,
@@ -417,7 +423,7 @@ internal class FeatureService(
                         affectedFeatureId == featureId && result.featureId != featureId
                     },
                 )
-                committedSeq[affectedKey] = seq
+                committedSeq[affectedKey] = committedSequence
                 featureInfo.update(affectedFeatureId, access, entityId)
             }
             val effectiveAccess = purchaseAccess(featureId, entityId)
@@ -510,7 +516,7 @@ internal class FeatureService(
         null -> durableGlobalAccess()[featureId]
         else -> durableEntities[featureId]?.let { entities ->
             entities[entityId] ?: durableGlobalAccess()[featureId]
-                ?.let { FeatureAccess(false, false, null, it.type) }
+                ?.let { FeatureAccess(false, false, null, FeatureType.BOOLEAN) }
         } ?: durableGlobalAccess()[featureId]
     }
 
