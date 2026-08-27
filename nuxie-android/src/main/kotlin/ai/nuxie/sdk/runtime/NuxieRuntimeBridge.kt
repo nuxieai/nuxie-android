@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.runtime
 
 import android.util.Log
+import java.io.File
 
 /**
  * JNI binding surface over the engine's portable C ABI (`nux_capi`) plus the
@@ -19,20 +20,52 @@ import android.util.Log
 internal object NuxieRuntimeBridge {
     private const val LOG_TAG = "Nuxie"
     private const val LIBRARY = "nuxie_runtime_android"
+    private const val HOST_CAPI_ENV = "NUXIE_HOST_CAPI_LIB"
+    private const val HOST_JNI_PROPERTY = "nuxie.host.jni.lib"
 
     val isAvailable: Boolean by lazy {
+        val hostCapi = if (isAndroidRuntime()) {
+            null
+        } else {
+            System.getenv(HOST_CAPI_ENV)?.takeIf(String::isNotBlank)
+        }
+        if (hostCapi == null) loadAndroidRuntime() else loadHostRuntime(hostCapi)
+    }
+
+    private fun isAndroidRuntime(): Boolean =
+        System.getProperty("java.runtime.name") == "Android Runtime" ||
+            System.getProperty("java.vm.name") == "Dalvik"
+
+    private fun loadAndroidRuntime(): Boolean = try {
+        // Keep the shipped Android loader and failure behavior unchanged.
+        System.loadLibrary(LIBRARY)
+        true
+    } catch (error: UnsatisfiedLinkError) {
+        Log.i(
+            LOG_TAG,
+            "Nuxie runtime library unavailable; experiences will not present.",
+            error,
+        )
+        false
+    }
+
+    private fun loadHostRuntime(hostCapi: String): Boolean =
         try {
-            System.loadLibrary(LIBRARY)
+            val capiFile = File(hostCapi).canonicalFile
+            require(capiFile.isFile) { "$HOST_CAPI_ENV is not a file: $capiFile" }
+            val hostJni = System.getProperty(HOST_JNI_PROPERTY)
+                ?.takeIf(String::isNotBlank)
+                ?.let(::File)
+                ?.canonicalFile
+                ?: error("Missing -D$HOST_JNI_PROPERTY for the host JNI adapter")
+            require(hostJni.isFile) { "Host JNI adapter is not a file: $hostJni" }
+            System.load(capiFile.path)
+            System.load(hostJni.path)
             true
-        } catch (error: UnsatisfiedLinkError) {
-            Log.i(
-                LOG_TAG,
-                "Nuxie runtime library unavailable; experiences will not present.",
-                error,
-            )
+        } catch (error: Throwable) {
+            System.err.println("Nuxie host runtime unavailable: ${error.message}")
             false
         }
-    }
 
     // MARK: portable core (nux_capi)
 
@@ -198,6 +231,14 @@ internal object NuxieRuntimeBridge {
         clearColor: Int,
         fitContainCenter: Boolean,
     ): Int
+
+    /** Renders into JVM-owned, tightly packed RGBA8 premultiplied-sRGB pixels. */
+    external fun nativeRendererRenderPlayerToCpuFrame(
+        renderer: Long,
+        player: Long,
+        clearColor: Int,
+        fitContainCenter: Boolean,
+    ): NuxieCpuFrame?
 
     external fun nativeRendererResetPlayerDomain(renderer: Long, player: Long): Int
 

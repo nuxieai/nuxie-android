@@ -161,6 +161,13 @@ internal interface NuxieTypedRuntimeNative {
         fitContainCenter: Boolean,
     ): Int = error("renderAndPresent is not implemented")
 
+    fun renderToCpuFrame(
+        rendererHandle: Long,
+        playerHandle: Long,
+        clearColor: Int,
+        fitContainCenter: Boolean,
+    ): NuxieCpuFrame = error("renderToCpuFrame is not implemented")
+
     fun resetPlayerDomain(rendererHandle: Long, playerHandle: Long): Int =
         error("resetPlayerDomain is not implemented")
 
@@ -260,6 +267,20 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         clearColor,
         fitContainCenter,
     )
+
+    override fun renderToCpuFrame(
+        rendererHandle: Long,
+        playerHandle: Long,
+        clearColor: Int,
+        fitContainCenter: Boolean,
+    ): NuxieCpuFrame = checkNotNull(
+        NuxieRuntimeBridge.nativeRendererRenderPlayerToCpuFrame(
+            rendererHandle,
+            playerHandle,
+            clearColor,
+            fitContainCenter,
+        ),
+    ) { "Android Vulkan renderer did not return a CPU frame" }
 
     override fun resetPlayerDomain(rendererHandle: Long, playerHandle: Long): Int =
         NuxieRuntimeBridge.nativeRendererResetPlayerDomain(rendererHandle, playerHandle)

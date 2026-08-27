@@ -118,6 +118,32 @@ class NuxieOwnedRuntimeTest {
         }
     }
 
+    @Test
+    fun `renderer returns an owned CPU frame and rejects rendering after close`() {
+        val native = RecordingNative()
+        val runtime = NuxieRuntime(native)
+        val file = checkNotNull(runtime.importFile(byteArrayOf(1)))
+        val artboard = checkNotNull(file.newArtboard())
+        val player = checkNotNull(artboard.newPlayer())
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(2, 1))
+
+        val frame = renderer.renderToCpuFrame(
+            player = player,
+            clearColor = 0xFFFF00FF.toInt(),
+            fitContainCenter = true,
+        )
+
+        assertEquals(2, frame.width)
+        assertEquals(1, frame.height)
+        assertEquals(8, frame.rgba.size)
+        assertEquals(0x7F, frame.rgba[4].toInt() and 0xff)
+
+        renderer.close()
+        assertThrows(IllegalStateException::class.java) {
+            renderer.renderToCpuFrame(player, 0, true)
+        }
+    }
+
     private class RecordingNative : NuxieTypedRuntimeNative {
         override val isAvailable = true
         var inspectedAssets: List<ExpectedFileAsset>? = emptyList()
@@ -194,6 +220,17 @@ class NuxieOwnedRuntimeTest {
             clearColor: Int,
             fitContainCenter: Boolean,
         ): Int = 1
+
+        override fun renderToCpuFrame(
+            rendererHandle: Long,
+            playerHandle: Long,
+            clearColor: Int,
+            fitContainCenter: Boolean,
+        ): NuxieCpuFrame = NuxieCpuFrame(
+            width = 2,
+            height = 1,
+            rgba = byteArrayOf(0, 0, 0, 0, 0x7F, 0, 0, 0),
+        )
 
         override fun resetPlayerDomain(rendererHandle: Long, playerHandle: Long): Int = 6
 
