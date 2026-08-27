@@ -1,0 +1,12 @@
+{
+  "name": "entitled-appstore-untouched.rs",
+  "lane": "rs",
+  "request": "entitled-appstore-untouched",
+  "endpoint": "/entitled",
+  "statusCode": 400,
+  "body": {
+    "error": "Invalid transaction JWT",
+    "success": false
+  },
+  "bodyText": "{\"error\":\"Invalid transaction JWT\",\"success\":false}"
+}

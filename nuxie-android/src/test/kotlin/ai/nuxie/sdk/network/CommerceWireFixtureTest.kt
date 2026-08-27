@@ -27,6 +27,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -34,6 +35,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.double
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -202,6 +204,42 @@ class CommerceWireFixtureTest {
             endpoint = "/purchase",
             statusCode = 422,
             body = null,
+            bodyText = """{"error":"invalid purchase"}""",
+        )
+
+        val failure = assertThrows(AssertionError::class.java) {
+            CommerceWireResponses.assertParses(fixture)
+        }
+        assertTrue(failure.message.orEmpty().contains("must contain body equal to its parsed bodyText"))
+    }
+
+    @Test
+    fun semanticJsonBodyEqualityAcceptsEquivalentNumberFormattingRecursively() {
+        CommerceWireResponses.assertParses(
+            CommerceWireResponses.ResponseFixture(
+                name = "purchase-one-time.rs",
+                lane = "rs",
+                request = "purchase-one-time",
+                endpoint = "/purchase",
+                statusCode = 422,
+                body = Json.parseToJsonElement(
+                    """{"empty":null,"ok":true,"values":[4,{"required":1}]}""",
+                ),
+                bodyText =
+                    """{"values":[4.0,{"required":1.0}],"ok":true,"empty":null}""",
+            ),
+        )
+    }
+
+    @Test
+    fun semanticJsonBodyEqualityRejectsSwappedResponseBody() {
+        val fixture = CommerceWireResponses.ResponseFixture(
+            name = "purchase-one-time.ts",
+            lane = "ts",
+            request = "purchase-one-time",
+            endpoint = "/purchase",
+            statusCode = 422,
+            body = Json.parseToJsonElement("""{"error":"different response"}"""),
             bodyText = """{"error":"invalid purchase"}""",
         )
 
@@ -696,10 +734,10 @@ private object CommerceWireResponses {
         )
         val parsedBody = runCatching { Json.parseToJsonElement(fixture.bodyText) }.getOrNull()
         if (parsedBody != null) {
-            assertEquals(
-                "${fixture.name} must contain body equal to its parsed bodyText.",
-                parsedBody,
-                fixture.body,
+            assertTrue(
+                "${fixture.name} must contain body equal to its parsed bodyText. " +
+                    "expected:<$parsedBody> but was:<${fixture.body}>",
+                fixture.body != null && parsedBody.semanticallyEquals(fixture.body),
             )
         } else {
             assertTrue(
@@ -821,6 +859,28 @@ private object CommerceWireResponses {
 
     private fun ResponseFixture.successBody(): JsonObject = body as? JsonObject
         ?: throw AssertionError("Successful response fixture '$name' must contain an object body.")
+
+    private fun JsonElement.semanticallyEquals(other: JsonElement): Boolean = when {
+        this is JsonObject && other is JsonObject ->
+            keys == other.keys && all { (key, value) -> value.semanticallyEquals(other.getValue(key)) }
+
+        this is JsonArray && other is JsonArray ->
+            size == other.size && indices.all { index -> this[index].semanticallyEquals(other[index]) }
+
+        this is JsonPrimitive && other is JsonPrimitive -> semanticallyEquals(other)
+        else -> false
+    }
+
+    private fun JsonPrimitive.semanticallyEquals(other: JsonPrimitive): Boolean {
+        if (isString || other.isString || this is JsonNull || other is JsonNull) return this == other
+        val number = doubleOrNull
+        val otherNumber = other.doubleOrNull
+        return if (number != null || otherNumber != null) {
+            number != null && otherNumber != null && number == otherNumber
+        } else {
+            this == other
+        }
+    }
 }
 
 private fun JsonElement.asString(): String =

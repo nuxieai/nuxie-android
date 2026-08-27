@@ -1,0 +1,22 @@
+{
+  "name": "purchase-subscription-full.ts",
+  "lane": "ts",
+  "request": "purchase-subscription-full",
+  "endpoint": "/purchase",
+  "statusCode": 200,
+  "body": {
+    "success": true,
+    "customer_id": "273eac55-5075-5ef4-963c-de2a9c53d586",
+    "features": [
+      {
+        "id": "feature-commerce-subscription",
+        "ext_id": "fixture-subscription-access",
+        "type": "boolean",
+        "allowed": true,
+        "balance": null,
+        "unlimited": false
+      }
+    ]
+  },
+  "bodyText": "{\"success\":true,\"customer_id\":\"273eac55-5075-5ef4-963c-de2a9c53d586\",\"features\":[{\"id\":\"feature-commerce-subscription\",\"ext_id\":\"fixture-subscription-access\",\"type\":\"boolean\",\"allowed\":true,\"balance\":null,\"unlimited\":false}]}"
+}

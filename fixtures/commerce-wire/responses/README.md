@@ -31,9 +31,11 @@ Every response fixture has this shape:
   the filename so duplicated or swapped response files fail conformance.
 - `request` names one committed request fixture and `endpoint` must match it.
 - `bodyText` is the worker's exact UTF-8 response text. For JSON responses,
-  `body` is required and must equal that text parsed as JSON, regardless of
-  status code. For an empty or non-JSON non-2xx response, omit `body` or set
-  it to `null`; status-based error mapping does not parse the real response
+  `body` is required and must equal that text parsed with semantic JSON
+  equality, regardless of status code: numeric primitives compare as doubles,
+  objects and arrays compare recursively, and strings, booleans, and null
+  compare exactly. For an empty or non-JSON non-2xx response, omit `body` or
+  set it to `null`; status-based error mapping does not parse the real response
   body either.
 - Successful `/purchase` fixtures are parsed through `PurchaseResponse`.
 - Successful `/entitled` fixtures are parsed through `FeatureCheckResult`.

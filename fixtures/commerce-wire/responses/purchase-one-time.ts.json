@@ -1,0 +1,22 @@
+{
+  "name": "purchase-one-time.ts",
+  "lane": "ts",
+  "request": "purchase-one-time",
+  "endpoint": "/purchase",
+  "statusCode": 200,
+  "body": {
+    "success": true,
+    "customer_id": "b0982940-81ec-579f-a6d1-85006ed216e6",
+    "features": [
+      {
+        "id": "feature-commerce-one-time",
+        "ext_id": "fixture-credits-one-time",
+        "type": "metered",
+        "allowed": true,
+        "balance": 10,
+        "unlimited": false
+      }
+    ]
+  },
+  "bodyText": "{\"success\":true,\"customer_id\":\"b0982940-81ec-579f-a6d1-85006ed216e6\",\"features\":[{\"id\":\"feature-commerce-one-time\",\"ext_id\":\"fixture-credits-one-time\",\"type\":\"metered\",\"allowed\":true,\"balance\":10,\"unlimited\":false}]}"
+}

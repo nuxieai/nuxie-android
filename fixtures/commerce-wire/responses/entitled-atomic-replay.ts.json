@@ -1,0 +1,18 @@
+{
+  "name": "entitled-atomic-replay.ts",
+  "lane": "ts",
+  "request": "entitled-atomic-replay",
+  "endpoint": "/entitled",
+  "statusCode": 200,
+  "body": {
+    "customerId": "fixture-customer-full",
+    "featureId": "fixture-credits-full",
+    "requiredBalance": 2.5,
+    "code": "feature_found",
+    "allowed": false,
+    "unlimited": false,
+    "balance": null,
+    "type": "metered"
+  },
+  "bodyText": "{\"customerId\":\"fixture-customer-full\",\"featureId\":\"fixture-credits-full\",\"requiredBalance\":2.5,\"code\":\"feature_found\",\"allowed\":false,\"unlimited\":false,\"balance\":null,\"type\":\"metered\"}"
+}

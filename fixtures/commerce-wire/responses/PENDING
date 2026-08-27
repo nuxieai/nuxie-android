@@ -1,5 +1,0 @@
-Parent-worker TypeScript and Rust commerce response fixtures have not landed yet.
-
-Delete this marker in the parent repository's response-landing commit. Its
-absence makes the Android conformance test require <case>.ts.json and
-<case>.rs.json for every committed request fixture.
