@@ -629,12 +629,20 @@ private object CommerceWireResponses {
     fun files(): List<Path> {
         val directory = responseDirectory()
         if (!Files.isDirectory(directory)) return emptyList()
-        return Files.walk(directory).use { paths ->
+        val files = Files.walk(directory).use { paths ->
             paths
                 .filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".json") }
                 .sorted()
                 .toList()
         }
+        // Response fixtures live flat in responses/; a nested or duplicate
+        // basename would let a stale copy satisfy the completeness matrix.
+        files.forEach { file ->
+            check(file.parent == directory) {
+                "Response fixture is not directly in responses/: $file"
+            }
+        }
+        return files
     }
 
     fun assertParses(path: Path) {
