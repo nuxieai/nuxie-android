@@ -1,0 +1,1 @@
+{"name":"purchase-token-first","endpoint":"/purchase","body":{"apiKey":"pk_fixture","type":"playstore","purchase_token":"fixture-token-first","distinct_id":"fixture-customer-token-first"},"bodyText":"{\"apiKey\":\"pk_fixture\",\"type\":\"playstore\",\"purchase_token\":\"fixture-token-first\",\"distinct_id\":\"fixture-customer-token-first\"}"}
