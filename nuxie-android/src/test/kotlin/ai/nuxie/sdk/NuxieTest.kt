@@ -2,6 +2,7 @@ package ai.nuxie.sdk
 
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.testsupport.FakeTransport
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -48,5 +49,12 @@ class NuxieTest {
     @Test
     fun versionIsExposed() {
         assertTrue(Nuxie.version.isNotBlank())
+    }
+
+    @Test
+    fun hasFeatureBeforeSetupThrows() {
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { Nuxie.hasFeature("premium") }
+        }
     }
 }

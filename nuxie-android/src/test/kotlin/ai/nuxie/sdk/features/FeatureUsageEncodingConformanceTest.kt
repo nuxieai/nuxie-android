@@ -1,17 +1,36 @@
 package ai.nuxie.sdk.features
 
+import ai.nuxie.sdk.LogLevel
+import ai.nuxie.sdk.Nuxie
+import ai.nuxie.sdk.NuxieConfiguration
+import ai.nuxie.sdk.NuxieEnvironment
+import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.fixtures.FixtureRunner
+import ai.nuxie.sdk.network.HttpTransport
+import ai.nuxie.sdk.testsupport.FakeTransport
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.double
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 
+@RunWith(RobolectricTestRunner::class)
 class FeatureUsageEncodingConformanceTest {
+    @After
+    fun tearDown() {
+        Nuxie.resetForTesting()
+        Nuxie.overridesForTesting = null
+    }
+
     @Test
     fun everyFeatureUsageAndAccessVectorEncodesToTheExpectedWireValue() {
         val coveredPolicies = mutableSetOf<String>()
@@ -52,7 +71,11 @@ class FeatureUsageEncodingConformanceTest {
                     )
                     coveredPolicies += policyName
 
-                    val access = featureAccess(vector.body.objectValue("access"))
+                    val access = featureAccessThroughPublicFacade(
+                        vectorName = vector.name,
+                        expected = vector.body.objectValue("access"),
+                        policy = policy,
+                    )
                     preservesFractionalAmounts = preservesFractionalAmounts ||
                         access.balance?.isFractional() == true
                     preservesUnlimitedAccess = preservesUnlimitedAccess || access.unlimited
@@ -96,6 +119,78 @@ class FeatureUsageEncodingConformanceTest {
         balance = value.optionalDouble("balance"),
         type = parseFeatureType(value.string("type")),
     )
+
+    private fun featureAccessThroughPublicFacade(
+        vectorName: String,
+        expected: JsonObject,
+        policy: FeatureCheckPolicy,
+    ): FeatureAccess = runBlocking {
+        Nuxie.resetForTesting()
+        val featureId = "fixture-${vectorName.hashCode()}"
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                when (request.url.path) {
+                    "/profile" -> HttpTransport.Response(
+                        200,
+                        profileResponse(featureId, expected, policy).encodeToByteArray(),
+                    )
+                    "/entitled" -> HttpTransport.Response(
+                        200,
+                        remoteResponse(
+                            customerId = requireNotNull(Nuxie.core).identity.distinctId(),
+                            featureId = featureId,
+                            access = expected,
+                        ).encodeToByteArray(),
+                    )
+                    else -> error("[$vectorName] unexpected request: ${request.url.path}")
+                }
+            }
+        }
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = transport,
+            registerLifecycle = false,
+        )
+        Nuxie.setup(
+            RuntimeEnvironment.getApplication(),
+            NuxieConfiguration("pk_test_feature_usage_conformance_${vectorName.hashCode()}").apply {
+                environment = NuxieEnvironment.DEVELOPMENT
+                logLevel = LogLevel.NONE
+            },
+        )
+        assertTrue("[$vectorName] profile refresh", requireNotNull(Nuxie.core).profile.refreshAndWait())
+
+        val access = Nuxie.hasFeature(
+            featureId = featureId,
+            requiredBalance = 1.0,
+            policy = policy,
+        )
+        if (policy == FeatureCheckPolicy.CACHE_FIRST) {
+            assertTrue(
+                "[$vectorName] cacheFirst must not request fresh usable access",
+                transport.requests.none { it.url.path == "/entitled" },
+            )
+        }
+        access
+    }
+
+    private fun profileResponse(
+        featureId: String,
+        access: JsonObject,
+        policy: FeatureCheckPolicy,
+    ): String {
+        val features = if (policy == FeatureCheckPolicy.CACHE_FIRST) {
+            """[{"id":"$featureId","type":"${access.string("type")}","unlimited":${access.boolean("unlimited")},"balance":${access.getValue("balance")}}]"""
+        } else {
+            "[]"
+        }
+        return """{"segments":[],"features":$features}"""
+    }
+
+    private fun remoteResponse(
+        customerId: String,
+        featureId: String,
+        access: JsonObject,
+    ): String = """{"customerId":"$customerId","featureId":"$featureId","requiredBalance":1.0,"code":"fixture","allowed":${access.boolean("allowed")},"unlimited":${access.boolean("unlimited")},"balance":${access.getValue("balance")},"type":"${access.string("type")}"}"""
 
     private fun parsePolicy(value: String): FeatureCheckPolicy = when (value) {
         "cacheFirst" -> FeatureCheckPolicy.CACHE_FIRST

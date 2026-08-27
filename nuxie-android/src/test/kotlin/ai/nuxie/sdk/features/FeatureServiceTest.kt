@@ -386,12 +386,16 @@ class FeatureServiceTest {
 
         val grant = listOf(LocalPurchaseGrant("exports", FeatureType.METERED, unlimited = true))
         core.features.applyLocalPurchase(grant, "local-token")
-        core.features.check("exports")
         assertTrue(core.features.getCached("exports", null)!!.allowed)
         assertTrue(core.features.checkWithCache("exports").allowed)
 
-        core.features.removePurchase("local-token")
+        assertFalse(core.features.check("exports").allowed)
+        assertFalse(core.features.getCached("exports", null)!!.allowed)
+
         core.features.applyLocalPurchase(grant, "other-token")
+        assertTrue(core.features.getCached("exports", null)!!.allowed)
+        core.features.removePurchase("other-token")
+        core.features.applyLocalPurchase(grant, "new-token")
         assertFalse(core.features.getCached("exports", null)!!.allowed)
         core.stop()
     }
@@ -498,7 +502,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun optimisticGrantLandingMidCheckOutranksTheCompletedResponse() = runBlocking {
+    fun remoteCheckCancelsWhenAnOptimisticGrantLandsMidRequest() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
         lateinit var core: NuxieCore
@@ -533,7 +537,7 @@ class FeatureServiceTest {
         )
         releaseCheck.countDown()
 
-        assertTrue(check.await().allowed)
+        assertTrue(runCatching { check.await() }.exceptionOrNull() is CancellationException)
         assertTrue(core.featureInfo.isAllowed("pro"))
         core.stop()
     }

@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.first
  * (identity transitions under runBlocking).
  */
 class FeatureInfo {
-    sealed interface State {
+    internal sealed interface State {
         /** No profile has hydrated access for the current customer yet. */
         object Unknown : State
 
@@ -25,21 +25,19 @@ class FeatureInfo {
     @Volatile
     private var entityAccess: Map<String, Map<String, FeatureAccess>> = emptyMap()
 
-    val state: StateFlow<State> = mutableState
+    internal val state: StateFlow<State> = mutableState
     val all: StateFlow<Map<String, FeatureAccess>> = mutableAll
 
     /** Suspends until profile-backed Feature access is available. */
-    suspend fun awaitReady() {
+    internal suspend fun awaitReady() {
         state.filterIsInstance<State.Ready>().first()
     }
 
     /** Whether the current cached access allows [featureId]. */
     fun isAllowed(featureId: String): Boolean = all.value[featureId]?.allowed ?: false
 
-    /** Returns the cached balance for [featureId], optionally scoped to [entityId]. */
-    fun balance(featureId: String, entityId: String? = null): Double? =
-        if (entityId == null) all.value[featureId]?.balance
-        else entityAccess[featureId]?.get(entityId)?.balance
+    /** Returns the globally scoped cached balance for [featureId]. */
+    fun balance(featureId: String): Double? = all.value[featureId]?.balance
 
     internal fun update(
         features: Map<String, FeatureAccess>,

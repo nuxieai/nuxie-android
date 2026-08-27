@@ -2,6 +2,8 @@ package ai.nuxie.sdk
 
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.events.SystemEventNames
+import ai.nuxie.sdk.features.FeatureAccess
+import ai.nuxie.sdk.features.FeatureCheckPolicy
 import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureUsageResult
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
@@ -152,6 +154,33 @@ object Nuxie {
             }
         }
         return done.await()
+    }
+
+    // MARK: Feature access
+
+    /**
+     * Check whether the current customer has access to a Feature.
+     * Metered Features are evaluated against [requiredBalance].
+     */
+    suspend fun hasFeature(
+        featureId: String,
+        requiredBalance: Double = 1.0,
+        entityId: String? = null,
+        policy: FeatureCheckPolicy = FeatureCheckPolicy.CACHE_FIRST,
+    ): FeatureAccess {
+        val core = core ?: throw IllegalStateException("Call Nuxie.setup first.")
+        return when (policy) {
+            FeatureCheckPolicy.CACHE_FIRST -> core.features.checkWithCache(
+                featureId = featureId,
+                requiredBalance = requiredBalance,
+                entityId = entityId,
+            )
+            FeatureCheckPolicy.REMOTE -> core.features.check(
+                featureId = featureId,
+                requiredBalance = requiredBalance,
+                entityId = entityId,
+            )
+        }
     }
 
     // MARK: Feature use
