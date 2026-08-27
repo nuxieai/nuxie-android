@@ -543,6 +543,62 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun globalPurchaseDoesNotSupersedeEntityScopedChecks() = runBlocking {
+        val checksStarted = CountDownLatch(2)
+        val releaseChecks = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checksStarted.countDown()
+                    assertTrue(releaseChecks.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "exports",
+                            requiredBalance = 1.0,
+                            balance = "3",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+        core.features.hydrateProfile(
+            core.identity.distinctId(),
+            Json.parseToJsonElement(
+                profile(
+                    """[{"id":"exports","type":"metered","balance":0,"unlimited":false,"entities":{"other-project":{"balance":0}}}]""",
+                ),
+            ).jsonObject,
+        )
+
+        val remote = async(Dispatchers.Default) {
+            core.features.check("exports", entityId = "requested-project")
+        }
+        val cacheFirst = async(Dispatchers.Default) {
+            core.features.checkWithCache(
+                "exports",
+                entityId = "requested-project",
+                forceRefresh = true,
+            )
+        }
+        assertTrue(checksStarted.await(5, TimeUnit.SECONDS))
+        core.features.applyLocalPurchase(
+            listOf(LocalPurchaseGrant("exports", FeatureType.METERED, unlimited = true)),
+            "global-purchase",
+        )
+        releaseChecks.countDown()
+
+        assertEquals(3.0, remote.await().balance!!, 0.0)
+        assertEquals(3.0, cacheFirst.await().balance!!, 0.0)
+        core.stop()
+    }
+
+    @Test
     fun revocationLandingMidForcedRefreshOutranksTheCompletedResponse() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
@@ -753,6 +809,42 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun missingEntityOnCachedMeteredFeatureReturnsBooleanNotFoundWithoutRemoteCheck() = runBlocking {
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                HttpTransport.Response(
+                    200,
+                    featureResponse(
+                        customerId = core.identity.distinctId(),
+                        featureId = "exports",
+                        requiredBalance = 1.0,
+                        balance = "5",
+                    ).encodeToByteArray(),
+                )
+            }
+        }
+        core = core(transport)
+        core.features.hydrateProfile(
+            core.identity.distinctId(),
+            Json.parseToJsonElement(
+                profile(
+                    """[{"id":"exports","type":"metered","balance":5,"unlimited":false,"entities":{"other-project":{"balance":5}}}]""",
+                ),
+            ).jsonObject,
+        )
+
+        val access = core.features.checkWithCache("exports", entityId = "missing-project")
+
+        assertFalse(access.allowed)
+        assertFalse(access.unlimited)
+        assertEquals(null, access.balance)
+        assertEquals(FeatureType.BOOLEAN, access.type)
+        assertTrue(transport.requests.none { it.url.path == "/entitled" })
+        core.stop()
+    }
+
+    @Test
     fun transitiveWalletResponseKeepsNonZeroBalanceOpaqueAndPreservesZero() = runBlocking {
         var checks = 0
         val transport = FakeTransport().apply {
@@ -776,6 +868,62 @@ class FeatureServiceTest {
         assertEquals(null, core.features.check("exports", requiredBalance = 2.0).balance)
         assertEquals(0.0, core.features.check("exports", requiredBalance = 2.0).balance)
         assertEquals(2, checks)
+        core.stop()
+    }
+
+    @Test
+    fun transitiveBalanceSourceCommitSupersedesPendingSourceCheck() = runBlocking {
+        val exportsStarted = CountDownLatch(1)
+        val walletStarted = CountDownLatch(1)
+        val releaseExports = CountDownLatch(1)
+        val releaseWallet = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                val body = request.body.decodeToString()
+                if (body.contains("\"featureId\":\"exports\"")) {
+                    exportsStarted.countDown()
+                    assertTrue(releaseExports.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "wallet",
+                            requiredBalance = 2.0,
+                            balance = "8",
+                            type = "creditSystem",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    walletStarted.countDown()
+                    assertTrue(releaseWallet.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "wallet",
+                            requiredBalance = 1.0,
+                            balance = "1",
+                            type = "creditSystem",
+                        ).encodeToByteArray(),
+                    )
+                }
+            }
+        }
+        core = core(transport)
+
+        val exports = async(Dispatchers.Default) {
+            core.features.check("exports", requiredBalance = 2.0)
+        }
+        assertTrue(exportsStarted.await(5, TimeUnit.SECONDS))
+        val wallet = async(Dispatchers.Default) { core.features.check("wallet") }
+        assertTrue(walletStarted.await(5, TimeUnit.SECONDS))
+        releaseExports.countDown()
+        exports.await()
+        releaseWallet.countDown()
+
+        assertTrue(runCatching { wallet.await() }.exceptionOrNull() is CancellationException)
+        assertEquals(8.0, core.features.getCached("wallet", null)!!.balance!!, 0.0)
         core.stop()
     }
 
