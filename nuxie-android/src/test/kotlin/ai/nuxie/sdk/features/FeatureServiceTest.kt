@@ -730,6 +730,55 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun cacheFirstSupersessionDoesNotFallBackToThePreRequestProfile() = runBlocking {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checkStarted.countDown()
+                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            allowed = false,
+                            balance = "null",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+        val customer = core.identity.distinctId()
+        val allowedProfile = Json.parseToJsonElement(
+            profile("""[{"id":"pro","type":"boolean","unlimited":false}]"""),
+        ).jsonObject
+        core.features.hydrateProfile(customer, allowedProfile)
+
+        val check = async(Dispatchers.Default) {
+            core.features.checkWithCache("pro", forceRefresh = true)
+        }
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+        core.features.applyLocalPurchase(
+            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+            "mid-check-token",
+        )
+        core.features.hydrateProfile(customer, allowedProfile)
+        releaseCheck.countDown()
+
+        assertFalse(check.await().allowed)
+        assertTrue(core.features.getCached("pro", null)!!.allowed)
+        core.stop()
+    }
+
+    @Test
     fun purchaseMutationForAnotherFeatureDoesNotSupersedeRemoteCheck() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
@@ -1152,6 +1201,64 @@ class FeatureServiceTest {
 
         assertTrue(runCatching { wallet.await() }.exceptionOrNull() is CancellationException)
         assertEquals(8.0, core.features.getCached("wallet", null)!!.balance!!, 0.0)
+        core.stop()
+    }
+
+    @Test
+    fun supersedingOpaqueDecisionIsAppliedOnlyToItsExactRequiredBalance() = runBlocking {
+        val olderCheckStarted = CountDownLatch(1)
+        val releaseOlderCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                val body = request.body.decodeToString()
+                if (body.contains("\"requiredBalance\":2.0")) {
+                    olderCheckStarted.countDown()
+                    assertTrue(releaseOlderCheck.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "exports",
+                            requiredBalance = 2.0,
+                            allowed = true,
+                            balance = "5",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "wallet",
+                            requiredBalance = 3.0,
+                            allowed = true,
+                            balance = "8",
+                            type = "creditSystem",
+                        ).encodeToByteArray(),
+                    )
+                }
+            }
+        }
+        core = core(transport)
+
+        val older = async(Dispatchers.Default) {
+            core.features.checkWithCache(
+                "exports",
+                requiredBalance = 2.0,
+                forceRefresh = true,
+            )
+        }
+        assertTrue(olderCheckStarted.await(5, TimeUnit.SECONDS))
+        val newer = core.features.checkWithCache(
+            "exports",
+            requiredBalance = 3.0,
+            forceRefresh = true,
+        )
+        releaseOlderCheck.countDown()
+
+        assertTrue(newer.allowed)
+        assertFalse(older.await().allowed)
         core.stop()
     }
 

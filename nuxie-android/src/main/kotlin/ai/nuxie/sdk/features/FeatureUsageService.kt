@@ -12,7 +12,9 @@ import android.util.Log
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -68,7 +70,7 @@ internal class FeatureUsageService(
         entityId: String?,
         setUsage: Boolean,
         metadata: JsonObject?,
-    ): FeatureUsageResult {
+    ): FeatureUsageResult = withContext(Dispatchers.IO) {
         val distinctId = identity.distinctId()
         if (!setUsage) {
             purchases.useFeatureWithPendingPurchase(
@@ -77,7 +79,7 @@ internal class FeatureUsageService(
                 amount = amount,
                 entityId = entityId,
                 metadata = metadata?.toMap(),
-            )?.let { return it }
+            )?.let { return@withContext it }
         }
         ensureIdentity(distinctId)
 
@@ -109,7 +111,7 @@ internal class FeatureUsageService(
             )
         }
         usage?.remaining?.let { featureInfo.setBalance(featureId, it, entityId) }
-        return FeatureUsageResult(
+        FeatureUsageResult(
             success = status == "ok" || status == "success",
             featureId = featureId,
             amountUsed = amount,
