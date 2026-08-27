@@ -7,8 +7,10 @@
 // - This shim performs no allocation-free trickery: owned results are freed
 //   before returning.
 
+#if defined(__ANDROID__)
 #include <android/log.h>
 #include <android/native_window_jni.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <jni.h>
@@ -23,8 +25,21 @@
 
 #include "nux_capi.generated.h"
 
+#if defined(__ANDROID__)
+#define NUXIE_LOG_WARN(...) \
+  __android_log_print(ANDROID_LOG_WARN, "Nuxie", __VA_ARGS__)
+#else
+#define NUXIE_LOG_WARN(...)          \
+  do {                               \
+    fprintf(stderr, "Nuxie: ");     \
+    fprintf(stderr, __VA_ARGS__);    \
+    fputc('\n', stderr);             \
+  } while (0)
+#endif
+
 // Android discards stderr, but Rust panic messages print there. Pump the
 // process's stderr into logcat so contained panics are diagnosable.
+#if defined(__ANDROID__)
 static void *stderr_pump(void *arg) {
   int fd = (int)(intptr_t)arg;
   char line[512];
@@ -43,7 +58,7 @@ static void *stderr_pump(void *arg) {
       if (chunk[i] == '\n' || used == sizeof(line) - 1) {
         line[used] = '\0';
         if (used > 0) {
-          __android_log_print(ANDROID_LOG_WARN, "Nuxie", "stderr: %s", line);
+          NUXIE_LOG_WARN("stderr: %s", line);
         }
         used = 0;
         if (chunk[i] == '\n') continue;
@@ -89,6 +104,7 @@ __attribute__((constructor)) static void redirect_stderr_to_logcat(void) {
   dup2(fds[1], STDERR_FILENO);
   close(fds[1]);
 }
+#endif
 
 static jlong as_handle(void *pointer) { return (jlong)(intptr_t)pointer; }
 static void *from_handle(jlong handle) { return (void *)(intptr_t)handle; }
@@ -109,15 +125,13 @@ static void log_and_free_result(const char *operation, NuxStatus status,
     view.struct_size = (uint32_t)sizeof(view);
     if (result != NULL &&
         nux_capi_result_diagnostic(result, &view) == NUX_STATUS_OK) {
-      __android_log_print(ANDROID_LOG_WARN, "Nuxie",
-                          "%s failed: status=%d code=%.*s message=%.*s",
-                          operation, (int)status, (int)view.code.len,
-                          view.code.data ? view.code.data : "",
-                          (int)view.message.len,
-                          view.message.data ? view.message.data : "");
+      NUXIE_LOG_WARN("%s failed: status=%d code=%.*s message=%.*s",
+                     operation, (int)status, (int)view.code.len,
+                     view.code.data ? view.code.data : "",
+                     (int)view.message.len,
+                     view.message.data ? view.message.data : "");
     } else {
-      __android_log_print(ANDROID_LOG_WARN, "Nuxie", "%s failed: status=%d",
-                          operation, (int)status);
+      NUXIE_LOG_WARN("%s failed: status=%d", operation, (int)status);
     }
   }
   free_result(result);
@@ -125,9 +139,7 @@ static void log_and_free_result(const char *operation, NuxStatus status,
 
 static void log_cleanup_failure(const char *operation, NuxStatus status) {
   if (status != NUX_STATUS_OK) {
-    __android_log_print(ANDROID_LOG_WARN, "Nuxie",
-                        "%s cleanup failed: status=%d", operation,
-                        (int)status);
+    NUXIE_LOG_WARN("%s cleanup failed: status=%d", operation, (int)status);
   }
 }
 
@@ -765,6 +777,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNewConfigured(
   hooks.maximum_decoded_image_bytes = 256u * 1024u * 1024u;
   hooks.maximum_total_decoded_image_bytes = 512u * 1024u * 1024u;
 
+#if defined(__ANDROID__)
   static const char module_name[] = "nuxie";
   struct NuxHostCommandImportConfig host;
   memset(&host, 0, sizeof(host));
@@ -780,11 +793,19 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNewConfigured(
   host.max_string_bytes = 1024u * 1024u;
   host.max_value_bytes = 4u * 1024u * 1024u;
   host.max_command_bytes_per_step = 4u * 1024u * 1024u;
+#endif
 
   struct NuxFileImportConfig config;
   memset(&config, 0, sizeof(config));
   config.struct_size = (uint32_t)sizeof(config);
+#if defined(__ANDROID__)
   config.host_commands = &host;
+#else
+  // The specified host build uses only `--features android-vulkan`, which
+  // deliberately excludes scripting. Asset hooks and exact catalog checks
+  // still travel through the same configured-import entry point.
+  config.host_commands = NULL;
+#endif
   config.asset_hooks = &hooks;
   config.expected_assets = expected;
   config.expected_asset_count = (size_t)count;
@@ -1324,8 +1345,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
     if (info_status != NUX_STATUS_OK || info.status != status) {
       status = info_status == NUX_STATUS_OK ? NUX_STATUS_RUNTIME_ERROR : info_status;
     } else if (status != NUX_STATUS_OK) {
-      __android_log_print(
-          ANDROID_LOG_WARN, "Nuxie",
+      NUXIE_LOG_WARN(
           "view_model_mutate failed: status=%d code=%.*s message=%.*s",
           (int)status, (int)info.code.len,
           info.code.data != NULL ? info.code.data : "", (int)info.message.len,
@@ -1561,8 +1581,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     diagnostic.struct_size = (uint32_t)sizeof(diagnostic);
     if (nux_player_step_result_diagnostic(step_result, &diagnostic) ==
         NUX_STATUS_OK) {
-      __android_log_print(
-          ANDROID_LOG_WARN, "Nuxie",
+      NUXIE_LOG_WARN(
           "player_step failed: status=%d code=%.*s message=%.*s",
           (int)result_status, (int)diagnostic.code.len,
           diagnostic.code.data != NULL ? diagnostic.code.data : "",
@@ -1906,6 +1925,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererNewAndroidVulkan(
   return status == NUX_STATUS_OK ? as_handle(renderer) : 0;
 }
 
+#if defined(__ANDROID__)
 JNIEXPORT jlong JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeWindowAcquire(
     JNIEnv *env, jobject self, jobject surface) {
@@ -2021,6 +2041,86 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererRenderPlayer(
       (ANativeWindow *)from_handle(window), frame);
   nux_android_vulkan_frame_free(frame);
   return outcome;
+}
+#endif
+
+JNIEXPORT jobject JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererRenderPlayerToCpuFrame(
+    JNIEnv *env, jobject self, jlong renderer, jlong player, jint clear_color,
+    jboolean fit_contain_center) {
+  (void)self;
+  if (renderer == 0 || player == 0) return NULL;
+
+  struct NuxAndroidVulkanFrame *frame = NULL;
+  struct NuxCapiResult *result = NULL;
+  NuxStatus status = nux_renderer_android_vulkan_render_player(
+      (struct NuxAndroidVulkanRenderer *)from_handle(renderer),
+      (struct NuxPlayer *)from_handle(player), (uint32_t)clear_color,
+      fit_contain_center == JNI_TRUE
+          ? NUX_ANDROID_VULKAN_RENDERER_FIT_CONTAIN_CENTER
+          : NUX_ANDROID_VULKAN_RENDERER_FIT_NONE,
+      &frame, &result);
+  log_and_free_result("renderer_android_vulkan_render_player", status, result);
+  if (status != NUX_STATUS_OK || frame == NULL) {
+    if (frame != NULL) nux_android_vulkan_frame_free(frame);
+    return NULL;
+  }
+
+  jobject output = NULL;
+  const uint32_t width = nux_android_vulkan_frame_width(frame);
+  const uint32_t height = nux_android_vulkan_frame_height(frame);
+  const uint32_t stride = nux_android_vulkan_frame_row_stride_bytes(frame);
+  const size_t source_len = nux_android_vulkan_frame_len(frame);
+  const uint8_t *source = nux_android_vulkan_frame_data(frame);
+  const size_t tight_stride = (size_t)width * 4u;
+  if (width == 0 || height == 0 || width > INT32_MAX || height > INT32_MAX ||
+      height > SIZE_MAX / tight_stride ||
+      tight_stride * height > INT32_MAX || source == NULL ||
+      stride < tight_stride || height > SIZE_MAX / stride ||
+      source_len < (size_t)height * stride ||
+      nux_android_vulkan_frame_pixel_format(frame) !=
+          NUX_ANDROID_VULKAN_PIXEL_FORMAT_RGBA8_PREMULTIPLIED) {
+    NUXIE_LOG_WARN("renderer returned an invalid CPU frame");
+    goto cpu_frame_cleanup;
+  }
+
+  const jsize byte_count = (jsize)(tight_stride * height);
+  jbyteArray pixels = (*env)->NewByteArray(env, byte_count);
+  if (pixels == NULL) goto cpu_frame_cleanup;
+  if (stride == tight_stride) {
+    (*env)->SetByteArrayRegion(env, pixels, 0, byte_count,
+                               (const jbyte *)source);
+  } else {
+    for (uint32_t row = 0; row < height; row++) {
+      (*env)->SetByteArrayRegion(
+          env, pixels, (jsize)((size_t)row * tight_stride),
+          (jsize)tight_stride, (const jbyte *)(source + (size_t)row * stride));
+      if ((*env)->ExceptionCheck(env)) break;
+    }
+  }
+  if ((*env)->ExceptionCheck(env)) {
+    (*env)->DeleteLocalRef(env, pixels);
+    goto cpu_frame_cleanup;
+  }
+
+  jclass frame_class =
+      (*env)->FindClass(env, "ai/nuxie/sdk/runtime/NuxieCpuFrame");
+  if (frame_class == NULL) {
+    (*env)->DeleteLocalRef(env, pixels);
+    goto cpu_frame_cleanup;
+  }
+  jmethodID constructor =
+      (*env)->GetMethodID(env, frame_class, "<init>", "(II[B)V");
+  if (constructor != NULL) {
+    output = (*env)->NewObject(env, frame_class, constructor, (jint)width,
+                               (jint)height, pixels);
+  }
+  (*env)->DeleteLocalRef(env, frame_class);
+  (*env)->DeleteLocalRef(env, pixels);
+
+cpu_frame_cleanup:
+  nux_android_vulkan_frame_free(frame);
+  return output;
 }
 
 JNIEXPORT jint JNICALL

@@ -115,6 +115,25 @@ internal class NuxieRuntimePlayer internal constructor(
     internal fun requireHandle(): Long = owned.require()
 }
 
+/** JVM-owned tightly packed, top-row-first RGBA8 premultiplied-sRGB pixels. */
+internal data class NuxieCpuFrame(
+    val width: Int,
+    val height: Int,
+    val rgba: ByteArray,
+) {
+    init {
+        require(width > 0 && height > 0) { "CPU frame dimensions must be positive" }
+        val expectedBytes = width.toLong() * height.toLong() * RGBA_BYTES_PER_PIXEL
+        require(expectedBytes <= Int.MAX_VALUE && rgba.size == expectedBytes.toInt()) {
+            "CPU frame must contain tightly packed RGBA8 pixels"
+        }
+    }
+
+    private companion object {
+        const val RGBA_BYTES_PER_PIXEL = 4L
+    }
+}
+
 /**
  * Lane-confined owned Android Vulkan renderer. [close] frees once; resize,
  * render/present, and player-domain reset all reject use after close.
@@ -137,6 +156,17 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
         owned.require(),
         player.requireHandle(),
         window.requireHandle(),
+        clearColor,
+        fitContainCenter,
+    )
+
+    fun renderToCpuFrame(
+        player: NuxieRuntimePlayer,
+        clearColor: Int,
+        fitContainCenter: Boolean,
+    ): NuxieCpuFrame = native.renderToCpuFrame(
+        owned.require(),
+        player.requireHandle(),
         clearColor,
         fitContainCenter,
     )
