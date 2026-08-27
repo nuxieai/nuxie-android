@@ -25,6 +25,7 @@ import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -332,8 +333,8 @@ private object CommerceWireFixtures {
                     purchaseToken = "fixture-subscription-token",
                     basePlanId = "annual",
                     offerId = "introductory",
-                    obfuscatedAccountId = "fixture-account-hash",
-                    distinctId = "fixture-customer-subscription",
+                    obfuscatedAccountId = sha256(SUBSCRIPTION_CUSTOMER_ID),
+                    distinctId = SUBSCRIPTION_CUSTOMER_ID,
                 ),
             ),
             captureTokenFirstPurchase(),
@@ -345,8 +346,8 @@ private object CommerceWireFixtures {
                     purchaseToken = "fixture-one-time-token",
                     basePlanId = null,
                     offerId = null,
-                    obfuscatedAccountId = "fixture-one-time-account-hash",
-                    distinctId = "fixture-customer-one-time",
+                    obfuscatedAccountId = sha256(ONE_TIME_CUSTOMER_ID),
+                    distinctId = ONE_TIME_CUSTOMER_ID,
                 ),
             ),
             captureEntitled(
@@ -477,7 +478,7 @@ private object CommerceWireFixtures {
                     basePlanId = "annual",
                     offerId = "introductory",
                     purchaseState = StoredPurchaseState.PURCHASED,
-                    obfuscatedAccountId = "fixture-entitled-account-hash",
+                    obfuscatedAccountId = sha256(FULL_CUSTOMER_ID),
                     syncAttributionDistinctId = FULL_CUSTOMER_ID,
                     ownerDistinctId = FULL_CUSTOMER_ID,
                     acknowledged = false,
@@ -594,6 +595,8 @@ private object CommerceWireFixtures {
         """{"success":true,"customer_id":"fixture-customer","features":[]}"""
     private const val ENTITLED_RESPONSE =
         """{"customerId":"fixture-customer","featureId":"fixture-feature","code":"allowed","allowed":true,"unlimited":false,"balance":8.0,"type":"metered"}"""
+    private const val SUBSCRIPTION_CUSTOMER_ID = "fixture-customer-subscription"
+    private const val ONE_TIME_CUSTOMER_ID = "fixture-customer-one-time"
     private const val FULL_CUSTOMER_ID = "fixture-customer-full"
     private const val FULL_FEATURE_ID = "fixture-credits-full"
     private const val FULL_PURCHASE_SCOPE = "fixture-commerce-wire-scope"
@@ -604,6 +607,10 @@ private object CommerceWireFixtures {
     )
     private const val FULL_ENTITLED_RESPONSE =
         """{"customerId":"fixture-customer-full","featureId":"fixture-credits-full","code":"allowed","allowed":true,"unlimited":false,"balance":8.0,"type":"creditSystem"}"""
+
+    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(StandardCharsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte) }
 }
 
 private object CommerceWireResponses {
