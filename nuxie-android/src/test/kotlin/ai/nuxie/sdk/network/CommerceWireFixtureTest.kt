@@ -170,6 +170,95 @@ class CommerceWireFixtureTest {
         )
     }
 
+    @Test
+    fun responseFixtureContentMustMatchItsFileName() {
+        assertResponseFixtureFileRejected(
+            name = "purchase-subscription-full.rs",
+            request = "purchase-one-time",
+            lane = "ts",
+            expectedMessage = "must carry its <case>.<lane> name",
+        )
+        assertResponseFixtureFileRejected(
+            name = "purchase-one-time.ts",
+            request = "purchase-subscription-full",
+            lane = "ts",
+            expectedMessage = "must carry its case name",
+        )
+        assertResponseFixtureFileRejected(
+            name = "purchase-one-time.ts",
+            request = "purchase-one-time",
+            lane = "rs",
+            expectedMessage = "must carry its lane",
+        )
+    }
+
+    @Test
+    fun jsonErrorResponseRequiresMatchingParsedBody() {
+        val fixture = CommerceWireResponses.ResponseFixture(
+            name = "purchase-one-time.ts",
+            lane = "ts",
+            request = "purchase-one-time",
+            endpoint = "/purchase",
+            statusCode = 422,
+            body = null,
+            bodyText = """{"error":"invalid purchase"}""",
+        )
+
+        val failure = assertThrows(AssertionError::class.java) {
+            CommerceWireResponses.assertParses(fixture)
+        }
+        assertTrue(failure.message.orEmpty().contains("must contain body equal to its parsed bodyText"))
+    }
+
+    @Test
+    fun nonJsonErrorResponseRejectsParsedBody() {
+        val fixture = CommerceWireResponses.ResponseFixture(
+            name = "purchase-one-time.ts",
+            lane = "ts",
+            request = "purchase-one-time",
+            endpoint = "/purchase",
+            statusCode = 502,
+            body = buildJsonObject { put("error", "upstream failure") },
+            bodyText = "upstream failure",
+        )
+
+        val failure = assertThrows(AssertionError::class.java) {
+            CommerceWireResponses.assertParses(fixture)
+        }
+        assertTrue(failure.message.orEmpty().contains("must omit body when bodyText is not JSON"))
+    }
+
+    private fun assertResponseFixtureFileRejected(
+        name: String,
+        request: String,
+        lane: String,
+        expectedMessage: String,
+    ) {
+        val directory = Files.createTempDirectory("commerce-wire-response")
+        val path = directory.resolve("purchase-one-time.ts.json")
+        val bodyText = """{"error":"invalid purchase"}"""
+        val fixtureText = buildJsonObject {
+            put("name", name)
+            put("lane", lane)
+            put("request", request)
+            put("endpoint", "/purchase")
+            put("statusCode", 422)
+            put("body", Json.parseToJsonElement(bodyText))
+            put("bodyText", bodyText)
+        }.toString()
+        Files.write(path, fixtureText.toByteArray(StandardCharsets.UTF_8))
+
+        try {
+            val failure = assertThrows(AssertionError::class.java) {
+                CommerceWireResponses.assertParses(path)
+            }
+            assertTrue(failure.message.orEmpty().contains(expectedMessage))
+        } finally {
+            Files.deleteIfExists(path)
+            Files.deleteIfExists(directory)
+        }
+    }
+
     private fun response(
         name: String,
         request: String,
@@ -178,6 +267,7 @@ class CommerceWireFixtureTest {
         bodyText: String,
     ): CommerceWireResponses.ResponseFixture = CommerceWireResponses.ResponseFixture(
         name = name,
+        lane = "scaffold",
         request = request,
         endpoint = endpoint,
         statusCode = statusCode,
@@ -519,6 +609,7 @@ private object CommerceWireFixtures {
 private object CommerceWireResponses {
     data class ResponseFixture(
         val name: String,
+        val lane: String,
         val request: String,
         val endpoint: String,
         val statusCode: Int,
@@ -551,16 +642,21 @@ private object CommerceWireResponses {
         val wrapper = Json.parseToJsonElement(text).jsonObject
         val fixture = ResponseFixture(
             name = wrapper.requiredString("name"),
+            lane = wrapper.requiredString("lane"),
             request = wrapper.requiredString("request"),
             endpoint = wrapper.requiredString("endpoint"),
             statusCode = wrapper.getValue("statusCode").jsonPrimitive.int,
-            body = wrapper["body"]?.takeUnless { it is JsonNull },
+            body = wrapper["body"],
             bodyText = wrapper.requiredString("bodyText"),
         )
         try {
+            assertMatchesFileName(path, fixture)
             assertParses(fixture)
         } catch (failure: AssertionError) {
-            throw AssertionError("Commerce response fixture '${fixture.name}' failed: ${failure.message}", failure)
+            throw AssertionError(
+                "Commerce response fixture '${path.fileName}' failed: ${failure.message}",
+                failure,
+            )
         }
     }
 
@@ -571,8 +667,18 @@ private object CommerceWireResponses {
                 it.name == fixture.request && it.endpoint == fixture.endpoint
             },
         )
-        fixture.body?.let { body ->
-            assertEquals(body, Json.parseToJsonElement(fixture.bodyText))
+        val parsedBody = runCatching { Json.parseToJsonElement(fixture.bodyText) }.getOrNull()
+        if (parsedBody != null) {
+            assertEquals(
+                "${fixture.name} must contain body equal to its parsed bodyText.",
+                parsedBody,
+                fixture.body,
+            )
+        } else {
+            assertTrue(
+                "${fixture.name} must omit body when bodyText is not JSON.",
+                fixture.body == null || fixture.body is JsonNull,
+            )
         }
 
         val transport = HttpTransport {
@@ -640,6 +746,16 @@ private object CommerceWireResponses {
 
             else -> throw AssertionError("Unsupported commerce response endpoint ${fixture.endpoint}")
         }
+    }
+
+    private fun assertMatchesFileName(path: Path, fixture: ResponseFixture) {
+        val fileName = path.fileName.toString()
+        val fixtureName = fileName.removeSuffix(".json")
+        val caseName = fixtureName.substringBeforeLast('.')
+        val lane = fixtureName.substringAfterLast('.')
+        assertEquals("$fileName must carry its <case>.<lane> name.", fixtureName, fixture.name)
+        assertEquals("$fileName must carry its case name.", caseName, fixture.request)
+        assertEquals("$fileName must carry its lane.", lane, fixture.lane)
     }
 
     private fun responsePathPurchaseReport() = NuxieApi.PlayPurchaseReport(
