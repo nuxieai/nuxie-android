@@ -350,6 +350,18 @@ private object CommerceWireFixtures {
                     distinctId = ONE_TIME_CUSTOMER_ID,
                 ),
             ),
+            capturePurchase(
+                name = "purchase-invalid-token",
+                report = NuxieApi.PlayPurchaseReport(
+                    packageName = "ai.nuxie.fixture",
+                    productId = "fixture-invalid-product",
+                    purchaseToken = "fixture-invalid-token",
+                    basePlanId = null,
+                    offerId = null,
+                    obfuscatedAccountId = null,
+                    distinctId = "fixture-customer-invalid-token",
+                ),
+            ),
             captureEntitled(
                 name = "entitled-atomic-use-minimal",
                 report = NuxieApi.PurchaseBackedFeatureUseReport(
