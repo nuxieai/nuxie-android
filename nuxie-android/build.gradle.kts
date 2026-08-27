@@ -84,7 +84,7 @@ val hostBridgeLibrary = hostBridgeDirectory.map {
 
 val compileHostRenderBridge by tasks.registering(Exec::class) {
   group = "host render"
-  description = "Compiles the host JVM JNI adapter against NUXIE_HOST_CAPI_LIB."
+  description = "Compiles the host JVM JNI adapter against scripting-enabled NUXIE_HOST_CAPI_LIB."
   inputs.file("src/main/cpp/nuxie_runtime_android.c")
   inputs.file(rootProject.file("runtime/prebuilt/include/nux_capi.generated.h"))
   hostCapiLibrary.orNull?.let { inputs.file(it) }
@@ -95,9 +95,33 @@ val compileHostRenderBridge by tasks.registering(Exec::class) {
       "The host render JNI adapter supports macOS and Linux (found $hostOperatingSystem)."
     }
     val capi = hostCapiLibrary.orNull?.let(::file)?.canonicalFile
-      ?: throw GradleException("Set NUXIE_HOST_CAPI_LIB to the host-built nux_capi library.")
+      ?: throw GradleException(
+        "Set NUXIE_HOST_CAPI_LIB to nux_capi built with " +
+          "`cargo build -p nux-capi --features android-vulkan,scripting`."
+      )
     if (!capi.isFile) {
       throw GradleException("NUXIE_HOST_CAPI_LIB is not a file: $capi")
+    }
+    val requiredScriptingSymbols = listOf(
+      "nux_file_import_trusted_with_host_commands",
+      "nux_player_step_result_host_command",
+      "nux_player_step_result_host_value",
+      "nux_player_step_result_host_value_child",
+    )
+    val nm = ProcessBuilder("nm", "-g", capi.path)
+      .redirectErrorStream(true)
+      .start()
+    val exportedSymbols = nm.inputStream.bufferedReader().use { it.readText() }
+    if (nm.waitFor() != 0) {
+      throw GradleException("Could not inspect symbols exported by $capi:\n$exportedSymbols")
+    }
+    val missingSymbols = requiredScriptingSymbols.filterNot(exportedSymbols::contains)
+    if (missingSymbols.isNotEmpty()) {
+      throw GradleException(
+        "NUXIE_HOST_CAPI_LIB lacks required scripting symbols " +
+          "${missingSymbols.joinToString()}. Build it with " +
+          "`cargo build -p nux-capi --features android-vulkan,scripting`."
+      )
     }
     val output = hostBridgeLibrary.get().asFile
     output.parentFile.mkdirs()
@@ -105,7 +129,7 @@ val compileHostRenderBridge by tasks.registering(Exec::class) {
     val platformInclude = if (hostIsMac) "darwin" else "linux"
     val compiler = if (hostIsMac) "clang" else "cc"
     val linkMode = if (hostIsMac) "-dynamiclib" else "-shared"
-    commandLine(
+    val command = mutableListOf(
       compiler,
       linkMode,
       "-fPIC",
@@ -117,9 +141,10 @@ val compileHostRenderBridge by tasks.registering(Exec::class) {
       file("src/main/cpp/nuxie_runtime_android.c"),
       capi,
       "-Wl,-rpath,${capi.parentFile}",
-      "-o",
-      output,
     )
+    if (hostIsLinux) command += "-Wl,-z,defs"
+    command += listOf("-o", output)
+    commandLine(command)
   }
 }
 
@@ -143,8 +168,30 @@ tasks.register<JavaExec>("hostRenderHarness") {
   }
 }
 
-if (hostCapiLibrary.isPresent) {
-  tasks.withType<Test>().configureEach {
+tasks.withType<Test>().matching {
+  it.name.startsWith("test") && it.name.endsWith("UnitTest")
+}.configureEach {
+  filter.excludeTestsMatching("ai.nuxie.sdk.hostrender.HostRenderSmokeTest")
+  // Host runtime selection is process-wide. Keep ordinary unit tests isolated
+  // from a developer shell that happens to configure the live host harness.
+  environment("NUXIE_HOST_CAPI_LIB", "")
+}
+
+tasks.register<Test>("hostRenderSmoke") {
+  group = "host render"
+  description = "Runs only the live host render smoke tests in a fresh worker JVM."
+  dependsOn(
+    "compileDebugUnitTestKotlin",
+    "compileDebugUnitTestJavaWithJavac",
+    "processDebugUnitTestJavaRes",
+  )
+  testClassesDirs = tasks.named<Test>("testDebugUnitTest").get().testClassesDirs
+  classpath = tasks.named<Test>("testDebugUnitTest").get().classpath
+  filter.includeTestsMatching("ai.nuxie.sdk.hostrender.HostRenderSmokeTest")
+  maxParallelForks = 1
+  forkEvery = 1
+
+  if (hostCapiLibrary.isPresent) {
     dependsOn(compileHostRenderBridge)
     systemProperty("nuxie.host.jni.lib", hostBridgeLibrary.get().asFile.absolutePath)
     if (hostVulkanIcd.isPresent) environment("VK_ICD_FILENAMES", hostVulkanIcd.get())

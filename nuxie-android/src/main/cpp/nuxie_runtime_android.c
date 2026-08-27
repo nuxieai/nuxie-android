@@ -143,6 +143,54 @@ static void log_cleanup_failure(const char *operation, NuxStatus status) {
   }
 }
 
+static void configure_host_commands(struct NuxHostCommandImportConfig *host) {
+  static const char module_name[] = "nuxie";
+  memset(host, 0, sizeof(*host));
+  host->struct_size = (uint32_t)sizeof(*host);
+  host->module_name.data = module_name;
+  host->module_name.len = sizeof(module_name) - 1;
+  host->max_script_memory_bytes = 64u * 1024u * 1024u;
+  host->max_script_interrupts_per_callback = 50000u;
+  host->max_commands_per_step = 256u;
+  host->max_value_depth = 32u;
+  host->max_value_nodes = 4096u;
+  host->max_identifier_bytes = 4096u;
+  host->max_string_bytes = 1024u * 1024u;
+  host->max_value_bytes = 4u * 1024u * 1024u;
+  host->max_command_bytes_per_step = 4u * 1024u * 1024u;
+}
+
+#if !defined(__ANDROID__)
+// A valid, minimal Rive file. Importing it through the trusted host-command
+// surface distinguishes a scripting-enabled nux_capi from one that exports
+// the compatibility symbol but was compiled without the scripting feature.
+static const uint8_t host_scripting_probe_file[] = {
+    0x52, 0x49, 0x56, 0x45, 0x07, 0x02, 0x98, 0xcf, 0x01,
+    0x00, 0x17, 0x00, 0x69, 0xcc, 0x01, 0x07, 0x00, 0x01,
+    0x07, 0x00, 0x00, 0x80, 0x42, 0x08, 0x00, 0x00, 0x80,
+    0x42, 0x00, 0x64, 0x05, 0x00, 0xce, 0x01, 0x00, 0x00,
+};
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeHostScriptingProbe(
+    JNIEnv *env, jobject self) {
+  (void)env;
+  (void)self;
+  struct NuxHostCommandImportConfig host;
+  configure_host_commands(&host);
+  struct NuxFile *file = NULL;
+  struct NuxCapiResult *result = NULL;
+  NuxStatus status = nux_file_import_trusted_with_host_commands(
+      host_scripting_probe_file, sizeof(host_scripting_probe_file), &host,
+      &file, &result);
+  log_and_free_result("host_scripting_probe", status, result);
+  if (file != NULL) {
+    log_cleanup_failure("host_scripting_probe_file_free", nux_file_free(file));
+  }
+  return (jint)status;
+}
+#endif
+
 struct asset_payload {
   uint8_t *data;
   size_t len;
@@ -777,35 +825,13 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNewConfigured(
   hooks.maximum_decoded_image_bytes = 256u * 1024u * 1024u;
   hooks.maximum_total_decoded_image_bytes = 512u * 1024u * 1024u;
 
-#if defined(__ANDROID__)
-  static const char module_name[] = "nuxie";
   struct NuxHostCommandImportConfig host;
-  memset(&host, 0, sizeof(host));
-  host.struct_size = (uint32_t)sizeof(host);
-  host.module_name.data = module_name;
-  host.module_name.len = sizeof(module_name) - 1;
-  host.max_script_memory_bytes = 64u * 1024u * 1024u;
-  host.max_script_interrupts_per_callback = 50000u;
-  host.max_commands_per_step = 256u;
-  host.max_value_depth = 32u;
-  host.max_value_nodes = 4096u;
-  host.max_identifier_bytes = 4096u;
-  host.max_string_bytes = 1024u * 1024u;
-  host.max_value_bytes = 4u * 1024u * 1024u;
-  host.max_command_bytes_per_step = 4u * 1024u * 1024u;
-#endif
+  configure_host_commands(&host);
 
   struct NuxFileImportConfig config;
   memset(&config, 0, sizeof(config));
   config.struct_size = (uint32_t)sizeof(config);
-#if defined(__ANDROID__)
   config.host_commands = &host;
-#else
-  // The specified host build uses only `--features android-vulkan`, which
-  // deliberately excludes scripting. Asset hooks and exact catalog checks
-  // still travel through the same configured-import entry point.
-  config.host_commands = NULL;
-#endif
   config.asset_hooks = &hooks;
   config.expected_assets = expected;
   config.expected_asset_count = (size_t)count;

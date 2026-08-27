@@ -43,9 +43,13 @@ release/
 Build the host runtime from a `nuxie-runtime` checkout:
 
 ```bash
-cargo build -p nux-capi --features android-vulkan
+cargo build -p nux-capi --features android-vulkan,scripting
 export NUXIE_HOST_CAPI_LIB=/absolute/path/to/nuxie-runtime/target/debug/libnux_capi.dylib
 ```
+
+The host adapter requires the same Vulkan and scripting capabilities as the
+shipped Android runtime. It probes scripting support when loading and fails
+with the required build command instead of rendering a degraded blank frame.
 
 On Linux, use `libnux_capi.so`; a conformant Vulkan ICD such as lavapipe may
 be selected with `VK_ICD_FILENAMES` when the machine has more than one ICD.
@@ -72,8 +76,16 @@ screen's authored width and height in the release descriptor. Omitting
 `frame-<index>.rgba`; `manifest.json` records its SHA-256 and dimensions plus
 the string returned by `NuxieRuntime.info()`.
 
-The JVM smoke test runs automatically when `NUXIE_HOST_CAPI_LIB` is set. When
-it is unset, JUnit reports the named assumption
+Verify the live harness separately from the default unit test suite:
+
+```bash
+./gradlew :nuxie-android:hostRenderSmoke
+```
+
+This dedicated task runs only the three host render smoke tests in a fresh
+worker JVM. The default `:nuxie-android:test` task excludes them and is
+insensitive to host harness environment variables. When `NUXIE_HOST_CAPI_LIB`
+is unset, the dedicated task skips them with the named assumption
 `NUXIE_HOST_CAPI_LIB must name a host-built nux_capi library`.
 
 ## Wrapper contract
