@@ -5,12 +5,17 @@ in `../requests/` against the real TypeScript and Rust ingest workers. It owns
 and commits the resulting response fixtures in this directory; the Android
 fixture generator does not create or delete them.
 
-Response fixtures may be nested by worker, but every `*.json` file must have
-this shape:
+While [`PENDING`](PENDING) exists, the Android response conformance test skips
+with the named assumption that parent-worker responses are pending. The parent
+repository's response-landing commit deletes `PENDING`. From that point on,
+the test requires both `<case>.ts.json` and `<case>.rs.json` for every request
+case and fails if any lane response is missing.
+
+Every response fixture has this shape:
 
 ```json
 {
-  "name": "typescript/purchase-one-time",
+  "name": "purchase-one-time.ts",
   "request": "purchase-one-time",
   "endpoint": "/purchase",
   "statusCode": 200,
@@ -30,7 +35,6 @@ this shape:
   including permanent-versus-retryable `/purchase` errors.
 
 `CommerceWireFixtureTest.everyCommittedWorkerResponseParsesThroughTheSdkResponsePath`
-globs every response file automatically. While this directory contains no
-JSON files, that test skips with the named assumption "Parent-worker commerce
-response fixtures have not been committed yet." A separate in-memory test
-keeps the success and error scaffolding executable until real responses land.
+checks the complete request × lane matrix before parsing every response. A
+separate in-memory test keeps the success and error scaffolding executable
+while `PENDING` exists.

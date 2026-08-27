@@ -1,12 +1,26 @@
 package ai.nuxie.sdk.network
 
+import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
+import ai.nuxie.sdk.commerce.ActivePurchasesResult
+import ai.nuxie.sdk.commerce.CheckoutRequest
+import ai.nuxie.sdk.commerce.InMemoryPurchaseEvidenceStore
 import ai.nuxie.sdk.commerce.NuxieApiPurchaseSynchronizer
+import ai.nuxie.sdk.commerce.PlayBillingGateway
 import ai.nuxie.sdk.commerce.PurchaseEvidence
+import ai.nuxie.sdk.commerce.PurchaseHandlingMode
+import ai.nuxie.sdk.commerce.PurchaseService
+import ai.nuxie.sdk.commerce.PurchaseSettings
+import ai.nuxie.sdk.commerce.PurchaseSynchronizer
 import ai.nuxie.sdk.commerce.PurchaseSyncOutcome
+import ai.nuxie.sdk.commerce.StoredLocalPurchaseGrant
 import ai.nuxie.sdk.commerce.StoredPurchaseState
+import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.fixtures.FixtureRunner
+import android.app.Activity
+import com.android.billingclient.api.BillingClient
+import com.android.billingclient.api.BillingResult
 import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -24,16 +38,23 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeFalse
 import org.junit.Assume.assumeTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 
+@RunWith(RobolectricTestRunner::class)
 class CommerceWireFixtureTest {
     @Test
-    fun committedRequestsMatchTheSdkWireByteForByte() {
+    fun committedRequestFixtureSetIsComplete() {
         val expected = CommerceWireFixtures.requests()
         val requestDirectory = CommerceWireFixtures.requestDirectory()
         val committedFiles = Files.list(requestDirectory).use { paths ->
@@ -47,27 +68,31 @@ class CommerceWireFixtureTest {
             expected.map { "${it.name}.json" },
             committedFiles.map { it.fileName.toString() },
         )
-        expected.forEach { fixture ->
-            val committed = String(
-                Files.readAllBytes(requestDirectory.resolve("${fixture.name}.json")),
-                StandardCharsets.UTF_8,
-            )
-            assertEquals(
-                "Regenerate commerce wire fixtures after an intentional encoder change.",
-                fixture.fileText(),
-                committed,
-            )
+    }
 
-            val wrapper = Json.parseToJsonElement(committed).jsonObject
-            assertEquals(fixture.name, wrapper.getValue("name").asString())
-            assertEquals(fixture.endpoint, wrapper.getValue("endpoint").asString())
-            assertEquals(fixture.bodyText, wrapper.getValue("bodyText").asString())
-            assertEquals(Json.parseToJsonElement(fixture.bodyText), wrapper.getValue("body"))
-        }
+    @Test
+    fun committedAndroidEncoderRequestsMatchTheSdkWireByteForByte() {
+        CommerceWireFixtures.requests()
+            .filterNot { it.name == APP_STORE_SERVER_CONTRACT_CASE }
+            .forEach(::assertCommittedRequest)
+    }
 
-        val full = expected.single { it.name == "entitled-atomic-use-full" }
-        val replay = expected.single { it.name == "entitled-atomic-replay" }
-        assertEquals(full.bodyText, replay.bodyText)
+    /**
+     * Server-contract coverage for the iOS CodingKeys canon used by parent
+     * worker replay; this is deliberately not Android encoder coverage.
+     */
+    @Test
+    fun entitledAppStoreUntouchedPinsIosCodingKeysForParentWorkerReplayNotAndroidEncoding() {
+        val fixture = CommerceWireFixtures.requests()
+            .single { it.name == APP_STORE_SERVER_CONTRACT_CASE }
+
+        assertEquals("/entitled", fixture.endpoint)
+        val body = Json.parseToJsonElement(fixture.bodyText).jsonObject
+        assertEquals("fixture.header.payload.signature", body.getValue("purchase").jsonObject
+            .getValue("transaction_jwt").jsonPrimitive.content)
+        assertEquals("fixture-entitled-appstore-event", body.getValue("purchase").jsonObject
+            .getValue("event_id").jsonPrimitive.content)
+        assertCommittedRequest(fixture)
     }
 
     @Test
@@ -81,10 +106,15 @@ class CommerceWireFixtureTest {
 
     @Test
     fun everyCommittedWorkerResponseParsesThroughTheSdkResponsePath() {
+        assumeFalse(
+            "Parent-worker commerce response fixtures are pending while responses/PENDING exists.",
+            CommerceWireResponses.isPending(),
+        )
         val responseFiles = CommerceWireResponses.files()
-        assumeTrue(
-            "Parent-worker commerce response fixtures have not been committed yet.",
-            responseFiles.isNotEmpty(),
+        assertEquals(
+            "Every commerce request needs TypeScript and Rust worker response fixtures.",
+            CommerceWireResponses.requiredFileNames(),
+            responseFiles.mapTo(sortedSetOf()) { it.fileName.toString() },
         )
         responseFiles.forEach(CommerceWireResponses::assertParses)
     }
@@ -154,6 +184,30 @@ class CommerceWireFixtureTest {
         body = runCatching { Json.parseToJsonElement(bodyText) }.getOrNull(),
         bodyText = bodyText,
     )
+
+    private fun assertCommittedRequest(fixture: CommerceWireFixtures.RequestFixture) {
+        val committed = String(
+            Files.readAllBytes(
+                CommerceWireFixtures.requestDirectory().resolve("${fixture.name}.json"),
+            ),
+            StandardCharsets.UTF_8,
+        )
+        assertEquals(
+            "Regenerate commerce wire fixtures after an intentional wire change.",
+            fixture.fileText(),
+            committed,
+        )
+
+        val wrapper = Json.parseToJsonElement(committed).jsonObject
+        assertEquals(fixture.name, wrapper.getValue("name").asString())
+        assertEquals(fixture.endpoint, wrapper.getValue("endpoint").asString())
+        assertEquals(fixture.bodyText, wrapper.getValue("bodyText").asString())
+        assertEquals(Json.parseToJsonElement(fixture.bodyText), wrapper.getValue("body"))
+    }
+
+    private companion object {
+        const val APP_STORE_SERVER_CONTRACT_CASE = "entitled-appstore-untouched"
+    }
 }
 
 private object CommerceWireFixtures {
@@ -175,61 +229,58 @@ private object CommerceWireFixtures {
     fun requestDirectory(): Path =
         FixtureRunner.fixturesRoot().toPath().resolve("commerce-wire/requests")
 
-    fun requests(): List<RequestFixture> = listOf(
-        capturePurchase(
-            name = "purchase-subscription-full",
-            report = NuxieApi.PlayPurchaseReport(
-                packageName = "ai.nuxie.fixture",
-                productId = "fixture-subscription",
-                purchaseToken = "fixture-subscription-token",
-                basePlanId = "annual",
-                offerId = "introductory",
-                obfuscatedAccountId = "fixture-account-hash",
-                distinctId = "fixture-customer-subscription",
-            ),
-        ),
-        captureTokenFirstPurchase(),
-        capturePurchase(
-            name = "purchase-one-time",
-            report = NuxieApi.PlayPurchaseReport(
-                packageName = "ai.nuxie.fixture",
-                productId = "fixture-credit-pack",
-                purchaseToken = "fixture-one-time-token",
-                basePlanId = null,
-                offerId = null,
-                obfuscatedAccountId = "fixture-one-time-account-hash",
-                distinctId = "fixture-customer-one-time",
-            ),
-        ),
-        captureEntitled(
-            name = "entitled-atomic-use-full",
-            report = fullFeatureUseReport(),
-        ),
-        captureEntitled(
-            name = "entitled-atomic-use-minimal",
-            report = NuxieApi.PurchaseBackedFeatureUseReport(
-                customerId = "fixture-customer-minimal",
-                featureId = "fixture-credits-minimal",
-                requiredBalance = 1.0,
-                eventData = NuxieApi.FeatureUseEventData(value = 1.0, properties = null),
-                entityId = null,
-                purchase = NuxieApi.PlayPurchaseUseReport(
+    fun requests(): List<RequestFixture> = capturedRequests
+
+    private val capturedRequests: List<RequestFixture> by lazy {
+        val atomicReplay = captureAtomicReplay()
+        (listOf(
+            capturePurchase(
+                name = "purchase-subscription-full",
+                report = NuxieApi.PlayPurchaseReport(
                     packageName = "ai.nuxie.fixture",
-                    productId = "fixture-credit-pack-minimal",
-                    purchaseToken = "fixture-entitled-minimal-token",
-                    basePlanId = null,
-                    offerId = null,
-                    obfuscatedAccountId = null,
-                    eventId = "fixture-entitled-minimal-event",
+                    productId = "fixture-subscription",
+                    purchaseToken = "fixture-subscription-token",
+                    basePlanId = "annual",
+                    offerId = "introductory",
+                    obfuscatedAccountId = "fixture-account-hash",
+                    distinctId = "fixture-customer-subscription",
                 ),
             ),
-        ),
-        captureEntitled(
-            name = "entitled-atomic-replay",
-            report = fullFeatureUseReport(),
-        ),
-        appStoreCompatibilityFixture(),
-    ).sortedBy { it.name }
+            captureTokenFirstPurchase(),
+            capturePurchase(
+                name = "purchase-one-time",
+                report = NuxieApi.PlayPurchaseReport(
+                    packageName = "ai.nuxie.fixture",
+                    productId = "fixture-credit-pack",
+                    purchaseToken = "fixture-one-time-token",
+                    basePlanId = null,
+                    offerId = null,
+                    obfuscatedAccountId = "fixture-one-time-account-hash",
+                    distinctId = "fixture-customer-one-time",
+                ),
+            ),
+            captureEntitled(
+                name = "entitled-atomic-use-minimal",
+                report = NuxieApi.PurchaseBackedFeatureUseReport(
+                    customerId = "fixture-customer-minimal",
+                    featureId = "fixture-credits-minimal",
+                    requiredBalance = 1.0,
+                    eventData = NuxieApi.FeatureUseEventData(value = 1.0, properties = null),
+                    entityId = null,
+                    purchase = NuxieApi.PlayPurchaseUseReport(
+                        packageName = "ai.nuxie.fixture",
+                        productId = "fixture-credit-pack-minimal",
+                        purchaseToken = "fixture-entitled-minimal-token",
+                        basePlanId = null,
+                        offerId = null,
+                        obfuscatedAccountId = null,
+                        eventId = "fixture-entitled-minimal-event",
+                    ),
+                ),
+            ),
+            appStoreServerContractFixture(),
+        ) + atomicReplay).sortedBy { it.name }
+    }
 
     fun writeRequests() {
         val directory = requestDirectory()
@@ -293,44 +344,117 @@ private object CommerceWireFixtures {
         return transport.fixture("purchase-token-first", "/purchase")
     }
 
-    /**
-     * Android never emits App Store evidence. This test-only compatibility
-     * fixture pins the pre-existing iOS arm while the worker request becomes
-     * a Play/App Store union.
-     */
-    private fun appStoreCompatibilityFixture(): RequestFixture {
+    /** Server-contract vector; this body is not produced by an Android encoder. */
+    private fun appStoreServerContractFixture(): RequestFixture {
         val body = buildJsonObject {
             put("apiKey", API_KEY)
-            put("type", "appstore")
-            put("transaction_jwt", "fixture.header.payload.signature")
-            put("distinct_id", "fixture-customer-appstore")
+            put("customerId", "fixture-customer-appstore")
+            put("featureId", "fixture-credits-appstore")
+            put("requiredBalance", 2.5)
+            put("eventData", buildJsonObject {
+                put("value", 2.5)
+                put("properties", buildJsonObject {
+                    put("source", "commerce-wire-fixture")
+                })
+            })
+            put("entityId", "fixture-workspace")
+            put("purchase", buildJsonObject {
+                put("transaction_jwt", "fixture.header.payload.signature")
+                put("event_id", "fixture-entitled-appstore-event")
+            })
         }.toString()
-        return RequestFixture("entitled-appstore-untouched", "/purchase", body)
+        return RequestFixture("entitled-appstore-untouched", "/entitled", body)
     }
 
-    private fun fullFeatureUseReport() = NuxieApi.PurchaseBackedFeatureUseReport(
-        customerId = "fixture-customer-full",
-        featureId = "fixture-credits-full",
-        requiredBalance = 2.5,
-        eventData = NuxieApi.FeatureUseEventData(
-            value = 2.5,
-            properties = mapOf(
-                "attempt" to 2,
-                "source" to "commerce-wire-fixture",
-                "verified" to true,
-            ),
-        ),
-        entityId = "fixture-workspace",
-        purchase = NuxieApi.PlayPurchaseUseReport(
-            packageName = "ai.nuxie.fixture",
-            productId = "fixture-credit-pack-full",
-            purchaseToken = "fixture-entitled-full-token",
-            basePlanId = "annual",
-            offerId = "introductory",
-            obfuscatedAccountId = "fixture-entitled-account-hash",
-            eventId = "fixture-entitled-replay-event",
-        ),
-    )
+    private fun captureAtomicReplay(): List<RequestFixture> {
+        val transport = ReplayCapturingTransport()
+        val core = NuxieCore(
+            context = RuntimeEnvironment.getApplication(),
+            apiKey = API_KEY,
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(transport = transport, registerLifecycle = false),
+        ).also { it.identity.setDistinctId(FULL_CUSTOMER_ID) }
+        val store = InMemoryPurchaseEvidenceStore().also { evidenceStore ->
+            evidenceStore.upsert(
+                PurchaseEvidence(
+                    purchaseToken = "fixture-entitled-full-token",
+                    authorityScope = FULL_PURCHASE_SCOPE,
+                    packageName = "ai.nuxie.fixture",
+                    storeProductIds = listOf("fixture-credit-pack-full"),
+                    nuxieProductId = "fixture-credit-pack",
+                    basePlanId = "annual",
+                    offerId = "introductory",
+                    purchaseState = StoredPurchaseState.PURCHASED,
+                    obfuscatedAccountId = "fixture-entitled-account-hash",
+                    syncAttributionDistinctId = FULL_CUSTOMER_ID,
+                    ownerDistinctId = FULL_CUSTOMER_ID,
+                    acknowledged = false,
+                    firstSeenMillis = 1L,
+                    localFeatureGrants = listOf(
+                        StoredLocalPurchaseGrant(FULL_FEATURE_ID, FeatureType.CREDIT_SYSTEM.name, false),
+                    ),
+                    catalogResolved = true,
+                    nuxieManaged = true,
+                ),
+            )
+        }
+        val service = PurchaseService(
+            billing = SuccessfulBilling,
+            evidenceStore = store,
+            synchronizer = PurchaseSynchronizer {
+                PurchaseSyncOutcome.Rejected(permanent = false)
+            },
+            features = core.features,
+            distinctId = core.identity::distinctId,
+            emit = { _, _ -> },
+            settings = PurchaseSettings(null, PurchaseHandlingMode.NUXIE_MANAGED),
+            scope = core.scope,
+            nowMillis = { 1L },
+            api = core.api,
+            purchaseStorageScope = FULL_PURCHASE_SCOPE,
+            capturePurchaseSynced = { _, _, _, _ -> true },
+        )
+
+        try {
+            runBlocking {
+                val firstAttempt = runCatching {
+                    service.useFeatureWithPendingPurchase(
+                        distinctId = FULL_CUSTOMER_ID,
+                        featureId = FULL_FEATURE_ID,
+                        amount = 2.5,
+                        entityId = "fixture-workspace",
+                        metadata = FULL_METADATA,
+                    )
+                }
+                assertTrue("The first atomic Feature-use attempt must fail.", firstAttempt.isFailure)
+                assertNotNull(
+                    service.useFeatureWithPendingPurchase(
+                        distinctId = FULL_CUSTOMER_ID,
+                        featureId = FULL_FEATURE_ID,
+                        amount = 2.5,
+                        entityId = "fixture-workspace",
+                        metadata = FULL_METADATA,
+                    ),
+                )
+            }
+        } finally {
+            core.stop()
+        }
+
+        val requests = transport.entitledRequests()
+        assertEquals("The real replay path must issue exactly two /entitled requests.", 2, requests.size)
+        assertArrayEquals(
+            "The failed request and retry must be byte-identical.",
+            requests[0],
+            requests[1],
+        )
+        return listOf(
+            RequestFixture("entitled-atomic-use-full", "/entitled", requests[0].decodeToString()),
+            RequestFixture("entitled-atomic-replay", "/entitled", requests[1].decodeToString()),
+        )
+    }
 
     private class CapturingTransport(private val responseBody: String) : HttpTransport {
         private val requests = mutableListOf<HttpTransport.Request>()
@@ -349,10 +473,47 @@ private object CommerceWireFixtures {
         }
     }
 
+    private class ReplayCapturingTransport : HttpTransport {
+        private val requestBodies = mutableListOf<ByteArray>()
+
+        override fun execute(request: HttpTransport.Request): HttpTransport.Response {
+            if (request.url.path != "/entitled") {
+                return HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
+            }
+            requestBodies += request.body.copyOf()
+            if (requestBodies.size == 1) return HttpTransport.Response(503, ByteArray(0))
+            return HttpTransport.Response(200, FULL_ENTITLED_RESPONSE.encodeToByteArray())
+        }
+
+        fun entitledRequests(): List<ByteArray> = requestBodies.toList()
+    }
+
+    private object SuccessfulBilling : PlayBillingGateway {
+        override suspend fun launch(activity: Activity, request: CheckoutRequest): BillingResult = success()
+        override suspend fun queryActive(productType: String): ActivePurchasesResult =
+            ActivePurchasesResult.Success(emptyList())
+        override suspend fun acknowledge(purchaseToken: String): BillingResult = success()
+        override suspend fun consume(purchaseToken: String): BillingResult = success()
+
+        private fun success(): BillingResult = BillingResult.newBuilder()
+            .setResponseCode(BillingClient.BillingResponseCode.OK)
+            .build()
+    }
+
     private const val PURCHASE_RESPONSE =
         """{"success":true,"customer_id":"fixture-customer","features":[]}"""
     private const val ENTITLED_RESPONSE =
         """{"customerId":"fixture-customer","featureId":"fixture-feature","code":"allowed","allowed":true,"unlimited":false,"balance":8.0,"type":"metered"}"""
+    private const val FULL_CUSTOMER_ID = "fixture-customer-full"
+    private const val FULL_FEATURE_ID = "fixture-credits-full"
+    private const val FULL_PURCHASE_SCOPE = "fixture-commerce-wire-scope"
+    private val FULL_METADATA = mapOf(
+        "attempt" to 2,
+        "source" to "commerce-wire-fixture",
+        "verified" to true,
+    )
+    private const val FULL_ENTITLED_RESPONSE =
+        """{"customerId":"fixture-customer-full","featureId":"fixture-credits-full","code":"allowed","allowed":true,"unlimited":false,"balance":8.0,"type":"creditSystem"}"""
 }
 
 private object CommerceWireResponses {
@@ -367,6 +528,12 @@ private object CommerceWireResponses {
 
     private fun responseDirectory(): Path =
         FixtureRunner.fixturesRoot().toPath().resolve("commerce-wire/responses")
+
+    fun isPending(): Boolean = Files.exists(responseDirectory().resolve("PENDING"))
+
+    fun requiredFileNames(): Set<String> = CommerceWireFixtures.requests()
+        .flatMap { fixture -> listOf("${fixture.name}.ts.json", "${fixture.name}.rs.json") }
+        .toSortedSet()
 
     fun files(): List<Path> {
         val directory = responseDirectory()
