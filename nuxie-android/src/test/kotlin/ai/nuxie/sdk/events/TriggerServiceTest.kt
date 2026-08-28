@@ -12,6 +12,7 @@ import ai.nuxie.sdk.experiences.AcquiredRelease
 import ai.nuxie.sdk.experiences.AuthenticatedRelease
 import ai.nuxie.sdk.experiences.Delivery
 import ai.nuxie.sdk.experiences.ExperienceReleaseIdentity
+import ai.nuxie.sdk.journey.JourneyEventNames
 import ai.nuxie.sdk.journey.JourneyPlane
 import ai.nuxie.sdk.journey.JourneyRun
 import ai.nuxie.sdk.journey.JourneyRunState
@@ -25,6 +26,7 @@ import ai.nuxie.sdk.presentation.PresentationReleaseProvider
 import ai.nuxie.sdk.testsupport.FakeTransport
 import java.io.Closeable
 import java.util.UUID
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -32,6 +34,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -343,6 +346,94 @@ class TriggerServiceTest {
         assertEquals(JourneyRunState.TERMINAL, ended.state)
         assertEquals("goal_met", ended.terminalReason)
         core.stop()
+    }
+
+    @Test
+    fun selectedJourneyOutcomeSurvivesIdentityChangeAndPersistsUnderOwner() = runBlocking {
+        val journeyId = "identity-race-${UUID.randomUUID()}"
+        val ref = ExperienceRef("exp-identity-race", "v-identity-race", journeyId)
+        val launched = mutableListOf<String>()
+        val outcomeSelected = CompletableDeferred<Unit>()
+        val continueReporting = CompletableDeferred<Unit>()
+        val rivFile = temporaryFolder.newFile("identity-race.riv").apply {
+            writeBytes(byteArrayOf(1))
+        }
+        val factory = NuxieCore.PresentationFactory { markOutcomeInMemory, reportOutcome ->
+            ExperiencePresentationService(
+                releases = PresentationReleaseProvider { presentationRelease(ref) },
+                acquire = {
+                    AcquiredRelease(
+                        identity = experienceIdentity(ref),
+                        artifactsByKey = mapOf("renders/identity-race.riv" to rivFile),
+                        rivFile = rivFile,
+                        protection = Closeable {},
+                    )
+                },
+                emit = { _, _, _ -> },
+                scope = CoroutineScope(Dispatchers.Unconfined),
+                runtimeAvailable = { true },
+                launch = launched::add,
+                markOutcomeInMemory = markOutcomeInMemory,
+                reportOutcome = { outcome ->
+                    outcomeSelected.complete(Unit)
+                    continueReporting.await()
+                    reportOutcome(outcome)
+                },
+            )
+        }
+        val core = core(
+            transportWithGate(null),
+            presentationFactory = factory,
+        )
+        val ownerDistinctId = core.identity.distinctId()
+        val replacementDistinctId = "replacement-${UUID.randomUUID()}"
+        val store = JourneyStore(RuntimeEnvironment.getApplication().filesDir)
+        store.save(
+            JourneyRun(
+                id = journeyId,
+                distinctId = ownerDistinctId,
+                experienceId = ref.experienceId,
+                experienceVersion = requireNotNull(ref.experienceVersion),
+                epoch = 0,
+                plane = JourneyPlane.DEVICE,
+                settingsSnapshot = buildJsonObject {},
+                state = JourneyRunState.ACTIVE,
+            ),
+        )
+
+        try {
+            val shown = async {
+                core.presentations.present(ref.experienceVersion!!, journeyId, ownerDistinctId)
+            }
+            while (launched.isEmpty()) yield()
+            PresentationRegistry.reportFirstFrame(launched.single())
+            shown.await()
+
+            PresentationRegistry.reportDismissed(launched.single(), CloseReason.GoalMet)
+            outcomeSelected.await()
+            core.identity.setDistinctId(replacementDistinctId)
+            continueReporting.complete(Unit)
+
+            withTimeout(2_000L) {
+                while (store.load(ownerDistinctId, journeyId)?.state != JourneyRunState.TERMINAL) {
+                    yield()
+                }
+            }
+            core.eventLog.awaitBarrier()
+
+            val ended = requireNotNull(store.load(ownerDistinctId, journeyId))
+            val exit = core.store.pendingBatch(100).single {
+                it.name == JourneyEventNames.EXITED &&
+                    it.properties["journey_id"] == JsonPrimitive(journeyId)
+            }
+            assertEquals("goal_met", ended.terminalReason)
+            assertTrue(store.hasCompleted(ownerDistinctId, ref.experienceId))
+            assertEquals(ownerDistinctId, exit.distinctId)
+            assertEquals(null, store.load(replacementDistinctId, journeyId))
+        } finally {
+            continueReporting.complete(Unit)
+            core.stop()
+        }
     }
 
     @Test
