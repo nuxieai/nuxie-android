@@ -175,7 +175,8 @@ internal class FeatureService(
                 }
             }
         }
-        return performCheck(featureId, requiredBalance, entityId).effective
+        val checked = performCheck(featureId, requiredBalance, entityId)
+        return if (checked.supersededByMutation) checked.effective else checked.authoritative
     }
 
     private suspend fun getPurchaseCached(

@@ -1295,6 +1295,45 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun cacheFirstNetworkFallbackReturnsRawTransitiveCreditAccess() = runBlocking {
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "credit-wallet",
+                            requiredBalance = 2.0,
+                            balance = "5",
+                            type = "creditSystem",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+        core.features.hydrateProfile(
+            core.identity.distinctId(),
+            Json.parseToJsonElement(
+                profile("""[{"id":"exports","type":"metered","balance":0,"unlimited":false}]"""),
+            ).jsonObject,
+        )
+
+        val access = core.features.checkWithCache("exports", requiredBalance = 2.0)
+
+        assertTrue(access.allowed)
+        assertFalse(access.unlimited)
+        assertEquals(5.0, access.balance)
+        assertEquals(FeatureType.CREDIT_SYSTEM, access.type)
+        assertEquals(1, transport.requests.count { it.url.path == "/entitled" })
+        core.stop()
+    }
+
+    @Test
     fun expiredRealTimeCacheForcesAnotherCheck() = runBlocking {
         var checks = 0
         val transport = FakeTransport().apply {

@@ -85,6 +85,43 @@ class NuxieMeteredUseTest {
     }
 
     @Test
+    fun confirmedEntityScopedUseUpdatesGlobalPublicFeatureWithoutEntityCache() = runBlocking {
+        val transport = usageTransport(remaining = 0.0)
+        val core = NuxieCore(
+            context = RuntimeEnvironment.getApplication(),
+            apiKey = "pk_test_entity_usage_projection",
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(
+                transport = transport,
+                registerLifecycle = false,
+            ),
+        )
+        core.features.hydrateProfile(
+            core.identity.distinctId(),
+            Json.parseToJsonElement(
+                """{"segments":[],"features":[{"id":"exports","type":"metered","balance":5,"unlimited":false}]}""",
+            ).jsonObject,
+        )
+
+        val result = core.featureUsage.useFeatureAndWait(
+            featureId = "exports",
+            amount = 5.0,
+            entityId = "workspace-without-cache",
+            setUsage = false,
+            metadata = null,
+        )
+
+        assertTrue(result.success)
+        assertEquals(0.0, core.featureInfo.all.value.getValue("exports").balance!!, 0.0)
+        assertFalse(core.featureInfo.all.value.getValue("exports").allowed)
+        assertFalse(core.featureInfo.isAllowed("exports"))
+        assertEquals(0.0, core.featureInfo.balance("exports")!!, 0.0)
+        core.stop()
+    }
+
+    @Test
     fun fireAndForgetUseFeatureDoesNotSurfaceBackgroundMetadataFailure() {
         Nuxie.overridesForTesting = NuxieCore.Overrides(
             transport = usageTransport(),
@@ -197,12 +234,12 @@ class NuxieMeteredUseTest {
         core.stop()
     }
 
-    private fun usageTransport() = FakeTransport().apply {
+    private fun usageTransport(remaining: Double = 8.0) = FakeTransport().apply {
         respond = { request ->
             when (request.url.path) {
                 "/event" -> HttpTransport.Response(
                     200,
-                    """{"status":"ok","message":"recorded","usage":{"current":2,"limit":10,"remaining":8}}"""
+                    """{"status":"ok","message":"recorded","usage":{"current":2,"limit":10,"remaining":$remaining}}"""
                         .encodeToByteArray(),
                 )
                 else -> HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
