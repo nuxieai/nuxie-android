@@ -6,6 +6,7 @@ import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.NuxieActivityInfo
+import ai.nuxie.sdk.SuppressReason
 import ai.nuxie.sdk.TriggerUpdate
 import ai.nuxie.sdk.events.ActivityForwarder
 import ai.nuxie.sdk.events.EventLog
@@ -458,6 +459,98 @@ class JourneyServiceTest {
             assertEquals(1, h.store.events.values.count { it.name == JourneyEventNames.EXITED })
             val recovered = JourneyStore(h.root).load("customer-1", started.ref.journeyId!!)
             assertNull(recovered)
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun pendingHostCompletionBlocksOneTimeReenrollmentUntilReceiptRecovery() = runBlocking {
+        val h = harness(JourneyReentry.OneTime)
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = started.ref.journeyId!!
+            reserveHostDismissal(h, journeyId)
+            val blockedCompletionsDirectory = File(h.root, "nuxie/journeys/completions").apply {
+                parentFile!!.mkdirs()
+                writeText("blocked")
+            }
+
+            assertTrue(
+                h.service.presentationEnded("customer-1", journeyId, CloseReason.HostDismissed),
+            )
+            val tombstone = requireNotNull(JourneyStore(h.root).load("customer-1", journeyId))
+            assertTrue(tombstone.pendingHostCompletion)
+            assertFalse(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
+
+            val whilePending = h.service.handleEventForTrigger(
+                StoredEvent("trigger-2", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single()
+            assertTrue(whilePending is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed)
+            assertEquals(
+                SuppressReason.REENTRY_LIMITED,
+                (whilePending as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed).reason,
+            )
+
+            assertTrue(blockedCompletionsDirectory.delete())
+            h.service.recoverPendingHostDismissals()
+            assertTrue(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
+            assertNull(JourneyStore(h.root).load("customer-1", journeyId))
+
+            val afterRecovery = h.service.handleEventForTrigger(
+                StoredEvent("trigger-3", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single()
+            assertTrue(afterRecovery is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed)
+            assertEquals(
+                SuppressReason.REENTRY_LIMITED,
+                (afterRecovery as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed).reason,
+            )
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun pendingHostCompletionUsesItsCompletionTimeForWindowedReenrollment() = runBlocking {
+        val h = harness(JourneyReentry.OncePerWindow(1_000))
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = started.ref.journeyId!!
+            reserveHostDismissal(h, journeyId)
+            val blockedCompletionsDirectory = File(h.root, "nuxie/journeys/completions").apply {
+                parentFile!!.mkdirs()
+                writeText("blocked")
+            }
+
+            assertTrue(
+                h.service.presentationEnded("customer-1", journeyId, CloseReason.HostDismissed),
+            )
+            val whilePending = h.service.handleEventForTrigger(
+                StoredEvent("trigger-2", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single()
+            assertTrue(whilePending is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed)
+            assertEquals(
+                SuppressReason.REENTRY_LIMITED,
+                (whilePending as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed).reason,
+            )
+
+            assertTrue(blockedCompletionsDirectory.delete())
+            h.service.recoverPendingHostDismissals()
+            val afterRecovery = h.service.handleEventForTrigger(
+                StoredEvent("trigger-3", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single()
+            assertTrue(afterRecovery is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed)
+
+            now += 1_000
+            assertTrue(
+                h.service.handleEventForTrigger(
+                    StoredEvent("trigger-4", "opened", timestampMillis = now, distinctId = "customer-1"),
+                ).single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started,
+            )
         } finally {
             h.root.deleteRecursively()
         }

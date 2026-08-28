@@ -364,9 +364,28 @@ internal class JourneyService(
 
     private fun isReentryLimited(distinctId: String, release: AdmittedJourneyRelease): Boolean = when (val policy = release.reentry) {
         JourneyReentry.EveryTime -> false
-        JourneyReentry.OneTime -> store.hasCompleted(distinctId, release.experienceId)
-        is JourneyReentry.OncePerWindow -> store.lastCompletionAtMillis(distinctId, release.experienceId)
-            ?.let { nowMillis() - it < policy.windowMillis } ?: false
+        JourneyReentry.OneTime ->
+            pendingHostCompletionTombstones(distinctId, release.experienceId).isNotEmpty() ||
+                store.hasCompleted(distinctId, release.experienceId)
+        is JourneyReentry.OncePerWindow -> {
+            val now = nowMillis()
+            val pendingCompletionAtMillis = pendingHostCompletionTombstones(
+                distinctId,
+                release.experienceId,
+            ).maxOfOrNull { it.completedAtMillis ?: now }
+            val lastCompletionAtMillis = listOfNotNull(
+                pendingCompletionAtMillis,
+                store.lastCompletionAtMillis(distinctId, release.experienceId),
+            ).maxOrNull()
+            lastCompletionAtMillis?.let { now - it < policy.windowMillis } ?: false
+        }
+    }
+
+    private fun pendingHostCompletionTombstones(
+        distinctId: String,
+        experienceId: String,
+    ): List<JourneyRun> = store.loadPendingHostDismissals(distinctId).filter { run ->
+        run.experienceId == experienceId && run.pendingHostCompletion
     }
 
     private fun routeDownFact(distinctId: String, name: String, properties: JsonObject) {
