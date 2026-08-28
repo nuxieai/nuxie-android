@@ -462,15 +462,26 @@ internal class EventLog(
      * Forwarding classification belongs to the original capture, while the
      * durable event and forwarding receipt time belong to the prepared result.
      */
-    private fun projectPostTransform(original: NuxieEvent, transformed: NuxieEvent): StoredEvent =
-        StoredEvent.from(
-            transformed,
+    private fun projectPostTransform(original: NuxieEvent, transformed: NuxieEvent): StoredEvent {
+        // The prepared field is authoritative, matching iOS: wrappers that pin
+        // distinctId also restore its property after a deleting or spoofing hook.
+        val projected = NuxieEvent(
+            id = transformed.id,
+            name = transformed.name,
+            distinctId = transformed.distinctId,
+            properties = transformed.properties + (DISTINCT_ID_PROPERTY to transformed.distinctId),
+            timestampMillis = transformed.timestampMillis,
+        )
+        return StoredEvent.from(
+            projected,
             forwardingName = original.name,
             forwardingReceivedAtMillis = forwardingAdmission(transformed.timestampMillis),
         )
+    }
 
     private companion object {
         const val LOG_TAG = "Nuxie"
+        const val DISTINCT_ID_PROPERTY = "\$distinct_id"
         const val SESSION_ID_PROPERTY = "\$session_id"
     }
 }
