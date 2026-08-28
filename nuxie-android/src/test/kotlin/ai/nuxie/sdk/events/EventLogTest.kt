@@ -89,6 +89,7 @@ class EventLogTest {
         store: EventStore,
         forwardingEnabled: () -> Boolean = { false },
         nowMillis: () -> Long = { 1_784_462_400_000L },
+        sessionIdProvider: (() -> String?)? = null,
         beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
     ): EventLog = EventLog(
         store = store,
@@ -97,6 +98,7 @@ class EventLogTest {
         beforeSend = beforeSend,
         scope = scope,
         nowMillis = nowMillis,
+        sessionIdProvider = sessionIdProvider,
     ).also { eventLog ->
         eventLog.subscribeForwarding(isEnabled = forwardingEnabled) {}
     }
@@ -228,6 +230,25 @@ class EventLogTest {
         assertTrue(store.pending.isEmpty())
         assertEquals(listOf("accepted-event"), store.delivered.map(StoredEvent::id))
         assertEquals(listOf("accepted-event"), observed.map(StoredEvent::id))
+    }
+
+    @Test
+    fun acceptedFeatureUseCarriesActiveSessionIdInDeliveredHistory() = runBlocking {
+        val store = RecordingStore()
+        val eventLog = log(store, sessionIdProvider = { "session-1" })
+
+        assertTrue(
+            eventLog.captureDeliveredIdempotently(
+                SystemEventNames.FEATURE_USED,
+                mapOf("feature_id" to "credits", "amount" to 1.0),
+                "accepted-event",
+                "owner-1",
+            ),
+        )
+
+        val delivered = store.delivered.single()
+        assertEquals("session-1", delivered.sessionId)
+        assertEquals("session-1", delivered.properties.stringValue("\$session_id"))
     }
 
     @Test
