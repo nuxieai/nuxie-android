@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.journey
 
 import ai.nuxie.sdk.ExperienceRef
+import ai.nuxie.sdk.JourneyExitReason
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieEnvironment
@@ -15,6 +16,7 @@ import ai.nuxie.sdk.experiences.ExperienceReleaseIdentity
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
 import ai.nuxie.sdk.experiences.SupportedRuntime
 import ai.nuxie.sdk.identity.IdentityProvider
+import ai.nuxie.sdk.presentation.CloseReason
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
@@ -160,8 +162,36 @@ class JourneyServiceTest {
                 h.store.events.values.first { it.name == JourneyEventNames.EFFECT_REQUESTED }.properties.keys.filterNot { it.startsWith("$") }.toSet(),
             )
             assertEquals(
-                setOf("journey_id", "epoch", "reason", "at"),
+                setOf("journey_id", "epoch", "experience_id", "experience_version", "reason", "at"),
                 h.store.events.values.first { it.name == JourneyEventNames.EXITED }.properties.keys.filterNot { it.startsWith("$") }.toSet(),
+            )
+        } finally { h.root.deleteRecursively() }
+    }
+
+    @Test
+    fun presentationDrivenExitForwardsJourneyEndedWithExperienceReference() = runBlocking {
+        val h = harness(forwardingEnabled = { true })
+        val forwarded = mutableListOf<NuxieActivityInfo>()
+        h.log.subscribeForwarding(
+            handler = ActivityForwarder(
+                resolveExperience = { _, _ -> null },
+                deliver = { forwarded += it },
+            )::onCommitted,
+        )
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+
+            h.service.presentationEnded("customer-1", started.ref.journeyId!!, CloseReason.UserDismissed)
+            h.log.awaitBarrier()
+
+            assertEquals(
+                NuxieActivity.JourneyEnded(
+                    ExperienceRef("experience-1", "version-1", started.ref.journeyId),
+                    JourneyExitReason.DISMISSED,
+                ),
+                forwarded.single { it.activity is NuxieActivity.JourneyEnded }.activity,
             )
         } finally { h.root.deleteRecursively() }
     }

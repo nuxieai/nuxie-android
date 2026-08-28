@@ -39,7 +39,14 @@ internal class JourneyLedger(private val eventLog: EventLog) {
 
     fun exited(run: JourneyRun, reason: String, atMillis: Long) = capture(
         JourneyEventNames.EXITED,
-        mapOf("journey_id" to run.id, "epoch" to run.epoch, "reason" to reason, "at" to atMillis),
+        mapOf(
+            "journey_id" to run.id,
+            "epoch" to run.epoch,
+            "experience_id" to run.experienceId,
+            "experience_version" to run.experienceVersion,
+            "reason" to reason,
+            "at" to atMillis,
+        ),
     )
 
     fun effectRequested(
