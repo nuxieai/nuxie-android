@@ -34,8 +34,10 @@ internal class JourneyStore(
 
     @Synchronized
     fun load(distinctId: String, journeyId: String): JourneyRun? {
-        val file = File(runsDirectory(distinctId), "$journeyId.json")
-        return decodeRun(file)
+        val directory = runsDirectory(distinctId)
+        val interrupted = decodeRun(File(directory, ".$journeyId.json.new"))
+            ?.takeIf { it.hasPendingHostDismissal() }
+        return interrupted ?: decodeRun(File(directory, "$journeyId.json"))
     }
 
     @Synchronized
@@ -53,13 +55,10 @@ internal class JourneyStore(
     fun loadPendingHostDismissals(distinctId: String): List<JourneyRun> = runsDirectory(distinctId)
         .listFiles()
         ?.asSequence()
-        ?.filter { it.extension == "json" }
+        ?.filter { it.isRunSnapshot() }
         ?.mapNotNull(::decodeRun)
-        ?.filter {
-            it.pendingHostExitCapture ||
-                it.pendingHostCompletion ||
-                it.pendingHostTriggerCompletion
-        }
+        ?.filter { it.hasPendingHostDismissal() }
+        ?.distinctBy(JourneyRun::id)
         ?.sortedBy { it.id }
         ?.toList()
         ?: emptyList()
@@ -70,20 +69,19 @@ internal class JourneyStore(
         ?.asSequence()
         ?.filter(File::isDirectory)
         ?.flatMap { directory -> directory.listFiles()?.asSequence() ?: emptySequence() }
-        ?.filter { it.extension == "json" }
+        ?.filter { it.isRunSnapshot() }
         ?.mapNotNull(::decodeRun)
-        ?.filter {
-            it.pendingHostExitCapture ||
-                it.pendingHostCompletion ||
-                it.pendingHostTriggerCompletion
-        }
+        ?.filter { it.hasPendingHostDismissal() }
+        ?.distinctBy { it.distinctId to it.id }
         ?.sortedWith(compareBy(JourneyRun::distinctId, JourneyRun::id))
         ?.toList()
         ?: emptyList()
 
     @Synchronized
     fun delete(run: JourneyRun) {
-        File(runsDirectory(run.distinctId), "${run.id}.json").delete()
+        val directory = runsDirectory(run.distinctId)
+        File(directory, "${run.id}.json").delete()
+        File(directory, ".${run.id}.json.new").delete()
     }
 
     @Synchronized
@@ -171,10 +169,16 @@ internal class JourneyStore(
         try {
             check(temporary.renameTo(destination)) { "Could not replace ${destination.name}" }
         } catch (failure: Throwable) {
-            temporary.delete()
+            // A fully written terminal replacement is itself recoverable
+            // tombstone evidence. Keep it for the startup/foreground scan.
             throw failure
         }
     }
+
+    private fun File.isRunSnapshot(): Boolean = extension == "json" || name.endsWith(".json.new")
+
+    private fun JourneyRun.hasPendingHostDismissal(): Boolean =
+        pendingHostExitCapture || pendingHostCompletion || pendingHostTriggerCompletion
 
     private fun encodeRun(run: JourneyRun): JsonObject = buildJsonObject {
         put("id", JsonPrimitive(run.id))

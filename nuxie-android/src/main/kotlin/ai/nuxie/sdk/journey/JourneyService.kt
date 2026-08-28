@@ -39,7 +39,7 @@ internal class JourneyService(
 ) : TriggerService.JourneyRouter, JourneyDownFactRouter {
     private val admissions = mutableSetOf<AdmissionKey>()
     private val restoredRunIds = mutableSetOf<String>()
-    private val hostDismissalReservations = mutableSetOf<HostDismissalKey>()
+    private val inMemoryHostExits = mutableMapOf<HostDismissalKey, InMemoryHostExit>()
     // E1 has few concurrent run operations; one lock keeps each run's
     // load-mutate-save sequence coherent until per-run locking is warranted.
     private val runLock = Mutex()
@@ -108,9 +108,7 @@ internal class JourneyService(
     suspend fun exit(distinctId: String, journeyId: String, reason: String) {
         runLock.withLock {
             val run = store.load(distinctId, journeyId) ?: return
-            if (run.state != JourneyRunState.ACTIVE ||
-                HostDismissalKey(distinctId, journeyId) in hostDismissalReservations
-            ) return
+            if (run.state != JourneyRunState.ACTIVE || hasInMemoryHostExit(distinctId, journeyId)) return
             val terminal = run.copy(state = JourneyRunState.TERMINAL, terminalReason = reason)
             store.save(terminal)
             if (!run.isGhost) {
@@ -146,37 +144,28 @@ internal class JourneyService(
         return true
     }
 
-    /**
-     * Reserves a live Journey before host dismissal may terminalize it. A call
-     * admitted under the old customer may then finish even if identity changes,
-     * while a call made after identity changed cannot terminalize or tear down
-     * the old customer's presentation.
-     */
-    suspend fun reserveHostDismissal(
+    fun markHostDismissedInMemory(
         ownerDistinctId: String,
         journeyId: String,
+        experienceId: String,
         initiatingDistinctId: String,
-    ): Boolean = runLock.withLock {
-        if (ownerDistinctId != initiatingDistinctId) return@withLock false
-        val run = withContext(Dispatchers.IO) { store.load(ownerDistinctId, journeyId) }
-            ?: return@withLock false
-        if (run.state != JourneyRunState.ACTIVE) return@withLock false
-        hostDismissalReservations += HostDismissalKey(ownerDistinctId, journeyId)
-        true
-    }
-
-    suspend fun releaseHostDismissalReservation(ownerDistinctId: String, journeyId: String) {
-        runLock.withLock {
-            hostDismissalReservations -= HostDismissalKey(ownerDistinctId, journeyId)
+    ): Boolean {
+        if (ownerDistinctId != initiatingDistinctId) return false
+        synchronized(inMemoryHostExits) {
+            val key = HostDismissalKey(ownerDistinctId, journeyId)
+            if (key !in inMemoryHostExits) {
+                inMemoryHostExits[key] = InMemoryHostExit(experienceId, nowMillis())
+            }
         }
+        return true
     }
 
     private suspend fun userDismiss(distinctId: String, journeyId: String): Boolean = runLock.withLock {
         val run = withContext(Dispatchers.IO) { store.load(distinctId, journeyId) }
             ?: return@withLock true
-        if (run.state != JourneyRunState.ACTIVE ||
-            HostDismissalKey(distinctId, journeyId) in hostDismissalReservations
-        ) return@withLock false
+        if (run.state != JourneyRunState.ACTIVE || hasInMemoryHostExit(distinctId, journeyId)) {
+            return@withLock false
+        }
         val completedAtMillis = nowMillis()
         val terminal = run.copy(
             state = JourneyRunState.TERMINAL,
@@ -197,14 +186,18 @@ internal class JourneyService(
     }
 
     private suspend fun hostDismiss(distinctId: String, journeyId: String): Boolean = runLock.withLock {
+        val key = HostDismissalKey(distinctId, journeyId)
+        val inMemoryExit = synchronized(inMemoryHostExits) { inMemoryHostExits[key] }
         val run = withContext(Dispatchers.IO) { store.load(distinctId, journeyId) }
-            ?: return@withLock true
+        if (run == null) {
+            synchronized(inMemoryHostExits) { inMemoryHostExits.remove(key) }
+            return@withLock true
+        }
         var terminal = when {
-            run.state == JourneyRunState.ACTIVE &&
-                HostDismissalKey(distinctId, journeyId) in hostDismissalReservations -> run.copy(
+            run.state == JourneyRunState.ACTIVE && inMemoryExit != null -> run.copy(
                 state = JourneyRunState.TERMINAL,
                 terminalReason = "dismissed",
-                completedAtMillis = nowMillis(),
+                completedAtMillis = inMemoryExit.completedAtMillis,
                 pendingHostExitCapture = true,
                 pendingHostCompletion = true,
                 pendingHostTriggerCompletion = true,
@@ -217,7 +210,6 @@ internal class JourneyService(
             else -> return@withLock false
         }
         withContext(Dispatchers.IO) { store.save(terminal) }
-        hostDismissalReservations -= HostDismissalKey(distinctId, journeyId)
         val completedAtMillis = terminal.completedAtMillis ?: return@withLock true
         if (terminal.pendingHostExitCapture) {
             val captured = runCatching {
@@ -259,11 +251,14 @@ internal class JourneyService(
             !terminal.pendingHostTriggerCompletion
         ) {
             withContext(Dispatchers.IO) { store.delete(terminal) }
+            synchronized(inMemoryHostExits) { inMemoryHostExits.remove(key) }
         }
         true
     }
 
     suspend fun recoverPendingHostDismissals() {
+        val inMemory = synchronized(inMemoryHostExits) { inMemoryHostExits.keys.toList() }
+        inMemory.forEach { key -> hostDismiss(key.distinctId, key.journeyId) }
         val pending = withContext(Dispatchers.IO) { store.loadPendingHostDismissals() }
         pending.forEach { run -> hostDismiss(run.distinctId, run.id) }
     }
@@ -326,11 +321,11 @@ internal class JourneyService(
             if (!admissions.add(key)) return TriggerService.JourneyTriggerResult.Suppressed(SuppressReason.ALREADY_ACTIVE)
         }
         try {
-            if (store.loadActive(event.distinctId).any { it.experienceId == release.experienceId }) {
-                return TriggerService.JourneyTriggerResult.Suppressed(SuppressReason.ALREADY_ACTIVE)
-            }
             if (isReentryLimited(event.distinctId, release)) {
                 return TriggerService.JourneyTriggerResult.Suppressed(SuppressReason.REENTRY_LIMITED)
+            }
+            if (store.loadActive(event.distinctId).any { it.experienceId == release.experienceId }) {
+                return TriggerService.JourneyTriggerResult.Suppressed(SuppressReason.ALREADY_ACTIVE)
             }
             val now = nowMillis()
             val run = JourneyRun(
@@ -365,7 +360,8 @@ internal class JourneyService(
     private fun isReentryLimited(distinctId: String, release: AdmittedJourneyRelease): Boolean = when (val policy = release.reentry) {
         JourneyReentry.EveryTime -> false
         JourneyReentry.OneTime ->
-            pendingHostCompletionTombstones(distinctId, release.experienceId).isNotEmpty() ||
+            inMemoryCompletionTimes(distinctId, release.experienceId).isNotEmpty() ||
+                pendingHostCompletionTombstones(distinctId, release.experienceId).isNotEmpty() ||
                 store.hasCompleted(distinctId, release.experienceId)
         is JourneyReentry.OncePerWindow -> {
             val now = nowMillis()
@@ -374,6 +370,7 @@ internal class JourneyService(
                 release.experienceId,
             ).maxOfOrNull { it.completedAtMillis ?: now }
             val lastCompletionAtMillis = listOfNotNull(
+                inMemoryCompletionTimes(distinctId, release.experienceId).maxOrNull(),
                 pendingCompletionAtMillis,
                 store.lastCompletionAtMillis(distinctId, release.experienceId),
             ).maxOrNull()
@@ -387,6 +384,20 @@ internal class JourneyService(
     ): List<JourneyRun> = store.loadPendingHostDismissals(distinctId).filter { run ->
         run.experienceId == experienceId && run.pendingHostCompletion
     }
+
+    private fun inMemoryCompletionTimes(distinctId: String, experienceId: String): List<Long> =
+        synchronized(inMemoryHostExits) {
+            inMemoryHostExits.mapNotNull { (key, exit) ->
+                exit.completedAtMillis.takeIf {
+                    key.distinctId == distinctId && exit.experienceId == experienceId
+                }
+            }
+        }
+
+    private fun hasInMemoryHostExit(distinctId: String, journeyId: String): Boolean =
+        synchronized(inMemoryHostExits) {
+            HostDismissalKey(distinctId, journeyId) in inMemoryHostExits
+        }
 
     private fun routeDownFact(distinctId: String, name: String, properties: JsonObject) {
         when (name) {
@@ -424,6 +435,7 @@ internal class JourneyService(
 
     private data class AdmissionKey(val distinctId: String, val experienceId: String)
     private data class HostDismissalKey(val distinctId: String, val journeyId: String)
+    private data class InMemoryHostExit(val experienceId: String, val completedAtMillis: Long)
 
     private fun JsonObject.string(key: String): String? =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content

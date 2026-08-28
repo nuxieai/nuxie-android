@@ -80,9 +80,8 @@ internal class NuxieCore(
 
     internal fun interface PresentationFactory {
         fun create(
-            reportOutcome: suspend (PresentationOutcome) -> Boolean,
-            reserveHostDismissal: suspend (PresentationOutcome) -> Boolean,
-            releaseHostDismissalReservation: suspend (PresentationOutcome) -> Unit,
+            markOutcomeInMemory: (PresentationOutcome) -> Boolean,
+            reportOutcome: suspend (PresentationOutcome) -> Unit,
         ): ExperiencePresentationService
     }
 
@@ -206,7 +205,25 @@ internal class NuxieCore(
         scope = scope,
     )
 
-    private val reportPresentationOutcome: suspend (PresentationOutcome) -> Boolean = { outcome ->
+    private val markPresentationOutcomeInMemory: (PresentationOutcome) -> Boolean = { outcome ->
+        val journeyId = outcome.ref.journeyId
+        val ownerDistinctId = outcome.ownerDistinctId
+        val initiatingDistinctId = outcome.initiatingDistinctId
+        if (outcome.reason != CloseReason.HostDismissed ||
+            journeyId == null || ownerDistinctId == null || initiatingDistinctId == null
+        ) {
+            true
+        } else {
+            journeys.markHostDismissedInMemory(
+                ownerDistinctId = ownerDistinctId,
+                journeyId = journeyId,
+                experienceId = outcome.ref.experienceId,
+                initiatingDistinctId = initiatingDistinctId,
+            )
+        }
+    }
+
+    private val reportPresentationOutcome: suspend (PresentationOutcome) -> Unit = { outcome ->
         outcome.ref.journeyId?.let { journeyId ->
             val currentDistinctId = identity.distinctId()
             val ownerDistinctId = outcome.ownerDistinctId
@@ -214,7 +231,7 @@ internal class NuxieCore(
                 ownerDistinctId != null &&
                 ownerDistinctId != currentDistinctId
             ) {
-                true
+                Unit
             } else {
                 journeys.presentationEnded(
                     ownerDistinctId ?: currentDistinctId,
@@ -222,32 +239,12 @@ internal class NuxieCore(
                     outcome.reason,
                 )
             }
-        } ?: true
-    }
-
-    private val reserveHostDismissal: suspend (PresentationOutcome) -> Boolean = { outcome ->
-        val journeyId = outcome.ref.journeyId
-        val ownerDistinctId = outcome.ownerDistinctId
-        val initiatingDistinctId = outcome.initiatingDistinctId
-        if (journeyId == null || ownerDistinctId == null || initiatingDistinctId == null) {
-            true
-        } else {
-            journeys.reserveHostDismissal(ownerDistinctId, journeyId, initiatingDistinctId)
-        }
-    }
-
-    private val releaseHostDismissalReservation: suspend (PresentationOutcome) -> Unit = { outcome ->
-        val journeyId = outcome.ref.journeyId
-        val ownerDistinctId = outcome.ownerDistinctId
-        if (journeyId != null && ownerDistinctId != null) {
-            journeys.releaseHostDismissalReservation(ownerDistinctId, journeyId)
         }
     }
 
     val presentations = overrides.presentationFactory?.create(
+        markPresentationOutcomeInMemory,
         reportPresentationOutcome,
-        reserveHostDismissal,
-        releaseHostDismissalReservation,
     )
         ?: ExperiencePresentationService(
             context = appContext,
@@ -256,9 +253,8 @@ internal class NuxieCore(
             emit = eventLog::capture,
             scope = scope,
             runtimeAvailable = AndroidRenderCapability::isAvailable,
+            markOutcomeInMemory = markPresentationOutcomeInMemory,
             reportOutcome = reportPresentationOutcome,
-            reserveHostDismissal = reserveHostDismissal,
-            releaseHostDismissalReservation = releaseHostDismissalReservation,
         )
 
     val triggers by lazy {
