@@ -6,10 +6,12 @@ import ai.nuxie.sdk.NuxieEvent
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.journey.JourneyEventNames
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -33,8 +35,12 @@ class EventLogTest {
         val pending = mutableListOf<StoredEvent>()
         val stableDrops = mutableListOf<String>()
         val delivered = mutableListOf<StoredEvent>()
+        var onPendingInserted: (StoredEvent) -> Unit = {}
 
-        override suspend fun insertPending(event: StoredEvent) { pending.add(event) }
+        override suspend fun insertPending(event: StoredEvent) {
+            pending.add(event)
+            onPendingInserted(event)
+        }
         override suspend fun insertPendingIfAbsent(event: StoredEvent): Boolean {
             if (pending.any { it.id == event.id } || delivered.any { it.id == event.id } ||
                 event.id in stableDrops
@@ -91,8 +97,9 @@ class EventLogTest {
         beforeSend = beforeSend,
         scope = scope,
         nowMillis = nowMillis,
-        forwardingEnabled = forwardingEnabled,
-    )
+    ).also { eventLog ->
+        eventLog.subscribeForwarding(isEnabled = forwardingEnabled) {}
+    }
 
     @After
     fun tearDown() {
@@ -126,6 +133,40 @@ class EventLogTest {
             observed,
         )
         assertEquals(listOf("one", "two", "three"), store.pending.map { it.name })
+    }
+
+    @Test
+    fun slowForwardingDoesNotDelayLaterPersistenceAndCallbacksStayFifo() = runBlocking {
+        val store = RecordingStore()
+        val secondPersisted = CompletableDeferred<Unit>()
+        store.onPendingInserted = { event ->
+            if (event.name == "second") secondPersisted.complete(Unit)
+        }
+        val eventLog = log(store)
+        val firstForwardingStarted = CompletableDeferred<Unit>()
+        val releaseFirstForwarding = CompletableDeferred<Unit>()
+        val forwarded = mutableListOf<String>()
+        eventLog.subscribeForwarding { event ->
+            if (event.name == "first") {
+                firstForwardingStarted.complete(Unit)
+                releaseFirstForwarding.await()
+            }
+            forwarded += event.name
+        }
+
+        try {
+            eventLog.capture("first")
+            withTimeout(1_000L) { firstForwardingStarted.await() }
+
+            eventLog.capture("second")
+            withTimeout(1_000L) { secondPersisted.await() }
+        } finally {
+            releaseFirstForwarding.complete(Unit)
+        }
+        eventLog.awaitBarrier()
+
+        assertEquals(listOf("first", "second"), store.pending.map { it.name })
+        assertEquals(listOf("first", "second"), forwarded)
     }
 
     @Test
@@ -242,7 +283,7 @@ class EventLogTest {
             resolveExperience = { _, _ -> null },
             deliver = { forwardedTimestamps += it.timestampMillis to it.receivedAtMillis },
         )
-        eventLog.subscribeCommitted { event -> forwarder.onCommitted(event) }
+        eventLog.subscribeForwarding { event -> forwarder.onCommitted(event) }
 
         assertTrue(
             eventLog.captureDeliveredIdempotently(
@@ -252,6 +293,7 @@ class EventLogTest {
                 "owner-1",
             ),
         )
+        eventLog.awaitBarrier()
 
         assertEquals(listOf(2_000L to 2_000L), forwardedTimestamps)
     }

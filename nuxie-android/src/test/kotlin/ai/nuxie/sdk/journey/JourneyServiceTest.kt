@@ -99,8 +99,9 @@ class JourneyServiceTest {
             beforeSend = null,
             scope = scope,
             nowMillis = { now },
-            forwardingEnabled = forwardingEnabled,
-        )
+        ).also { log ->
+            log.subscribeForwarding(isEnabled = forwardingEnabled) {}
+        }
         val release = AdmittedJourneyRelease(
             experienceId = "experience-1",
             experienceVersion = "version-1",
