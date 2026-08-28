@@ -1,9 +1,15 @@
 package ai.nuxie.sdk.features
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * Reactive snapshot of the current customer's Feature access. StateFlow
@@ -22,8 +28,24 @@ class FeatureInfo {
 
     private val mutableState = MutableStateFlow<State>(State.Unknown)
     private val mutableAll = MutableStateFlow<Map<String, FeatureAccess>>(emptyMap())
+    private val mutationLock = Mutex()
+    private val stagingLock = Any()
+    private var mutationTail = CompletableDeferred<Unit>().also { it.complete(Unit) }
     @Volatile
     private var entityAccess: Map<String, Map<String, FeatureAccess>> = emptyMap()
+
+    internal var onFeatureChange: suspend (
+        featureId: String,
+        oldAccess: FeatureAccess?,
+        newAccess: FeatureAccess,
+    ) -> Unit = { _, _, _ -> }
+
+    /** A FIFO position reserved at the engine mutation commit point. */
+    internal class Mutation internal constructor(
+        internal val previous: Deferred<Unit>,
+        internal val completed: CompletableDeferred<Unit>,
+        internal val apply: suspend () -> Unit,
+    )
 
     internal val state: StateFlow<State> = mutableState
     val all: StateFlow<Map<String, FeatureAccess>> = mutableAll
@@ -39,20 +61,37 @@ class FeatureInfo {
     /** Returns the globally scoped cached balance for [featureId]. */
     fun balance(featureId: String): Double? = all.value[featureId]?.balance
 
-    internal fun update(
+    internal suspend fun update(
         features: Map<String, FeatureAccess>,
         entities: Map<String, Map<String, FeatureAccess>>,
         ready: Boolean = false,
-    ) {
-        synchronized(this) {
+    ) = publish(stageUpdate(features, entities, ready))
+
+    internal fun stageUpdate(
+        features: Map<String, FeatureAccess>,
+        entities: Map<String, Map<String, FeatureAccess>>,
+        ready: Boolean = false,
+    ): Mutation = stage {
+            val oldFeatures = mutableAll.value
+            features.forEach { (featureId, newAccess) ->
+                val oldAccess = oldFeatures[featureId]
+                if (oldAccess != newAccess) {
+                    runCatching { onFeatureChange(featureId, oldAccess, newAccess) }
+                }
+            }
             entityAccess = entities
             mutableAll.value = features
             if (ready) mutableState.value = State.Ready
-        }
     }
 
-    internal fun update(featureId: String, access: FeatureAccess, entityId: String?) {
-        synchronized(this) {
+    internal suspend fun update(featureId: String, access: FeatureAccess, entityId: String?) =
+        publish(stageUpdate(featureId, access, entityId))
+
+    internal fun stageUpdate(featureId: String, access: FeatureAccess, entityId: String?): Mutation = stage {
+            val oldAccess = mutableAll.value[featureId]
+            if (oldAccess != access) {
+                runCatching { onFeatureChange(featureId, oldAccess, access) }
+            }
             // iOS has one reactive Feature map: an entity check publishes its
             // result there even though its reusable cache entry stays scoped.
             mutableAll.value = mutableAll.value + (featureId to access)
@@ -61,16 +100,18 @@ class FeatureInfo {
                     featureId to (entityAccess[featureId].orEmpty() + (entityId to access))
                 )
             }
-        }
     }
 
-    internal fun setBalance(featureId: String, balance: Double, entityId: String?) {
-        synchronized(this) {
-            val current = mutableAll.value[featureId] ?: return
+    internal suspend fun setBalance(featureId: String, balance: Double, entityId: String?) =
+        publish(stage {
+            val current = mutableAll.value[featureId] ?: return@stage
             val updated = current.copy(
                 allowed = current.unlimited || balance >= 1.0,
                 balance = balance,
             )
+            if (current != updated) {
+                runCatching { onFeatureChange(featureId, current, updated) }
+            }
             // Match the same iOS reactive publication after entity-scoped use.
             mutableAll.value = mutableAll.value + (featureId to updated)
             if (entityId != null) {
@@ -78,21 +119,38 @@ class FeatureInfo {
                     featureId to (entityAccess[featureId].orEmpty() + (entityId to updated))
                 )
             }
-        }
-    }
+        })
 
-    internal fun clear() {
-        synchronized(this) {
+    internal suspend fun clear() = publish(stageClear())
+
+    internal fun stageClear(): Mutation = stage {
             entityAccess = emptyMap()
             mutableAll.value = emptyMap()
-        }
     }
 
-    internal fun reset() {
-        synchronized(this) {
+    internal suspend fun reset() = publish(stageReset())
+
+    internal fun stageReset(): Mutation = stage {
             entityAccess = emptyMap()
             mutableAll.value = emptyMap()
             mutableState.value = State.Unknown
+    }
+
+    internal suspend fun publish(mutation: Mutation) {
+        // Once engine state commits, cancellation cannot abandon its matching
+        // listener/StateFlow publication or strand later FIFO reservations.
+        withContext(NonCancellable) {
+            mutation.previous.await()
+            try {
+                mutationLock.withLock { mutation.apply() }
+            } finally {
+                mutation.completed.complete(Unit)
+            }
         }
+    }
+
+    private fun stage(apply: suspend () -> Unit): Mutation = synchronized(stagingLock) {
+        val completed = CompletableDeferred<Unit>()
+        Mutation(mutationTail, completed, apply).also { mutationTail = completed }
     }
 }

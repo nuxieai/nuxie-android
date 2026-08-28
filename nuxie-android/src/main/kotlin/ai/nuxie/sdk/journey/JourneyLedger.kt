@@ -64,7 +64,8 @@ internal class JourneyLedger(private val eventLog: EventLog) {
         return invocationId
     }
 
-    suspend fun serverFact(event: StoredEvent): Boolean = eventLog.commitServerFact(event)
+    suspend fun serverFact(event: StoredEvent, receivedAtMillis: Long): Boolean =
+        eventLog.commitServerFact(event, receivedAtMillis)
 
     private fun capture(name: String, properties: Map<String, Any?>) {
         eventLog.capture(name, properties)

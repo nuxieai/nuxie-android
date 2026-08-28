@@ -399,6 +399,11 @@ internal class ExperiencePresentationService(
             "experience_id" to ref.experienceId,
             "experience_version" to ref.experienceVersion,
         )
+        when (reason) {
+            CloseReason.UserDismissed -> properties["reason"] = "user"
+            CloseReason.GoalMet -> properties["reason"] = "goal_met"
+            else -> Unit
+        }
         val name = when (reason) {
             CloseReason.UserDismissed, CloseReason.GoalMet -> SystemEventNames.EXPERIENCE_DISMISSED
             CloseReason.PurchaseCompleted -> {

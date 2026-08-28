@@ -3,6 +3,8 @@ package ai.nuxie.sdk.core
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.NuxieEvent
+import ai.nuxie.sdk.NuxieActivityInfo
+import ai.nuxie.sdk.events.ActivityForwarder
 import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.NuxieContextBuilder
@@ -70,6 +72,8 @@ internal class NuxieCore(
     purchaseDelegate: NuxiePurchaseDelegate? = null,
     purchaseHandlingMode: PurchaseHandlingMode = PurchaseHandlingMode.NUXIE_MANAGED,
     overrides: Overrides = Overrides(),
+    private val forwardingEnabled: () -> Boolean = { false },
+    private val forwardActivity: suspend (NuxieActivityInfo) -> Unit = {},
 ) {
     private val registerLifecycle = overrides.registerLifecycle
 
@@ -131,6 +135,7 @@ internal class NuxieCore(
         scope = scope,
         nowMillis = nowMillis,
         sessionIdProvider = { sessions.getSessionId() },
+        forwardingEnabled = forwardingEnabled,
     )
 
     private val journeyCatalog = JourneyReleaseCatalog(
@@ -192,6 +197,7 @@ internal class NuxieCore(
         purchases = purchases,
         identity = identity,
         featureInfo = featureInfo,
+        eventLog = eventLog,
         scope = scope,
     )
 
@@ -285,6 +291,11 @@ internal class NuxieCore(
 
     /** Called once from Nuxie.setup after construction. */
     fun start() {
+        val activityForwarder = ActivityForwarder(
+            resolveExperience = journeys::forwardingExperienceRef,
+            deliver = forwardActivity,
+        )
+        eventLog.subscribeCommitted(handler = activityForwarder::onCommitted)
         // Every committed capture nudges the delivery threshold check.
         eventLog.subscribeCommitted { delivery.kick() }
         userTransitions.addObserver(UserTransitionCoordinator.Observer { _, from, to ->

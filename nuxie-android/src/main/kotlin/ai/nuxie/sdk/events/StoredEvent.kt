@@ -15,6 +15,10 @@ internal class StoredEvent private constructor(
     val timestampMillis: Long,
     val distinctId: String,
     val sessionId: String?,
+    /** Capture-time name retained only for forwarding classification. */
+    val forwardingName: String,
+    /** Admission time when forwarding was enabled; null means do not replay. */
+    val forwardingReceivedAtMillis: Long?,
 ) {
     private val encodedProperties = encodedProperties.copyOf()
 
@@ -28,6 +32,8 @@ internal class StoredEvent private constructor(
         properties: JsonObject = JsonObject(emptyMap()),
         timestampMillis: Long = System.currentTimeMillis(),
         distinctId: String,
+        forwardingName: String = name,
+        forwardingReceivedAtMillis: Long? = null,
     ) : this(
         id = id,
         name = name,
@@ -37,19 +43,38 @@ internal class StoredEvent private constructor(
         sessionId = (properties[SESSION_ID_PROPERTY] as? JsonPrimitive)
             ?.takeIf { it.isString }
             ?.contentOrNull,
+        forwardingName = forwardingName,
+        forwardingReceivedAtMillis = forwardingReceivedAtMillis,
     )
 
     fun encodedProperties(): ByteArray = encodedProperties.copyOf()
 
+    fun withForwardingAdmission(receivedAtMillis: Long?): StoredEvent = StoredEvent(
+        id = id,
+        name = name,
+        encodedProperties = encodedProperties,
+        timestampMillis = timestampMillis,
+        distinctId = distinctId,
+        sessionId = sessionId,
+        forwardingName = forwardingName,
+        forwardingReceivedAtMillis = receivedAtMillis,
+    )
+
     internal companion object {
         private const val SESSION_ID_PROPERTY = "\$session_id"
 
-        fun from(event: NuxieEvent): StoredEvent = StoredEvent(
+        fun from(
+            event: NuxieEvent,
+            forwardingName: String = event.name,
+            forwardingReceivedAtMillis: Long? = null,
+        ): StoredEvent = StoredEvent(
             id = event.id,
             name = event.name,
             properties = JsonValueConverter.fromMap(event.properties),
             timestampMillis = event.timestampMillis,
             distinctId = event.distinctId,
+            forwardingName = forwardingName,
+            forwardingReceivedAtMillis = forwardingReceivedAtMillis,
         )
 
         fun fromStorage(
@@ -66,6 +91,8 @@ internal class StoredEvent private constructor(
             timestampMillis = timestampMillis,
             distinctId = distinctId,
             sessionId = sessionId,
+            forwardingName = name,
+            forwardingReceivedAtMillis = null,
         )
     }
 }

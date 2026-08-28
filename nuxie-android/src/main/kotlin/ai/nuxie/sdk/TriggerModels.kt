@@ -13,7 +13,16 @@ data class ExperienceRef(
     val journeyId: String?,
 )
 
-enum class JourneyExitReason { COMPLETED, DISMISSED, GOAL_MET, TRIGGER_UNMATCHED, EXPIRED, CANCELLED, ERROR }
+enum class JourneyExitReason {
+    COMPLETED,
+    DISMISSED,
+    GOAL_MET,
+    TRIGGER_UNMATCHED,
+    EXPIRED,
+    CANCELLED,
+    ERROR,
+    SUPERSEDED,
+}
 
 data class JourneyUpdate(
     val ref: ExperienceRef,

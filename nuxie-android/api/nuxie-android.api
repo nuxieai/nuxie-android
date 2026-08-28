@@ -60,6 +60,16 @@ public final class ai/nuxie/sdk/AppActionValue$String : ai/nuxie/sdk/AppActionVa
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class ai/nuxie/sdk/DismissReason : java/lang/Enum {
+	public static final field ERROR Lai/nuxie/sdk/DismissReason;
+	public static final field GOAL_MET Lai/nuxie/sdk/DismissReason;
+	public static final field HOST Lai/nuxie/sdk/DismissReason;
+	public static final field USER Lai/nuxie/sdk/DismissReason;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lai/nuxie/sdk/DismissReason;
+	public static fun values ()[Lai/nuxie/sdk/DismissReason;
+}
+
 public final class ai/nuxie/sdk/ExperienceRef {
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
 	public final fun component1 ()Ljava/lang/String;
@@ -106,6 +116,7 @@ public final class ai/nuxie/sdk/JourneyExitReason : java/lang/Enum {
 	public static final field ERROR Lai/nuxie/sdk/JourneyExitReason;
 	public static final field EXPIRED Lai/nuxie/sdk/JourneyExitReason;
 	public static final field GOAL_MET Lai/nuxie/sdk/JourneyExitReason;
+	public static final field SUPERSEDED Lai/nuxie/sdk/JourneyExitReason;
 	public static final field TRIGGER_UNMATCHED Lai/nuxie/sdk/JourneyExitReason;
 	public static fun getEntries ()Lkotlin/enums/EnumEntries;
 	public static fun valueOf (Ljava/lang/String;)Lai/nuxie/sdk/JourneyExitReason;
@@ -171,6 +182,461 @@ public final class ai/nuxie/sdk/Nuxie {
 	public static synthetic fun useFeatureAndWait$default (Lai/nuxie/sdk/Nuxie;Ljava/lang/String;DLjava/lang/String;ZLjava/util/Map;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 }
 
+public abstract interface class ai/nuxie/sdk/NuxieActivity {
+	public abstract fun getName ()Ljava/lang/String;
+	public abstract fun getProperties ()Ljava/util/Map;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$AppBackgrounded : ai/nuxie/sdk/NuxieActivity {
+	public static final field INSTANCE Lai/nuxie/sdk/NuxieActivity$AppBackgrounded;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$AppInstalled : ai/nuxie/sdk/NuxieActivity {
+	public static final field INSTANCE Lai/nuxie/sdk/NuxieActivity$AppInstalled;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$AppOpened : ai/nuxie/sdk/NuxieActivity {
+	public static final field INSTANCE Lai/nuxie/sdk/NuxieActivity$AppOpened;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$AppUpdated : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;)Lai/nuxie/sdk/NuxieActivity$AppUpdated;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$AppUpdated;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$AppUpdated;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getFromVersion ()Ljava/lang/String;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public final fun getToVersion ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$DefaultImpls {
+	public static fun getName (Lai/nuxie/sdk/NuxieActivity;)Ljava/lang/String;
+	public static fun getProperties (Lai/nuxie/sdk/NuxieActivity;)Ljava/util/Map;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$ExperienceDismissed : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;Lai/nuxie/sdk/DismissReason;)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component2 ()Lai/nuxie/sdk/DismissReason;
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;Lai/nuxie/sdk/DismissReason;)Lai/nuxie/sdk/NuxieActivity$ExperienceDismissed;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$ExperienceDismissed;Lai/nuxie/sdk/ExperienceRef;Lai/nuxie/sdk/DismissReason;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$ExperienceDismissed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public final fun getReason ()Lai/nuxie/sdk/DismissReason;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$ExperienceErrored : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;)Lai/nuxie/sdk/NuxieActivity$ExperienceErrored;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$ExperienceErrored;Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$ExperienceErrored;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun getMessage ()Ljava/lang/String;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$ExperienceLoadFailed : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;)Lai/nuxie/sdk/NuxieActivity$ExperienceLoadFailed;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$ExperienceLoadFailed;Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$ExperienceLoadFailed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun getMessage ()Ljava/lang/String;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$ExperienceShown : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;)Lai/nuxie/sdk/NuxieActivity$ExperienceShown;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$ExperienceShown;Lai/nuxie/sdk/ExperienceRef;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$ExperienceShown;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$ExperimentError : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;Ljava/lang/String;)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;Ljava/lang/String;)Lai/nuxie/sdk/NuxieActivity$ExperimentError;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$ExperimentError;Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$ExperimentError;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun getExperimentKey ()Ljava/lang/String;
+	public final fun getMessage ()Ljava/lang/String;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$ExperimentExposure : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;Ljava/lang/String;Z)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()Z
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;Ljava/lang/String;Z)Lai/nuxie/sdk/NuxieActivity$ExperimentExposure;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$ExperimentExposure;Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;Ljava/lang/String;ZILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$ExperimentExposure;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun getExperimentKey ()Ljava/lang/String;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public final fun getVariantKey ()Ljava/lang/String;
+	public fun hashCode ()I
+	public final fun isHoldout ()Z
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$FeatureUsed : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Ljava/lang/String;DLjava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()D
+	public final fun component3 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;DLjava/lang/String;)Lai/nuxie/sdk/NuxieActivity$FeatureUsed;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$FeatureUsed;Ljava/lang/String;DLjava/lang/String;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$FeatureUsed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAmount ()D
+	public final fun getEntityId ()Ljava/lang/String;
+	public final fun getFeatureId ()Ljava/lang/String;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$JourneyConverted : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;)Lai/nuxie/sdk/NuxieActivity$JourneyConverted;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$JourneyConverted;Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$JourneyConverted;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun getJourneyId ()Ljava/lang/String;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$JourneyEnded : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;Lai/nuxie/sdk/JourneyExitReason;)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component2 ()Lai/nuxie/sdk/JourneyExitReason;
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;Lai/nuxie/sdk/JourneyExitReason;)Lai/nuxie/sdk/NuxieActivity$JourneyEnded;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$JourneyEnded;Lai/nuxie/sdk/ExperienceRef;Lai/nuxie/sdk/JourneyExitReason;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$JourneyEnded;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExitReason ()Lai/nuxie/sdk/JourneyExitReason;
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$JourneyStarted : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;)Lai/nuxie/sdk/NuxieActivity$JourneyStarted;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$JourneyStarted;Lai/nuxie/sdk/ExperienceRef;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$JourneyStarted;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$MilestoneReached : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;)Lai/nuxie/sdk/NuxieActivity$MilestoneReached;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$MilestoneReached;Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$MilestoneReached;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun getMilestoneId ()Ljava/lang/String;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$PermissionResolved : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;Lai/nuxie/sdk/PermissionKind;Z)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component2 ()Lai/nuxie/sdk/PermissionKind;
+	public final fun component3 ()Z
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;Lai/nuxie/sdk/PermissionKind;Z)Lai/nuxie/sdk/NuxieActivity$PermissionResolved;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$PermissionResolved;Lai/nuxie/sdk/ExperienceRef;Lai/nuxie/sdk/PermissionKind;ZILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$PermissionResolved;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun getGranted ()Z
+	public final fun getKind ()Lai/nuxie/sdk/PermissionKind;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$ProductsUnavailable : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;Ljava/util/List;)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component2 ()Ljava/util/List;
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;Ljava/util/List;)Lai/nuxie/sdk/NuxieActivity$ProductsUnavailable;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$ProductsUnavailable;Lai/nuxie/sdk/ExperienceRef;Ljava/util/List;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$ProductsUnavailable;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public fun getName ()Ljava/lang/String;
+	public final fun getProductIds ()Ljava/util/List;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$PurchaseCancelled : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/PurchaseInfo;)V
+	public final fun component1 ()Lai/nuxie/sdk/PurchaseInfo;
+	public final fun copy (Lai/nuxie/sdk/PurchaseInfo;)Lai/nuxie/sdk/NuxieActivity$PurchaseCancelled;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$PurchaseCancelled;Lai/nuxie/sdk/PurchaseInfo;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$PurchaseCancelled;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getInfo ()Lai/nuxie/sdk/PurchaseInfo;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$PurchaseCompleted : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/PurchaseInfo;)V
+	public final fun component1 ()Lai/nuxie/sdk/PurchaseInfo;
+	public final fun copy (Lai/nuxie/sdk/PurchaseInfo;)Lai/nuxie/sdk/NuxieActivity$PurchaseCompleted;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$PurchaseCompleted;Lai/nuxie/sdk/PurchaseInfo;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$PurchaseCompleted;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getInfo ()Lai/nuxie/sdk/PurchaseInfo;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$PurchaseFailed : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/PurchaseInfo;Ljava/lang/String;)V
+	public final fun component1 ()Lai/nuxie/sdk/PurchaseInfo;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (Lai/nuxie/sdk/PurchaseInfo;Ljava/lang/String;)Lai/nuxie/sdk/NuxieActivity$PurchaseFailed;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$PurchaseFailed;Lai/nuxie/sdk/PurchaseInfo;Ljava/lang/String;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$PurchaseFailed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getInfo ()Lai/nuxie/sdk/PurchaseInfo;
+	public final fun getMessage ()Ljava/lang/String;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$PurchasePending : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/PurchaseInfo;)V
+	public final fun component1 ()Lai/nuxie/sdk/PurchaseInfo;
+	public final fun copy (Lai/nuxie/sdk/PurchaseInfo;)Lai/nuxie/sdk/NuxieActivity$PurchasePending;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$PurchasePending;Lai/nuxie/sdk/PurchaseInfo;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$PurchasePending;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getInfo ()Lai/nuxie/sdk/PurchaseInfo;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$PurchaseSynced : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lai/nuxie/sdk/ExperienceRef;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lai/nuxie/sdk/ExperienceRef;)Lai/nuxie/sdk/NuxieActivity$PurchaseSynced;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$PurchaseSynced;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lai/nuxie/sdk/ExperienceRef;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$PurchaseSynced;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public fun getName ()Ljava/lang/String;
+	public final fun getOriginalTransactionId ()Ljava/lang/String;
+	public final fun getProductId ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public final fun getTransactionId ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$RestoreCompleted : ai/nuxie/sdk/NuxieActivity {
+	public static final field INSTANCE Lai/nuxie/sdk/NuxieActivity$RestoreCompleted;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$RestoreFailed : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lai/nuxie/sdk/NuxieActivity$RestoreFailed;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$RestoreFailed;Ljava/lang/String;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$RestoreFailed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getMessage ()Ljava/lang/String;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$RestoreNoPurchases : ai/nuxie/sdk/NuxieActivity {
+	public static final field INSTANCE Lai/nuxie/sdk/NuxieActivity$RestoreNoPurchases;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$ScreenDismissed : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;)Lai/nuxie/sdk/NuxieActivity$ScreenDismissed;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$ScreenDismissed;Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$ScreenDismissed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public final fun getScreenId ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$ScreenShown : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;)Lai/nuxie/sdk/NuxieActivity$ScreenShown;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$ScreenShown;Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$ScreenShown;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public fun getName ()Ljava/lang/String;
+	public fun getProperties ()Ljava/util/Map;
+	public final fun getScreenId ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivityInfo {
+	public static final field Companion Lai/nuxie/sdk/NuxieActivityInfo$Companion;
+	public static final field SCHEMA_VERSION I
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()J
+	public final fun component3 ()J
+	public final fun component4 ()Lai/nuxie/sdk/NuxieActivity;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getActivity ()Lai/nuxie/sdk/NuxieActivity;
+	public final fun getId ()Ljava/lang/String;
+	public final fun getName ()Ljava/lang/String;
+	public final fun getProperties ()Ljava/util/Map;
+	public final fun getReceivedAtMillis ()J
+	public final fun getTimestampMillis ()J
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivityInfo$Companion {
+}
+
+public abstract interface class ai/nuxie/sdk/NuxieActivityValue {
+}
+
+public final class ai/nuxie/sdk/NuxieActivityValue$Bool : ai/nuxie/sdk/NuxieActivityValue {
+	public fun <init> (Z)V
+	public final fun component1 ()Z
+	public final fun copy (Z)Lai/nuxie/sdk/NuxieActivityValue$Bool;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivityValue$Bool;ZILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivityValue$Bool;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getValue ()Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivityValue$Double : ai/nuxie/sdk/NuxieActivityValue {
+	public fun <init> (D)V
+	public final fun component1 ()D
+	public final fun copy (D)Lai/nuxie/sdk/NuxieActivityValue$Double;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivityValue$Double;DILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivityValue$Double;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getValue ()D
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivityValue$Int : ai/nuxie/sdk/NuxieActivityValue {
+	public fun <init> (J)V
+	public final fun component1 ()J
+	public final fun copy (J)Lai/nuxie/sdk/NuxieActivityValue$Int;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivityValue$Int;JILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivityValue$Int;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getValue ()J
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivityValue$String : ai/nuxie/sdk/NuxieActivityValue {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lai/nuxie/sdk/NuxieActivityValue$String;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivityValue$String;Ljava/lang/String;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivityValue$String;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getValue ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class ai/nuxie/sdk/NuxieConfiguration {
 	public fun <init> (Ljava/lang/String;)V
 	public final fun getApiKey ()Ljava/lang/String;
@@ -207,7 +673,48 @@ public final class ai/nuxie/sdk/NuxieEvent {
 }
 
 public abstract interface class ai/nuxie/sdk/NuxieListener {
+	public abstract fun featureAccessDidChange (Ljava/lang/String;Lai/nuxie/sdk/features/FeatureAccess;Lai/nuxie/sdk/features/FeatureAccess;)V
+	public abstract fun onActivityEmitted (Lai/nuxie/sdk/Nuxie;Lai/nuxie/sdk/NuxieActivityInfo;)V
 	public abstract fun onAppActionRequested (Lai/nuxie/sdk/Nuxie;Lai/nuxie/sdk/AppAction;)V
+}
+
+public final class ai/nuxie/sdk/NuxieListener$DefaultImpls {
+	public static fun featureAccessDidChange (Lai/nuxie/sdk/NuxieListener;Ljava/lang/String;Lai/nuxie/sdk/features/FeatureAccess;Lai/nuxie/sdk/features/FeatureAccess;)V
+	public static fun onActivityEmitted (Lai/nuxie/sdk/NuxieListener;Lai/nuxie/sdk/Nuxie;Lai/nuxie/sdk/NuxieActivityInfo;)V
+}
+
+public final class ai/nuxie/sdk/PermissionKind : java/lang/Enum {
+	public static final field NOTIFICATIONS Lai/nuxie/sdk/PermissionKind;
+	public static final field OTHER Lai/nuxie/sdk/PermissionKind;
+	public static final field TRACKING Lai/nuxie/sdk/PermissionKind;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lai/nuxie/sdk/PermissionKind;
+	public static fun values ()[Lai/nuxie/sdk/PermissionKind;
+}
+
+public final class ai/nuxie/sdk/PurchaseInfo {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lai/nuxie/sdk/ExperienceRef;Ljava/math/BigDecimal;Ljava/lang/String;Ljava/lang/String;Z)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component5 ()Ljava/math/BigDecimal;
+	public final fun component6 ()Ljava/lang/String;
+	public final fun component7 ()Ljava/lang/String;
+	public final fun component8 ()Z
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lai/nuxie/sdk/ExperienceRef;Ljava/math/BigDecimal;Ljava/lang/String;Ljava/lang/String;Z)Lai/nuxie/sdk/PurchaseInfo;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/PurchaseInfo;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lai/nuxie/sdk/ExperienceRef;Ljava/math/BigDecimal;Ljava/lang/String;Ljava/lang/String;ZILjava/lang/Object;)Lai/nuxie/sdk/PurchaseInfo;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getDisplayPrice ()Ljava/lang/String;
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun getPlacementId ()Ljava/lang/String;
+	public final fun getPrice ()Ljava/math/BigDecimal;
+	public final fun getProductId ()Ljava/lang/String;
+	public final fun getStoreProductId ()Ljava/lang/String;
+	public final fun getTransactionId ()Ljava/lang/String;
+	public fun hashCode ()I
+	public final fun isTestStore ()Z
+	public fun toString ()Ljava/lang/String;
 }
 
 public final class ai/nuxie/sdk/SuppressReason : java/lang/Enum {

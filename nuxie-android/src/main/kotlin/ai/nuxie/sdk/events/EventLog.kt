@@ -33,6 +33,8 @@ internal class EventLog(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     /** Stamps \$session_id and touches the session; null until sessions exist. */
     private val sessionIdProvider: (() -> String?)? = null,
+    /** Sampled before persistence so listener attachment never replays prior captures. */
+    private val forwardingEnabled: () -> Boolean = { false },
 ) {
     internal fun interface CommittedSubscription {
         suspend fun onCommitted(event: StoredEvent)
@@ -57,7 +59,18 @@ internal class EventLog(
             val distinctId: String,
             val done: CompletableDeferred<Boolean>,
         ) : Command
-        data class CommitServerFact(val event: StoredEvent, val done: CompletableDeferred<Boolean>) : Command
+        data class CaptureDeliveredIdempotently(
+            val name: String,
+            val properties: Map<String, Any?>,
+            val eventId: String,
+            val distinctId: String,
+            val done: CompletableDeferred<Boolean>,
+        ) : Command
+        data class CommitServerFact(
+            val event: StoredEvent,
+            val receivedAtMillis: Long,
+            val done: CompletableDeferred<Boolean>,
+        ) : Command
         data class Barrier(val done: CompletableDeferred<Unit>) : Command
     }
 
@@ -89,7 +102,21 @@ internal class EventLog(
                         .getOrDefault(false)
                     command.done.complete(captured)
                 }
-                is Command.CommitServerFact -> command.done.complete(commitServerFactNow(command.event))
+                is Command.CaptureDeliveredIdempotently -> {
+                    val captured = runCatching {
+                        processDeliveredIdempotently(
+                            command.name,
+                            command.properties,
+                            command.eventId,
+                            command.distinctId,
+                        )
+                    }.onFailure { Log.w(LOG_TAG, "Delivered event capture failed", it) }
+                        .getOrDefault(false)
+                    command.done.complete(captured)
+                }
+                is Command.CommitServerFact -> command.done.complete(
+                    commitServerFactNow(command.event, command.receivedAtMillis),
+                )
                 is Command.Barrier -> command.done.complete(Unit)
             }
         }
@@ -163,6 +190,20 @@ internal class EventLog(
         return done.await()
     }
 
+    /** Persist an already server-accepted event in history and announce it locally exactly once. */
+    suspend fun captureDeliveredIdempotently(
+        name: String,
+        properties: Map<String, Any?>,
+        eventId: String,
+        distinctId: String,
+    ): Boolean {
+        if (name.isEmpty() || eventId.isEmpty() || distinctId.isEmpty()) return false
+        val done = CompletableDeferred<Boolean>()
+        val command = Command.CaptureDeliveredIdempotently(name, properties, eventId, distinctId, done)
+        if (commands.trySend(command).isFailure) return false
+        return done.await()
+    }
+
     /**
      * The decision lane delivered this event synchronously via /event; mark
      * it so batch delivery does not redundantly resend (the idempotency key
@@ -173,9 +214,13 @@ internal class EventLog(
     }
 
     /** Commits a server fact once, delivers it locally, and never uploads it. */
-    suspend fun commitServerFact(event: StoredEvent): Boolean {
+    suspend fun commitServerFact(
+        event: StoredEvent,
+        receivedAtMillis: Long = nowMillis(),
+    ): Boolean {
         val done = CompletableDeferred<Boolean>()
-        if (commands.trySend(Command.CommitServerFact(event, done)).isFailure) return false
+        val command = Command.CommitServerFact(event, receivedAtMillis, done)
+        if (commands.trySend(command).isFailure) return false
         return done.await()
     }
 
@@ -193,7 +238,6 @@ internal class EventLog(
             properties = enriched,
             timestampMillis = nowMillis(),
         )
-
         val transformed = applyBeforeSend(original)
         if (transformed == null) {
             // Terminal beforeSend drop: record it so recovery never resurrects
@@ -203,7 +247,11 @@ internal class EventLog(
             return null
         }
 
-        val stored = StoredEvent.from(transformed)
+        val stored = StoredEvent.from(
+            transformed,
+            forwardingName = original.name,
+            forwardingReceivedAtMillis = original.timestampMillis.takeIf { forwardingEnabled() },
+        )
         store.insertPending(stored)
         subscribers.forEach { subscriber ->
             if (subscriber.predicate(stored)) {
@@ -240,7 +288,11 @@ internal class EventLog(
             Log.d(LOG_TAG, "Event '$name' terminally dropped by beforeSend hook")
             return true
         }
-        val stored = StoredEvent.from(transformed)
+        val stored = StoredEvent.from(
+            transformed,
+            forwardingName = original.name,
+            forwardingReceivedAtMillis = original.timestampMillis.takeIf { forwardingEnabled() },
+        )
         val inserted = store.insertPendingIfAbsent(stored)
         if (inserted) {
             subscribers.forEach { subscriber ->
@@ -253,16 +305,56 @@ internal class EventLog(
         return true
     }
 
-    private suspend fun commitServerFactNow(event: StoredEvent): Boolean {
-        val inserted = runCatching { store.insertDeliveredIfAbsent(event) }.getOrElse { return false }
+    private suspend fun commitServerFactNow(event: StoredEvent, receivedAtMillis: Long): Boolean {
+        val admitted = event.withForwardingAdmission(receivedAtMillis.takeIf { forwardingEnabled() })
+        val inserted = runCatching { store.insertDeliveredIfAbsent(admitted) }.getOrElse { return false }
         if (!inserted) return false
+        subscribers.forEach { subscriber ->
+            if (subscriber.predicate(admitted)) {
+                runCatching { subscriber.handler.onCommitted(admitted) }
+                    .onFailure { Log.w(LOG_TAG, "Committed-event subscriber failed", it) }
+            }
+        }
+        return true
+    }
+
+    private suspend fun processDeliveredIdempotently(
+        name: String,
+        commandProperties: Map<String, Any?>,
+        eventId: String,
+        distinctId: String,
+    ): Boolean {
+        if (store.hasStableOutcome(eventId)) return true
+        val sanitized = EventSanitizer.sanitizeDataTypes(commandProperties)
+        val original = NuxieEvent(
+            id = eventId,
+            name = name,
+            distinctId = distinctId,
+            properties = contextBuilder.buildEnrichedProperties(sanitized),
+            timestampMillis = nowMillis(),
+        )
+        val transformed = applyBeforeSend(original)
+        if (transformed == null) {
+            store.recordStableDrop(original.id, original.timestampMillis)
+            return true
+        }
+        val stored = StoredEvent.from(
+            transformed,
+            forwardingName = original.name,
+            forwardingReceivedAtMillis = original.timestampMillis.takeIf { forwardingEnabled() },
+        )
+        val inserted = store.insertDeliveredIfAbsent(stored)
+        if (inserted) announce(stored)
+        return true
+    }
+
+    private suspend fun announce(event: StoredEvent) {
         subscribers.forEach { subscriber ->
             if (subscriber.predicate(event)) {
                 runCatching { subscriber.handler.onCommitted(event) }
                     .onFailure { Log.w(LOG_TAG, "Committed-event subscriber failed", it) }
             }
         }
-        return true
     }
 
     private fun applyBeforeSend(original: NuxieEvent): NuxieEvent? {

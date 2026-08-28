@@ -300,7 +300,7 @@ class PurchaseFeatureUseTest {
         }
         val core = core(transport)
         val store = InMemoryPurchaseEvidenceStore()
-        store.upsert(evidence())
+        store.upsert(evidence(context = StoredPurchaseContext("placement-1", "experience-1", "version-1")))
         val captured = mutableListOf<CapturedEvent>()
         val service = service(core, store, capture = { name, properties, eventId, distinctId ->
             captured += CapturedEvent(name, properties, eventId, distinctId)
@@ -339,6 +339,8 @@ class PurchaseFeatureUseTest {
                 "original_transaction_id" to "token-1",
                 "product_id" to "play-credit-pack",
                 "customer_id" to "customer-a",
+                "experience_id" to "experience-1",
+                "experience_version" to "version-1",
             ),
             captured.single().properties,
         )
@@ -404,6 +406,7 @@ class PurchaseFeatureUseTest {
         backendSyncedAtMillis: Long? = null,
         signatureVerificationRequired: Boolean = false,
         signatureVerified: Boolean = false,
+        context: StoredPurchaseContext? = null,
     ) = PurchaseEvidence(
         purchaseToken = token,
         authorityScope = authorityScope,
@@ -427,6 +430,7 @@ class PurchaseFeatureUseTest {
         backendSyncedAtMillis = backendSyncedAtMillis,
         signatureVerificationRequired = signatureVerificationRequired,
         signatureVerified = signatureVerified,
+        context = context,
     )
 
     private fun assertDisqualified(disqualified: PurchaseEvidence) = runTest {
