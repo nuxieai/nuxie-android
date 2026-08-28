@@ -53,9 +53,10 @@ class FeatureInfo {
 
     internal fun update(featureId: String, access: FeatureAccess, entityId: String?) {
         synchronized(this) {
-            if (entityId == null) {
-                mutableAll.value = mutableAll.value + (featureId to access)
-            } else {
+            // iOS has one reactive Feature map: an entity check publishes its
+            // result there even though its reusable cache entry stays scoped.
+            mutableAll.value = mutableAll.value + (featureId to access)
+            if (entityId != null) {
                 entityAccess = entityAccess + (
                     featureId to (entityAccess[featureId].orEmpty() + (entityId to access))
                 )
@@ -72,9 +73,9 @@ class FeatureInfo {
                 allowed = current.unlimited || balance >= 1.0,
                 balance = balance,
             )
-            if (entityId == null) {
-                mutableAll.value = mutableAll.value + (featureId to updated)
-            } else {
+            // Match the same iOS reactive publication after entity-scoped use.
+            mutableAll.value = mutableAll.value + (featureId to updated)
+            if (entityId != null) {
                 entityAccess = entityAccess + (
                     featureId to (entityAccess[featureId].orEmpty() + (entityId to updated))
                 )

@@ -436,8 +436,13 @@ internal class FeatureService(
         }
         val allowedFeatureIds = publishedAccess.filterValues { it.allowed }.keys
 
-        if (allowedFeatureIds.isNotEmpty()) {
+        return withContext(Dispatchers.IO) {
             synchronized(lock) {
+                // Identity flips synchronously while handleUserChange (which
+                // bumps the generation) is queued behind it, so the live
+                // identity is re-read inside the commit lock; a flip landing
+                // after this check is cleaned up by the queued handleUserChange
+                // reset, bounding any stale publication to that queue delay.
                 validateCheckScope(distinctId, requestGeneration)
                 supersededCheckAccess(
                     featureId = featureId,
@@ -448,59 +453,43 @@ internal class FeatureService(
                     requestMutationRevision = requestMutationRevision,
                     serverAccess = serverAccess,
                     requestedAccess = requestedAccess,
-                )?.let { return it }
-            }
-            val retiredRevocations = withContext(Dispatchers.IO) {
-                revocationStore.retireRevokedGrants(distinctId, allowedFeatureIds)
-            }
-            if (!retiredRevocations) throw kotlinx.coroutines.CancellationException()
-        }
-
-        return synchronized(lock) {
-            // Identity flips synchronously while handleUserChange (which
-            // bumps the generation) is queued behind it, so the live
-            // identity is re-read inside the commit lock; a flip landing
-            // after this check is cleaned up by the queued handleUserChange
-            // reset, bounding any stale publication to that queue delay.
-            validateCheckScope(distinctId, requestGeneration)
-            supersededCheckAccess(
-                featureId = featureId,
-                requiredBalance = requiredBalance,
-                entityId = entityId,
-                key = key,
-                requestPurchaseRevision = requestPurchaseRevision,
-                requestMutationRevision = requestMutationRevision,
-                serverAccess = serverAccess,
-                requestedAccess = requestedAccess,
-            )?.let { return@synchronized it }
-            val mutationRevisions = affectedFeatureIds.associateWith { affectedFeatureId ->
-                if (affectedFeatureId == featureId) {
-                    requestMutationRevision
-                } else {
-                    advanceFeatureMutationRevision(affectedFeatureId)
+                )?.let { return@synchronized it }
+                // iOS performs this synchronous ledger write on its actor.
+                // Keep it serialized with the supersession guard and commit.
+                if (allowedFeatureIds.isNotEmpty() &&
+                    !revocationStore.retireRevokedGrants(distinctId, allowedFeatureIds)
+                ) {
+                    throw kotlinx.coroutines.CancellationException()
                 }
-            }
-            reconcileLocalPurchases(affectedFeatureIds)
-            if (allowedFeatureIds.isNotEmpty()) reconcileRevokedPurchases(allowedFeatureIds)
+                val mutationRevisions = affectedFeatureIds.associateWith { affectedFeatureId ->
+                    if (affectedFeatureId == featureId) {
+                        requestMutationRevision
+                    } else {
+                        advanceFeatureMutationRevision(affectedFeatureId)
+                    }
+                }
+                reconcileLocalPurchases(affectedFeatureIds)
+                if (allowedFeatureIds.isNotEmpty()) reconcileRevokedPurchases(allowedFeatureIds)
 
-            val cachedAt = nowMillis()
-            affectedFeatureIds.forEach { affectedFeatureId ->
-                val access = publishedAccess.getValue(affectedFeatureId)
-                val affectedKey = CacheKey(affectedFeatureId, entityId)
-                realTimeCache[affectedKey] = TimedAccess(
-                    access = access,
-                    cachedAtMillis = cachedAt,
-                    opaqueRequiredBalance = result.requiredBalance.takeIf {
-                        affectedFeatureId == featureId && result.featureId != featureId
-                    },
-                )
-                committedMutationRevisions[affectedKey] = mutationRevisions.getValue(affectedFeatureId)
-                featureInfo.update(affectedFeatureId, access, entityId)
+                val cachedAt = nowMillis()
+                affectedFeatureIds.forEach { affectedFeatureId ->
+                    val access = publishedAccess.getValue(affectedFeatureId)
+                    val affectedKey = CacheKey(affectedFeatureId, entityId)
+                    realTimeCache[affectedKey] = TimedAccess(
+                        access = access,
+                        cachedAtMillis = cachedAt,
+                        opaqueRequiredBalance = result.requiredBalance.takeIf {
+                            affectedFeatureId == featureId && result.featureId != featureId
+                        },
+                    )
+                    committedMutationRevisions[affectedKey] = mutationRevisions.getValue(affectedFeatureId)
+                    featureInfo.update(affectedFeatureId, access, entityId)
+                }
+                val effectiveAccess = purchaseAccess(featureId, entityId)
+                    ?.forRequiredBalance(requiredBalance)
+                    ?: requestedAccess
+                CheckedAccess(serverAccess, effectiveAccess, supersededByMutation = false)
             }
-            val effectiveAccess = purchaseAccess(featureId, entityId)
-                ?.forRequiredBalance(requiredBalance)
-                ?: requestedAccess
-            CheckedAccess(serverAccess, effectiveAccess, supersededByMutation = false)
         }
     }
 
