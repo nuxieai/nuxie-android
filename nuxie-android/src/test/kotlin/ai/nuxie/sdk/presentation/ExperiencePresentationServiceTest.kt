@@ -683,6 +683,49 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun recreatedActivityIsRejectedAfterDismissalSelectsOldInstance() = runTest {
+        val launched = mutableListOf<String>()
+        val service = service(launch = launched::add)
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        val presentationId = launched.single()
+        PresentationRegistry.reportFirstFrame(presentationId)
+        shown.await()
+
+        val oldActivity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        setActivityField(oldActivity, "presentationId", presentationId)
+        assertTrue(PresentationRegistry.attach(presentationId, oldActivity))
+
+        val dismissal = async { service.dismissFromHost("customer-1") }
+        runCurrent()
+        assertEquals(CloseReason.HostDismissed, oldActivity.claimedCloseReason())
+        assertFalse("dismissal completed before Activity teardown", dismissal.isCompleted)
+
+        val attachCandidate = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        assertFalse(
+            "recreated Activity replaced the dismissal-selected instance",
+            PresentationRegistry.attach(presentationId, attachCandidate),
+        )
+        val recreationIntent = Intent(
+            RuntimeEnvironment.getApplication(),
+            NuxieExperienceActivity::class.java,
+        ).putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, presentationId)
+        val recreatedActivity = Robolectric.buildActivity(
+            NuxieExperienceActivity::class.java,
+            recreationIntent,
+        ).create(Bundle()).get()
+        assertTrue("recreated Activity remained visible", recreatedActivity.isFinishing)
+
+        NuxieExperienceActivity::class.java
+            .getDeclaredMethod("onDestroy")
+            .apply { isAccessible = true }
+            .invoke(oldActivity)
+        dismissal.await()
+
+        assertEquals(null, PresentationRegistry.resolve(presentationId))
+    }
+
+    @Test
     fun firstTerminalCloseReasonWinsAtomically() {
         val reported = mutableListOf<CloseReason>()
         val claim = TerminalCloseClaim(reported::add)

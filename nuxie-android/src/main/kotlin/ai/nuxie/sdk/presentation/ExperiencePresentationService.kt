@@ -120,6 +120,7 @@ internal object PresentationRegistry {
         var activity = WeakReference<NuxieExperienceActivity>(null)
         var reservedReason: CloseReason? = null
         var reservationReady = false
+        var dismissalSelected = false
     }
 
     private val lock = Any()
@@ -142,6 +143,7 @@ internal object PresentationRegistry {
 
     fun attach(id: String, activity: NuxieExperienceActivity): Boolean = synchronized(lock) {
         val entry = entries[id] ?: return@synchronized false
+        if (entry.dismissalSelected) return@synchronized false
         entry.activity = WeakReference(activity)
         true
     }
@@ -244,6 +246,7 @@ internal object PresentationRegistry {
                 if (entry.terminal.compareAndSet(false, true)) callback = entry.onDismissed
                 null
             } else if (attached.claimFromService(reason) || attached.claimedCloseReason() == reason) {
+                entry.dismissalSelected = true
                 attached
             } else {
                 null
