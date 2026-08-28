@@ -1,7 +1,9 @@
 package ai.nuxie.sdk.commerce
 
 import ai.nuxie.sdk.features.LocalPurchaseGrant
+import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.ProductDetails
+import java.math.BigDecimal
 
 /** The exact Nuxie Product, Placement, and live Play details retained for checkout. */
 class StoreProduct internal constructor(
@@ -19,6 +21,38 @@ class StoreProduct internal constructor(
     internal val licensingPublicKey: String? = null,
     internal val purchaseContext: PurchaseContext? = null,
 )
+
+internal data class StorePrice(
+    val amount: BigDecimal,
+    val display: String,
+)
+
+internal fun StoreProduct.storePrice(): StorePrice? {
+    val details = rawProduct ?: return null
+    val amountMicros: Long
+    val displayPrice: String
+    when (productType) {
+        BillingClient.ProductType.INAPP -> {
+            val offer = details.oneTimePurchaseOfferDetails ?: return null
+            amountMicros = offer.priceAmountMicros
+            displayPrice = offer.formattedPrice
+        }
+        BillingClient.ProductType.SUBS -> {
+            val phase = details.subscriptionOfferDetails
+                ?.firstOrNull { it.offerToken == offerToken }
+                ?.pricingPhases
+                ?.pricingPhaseList
+                ?.lastOrNull()
+                ?: return null
+            amountMicros = phase.priceAmountMicros
+            displayPrice = phase.formattedPrice
+        }
+        else -> return null
+    }
+    return StorePrice(BigDecimal.valueOf(amountMicros, PLAY_PRICE_SCALE), displayPrice)
+}
+
+private const val PLAY_PRICE_SCALE = 6
 
 /** A configured Play subscription upgrade or downgrade. */
 data class SubscriptionReplacement(

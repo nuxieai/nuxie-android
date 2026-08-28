@@ -1,8 +1,11 @@
 package ai.nuxie.sdk.commerce
 
 import ai.nuxie.sdk.LogLevel
+import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.events.ActivityCuration
+import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.features.LocalPurchaseGrant
 import ai.nuxie.sdk.network.NuxieApi
@@ -10,6 +13,8 @@ import ai.nuxie.sdk.testsupport.FakeTransport
 import android.app.Activity
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.BillingResult
+import com.android.billingclient.api.ProductDetails
+import java.math.BigDecimal
 import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -68,13 +73,102 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun completedCheckoutCarriesTheLocalizedPlayPrice() = runTest {
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, emissions = emissions)
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(rawProduct = oneTimeProductDetails()),
+                null,
+            )
+        }
+        runCurrent()
+
+        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("priced-token").forCheckout(fixture)))
+
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        val properties = emissions.single {
+            it.first == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED
+        }.second
+        assertEquals(1_200.0, properties["price"])
+        assertTrue(properties["price"] is Double)
+        assertEquals("¥1,200", properties["display_price"])
+        assertForwardedPrice(
+            ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED,
+            properties,
+            "1200",
+            "¥1,200",
+        )
+        fixture.close()
+    }
+
+    @Test
+    fun cancelledCheckoutCarriesTheLocalizedPlayPrice() = runTest {
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, emissions = emissions)
+        fixture.billing.launchCode = BillingClient.BillingResponseCode.USER_CANCELED
+
+        val result = fixture.service.purchase(
+            activity(),
+            product(rawProduct = oneTimeProductDetails()),
+            null,
+        )
+
+        assertEquals(PurchaseResult.Cancelled, result)
+        val properties = emissions.single {
+            it.first == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_CANCELLED
+        }.second
+        assertEquals(1_200.0, properties["price"])
+        assertEquals("¥1,200", properties["display_price"])
+        assertForwardedPrice(
+            ai.nuxie.sdk.events.SystemEventNames.PURCHASE_CANCELLED,
+            properties,
+            "1200",
+            "¥1,200",
+        )
+        fixture.close()
+    }
+
+    @Test
+    fun failedCheckoutCarriesTheLocalizedPlayPrice() = runTest {
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, emissions = emissions)
+        fixture.billing.failQueries = true
+
+        val result = fixture.service.purchase(
+            activity(),
+            product(rawProduct = oneTimeProductDetails()),
+            null,
+        )
+
+        assertTrue(result is PurchaseResult.Failed)
+        val properties = emissions.single {
+            it.first == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_FAILED
+        }.second
+        assertEquals(1_200.0, properties["price"])
+        assertEquals("¥1,200", properties["display_price"])
+        assertForwardedPrice(
+            ai.nuxie.sdk.events.SystemEventNames.PURCHASE_FAILED,
+            properties,
+            "1200",
+            "¥1,200",
+        )
+        fixture.close()
+    }
+
+    @Test
     fun pendingPersistsButDoesNotGrantSyncOrAcknowledge() = runTest {
         val actions = mutableListOf<String>()
-        val fixture = fixture(this, actions = actions)
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, actions = actions, emissions = emissions)
         val purchase = async {
             fixture.service.purchase(
                 activity(),
-                product(grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN))),
+                product(
+                    grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+                    rawProduct = oneTimeProductDetails(),
+                ),
                 null,
             )
         }
@@ -92,6 +186,17 @@ class PurchaseServiceTest {
         assertEquals(
             1,
             actions.count { it == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_PENDING },
+        )
+        val properties = emissions.single {
+            it.first == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_PENDING
+        }.second
+        assertEquals(1_200.0, properties["price"])
+        assertEquals("¥1,200", properties["display_price"])
+        assertForwardedPrice(
+            ai.nuxie.sdk.events.SystemEventNames.PURCHASE_PENDING,
+            properties,
+            "1200",
+            "¥1,200",
         )
         fixture.close()
     }
@@ -568,16 +673,35 @@ class PurchaseServiceTest {
     @Test
     fun purchasedDelegateOutcomeCapturesCheckoutCompletionWithoutNativeEvidence() = runTest {
         val actions = mutableListOf<String>()
-        val fixture = fixture(this, actions = actions)
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, actions = actions, emissions = emissions)
         fixture.settings.delegate = object : NuxiePurchaseDelegate {
             override suspend fun purchase(product: StoreProduct): PurchaseResult = PurchaseResult.Purchased
             override suspend fun restorePurchases(): RestoreResult = RestoreResult.NoPurchases
         }
 
-        assertEquals(PurchaseResult.Purchased, fixture.service.purchase(activity(), product(), null))
+        assertEquals(
+            PurchaseResult.Purchased,
+            fixture.service.purchase(
+                activity(),
+                product(subscription = true, rawProduct = subscriptionProductDetails()),
+                null,
+            ),
+        )
         assertEquals(
             1,
             actions.count { it == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED },
+        )
+        val properties = emissions.single {
+            it.first == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED
+        }.second
+        assertEquals(9.99, properties["price"])
+        assertEquals("€9.99", properties["display_price"])
+        assertForwardedPrice(
+            ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED,
+            properties,
+            "9.99",
+            "€9.99",
         )
         assertEquals(null, fixture.billing.launched)
         fixture.close()
@@ -759,6 +883,7 @@ class PurchaseServiceTest {
         mode: PurchaseHandlingMode = PurchaseHandlingMode.NUXIE_MANAGED,
         store: RecordingEvidenceStore = RecordingEvidenceStore(),
         actions: MutableList<String> = mutableListOf(),
+        emissions: MutableList<Pair<String, Map<String, Any?>>> = mutableListOf(),
         initialRetryDelayMillis: Long = 60_000,
         maxRetryDelayMillis: Long = 60_000,
     ): Fixture {
@@ -781,7 +906,10 @@ class PurchaseServiceTest {
             synchronizer = PurchaseSynchronizer { fixture.synchronizer(it) },
             features = core.features,
             distinctId = { core.identity.distinctId() },
-            emit = { name, _ -> actions += name },
+            emit = { name, properties ->
+                actions += name
+                emissions += name to properties
+            },
             settings = settings,
             scope = scope.backgroundScope,
             initialRetryDelayMillis = initialRetryDelayMillis,
@@ -829,12 +957,13 @@ class PurchaseServiceTest {
         val active = mutableMapOf<String, List<PlayPurchase>>()
         val queries = mutableListOf<String>()
         var launched: CheckoutRequest? = null
+        var launchCode = BillingClient.BillingResponseCode.OK
         val acknowledgeCodes = mutableListOf<Int>()
         var failQueries = false
 
         override suspend fun launch(activity: Activity, request: CheckoutRequest): BillingResult {
             launched = request
-            return billingResult(BillingClient.BillingResponseCode.OK)
+            return billingResult(launchCode)
         }
 
         override suspend fun queryActive(productType: String): ActivePurchasesResult {
@@ -872,13 +1001,14 @@ class PurchaseServiceTest {
         consumable: Boolean = false,
         grants: List<LocalPurchaseGrant> = emptyList(),
         licensingPublicKey: String? = null,
+        rawProduct: ProductDetails? = null,
     ) = StoreProduct(
         productId = "nuxie-pro",
         storeProductId = "play-pro",
         basePlanId = if (subscription) "annual" else null,
         offerId = if (subscription) "launch" else null,
         placementId = "primary",
-        rawProduct = null,
+        rawProduct = rawProduct,
         offerToken = "offer-token",
         isOfferPersonalized = true,
         productType = if (subscription) BillingClient.ProductType.SUBS else BillingClient.ProductType.INAPP,
@@ -887,6 +1017,42 @@ class PurchaseServiceTest {
         licensingPublicKey = licensingPublicKey,
         purchaseContext = PurchaseContext("experience-1", "v1"),
     )
+
+    private fun oneTimeProductDetails(): ProductDetails {
+        val constructor = ProductDetails::class.java.getDeclaredConstructor(String::class.java)
+        constructor.isAccessible = true
+        return constructor.newInstance(
+            """{"productId":"play-pro","type":"inapp","title":"Pro","name":"Pro","description":"Pro","oneTimePurchaseOfferDetails":{"formattedPrice":"¥1,200","priceAmountMicros":1200000000,"priceCurrencyCode":"JPY"}}""",
+        )
+    }
+
+    private fun subscriptionProductDetails(): ProductDetails {
+        val constructor = ProductDetails::class.java.getDeclaredConstructor(String::class.java)
+        constructor.isAccessible = true
+        return constructor.newInstance(
+            """{"productId":"play-pro","type":"subs","title":"Pro","name":"Pro","description":"Pro","subscriptionOfferDetails":[{"basePlanId":"annual","offerId":"launch","offerIdToken":"offer-token","pricingPhases":[{"billingPeriod":"P1M","priceCurrencyCode":"EUR","formattedPrice":"€0.00","priceAmountMicros":0,"recurrenceMode":2,"billingCycleCount":1},{"billingPeriod":"P1Y","priceCurrencyCode":"EUR","formattedPrice":"€9.99","priceAmountMicros":9990000,"recurrenceMode":1,"billingCycleCount":0}]}]}""",
+        )
+    }
+
+    private fun assertForwardedPrice(
+        name: String,
+        properties: Map<String, Any?>,
+        expectedPrice: String,
+        expectedDisplayPrice: String,
+    ) {
+        val activity = checkNotNull(
+            ActivityCuration.activity(name, JsonValueConverter.fromMap(properties)),
+        )
+        val info = when (activity) {
+            is NuxieActivity.PurchaseCompleted -> activity.info
+            is NuxieActivity.PurchaseFailed -> activity.info
+            is NuxieActivity.PurchaseCancelled -> activity.info
+            is NuxieActivity.PurchasePending -> activity.info
+            else -> error("Expected a purchase lifecycle activity, got ${activity.name}.")
+        }
+        assertEquals(0, checkNotNull(info.price).compareTo(BigDecimal(expectedPrice)))
+        assertEquals(expectedDisplayPrice, info.displayPrice)
+    }
 
     private fun playPurchase(
         token: String,
