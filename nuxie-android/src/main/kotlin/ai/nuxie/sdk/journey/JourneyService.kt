@@ -13,6 +13,7 @@ import ai.nuxie.sdk.events.TriggerBroker
 import ai.nuxie.sdk.TriggerUpdate
 import ai.nuxie.sdk.util.IsoDates
 import ai.nuxie.sdk.presentation.CloseReason
+import android.util.Log
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.CancellationException
@@ -277,9 +278,24 @@ internal class JourneyService(
 
     suspend fun recoverPendingHostDismissals() {
         val inMemory = synchronized(inMemoryHostExits) { inMemoryHostExits.keys.toList() }
-        inMemory.forEach { key -> hostDismiss(key.distinctId, key.journeyId) }
+        inMemory.forEach { key -> recoverHostDismissal(key.distinctId, key.journeyId) }
         val pending = withContext(Dispatchers.IO) { store.loadPendingHostDismissals() }
-        pending.forEach { run -> hostDismiss(run.distinctId, run.id) }
+        pending.forEach { run -> recoverHostDismissal(run.distinctId, run.id) }
+    }
+
+    private suspend fun recoverHostDismissal(distinctId: String, journeyId: String) {
+        try {
+            hostDismiss(distinctId, journeyId)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            Log.w(
+                LOG_TAG,
+                "Pending host-dismissal recovery failed for Journey '$journeyId'; " +
+                    "will retry on the next recovery scan.",
+                failure,
+            )
+        }
     }
 
     private suspend fun emitDismissedTrigger(run: JourneyRun) {
@@ -463,6 +479,7 @@ internal class JourneyService(
         (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toLongOrNull()
 
     private companion object {
+        const val LOG_TAG = "Nuxie"
         const val INITIAL_HOST_DISMISS_RETRY_DELAY_MILLIS = 1_000L
         const val MAX_HOST_DISMISS_RETRY_DELAY_MILLIS = 60_000L
 

@@ -46,6 +46,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.shadows.ShadowLog
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyServiceTest {
@@ -643,6 +644,61 @@ class JourneyServiceTest {
             assertEquals(1, h.store.events.values.count { it.name == JourneyEventNames.EXITED })
             val recovered = JourneyStore(h.root).load("customer-1", started.ref.journeyId!!)
             assertNull(recovered)
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun foregroundRecoveryIsolatesTombstoneFailuresAndRetriesThemOnTheNextScan() = runBlocking {
+        val h = harness()
+        try {
+            val journeyStore = JourneyStore(h.root)
+            val journeyIds = listOf("customer-a", "customer-b").associateWith { distinctId ->
+                val started = h.service.handleEventForTrigger(
+                    StoredEvent(
+                        "trigger-$distinctId",
+                        "opened",
+                        timestampMillis = now,
+                        distinctId = distinctId,
+                    ),
+                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+                val journeyId = requireNotNull(started.ref.journeyId)
+                val active = requireNotNull(journeyStore.load(distinctId, journeyId))
+                journeyStore.save(
+                    active.copy(
+                        state = JourneyRunState.TERMINAL,
+                        terminalReason = "dismissed",
+                        completedAtMillis = now,
+                        pendingHostExitCapture = true,
+                        pendingHostCompletion = true,
+                        pendingHostTriggerCompletion = true,
+                    ),
+                )
+                journeyId
+            }
+            val firstJourneyId = requireNotNull(journeyIds["customer-a"])
+            val firstRunFile = File(h.root, "nuxie/journeys/runs")
+                .walkTopDown()
+                .single { it.isFile && it.name == "$firstJourneyId.json" }
+            val blockedFirstRewrite = File(firstRunFile.parentFile, ".$firstJourneyId.json.new")
+            assertTrue(blockedFirstRewrite.mkdir())
+            ShadowLog.clear()
+
+            h.service.recoverPendingHostDismissals()
+
+            assertTrue(journeyStore.load("customer-a", firstJourneyId)?.pendingHostExitCapture == true)
+            assertNull(journeyStore.load("customer-b", requireNotNull(journeyIds["customer-b"])))
+            val failureLog = ShadowLog.getLogsForTag("Nuxie").single {
+                it.msg.contains("Pending host-dismissal recovery failed")
+            }
+            assertTrue(failureLog.msg.contains(firstJourneyId))
+            assertTrue(failureLog.throwable is java.io.FileNotFoundException)
+
+            assertTrue(blockedFirstRewrite.delete())
+            h.service.recoverPendingHostDismissals()
+
+            assertNull(journeyStore.load("customer-a", firstJourneyId))
         } finally {
             h.root.deleteRecursively()
         }
