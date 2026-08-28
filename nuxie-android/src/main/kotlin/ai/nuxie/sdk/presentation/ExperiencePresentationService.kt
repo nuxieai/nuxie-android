@@ -10,6 +10,8 @@ import android.content.Context
 import android.content.Intent
 import java.io.File
 import java.lang.ref.WeakReference
+import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
@@ -126,8 +128,12 @@ internal object PresentationRegistry {
     ) {
         val terminal = AtomicBoolean(false)
         val firstFrame = AtomicBoolean(false)
-        var activity = WeakReference<PresentationActivityHandle>(null)
-        var dismissalSelected = false
+        var latestActivity = WeakReference<PresentationActivityHandle>(null)
+        // Configuration recreation changes the dismissal target, but every
+        // instance remains pending until its runtime lane calls detach.
+        val attachedActivities: MutableSet<PresentationActivityHandle> =
+            Collections.newSetFromMap(IdentityHashMap())
+        var dismissalReason: CloseReason? = null
     }
 
     private val lock = Any()
@@ -150,38 +156,25 @@ internal object PresentationRegistry {
 
     fun attach(id: String, activity: PresentationActivityHandle): Boolean = synchronized(lock) {
         val entry = entries[id] ?: return@synchronized false
-        if (entry.dismissalSelected) return@synchronized false
-        entry.activity = WeakReference(activity)
+        if (entry.dismissalReason != null) return@synchronized false
+        entry.attachedActivities += activity
+        entry.latestActivity = WeakReference(activity)
         true
     }
 
     fun detach(id: String, activity: PresentationActivityHandle) {
-        var dismissed: ((CloseReason) -> Unit)? = null
-        var failed: ((Throwable) -> Unit)? = null
-        var detachedReason: CloseReason? = null
-        synchronized(lock) {
+        val completion = synchronized(lock) {
             val entry = entries[id] ?: return
-            if (entry.activity.get() === activity) {
-                val reason = activity.claimedCloseReason()
-                if (reason == null) {
-                    entry.activity = WeakReference(null)
-                } else {
-                    entries.remove(id)
-                    if (entry.terminal.compareAndSet(false, true)) {
-                        detachedReason = reason
-                        when (reason) {
-                            is CloseReason.Error -> failed = entry.onFailure
-                            else -> dismissed = entry.onDismissed
-                        }
-                    }
-                }
+            entry.attachedActivities.remove(activity)
+            if (entry.latestActivity.get() === activity) {
+                entry.latestActivity = WeakReference(null)
             }
+            if (entry.dismissalReason == null) {
+                entry.dismissalReason = activity.claimedCloseReason()
+            }
+            completionIfReady(id, entry)
         }
-        when (val reason = detachedReason) {
-            is CloseReason.Error -> failed?.invoke(reason.cause)
-            null -> Unit
-            else -> dismissed?.invoke(reason)
-        }
+        completion?.invoke()
     }
 
     fun reportFirstFrame(id: String) {
@@ -198,42 +191,49 @@ internal object PresentationRegistry {
     }
 
     fun reportDismissed(id: String, reason: CloseReason) {
-        val callback = synchronized(lock) {
+        val completion = synchronized(lock) {
             val entry = entries[id] ?: return
-            entries.remove(id)
-            if (!entry.terminal.compareAndSet(false, true)) return
-            entry.onDismissed
+            if (entry.dismissalReason == null) entry.dismissalReason = reason
+            completionIfReady(id, entry)
         }
-        callback(reason)
+        completion?.invoke()
     }
 
     fun dismiss(id: String, reason: CloseReason) {
-        var dismissed: ((CloseReason) -> Unit)? = null
-        var failed: ((Throwable) -> Unit)? = null
-        val activity = synchronized(lock) {
+        var completion: (() -> Unit)? = null
+        val activityToFinish = synchronized(lock) {
             val entry = entries[id] ?: return
-            val attached = entry.activity.get()
-            if (attached == null) {
-                entries.remove(id)
-                if (entry.terminal.compareAndSet(false, true)) {
-                    when (reason) {
-                        is CloseReason.Error -> failed = entry.onFailure
-                        else -> dismissed = entry.onDismissed
-                    }
+            val attached = entry.latestActivity.get()
+            val selected = entry.dismissalReason
+            when {
+                selected != null -> {
+                    if (attached?.claimedCloseReason() == selected) attached else null
                 }
-                null
-            } else if (attached.claimFromService(reason) || attached.claimedCloseReason() == reason) {
-                entry.dismissalSelected = true
-                attached
-            } else {
-                null
+                attached == null -> {
+                    entry.dismissalReason = reason
+                    completion = completionIfReady(id, entry)
+                    null
+                }
+                attached.claimFromService(reason) || attached.claimedCloseReason() == reason -> {
+                    entry.dismissalReason = reason
+                    attached
+                }
+                else -> null
             }
         }
-        when (reason) {
-            is CloseReason.Error -> failed?.invoke(reason.cause)
-            else -> dismissed?.invoke(reason)
+        completion?.invoke()
+        activityToFinish?.finishAfterServiceClaim()
+    }
+
+    private fun completionIfReady(id: String, entry: Entry): (() -> Unit)? {
+        val reason = entry.dismissalReason ?: return null
+        if (entry.attachedActivities.isNotEmpty()) return null
+        entries.remove(id)
+        if (!entry.terminal.compareAndSet(false, true)) return null
+        return when (reason) {
+            is CloseReason.Error -> ({ entry.onFailure(reason.cause) })
+            else -> ({ entry.onDismissed(reason) })
         }
-        activity?.finishAfterServiceClaim()
     }
 
     internal fun clearForTesting() {

@@ -8,6 +8,7 @@ import ai.nuxie.sdk.experiences.ExperienceReleaseIdentity
 import ai.nuxie.sdk.runtime.NuxieRuntimeFile
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import ai.nuxie.sdk.runtime.NuxieTypedRuntimeNative
+import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import android.os.Looper
@@ -1032,6 +1033,97 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun hostDismissalAfterRecreationWaitsForBothActivitiesNativeHandleRelease() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        val presentationId = launched.single()
+        PresentationRegistry.reportFirstFrame(presentationId)
+        shown.await()
+
+        val oldLane = NuxieRuntimeLane()
+        val oldLaneBlocked = CountDownLatch(1)
+        val unblockOldLane = CountDownLatch(1)
+        val oldNativeReleased = AtomicBoolean(false)
+        val oldFile = NuxieRuntimeFile(
+            handle = 41L,
+            native = object : NuxieTypedRuntimeNative {
+                override fun freeFile(handle: Long) {
+                    assertEquals(41L, handle)
+                    oldNativeReleased.set(true)
+                }
+            },
+        )
+        assertTrue(oldLane.enqueue {
+            oldLaneBlocked.countDown()
+            check(unblockOldLane.await(5, TimeUnit.SECONDS)) { "old runtime lane was not released" }
+        })
+        assertTrue(oldLaneBlocked.await(2, TimeUnit.SECONDS))
+        assertTrue(oldLane.enqueue(oldFile::close))
+
+        val oldActivity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        setActivityField(oldActivity, "presentationId", presentationId)
+        setActivityField(oldActivity, "lane", oldLane)
+        setChangingConfigurations(oldActivity)
+        assertTrue(PresentationRegistry.attach(presentationId, oldActivity))
+        invokeOnDestroy(oldActivity)
+
+        val newLane = NuxieRuntimeLane()
+        val newLaneBlocked = CountDownLatch(1)
+        val unblockNewLane = CountDownLatch(1)
+        val newNativeReleased = AtomicBoolean(false)
+        val newFile = NuxieRuntimeFile(
+            handle = 42L,
+            native = object : NuxieTypedRuntimeNative {
+                override fun freeFile(handle: Long) {
+                    assertEquals(42L, handle)
+                    newNativeReleased.set(true)
+                }
+            },
+        )
+        assertTrue(newLane.enqueue {
+            newLaneBlocked.countDown()
+            check(unblockNewLane.await(5, TimeUnit.SECONDS)) { "new runtime lane was not released" }
+        })
+        assertTrue(newLaneBlocked.await(2, TimeUnit.SECONDS))
+        assertTrue(newLane.enqueue(newFile::close))
+
+        val recreatedActivity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        setActivityField(recreatedActivity, "presentationId", presentationId)
+        setActivityField(recreatedActivity, "lane", newLane)
+        assertTrue(PresentationRegistry.attach(presentationId, recreatedActivity))
+
+        val dismissal = async { service.dismissFromHost("customer-1") }
+        runCurrent()
+        assertEquals(CloseReason.HostDismissed, recreatedActivity.claimedCloseReason())
+        invokeOnDestroy(recreatedActivity)
+
+        try {
+            unblockNewLane.countDown()
+            assertTrue("recreated runtime lane did not finish", newLane.awaitQuiescence(2_000))
+            runCurrent()
+
+            assertTrue("recreated Activity did not release its native handle", newNativeReleased.get())
+            assertFalse("old Activity released before its lane was unblocked", oldNativeReleased.get())
+            assertFalse("dismissal ignored the old Activity teardown", dismissal.isCompleted)
+            assertFalse("acquisition lease closed before both Activities tore down", lease.closed.get())
+        } finally {
+            unblockOldLane.countDown()
+            unblockNewLane.countDown()
+        }
+
+        dismissal.await()
+        assertTrue("old Activity did not release its native handle", oldNativeReleased.get())
+        assertTrue(lease.closed.get())
+        assertEquals(null, PresentationRegistry.resolve(presentationId))
+    }
+
+    @Test
     fun cancellingHostDismissalOnlyDetachesCallerWhileBookkeepingCompletes() = runTest {
         val launched = mutableListOf<String>()
         val lease = Lease()
@@ -1122,6 +1214,20 @@ class ExperiencePresentationServiceTest {
             isAccessible = true
             set(activity, value)
         }
+    }
+
+    private fun setChangingConfigurations(activity: Activity) {
+        Activity::class.java.getDeclaredField("mChangingConfigurations").apply {
+            isAccessible = true
+            setBoolean(activity, true)
+        }
+    }
+
+    private fun invokeOnDestroy(activity: NuxieExperienceActivity) {
+        NuxieExperienceActivity::class.java
+            .getDeclaredMethod("onDestroy")
+            .apply { isAccessible = true }
+            .invoke(activity)
     }
 
     private fun service(
