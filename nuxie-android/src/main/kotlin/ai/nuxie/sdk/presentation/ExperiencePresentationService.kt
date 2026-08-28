@@ -285,6 +285,8 @@ internal class ExperiencePresentationService(
         val shown: AtomicBoolean = AtomicBoolean(false),
         val semanticReported: AtomicBoolean = AtomicBoolean(false),
         val finished: CompletableDeferred<Unit> = CompletableDeferred(),
+        // One host dismissal applies the run transition; every concurrent caller awaits it.
+        val runTransitionFinished: CompletableDeferred<Unit> = CompletableDeferred(),
     )
 
     private val presentationMutex = Mutex()
@@ -431,16 +433,17 @@ internal class ExperiencePresentationService(
             CloseReason.IdentityChanged
         }
         PresentationRegistry.dismiss(active.id, teardownReason)
-        if (!reportsOutcome) {
-            active.finished.await()
-            return
-        }
-        val transition = scope.launch {
-            if (runCatching { markOutcomeInMemory(outcome) }.getOrDefault(false)) {
-                scope.launch { runCatching { reportOutcome(outcome) } }
+        if (reportsOutcome) {
+            val transition = scope.launch {
+                if (runCatching { markOutcomeInMemory(outcome) }.getOrDefault(false)) {
+                    scope.launch { runCatching { reportOutcome(outcome) } }
+                }
+            }
+            transition.invokeOnCompletion {
+                active.runTransitionFinished.complete(Unit)
             }
         }
-        joinAll(active.finished, transition)
+        joinAll(active.finished, active.runTransitionFinished)
     }
 
     /**

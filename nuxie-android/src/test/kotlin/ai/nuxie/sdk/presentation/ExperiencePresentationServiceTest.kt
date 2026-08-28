@@ -415,6 +415,51 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun concurrentHostDismissalLoserWaitsForWinnerRunTransitionAfterTeardown() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val transitionStarted = CompletableDeferred<Unit>()
+        val releaseTransition = CompletableDeferred<Unit>()
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+            markOutcomeInMemory = {
+                transitionStarted.complete(Unit)
+                releaseTransition.await()
+                true
+            },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        val presentationId = launched.single()
+        PresentationRegistry.reportFirstFrame(presentationId)
+        shown.await()
+        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        setActivityField(activity, "presentationId", presentationId)
+        assertTrue(PresentationRegistry.attach(presentationId, activity))
+
+        val winner = async { service.dismissFromHost("customer-1") }
+        transitionStarted.await()
+        val loser = async { service.dismissFromHost("customer-1") }
+        runCurrent()
+
+        try {
+            invokeOnDestroy(activity)
+            runCurrent()
+
+            assertTrue("Activity teardown did not release the presentation", lease.closed.get())
+            assertFalse("winner completed before its run transition", winner.isCompleted)
+            assertFalse("loser completed before the winner's run transition", loser.isCompleted)
+        } finally {
+            releaseTransition.complete(Unit)
+            if (activity.isFinishing && !lease.closed.get()) invokeOnDestroy(activity)
+        }
+
+        winner.await()
+        loser.await()
+    }
+
+    @Test
     fun hostDismissalReturnsAfterPresentationTeardownWithoutAwaitingBookkeeping() = runTest {
         val launched = mutableListOf<String>()
         val lease = Lease()
