@@ -7,6 +7,7 @@ import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.StoredEvent
+import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.experiences.AcquiredRelease
 import ai.nuxie.sdk.experiences.AuthenticatedRelease
 import ai.nuxie.sdk.experiences.Delivery
@@ -50,11 +51,15 @@ import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 class DismissalFixtureTest {
-    private class Identity(private val id: String) : IdentityProvider {
+    private class Identity(private var id: String) : IdentityProvider {
         override fun distinctId() = id
         override fun anonymousId() = id
         override fun rawDistinctId(): String? = id
         override val isIdentified = true
+
+        fun changeTo(distinctId: String) {
+            id = distinctId
+        }
     }
 
     private class Store : EventStore {
@@ -112,6 +117,61 @@ class DismissalFixtureTest {
         }
     }
 
+    @Test
+    fun hostDismissedFactKeepsPresentationOwnerAcrossIdentityChange() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            runBlocking {
+                val ownerDistinctId = "owner-customer"
+                val identity = Identity(ownerDistinctId)
+                val eventStore = Store()
+                val eventLog = EventLog(
+                    store = eventStore,
+                    contextBuilder = NuxieContextBuilder(
+                        RuntimeEnvironment.getApplication(),
+                        NuxieEnvironment.DEVELOPMENT,
+                        LogLevel.NONE,
+                        identity,
+                    ),
+                    identity = identity,
+                    beforeSend = null,
+                    scope = scope,
+                )
+                val launched = mutableListOf<String>()
+                val presentations = ExperiencePresentationService(
+                    releases = PresentationReleaseProvider { release() },
+                    acquire = { acquired() },
+                    emit = eventLog::capture,
+                    scope = scope,
+                    runtimeAvailable = { true },
+                    launch = launched::add,
+                )
+                val shown = scope.async {
+                    presentations.present(
+                        "flow-version-1",
+                        "journey-1",
+                        ownerDistinctId,
+                    )
+                }
+                PresentationRegistry.reportFirstFrame(launched.single())
+                shown.await()
+                eventLog.awaitBarrier()
+
+                identity.changeTo("current-customer")
+                presentations.dismissFromHost(ownerDistinctId)
+                eventLog.awaitBarrier()
+
+                val dismissed = eventStore.events.values.single {
+                    it.name == SystemEventNames.EXPERIENCE_DISMISSED
+                }
+                assertEquals(ownerDistinctId, dismissed.distinctId)
+            }
+        } finally {
+            scope.cancel()
+            PresentationRegistry.clearForTesting()
+        }
+    }
+
     private suspend fun runVector(
         vector: JsonObject,
         nowMillis: Long,
@@ -124,14 +184,15 @@ class DismissalFixtureTest {
             val distinctId = "fixture-customer"
             val identity = Identity(distinctId)
             val eventStore = Store()
+            val contextBuilder = NuxieContextBuilder(
+                RuntimeEnvironment.getApplication(),
+                NuxieEnvironment.DEVELOPMENT,
+                LogLevel.NONE,
+                identity,
+            )
             val eventLog = EventLog(
                 store = eventStore,
-                contextBuilder = NuxieContextBuilder(
-                    RuntimeEnvironment.getApplication(),
-                    NuxieEnvironment.DEVELOPMENT,
-                    LogLevel.NONE,
-                    identity,
-                ),
+                contextBuilder = contextBuilder,
                 identity = identity,
                 beforeSend = null,
                 scope = scope,
@@ -163,7 +224,7 @@ class DismissalFixtureTest {
             val presentations = ExperiencePresentationService(
                 releases = PresentationReleaseProvider { release() },
                 acquire = { acquired() },
-                emit = { _, _ -> },
+                emit = { _, _, _ -> },
                 scope = scope,
                 runtimeAvailable = { true },
                 launch = launched::add,
@@ -214,10 +275,11 @@ class DismissalFixtureTest {
                     "no Journey exit for ${vector.getValue("dismissedBy")}; " +
                         "captured=${eventStore.events.values.map(StoredEvent::name)}",
                 )
-            val actual = JsonValueConverter.fromMap(
-                exit.properties.filterKeys { it in expected.keys },
+            // Rebuild known SDK context around the fixture payload, then compare the full maps.
+            val expectedProperties = JsonValueConverter.fromMap(
+                contextBuilder.buildEnrichedProperties(JsonValueConverter.toNativeMap(expected)),
             )
-            assertEquals(expected, actual)
+            assertEquals(expectedProperties, exit.properties)
         } finally {
             scope.cancel()
             PresentationRegistry.clearForTesting()

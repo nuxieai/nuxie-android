@@ -261,7 +261,7 @@ internal object PresentationRegistry {
 internal class ExperiencePresentationService(
     private val releases: PresentationReleaseProvider,
     private val acquire: suspend (PresentationRelease) -> AcquiredRelease,
-    private val emit: (String, Map<String, Any?>) -> Unit,
+    private val emit: (String, Map<String, Any?>, String?) -> Unit,
     private val scope: CoroutineScope,
     private val runtimeAvailable: () -> Boolean,
     private val launch: (String) -> Unit,
@@ -274,7 +274,7 @@ internal class ExperiencePresentationService(
         context: Context,
         releases: PresentationReleaseProvider,
         acquirer: ReleaseArtifactAcquirer,
-        emit: (String, Map<String, Any?>) -> Unit,
+        emit: (String, Map<String, Any?>, String?) -> Unit,
         scope: CoroutineScope,
         runtimeAvailable: () -> Boolean,
         reportOutcome: suspend (PresentationOutcome) -> Boolean = { true },
@@ -464,6 +464,7 @@ internal class ExperiencePresentationService(
                     "experience_id" to active.ref.experienceId,
                     "experience_version" to active.ref.experienceVersion,
                 ),
+                null,
             )
         }
         active.firstFrame.complete(active.ref)
@@ -482,7 +483,7 @@ internal class ExperiencePresentationService(
             )
         }
         active.firstFrame.completeExceptionally(typed)
-        if (active.shown.get()) emitCloseFact(active.ref, CloseReason.Error(typed))
+        if (active.shown.get()) emitCloseFact(active, CloseReason.Error(typed))
         scope.launch {
             if (active.semanticReported.compareAndSet(false, true)) {
                 reportOutcome(
@@ -508,7 +509,7 @@ internal class ExperiencePresentationService(
                 ),
             )
         }
-        if (active.shown.get()) emitCloseFact(active.ref, reason)
+        if (active.shown.get()) emitCloseFact(active, reason)
         active.finished.complete(Unit)
         scope.launch {
             if (active.semanticReported.compareAndSet(false, true)) {
@@ -529,7 +530,8 @@ internal class ExperiencePresentationService(
         }
     }
 
-    private fun emitCloseFact(ref: ExperienceRef, reason: CloseReason) {
+    private fun emitCloseFact(active: ActivePresentation, reason: CloseReason) {
+        val ref = active.ref
         val properties = linkedMapOf<String, Any?>(
             "journey_id" to ref.journeyId,
             "experience_id" to ref.experienceId,
@@ -554,7 +556,12 @@ internal class ExperiencePresentationService(
                 SystemEventNames.EXPERIENCE_ERRORED
             }
         }
-        runCatching { emit(name, properties) }
+        val distinctIdOverride = when (reason) {
+            CloseReason.UserDismissed, CloseReason.HostDismissed, CloseReason.GoalMet ->
+                active.ownerDistinctId
+            else -> null
+        }
+        runCatching { emit(name, properties, distinctIdOverride) }
     }
 
     private class AndroidPresentationLauncher(private val context: Context) : (String) -> Unit {

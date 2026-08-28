@@ -300,7 +300,7 @@ class TriggerServiceTest {
                         protection = Closeable {},
                     )
                 },
-                emit = { _, _ -> },
+                emit = { _, _, _ -> },
                 scope = CoroutineScope(Dispatchers.Unconfined),
                 runtimeAvailable = { true },
                 launch = launched::add,
