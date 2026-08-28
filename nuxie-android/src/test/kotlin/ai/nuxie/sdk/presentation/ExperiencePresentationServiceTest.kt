@@ -812,16 +812,19 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun cancellingOneJoinedHostDismissalKeepsSharedAttemptUntilNativeHandleRelease() = runTest {
+    fun cancellingHostDismissalOnlyDetachesCallerWhileBookkeepingCompletes() = runTest {
         val launched = mutableListOf<String>()
         val lease = Lease()
-        var semanticCalls = 0
+        val bookkeepingStarted = CompletableDeferred<PresentationOutcome>()
+        val allowBookkeepingToComplete = CompletableDeferred<Unit>()
+        val bookkeepingCompleted = CompletableDeferred<Unit>()
         val service = service(
             launch = launched::add,
             acquire = { acquired("exp-1", "v1", lease) },
-            reportOutcome = {
-                semanticCalls += 1
-                true
+            reportOutcome = { outcome ->
+                bookkeepingStarted.complete(outcome)
+                allowBookkeepingToComplete.await()
+                bookkeepingCompleted.complete(Unit)
             },
         )
         val shown = async { service.present("v1", "journey-7", "customer-1") }
@@ -851,35 +854,43 @@ class ExperiencePresentationServiceTest {
         setActivityField(activity, "lane", lane)
         assertTrue(PresentationRegistry.attach(presentationId, activity))
 
-        val cancelled = async { service.dismissFromHost("customer-1") }
+        val dismissal = async { service.dismissFromHost("customer-1") }
         runCurrent()
-        val survivor = async { service.dismissFromHost("customer-1") }
-        runCurrent()
+        val outcome = bookkeepingStarted.await()
+        assertEquals(CloseReason.HostDismissed, outcome.reason)
+        assertEquals("customer-1", outcome.ownerDistinctId)
+        assertEquals("customer-1", outcome.initiatingDistinctId)
+
         NuxieExperienceActivity::class.java
             .getDeclaredMethod("onDestroy")
             .apply { isAccessible = true }
             .invoke(activity)
         runCurrent()
 
-        assertFalse(cancelled.isCompleted)
-        assertFalse(survivor.isCompleted)
-        cancelled.cancelAndJoin()
-        runCurrent()
-        val fresh = async { service.dismissFromHost("customer-1") }
-        runCurrent()
-
         try {
-            assertFalse("joined dismissal completed before native release", survivor.isCompleted)
-            assertFalse("fresh dismissal completed before native release", fresh.isCompleted)
-            assertEquals("fresh dismissal started a second attempt", 1, semanticCalls)
+            assertFalse("dismissal completed before native release", dismissal.isCompleted)
             assertFalse("acquisition lease closed before native release", lease.closed.get())
+
+            dismissal.cancelAndJoin()
+            assertTrue("dismissal caller was not cancelled", dismissal.isCancelled)
+            assertFalse("caller cancellation completed bookkeeping", bookkeepingCompleted.isCompleted)
+            assertFalse("caller cancellation completed teardown", lease.closed.get())
+
+            allowBookkeepingToComplete.complete(Unit)
+            runCurrent()
+
+            assertTrue(
+                "caller cancellation cancelled detached bookkeeping",
+                bookkeepingCompleted.isCompleted,
+            )
+            assertFalse("bookkeeping completion bypassed native teardown", lease.closed.get())
         } finally {
             unblockLane.countDown()
         }
 
-        survivor.await()
-        fresh.await()
+        assertTrue("Runtime lane did not finish", lane.awaitQuiescence(2_000))
         assertTrue(lease.closed.get())
+        assertEquals(null, PresentationRegistry.resolve(presentationId))
     }
 
     private fun setActivityField(
