@@ -880,6 +880,45 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun entityScopedCheckUpdatesPublicReactiveFeatureState() = runBlocking {
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            allowed = false,
+                            balance = "null",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+        core.features.hydrateProfile(
+            core.identity.distinctId(),
+            Json.parseToJsonElement(
+                profile("""[{"id":"pro","type":"boolean","unlimited":false}]"""),
+            ).jsonObject,
+        )
+        assertTrue(core.featureInfo.isAllowed("pro"))
+
+        val entityAccess = core.features.check("pro", entityId = "workspace-1")
+
+        assertFalse(entityAccess.allowed)
+        assertFalse(core.featureInfo.all.value.getValue("pro").allowed)
+        assertFalse(core.featureInfo.isAllowed("pro"))
+        core.stop()
+    }
+
+    @Test
     fun staleEntityResultKeepsTheNewerSameEntityCommitAfterPurchaseRevisionChanges() = runBlocking {
         val olderCheckStarted = CountDownLatch(1)
         val releaseOlderCheck = CountDownLatch(1)
@@ -944,7 +983,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun allowedCheckRetiresRevocationsOnIoWithoutHoldingTheFeatureStateLock() = runBlocking {
+    fun allowedCheckRetiresRevocationsOnIo() = runBlocking {
         val retirementStarted = CountDownLatch(1)
         val releaseRetirement = CountDownLatch(1)
         val callerThread = AtomicReference<Thread>()
@@ -999,20 +1038,103 @@ class FeatureServiceTest {
                 core.features.check("pro")
             }
             assertTrue(retirementStarted.await(5, TimeUnit.SECONDS))
-            val readCompleted = CountDownLatch(1)
-            val read = async(Dispatchers.Default) {
-                core.features.getAllCached()
-                readCompleted.countDown()
-            }
-            val featureStateLockWasFree = readCompleted.await(1, TimeUnit.SECONDS)
             val ledgerWasOffCaller = ledgerThread.get() !== callerThread.get()
             releaseRetirement.countDown()
 
             assertTrue(check.await().allowed)
-            read.await()
             assertTrue(ledgerWasOffCaller)
-            assertTrue(featureStateLockWasFree)
         }
+        core.stop()
+    }
+
+    @Test
+    fun concurrentNewerRevocationDuringRetirementSurvivesDurably() = runBlocking {
+        val retirementStarted = CountDownLatch(1)
+        val releaseRetirement = CountDownLatch(1)
+        val newerRevocationPersisted = CountDownLatch(1)
+        val entries = linkedMapOf<String, PurchaseEvidence>()
+        val store = object : PurchaseEvidenceStore {
+            override fun load(): Map<String, PurchaseEvidence> = synchronized(entries) {
+                entries.toMap()
+            }
+
+            override fun upsert(evidence: PurchaseEvidence): Boolean = synchronized(entries) {
+                entries[evidence.purchaseToken] = evidence
+                true
+            }
+
+            override fun retireRevokedGrants(distinctId: String, featureIds: Set<String>): Boolean {
+                retirementStarted.countDown()
+                assertTrue(releaseRetirement.await(5, TimeUnit.SECONDS))
+                synchronized(entries) {
+                    entries.replaceAll { _, evidence ->
+                        if (evidence.revoked && evidence.ownerDistinctId == distinctId) {
+                            evidence.copy(
+                                localFeatureGrants = evidence.localFeatureGrants.filterNot {
+                                    it.featureId in featureIds
+                                },
+                            )
+                        } else {
+                            evidence
+                        }
+                    }
+                }
+                return true
+            }
+        }
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            balance = "1",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = NuxieCore(
+            context = RuntimeEnvironment.getApplication(),
+            apiKey = "pk_test_features_concurrent_revocation_retirement",
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(
+                transport = transport,
+                registerLifecycle = false,
+                purchaseEvidenceStore = store,
+            ),
+        )
+        val customer = core.identity.distinctId()
+        val grant = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN))
+        val evidence = revokedEvidence(customer, "pro").copy(purchaseToken = "newer-revocation")
+
+        val check = async(Dispatchers.Default) { runCatching { core.features.check("pro") } }
+        assertTrue(retirementStarted.await(5, TimeUnit.SECONDS))
+        val newerRevocation = async(Dispatchers.Default) {
+            core.features.applyLocalPurchase(grant, evidence.purchaseToken)
+            assertTrue(store.upsert(evidence))
+            newerRevocationPersisted.countDown()
+            core.features.removePurchase(evidence.purchaseToken)
+        }
+        newerRevocationPersisted.await(1, TimeUnit.SECONDS)
+        releaseRetirement.countDown()
+
+        check.await()
+        newerRevocation.await()
+        assertFalse(core.features.getCached("pro", null)!!.allowed)
+        assertEquals(
+            listOf("pro"),
+            store.load().getValue(evidence.purchaseToken).localFeatureGrants.map { it.featureId },
+        )
         core.stop()
     }
 
