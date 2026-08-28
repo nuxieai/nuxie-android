@@ -377,6 +377,44 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun hostDismissalRequestsTeardownBeforeBlockedRunTransition() = runTest {
+        val launched = mutableListOf<String>()
+        val transitionStarted = CompletableDeferred<Unit>()
+        val releaseTransition = CompletableDeferred<Unit>()
+        val service = service(
+            launch = launched::add,
+            markOutcomeInMemory = {
+                transitionStarted.complete(Unit)
+                releaseTransition.await()
+                true
+            },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        val presentationId = launched.single()
+        PresentationRegistry.reportFirstFrame(presentationId)
+        shown.await()
+        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        setActivityField(activity, "presentationId", presentationId)
+        assertTrue(PresentationRegistry.attach(presentationId, activity))
+
+        val dismissal = async { service.dismissFromHost("customer-1") }
+        transitionStarted.await()
+
+        try {
+            assertEquals(CloseReason.HostDismissed, activity.claimedCloseReason())
+            assertTrue("blocked run transition kept the screen open", activity.isFinishing)
+            assertFalse("dismissal completed before the run transition", dismissal.isCompleted)
+        } finally {
+            releaseTransition.complete(Unit)
+            runCurrent()
+            if (activity.isFinishing) invokeOnDestroy(activity)
+        }
+
+        dismissal.await()
+    }
+
+    @Test
     fun hostDismissalReturnsAfterPresentationTeardownWithoutAwaitingBookkeeping() = runTest {
         val launched = mutableListOf<String>()
         val lease = Lease()
@@ -433,10 +471,12 @@ class ExperiencePresentationServiceTest {
     @Test
     fun hostDismissalAfterIdentityChangedClosesWithoutAttributingTheOldPresentation() = runTest {
         val launched = mutableListOf<String>()
+        val emitted = mutableListOf<String>()
         val lease = Lease()
         var semanticCalls = 0
         val marks = mutableListOf<PresentationOutcome>()
         val service = service(
+            emit = { name, _, _ -> emitted += name },
             launch = launched::add,
             acquire = { acquired("exp-1", "v1", lease) },
             markOutcomeInMemory = { outcome ->
@@ -458,6 +498,7 @@ class ExperiencePresentationServiceTest {
         assertEquals("customer-1", marks.single().ownerDistinctId)
         assertEquals("customer-2", marks.single().initiatingDistinctId)
         assertEquals(0, semanticCalls)
+        assertFalse("identity transition emitted a dismissal", "\$experience_dismissed" in emitted)
         assertTrue(lease.closed.get())
         assertEquals(null, PresentationRegistry.resolve(launched.single()))
     }
@@ -696,7 +737,7 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun firstFrameFailureRacingHostDismissalWaitsForActivityTeardown() = runTest {
+    fun hostDismissalTeardownSelectionSurvivesARacingFirstFrameFailure() = runTest {
         val launched = mutableListOf<String>()
         val failure = IllegalStateException("first frame failed")
         val service = service(
@@ -717,7 +758,7 @@ class ExperiencePresentationServiceTest {
         runCurrent()
 
         assertFalse("dismissal completed before Activity teardown", dismissal.isCompleted)
-        assertEquals(CloseReason.Error(failure), activity.claimedCloseReason())
+        assertEquals(CloseReason.HostDismissed, activity.claimedCloseReason())
         assertTrue("Activity finish was not delivered", activity.isFinishing)
         assertTrue("registry completed before Activity teardown", PresentationRegistry.resolve(presentationId) != null)
 
@@ -735,8 +776,7 @@ class ExperiencePresentationServiceTest {
         } catch (error: ExperiencePresentationException) {
             error
         }
-        assertEquals(ExperiencePresentationException.Reason.HOST_FAILED, error.reason)
-        assertEquals(failure, error.cause)
+        assertEquals(ExperiencePresentationException.Reason.SUPERSEDED, error.reason)
     }
 
     @Test
