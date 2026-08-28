@@ -334,10 +334,10 @@ internal class PurchaseService(
         val initiatingOwner = distinctId()
         settings.delegate?.let { delegate ->
             val outcome = delegate.purchase(product)
-            if (outcome == PurchaseResult.Purchased && distinctId() == initiatingOwner) {
-                emitPurchaseCompleted(product, transactionId = null)
-            } else if (distinctId() == initiatingOwner) {
-                emitPurchaseOutcome(product, outcome)
+            if (outcome == PurchaseResult.Purchased) {
+                emitPurchaseCompleted(product, transactionId = null, initiatingOwner)
+            } else {
+                emitPurchaseOutcome(product, outcome, initiatingOwner)
             }
             return outcome
         }
@@ -347,17 +347,18 @@ internal class PurchaseService(
         if (!evidenceStore.upsertProductMapping(product.toMapping()) ||
             !evidenceStore.upsertBinding(product.toBinding(accountId, owner))
         ) {
-            return failed(product, IllegalStateException("Could not persist purchase catalog mapping."))
+            return failed(product, IllegalStateException("Could not persist purchase catalog mapping."), owner)
         }
         val active = when (val queried = billing.queryActive(product.productType)) {
             is ActivePurchasesResult.Failed -> return failed(
                 product,
                 BillingUnavailableException(queried.responseCode, queried.debugMessage),
+                owner,
             )
             is ActivePurchasesResult.Success -> queried.purchases
         }
         if (product.productType == BillingClient.ProductType.SUBS && replacement == null && active.isNotEmpty()) {
-            return failed(product, SubscriptionReplacementRequiredException())
+            return failed(product, SubscriptionReplacementRequiredException(), owner)
         }
         val priorTokens = active.mapTo(mutableSetOf()) { it.purchaseToken }
 
@@ -377,7 +378,7 @@ internal class PurchaseService(
             }
         }
         if (!registered) {
-            return failed(product, IllegalStateException("Another Play purchase is already in flight."))
+            return failed(product, IllegalStateException("Another Play purchase is already in flight."), owner)
         }
         val launch = runCatching {
             billing.launch(
@@ -386,34 +387,39 @@ internal class PurchaseService(
             )
         }.getOrElse {
             inFlight.remove(product.storeProductId, pending)
-            return failed(product, it)
+            return failed(product, it, owner)
         }
         if (launch.responseCode != BillingClient.BillingResponseCode.OK) {
             inFlight.remove(product.storeProductId, pending)
             return if (launch.responseCode == BillingClient.BillingResponseCode.USER_CANCELED) {
-                PurchaseResult.Cancelled.also { emitPurchaseOutcome(product, it) }
+                PurchaseResult.Cancelled.also { emitPurchaseOutcome(product, it, owner) }
             } else {
-                failed(product, BillingUnavailableException(launch.responseCode, launch.debugMessage))
+                failed(product, BillingUnavailableException(launch.responseCode, launch.debugMessage), owner)
             }
         }
         return result.await()
     }
 
     suspend fun restorePurchases(): RestoreResult {
-        settings.delegate?.let { return it.restorePurchases().also(::emitRestoreOutcome) }
+        val initiatingOwner = distinctId()
+        settings.delegate?.let {
+            return it.restorePurchases().also { outcome -> emitRestoreOutcome(outcome, initiatingOwner) }
+        }
         val found = mutableListOf<PlayPurchase>()
         for (type in listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP)) {
             when (val result = billing.queryActive(type)) {
                 is ActivePurchasesResult.Success -> found += result.purchases
                 is ActivePurchasesResult.Failed -> return RestoreResult.Failed(
                     BillingUnavailableException(result.responseCode, result.debugMessage),
-                ).also(::emitRestoreOutcome)
+                ).also { outcome -> emitRestoreOutcome(outcome, initiatingOwner) }
             }
         }
         revokeMissingOptimistic(found.mapTo(mutableSetOf()) { it.purchaseToken })
-        if (found.isEmpty()) return RestoreResult.NoPurchases.also(::emitRestoreOutcome)
+        if (found.isEmpty()) {
+            return RestoreResult.NoPurchases.also { emitRestoreOutcome(it, initiatingOwner) }
+        }
         processPurchases(found)
-        return RestoreResult.Restored.also(::emitRestoreOutcome)
+        return RestoreResult.Restored.also { emitRestoreOutcome(it, initiatingOwner) }
     }
 
     suspend fun onPurchasesUpdated(update: PurchaseUpdate) {
@@ -614,8 +620,7 @@ internal class PurchaseService(
             evidence.acceptedResponseBody?.let { body ->
                 features.updateFromPurchase(evidence.ownerDistinctId!!, body, purchase.purchaseToken)
             }
-            if (isCheckoutOutcome && !evidence.completionEmitted) {
-                emitPurchaseCompleted(evidence)
+            if (isCheckoutOutcome && !evidence.completionEmitted && emitPurchaseCompleted(evidence)) {
                 currentEvidence = evidence.copy(completionEmitted = true)
                 evidenceStore.upsert(currentEvidence)
             }
@@ -811,7 +816,8 @@ internal class PurchaseService(
         (initialRetryDelayMillis * (1L shl attempt.coerceAtMost(16)))
             .coerceAtMost(maxRetryDelayMillis)
 
-    private fun emitPurchaseCompleted(evidence: PurchaseEvidence) {
+    private fun emitPurchaseCompleted(evidence: PurchaseEvidence): Boolean {
+        if (evidence.ownerDistinctId != distinctId()) return false
         val properties = linkedMapOf<String, Any?>(
             "product_id" to (evidence.nuxieProductId ?: evidence.storeProductIds.firstOrNull().orEmpty()),
             "placement_id" to evidence.context?.placementId,
@@ -822,9 +828,15 @@ internal class PurchaseService(
             "transaction_id" to evidence.purchaseToken,
         ).filterValues { it != null }
         emit(SystemEventNames.PURCHASE_COMPLETED, properties)
+        return true
     }
 
-    private fun emitPurchaseCompleted(product: StoreProduct, transactionId: String?) {
+    private fun emitPurchaseCompleted(
+        product: StoreProduct,
+        transactionId: String?,
+        initiatingOwner: String,
+    ) {
+        if (distinctId() != initiatingOwner) return
         val properties = linkedMapOf<String, Any?>(
             "product_id" to product.productId,
             "placement_id" to product.placementId,
@@ -841,7 +853,7 @@ internal class PurchaseService(
         purchase.products.forEach { productId ->
             val pending = inFlight[productId] ?: return@forEach
             if (pending.matches(purchase) && inFlight.remove(productId, pending)) {
-                emitPurchaseOutcome(pending.product, result)
+                emitPurchaseOutcome(pending.product, result, pending.owner)
                 pending.result.complete(result)
             }
         }
@@ -856,16 +868,25 @@ internal class PurchaseService(
         val keys = inFlight.keys()
         while (keys.hasMoreElements()) {
             inFlight.remove(keys.nextElement())?.let { pending ->
-                emitPurchaseOutcome(pending.product, result)
+                emitPurchaseOutcome(pending.product, result, pending.owner)
                 pending.result.complete(result)
             }
         }
     }
 
-    private fun failed(product: StoreProduct, cause: Throwable): PurchaseResult.Failed =
-        PurchaseResult.Failed(cause).also { emitPurchaseOutcome(product, it) }
+    private fun failed(
+        product: StoreProduct,
+        cause: Throwable,
+        initiatingOwner: String,
+    ): PurchaseResult.Failed =
+        PurchaseResult.Failed(cause).also { emitPurchaseOutcome(product, it, initiatingOwner) }
 
-    private fun emitPurchaseOutcome(product: StoreProduct, result: PurchaseResult) {
+    private fun emitPurchaseOutcome(
+        product: StoreProduct,
+        result: PurchaseResult,
+        initiatingOwner: String,
+    ) {
+        if (distinctId() != initiatingOwner) return
         val properties = linkedMapOf<String, Any?>(
             "product_id" to product.productId,
             "store_product_id" to product.storeProductId,
@@ -884,7 +905,8 @@ internal class PurchaseService(
         }
     }
 
-    private fun emitRestoreOutcome(result: RestoreResult) {
+    private fun emitRestoreOutcome(result: RestoreResult, initiatingOwner: String) {
+        if (distinctId() != initiatingOwner) return
         when (result) {
             RestoreResult.Restored -> emit(SystemEventNames.RESTORE_COMPLETED, emptyMap())
             RestoreResult.NoPurchases -> emit(SystemEventNames.RESTORE_NO_PURCHASES, emptyMap())

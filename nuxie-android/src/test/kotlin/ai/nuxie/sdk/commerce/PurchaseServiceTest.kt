@@ -13,6 +13,7 @@ import com.android.billingclient.api.BillingResult
 import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -88,6 +89,27 @@ class PurchaseServiceTest {
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         assertFalse("sync" in actions)
         assertFalse("ack" in actions)
+        assertEquals(
+            1,
+            actions.count { it == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_PENDING },
+        )
+        fixture.close()
+    }
+
+    @Test
+    fun identityChangeBeforePlayUpdateSuppressesTheForwardedCheckoutOutcome() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+
+        fixture.core.identity.setDistinctId("replacement-customer")
+        fixture.service.onPurchasesUpdated(
+            okUpdate(playPurchase("pending-token", state = StoredPurchaseState.PENDING).forCheckout(fixture)),
+        )
+
+        assertEquals(PurchaseResult.Pending, checkout.await())
+        assertFalse(ai.nuxie.sdk.events.SystemEventNames.PURCHASE_PENDING in actions)
         fixture.close()
     }
 
@@ -663,8 +685,13 @@ class PurchaseServiceTest {
 
     @Test
     fun restoreQueriesBothProductTypesAndDistinguishesEmptyFromRestored() = runTest {
-        val fixture = fixture(this)
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
         assertEquals(RestoreResult.NoPurchases, fixture.service.restorePurchases())
+        assertEquals(
+            1,
+            actions.count { it == ai.nuxie.sdk.events.SystemEventNames.RESTORE_NO_PURCHASES },
+        )
 
         fixture.store.upsertBinding(product().bindingFor(fixture.core.identity.distinctId()))
         fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
@@ -674,11 +701,40 @@ class PurchaseServiceTest {
             ),
         )
         assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+        assertEquals(
+            1,
+            actions.count { it == ai.nuxie.sdk.events.SystemEventNames.RESTORE_COMPLETED },
+        )
         assertTrue(fixture.store.load().containsKey("restore-token"))
         assertEquals(
             listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP).let { it + it },
             fixture.billing.queries,
         )
+        fixture.close()
+    }
+
+    @Test
+    fun identityChangeDuringDelegateRestoreSuppressesTheForwardedOutcome() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
+        val restoreStarted = CompletableDeferred<Unit>()
+        val finishRestore = CompletableDeferred<Unit>()
+        fixture.settings.delegate = object : NuxiePurchaseDelegate {
+            override suspend fun purchase(product: StoreProduct): PurchaseResult = PurchaseResult.Purchased
+            override suspend fun restorePurchases(): RestoreResult {
+                restoreStarted.complete(Unit)
+                finishRestore.await()
+                return RestoreResult.NoPurchases
+            }
+        }
+        val restoring = async { fixture.service.restorePurchases() }
+        restoreStarted.await()
+
+        fixture.core.identity.setDistinctId("replacement-customer")
+        finishRestore.complete(Unit)
+
+        assertEquals(RestoreResult.NoPurchases, restoring.await())
+        assertFalse(ai.nuxie.sdk.events.SystemEventNames.RESTORE_NO_PURCHASES in actions)
         fixture.close()
     }
 
