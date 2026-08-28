@@ -56,7 +56,7 @@ class ExperiencePresentationServiceTest {
         val launched = mutableListOf<String>()
         val lease = Lease()
         val service = service(
-            emit = { name, properties -> emitted += Emitted(name, properties) },
+            emit = { name, properties, _ -> emitted += Emitted(name, properties) },
             launch = launched::add,
             acquire = { acquired("exp-1", "v1", lease) },
         )
@@ -617,7 +617,7 @@ class ExperiencePresentationServiceTest {
                 Lease(),
             )
         },
-        emit: (String, Map<String, Any?>) -> Unit = { _, _ -> },
+        emit: (String, Map<String, Any?>, String?) -> Unit = { _, _, _ -> },
         launch: (String) -> Unit = {},
         reportOutcome: suspend (PresentationOutcome) -> Boolean = { true },
         reserveHostDismissal: suspend (PresentationOutcome) -> Boolean = { true },

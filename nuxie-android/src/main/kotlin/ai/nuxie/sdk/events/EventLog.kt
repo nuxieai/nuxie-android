@@ -57,7 +57,11 @@ internal class EventLog(
     )
 
     private sealed interface Command {
-        data class Capture(val name: String, val properties: Map<String, Any?>?) : Command
+        data class Capture(
+            val name: String,
+            val properties: Map<String, Any?>?,
+            val distinctIdOverride: String?,
+        ) : Command
         data class CaptureForTrigger(
             val name: String,
             val properties: Map<String, Any?>?,
@@ -101,7 +105,9 @@ internal class EventLog(
     private val worker = scope.launch {
         for (command in commands) {
             when (command) {
-                is Command.Capture -> runCatching { process(command.name, command.properties) }
+                is Command.Capture -> runCatching {
+                    process(command.name, command.properties, command.distinctIdOverride)
+                }
                     .onFailure { Log.w(LOG_TAG, "Event capture failed", it) }
                 is Command.CaptureForTrigger -> {
                     val stored = runCatching { process(command.name, command.properties) }
@@ -157,12 +163,21 @@ internal class EventLog(
 
     /** Enqueue a capture; safe from any thread, never blocks the caller. */
     fun capture(name: String, properties: Map<String, Any?>? = null) {
+        capture(name, properties, distinctIdOverride = null)
+    }
+
+    /** Enqueue a capture attributed to an already-owned customer scope. */
+    fun capture(
+        name: String,
+        properties: Map<String, Any?>?,
+        distinctIdOverride: String?,
+    ) {
         if (name.isEmpty()) {
             // iOS parity: EventLog guards empty event names at every entry.
             Log.w(LOG_TAG, "Event name cannot be empty")
             return
         }
-        val result = commands.trySend(Command.Capture(name, properties))
+        val result = commands.trySend(Command.Capture(name, properties, distinctIdOverride))
         if (result.isFailure) {
             Log.w(LOG_TAG, "Event '$name' dropped: capture pipeline is closed.")
         }
@@ -284,7 +299,11 @@ internal class EventLog(
         return done.await()
     }
 
-    private suspend fun process(name: String, commandProperties: Map<String, Any?>?): StoredEvent? {
+    private suspend fun process(
+        name: String,
+        commandProperties: Map<String, Any?>?,
+        distinctIdOverride: String? = null,
+    ): StoredEvent? {
         var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties ?: emptyMap())
         if (!sanitized.containsKey(SESSION_ID_PROPERTY)) {
             sessionIdProvider?.invoke()?.let { sessionId ->
@@ -294,7 +313,7 @@ internal class EventLog(
         val enriched = contextBuilder.buildEnrichedProperties(sanitized)
         val original = NuxieEvent(
             name = name,
-            distinctId = identity.distinctId(),
+            distinctId = distinctIdOverride ?: identity.distinctId(),
             properties = enriched,
             timestampMillis = nowMillis(),
         )
