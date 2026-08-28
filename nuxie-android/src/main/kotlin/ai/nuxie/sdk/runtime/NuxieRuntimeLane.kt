@@ -1,9 +1,11 @@
 package ai.nuxie.sdk.runtime
 
 import android.util.Log
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -16,8 +18,19 @@ import kotlin.coroutines.resumeWithException
  * back from arbitrary threads.
  */
 internal class NuxieRuntimeLane {
-    private val executor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, THREAD_NAME).apply { isDaemon = true }
+    private val terminationCallback = AtomicReference<(() -> Unit)?>(null)
+    private val executor = object : ThreadPoolExecutor(
+        1,
+        1,
+        0L,
+        TimeUnit.MILLISECONDS,
+        LinkedBlockingQueue(),
+        { runnable -> Thread(runnable, THREAD_NAME).apply { isDaemon = true } },
+    ) {
+        override fun terminated() {
+            terminationCallback.getAndSet(null)?.let(::runTerminationCallback)
+            super.terminated()
+        }
     }
 
     /** Run [block] on the runtime lane and await its result. */
@@ -60,6 +73,19 @@ internal class NuxieRuntimeLane {
     }
 
     /**
+     * Stop accepting work without blocking the caller, then invoke
+     * [onTerminated] after every already-accepted task has finished and the
+     * lane has terminated.
+     */
+    fun shutdown(onTerminated: () -> Unit) {
+        terminationCallback.set(onTerminated)
+        executor.shutdown()
+        if (executor.isTerminated) {
+            terminationCallback.getAndSet(null)?.let(::runTerminationCallback)
+        }
+    }
+
+    /**
      * After [shutdown], wait for already-accepted work to drain. Returns
      * true once the lane has fully terminated; false on timeout or if the
      * lane was never shut down.
@@ -73,21 +99,10 @@ internal class NuxieRuntimeLane {
         }
     }
 
-    /**
-     * After [shutdown], wait until every already-accepted task has finished.
-     * Interruption is restored only after the lane terminates so callers that
-     * publish semantic completion cannot outrun lane-confined native cleanup.
-     */
-    fun awaitQuiescence() {
-        var interrupted = false
-        while (!executor.isTerminated) {
-            try {
-                executor.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
-            } catch (_: InterruptedException) {
-                interrupted = true
-            }
+    private fun runTerminationCallback(callback: () -> Unit) {
+        runCatching(callback).onFailure {
+            Log.w(LOG_TAG, "Runtime lane termination callback failed", it)
         }
-        if (interrupted) Thread.currentThread().interrupt()
     }
 
     private companion object {
