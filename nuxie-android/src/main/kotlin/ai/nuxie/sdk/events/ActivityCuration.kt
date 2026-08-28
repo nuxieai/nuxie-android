@@ -13,6 +13,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.doubleOrNull
+import java.math.BigDecimal
 
 /** Converts the curated internal event catalog into the stable typed forwarding contract. */
 internal object ActivityCuration {
@@ -221,17 +222,36 @@ internal object ActivityCuration {
         else -> null
     }
 
+    /*
+     * JSON coercion matrix, mirrored from iOS
+     * Sources/Nuxie/Forwarding/ActivityCuration.swift's string, nonemptyString,
+     * double, bool, and strings helpers. Android decimal follows double because
+     * iOS parses price with double before constructing Decimal.
+     *
+     * Parser          String       Number                 Boolean             Array
+     * string          accept       reject                 reject              reject
+     * nonemptyString  accept if >0 reject                 reject              reject
+     * double/decimal  reject       accept                 true=1, false=0     reject
+     * bool            reject       0=false, nonzero=true  accept              reject
+     * strings         reject       reject                 reject              all elements must be strings
+     *
+     * Every target rejects objects and null/missing values. Empty string lists
+     * are accepted. Keep both SDKs aligned when changing any cell.
+     */
     private fun JsonObject.string(key: String): String? =
         (get(key) as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content
 
     private fun JsonObject.nonemptyString(key: String): String? = string(key)?.takeIf(String::isNotEmpty)
-    private fun JsonObject.double(key: String): Double? = (get(key) as? JsonPrimitive)
-        ?.takeUnless(JsonPrimitive::isString)
-        ?.doubleOrNull
-    private fun JsonObject.decimal(key: String) = (get(key) as? JsonPrimitive)
-        ?.takeUnless(JsonPrimitive::isString)
-        ?.content
-        ?.toBigDecimalOrNull()
+    private fun JsonObject.double(key: String): Double? {
+        val primitive = (get(key) as? JsonPrimitive)?.takeUnless(JsonPrimitive::isString) ?: return null
+        return primitive.booleanOrNull?.let { if (it) 1.0 else 0.0 } ?: primitive.doubleOrNull
+    }
+
+    private fun JsonObject.decimal(key: String): BigDecimal? {
+        val primitive = (get(key) as? JsonPrimitive)?.takeUnless(JsonPrimitive::isString) ?: return null
+        return primitive.booleanOrNull?.let { if (it) BigDecimal.ONE else BigDecimal.ZERO }
+            ?: primitive.content.toBigDecimalOrNull()
+    }
 
     private fun JsonObject.bool(key: String): Boolean? {
         val primitive = (get(key) as? JsonPrimitive)?.takeUnless(JsonPrimitive::isString) ?: return null

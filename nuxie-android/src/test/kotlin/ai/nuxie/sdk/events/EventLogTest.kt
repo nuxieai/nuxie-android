@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.events
 
 import ai.nuxie.sdk.LogLevel
+import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.NuxieEvent
 import ai.nuxie.sdk.identity.IdentityProvider
@@ -317,6 +318,39 @@ class EventLogTest {
         eventLog.awaitBarrier()
 
         assertEquals(listOf(2_000L to 2_000L), forwardedTimestamps)
+    }
+
+    @Test
+    fun beforeSendBooleanFeatureAmountIsForwardedAsDouble() = runBlocking {
+        val store = RecordingStore()
+        val forwarded = mutableListOf<ai.nuxie.sdk.NuxieActivityInfo>()
+        val eventLog = log(
+            store = store,
+            forwardingEnabled = { true },
+            beforeSend = { event ->
+                NuxieEvent(
+                    id = event.id,
+                    name = event.name,
+                    distinctId = event.distinctId,
+                    properties = event.properties + ("amount" to true),
+                    timestampMillis = event.timestampMillis,
+                )
+            },
+        )
+        val forwarder = ActivityForwarder(
+            resolveExperience = { _, _ -> null },
+            deliver = { forwarded += it },
+        )
+        eventLog.subscribeForwarding { event -> forwarder.onCommitted(event) }
+
+        eventLog.capture(
+            SystemEventNames.FEATURE_USED,
+            mapOf("feature_id" to "credits", "amount" to 2.0),
+        )
+        eventLog.awaitBarrier()
+
+        val activity = forwarded.single().activity as NuxieActivity.FeatureUsed
+        assertEquals(1.0, activity.amount, 0.0)
     }
 
     @Test
