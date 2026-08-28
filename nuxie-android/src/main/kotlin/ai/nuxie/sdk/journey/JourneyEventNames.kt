@@ -10,4 +10,7 @@ internal object JourneyEventNames {
     const val EFFECT_REQUESTED = "\$journey_effect_requested"
     const val EFFECT_COMPLETED = "\$journey_effect_completed"
     const val SUPERSEDED = "\$journey_superseded"
+    const val EXPERIENCE_ARTIFACT_LOAD_FAILED = "\$experience_artifact_load_failed"
+    const val EXPERIMENT_EXPOSURE = "\$experiment_exposure"
+    const val EXPERIMENT_EXPOSURE_ERROR = "\$experiment_exposure_error"
 }

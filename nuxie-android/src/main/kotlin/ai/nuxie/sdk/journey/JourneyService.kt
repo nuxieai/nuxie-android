@@ -53,6 +53,12 @@ internal class JourneyService(
         return results
     }
 
+    /** Resolves the typed forwarding view without changing the persisted event contract. */
+    internal fun forwardingExperienceRef(distinctId: String, journeyId: String): ExperienceRef? =
+        store.load(distinctId, journeyId)?.let { run ->
+            ExperienceRef(run.experienceId, run.experienceVersion, run.id)
+        }
+
     suspend fun transition(
         distinctId: String,
         journeyId: String,
@@ -120,6 +126,7 @@ internal class JourneyService(
 
     override suspend fun applyDownFacts(body: JsonObject, distinctId: String) {
         val facts = body["facts"] as? JsonArray ?: return
+        val receivedAtMillis = nowMillis()
         facts.forEach { element ->
             val fact = element as? JsonObject ?: return@forEach
             val id = fact.string("id") ?: return@forEach
@@ -139,11 +146,11 @@ internal class JourneyService(
             val event = StoredEvent(id, name, serverProperties, timestamp, distinctId)
             if (name == JourneyEventNames.SUPERSEDED || name == JourneyEventNames.CONVERTED) {
                 runLock.withLock {
-                    if (ledger.serverFact(event)) {
+                    if (ledger.serverFact(event, receivedAtMillis)) {
                         routeDownFact(distinctId, name, serverProperties)
                     }
                 }
-            } else if (ledger.serverFact(event)) {
+            } else if (ledger.serverFact(event, receivedAtMillis)) {
                 routeDownFact(distinctId, name, serverProperties)
             }
         }

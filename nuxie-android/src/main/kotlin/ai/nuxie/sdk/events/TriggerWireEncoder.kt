@@ -55,6 +55,7 @@ internal object TriggerWireEncoder {
         JourneyExitReason.EXPIRED -> "expired"
         JourneyExitReason.CANCELLED -> "cancelled"
         JourneyExitReason.ERROR -> "error"
+        JourneyExitReason.SUPERSEDED -> "superseded"
     }
 
     fun parseExitReason(wire: String): JourneyExitReason? = when (wire) {
@@ -65,6 +66,7 @@ internal object TriggerWireEncoder {
         "expired" -> JourneyExitReason.EXPIRED
         "cancelled" -> JourneyExitReason.CANCELLED
         "error" -> JourneyExitReason.ERROR
+        "superseded" -> JourneyExitReason.SUPERSEDED
         else -> null
     }
 }

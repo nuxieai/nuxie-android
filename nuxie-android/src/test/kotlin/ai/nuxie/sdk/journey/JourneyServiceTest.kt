@@ -81,7 +81,10 @@ class JourneyServiceTest {
 
     private data class Harness(val root: File, val store: Store, val log: EventLog, val service: JourneyService)
 
-    private fun harness(reentry: JourneyReentry = JourneyReentry.EveryTime): Harness {
+    private fun harness(
+        reentry: JourneyReentry = JourneyReentry.EveryTime,
+        forwardingEnabled: () -> Boolean = { false },
+    ): Harness {
         val root = createTempDir(prefix = "nuxie-journey-")
         val eventStore = Store()
         val identity = Identity()
@@ -92,6 +95,7 @@ class JourneyServiceTest {
             beforeSend = null,
             scope = scope,
             nowMillis = { now },
+            forwardingEnabled = forwardingEnabled,
         )
         val release = AdmittedJourneyRelease(
             experienceId = "experience-1",
@@ -236,6 +240,33 @@ class JourneyServiceTest {
             h.service.applyDownFacts(buildJsonObject { put("facts", JsonArray(listOf(fact("later", 50L), fact("earlier", 10L)))) }, "customer-1")
 
             assertEquals(10L, JourneyStore(h.root).load("customer-1", journeyId)!!.convertedAtMillis)
+        } finally { h.root.deleteRecursively() }
+    }
+
+    @Test
+    fun downFactsFromOneResponseShareOneLocalReceiptTime() = runBlocking {
+        val h = harness(forwardingEnabled = { true })
+        try {
+            fun fact(id: String, timestamp: Long) = buildJsonObject {
+                put("id", JsonPrimitive(id))
+                put("event", JsonPrimitive(JourneyEventNames.CONVERTED))
+                put("timestamp", JsonPrimitive(timestamp))
+                put("properties", buildJsonObject { put("journey_id", JsonPrimitive("journey-1")) })
+            }
+            h.log.subscribeCommitted({ it.id == "first" }) { now += 5_000L }
+
+            h.service.applyDownFacts(
+                buildJsonObject { put("facts", JsonArray(listOf(fact("first", 10L), fact("second", 20L)))) },
+                "customer-1",
+            )
+
+            assertEquals(10L, h.store.events.getValue("first").timestampMillis)
+            assertEquals(20L, h.store.events.getValue("second").timestampMillis)
+            assertEquals(
+                h.store.events.getValue("first").forwardingReceivedAtMillis,
+                h.store.events.getValue("second").forwardingReceivedAtMillis,
+            )
+            assertEquals(1_784_462_400_000L, h.store.events.getValue("second").forwardingReceivedAtMillis)
         } finally { h.root.deleteRecursively() }
     }
 

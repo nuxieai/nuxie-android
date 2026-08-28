@@ -73,6 +73,7 @@ object Nuxie {
 
         require(configuration.apiKey.isNotBlank()) { "apiKey must not be blank." }
 
+        featureInfoInstance.onFeatureChange = ::deliverFeatureAccessChange
         val core = NuxieCore(
             context = context,
             apiKey = configuration.apiKey,
@@ -84,6 +85,8 @@ object Nuxie {
             purchaseDelegate = configuration.purchaseDelegate,
             purchaseHandlingMode = configuration.purchaseHandlingMode,
             overrides = overridesForTesting ?: NuxieCore.Overrides(),
+            forwardingEnabled = { listener != null },
+            forwardActivity = ::deliverActivity,
         )
         setupState = SetupState(logLevel = configuration.logLevel, core = core)
         core.start()
@@ -308,20 +311,41 @@ object Nuxie {
      * so changing or clearing it before delivery takes effect immediately.
      */
     internal suspend fun deliverAppAction(action: AppAction) {
+        deliverOnMain("App Action") { it.onAppActionRequested(this, action) }
+    }
+
+    /** Last-mile typed activity delivery through the weak listener seam. */
+    internal suspend fun deliverActivity(info: NuxieActivityInfo) {
+        deliverOnMain("activity") { it.onActivityEmitted(this, info) }
+    }
+
+    /** Last-mile Feature transition delivery through the weak listener seam. */
+    internal suspend fun deliverFeatureAccessChange(
+        featureId: String,
+        oldAccess: FeatureAccess?,
+        newAccess: FeatureAccess,
+    ) {
+        deliverOnMain("Feature access change") {
+            it.featureAccessDidChange(featureId, oldAccess, newAccess)
+        }
+    }
+
+    private suspend fun deliverOnMain(label: String, callback: (NuxieListener) -> Unit) {
+        if (listener == null) return
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            listener?.onAppActionRequested(this, action)
-        } else {
-            suspendCancellableCoroutine { continuation ->
-                val posted = mainHandler.post {
-                    runCatching { listener?.onAppActionRequested(this, action) }
-                        .onSuccess { continuation.resume(Unit) }
-                        .onFailure(continuation::resumeWithException)
-                }
-                if (!posted) {
-                    continuation.resumeWithException(
-                        IllegalStateException("Could not dispatch App Action to the main thread."),
-                    )
-                }
+            listener?.let(callback)
+            return
+        }
+        suspendCancellableCoroutine { continuation ->
+            val posted = mainHandler.post {
+                runCatching { listener?.let(callback) }
+                    .onSuccess { continuation.resume(Unit) }
+                    .onFailure(continuation::resumeWithException)
+            }
+            if (!posted) {
+                continuation.resumeWithException(
+                    IllegalStateException("Could not dispatch $label to the main thread."),
+                )
             }
         }
     }
@@ -359,7 +383,7 @@ object Nuxie {
         setupState?.core?.let { runCatching { it.stop() } }
         setupState = null
         listener = null
-        featureInfoInstance.reset()
+        kotlinx.coroutines.runBlocking { featureInfoInstance.reset() }
     }
 
     private class SetupState(

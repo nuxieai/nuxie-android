@@ -41,7 +41,6 @@ internal class FeatureService(
         val grants: Map<String, FeatureAccess>,
         val committedRevision: Long,
     )
-
     private companion object {
         /** A null requiredBalance means "one unit" everywhere. */
         const val DEFAULT_REQUIRED_BALANCE = 1.0
@@ -106,7 +105,7 @@ internal class FeatureService(
         ) {
             throw kotlinx.coroutines.CancellationException()
         }
-        return synchronized(lock) {
+        val (access, publications) = synchronized(lock) {
             if (identity.distinctId() != distinctId || cacheDistinctId != distinctId ||
                 scopeGeneration != expectedScope.generation
             ) {
@@ -130,7 +129,7 @@ internal class FeatureService(
             if (allowedFeatureIds.isNotEmpty() &&
                 !revocationStore.retireRevokedGrants(distinctId, allowedFeatureIds)
             ) {
-                return@synchronized requestedAccess
+                return@synchronized requestedAccess to emptyList()
             }
             if (identity.distinctId() != distinctId || cacheDistinctId != distinctId ||
                 scopeGeneration != expectedScope.generation
@@ -142,7 +141,7 @@ internal class FeatureService(
             }
 
             val cachedAt = nowMillis()
-            affectedFeatureIds.forEach { featureId ->
+            val committed = affectedFeatureIds.map { featureId ->
                 val access = publishedAccess.getValue(featureId)
                 val key = CacheKey(featureId, entityId)
                 committedMutationRevisions[key] = mutationRevisions.getValue(featureId)
@@ -153,10 +152,12 @@ internal class FeatureService(
                         featureId == requestedFeatureId && result.featureId != requestedFeatureId
                     },
                 )
-                featureInfo.update(featureId, access, entityId)
+                featureInfo.stageUpdate(featureId, access, entityId)
             }
-            requestedAccess
+            requestedAccess to committed
         }
+        publications.forEach { featureInfo.publish(it) }
+        return access
     }
 
     suspend fun checkWithCache(
@@ -192,15 +193,18 @@ internal class FeatureService(
 
     suspend fun clearCache() {
         synchronizeCustomerScopeIfNeeded()
-        synchronized(lock) { realTimeCache.clear() }
+        val publication = synchronized(lock) {
+            realTimeCache.clear()
+            featureInfo.stageClear()
+        }
         // Profile remains the durable source for future cache reads. Clearing
         // the reactive projection matches iOS: a later profile hydration is
         // what republishes that durable snapshot.
-        featureInfo.clear()
+        featureInfo.publish(publication)
     }
 
     suspend fun handleUserChange(from: String, to: String) {
-        synchronized(lock) {
+        val publication = synchronized(lock) {
             // A new customer must never inherit the prior customer's durable
             // profile snapshot or short-lived check results.
             cacheDistinctId = to
@@ -213,8 +217,9 @@ internal class FeatureService(
             featureMutationRevisions.clear()
             committedMutationRevisions.clear()
             scopeGeneration += 1
+            featureInfo.stageReset()
         }
-        featureInfo.reset()
+        featureInfo.publish(publication)
     }
 
     /** Called by ProfileService whenever its raw profile body is applied. */
@@ -228,7 +233,7 @@ internal class FeatureService(
         val hydrationGeneration = synchronized(lock) { scopeGeneration }
         if (identity.distinctId() != distinctId) return
         val parsed = parseProfileFeatures(body)
-        synchronized(lock) {
+        val publication = synchronized(lock) {
             if (identity.distinctId() != distinctId || scopeGeneration != hydrationGeneration) return
             cacheDistinctId = distinctId
             durableAccess = parsed.first
@@ -251,8 +256,9 @@ internal class FeatureService(
             }
             localPurchases.entries.removeAll { it.value.grants.isEmpty() }
             revokedPurchases.entries.removeAll { it.value.grants.isEmpty() }
+            stageCurrentLocked(ready = true, expectedGeneration = hydrationGeneration)
         }
-        publishCurrent(ready = true, expectedGeneration = hydrationGeneration)
+        publication?.let { featureInfo.publish(it) }
     }
 
     suspend fun syncFeatureInfo() = publishCurrent(ready = true)
@@ -269,7 +275,7 @@ internal class FeatureService(
                 )
             }
         if (optimistic.isEmpty()) return
-        synchronized(lock) {
+        val publication = synchronized(lock) {
             if (localPurchases.containsKey(transactionId)) return
             val replacedRevocation = revokedPurchases.remove(transactionId)?.grants.orEmpty()
             optimistic.keys.forEach { featureId ->
@@ -280,13 +286,14 @@ internal class FeatureService(
             optimistic.keys.forEach { featureId ->
                 committedMutationRevisions[CacheKey(featureId, null)] = advanceFeatureMutationRevision(featureId)
             }
+            stageCurrentLocked()
         }
-        publishCurrent()
+        publication?.let { featureInfo.publish(it) }
     }
 
     suspend fun removePurchase(transactionId: String) {
         synchronizeCustomerScopeIfNeeded()
-        synchronized(lock) {
+        val publication = synchronized(lock) {
             val optimistic = localPurchases.remove(transactionId)?.grants.orEmpty()
             val accepted = purchaseUpdates.remove(transactionId)?.grants.orEmpty()
             val removed = optimistic + accepted
@@ -298,8 +305,9 @@ internal class FeatureService(
                 FeatureAccess(false, false, access.balance, access.type)
             }
             revokedPurchases[transactionId] = PurchaseProjection(tombstones, revision)
+            stageCurrentLocked()
         }
-        publishCurrent()
+        publication?.let { featureInfo.publish(it) }
     }
 
     /** Merge the incremental Feature grants returned by /purchase. */
@@ -307,7 +315,7 @@ internal class FeatureService(
         val hydrationGeneration = synchronized(lock) { scopeGeneration }
         if (identity.distinctId() != distinctId) return
         val updates = parsePurchaseFeatures(body)
-        synchronized(lock) {
+        val publication = synchronized(lock) {
             if (identity.distinctId() != distinctId || scopeGeneration != hydrationGeneration) return
             val replaced = purchaseUpdates[transactionId]?.grants.orEmpty() +
                 localPurchases.remove(transactionId)?.grants.orEmpty() +
@@ -317,8 +325,9 @@ internal class FeatureService(
                 realTimeCache.keys.removeAll { it.featureId == featureId }
             }
             purchaseUpdates[transactionId] = PurchaseProjection(updates, revision)
+            stageCurrentLocked(ready = true, expectedGeneration = hydrationGeneration)
         }
-        publishCurrent(ready = true, expectedGeneration = hydrationGeneration)
+        publication?.let { featureInfo.publish(it) }
     }
 
     suspend fun getCached(
@@ -438,7 +447,7 @@ internal class FeatureService(
         val allowedFeatureIds = publishedAccess.filterValues { it.allowed }.keys
 
         return withContext(Dispatchers.IO) {
-            synchronized(lock) {
+            val (checked, publications) = synchronized(lock) {
                 // Identity flips synchronously while handleUserChange (which
                 // bumps the generation) is queued behind it, so the live
                 // identity is re-read inside the commit lock; a flip landing
@@ -454,7 +463,7 @@ internal class FeatureService(
                     requestMutationRevision = requestMutationRevision,
                     serverAccess = serverAccess,
                     requestedAccess = requestedAccess,
-                )?.let { return@synchronized it }
+                )?.let { return@synchronized it to emptyList() }
                 // iOS performs this synchronous ledger write on its actor.
                 // Keep it serialized with the supersession guard and commit.
                 if (allowedFeatureIds.isNotEmpty() &&
@@ -473,7 +482,7 @@ internal class FeatureService(
                 if (allowedFeatureIds.isNotEmpty()) reconcileRevokedPurchases(allowedFeatureIds)
 
                 val cachedAt = nowMillis()
-                affectedFeatureIds.forEach { affectedFeatureId ->
+                val committed = affectedFeatureIds.map { affectedFeatureId ->
                     val access = publishedAccess.getValue(affectedFeatureId)
                     val affectedKey = CacheKey(affectedFeatureId, entityId)
                     realTimeCache[affectedKey] = TimedAccess(
@@ -484,13 +493,15 @@ internal class FeatureService(
                         },
                     )
                     committedMutationRevisions[affectedKey] = mutationRevisions.getValue(affectedFeatureId)
-                    featureInfo.update(affectedFeatureId, access, entityId)
+                    featureInfo.stageUpdate(affectedFeatureId, access, entityId)
                 }
                 val effectiveAccess = purchaseAccess(featureId, entityId)
                     ?.forRequiredBalance(requiredBalance)
                     ?: requestedAccess
-                CheckedAccess(serverAccess, effectiveAccess, supersededByMutation = false)
+                CheckedAccess(serverAccess, effectiveAccess, supersededByMutation = false) to committed
             }
+            publications.forEach { featureInfo.publish(it) }
+            checked
         }
     }
 
@@ -529,8 +540,8 @@ internal class FeatureService(
 
     private suspend fun synchronizeCustomerScopeIfNeeded() {
         val distinctId = identity.distinctId()
-        val changed = synchronized(lock) {
-            if (cacheDistinctId == distinctId) false else {
+        val publication = synchronized(lock) {
+            if (cacheDistinctId == distinctId) null else {
                 cacheDistinctId = distinctId
                 durableAccess = emptyMap()
                 durableEntities = emptyMap()
@@ -541,21 +552,34 @@ internal class FeatureService(
                 featureMutationRevisions.clear()
                 committedMutationRevisions.clear()
                 scopeGeneration += 1
-                true
+                featureInfo.stageReset()
             }
         }
-        if (changed) featureInfo.reset()
+        publication?.let { featureInfo.publish(it) }
     }
 
     private suspend fun publishCurrent(ready: Boolean = false, expectedGeneration: Long? = null) {
-        synchronized(lock) {
-            if (expectedGeneration != null && scopeGeneration != expectedGeneration) return
-            val fresh = realTimeCache
-                .filter { (key, timed) -> key.entityId == null && isFresh(timed) }
-                .mapValues { it.value.access }
-                .mapKeys { it.key.featureId }
-            featureInfo.update(mergePurchaseAccess(durableGlobalAccess() + fresh), durableEntities, ready)
+        val publication = synchronized(lock) {
+            stageCurrentLocked(ready, expectedGeneration)
         }
+        publication?.let { featureInfo.publish(it) }
+    }
+
+    /** Must be called while [lock] is held so reservation order equals commit order. */
+    private fun stageCurrentLocked(
+        ready: Boolean = false,
+        expectedGeneration: Long? = null,
+    ): FeatureInfo.Mutation? {
+        if (expectedGeneration != null && scopeGeneration != expectedGeneration) return null
+        val fresh = realTimeCache
+            .filter { (key, timed) -> key.entityId == null && isFresh(timed) }
+            .mapValues { it.value.access }
+            .mapKeys { it.key.featureId }
+        return featureInfo.stageUpdate(
+            mergePurchaseAccess(durableGlobalAccess() + fresh),
+            durableEntities,
+            ready,
+        )
     }
 
     private fun mergedGlobalAccess(): Map<String, FeatureAccess> {

@@ -23,6 +23,9 @@ internal object SystemEventNames {
     // Feature gating / metered usage (backend-ingested by name)
     const val FEATURE_USED = "\$feature_used"
 
+    // Product resolution
+    const val PRODUCTS_UNAVAILABLE = "\$products_unavailable"
+
     // Experience presentation
     const val EXPERIENCE_SHOWN = "\$experience_shown"
     const val EXPERIENCE_DISMISSED = "\$experience_dismissed"
@@ -43,4 +46,12 @@ internal object SystemEventNames {
     const val RESTORE_COMPLETED = "\$restore_completed"
     const val RESTORE_FAILED = "\$restore_failed"
     const val RESTORE_NO_PURCHASES = "\$restore_no_purchases"
+
+    // Permissions
+    const val NOTIFICATIONS_ENABLED = "\$notifications_enabled"
+    const val NOTIFICATIONS_DENIED = "\$notifications_denied"
+    const val PERMISSION_GRANTED = "\$permission_granted"
+    const val PERMISSION_DENIED = "\$permission_denied"
+    const val TRACKING_AUTHORIZED = "\$tracking_authorized"
+    const val TRACKING_DENIED = "\$tracking_denied"
 }

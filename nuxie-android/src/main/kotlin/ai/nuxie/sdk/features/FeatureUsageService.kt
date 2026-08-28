@@ -6,6 +6,8 @@ import ai.nuxie.sdk.events.BatchItemWireEncoder
 import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.SystemEventNames
+import ai.nuxie.sdk.events.EventLog
+import ai.nuxie.sdk.events.TimeBasedEpochGenerator
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.network.NuxieApi
 import android.util.Log
@@ -28,6 +30,7 @@ internal class FeatureUsageService(
     private val purchases: PurchaseService,
     private val identity: IdentityProvider,
     private val featureInfo: FeatureInfo,
+    private val eventLog: EventLog,
     private val scope: CoroutineScope,
 ) {
     fun useFeature(
@@ -79,7 +82,19 @@ internal class FeatureUsageService(
                 amount = amount,
                 entityId = entityId,
                 metadata = metadata?.toMap(),
-            )?.let { return@withContext it }
+            )?.let { result ->
+                if (result.success) {
+                    captureAcceptedUse(
+                        featureId,
+                        amount,
+                        entityId,
+                        metadata,
+                        TimeBasedEpochGenerator.shared.next(),
+                        distinctId,
+                    )
+                }
+                return@withContext result
+            }
         }
         ensureIdentity(distinctId)
 
@@ -111,12 +126,45 @@ internal class FeatureUsageService(
             )
         }
         usage?.remaining?.let { featureInfo.setBalance(featureId, it, entityId) }
+        val accepted = status == "ok" || status == "success"
+        if (accepted) {
+            captureAcceptedUse(
+                featureId,
+                amount,
+                entityId,
+                metadata,
+                response.string("eventId") ?: response.string("event_id") ?: stored.id,
+                distinctId,
+            )
+        }
         FeatureUsageResult(
-            success = status == "ok" || status == "success",
+            success = accepted,
             featureId = featureId,
             amountUsed = amount,
             message = response.string("message"),
             usage = usage,
+        )
+    }
+
+    private suspend fun captureAcceptedUse(
+        featureId: String,
+        amount: Double,
+        entityId: String?,
+        metadata: JsonObject?,
+        eventId: String,
+        distinctId: String,
+    ) {
+        val properties = linkedMapOf<String, Any?>(
+            "feature_id" to featureId,
+            "amount" to amount,
+        )
+        entityId?.let { properties["entity_id"] = it }
+        metadata?.let { properties["metadata"] = it }
+        eventLog.captureDeliveredIdempotently(
+            SystemEventNames.FEATURE_USED,
+            properties,
+            eventId,
+            distinctId,
         )
     }
 

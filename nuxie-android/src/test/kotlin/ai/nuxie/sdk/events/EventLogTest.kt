@@ -4,6 +4,7 @@ import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.NuxieEvent
 import ai.nuxie.sdk.identity.IdentityProvider
+import ai.nuxie.sdk.journey.JourneyEventNames
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -80,6 +81,8 @@ class EventLogTest {
 
     private fun log(
         store: EventStore,
+        forwardingEnabled: () -> Boolean = { false },
+        nowMillis: () -> Long = { 1_784_462_400_000L },
         beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
     ): EventLog = EventLog(
         store = store,
@@ -87,7 +90,8 @@ class EventLogTest {
         identity = FakeIdentity(),
         beforeSend = beforeSend,
         scope = scope,
-        nowMillis = { 1_784_462_400_000L },
+        nowMillis = nowMillis,
+        forwardingEnabled = forwardingEnabled,
     )
 
     @After
@@ -157,6 +161,35 @@ class EventLogTest {
     }
 
     @Test
+    fun acceptedDirectEventCommitsDeliveredAndAnnouncesExactlyOnce() = runBlocking {
+        val store = RecordingStore()
+        val eventLog = log(store)
+        val observed = mutableListOf<StoredEvent>()
+        eventLog.subscribeCommitted { observed += it }
+
+        assertTrue(
+            eventLog.captureDeliveredIdempotently(
+                SystemEventNames.FEATURE_USED,
+                mapOf("feature_id" to "credits", "amount" to 1.0),
+                "accepted-event",
+                "owner-1",
+            ),
+        )
+        assertTrue(
+            eventLog.captureDeliveredIdempotently(
+                SystemEventNames.FEATURE_USED,
+                mapOf("feature_id" to "credits", "amount" to 1.0),
+                "accepted-event",
+                "owner-1",
+            ),
+        )
+
+        assertTrue(store.pending.isEmpty())
+        assertEquals(listOf("accepted-event"), store.delivered.map(StoredEvent::id))
+        assertEquals(listOf("accepted-event"), observed.map(StoredEvent::id))
+    }
+
+    @Test
     fun beforeSendRenameKeepsIdentityAndTimestamp() = runBlocking {
         val store = RecordingStore()
         val eventLog = log(store) { event ->
@@ -174,10 +207,51 @@ class EventLogTest {
 
         val stored = store.pending.single()
         assertEquals("renamed", stored.name)
+        assertEquals("original", stored.forwardingName)
         // Recovery owns identity: id, distinctId, and timestamp are pinned.
         assertEquals("anon-1", stored.distinctId)
         assertEquals(1_784_462_400_000L, stored.timestampMillis)
         assertTrue(stored.id != "attacker-controlled-id")
+    }
+
+    @Test
+    fun forwardingTimestampPrecedesBeforeSendButAdmissionFollowsIt() = runBlocking {
+        val store = RecordingStore()
+        var enabled = false
+        var clock = 1_000L
+        val eventLog = log(
+            store = store,
+            beforeSend = { event ->
+                clock = 2_000L
+                enabled = true
+                event
+            },
+            forwardingEnabled = { enabled },
+            nowMillis = { clock },
+        )
+
+        eventLog.capture("first")
+        eventLog.awaitBarrier()
+
+        assertEquals(1_000L, store.pending.single().forwardingReceivedAtMillis)
+    }
+
+    @Test
+    fun serverFactKeepsHistoricalEventTimeAndUsesLocalReceiptTime() = runBlocking {
+        val store = RecordingStore()
+        val eventLog = log(store, forwardingEnabled = { true }, nowMillis = { 2_000L })
+        val fact = StoredEvent(
+            id = "server-fact",
+            name = JourneyEventNames.CONVERTED,
+            timestampMillis = 500L,
+            distinctId = "anon-1",
+        )
+
+        assertTrue(eventLog.commitServerFact(fact))
+
+        val committed = store.delivered.single()
+        assertEquals(500L, committed.timestampMillis)
+        assertEquals(2_000L, committed.forwardingReceivedAtMillis)
     }
 
     @Test
