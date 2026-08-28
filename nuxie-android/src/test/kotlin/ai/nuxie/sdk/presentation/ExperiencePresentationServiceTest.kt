@@ -447,6 +447,84 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun identityShutdownRejectsSameOwnerPresentationStillAcquiring() = runTest {
+        val acquisitionStarted = CompletableDeferred<Unit>()
+        val continueAcquisition = CompletableDeferred<Unit>()
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val service = service(
+            launch = launched::add,
+            acquire = {
+                acquisitionStarted.complete(Unit)
+                continueAcquisition.await()
+                acquired("exp-1", "v1", lease)
+            },
+        )
+        val presentation = async(SupervisorJob()) {
+            service.present("v1", "journey-7", "customer-1")
+        }
+
+        try {
+            acquisitionStarted.await()
+            service.shutdownOwnedBy("customer-1")
+
+            continueAcquisition.complete(Unit)
+            runCurrent()
+
+            assertTrue("rejected acquisition must finish", presentation.isCompleted)
+            assertTrue("rejected acquisition must release its lease", lease.closed.get())
+            assertTrue("old-owner presentation launched after identity teardown", launched.isEmpty())
+            val error = try {
+                presentation.await()
+                fail("old-owner presentation should be superseded")
+                error("unreachable")
+            } catch (error: ExperiencePresentationException) {
+                error
+            }
+            assertEquals(ExperiencePresentationException.Reason.SUPERSEDED, error.reason)
+        } finally {
+            presentation.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun identityShutdownLeavesDifferentOwnerPresentationAcquiring() = runTest {
+        val acquisitionStarted = CompletableDeferred<Unit>()
+        val continueAcquisition = CompletableDeferred<Unit>()
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val service = service(
+            launch = launched::add,
+            acquire = {
+                acquisitionStarted.complete(Unit)
+                continueAcquisition.await()
+                acquired("exp-1", "v1", lease)
+            },
+        )
+        val presentation = async(SupervisorJob()) {
+            service.present("v1", "journey-7", "customer-2")
+        }
+
+        try {
+            acquisitionStarted.await()
+            service.shutdownOwnedBy("customer-1")
+
+            continueAcquisition.complete(Unit)
+            runCurrent()
+
+            PresentationRegistry.reportFirstFrame(launched.single())
+            assertEquals("v1", presentation.await().experienceVersion)
+            assertFalse("different-owner acquisition was rejected", lease.closed.get())
+        } finally {
+            continueAcquisition.complete(Unit)
+            runCurrent()
+            service.shutdownOwnedBy("customer-2")
+            presentation.cancelAndJoin()
+        }
+        assertTrue(lease.closed.get())
+    }
+
+    @Test
     fun admittedHostDismissalKeepsItsOwnerAfterIdentityChanges() = runTest {
         val launched = mutableListOf<String>()
         val reservationEstablished = CompletableDeferred<Unit>()

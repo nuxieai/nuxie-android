@@ -341,11 +341,36 @@ internal class ExperiencePresentationService(
     private val stateLock = Any()
     private var current: ActivePresentation? = null
     private var hostDismissalAttempt: HostDismissalAttempt? = null
+    private var identityEpoch = 0L
+    private var acquisitionAdmission: AcquisitionAdmission? = null
 
     private data class HostDismissalAttempt(
         val active: ActivePresentation,
         val completion: CompletableDeferred<Unit> = CompletableDeferred(),
     )
+
+    private data class AcquisitionAdmission(
+        val ownerDistinctId: String?,
+        val identityEpoch: Long,
+    )
+
+    private suspend fun <T> withAcquisitionAdmission(
+        ownerDistinctId: String?,
+        block: suspend (AcquisitionAdmission) -> T,
+    ): T {
+        val admission = synchronized(stateLock) {
+            AcquisitionAdmission(ownerDistinctId, identityEpoch).also {
+                acquisitionAdmission = it
+            }
+        }
+        return try {
+            block(admission)
+        } finally {
+            synchronized(stateLock) {
+                if (acquisitionAdmission === admission) acquisitionAdmission = null
+            }
+        }
+    }
 
     suspend fun present(
         experienceVersionId: String,
@@ -353,65 +378,87 @@ internal class ExperiencePresentationService(
         ownerDistinctId: String? = null,
     ): ExperienceRef {
         val active = presentationMutex.withLock {
-            if (!runtimeAvailable()) {
-                throw ExperiencePresentationException(
-                    ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE,
-                    "Experience renderer is unavailable on this device",
-                )
-            }
+            withAcquisitionAdmission(ownerDistinctId) { admission ->
+                if (!runtimeAvailable()) {
+                    throw ExperiencePresentationException(
+                        ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE,
+                        "Experience renderer is unavailable on this device",
+                    )
+                }
 
-            synchronized(stateLock) { current }?.let {
-                PresentationRegistry.dismiss(it.id, CloseReason.UserDismissed)
-                it.finished.await()
-            }
+                synchronized(stateLock) { current }?.let {
+                    PresentationRegistry.dismiss(it.id, CloseReason.UserDismissed)
+                    it.finished.await()
+                }
 
-            val admitted = releases.releaseFor(experienceVersionId)
-                ?: throw ExperiencePresentationException(
-                    ExperiencePresentationException.Reason.RELEASE_NOT_FOUND,
-                    "Authenticated Experience release not found: $experienceVersionId",
+                val admitted = releases.releaseFor(experienceVersionId)
+                    ?: throw ExperiencePresentationException(
+                        ExperiencePresentationException.Reason.RELEASE_NOT_FOUND,
+                        "Authenticated Experience release not found: $experienceVersionId",
+                    )
+                val acquired = try {
+                    acquire(admitted)
+                } catch (error: Throwable) {
+                    if (error is CancellationException) throw error
+                    throw ExperiencePresentationException(
+                        ExperiencePresentationException.Reason.ACQUISITION_FAILED,
+                        "Experience artifact acquisition failed: ${error.message ?: "unknown error"}",
+                        error,
+                    )
+                }
+                val identity = admitted.release.identity
+                val ref = ExperienceRef(
+                    identity.experienceId,
+                    identity.experienceVersionId,
+                    journeyId,
                 )
-            val acquired = try {
-                acquire(admitted)
-            } catch (error: Throwable) {
-                if (error is CancellationException) throw error
-                throw ExperiencePresentationException(
-                    ExperiencePresentationException.Reason.ACQUISITION_FAILED,
-                    "Experience artifact acquisition failed: ${error.message ?: "unknown error"}",
-                    error,
+                val id = UUID.randomUUID().toString()
+                val pending = ActivePresentation(
+                    id,
+                    ref,
+                    acquired,
+                    ownerDistinctId,
+                    CompletableDeferred(),
                 )
+                val launched = synchronized(stateLock) {
+                    if (identityEpoch != admission.identityEpoch) {
+                        false
+                    } else {
+                        // Identity shutdown and late launch admission share this
+                        // transition: teardown either invalidates the epoch first
+                        // or observes a fully registered presentation afterward.
+                        current = pending
+                        PresentationRegistry.register(
+                            id = id,
+                            content = PreparedPresentation(
+                                rivFile = acquired.rivFile,
+                                artboardName = admitted.release.defaultArtboardName(),
+                                clearColor = admitted.release.presentationClearColor(),
+                                shell = admitted.release.presentationShell(),
+                                descriptor = admitted.release.descriptor,
+                                artifactsByKey = acquired.artifactsByKey,
+                            ),
+                            onFirstFrame = { firstFrame(pending) },
+                            onFailure = { error -> failed(pending, error) },
+                            onDismissed = { reason -> ended(pending, reason) },
+                        )
+                        try {
+                            launch(id)
+                        } catch (error: Throwable) {
+                            PresentationRegistry.reportFailure(id, error)
+                        }
+                        true
+                    }
+                }
+                if (!launched) {
+                    acquired.close()
+                    throw ExperiencePresentationException(
+                        ExperiencePresentationException.Reason.SUPERSEDED,
+                        "Experience presentation was superseded by an identity transition",
+                    )
+                }
+                pending
             }
-            val identity = admitted.release.identity
-            val ref = ExperienceRef(identity.experienceId, identity.experienceVersionId, journeyId)
-            val id = UUID.randomUUID().toString()
-            val pending = ActivePresentation(
-                id,
-                ref,
-                acquired,
-                ownerDistinctId,
-                CompletableDeferred(),
-            )
-            synchronized(stateLock) { current = pending }
-
-            PresentationRegistry.register(
-                id = id,
-                content = PreparedPresentation(
-                    rivFile = acquired.rivFile,
-                    artboardName = admitted.release.defaultArtboardName(),
-                    clearColor = admitted.release.presentationClearColor(),
-                    shell = admitted.release.presentationShell(),
-                    descriptor = admitted.release.descriptor,
-                    artifactsByKey = acquired.artifactsByKey,
-                ),
-                onFirstFrame = { firstFrame(pending) },
-                onFailure = { error -> failed(pending, error) },
-                onDismissed = { reason -> ended(pending, reason) },
-            )
-            try {
-                launch(id)
-            } catch (error: Throwable) {
-                PresentationRegistry.reportFailure(id, error)
-            }
-            pending
         }
         return try {
             withTimeout(firstFrameTimeoutMillis) { active.firstFrame.await() }
@@ -506,6 +553,11 @@ internal class ExperiencePresentationService(
      * Mirrors iOS identity-transition presentation shutdown (`reason: nil`).
      */
     suspend fun shutdownOwnedBy(ownerDistinctId: String) {
+        synchronized(stateLock) {
+            if (acquisitionAdmission?.ownerDistinctId == ownerDistinctId) {
+                identityEpoch += 1L
+            }
+        }
         while (true) {
             val existingAttempt = synchronized(stateLock) { hostDismissalAttempt }
             if (existingAttempt != null) {
