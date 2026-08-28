@@ -6,11 +6,17 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.longOrNull
 
 internal object JsonValueConverter {
     fun fromMap(properties: Map<String, Any?>): JsonObject = JsonObject(
         properties.mapValues { (_, value) -> fromAny(value) },
     )
+
+    fun toNativeMap(properties: JsonObject): Map<String, Any?> =
+        properties.mapValues { (_, value) -> toNativeValue(value) }
 
     private fun fromAny(value: Any?): JsonElement = when (value) {
         null -> JsonNull
@@ -41,6 +47,20 @@ internal object JsonValueConverter {
         else -> throw IllegalArgumentException(
             "Unsupported event property type: ${value::class.qualifiedName}",
         )
+    }
+
+    private fun toNativeValue(value: JsonElement): Any? = when (value) {
+        JsonNull -> null
+        is JsonObject -> toNativeMap(value)
+        is JsonArray -> value.map(::toNativeValue)
+        is JsonPrimitive -> when {
+            value.isString -> value.content
+            value.booleanOrNull != null -> value.booleanOrNull
+            value.longOrNull != null -> value.longOrNull
+            else -> value.doubleOrNull
+                ?: error("Validated JSON metadata contains a non-native scalar: ${value.content}")
+        }
+        else -> error("Unsupported JSON metadata value: $value")
     }
 
     private fun map(value: Map<*, *>): JsonObject {

@@ -6,10 +6,14 @@ import ai.nuxie.sdk.commerce.StoredLocalPurchaseGrant
 import ai.nuxie.sdk.commerce.StoredPurchaseState
 import ai.nuxie.sdk.commerce.purchaseAuthorityScope
 import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.events.EventStore
+import ai.nuxie.sdk.events.StoredEvent
+import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.identity.IdentityService
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.testsupport.FakeTransport
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
@@ -32,6 +36,42 @@ import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(RobolectricTestRunner::class)
 class NuxieMeteredUseTest {
+    private class RecordingDeliveredStore : EventStore {
+        val delivered = CopyOnWriteArrayList<StoredEvent>()
+
+        override suspend fun insertPending(event: StoredEvent) = Unit
+        override suspend fun insertDeliveredIfAbsent(event: StoredEvent): Boolean {
+            delivered += event
+            return true
+        }
+        override suspend fun markDelivered(ids: List<String>) = Unit
+        override suspend fun hasEvent(name: String, distinctId: String, sinceMillis: Long?) = false
+        override suspend fun countEvents(
+            name: String,
+            distinctId: String,
+            sinceMillis: Long?,
+            untilMillis: Long?,
+        ) = 0
+        override suspend fun getFirstEventTime(
+            name: String,
+            distinctId: String,
+            sinceMillis: Long?,
+            untilMillis: Long?,
+        ): Long? = null
+        override suspend fun getLastEventTime(
+            name: String,
+            distinctId: String,
+            sinceMillis: Long?,
+            untilMillis: Long?,
+        ): Long? = null
+        override suspend fun querySessionEvents(sessionId: String) = emptyList<StoredEvent>()
+        override suspend fun reassignEvents(from: String, to: String) = 0
+        override suspend fun deleteOldestDeliveredEvents(keeping: Int) = 0
+        override suspend fun recordStableDrop(eventId: String, recordedAtMillis: Long) = true
+        override suspend fun pendingBatch(limit: Int) = emptyList<StoredEvent>()
+        override suspend fun close() = Unit
+    }
+
     @After
     fun tearDown() {
         Nuxie.resetForTesting()
@@ -82,6 +122,52 @@ class NuxieMeteredUseTest {
         assertEquals("exports", properties.getValue("feature_extId").jsonPrimitive.content)
         assertEquals("pdf", properties.getValue("metadata").jsonObject
             .getValue("source").jsonPrimitive.content)
+    }
+
+    @Test
+    fun acceptedUseMetadataKeepsNativeScalarTypesInBeforeSendAndDeliveredHistory() = runBlocking {
+        val store = RecordingDeliveredStore()
+        val beforeSendFeatureUse = AtomicReference<NuxieEvent>()
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            store = store,
+            transport = usageTransport(),
+            registerLifecycle = false,
+        )
+        Nuxie.setup(
+            RuntimeEnvironment.getApplication(),
+            NuxieConfiguration("pk_test_metered_metadata").apply {
+                environment = NuxieEnvironment.DEVELOPMENT
+                logLevel = LogLevel.NONE
+                beforeSend = { event ->
+                    if (event.name == SystemEventNames.FEATURE_USED) beforeSendFeatureUse.set(event)
+                    event
+                }
+            },
+        )
+
+        assertTrue(
+            Nuxie.useFeatureAndWait(
+                featureId = "exports",
+                metadata = mapOf("sample_rate" to 2.5, "is_trial" to true),
+            ).success,
+        )
+
+        val beforeSendMetadata = beforeSendFeatureUse.get().properties.getValue("metadata")
+        assertTrue(beforeSendMetadata is Map<*, *>)
+        beforeSendMetadata as Map<*, *>
+        assertTrue(beforeSendMetadata["sample_rate"] is Double)
+        assertEquals(2.5, beforeSendMetadata["sample_rate"])
+        assertTrue(beforeSendMetadata["is_trial"] is Boolean)
+        assertEquals(true, beforeSendMetadata["is_trial"])
+
+        val deliveredMetadata = store.delivered.single().properties
+            .getValue("metadata").jsonObject
+        val deliveredSampleRate = deliveredMetadata.getValue("sample_rate").jsonPrimitive
+        assertFalse(deliveredSampleRate.isString)
+        assertEquals(2.5, deliveredSampleRate.double, 0.0)
+        val deliveredIsTrial = deliveredMetadata.getValue("is_trial").jsonPrimitive
+        assertFalse(deliveredIsTrial.isString)
+        assertTrue(deliveredIsTrial.boolean)
     }
 
     @Test
