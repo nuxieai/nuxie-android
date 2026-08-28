@@ -6,11 +6,13 @@ import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.NuxieActivityInfo
+import ai.nuxie.sdk.TriggerUpdate
 import ai.nuxie.sdk.events.ActivityForwarder
 import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.StoredEvent
+import ai.nuxie.sdk.events.TriggerBroker
 import ai.nuxie.sdk.experiences.AuthenticatedRelease
 import ai.nuxie.sdk.experiences.ExperienceReleaseIdentity
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
@@ -33,6 +35,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -56,9 +59,11 @@ class JourneyServiceTest {
         val events = linkedMapOf<String, StoredEvent>()
         val delivered = mutableSetOf<String>()
         var failNextPendingInsert = false
+        var beforePendingInsert: ((StoredEvent) -> Unit)? = null
         var serverFactInsertStarted: CompletableDeferred<Unit>? = null
         var serverFactInsertGate: CompletableDeferred<Unit>? = null
         override suspend fun insertPending(event: StoredEvent) {
+            beforePendingInsert?.invoke(event)
             if (failNextPendingInsert) {
                 failNextPendingInsert = false
                 error("pending insert failed")
@@ -85,7 +90,14 @@ class JourneyServiceTest {
         override suspend fun close() = Unit
     }
 
-    private data class Harness(val root: File, val store: Store, val log: EventLog, val service: JourneyService)
+    private data class Harness(
+        val root: File,
+        val store: Store,
+        val log: EventLog,
+        val service: JourneyService,
+        val broker: TriggerBroker,
+        val releases: JourneyReleaseProvider,
+    )
 
     private fun harness(
         reentry: JourneyReentry = JourneyReentry.EveryTime,
@@ -116,6 +128,10 @@ class JourneyServiceTest {
                 put("end_on_goal", JsonPrimitive(true))
             },
         )
+        val broker = TriggerBroker()
+        val releases = JourneyReleaseProvider { _, name ->
+            if (name == "opened") listOf(release) else emptyList()
+        }
         return Harness(
             root,
             eventStore,
@@ -123,9 +139,12 @@ class JourneyServiceTest {
             JourneyService(
                 JourneyStore(root),
                 JourneyLedger(eventLog),
-                JourneyReleaseProvider { _, name -> if (name == "opened") listOf(release) else emptyList() },
+                releases,
                 { now },
+                triggerBroker = broker,
             ),
+            broker,
+            releases,
         )
     }
 
@@ -194,6 +213,254 @@ class JourneyServiceTest {
                 forwarded.single { it.activity is NuxieActivity.JourneyEnded }.activity,
             )
         } finally { h.root.deleteRecursively() }
+    }
+
+    @Test
+    fun hostDismissalDurablyCapturesTheAttributedExitBeforeReturning() = runBlocking {
+        val h = harness()
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = started.ref.journeyId!!
+            reserveHostDismissal(h, journeyId)
+            var persistedAtCapture: JourneyRun? = null
+            h.store.beforePendingInsert = { event ->
+                if (event.name == JourneyEventNames.EXITED) {
+                    persistedAtCapture = JourneyStore(h.root).load("customer-1", journeyId)
+                }
+            }
+
+            val completed = h.service.presentationEnded(
+                "customer-1",
+                journeyId,
+                CloseReason.HostDismissed,
+            )
+
+            assertTrue(completed)
+            val durableTombstone = requireNotNull(persistedAtCapture)
+            assertEquals(JourneyRunState.TERMINAL, durableTombstone.state)
+            assertEquals("dismissed", durableTombstone.terminalReason)
+            assertEquals(now, durableTombstone.completedAtMillis)
+            assertTrue(durableTombstone.pendingHostExitCapture)
+            assertTrue(durableTombstone.pendingHostCompletion)
+            assertTrue(durableTombstone.pendingHostTriggerCompletion)
+            val exit = h.store.events.values.single { it.name == JourneyEventNames.EXITED }
+            assertEquals("journey-exited:$journeyId:0", exit.id)
+            assertEquals("customer-1", exit.distinctId)
+            assertEquals("dismissed", exit.properties.stringValue("reason"))
+            assertEquals("host", exit.properties.stringValue("dismissed_by"))
+            assertEquals("2026-07-19T12:00:00.000Z", exit.properties.stringValue("at"))
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun hostDismissalRemainsAuthoritativeForAGhostJourney() = runBlocking {
+        val h = harness()
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = started.ref.journeyId!!
+            val journeyStore = JourneyStore(h.root)
+            journeyStore.save(requireNotNull(journeyStore.load("customer-1", journeyId)).copy(isGhost = true))
+            reserveHostDismissal(h, journeyId)
+
+            assertTrue(
+                h.service.presentationEnded(
+                    "customer-1",
+                    journeyId,
+                    CloseReason.HostDismissed,
+                ),
+            )
+
+            val exit = h.store.events.values.single { it.name == JourneyEventNames.EXITED }
+            assertEquals("host", exit.properties.stringValue("dismissed_by"))
+            assertEquals("dismissed", exit.properties.stringValue("reason"))
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun userDismissalPreservesCancelledWireReasonAndUserAttribution() = runBlocking {
+        val h = harness()
+        try {
+            val updates = mutableListOf<TriggerUpdate>()
+            h.broker.register("trigger-1", updates::add)
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+
+            assertTrue(
+                h.service.presentationEnded(
+                    "customer-1",
+                    started.ref.journeyId!!,
+                    CloseReason.UserDismissed,
+                ),
+            )
+
+            val exit = h.store.events.values.single { it.name == JourneyEventNames.EXITED }
+            assertEquals("cancelled", exit.properties.stringValue("reason"))
+            assertEquals("user", exit.properties.stringValue("dismissed_by"))
+            assertEquals("2026-07-19T12:00:00.000Z", exit.properties.stringValue("at"))
+            val terminal = requireNotNull(
+                JourneyStore(h.root).load("customer-1", started.ref.journeyId!!),
+            )
+            assertEquals("dismissed", terminal.terminalReason)
+            assertTrue(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
+            val completion = updates.single() as TriggerUpdate.Journey
+            assertEquals(JourneyExitReason.DISMISSED, completion.update.exitReason)
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun hostDismissalResolvesTheOriginatingTriggerAsJourneyCompletedDismissed() = runBlocking {
+        val h = harness()
+        try {
+            val updates = mutableListOf<TriggerUpdate>()
+            h.broker.register("trigger-1", updates::add)
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = started.ref.journeyId!!
+            val journeyStore = JourneyStore(h.root)
+            journeyStore.save(
+                requireNotNull(journeyStore.load("customer-1", journeyId)).copy(
+                    convertedAtMillis = now - 1,
+                ),
+            )
+            reserveHostDismissal(h, journeyId)
+
+            assertTrue(
+                h.service.presentationEnded(
+                    "customer-1",
+                    started.ref.journeyId!!,
+                    CloseReason.HostDismissed,
+                ),
+            )
+
+            val completion = updates.single() as TriggerUpdate.Journey
+            assertEquals(started.ref, completion.update.ref)
+            assertEquals(JourneyExitReason.DISMISSED, completion.update.exitReason)
+            assertTrue(completion.update.goalMet)
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun hostReservationRejectsALateIdentityAndBlocksOrdinaryTerminalization() = runBlocking {
+        val h = harness()
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = started.ref.journeyId!!
+
+            assertFalse(
+                h.service.reserveHostDismissal(
+                    ownerDistinctId = "customer-1",
+                    journeyId = journeyId,
+                    initiatingDistinctId = "customer-2",
+                ),
+            )
+            reserveHostDismissal(h, journeyId)
+            assertFalse(
+                h.service.presentationEnded(
+                    "customer-1",
+                    journeyId,
+                    CloseReason.UserDismissed,
+                ),
+            )
+            assertEquals(
+                JourneyRunState.ACTIVE,
+                JourneyStore(h.root).load("customer-1", journeyId)?.state,
+            )
+            assertTrue(
+                h.service.presentationEnded(
+                    "customer-1",
+                    journeyId,
+                    CloseReason.HostDismissed,
+                ),
+            )
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun postTerminalHostExitCaptureFailureTearsDownAndRecovers() = runBlocking {
+        val h = harness()
+        try {
+            val updates = mutableListOf<TriggerUpdate>()
+            h.broker.register("trigger-1", updates::add)
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = started.ref.journeyId!!
+            reserveHostDismissal(h, journeyId)
+            h.store.failNextPendingInsert = true
+
+            assertTrue(
+                h.service.presentationEnded("customer-1", journeyId, CloseReason.HostDismissed),
+            )
+            assertEquals(1, updates.size)
+            assertTrue(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
+            assertTrue(h.store.events.values.none { it.name == JourneyEventNames.EXITED })
+
+            val afterReturn = requireNotNull(JourneyStore(h.root).load("customer-1", journeyId))
+            assertEquals(JourneyRunState.TERMINAL, afterReturn.state)
+            assertTrue(afterReturn.pendingHostExitCapture)
+            assertFalse(afterReturn.pendingHostCompletion)
+            assertFalse(afterReturn.pendingHostTriggerCompletion)
+
+            val restartedService = JourneyService(
+                JourneyStore(h.root),
+                JourneyLedger(h.log),
+                h.releases,
+                { now },
+                triggerBroker = h.broker,
+            )
+            restartedService.recoverPendingHostDismissals()
+            assertEquals(1, updates.size)
+            assertEquals(1, h.store.events.values.count { it.name == JourneyEventNames.EXITED })
+            assertNull(JourneyStore(h.root).load("customer-1", journeyId))
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun pendingHostExitCaptureRecoversAtStartup() = runBlocking {
+        val h = harness()
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            reserveHostDismissal(h, started.ref.journeyId!!)
+            h.store.failNextPendingInsert = true
+            assertTrue(
+                h.service.presentationEnded(
+                    "customer-1",
+                    started.ref.journeyId!!,
+                    CloseReason.HostDismissed,
+                ),
+            )
+
+            h.service.recoverPendingHostDismissals()
+            h.service.recoverPendingHostDismissals()
+
+            assertEquals(1, h.store.events.values.count { it.name == JourneyEventNames.EXITED })
+            val recovered = JourneyStore(h.root).load("customer-1", started.ref.journeyId!!)
+            assertNull(recovered)
+        } finally {
+            h.root.deleteRecursively()
+        }
     }
 
     @Test
@@ -476,4 +743,14 @@ class JourneyServiceTest {
 
     private fun JsonObject.stringValue(key: String): String? =
         (this[key] as? JsonPrimitive)?.content
+
+    private suspend fun reserveHostDismissal(h: Harness, journeyId: String) {
+        assertTrue(
+            h.service.reserveHostDismissal(
+                ownerDistinctId = "customer-1",
+                journeyId = journeyId,
+                initiatingDistinctId = "customer-1",
+            ),
+        )
+    }
 }

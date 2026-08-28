@@ -46,6 +46,7 @@ import ai.nuxie.sdk.experiences.SupportedRuntime
 import ai.nuxie.sdk.experiences.ReleaseArtifactAcquirer
 import ai.nuxie.sdk.presentation.ExperiencePresentationService
 import ai.nuxie.sdk.presentation.AndroidRenderCapability
+import ai.nuxie.sdk.presentation.CloseReason
 import ai.nuxie.sdk.presentation.PresentationOutcome
 import android.app.Application
 import android.content.Context
@@ -79,7 +80,9 @@ internal class NuxieCore(
 
     internal fun interface PresentationFactory {
         fun create(
-            reportOutcome: suspend (PresentationOutcome) -> Unit,
+            reportOutcome: suspend (PresentationOutcome) -> Boolean,
+            reserveHostDismissal: suspend (PresentationOutcome) -> Boolean,
+            releaseHostDismissalReservation: suspend (PresentationOutcome) -> Unit,
         ): ExperiencePresentationService
     }
 
@@ -143,12 +146,15 @@ internal class NuxieCore(
         supportedRuntime = ::journeySupportedRuntime,
     )
 
+    private val triggerBroker = TriggerBroker()
+
     val journeys = JourneyService(
         store = JourneyStore(appContext.filesDir),
         ledger = JourneyLedger(eventLog),
         releases = journeyCatalog,
         nowMillis = nowMillis,
         initialDistinctId = identity.distinctId(),
+        triggerBroker = triggerBroker,
     )
 
     private val purchaseEvidenceStore = overrides.purchaseEvidenceStore
@@ -200,13 +206,49 @@ internal class NuxieCore(
         scope = scope,
     )
 
-    private val reportPresentationOutcome: suspend (PresentationOutcome) -> Unit = { outcome ->
+    private val reportPresentationOutcome: suspend (PresentationOutcome) -> Boolean = { outcome ->
         outcome.ref.journeyId?.let { journeyId ->
-            journeys.presentationEnded(identity.distinctId(), journeyId, outcome.reason)
+            val currentDistinctId = identity.distinctId()
+            val ownerDistinctId = outcome.ownerDistinctId
+            if (outcome.reason != CloseReason.HostDismissed &&
+                ownerDistinctId != null &&
+                ownerDistinctId != currentDistinctId
+            ) {
+                true
+            } else {
+                journeys.presentationEnded(
+                    ownerDistinctId ?: currentDistinctId,
+                    journeyId,
+                    outcome.reason,
+                )
+            }
+        } ?: true
+    }
+
+    private val reserveHostDismissal: suspend (PresentationOutcome) -> Boolean = { outcome ->
+        val journeyId = outcome.ref.journeyId
+        val ownerDistinctId = outcome.ownerDistinctId
+        val initiatingDistinctId = outcome.initiatingDistinctId
+        if (journeyId == null || ownerDistinctId == null || initiatingDistinctId == null) {
+            true
+        } else {
+            journeys.reserveHostDismissal(ownerDistinctId, journeyId, initiatingDistinctId)
         }
     }
 
-    val presentations = overrides.presentationFactory?.create(reportPresentationOutcome)
+    private val releaseHostDismissalReservation: suspend (PresentationOutcome) -> Unit = { outcome ->
+        val journeyId = outcome.ref.journeyId
+        val ownerDistinctId = outcome.ownerDistinctId
+        if (journeyId != null && ownerDistinctId != null) {
+            journeys.releaseHostDismissalReservation(ownerDistinctId, journeyId)
+        }
+    }
+
+    val presentations = overrides.presentationFactory?.create(
+        reportPresentationOutcome,
+        reserveHostDismissal,
+        releaseHostDismissalReservation,
+    )
         ?: ExperiencePresentationService(
             context = appContext,
             releases = journeyCatalog,
@@ -215,13 +257,15 @@ internal class NuxieCore(
             scope = scope,
             runtimeAvailable = AndroidRenderCapability::isAvailable,
             reportOutcome = reportPresentationOutcome,
+            reserveHostDismissal = reserveHostDismissal,
+            releaseHostDismissalReservation = releaseHostDismissalReservation,
         )
 
     val triggers by lazy {
         TriggerService(
         eventLog = eventLog,
         api = api,
-        broker = TriggerBroker(),
+        broker = triggerBroker,
         journeys = overrides.journeys ?: journeys,
         features = overrides.features ?: object : TriggerService.FeatureGate {
             override suspend fun cachedAccess(
@@ -243,7 +287,7 @@ internal class NuxieCore(
             ): Boolean = features.checkWithCache(featureId, requiredBalance, entityId).allowed
         },
             presenter = overrides.presenter ?: TriggerService.ExperiencePresenter { experienceVersionId, journeyId ->
-                presentations.present(experienceVersionId, journeyId)
+                presentations.present(experienceVersionId, journeyId, identity.distinctId())
             },
             nowMillis = nowMillis,
         )
@@ -285,6 +329,7 @@ internal class NuxieCore(
             // revocation lane; purchase recovery handles still-active Play evidence.
             profile.requestRefresh()
             purchases.recover()
+            journeys.recoverPendingHostDismissals()
         },
     )
 
@@ -306,6 +351,7 @@ internal class NuxieCore(
         })
         userTransitions.addObserver(profile.transitionObserver)
         profile.requestRefresh()
+        scope.launch { journeys.recoverPendingHostDismissals() }
         lifecycleTracker.trackAppLaunchEvents()
         billing.connect()
         if (registerLifecycle) {

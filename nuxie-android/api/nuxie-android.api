@@ -151,7 +151,7 @@ public final class ai/nuxie/sdk/LogLevel : java/lang/Enum {
 
 public final class ai/nuxie/sdk/Nuxie {
 	public static final field INSTANCE Lai/nuxie/sdk/Nuxie;
-	public final fun dismiss ()V
+	public final fun dismiss (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun getAnonymousId ()Ljava/lang/String;
 	public final fun getDistinctId ()Ljava/lang/String;
 	public final fun getFeatures ()Lai/nuxie/sdk/features/FeatureInfo;

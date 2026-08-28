@@ -23,6 +23,8 @@ internal class TerminalCloseClaim(
 
     fun tryClaim(reason: CloseReason): Boolean = claimed.compareAndSet(null, reason)
 
+    fun release(reason: CloseReason): Boolean = claimed.compareAndSet(reason, null)
+
     fun prepareForTeardown(isChangingConfigurations: Boolean) {
         if (reason == null && isChangingConfigurations) return
         tryClaim(CloseReason.UserDismissed)
@@ -118,17 +120,22 @@ internal class NuxieExperienceActivity : Activity() {
 
     override fun onDestroy() {
         terminal.prepareForTeardown(isChangingConfigurations)
-        presentationId?.let { PresentationRegistry.detach(it, this) }
         host?.release()
         lane?.shutdown()
         unregisterPredictiveBack()
-        terminal.reportAtTeardown(isChangingConfigurations)
         super.onDestroy()
+        // Publish terminal completion only after the renderer and its lane
+        // and the Activity are torn down so awaitable host dismissal covers
+        // the complete local cleanup boundary.
+        presentationId?.let { PresentationRegistry.detach(it, this) }
+        terminal.reportAtTeardown(isChangingConfigurations)
     }
 
     internal fun claimFromService(reason: CloseReason): Boolean = terminal.tryClaim(reason)
 
     internal fun claimedCloseReason(): CloseReason? = terminal.reason
+
+    internal fun releaseServiceClaim(reason: CloseReason): Boolean = terminal.release(reason)
 
     internal fun finishAfterServiceClaim() {
         runOnUiThread { finish() }
@@ -140,8 +147,7 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private fun finishTerminal(reason: CloseReason) {
-        terminal.tryClaim(reason)
-        finish()
+        if (terminal.tryClaim(reason)) finish()
     }
 
     private fun reportClaimedTerminal(reason: CloseReason) {

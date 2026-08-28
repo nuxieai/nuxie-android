@@ -1,16 +1,22 @@
 package ai.nuxie.sdk.journey
 
 import ai.nuxie.sdk.ExperienceRef
+import ai.nuxie.sdk.JourneyExitReason
+import ai.nuxie.sdk.JourneyUpdate
 import ai.nuxie.sdk.SuppressReason
 import ai.nuxie.sdk.TriggerError
 import ai.nuxie.sdk.TriggerErrorCode
 import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.TimeBasedEpochGenerator
 import ai.nuxie.sdk.events.TriggerService
+import ai.nuxie.sdk.events.TriggerBroker
+import ai.nuxie.sdk.TriggerUpdate
 import ai.nuxie.sdk.util.IsoDates
 import ai.nuxie.sdk.presentation.CloseReason
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -29,9 +35,11 @@ internal class JourneyService(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val ids: TimeBasedEpochGenerator = TimeBasedEpochGenerator.shared,
     initialDistinctId: String? = null,
+    private val triggerBroker: TriggerBroker = TriggerBroker(),
 ) : TriggerService.JourneyRouter, JourneyDownFactRouter {
     private val admissions = mutableSetOf<AdmissionKey>()
     private val restoredRunIds = mutableSetOf<String>()
+    private val hostDismissalReservations = mutableSetOf<HostDismissalKey>()
     // E1 has few concurrent run operations; one lock keeps each run's
     // load-mutate-save sequence coherent until per-run locking is warranted.
     private val runLock = Mutex()
@@ -100,28 +108,178 @@ internal class JourneyService(
     suspend fun exit(distinctId: String, journeyId: String, reason: String) {
         runLock.withLock {
             val run = store.load(distinctId, journeyId) ?: return
-            if (run.state != JourneyRunState.ACTIVE) return
+            if (run.state != JourneyRunState.ACTIVE ||
+                HostDismissalKey(distinctId, journeyId) in hostDismissalReservations
+            ) return
             val terminal = run.copy(state = JourneyRunState.TERMINAL, terminalReason = reason)
             store.save(terminal)
             if (!run.isGhost) {
                 ledger.exited(run, reason, nowMillis())
                 if (reason != "cancelled" && reason != "error") {
-                    store.recordCompletion(distinctId, JourneyCompletion(run.experienceId, nowMillis()))
+                    store.recordCompletion(
+                        distinctId,
+                        JourneyCompletion(run.experienceId, run.id, nowMillis()),
+                    )
                 }
             }
         }
     }
 
     /** Receives the presentation-scoped close outcome for a linked Journey. */
-    suspend fun presentationEnded(distinctId: String, journeyId: String, reason: CloseReason) {
+    suspend fun presentationEnded(distinctId: String, journeyId: String, reason: CloseReason): Boolean {
+        if (reason == CloseReason.HostDismissed) {
+            return hostDismiss(distinctId, journeyId)
+        }
+        if (reason == CloseReason.UserDismissed) {
+            return userDismiss(distinctId, journeyId)
+        }
         val exitReason = when (reason) {
-            CloseReason.UserDismissed -> "dismissed"
+            CloseReason.UserDismissed -> error("handled above")
+            CloseReason.HostDismissed -> error("handled above")
             CloseReason.GoalMet -> "goal_met"
             CloseReason.PurchaseCompleted -> "completed"
             CloseReason.Timeout -> "completed"
             is CloseReason.Error -> "error"
         }
         exit(distinctId, journeyId, exitReason)
+        return true
+    }
+
+    /**
+     * Reserves a live Journey before host dismissal may terminalize it. A call
+     * admitted under the old customer may then finish even if identity changes,
+     * while a call made after identity changed cannot terminalize or tear down
+     * the old customer's presentation.
+     */
+    suspend fun reserveHostDismissal(
+        ownerDistinctId: String,
+        journeyId: String,
+        initiatingDistinctId: String,
+    ): Boolean = runLock.withLock {
+        if (ownerDistinctId != initiatingDistinctId) return@withLock false
+        val run = withContext(Dispatchers.IO) { store.load(ownerDistinctId, journeyId) }
+            ?: return@withLock false
+        if (run.state != JourneyRunState.ACTIVE) return@withLock false
+        hostDismissalReservations += HostDismissalKey(ownerDistinctId, journeyId)
+        true
+    }
+
+    suspend fun releaseHostDismissalReservation(ownerDistinctId: String, journeyId: String) {
+        runLock.withLock {
+            hostDismissalReservations -= HostDismissalKey(ownerDistinctId, journeyId)
+        }
+    }
+
+    private suspend fun userDismiss(distinctId: String, journeyId: String): Boolean = runLock.withLock {
+        val run = withContext(Dispatchers.IO) { store.load(distinctId, journeyId) }
+            ?: return@withLock true
+        if (run.state != JourneyRunState.ACTIVE ||
+            HostDismissalKey(distinctId, journeyId) in hostDismissalReservations
+        ) return@withLock false
+        val completedAtMillis = nowMillis()
+        val terminal = run.copy(
+            state = JourneyRunState.TERMINAL,
+            terminalReason = "dismissed",
+            completedAtMillis = completedAtMillis,
+        )
+        withContext(Dispatchers.IO) { store.save(terminal) }
+        if (run.isGhost) return@withLock true
+        ledger.userExited(run, completedAtMillis)
+        withContext(Dispatchers.IO) {
+            store.recordCompletion(
+                distinctId,
+                JourneyCompletion(run.experienceId, run.id, completedAtMillis),
+            )
+        }
+        emitDismissedTrigger(run)
+        true
+    }
+
+    private suspend fun hostDismiss(distinctId: String, journeyId: String): Boolean = runLock.withLock {
+        val run = withContext(Dispatchers.IO) { store.load(distinctId, journeyId) }
+            ?: return@withLock true
+        var terminal = when {
+            run.state == JourneyRunState.ACTIVE &&
+                HostDismissalKey(distinctId, journeyId) in hostDismissalReservations -> run.copy(
+                state = JourneyRunState.TERMINAL,
+                terminalReason = "dismissed",
+                completedAtMillis = nowMillis(),
+                pendingHostExitCapture = true,
+                pendingHostCompletion = true,
+                pendingHostTriggerCompletion = true,
+            )
+            run.state == JourneyRunState.TERMINAL &&
+                run.terminalReason == "dismissed" &&
+                (run.pendingHostExitCapture ||
+                    run.pendingHostCompletion ||
+                    run.pendingHostTriggerCompletion) -> run
+            else -> return@withLock false
+        }
+        withContext(Dispatchers.IO) { store.save(terminal) }
+        hostDismissalReservations -= HostDismissalKey(distinctId, journeyId)
+        val completedAtMillis = terminal.completedAtMillis ?: return@withLock true
+        if (terminal.pendingHostExitCapture) {
+            val captured = runCatching {
+                ledger.hostExited(terminal, completedAtMillis)
+            }.getOrDefault(false)
+            if (captured) {
+                val advanced = terminal.copy(pendingHostExitCapture = false)
+                if (runCatching { withContext(Dispatchers.IO) { store.save(advanced) } }.isSuccess) {
+                    terminal = advanced
+                }
+            }
+        }
+        if (terminal.pendingHostCompletion) {
+            val recorded = runCatching {
+                withContext(Dispatchers.IO) {
+                    store.recordCompletion(
+                        distinctId,
+                        JourneyCompletion(terminal.experienceId, terminal.id, completedAtMillis),
+                    )
+                }
+            }.isSuccess
+            if (recorded) {
+                val advanced = terminal.copy(pendingHostCompletion = false)
+                if (runCatching { withContext(Dispatchers.IO) { store.save(advanced) } }.isSuccess) {
+                    terminal = advanced
+                }
+            }
+        }
+        if (terminal.pendingHostTriggerCompletion) {
+            if (runCatching { emitDismissedTrigger(terminal) }.isSuccess) {
+                val advanced = terminal.copy(pendingHostTriggerCompletion = false)
+                if (runCatching { withContext(Dispatchers.IO) { store.save(advanced) } }.isSuccess) {
+                    terminal = advanced
+                }
+            }
+        }
+        if (!terminal.pendingHostExitCapture &&
+            !terminal.pendingHostCompletion &&
+            !terminal.pendingHostTriggerCompletion
+        ) {
+            withContext(Dispatchers.IO) { store.delete(terminal) }
+        }
+        true
+    }
+
+    suspend fun recoverPendingHostDismissals() {
+        val pending = withContext(Dispatchers.IO) { store.loadPendingHostDismissals() }
+        pending.forEach { run -> hostDismiss(run.distinctId, run.id) }
+    }
+
+    private suspend fun emitDismissedTrigger(run: JourneyRun) {
+        run.triggerRef?.let { triggerRef ->
+            triggerBroker.emit(
+                triggerRef,
+                TriggerUpdate.Journey(
+                    JourneyUpdate(
+                        ref = ExperienceRef(run.experienceId, run.experienceVersion, run.id),
+                        exitReason = JourneyExitReason.DISMISSED,
+                        goalMet = run.convertedAtMillis != null,
+                    ),
+                ),
+            )
+        }
     }
 
     override suspend fun applyDownFacts(body: JsonObject, distinctId: String) {
@@ -183,6 +341,7 @@ internal class JourneyService(
                 plane = JourneyPlane.DEVICE,
                 settingsSnapshot = release.settingsTemplate.withAnchor(now),
                 state = JourneyRunState.ACTIVE,
+                triggerRef = event.id,
             )
             // The enrollment fact is a synchronous durability boundary. Do
             // not admit or persist a run if committing it failed.
@@ -244,6 +403,7 @@ internal class JourneyService(
     }
 
     private data class AdmissionKey(val distinctId: String, val experienceId: String)
+    private data class HostDismissalKey(val distinctId: String, val journeyId: String)
 
     private fun JsonObject.string(key: String): String? =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content

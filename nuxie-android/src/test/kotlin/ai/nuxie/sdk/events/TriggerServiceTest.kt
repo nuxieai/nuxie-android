@@ -28,7 +28,9 @@ import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import kotlinx.serialization.json.buildJsonObject
 import org.junit.Assert.assertEquals
@@ -283,7 +285,11 @@ class TriggerServiceTest {
         val started = ExperienceRef("exp-composed", "v-composed", journeyId)
         val launched = mutableListOf<String>()
         val rivFile = temporaryFolder.newFile("composed.riv").apply { writeBytes(byteArrayOf(1)) }
-        val factory = NuxieCore.PresentationFactory { reportOutcome ->
+        val factory = NuxieCore.PresentationFactory {
+                reportOutcome,
+                reserveHostDismissal,
+                releaseHostDismissalReservation,
+            ->
             ExperiencePresentationService(
                 releases = PresentationReleaseProvider { presentationRelease(started) },
                 acquire = {
@@ -299,6 +305,8 @@ class TriggerServiceTest {
                 runtimeAvailable = { true },
                 launch = launched::add,
                 reportOutcome = reportOutcome,
+                reserveHostDismissal = reserveHostDismissal,
+                releaseHostDismissalReservation = releaseHostDismissalReservation,
             )
         }
         val core = core(
@@ -340,6 +348,44 @@ class TriggerServiceTest {
         assertEquals(JourneyRunState.TERMINAL, ended.state)
         assertEquals("goal_met", ended.terminalReason)
         core.stop()
+    }
+
+    @Test
+    fun coreStartupRecoversPendingHostDismissalTombstones() = runBlocking {
+        val core = core(transportWithGate(null))
+        val ownerDistinctId = core.identity.distinctId()
+        val journeyId = "startup-recovery-${UUID.randomUUID()}"
+        val store = JourneyStore(RuntimeEnvironment.getApplication().filesDir)
+        store.save(
+            JourneyRun(
+                id = journeyId,
+                distinctId = ownerDistinctId,
+                experienceId = "experience-recovery",
+                experienceVersion = "version-recovery",
+                epoch = 7,
+                plane = JourneyPlane.DEVICE,
+                settingsSnapshot = buildJsonObject {},
+                state = JourneyRunState.TERMINAL,
+                terminalReason = "dismissed",
+                completedAtMillis = 1_000L,
+                pendingHostExitCapture = true,
+                pendingHostCompletion = true,
+            ),
+        )
+        try {
+            core.start()
+            withTimeout(5_000L) {
+                while (store.load(ownerDistinctId, journeyId) != null) delay(10L)
+            }
+
+            assertTrue(
+                core.store.pendingBatch(100).any {
+                    it.id == "journey-exited:$journeyId:7"
+                },
+            )
+        } finally {
+            core.stop()
+        }
     }
 
     @Test

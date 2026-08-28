@@ -11,6 +11,7 @@ import java.io.Closeable
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -233,9 +234,9 @@ class ExperiencePresentationServiceTest {
         val outcomes = mutableListOf<PresentationOutcome>()
         val service = service(
             launch = launched::add,
-            reportOutcome = { outcomes += it },
+            reportOutcome = { outcomes += it; true },
         )
-        val shown = async { service.present("v1", "journey-7") }
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
         runCurrent()
         PresentationRegistry.reportFirstFrame(launched.single())
         assertEquals("journey-7", shown.await().journeyId)
@@ -245,6 +246,222 @@ class ExperiencePresentationServiceTest {
 
         assertEquals("journey-7", outcomes.single().ref.journeyId)
         assertEquals(CloseReason.GoalMet, outcomes.single().reason)
+    }
+
+    @Test
+    fun hostDismissalAwaitsSemanticCompletionBeforePresentationTeardown() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val semanticStarted = CompletableDeferred<PresentationOutcome>()
+        val releaseSemanticCompletion = CompletableDeferred<Unit>()
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+            reportOutcome = { outcome ->
+                semanticStarted.complete(outcome)
+                releaseSemanticCompletion.await()
+                true
+            },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        val dismissal = async { service.dismissFromHost("customer-1") }
+        runCurrent()
+
+        val pendingOutcome = semanticStarted.await()
+        assertEquals(CloseReason.HostDismissed, pendingOutcome.reason)
+        assertEquals("customer-1", pendingOutcome.ownerDistinctId)
+        assertEquals("customer-1", pendingOutcome.initiatingDistinctId)
+        assertFalse(dismissal.isCompleted)
+        assertFalse(lease.closed.get())
+
+        releaseSemanticCompletion.complete(Unit)
+        dismissal.await()
+        assertTrue(lease.closed.get())
+    }
+
+    @Test
+    fun hostDismissalAfterIdentityChangedCannotClaimTheOldPresentation() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        var semanticCalls = 0
+        val reservations = mutableListOf<PresentationOutcome>()
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+            reserveHostDismissal = { outcome ->
+                reservations += outcome
+                outcome.ownerDistinctId == outcome.initiatingDistinctId
+            },
+            reportOutcome = {
+                semanticCalls += 1
+                true
+            },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        service.dismissFromHost("customer-2")
+
+        assertEquals("customer-1", reservations.single().ownerDistinctId)
+        assertEquals("customer-2", reservations.single().initiatingDistinctId)
+        assertEquals(0, semanticCalls)
+        assertFalse(lease.closed.get())
+        assertTrue(PresentationRegistry.resolve(launched.single()) != null)
+    }
+
+    @Test
+    fun admittedHostDismissalKeepsItsOwnerAfterIdentityChanges() = runTest {
+        val launched = mutableListOf<String>()
+        val reservationEstablished = CompletableDeferred<Unit>()
+        val continueAfterIdentityChange = CompletableDeferred<Unit>()
+        val outcomes = mutableListOf<PresentationOutcome>()
+        var currentDistinctId = "customer-1"
+        val service = service(
+            launch = launched::add,
+            reserveHostDismissal = { outcome ->
+                val admitted = outcome.ownerDistinctId == currentDistinctId &&
+                    outcome.initiatingDistinctId == currentDistinctId
+                reservationEstablished.complete(Unit)
+                continueAfterIdentityChange.await()
+                admitted
+            },
+            reportOutcome = { outcome ->
+                outcomes += outcome
+                true
+            },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        val dismissal = async { service.dismissFromHost("customer-1") }
+        reservationEstablished.await()
+        currentDistinctId = "customer-2"
+        continueAfterIdentityChange.complete(Unit)
+        dismissal.await()
+
+        assertEquals("customer-1", outcomes.single().ownerDistinctId)
+        assertEquals("customer-1", outcomes.single().initiatingDistinctId)
+    }
+
+    @Test
+    fun reentrantHostDismissalsJoinTheSameAttempt() = runTest {
+        val launched = mutableListOf<String>()
+        val semanticStarted = CompletableDeferred<Unit>()
+        val releaseSemanticCompletion = CompletableDeferred<Unit>()
+        var semanticCalls = 0
+        val service = service(
+            launch = launched::add,
+            reportOutcome = {
+                semanticCalls += 1
+                semanticStarted.complete(Unit)
+                releaseSemanticCompletion.await()
+                true
+            },
+        )
+        val shown = async { service.present("v1", "journey-7") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        val first = async { service.dismissFromHost("customer-1") }
+        semanticStarted.await()
+        val second = async { service.dismissFromHost("customer-1") }
+        runCurrent()
+
+        assertEquals(1, semanticCalls)
+        assertFalse(first.isCompleted)
+        assertFalse(second.isCompleted)
+
+        releaseSemanticCompletion.complete(Unit)
+        first.await()
+        second.await()
+        assertEquals(1, semanticCalls)
+    }
+
+    @Test
+    fun failedHostTerminalizationKeepsThePresentationForAnExplicitRetry() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        var attempts = 0
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+            reportOutcome = {
+                attempts += 1
+                attempts > 1
+            },
+        )
+        val shown = async { service.present("v1", "journey-7") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        service.dismissFromHost("customer-1")
+        assertFalse(lease.closed.get())
+        assertTrue(PresentationRegistry.resolve(launched.single()) != null)
+
+        service.dismissFromHost("customer-1")
+        assertTrue(lease.closed.get())
+        assertEquals(2, attempts)
+    }
+
+    @Test
+    fun hostDismissalReservationWinsACompetingUserDismissal() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val semanticStarted = CompletableDeferred<Unit>()
+        val finishSemantic = CompletableDeferred<Unit>()
+        val outcomes = mutableListOf<CloseReason>()
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+            reportOutcome = { outcome ->
+                outcomes += outcome.reason
+                semanticStarted.complete(Unit)
+                finishSemantic.await()
+                true
+            },
+        )
+        val shown = async { service.present("v1", "journey-7") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        val hostDismissal = async { service.dismissFromHost("customer-1") }
+        semanticStarted.await()
+        service.dismiss(CloseReason.UserDismissed)
+        runCurrent()
+
+        assertFalse(lease.closed.get())
+        assertEquals(listOf<CloseReason>(CloseReason.HostDismissed), outcomes)
+
+        finishSemantic.complete(Unit)
+        hostDismissal.await()
+        assertTrue(lease.closed.get())
+        assertEquals(listOf<CloseReason>(CloseReason.HostDismissed), outcomes)
+    }
+
+    @Test
+    fun hostDismissalWithoutAPresentationIsANoop() = runTest {
+        var semanticCalls = 0
+        val service = service(
+            reportOutcome = {
+                semanticCalls += 1
+                true
+            },
+        )
+
+        service.dismissFromHost("customer-1")
+
+        assertEquals(0, semanticCalls)
     }
 
     @Test
@@ -402,7 +619,9 @@ class ExperiencePresentationServiceTest {
         },
         emit: (String, Map<String, Any?>) -> Unit = { _, _ -> },
         launch: (String) -> Unit = {},
-        reportOutcome: suspend (PresentationOutcome) -> Unit = {},
+        reportOutcome: suspend (PresentationOutcome) -> Boolean = { true },
+        reserveHostDismissal: suspend (PresentationOutcome) -> Boolean = { true },
+        releaseHostDismissalReservation: suspend (PresentationOutcome) -> Unit = {},
         firstFrameTimeoutMillis: Long = 30_000,
     ) = ExperiencePresentationService(
         releases = provider,
@@ -412,6 +631,8 @@ class ExperiencePresentationServiceTest {
         runtimeAvailable = { runtimeAvailable },
         launch = launch,
         reportOutcome = reportOutcome,
+        reserveHostDismissal = reserveHostDismissal,
+        releaseHostDismissalReservation = releaseHostDismissalReservation,
         firstFrameTimeoutMillis = firstFrameTimeoutMillis,
     )
 
