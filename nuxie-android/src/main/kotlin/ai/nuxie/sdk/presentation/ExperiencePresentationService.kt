@@ -253,6 +253,7 @@ internal class ExperiencePresentationService(
     private val markOutcomeInMemory: suspend (PresentationOutcome) -> Boolean = { true },
     private val reportOutcome: suspend (PresentationOutcome) -> Unit = {},
     private val firstFrameTimeoutMillis: Long = FIRST_FRAME_TIMEOUT_MILLIS,
+    private val beforeHostSemanticClaimForTesting: () -> Unit = {},
 ) {
     constructor(
         context: Context,
@@ -426,6 +427,7 @@ internal class ExperiencePresentationService(
         )
         // Reserve the matching durable reporter before requesting teardown so
         // a synchronous terminal callback cannot claim semantic reporting.
+        beforeHostSemanticClaimForTesting()
         val reportsOutcome = active.semanticReported.compareAndSet(false, true)
         val teardownReason = if (active.ownerDistinctId == initiatingDistinctId) {
             CloseReason.HostDismissed
@@ -502,7 +504,8 @@ internal class ExperiencePresentationService(
         if (active.shown.get()) emitCloseFact(active, CloseReason.Error(typed))
         scope.launch {
             if (active.semanticReported.compareAndSet(false, true)) {
-                reportOutcome(
+                reportTerminalOutcome(
+                    active,
                     PresentationOutcome(
                         ref = active.ref,
                         reason = CloseReason.Error(typed),
@@ -531,7 +534,8 @@ internal class ExperiencePresentationService(
         if (reportsSemanticOutcome) {
             scope.launch {
                 if (active.semanticReported.compareAndSet(false, true)) {
-                    reportOutcome(
+                    reportTerminalOutcome(
+                        active,
                         PresentationOutcome(
                             ref = active.ref,
                             reason = reason,
@@ -540,6 +544,17 @@ internal class ExperiencePresentationService(
                     )
                 }
             }
+        }
+    }
+
+    private suspend fun reportTerminalOutcome(
+        active: ActivePresentation,
+        outcome: PresentationOutcome,
+    ) {
+        try {
+            reportOutcome(outcome)
+        } finally {
+            active.runTransitionFinished.complete(Unit)
         }
     }
 

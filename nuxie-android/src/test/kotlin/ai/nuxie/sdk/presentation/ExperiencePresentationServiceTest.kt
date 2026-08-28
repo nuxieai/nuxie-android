@@ -27,6 +27,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.JsonObject
@@ -457,6 +458,63 @@ class ExperiencePresentationServiceTest {
 
         winner.await()
         loser.await()
+    }
+
+    @Test
+    fun hostDismissalReturnsWhenEndedWinsSemanticRace() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val outcomes = mutableListOf<CloseReason>()
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+            reportOutcome = { outcomes += it.reason },
+            beforeHostSemanticClaimForTesting = {
+                PresentationRegistry.reportDismissed(
+                    launched.single(),
+                    CloseReason.GoalMet,
+                )
+            },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        withTimeout(1_000) {
+            service.dismissFromHost("customer-1")
+        }
+
+        assertTrue(lease.closed.get())
+        assertEquals(listOf<CloseReason>(CloseReason.GoalMet), outcomes)
+    }
+
+    @Test
+    fun hostDismissalReturnsWhenFailedWinsSemanticRace() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val outcomes = mutableListOf<CloseReason>()
+        val failure = IllegalStateException("renderer failed")
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+            reportOutcome = { outcomes += it.reason },
+            beforeHostSemanticClaimForTesting = {
+                PresentationRegistry.reportFailure(launched.single(), failure)
+            },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        withTimeout(1_000) {
+            service.dismissFromHost("customer-1")
+        }
+
+        assertTrue(lease.closed.get())
+        val reason = outcomes.single() as CloseReason.Error
+        assertEquals(failure, reason.cause.cause)
     }
 
     @Test
@@ -1330,6 +1388,7 @@ class ExperiencePresentationServiceTest {
         markOutcomeInMemory: suspend (PresentationOutcome) -> Boolean = { true },
         reportOutcome: suspend (PresentationOutcome) -> Unit = {},
         firstFrameTimeoutMillis: Long = 30_000,
+        beforeHostSemanticClaimForTesting: () -> Unit = {},
     ) = ExperiencePresentationService(
         releases = provider,
         acquire = acquire,
@@ -1340,6 +1399,7 @@ class ExperiencePresentationServiceTest {
         markOutcomeInMemory = markOutcomeInMemory,
         reportOutcome = reportOutcome,
         firstFrameTimeoutMillis = firstFrameTimeoutMillis,
+        beforeHostSemanticClaimForTesting = beforeHostSemanticClaimForTesting,
     )
 
     private suspend fun expectPresentationFailure(
