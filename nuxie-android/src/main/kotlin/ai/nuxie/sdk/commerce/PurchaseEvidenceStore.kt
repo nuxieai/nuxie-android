@@ -4,6 +4,7 @@ import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.features.DurableFeatureRevocationStore
 import android.util.Log
 import java.io.File
+import java.math.BigDecimal
 import java.security.MessageDigest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -36,6 +37,8 @@ internal data class StoredPurchaseContext(
     val placementId: String? = null,
     val experienceId: String? = null,
     val experienceVersion: String? = null,
+    val price: BigDecimal? = null,
+    val displayPrice: String? = null,
 )
 
 internal data class StoredLocalPurchaseGrant(
@@ -246,13 +249,7 @@ internal class FilePurchaseEvidenceStore(
             evidence.obfuscatedAccountId?.let { put("obfuscatedAccountId", JsonPrimitive(it)) }
             put("syncAttributionDistinctId", JsonPrimitive(evidence.syncAttributionDistinctId))
             evidence.ownerDistinctId?.let { put("ownerDistinctId", JsonPrimitive(it)) }
-            evidence.context?.let { context ->
-                put("context", JsonObject(buildMap {
-                    context.placementId?.let { put("placementId", JsonPrimitive(it)) }
-                    context.experienceId?.let { put("experienceId", JsonPrimitive(it)) }
-                    context.experienceVersion?.let { put("experienceVersion", JsonPrimitive(it)) }
-                }))
-            }
+            evidence.context?.let { put("context", encodeContext(it)) }
             put("acknowledged", JsonPrimitive(evidence.acknowledged))
             put("consumed", JsonPrimitive(evidence.consumed))
             put("synced", JsonPrimitive(evidence.synced))
@@ -295,9 +292,7 @@ internal class FilePurchaseEvidenceStore(
             obfuscatedAccountId = raw.string("obfuscatedAccountId"),
             syncAttributionDistinctId = raw.string("syncAttributionDistinctId") ?: return null,
             ownerDistinctId = raw.string("ownerDistinctId"),
-            context = (raw["context"] as? JsonObject)?.let {
-                StoredPurchaseContext(it.string("placementId"), it.string("experienceId"), it.string("experienceVersion"))
-            },
+            context = (raw["context"] as? JsonObject)?.let(::decodeContext),
             acknowledged = raw.boolean("acknowledged"),
             consumed = raw.boolean("consumed"),
             synced = raw.boolean("synced"),
@@ -338,13 +333,7 @@ internal class FilePurchaseEvidenceStore(
             binding.offerId?.let { put("offerId", JsonPrimitive(it)) }
             put("productType", JsonPrimitive(binding.productType))
             put("consumable", JsonPrimitive(binding.consumable))
-            binding.context?.let { context ->
-                put("context", JsonObject(buildMap {
-                    context.placementId?.let { put("placementId", JsonPrimitive(it)) }
-                    context.experienceId?.let { put("experienceId", JsonPrimitive(it)) }
-                    context.experienceVersion?.let { put("experienceVersion", JsonPrimitive(it)) }
-                }))
-            }
+            binding.context?.let { put("context", encodeContext(it)) }
             put("localFeatureGrants", JsonArray(binding.localFeatureGrants.map { grant ->
                 JsonObject(mapOf(
                     "featureId" to JsonPrimitive(grant.featureId),
@@ -367,9 +356,7 @@ internal class FilePurchaseEvidenceStore(
             offerId = raw.string("offerId"),
             productType = raw.string("productType") ?: return null,
             consumable = raw.boolean("consumable"),
-            context = (raw["context"] as? JsonObject)?.let {
-                StoredPurchaseContext(it.string("placementId"), it.string("experienceId"), it.string("experienceVersion"))
-            },
+            context = (raw["context"] as? JsonObject)?.let(::decodeContext),
             localFeatureGrants = (raw["localFeatureGrants"] as? JsonArray).orEmpty().mapNotNull {
                 val grant = it as? JsonObject ?: return@mapNotNull null
                 StoredLocalPurchaseGrant(
@@ -416,6 +403,22 @@ internal class FilePurchaseEvidenceStore(
 
     private fun JsonObject.string(key: String): String? =
         (this[key] as? JsonPrimitive)?.contentOrNull
+
+    private fun encodeContext(context: StoredPurchaseContext): JsonObject = JsonObject(buildMap {
+        context.placementId?.let { put("placementId", JsonPrimitive(it)) }
+        context.experienceId?.let { put("experienceId", JsonPrimitive(it)) }
+        context.experienceVersion?.let { put("experienceVersion", JsonPrimitive(it)) }
+        context.price?.let { put("price", JsonPrimitive(it.toPlainString())) }
+        context.displayPrice?.let { put("displayPrice", JsonPrimitive(it)) }
+    })
+
+    private fun decodeContext(raw: JsonObject) = StoredPurchaseContext(
+        raw.string("placementId"),
+        raw.string("experienceId"),
+        raw.string("experienceVersion"),
+        raw.string("price")?.toBigDecimalOrNull(),
+        raw.string("displayPrice"),
+    )
 
     private fun JsonObject.boolean(key: String): Boolean =
         (this[key] as? JsonPrimitive)?.booleanOrNull ?: false

@@ -826,6 +826,8 @@ internal class PurchaseService(
             "source" to "purchase",
             "test_store" to false,
             "transaction_id" to evidence.purchaseToken,
+            "price" to evidence.context?.price?.toDouble(),
+            "display_price" to evidence.context?.displayPrice,
         ).filterValues { it != null }
         emit(SystemEventNames.PURCHASE_COMPLETED, properties)
         return true
@@ -837,6 +839,7 @@ internal class PurchaseService(
         initiatingOwner: String,
     ) {
         if (distinctId() != initiatingOwner) return
+        val price = product.storePrice()
         val properties = linkedMapOf<String, Any?>(
             "product_id" to product.productId,
             "placement_id" to product.placementId,
@@ -845,6 +848,8 @@ internal class PurchaseService(
             "source" to "purchase",
             "test_store" to false,
             "transaction_id" to transactionId,
+            "price" to price?.amount?.toDouble(),
+            "display_price" to price?.display,
         ).filterValues { it != null }
         emit(SystemEventNames.PURCHASE_COMPLETED, properties)
     }
@@ -887,12 +892,15 @@ internal class PurchaseService(
         initiatingOwner: String,
     ) {
         if (distinctId() != initiatingOwner) return
+        val price = product.storePrice()
         val properties = linkedMapOf<String, Any?>(
             "product_id" to product.productId,
             "store_product_id" to product.storeProductId,
             "placement_id" to product.placementId,
             "experience_id" to product.purchaseContext?.experienceId,
             "test_store" to false,
+            "price" to price?.amount?.toDouble(),
+            "display_price" to price?.display,
         ).filterValues { it != null }.toMutableMap()
         when (result) {
             PurchaseResult.Purchased -> return
@@ -947,11 +955,16 @@ internal class PurchaseService(
         licensingPublicKey = licensingPublicKey,
     )
 
-    private fun StoreProduct.toStoredContext() = StoredPurchaseContext(
-        placementId,
-        purchaseContext?.experienceId,
-        purchaseContext?.experienceVersion,
-    )
+    private fun StoreProduct.toStoredContext(): StoredPurchaseContext {
+        val price = storePrice()
+        return StoredPurchaseContext(
+            placementId,
+            purchaseContext?.experienceId,
+            purchaseContext?.experienceVersion,
+            price?.amount,
+            price?.display,
+        )
+    }
 
     private fun List<LocalPurchaseGrant>.toStoredGrants() = map {
         StoredLocalPurchaseGrant(it.featureId, it.type.name, it.unlimited)

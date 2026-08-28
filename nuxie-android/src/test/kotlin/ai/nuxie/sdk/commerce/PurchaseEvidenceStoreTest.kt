@@ -2,6 +2,7 @@ package ai.nuxie.sdk.commerce
 
 import ai.nuxie.sdk.NuxieEnvironment
 import android.util.Base64
+import java.math.BigDecimal
 import java.nio.file.Files
 import java.security.KeyPairGenerator
 import java.security.Signature
@@ -27,6 +28,13 @@ class PurchaseEvidenceStoreTest {
                 purchaseState = StoredPurchaseState.PURCHASED,
                 syncAttributionDistinctId = "customer-1",
                 ownerDistinctId = "customer-1",
+                context = StoredPurchaseContext(
+                    "primary",
+                    "experience-1",
+                    "v1",
+                    BigDecimal("9.990000"),
+                    "€9.99",
+                ),
                 acknowledged = false,
                 syncAttempts = 1,
                 completionAttempts = 2,
@@ -102,7 +110,13 @@ class PurchaseEvidenceStoreTest {
                 offerId = "launch",
                 productType = "subs",
                 consumable = false,
-                context = StoredPurchaseContext("primary", "experience-1", "v1"),
+                context = StoredPurchaseContext(
+                    "primary",
+                    "experience-1",
+                    "v1",
+                    BigDecimal("9.990000"),
+                    "€9.99",
+                ),
                 localFeatureGrants = listOf(StoredLocalPurchaseGrant("pro", "BOOLEAN", false)),
                 licensingPublicKey = "public-key",
                 nuxieManaged = true,
@@ -127,7 +141,13 @@ class PurchaseEvidenceStoreTest {
                 offerId = "launch",
                 productType = "subs",
                 consumable = false,
-                context = StoredPurchaseContext("primary", "experience-1", "v1"),
+                context = StoredPurchaseContext(
+                    "primary",
+                    "experience-1",
+                    "v1",
+                    BigDecimal("9.990000"),
+                    "€9.99",
+                ),
                 localFeatureGrants = listOf(StoredLocalPurchaseGrant("pro", "BOOLEAN", false)),
                 licensingPublicKey = "public-key",
             )
