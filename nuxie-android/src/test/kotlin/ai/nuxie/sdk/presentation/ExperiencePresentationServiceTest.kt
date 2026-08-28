@@ -26,6 +26,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.JsonObject
@@ -70,6 +71,11 @@ class ExperiencePresentationServiceTest {
             return terminal.release(reason)
         }
 
+        override fun replaceServiceClaim(
+            expected: CloseReason,
+            replacement: CloseReason,
+        ): Boolean = terminal.replace(expected, replacement)
+
         override fun finishAfterServiceClaim() = Unit
     }
 
@@ -84,11 +90,56 @@ class ExperiencePresentationServiceTest {
 
         override fun releaseServiceClaim(reason: CloseReason): Boolean = terminal.release(reason)
 
+        override fun replaceServiceClaim(
+            expected: CloseReason,
+            replacement: CloseReason,
+        ): Boolean = terminal.replace(expected, replacement)
+
         override fun finishAfterServiceClaim() {
             PresentationRegistry.reportDismissed(
                 presentationId,
                 requireNotNull(terminal.reason),
             )
+        }
+    }
+
+    private class DestroyRacingActivity(
+        private val presentationId: String,
+        report: (CloseReason) -> Unit,
+    ) : PresentationActivityHandle {
+        private val terminal = TerminalCloseClaim { reason ->
+            report(reason)
+            PresentationRegistry.reportDismissed(presentationId, reason)
+        }
+        val releaseGapOpened = CountDownLatch(1)
+        val continueRelease = CountDownLatch(1)
+        val teardownClaimed = CountDownLatch(1)
+
+        override fun claimFromService(reason: CloseReason): Boolean = terminal.tryClaim(reason)
+
+        override fun claimedCloseReason(): CloseReason? = terminal.reason
+
+        override fun releaseServiceClaim(reason: CloseReason): Boolean {
+            val released = terminal.release(reason)
+            releaseGapOpened.countDown()
+            check(continueRelease.await(5, TimeUnit.SECONDS)) {
+                "identity replacement was not allowed to continue"
+            }
+            return released
+        }
+
+        override fun replaceServiceClaim(
+            expected: CloseReason,
+            replacement: CloseReason,
+        ): Boolean = terminal.replace(expected, replacement)
+
+        override fun finishAfterServiceClaim() = destroy()
+
+        fun destroy() {
+            terminal.prepareForTeardown(isChangingConfigurations = false)
+            teardownClaimed.countDown()
+            PresentationRegistry.detach(presentationId, this)
+            terminal.reportAtTeardown(isChangingConfigurations = false)
         }
     }
 
@@ -579,6 +630,56 @@ class ExperiencePresentationServiceTest {
         assertEquals(CloseReason.IdentityChanged, activity.claimedCloseReason())
         assertEquals(1, terminalizationAttempts)
         assertEquals(1, journeyReservationReleases)
+    }
+
+    @Test
+    fun identityShutdownAtomicallySupersedesRetryOwnershipRacingActivityDestroy() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val terminalReasons = mutableListOf<CloseReason>()
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+            reportOutcome = { false },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        val presentationId = launched.single()
+        PresentationRegistry.reportFirstFrame(presentationId)
+        shown.await()
+        val activity = DestroyRacingActivity(presentationId, terminalReasons::add)
+        assertTrue(PresentationRegistry.attach(presentationId, activity))
+
+        service.dismissFromHost("customer-1")
+        assertEquals(CloseReason.HostDismissed, activity.claimedCloseReason())
+
+        val shutdownFailure = AtomicReference<Throwable?>()
+        val shutdownThread = Thread {
+            runCatching {
+                runBlocking { service.shutdownOwnedBy("customer-1") }
+            }.exceptionOrNull()?.let(shutdownFailure::set)
+        }
+        shutdownThread.start()
+
+        val destroyThread = if (activity.releaseGapOpened.await(2, TimeUnit.SECONDS)) {
+            Thread(activity::destroy).also { thread ->
+                thread.start()
+                assertTrue(activity.teardownClaimed.await(2, TimeUnit.SECONDS))
+                activity.continueRelease.countDown()
+            }
+        } else {
+            null
+        }
+        activity.continueRelease.countDown()
+        shutdownThread.join(2_000)
+        destroyThread?.join(2_000)
+
+        assertFalse("identity shutdown did not finish", shutdownThread.isAlive)
+        assertFalse("Activity teardown did not finish", destroyThread?.isAlive ?: false)
+        assertEquals(null, shutdownFailure.get())
+        assertTrue("identity transition must release the presentation", lease.closed.get())
+        assertEquals(CloseReason.IdentityChanged, activity.claimedCloseReason())
+        assertEquals(listOf<CloseReason>(CloseReason.IdentityChanged), terminalReasons)
     }
 
     @Test
