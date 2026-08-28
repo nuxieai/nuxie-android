@@ -159,7 +159,7 @@ internal class FeatureUsageService(
             "amount" to amount,
         )
         entityId?.let { properties["entity_id"] = it }
-        metadata?.let { properties["metadata"] = it }
+        metadata?.let { properties["metadata"] = JsonValueConverter.toNativeMap(it) }
         eventLog.captureDeliveredIdempotently(
             SystemEventNames.FEATURE_USED,
             properties,
