@@ -3,9 +3,12 @@ package ai.nuxie.sdk.features
 import ai.nuxie.sdk.hasSameDoubleValueAs
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
@@ -28,7 +31,7 @@ class FeatureInfo {
     }
 
     private val mutableState = MutableStateFlow<State>(State.Unknown)
-    private val mutableAll = MutableStateFlow<Map<String, FeatureAccess>>(emptyMap())
+    private val mutableAll = MutableFeatureAccessFlow()
     private val mutationLock = Mutex()
     private val stagingLock = Any()
     private var mutationTail = CompletableDeferred<Unit>().also { it.complete(Unit) }
@@ -81,7 +84,7 @@ class FeatureInfo {
                 }
             }
             entityAccess = entities
-            mutableAll.value = features
+            mutableAll.publish(features)
             if (ready) mutableState.value = State.Ready
     }
 
@@ -95,7 +98,7 @@ class FeatureInfo {
             }
             // iOS has one reactive Feature map: an entity check publishes its
             // result there even though its reusable cache entry stays scoped.
-            mutableAll.value = mutableAll.value + (featureId to access)
+            mutableAll.publish(mutableAll.value + (featureId to access))
             if (entityId != null) {
                 entityAccess = entityAccess + (
                     featureId to (entityAccess[featureId].orEmpty() + (entityId to access))
@@ -114,7 +117,7 @@ class FeatureInfo {
                 runCatching { onFeatureChange(featureId, current, updated) }
             }
             // Match the same iOS reactive publication after entity-scoped use.
-            mutableAll.value = mutableAll.value + (featureId to updated)
+            mutableAll.publish(mutableAll.value + (featureId to updated))
             if (entityId != null) {
                 entityAccess = entityAccess + (
                     featureId to (entityAccess[featureId].orEmpty() + (entityId to updated))
@@ -126,14 +129,14 @@ class FeatureInfo {
 
     internal fun stageClear(): Mutation = stage {
             entityAccess = emptyMap()
-            mutableAll.value = emptyMap()
+            mutableAll.publish(emptyMap())
     }
 
     internal suspend fun reset() = publish(stageReset())
 
     internal fun stageReset(): Mutation = stage {
             entityAccess = emptyMap()
-            mutableAll.value = emptyMap()
+            mutableAll.publish(emptyMap())
             mutableState.value = State.Unknown
     }
 
@@ -162,3 +165,39 @@ private fun FeatureAccess?.hasSameFieldsAs(other: FeatureAccess): Boolean =
         unlimited == other.unlimited &&
         balance.hasSameDoubleValueAs(other.balance) &&
         type == other.type
+
+private fun Map<String, FeatureAccess>.hasSameFieldsAs(
+    other: Map<String, FeatureAccess>,
+): Boolean = size == other.size && all { (featureId, access) ->
+    other[featureId]?.let(access::hasSameFieldsAs) == true
+}
+
+private data class PublishedFeatures(
+    val revision: Long,
+    val features: Map<String, FeatureAccess>,
+)
+
+/**
+ * Publishes Feature maps using Swift field equality instead of Kotlin data-class equality.
+ * The revision makes every comparator-approved transition visible to MutableStateFlow,
+ * including NaN-to-NaN changes.
+ */
+@OptIn(ExperimentalForInheritanceCoroutinesApi::class)
+private class MutableFeatureAccessFlow : StateFlow<Map<String, FeatureAccess>> {
+    private val published = MutableStateFlow(PublishedFeatures(0L, emptyMap()))
+
+    override val value: Map<String, FeatureAccess>
+        get() = published.value.features
+
+    override val replayCache: List<Map<String, FeatureAccess>>
+        get() = published.replayCache.map(PublishedFeatures::features)
+
+    override suspend fun collect(collector: FlowCollector<Map<String, FeatureAccess>>): Nothing =
+        published.collect { collector.emit(it.features) }
+
+    fun publish(features: Map<String, FeatureAccess>) {
+        val current = published.value
+        if (current.features.hasSameFieldsAs(features)) return
+        published.value = PublishedFeatures(current.revision + 1, features)
+    }
+}
