@@ -257,6 +257,8 @@ class JourneyServiceTest {
                 put("timestamp", JsonPrimitive(50L))
                 put("properties", buildJsonObject {
                     put("journey_id", JsonPrimitive("journey-1"))
+                    put("experience_id", JsonPrimitive("experience-1"))
+                    put("experience_version", JsonPrimitive("version-1"))
                     put("at", JsonPrimitive(10L))
                 })
             }
@@ -268,7 +270,7 @@ class JourneyServiceTest {
 
             val delivered = mutableListOf<NuxieActivityInfo>()
             ActivityForwarder(
-                resolveExperience = { _, journeyId -> ExperienceRef("experience-1", "version-1", journeyId) },
+                resolveExperience = { _, _ -> null },
                 deliver = { delivered += it },
             ).onCommitted(h.store.events.getValue("converted-fact"))
 
