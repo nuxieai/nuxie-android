@@ -217,7 +217,6 @@ internal class NuxieCore(
             journeys.markHostDismissedInMemory(
                 ownerDistinctId = ownerDistinctId,
                 journeyId = journeyId,
-                experienceId = outcome.ref.experienceId,
                 initiatingDistinctId = initiatingDistinctId,
             )
         }

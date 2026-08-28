@@ -18,6 +18,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.sync.Mutex
@@ -421,25 +422,25 @@ internal class ExperiencePresentationService(
             ownerDistinctId = active.ownerDistinctId,
             initiatingDistinctId = initiatingDistinctId,
         )
-        // Reserve the matching durable reporter before applying the in-memory
-        // exit. A re-entrant terminal callback from the mark must not strand
-        // that exit by claiming semantic reporting first.
+        // Reserve the matching durable reporter before requesting teardown so
+        // a synchronous terminal callback cannot claim semantic reporting.
         val reportsOutcome = active.semanticReported.compareAndSet(false, true)
+        val teardownReason = if (active.ownerDistinctId == initiatingDistinctId) {
+            CloseReason.HostDismissed
+        } else {
+            CloseReason.IdentityChanged
+        }
+        PresentationRegistry.dismiss(active.id, teardownReason)
         if (!reportsOutcome) {
-            PresentationRegistry.dismiss(active.id, CloseReason.HostDismissed)
             active.finished.await()
             return
         }
-        if (!markOutcomeInMemory(outcome)) {
-            PresentationRegistry.dismiss(active.id, CloseReason.IdentityChanged)
-            active.finished.await()
-            return
+        val transition = scope.launch {
+            if (runCatching { markOutcomeInMemory(outcome) }.getOrDefault(false)) {
+                scope.launch { runCatching { reportOutcome(outcome) } }
+            }
         }
-        PresentationRegistry.dismiss(active.id, CloseReason.HostDismissed)
-        scope.launch {
-            runCatching { reportOutcome(outcome) }
-        }
-        active.finished.await()
+        joinAll(active.finished, transition)
     }
 
     /**

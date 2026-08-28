@@ -22,9 +22,6 @@ import ai.nuxie.sdk.experiences.SupportedRuntime
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.presentation.CloseReason
 import java.io.File
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -281,8 +278,19 @@ class JourneyServiceTest {
                 StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
             ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
             val journeyId = started.ref.journeyId!!
-            val journeyStore = JourneyStore(h.root)
-            journeyStore.save(requireNotNull(journeyStore.load("customer-1", journeyId)).copy(isGhost = true))
+            h.service.applyDownFacts(
+                buildJsonObject {
+                    put("facts", JsonArray(listOf(buildJsonObject {
+                        put("id", JsonPrimitive("superseded-before-dismissal"))
+                        put("event", JsonPrimitive(JourneyEventNames.SUPERSEDED))
+                        put("timestamp", JsonPrimitive(now))
+                        put("properties", buildJsonObject {
+                            put("journey_id", JsonPrimitive(journeyId))
+                        })
+                    })))
+                },
+                "customer-1",
+            )
             markHostDismissed(h, journeyId)
 
             assertTrue(
@@ -391,11 +399,19 @@ class JourneyServiceTest {
                 StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
             ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
             val journeyId = started.ref.journeyId!!
-            val journeyStore = JourneyStore(h.root)
-            journeyStore.save(
-                requireNotNull(journeyStore.load("customer-1", journeyId)).copy(
-                    convertedAtMillis = now - 1,
-                ),
+            h.service.applyDownFacts(
+                buildJsonObject {
+                    put("facts", JsonArray(listOf(buildJsonObject {
+                        put("id", JsonPrimitive("converted-before-dismissal"))
+                        put("event", JsonPrimitive(JourneyEventNames.CONVERTED))
+                        put("timestamp", JsonPrimitive(now))
+                        put("properties", buildJsonObject {
+                            put("journey_id", JsonPrimitive(journeyId))
+                            put("at", JsonPrimitive(now - 1))
+                        })
+                    })))
+                },
+                "customer-1",
             )
             markHostDismissed(h, journeyId)
 
@@ -417,40 +433,54 @@ class JourneyServiceTest {
     }
 
     @Test
-    fun inMemoryHostExitRejectsALateIdentityAndBlocksOrdinaryTerminalization() = runBlocking {
-        val h = harness()
+    fun hostDismissalWinsWhenItMakesTheFirstTerminalRunTransition() = runBlocking {
+        val h = harness(reentry = JourneyReentry.OneTime)
         try {
+            val distinctId = "customer-1"
             val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = distinctId),
             ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = started.ref.journeyId!!
+            val journeyId = requireNotNull(started.ref.journeyId)
 
-            assertFalse(
-                h.service.markHostDismissedInMemory(
-                    ownerDistinctId = "customer-1",
-                    journeyId = journeyId,
-                    experienceId = "experience-1",
-                    initiatingDistinctId = "customer-2",
-                ),
-            )
             markHostDismissed(h, journeyId)
+            h.service.exit(distinctId, journeyId, "error")
+
+            assertTrue(h.service.presentationEnded(distinctId, journeyId, CloseReason.HostDismissed))
+            assertNull(JourneyStore(h.root).load(distinctId, journeyId))
+            assertTrue(JourneyStore(h.root).hasCompleted(distinctId, "experience-1"))
+            val admission = h.service.handleEventForTrigger(
+                StoredEvent("trigger-2", "opened", timestampMillis = now, distinctId = distinctId),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed
+            assertEquals(SuppressReason.REENTRY_LIMITED, admission.reason)
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun competingExitWinsWhenItMakesTheFirstTerminalRunTransition() = runBlocking {
+        val h = harness(reentry = JourneyReentry.OneTime)
+        try {
+            val distinctId = "customer-1"
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = distinctId),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = requireNotNull(started.ref.journeyId)
+
+            h.service.exit(distinctId, journeyId, "error")
             assertFalse(
-                h.service.presentationEnded(
-                    "customer-1",
-                    journeyId,
-                    CloseReason.UserDismissed,
-                ),
+                h.service.markHostDismissedInMemory(distinctId, journeyId, distinctId),
             )
-            assertEquals(
-                JourneyRunState.ACTIVE,
-                JourneyStore(h.root).load("customer-1", journeyId)?.state,
-            )
+
+            assertFalse(h.service.presentationEnded(distinctId, journeyId, CloseReason.HostDismissed))
+            val durableRun = requireNotNull(JourneyStore(h.root).load(distinctId, journeyId))
+            assertEquals(JourneyRunState.TERMINAL, durableRun.state)
+            assertEquals("error", durableRun.terminalReason)
+            assertFalse(JourneyStore(h.root).hasCompleted(distinctId, "experience-1"))
             assertTrue(
-                h.service.presentationEnded(
-                    "customer-1",
-                    journeyId,
-                    CloseReason.HostDismissed,
-                ),
+                h.service.handleEventForTrigger(
+                    StoredEvent("trigger-2", "opened", timestampMillis = now, distinctId = distinctId),
+                ).single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started,
             )
         } finally {
             h.root.deleteRecursively()
@@ -458,156 +488,7 @@ class JourneyServiceTest {
     }
 
     @Test
-    fun hostExitMarkWinsConcurrentTerminalSavesUnderLoadAndDurablyGatesAdmission() = runBlocking {
-        val blockNextClockRead = AtomicBoolean(false)
-        var markReadActiveRun = CountDownLatch(0)
-        var releaseMark = CountDownLatch(0)
-        val h = harness(
-            reentry = JourneyReentry.OneTime,
-            onJourneyClockRead = {
-                if (blockNextClockRead.compareAndSet(true, false)) {
-                    markReadActiveRun.countDown()
-                    check(releaseMark.await(5, TimeUnit.SECONDS))
-                }
-            },
-        )
-        try {
-            repeat(32) { attempt ->
-                val distinctId = "mark-wins-customer-$attempt"
-                val started = h.service.handleEventForTrigger(
-                    StoredEvent(
-                        "mark-wins-trigger-$attempt",
-                        "opened",
-                        timestampMillis = now,
-                        distinctId = distinctId,
-                    ),
-                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-                val journeyId = requireNotNull(started.ref.journeyId)
-                markReadActiveRun = CountDownLatch(1)
-                releaseMark = CountDownLatch(1)
-                blockNextClockRead.set(true)
-
-                val mark = async(Dispatchers.Default) {
-                    h.service.markHostDismissedInMemory(
-                        ownerDistinctId = distinctId,
-                        journeyId = journeyId,
-                        experienceId = "experience-1",
-                        initiatingDistinctId = distinctId,
-                    )
-                }
-                assertTrue(markReadActiveRun.await(5, TimeUnit.SECONDS))
-                val competingTerminalSave = async(Dispatchers.Unconfined) {
-                    h.service.exit(distinctId, journeyId, "error")
-                }
-                releaseMark.countDown()
-                assertTrue(mark.await())
-                competingTerminalSave.await()
-
-                assertTrue(
-                    h.service.presentationEnded(
-                        distinctId,
-                        journeyId,
-                        CloseReason.HostDismissed,
-                    ),
-                )
-                assertNull(JourneyStore(h.root).load(distinctId, journeyId))
-                assertTrue(JourneyStore(h.root).hasCompleted(distinctId, "experience-1"))
-                val admission = h.service.handleEventForTrigger(
-                    StoredEvent(
-                        "mark-wins-retrigger-$attempt",
-                        "opened",
-                        timestampMillis = now,
-                        distinctId = distinctId,
-                    ),
-                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed
-                assertEquals(SuppressReason.REENTRY_LIMITED, admission.reason)
-            }
-        } finally {
-            releaseMark.countDown()
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun hostExitMarkFollowingCompetingTerminalSavesReconcilesAdmissionUnderLoad() = runBlocking {
-        val blockNextClockRead = AtomicBoolean(false)
-        var terminalSaved = CountDownLatch(0)
-        var releaseTerminalSave = CountDownLatch(0)
-        val h = harness(
-            reentry = JourneyReentry.OneTime,
-            onJourneyClockRead = {
-                if (blockNextClockRead.compareAndSet(true, false)) {
-                    terminalSaved.countDown()
-                    check(releaseTerminalSave.await(5, TimeUnit.SECONDS))
-                }
-            },
-        )
-        try {
-            repeat(32) { attempt ->
-                val distinctId = "race-customer-$attempt"
-                val started = h.service.handleEventForTrigger(
-                    StoredEvent(
-                        "race-trigger-$attempt",
-                        "opened",
-                        timestampMillis = now,
-                        distinctId = distinctId,
-                    ),
-                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-                val journeyId = requireNotNull(started.ref.journeyId)
-                terminalSaved = CountDownLatch(1)
-                releaseTerminalSave = CountDownLatch(1)
-                blockNextClockRead.set(true)
-
-                val terminalSave = async(Dispatchers.Default) {
-                    h.service.exit(distinctId, journeyId, "error")
-                }
-                assertTrue(terminalSaved.await(5, TimeUnit.SECONDS))
-                val markStarted = CountDownLatch(1)
-                val mark = async(Dispatchers.Default) {
-                    markStarted.countDown()
-                    h.service.markHostDismissedInMemory(
-                        ownerDistinctId = distinctId,
-                        journeyId = journeyId,
-                        experienceId = "experience-1",
-                        initiatingDistinctId = distinctId,
-                    )
-                }
-                assertTrue(markStarted.await(5, TimeUnit.SECONDS))
-                releaseTerminalSave.countDown()
-                terminalSave.await()
-                assertTrue(mark.await())
-
-                assertFalse(
-                    h.service.presentationEnded(
-                        distinctId,
-                        journeyId,
-                        CloseReason.HostDismissed,
-                    ),
-                )
-                val durableRun = requireNotNull(JourneyStore(h.root).load(distinctId, journeyId))
-                assertEquals(JourneyRunState.TERMINAL, durableRun.state)
-                assertEquals("error", durableRun.terminalReason)
-                assertFalse(JourneyStore(h.root).hasCompleted(distinctId, "experience-1"))
-
-                assertTrue(
-                    h.service.handleEventForTrigger(
-                        StoredEvent(
-                            "race-retrigger-$attempt",
-                            "opened",
-                            timestampMillis = now,
-                            distinctId = distinctId,
-                        ),
-                    ).single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started,
-                )
-            }
-        } finally {
-            releaseTerminalSave.countDown()
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun inMemoryHostExitRefusesRunFactsBeforeTombstonePersistence() = runBlocking {
+    fun terminalRunRefusesRunFactsBeforeWriteBehindPersistence() = runBlocking {
         val h = harness()
         try {
             val started = h.service.handleEventForTrigger(
@@ -647,7 +528,7 @@ class JourneyServiceTest {
     }
 
     @Test
-    fun inMemoryHostExitRefusesDownFactRunMutationsBeforeTombstonePersistence() = runBlocking {
+    fun terminalRunRefusesDownFactMutationsBeforeWriteBehindPersistence() = runBlocking {
         val h = harness()
         try {
             val started = h.service.handleEventForTrigger(
@@ -801,6 +682,7 @@ class JourneyServiceTest {
                 JourneyLedger(h.log),
                 h.releases,
                 { now },
+                initialDistinctId = "customer-1",
                 triggerBroker = h.broker,
             )
             restartedService.recoverPendingHostDismissals()
@@ -919,11 +801,18 @@ class JourneyServiceTest {
             val blockedFirstRewrite = File(firstRunFile.parentFile, ".$firstJourneyId.json.new")
             assertTrue(blockedFirstRewrite.mkdir())
             ShadowLog.clear()
+            val recoveringService = JourneyService(
+                JourneyStore(h.root),
+                JourneyLedger(h.log),
+                h.releases,
+                { now },
+                triggerBroker = h.broker,
+            )
 
-            h.service.recoverPendingHostDismissals()
+            recoveringService.recoverPendingHostDismissals()
 
-            assertTrue(journeyStore.load("customer-a", firstJourneyId)?.pendingHostExitCapture == true)
-            assertNull(journeyStore.load("customer-b", requireNotNull(journeyIds["customer-b"])))
+            assertTrue(JourneyStore(h.root).load("customer-a", firstJourneyId)?.pendingHostExitCapture == true)
+            assertNull(JourneyStore(h.root).load("customer-b", requireNotNull(journeyIds["customer-b"])))
             val failureLog = ShadowLog.getLogsForTag("Nuxie").single {
                 it.msg.contains("Pending host-dismissal recovery failed")
             }
@@ -931,9 +820,9 @@ class JourneyServiceTest {
             assertTrue(failureLog.throwable is java.io.FileNotFoundException)
 
             assertTrue(blockedFirstRewrite.delete())
-            h.service.recoverPendingHostDismissals()
+            recoveringService.recoverPendingHostDismissals()
 
-            assertNull(journeyStore.load("customer-a", firstJourneyId))
+            assertNull(JourneyStore(h.root).load("customer-a", firstJourneyId))
         } finally {
             h.root.deleteRecursively()
         }
@@ -1077,7 +966,7 @@ class JourneyServiceTest {
     }
 
     @Test
-    fun inMemoryHostExitImmediatelyGatesOneTimeReentryBeforeBookkeeping() = runBlocking {
+    fun terminalRunImmediatelyGatesOneTimeReentryBeforeWriteBehind() = runBlocking {
         val h = harness(JourneyReentry.OneTime)
         try {
             val started = h.service.handleEventForTrigger(
@@ -1100,7 +989,7 @@ class JourneyServiceTest {
     }
 
     @Test
-    fun inMemoryHostExitImmediatelyGatesWindowedReentryBeforeBookkeeping() = runBlocking {
+    fun terminalRunImmediatelyGatesWindowedReentryBeforeWriteBehind() = runBlocking {
         val h = harness(JourneyReentry.OncePerWindow(1_000))
         try {
             val started = h.service.handleEventForTrigger(
@@ -1119,7 +1008,7 @@ class JourneyServiceTest {
     }
 
     @Test
-    fun inMemoryHostExitImmediatelyAllowsEveryTimeReentryBeforeBookkeeping() = runBlocking {
+    fun terminalRunImmediatelyAllowsEveryTimeReentryBeforeWriteBehind() = runBlocking {
         val h = harness(JourneyReentry.EveryTime)
         try {
             val started = h.service.handleEventForTrigger(
@@ -1428,7 +1317,6 @@ class JourneyServiceTest {
             h.service.markHostDismissedInMemory(
                 ownerDistinctId = "customer-1",
                 journeyId = journeyId,
-                experienceId = "experience-1",
                 initiatingDistinctId = "customer-1",
             ),
         )

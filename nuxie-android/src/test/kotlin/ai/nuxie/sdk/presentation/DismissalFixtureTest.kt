@@ -215,6 +215,7 @@ class DismissalFixtureTest {
                 store = runStore,
                 ledger = JourneyLedger(eventLog),
                 releases = JourneyReleaseProvider { _, _ -> emptyList() },
+                initialDistinctId = distinctId,
             )
             val launched = mutableListOf<String>()
             val reported = mutableListOf<CloseReason>()
@@ -231,7 +232,6 @@ class DismissalFixtureTest {
                     val marked = journeys.markHostDismissedInMemory(
                         ownerDistinctId = requireNotNull(outcome.ownerDistinctId),
                         journeyId = requireNotNull(outcome.ref.journeyId),
-                        experienceId = outcome.ref.experienceId,
                         initiatingDistinctId = requireNotNull(outcome.initiatingDistinctId),
                     )
                     PresentationRegistry.reportFailure(
@@ -345,6 +345,7 @@ class DismissalFixtureTest {
                 ledger = JourneyLedger(eventLog),
                 releases = JourneyReleaseProvider { _, _ -> emptyList() },
                 nowMillis = { nowMillis },
+                initialDistinctId = distinctId,
             )
             val launched = mutableListOf<String>()
             var semanticFailure: Throwable? = null
@@ -362,7 +363,6 @@ class DismissalFixtureTest {
                     journeys.markHostDismissedInMemory(
                         ownerDistinctId = requireNotNull(outcome.ownerDistinctId),
                         journeyId = requireNotNull(outcome.ref.journeyId),
-                        experienceId = outcome.ref.experienceId,
                         initiatingDistinctId = requireNotNull(outcome.initiatingDistinctId),
                     )
                 },
