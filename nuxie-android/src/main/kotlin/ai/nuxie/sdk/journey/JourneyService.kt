@@ -80,14 +80,24 @@ internal class JourneyService(
     ) {
         runLock.withLock {
             val run = store.load(distinctId, journeyId) ?: return
-            if (run.state == JourneyRunState.ACTIVE && !run.isGhost) ledger.transition(run, fromNode, toNode, region)
+            if (run.state == JourneyRunState.ACTIVE &&
+                !run.isGhost &&
+                !hasInMemoryHostExit(distinctId, journeyId)
+            ) {
+                ledger.transition(run, fromNode, toNode, region)
+            }
         }
     }
 
     suspend fun milestone(distinctId: String, journeyId: String, milestoneId: String) {
         runLock.withLock {
             val run = store.load(distinctId, journeyId) ?: return
-            if (run.state == JourneyRunState.ACTIVE && !run.isGhost) ledger.milestone(run, milestoneId)
+            if (run.state == JourneyRunState.ACTIVE &&
+                !run.isGhost &&
+                !hasInMemoryHostExit(distinctId, journeyId)
+            ) {
+                ledger.milestone(run, milestoneId)
+            }
         }
     }
 
@@ -101,7 +111,10 @@ internal class JourneyService(
     ): String? {
         return runLock.withLock {
             val run = store.load(distinctId, journeyId) ?: return null
-            if (run.state == JourneyRunState.ACTIVE && !run.isGhost) {
+            if (run.state == JourneyRunState.ACTIVE &&
+                !run.isGhost &&
+                !hasInMemoryHostExit(distinctId, journeyId)
+            ) {
                 ledger.effectRequested(run, nodeId, attempt, effect, payload)
             } else {
                 null
@@ -431,10 +444,8 @@ internal class JourneyService(
 
     private fun activeRunsForAdmission(distinctId: String): List<JourneyRun> {
         val persistedActiveRuns = store.loadActive(distinctId)
-        return synchronized(inMemoryHostExits) {
-            persistedActiveRuns.filterNot { run ->
-                HostDismissalKey(distinctId, run.id) in inMemoryHostExits
-            }
+        return persistedActiveRuns.filterNot { run ->
+            hasInMemoryHostExit(distinctId, run.id)
         }
     }
 
@@ -448,6 +459,7 @@ internal class JourneyService(
             JourneyEventNames.SUPERSEDED -> {
                 val journeyId = properties.string("journey_id") ?: return
                 val run = store.load(distinctId, journeyId) ?: return
+                if (hasInMemoryHostExit(distinctId, journeyId)) return
                 // iOS parity: only a live run enters ghost play-out. A
                 // supersede arriving after the run already ended terminally
                 // is a late fact and a no-op; the server reconciles the
@@ -460,6 +472,7 @@ internal class JourneyService(
                 val journeyId = properties.string("journey_id") ?: return
                 val convertedAt = properties.long("at") ?: properties.string("at")?.let(IsoDates::parseMillis) ?: return
                 val run = store.load(distinctId, journeyId) ?: return
+                if (hasInMemoryHostExit(distinctId, journeyId)) return
                 if (run.convertedAtMillis == null || convertedAt < run.convertedAtMillis) {
                     store.save(run.copy(convertedAtMillis = convertedAt))
                 }

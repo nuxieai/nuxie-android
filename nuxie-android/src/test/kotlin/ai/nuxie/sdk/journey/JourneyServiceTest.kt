@@ -455,6 +455,89 @@ class JourneyServiceTest {
     }
 
     @Test
+    fun inMemoryHostExitRefusesRunFactsBeforeTombstonePersistence() = runBlocking {
+        val h = harness()
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = requireNotNull(started.ref.journeyId)
+
+            markHostDismissed(h, journeyId)
+            assertEquals(
+                JourneyRunState.ACTIVE,
+                JourneyStore(h.root).load("customer-1", journeyId)?.state,
+            )
+
+            h.service.transition("customer-1", journeyId, null, "screen-a")
+            h.service.milestone("customer-1", journeyId, "reached-a")
+            val invocationId = h.service.requestEffect(
+                "customer-1",
+                journeyId,
+                "effect-a",
+                1,
+                "send_push",
+                JsonObject(emptyMap()),
+            )
+            h.log.awaitBarrier()
+
+            assertNull(invocationId)
+            assertTrue(
+                h.store.events.values.none {
+                    it.name == JourneyEventNames.TRANSITION ||
+                        it.name == JourneyEventNames.MILESTONE ||
+                        it.name == JourneyEventNames.EFFECT_REQUESTED
+                },
+            )
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun inMemoryHostExitRefusesDownFactRunMutationsBeforeTombstonePersistence() = runBlocking {
+        val h = harness()
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = requireNotNull(started.ref.journeyId)
+            markHostDismissed(h, journeyId)
+            val superseded = buildJsonObject {
+                put("id", JsonPrimitive("superseded-after-host-exit"))
+                put("event", JsonPrimitive(JourneyEventNames.SUPERSEDED))
+                put("timestamp", JsonPrimitive(now))
+                put("properties", buildJsonObject {
+                    put("journey_id", JsonPrimitive(journeyId))
+                })
+            }
+            val converted = buildJsonObject {
+                put("id", JsonPrimitive("converted-after-host-exit"))
+                put("event", JsonPrimitive(JourneyEventNames.CONVERTED))
+                put("timestamp", JsonPrimitive(now))
+                put("properties", buildJsonObject {
+                    put("journey_id", JsonPrimitive(journeyId))
+                    put("at", JsonPrimitive(now))
+                })
+            }
+
+            h.service.applyDownFacts(
+                buildJsonObject { put("facts", JsonArray(listOf(superseded, converted))) },
+                "customer-1",
+            )
+
+            val durableRun = requireNotNull(JourneyStore(h.root).load("customer-1", journeyId))
+            assertEquals(JourneyRunState.ACTIVE, durableRun.state)
+            assertFalse(durableRun.isGhost)
+            assertNull(durableRun.convertedAtMillis)
+            assertTrue("superseded-after-host-exit" in h.store.events)
+            assertTrue("converted-after-host-exit" in h.store.events)
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun failedInitialTombstoneWriteRetriesWithBackoffOnTheDetachedLane() = runBlocking {
         val retryDelays = Channel<Long>(Channel.UNLIMITED)
         val allowRetry = Channel<Unit>(Channel.UNLIMITED)
