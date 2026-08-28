@@ -133,9 +133,14 @@ internal class JourneyService(
             val name = fact.string("event") ?: return@forEach
             val properties = fact["properties"] as? JsonObject ?: return@forEach
             if (name !in DOWN_FACT_NAMES) return@forEach
-            // Server facts carry their server-authored time, as epoch millis
-            // or ISO-8601; substituting receipt time would skew the ledger.
-            val timestamp = fact.long("timestamp")
+            // A conversion payload carries its authoritative conversion time;
+            // other server facts use their envelope time. Both accept epoch
+            // millis or ISO-8601, and only fall back to local receipt time.
+            val timestamp = if (name == JourneyEventNames.CONVERTED) {
+                properties.long("at") ?: properties.string("at")?.let(IsoDates::parseMillis)
+            } else {
+                null
+            } ?: fact.long("timestamp")
                 ?: fact.string("timestamp")?.let(IsoDates::parseMillis)
                 ?: nowMillis()
             val serverProperties = buildJsonObject {

@@ -1,7 +1,11 @@
 package ai.nuxie.sdk.journey
 
+import ai.nuxie.sdk.ExperienceRef
 import ai.nuxie.sdk.LogLevel
+import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieEnvironment
+import ai.nuxie.sdk.NuxieActivityInfo
+import ai.nuxie.sdk.events.ActivityForwarder
 import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.NuxieContextBuilder
@@ -240,6 +244,37 @@ class JourneyServiceTest {
             h.service.applyDownFacts(buildJsonObject { put("facts", JsonArray(listOf(fact("later", 50L), fact("earlier", 10L)))) }, "customer-1")
 
             assertEquals(10L, JourneyStore(h.root).load("customer-1", journeyId)!!.convertedAtMillis)
+        } finally { h.root.deleteRecursively() }
+    }
+
+    @Test
+    fun convertedFactUsesTheConversionPayloadTimeForTheCommittedActivity() = runBlocking {
+        val h = harness(forwardingEnabled = { true })
+        try {
+            val fact = buildJsonObject {
+                put("id", JsonPrimitive("converted-fact"))
+                put("event", JsonPrimitive(JourneyEventNames.CONVERTED))
+                put("timestamp", JsonPrimitive(50L))
+                put("properties", buildJsonObject {
+                    put("journey_id", JsonPrimitive("journey-1"))
+                    put("at", JsonPrimitive(10L))
+                })
+            }
+
+            h.service.applyDownFacts(
+                buildJsonObject { put("facts", JsonArray(listOf(fact))) },
+                "customer-1",
+            )
+
+            val delivered = mutableListOf<NuxieActivityInfo>()
+            ActivityForwarder(
+                resolveExperience = { _, journeyId -> ExperienceRef("experience-1", "version-1", journeyId) },
+                deliver = { delivered += it },
+            ).onCommitted(h.store.events.getValue("converted-fact"))
+
+            val info = delivered.single()
+            assertEquals(10L, info.timestampMillis)
+            assertTrue(info.activity is NuxieActivity.JourneyConverted)
         } finally { h.root.deleteRecursively() }
     }
 

@@ -96,7 +96,7 @@ sealed interface NuxieActivity {
 enum class DismissReason { USER, GOAL_MET, ERROR, HOST }
 
 /** Commerce details captured at the presentation seam. */
-data class PurchaseInfo(
+class PurchaseInfo internal constructor(
     val productId: String?,
     val storeProductId: String?,
     val placementId: String?,
