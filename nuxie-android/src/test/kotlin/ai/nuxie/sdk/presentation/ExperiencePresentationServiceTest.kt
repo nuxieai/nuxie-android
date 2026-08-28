@@ -21,6 +21,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -737,6 +738,77 @@ class ExperiencePresentationServiceTest {
         dismissal.await()
         assertTrue(lease.closed.get())
         assertEquals("com.nuxie.runtime.android.native", releaseThread.get())
+    }
+
+    @Test
+    fun cancellingOneJoinedHostDismissalKeepsSharedAttemptUntilNativeHandleRelease() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        var semanticCalls = 0
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+            reportOutcome = {
+                semanticCalls += 1
+                true
+            },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        val presentationId = launched.single()
+        PresentationRegistry.reportFirstFrame(presentationId)
+        shown.await()
+
+        val lane = NuxieRuntimeLane()
+        val laneBlocked = CountDownLatch(1)
+        val unblockLane = CountDownLatch(1)
+        val file = NuxieRuntimeFile(
+            handle = 42L,
+            native = object : NuxieTypedRuntimeNative {
+                override fun freeFile(handle: Long) = Unit
+            },
+        )
+        assertTrue(lane.enqueue {
+            laneBlocked.countDown()
+            check(unblockLane.await(5, TimeUnit.SECONDS)) { "runtime lane was not released" }
+        })
+        assertTrue(laneBlocked.await(2, TimeUnit.SECONDS))
+        assertTrue(lane.enqueue(file::close))
+
+        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        setActivityField(activity, "presentationId", presentationId)
+        setActivityField(activity, "lane", lane)
+        assertTrue(PresentationRegistry.attach(presentationId, activity))
+
+        val cancelled = async { service.dismissFromHost("customer-1") }
+        runCurrent()
+        val survivor = async { service.dismissFromHost("customer-1") }
+        runCurrent()
+        NuxieExperienceActivity::class.java
+            .getDeclaredMethod("onDestroy")
+            .apply { isAccessible = true }
+            .invoke(activity)
+        runCurrent()
+
+        assertFalse(cancelled.isCompleted)
+        assertFalse(survivor.isCompleted)
+        cancelled.cancelAndJoin()
+        runCurrent()
+        val fresh = async { service.dismissFromHost("customer-1") }
+        runCurrent()
+
+        try {
+            assertFalse("joined dismissal completed before native release", survivor.isCompleted)
+            assertFalse("fresh dismissal completed before native release", fresh.isCompleted)
+            assertEquals("fresh dismissal started a second attempt", 1, semanticCalls)
+            assertFalse("acquisition lease closed before native release", lease.closed.get())
+        } finally {
+            unblockLane.countDown()
+        }
+
+        survivor.await()
+        fresh.await()
+        assertTrue(lease.closed.get())
     }
 
     private fun setActivityField(
