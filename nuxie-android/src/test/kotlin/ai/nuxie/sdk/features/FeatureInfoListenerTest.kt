@@ -1,7 +1,11 @@
 package ai.nuxie.sdk.features
 
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -49,27 +53,43 @@ class FeatureInfoListenerTest {
     }
 
     @Test
-    fun signedZeroBalanceDoesNotEmitAPhantomFeatureTransition() = runBlocking {
+    fun signedZeroBalanceDoesNotEmitOnEitherSurface() = runBlocking {
         val info = FeatureInfo()
         val transitions = mutableListOf<Pair<FeatureAccess?, FeatureAccess>>()
+        val flowBalances = mutableListOf<Double>()
         info.onFeatureChange = { _, oldAccess, newAccess -> transitions += oldAccess to newAccess }
+        val collector = launch(start = CoroutineStart.UNDISPATCHED) {
+            info.all.collect { access -> access["credits"]?.balance?.let(flowBalances::add) }
+        }
 
         info.update(mapOf("credits" to access(allowed = false, balance = -0.0)), emptyMap())
+        yield()
         info.update(mapOf("credits" to access(allowed = false, balance = 0.0)), emptyMap())
+        yield()
+        collector.cancelAndJoin()
 
         assertEquals(1, transitions.size)
+        assertEquals(1, flowBalances.size)
     }
 
     @Test
-    fun nanBalanceRemainsUnequalLikeSwift() = runBlocking {
+    fun nanBalanceEmitsOnBothSurfacesLikeSwift() = runBlocking {
         val info = FeatureInfo()
         val transitions = mutableListOf<Pair<FeatureAccess?, FeatureAccess>>()
+        val flowBalances = mutableListOf<Double>()
         info.onFeatureChange = { _, oldAccess, newAccess -> transitions += oldAccess to newAccess }
+        val collector = launch(start = CoroutineStart.UNDISPATCHED) {
+            info.all.collect { access -> access["credits"]?.balance?.let(flowBalances::add) }
+        }
 
         info.update(mapOf("credits" to access(allowed = false, balance = Double.NaN)), emptyMap())
+        yield()
         info.update(mapOf("credits" to access(allowed = false, balance = Double.NaN)), emptyMap())
+        yield()
+        collector.cancelAndJoin()
 
         assertEquals(2, transitions.size)
+        assertEquals(2, flowBalances.size)
     }
 
     private fun access(allowed: Boolean, balance: Double) = FeatureAccess(
