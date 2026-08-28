@@ -250,8 +250,20 @@ internal object PresentationRegistry {
         var callback: ((CloseReason) -> Unit)? = null
         val activity = synchronized(lock) {
             val entry = entries[id] ?: return
-            val reserved = entry.reservedReason
-            if (reserved != null && reserved != reason) return
+            var reserved = entry.reservedReason
+            if (reserved != null && reserved != reason) {
+                // Identity teardown is authoritative over a failed host
+                // terminalization retry. Revoke the Activity claim and the
+                // registry reservation under one lock before selecting the
+                // identity close, matching iOS shutdown semantics.
+                if (reason != CloseReason.IdentityChanged ||
+                    reserved != CloseReason.HostDismissed ||
+                    entry.reservationReady
+                ) return
+                entry.activity.get()?.releaseServiceClaim(reserved)
+                entry.reservedReason = null
+                reserved = null
+            }
             if (reserved == reason) entry.reservationReady = true
             val attached = entry.activity.get()
             if (attached == null) {

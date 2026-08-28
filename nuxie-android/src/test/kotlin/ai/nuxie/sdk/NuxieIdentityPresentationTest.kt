@@ -18,6 +18,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -54,6 +55,13 @@ class NuxieIdentityPresentationTest {
     }
 
     @Test
+    fun identifyShutsDownPresentationHeldForFailedHostTerminalizationRetry() = runBlocking {
+        assertIdentityTransitionShutsDownPresentation(failHostTerminalization = true) {
+            Nuxie.identify("identified-customer")
+        }
+    }
+
+    @Test
     fun resetShutsDownPresentationOwnedByPreviousIdentity() = runBlocking {
         assertIdentityTransitionShutsDownPresentation(initiallyIdentified = true) {
             Nuxie.reset()
@@ -62,6 +70,7 @@ class NuxieIdentityPresentationTest {
 
     private suspend fun assertIdentityTransitionShutsDownPresentation(
         initiallyIdentified: Boolean = false,
+        failHostTerminalization: Boolean = false,
         transition: () -> Unit,
     ) {
         val launched = mutableListOf<String>()
@@ -80,7 +89,7 @@ class NuxieIdentityPresentationTest {
                     launch = launched::add,
                     reportOutcome = {
                         semanticOutcomes += 1
-                        true
+                        !failHostTerminalization
                     },
                     reserveHostDismissal = { outcome ->
                         outcome.ownerDistinctId == outcome.initiatingDistinctId
@@ -105,13 +114,21 @@ class NuxieIdentityPresentationTest {
         PresentationRegistry.reportFirstFrame(launched.single())
         shown.await()
 
+        if (failHostTerminalization) {
+            Nuxie.dismiss()
+            assertTrue(
+                "failed host terminalization must preserve the presentation for recovery",
+                !lease.closed.get(),
+            )
+        }
+
         transition()
-        core.userTransitions.drain()
+        withTimeout(2_000) { core.userTransitions.drain() }
         Nuxie.dismiss()
 
         assertTrue("identity transition must dismiss the old presentation", lease.closed.get())
         assertEquals(listOf("\$experience_shown"), emitted)
-        assertEquals(0, semanticOutcomes)
+        assertEquals(if (failHostTerminalization) 1 else 0, semanticOutcomes)
     }
 
     private fun release(version: String): PresentationRelease {
