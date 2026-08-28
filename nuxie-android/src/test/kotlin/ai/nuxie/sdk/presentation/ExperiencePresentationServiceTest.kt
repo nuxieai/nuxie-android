@@ -10,13 +10,13 @@ import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import ai.nuxie.sdk.runtime.NuxieTypedRuntimeNative
 import android.content.Intent
 import android.os.Bundle
+import android.os.Looper
 import java.io.Closeable
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.concurrent.thread
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.SupervisorJob
@@ -648,8 +648,49 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun activityTeardownPublishesDismissalOnlyAfterQueuedNativeHandleRelease() {
-        val presentationId = "await-runtime-release"
+    fun activityOnDestroyReturnsPromptlyWhenRuntimeLaneIsStuck() {
+        val lane = NuxieRuntimeLane()
+        val laneBlocked = CountDownLatch(1)
+        val unblockLane = CountDownLatch(1)
+        assertTrue(lane.enqueue {
+            laneBlocked.countDown()
+            check(unblockLane.await(5, TimeUnit.SECONDS)) { "runtime lane was not released" }
+        })
+        assertTrue(laneBlocked.await(2, TimeUnit.SECONDS))
+
+        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        setActivityField(activity, "lane", lane)
+
+        assertEquals(Looper.getMainLooper(), Looper.myLooper())
+        val startedAtNanos = System.nanoTime()
+        try {
+            NuxieExperienceActivity::class.java
+                .getDeclaredMethod("onDestroy")
+                .apply { isAccessible = true }
+                .invoke(activity)
+        } finally {
+            unblockLane.countDown()
+        }
+        val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos)
+
+        assertTrue("onDestroy blocked on the runtime lane for ${elapsedMillis}ms", elapsedMillis < 250)
+        assertTrue("Runtime lane did not finish", lane.awaitQuiescence(2_000))
+    }
+
+    @Test
+    fun hostDismissalCompletesOnlyAfterQueuedNativeHandleRelease() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        val presentationId = launched.single()
+        PresentationRegistry.reportFirstFrame(presentationId)
+        shown.await()
+
         val lane = NuxieRuntimeLane()
         val laneBlocked = CountDownLatch(1)
         val unblockLane = CountDownLatch(1)
@@ -665,69 +706,36 @@ class ExperiencePresentationServiceTest {
         )
         assertTrue(lane.enqueue {
             laneBlocked.countDown()
-            check(unblockLane.await(2, TimeUnit.SECONDS)) { "runtime lane was not released" }
+            check(unblockLane.await(5, TimeUnit.SECONDS)) { "runtime lane was not released" }
         })
         assertTrue(laneBlocked.await(2, TimeUnit.SECONDS))
         assertTrue(lane.enqueue(file::close))
 
-        val dismissed = CountDownLatch(1)
         val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
         setActivityField(activity, "presentationId", presentationId)
         setActivityField(activity, "lane", lane)
-        PresentationRegistry.register(
-            id = presentationId,
-            content = PreparedPresentation(
-                File("does-not-exist"),
-                null,
-                0,
-                PresentationShell.FullScreen,
-            ),
-            onFirstFrame = {},
-            onFailure = { throw AssertionError(it) },
-            onDismissed = {
-                assertEquals(CloseReason.HostDismissed, it)
-                assertEquals(
-                    "com.nuxie.runtime.android.native",
-                    releaseThread.get(),
-                )
-                dismissed.countDown()
-            },
-        )
         assertTrue(PresentationRegistry.attach(presentationId, activity))
-        assertTrue(activity.claimFromService(CloseReason.HostDismissed))
 
-        val teardownFailure = AtomicReference<Throwable?>()
-        val teardownFinished = CountDownLatch(1)
-        val teardownThread = thread(name = "activity-teardown-test") {
-            try {
-                NuxieExperienceActivity::class.java
-                    .getDeclaredMethod("onDestroy")
-                    .apply { isAccessible = true }
-                    .invoke(activity)
-            } catch (error: Throwable) {
-                teardownFailure.set(error)
-            } finally {
-                teardownFinished.countDown()
-            }
-        }
+        val dismissal = async { service.dismissFromHost("customer-1") }
+        runCurrent()
+        assertEquals(CloseReason.HostDismissed, activity.claimedCloseReason())
 
         try {
-            assertFalse(
-                "dismissal must remain pending while native release is queued",
-                dismissed.await(100, TimeUnit.MILLISECONDS),
-            )
-            assertFalse(
-                "Activity teardown must await the runtime lane",
-                teardownFinished.await(0, TimeUnit.MILLISECONDS),
-            )
+            NuxieExperienceActivity::class.java
+                .getDeclaredMethod("onDestroy")
+                .apply { isAccessible = true }
+                .invoke(activity)
+            runCurrent()
+
+            assertFalse("dismiss completed before native release", dismissal.isCompleted)
+            assertFalse("acquisition lease closed before native release", lease.closed.get())
+            assertEquals(null, releaseThread.get())
         } finally {
             unblockLane.countDown()
         }
 
-        assertTrue("Activity teardown did not finish", teardownFinished.await(2, TimeUnit.SECONDS))
-        teardownThread.join(2_000)
-        teardownFailure.get()?.let { throw AssertionError("Activity teardown failed", it) }
-        assertTrue("dismissal was not published", dismissed.await(0, TimeUnit.MILLISECONDS))
+        dismissal.await()
+        assertTrue(lease.closed.get())
         assertEquals("com.nuxie.runtime.android.native", releaseThread.get())
     }
 

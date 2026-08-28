@@ -119,17 +119,20 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     override fun onDestroy() {
-        terminal.prepareForTeardown(isChangingConfigurations)
+        val changingConfigurations = isChangingConfigurations
+        terminal.prepareForTeardown(changingConfigurations)
         host?.release()
-        lane?.shutdown()
-        lane?.awaitQuiescence()
         unregisterPredictiveBack()
         super.onDestroy()
-        // Publish terminal completion only after the renderer and its lane
-        // and the Activity are torn down so awaitable host dismissal covers
-        // the complete local cleanup boundary.
-        presentationId?.let { PresentationRegistry.detach(it, this) }
-        terminal.reportAtTeardown(isChangingConfigurations)
+
+        // Like iOS's presentationCleanupTask, lifecycle teardown only hands
+        // off ordered cleanup. Suspend dismissal joins the registry completion
+        // published after the lane has released every native handle.
+        val completeTeardown = {
+            presentationId?.let { PresentationRegistry.detach(it, this) }
+            terminal.reportAtTeardown(changingConfigurations)
+        }
+        lane?.shutdown(completeTeardown) ?: completeTeardown()
     }
 
     internal fun claimFromService(reason: CloseReason): Boolean = terminal.tryClaim(reason)
