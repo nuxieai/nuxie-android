@@ -345,6 +345,9 @@ internal class NuxieCore(
         )
         // Every committed capture nudges the delivery threshold check.
         eventLog.subscribeCommitted { delivery.kick() }
+        userTransitions.addObserver(UserTransitionCoordinator.Observer { _, from, _ ->
+            presentations.shutdownOwnedBy(from)
+        })
         userTransitions.addObserver(UserTransitionCoordinator.Observer { _, from, to ->
             features.handleUserChange(from, to)
             purchases.recover()

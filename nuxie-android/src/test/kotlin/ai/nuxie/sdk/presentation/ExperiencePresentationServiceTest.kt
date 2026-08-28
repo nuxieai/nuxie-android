@@ -323,6 +323,39 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun identityChangeShutdownOnlyClosesTheDepartingCustomersPresentation() = runTest {
+        val emitted = mutableListOf<String>()
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        var semanticCalls = 0
+        val service = service(
+            emit = { name, _, _ -> emitted += name },
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+            reportOutcome = {
+                semanticCalls += 1
+                true
+            },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-2") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        service.shutdownOwnedBy("customer-1")
+
+        assertFalse(lease.closed.get())
+        assertTrue(PresentationRegistry.resolve(launched.single()) != null)
+
+        service.shutdownOwnedBy("customer-2")
+
+        assertTrue(lease.closed.get())
+        assertEquals(null, PresentationRegistry.resolve(launched.single()))
+        assertEquals(listOf("\$experience_shown"), emitted)
+        assertEquals(0, semanticCalls)
+    }
+
+    @Test
     fun admittedHostDismissalKeepsItsOwnerAfterIdentityChanges() = runTest {
         val launched = mutableListOf<String>()
         val reservationEstablished = CompletableDeferred<Unit>()

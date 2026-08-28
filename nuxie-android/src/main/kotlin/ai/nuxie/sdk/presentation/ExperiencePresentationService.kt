@@ -39,6 +39,7 @@ internal fun interface PresentationReleaseProvider {
 internal sealed interface CloseReason {
     data object UserDismissed : CloseReason
     data object HostDismissed : CloseReason
+    data object IdentityChanged : CloseReason
     data object GoalMet : CloseReason
     data object PurchaseCompleted : CloseReason
     data object Timeout : CloseReason
@@ -452,6 +453,27 @@ internal class ExperiencePresentationService(
         }
     }
 
+    /**
+     * Tears down a presentation owned by the departing customer without
+     * attributing a dismissal or terminal Journey outcome to either identity.
+     * Mirrors iOS identity-transition presentation shutdown (`reason: nil`).
+     */
+    suspend fun shutdownOwnedBy(ownerDistinctId: String) {
+        while (true) {
+            val existingAttempt = synchronized(stateLock) { hostDismissalAttempt }
+            if (existingAttempt != null) {
+                existingAttempt.completion.await()
+                continue
+            }
+            val active = synchronized(stateLock) {
+                current?.takeIf { it.ownerDistinctId == ownerDistinctId }
+            } ?: return
+            PresentationRegistry.dismiss(active.id, CloseReason.IdentityChanged)
+            active.finished.await()
+            return
+        }
+    }
+
     fun close() = dismiss(CloseReason.UserDismissed)
 
     private fun firstFrame(active: ActivePresentation) {
@@ -509,17 +531,20 @@ internal class ExperiencePresentationService(
                 ),
             )
         }
-        if (active.shown.get()) emitCloseFact(active, reason)
+        val reportsSemanticOutcome = reason != CloseReason.IdentityChanged
+        if (active.shown.get() && reportsSemanticOutcome) emitCloseFact(active, reason)
         active.finished.complete(Unit)
-        scope.launch {
-            if (active.semanticReported.compareAndSet(false, true)) {
-                reportOutcome(
-                    PresentationOutcome(
-                        ref = active.ref,
-                        reason = reason,
-                        ownerDistinctId = active.ownerDistinctId,
-                    ),
-                )
+        if (reportsSemanticOutcome) {
+            scope.launch {
+                if (active.semanticReported.compareAndSet(false, true)) {
+                    reportOutcome(
+                        PresentationOutcome(
+                            ref = active.ref,
+                            reason = reason,
+                            ownerDistinctId = active.ownerDistinctId,
+                        ),
+                    )
+                }
             }
         }
     }
@@ -540,12 +565,14 @@ internal class ExperiencePresentationService(
         when (reason) {
             CloseReason.UserDismissed -> properties["reason"] = "user"
             CloseReason.HostDismissed -> properties["reason"] = "host"
+            CloseReason.IdentityChanged -> return
             CloseReason.GoalMet -> properties["reason"] = "goal_met"
             else -> Unit
         }
         val name = when (reason) {
             CloseReason.UserDismissed, CloseReason.HostDismissed, CloseReason.GoalMet ->
                 SystemEventNames.EXPERIENCE_DISMISSED
+            CloseReason.IdentityChanged -> error("identity-change shutdown has no close fact")
             CloseReason.PurchaseCompleted -> {
                 properties["product_id"] = null
                 SystemEventNames.EXPERIENCE_PURCHASED
