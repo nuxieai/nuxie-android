@@ -29,6 +29,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -109,6 +111,7 @@ class JourneyServiceTest {
         identity: Identity = Identity(),
         beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
         onJourneyClockRead: () -> Unit = {},
+        hostDismissRetrySleep: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
     ): Harness {
         val root = createTempDir(prefix = "nuxie-journey-")
         val eventStore = Store()
@@ -151,6 +154,7 @@ class JourneyServiceTest {
                     now
                 },
                 triggerBroker = broker,
+                hostDismissRetrySleep = hostDismissRetrySleep,
             ),
             broker,
             releases,
@@ -450,8 +454,15 @@ class JourneyServiceTest {
     }
 
     @Test
-    fun failedInitialTombstoneWriteRetriesFromTheInMemoryExitOnForeground() = runBlocking {
-        val h = harness()
+    fun failedInitialTombstoneWriteRetriesWithBackoffOnTheDetachedLane() = runBlocking {
+        val retryDelays = Channel<Long>(Channel.UNLIMITED)
+        val allowRetry = Channel<Unit>(Channel.UNLIMITED)
+        val h = harness(
+            hostDismissRetrySleep = { delayMillis ->
+                retryDelays.send(delayMillis)
+                allowRetry.receive()
+            },
+        )
         try {
             val started = h.service.handleEventForTrigger(
                 StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
@@ -464,25 +475,103 @@ class JourneyServiceTest {
             val blockedTemporary = File(runFile.parentFile, ".$journeyId.json.new")
             assertTrue(blockedTemporary.mkdir())
 
-            assertTrue(
-                runCatching {
-                    h.service.presentationEnded(
-                        "customer-1",
-                        journeyId,
-                        CloseReason.HostDismissed,
-                    )
-                }.isFailure,
-            )
+            val bookkeeping = async {
+                h.service.presentationEnded(
+                    "customer-1",
+                    journeyId,
+                    CloseReason.HostDismissed,
+                )
+            }
+            assertEquals(1_000L, retryDelays.receive())
             assertEquals(
                 JourneyRunState.ACTIVE,
                 JourneyStore(h.root).load("customer-1", journeyId)?.state,
             )
+            assertFalse("failed bookkeeping did not enter backoff", bookkeeping.isCompleted)
 
+            allowRetry.send(Unit)
+            assertEquals(2_000L, retryDelays.receive())
             assertTrue(blockedTemporary.delete())
-            h.service.recoverPendingHostDismissals()
+            allowRetry.send(Unit)
+            assertTrue(bookkeeping.await())
 
             assertEquals(1, h.store.events.values.count { it.name == JourneyEventNames.EXITED })
             assertTrue(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
+            assertNull(JourneyStore(h.root).load("customer-1", journeyId))
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun foregroundReattemptPersistsFailedInitialTombstoneForStartupRecovery() = runBlocking {
+        val retryDelays = Channel<Long>(Channel.UNLIMITED)
+        val holdDetachedRetry = Channel<Unit>()
+        val h = harness(
+            hostDismissRetrySleep = { delayMillis ->
+                retryDelays.send(delayMillis)
+                holdDetachedRetry.receive()
+            },
+        )
+        try {
+            val updates = mutableListOf<TriggerUpdate>()
+            var failTriggerCompletion = true
+            h.broker.register("trigger-1") { update ->
+                if (failTriggerCompletion) error("trigger completion failed")
+                updates += update
+            }
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = requireNotNull(started.ref.journeyId)
+            markHostDismissed(h, journeyId)
+            val runFile = File(h.root, "nuxie/journeys/runs")
+                .walkTopDown()
+                .single { it.isFile && it.name == "$journeyId.json" }
+            val blockedTemporary = File(runFile.parentFile, ".$journeyId.json.new")
+            assertTrue(blockedTemporary.mkdir())
+            val bookkeeping = async {
+                h.service.presentationEnded(
+                    "customer-1",
+                    journeyId,
+                    CloseReason.HostDismissed,
+                )
+            }
+            assertEquals(1_000L, retryDelays.receive())
+
+            assertTrue(blockedTemporary.delete())
+            h.store.beforePendingInsert = { event ->
+                if (event.name == JourneyEventNames.EXITED) error("exit capture failed")
+            }
+            val blockedCompletionsDirectory = File(h.root, "nuxie/journeys/completions").apply {
+                parentFile!!.mkdirs()
+                writeText("blocked")
+            }
+
+            h.service.recoverPendingHostDismissals()
+
+            val tombstone = requireNotNull(JourneyStore(h.root).load("customer-1", journeyId))
+            assertEquals(JourneyRunState.TERMINAL, tombstone.state)
+            assertTrue(tombstone.pendingHostExitCapture)
+            assertTrue(tombstone.pendingHostCompletion)
+            assertTrue(tombstone.pendingHostTriggerCompletion)
+            bookkeeping.cancelAndJoin()
+
+            h.store.beforePendingInsert = null
+            assertTrue(blockedCompletionsDirectory.delete())
+            failTriggerCompletion = false
+            val restartedService = JourneyService(
+                JourneyStore(h.root),
+                JourneyLedger(h.log),
+                h.releases,
+                { now },
+                triggerBroker = h.broker,
+            )
+            restartedService.recoverPendingHostDismissals()
+
+            assertEquals(1, h.store.events.values.count { it.name == JourneyEventNames.EXITED })
+            assertTrue(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
+            assertEquals(1, updates.size)
             assertNull(JourneyStore(h.root).load("customer-1", journeyId))
         } finally {
             h.root.deleteRecursively()

@@ -15,7 +15,9 @@ import ai.nuxie.sdk.util.IsoDates
 import ai.nuxie.sdk.presentation.CloseReason
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -36,6 +38,7 @@ internal class JourneyService(
     private val ids: TimeBasedEpochGenerator = TimeBasedEpochGenerator.shared,
     initialDistinctId: String? = null,
     private val triggerBroker: TriggerBroker = TriggerBroker(),
+    private val hostDismissRetrySleep: suspend (Long) -> Unit = { delay(it) },
 ) : TriggerService.JourneyRouter, JourneyDownFactRouter {
     private val admissions = mutableSetOf<AdmissionKey>()
     private val restoredRunIds = mutableSetOf<String>()
@@ -126,7 +129,7 @@ internal class JourneyService(
     /** Receives the presentation-scoped close outcome for a linked Journey. */
     suspend fun presentationEnded(distinctId: String, journeyId: String, reason: CloseReason): Boolean {
         if (reason == CloseReason.HostDismissed) {
-            return hostDismiss(distinctId, journeyId)
+            return hostDismissWithRetry(distinctId, journeyId)
         }
         if (reason == CloseReason.UserDismissed) {
             return userDismiss(distinctId, journeyId)
@@ -142,6 +145,22 @@ internal class JourneyService(
         }
         exit(distinctId, journeyId, exitReason)
         return true
+    }
+
+    private suspend fun hostDismissWithRetry(distinctId: String, journeyId: String): Boolean {
+        var retryDelayMillis = INITIAL_HOST_DISMISS_RETRY_DELAY_MILLIS
+        while (true) {
+            try {
+                return hostDismiss(distinctId, journeyId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                if (!hasInMemoryHostExit(distinctId, journeyId)) throw failure
+                hostDismissRetrySleep(retryDelayMillis)
+                retryDelayMillis = (retryDelayMillis * 2)
+                    .coerceAtMost(MAX_HOST_DISMISS_RETRY_DELAY_MILLIS)
+            }
+        }
     }
 
     fun markHostDismissedInMemory(
@@ -444,6 +463,9 @@ internal class JourneyService(
         (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toLongOrNull()
 
     private companion object {
+        const val INITIAL_HOST_DISMISS_RETRY_DELAY_MILLIS = 1_000L
+        const val MAX_HOST_DISMISS_RETRY_DELAY_MILLIS = 60_000L
+
         val DOWN_FACT_NAMES = setOf(
             JourneyEventNames.CONVERTED,
             JourneyEventNames.EFFECT_COMPLETED,
