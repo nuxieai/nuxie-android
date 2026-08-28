@@ -53,6 +53,26 @@ class ExperiencePresentationServiceTest {
         }
     }
 
+    private class BlockingClaimActivity : PresentationActivityHandle {
+        private val terminal = TerminalCloseClaim()
+        val releaseStarted = CountDownLatch(1)
+        val continueRelease = CountDownLatch(1)
+
+        override fun claimFromService(reason: CloseReason): Boolean = terminal.tryClaim(reason)
+
+        override fun claimedCloseReason(): CloseReason? = terminal.reason
+
+        override fun releaseServiceClaim(reason: CloseReason): Boolean {
+            releaseStarted.countDown()
+            check(continueRelease.await(5, TimeUnit.SECONDS)) {
+                "reservation release was not allowed to continue"
+            }
+            return terminal.release(reason)
+        }
+
+        override fun finishAfterServiceClaim() = Unit
+    }
+
     @After
     fun tearDown() {
         PresentationRegistry.clearForTesting()
@@ -680,6 +700,73 @@ class ExperiencePresentationServiceTest {
 
         assertEquals(listOf<CloseReason>(CloseReason.GoalMet), dismissed)
         assertEquals(null, PresentationRegistry.resolve(presentationId))
+    }
+
+    @Test
+    fun reservationReleaseRacingDetachDoesNotPublishHostDismissedWithoutAdmission() {
+        val presentationId = "rejected-host-dismissal"
+        val dismissed = mutableListOf<CloseReason>()
+        val activity = BlockingClaimActivity()
+        PresentationRegistry.register(
+            id = presentationId,
+            content = PreparedPresentation(
+                File("does-not-exist"),
+                null,
+                0,
+                PresentationShell.FullScreen,
+            ),
+            onFirstFrame = {},
+            onFailure = {},
+            onDismissed = dismissed::add,
+        )
+        assertTrue(PresentationRegistry.attach(presentationId, activity))
+        assertTrue(
+            PresentationRegistry.reserveDismissal(presentationId, CloseReason.HostDismissed),
+        )
+
+        val releaseFailure = AtomicReference<Throwable?>()
+        val releaseThread = Thread {
+            runCatching {
+                PresentationRegistry.releaseDismissalReservation(
+                    presentationId,
+                    CloseReason.HostDismissed,
+                )
+            }.exceptionOrNull()?.let(releaseFailure::set)
+        }
+        releaseThread.start()
+        assertTrue(activity.releaseStarted.await(2, TimeUnit.SECONDS))
+
+        val detachFailure = AtomicReference<Throwable?>()
+        val detachFinished = CountDownLatch(1)
+        val detachThread = Thread {
+            try {
+                PresentationRegistry.detach(presentationId, activity)
+            } catch (error: Throwable) {
+                detachFailure.set(error)
+            } finally {
+                detachFinished.countDown()
+            }
+        }
+        detachThread.start()
+        val contentionDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        while (detachFinished.count != 0L &&
+            detachThread.state != Thread.State.BLOCKED &&
+            System.nanoTime() < contentionDeadline
+        ) {
+            Thread.yield()
+        }
+
+        activity.continueRelease.countDown()
+        releaseThread.join(2_000)
+        detachThread.join(2_000)
+
+        assertFalse("reservation release did not finish", releaseThread.isAlive)
+        assertFalse("detach did not finish", detachThread.isAlive)
+        assertEquals(null, releaseFailure.get())
+        assertEquals(null, detachFailure.get())
+        assertEquals(emptyList<CloseReason>(), dismissed)
+        assertEquals(null, activity.claimedCloseReason())
+        assertTrue(PresentationRegistry.resolve(presentationId) != null)
     }
 
     @Test

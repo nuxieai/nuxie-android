@@ -46,7 +46,7 @@ internal class TerminalCloseClaim(
  * Process-death policy (decision 10): a cold-recreated instance (no live
  * SDK state behind it) finishes immediately and never re-presents.
  */
-internal class NuxieExperienceActivity : Activity() {
+internal class NuxieExperienceActivity : Activity(), PresentationActivityHandle {
     private var host: ExperienceSurfaceHost? = null
     private var lane: NuxieRuntimeLane? = null
     private var presentationId: String? = null
@@ -135,13 +135,13 @@ internal class NuxieExperienceActivity : Activity() {
         lane?.shutdown(completeTeardown) ?: completeTeardown()
     }
 
-    internal fun claimFromService(reason: CloseReason): Boolean = terminal.tryClaim(reason)
+    override fun claimFromService(reason: CloseReason): Boolean = terminal.tryClaim(reason)
 
-    internal fun claimedCloseReason(): CloseReason? = terminal.reason
+    override fun claimedCloseReason(): CloseReason? = terminal.reason
 
-    internal fun releaseServiceClaim(reason: CloseReason): Boolean = terminal.release(reason)
+    override fun releaseServiceClaim(reason: CloseReason): Boolean = terminal.release(reason)
 
-    internal fun finishAfterServiceClaim() {
+    override fun finishAfterServiceClaim() {
         runOnUiThread { finish() }
     }
 
