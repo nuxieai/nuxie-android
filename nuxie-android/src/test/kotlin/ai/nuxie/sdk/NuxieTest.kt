@@ -57,4 +57,9 @@ class NuxieTest {
             runBlocking { Nuxie.hasFeature("premium") }
         }
     }
+
+    @Test
+    fun dismissBeforeSetupIsANoop() = runBlocking {
+        Nuxie.dismiss()
+    }
 }

@@ -38,6 +38,7 @@ internal fun interface PresentationReleaseProvider {
 /** Kotlin analog of the iOS presentation close-reason set. */
 internal sealed interface CloseReason {
     data object UserDismissed : CloseReason
+    data object HostDismissed : CloseReason
     data object GoalMet : CloseReason
     data object PurchaseCompleted : CloseReason
     data object Timeout : CloseReason
@@ -63,6 +64,8 @@ internal class ExperiencePresentationException(
 internal data class PresentationOutcome(
     val ref: ExperienceRef,
     val reason: CloseReason,
+    val ownerDistinctId: String? = null,
+    val initiatingDistinctId: String? = null,
 )
 
 /** Prepared content remains service-owned; only its opaque id crosses the Activity boundary. */
@@ -114,6 +117,8 @@ internal object PresentationRegistry {
         val terminal = AtomicBoolean(false)
         val firstFrame = AtomicBoolean(false)
         var activity = WeakReference<NuxieExperienceActivity>(null)
+        var reservedReason: CloseReason? = null
+        var reservationReady = false
     }
 
     private val lock = Any()
@@ -148,7 +153,9 @@ internal object PresentationRegistry {
             val entry = entries[id] ?: return
             if (entry.activity.get() === activity) {
                 val reason = activity.claimedCloseReason()
-                if (reason == null) {
+                if (entry.reservedReason != null && !entry.reservationReady) {
+                    entry.activity = WeakReference(null)
+                } else if (reason == null) {
                     entry.activity = WeakReference(null)
                 } else {
                     entries.remove(id)
@@ -189,23 +196,53 @@ internal object PresentationRegistry {
 
     fun reportDismissed(id: String, reason: CloseReason) {
         val callback = synchronized(lock) {
-            val entry = entries.remove(id) ?: return
+            val entry = entries[id] ?: return
+            if (entry.reservedReason != null &&
+                (!entry.reservationReady || entry.reservedReason != reason)
+            ) {
+                return
+            }
+            entries.remove(id)
             if (!entry.terminal.compareAndSet(false, true)) return
             entry.onDismissed
         }
         callback(reason)
     }
 
+    fun reserveDismissal(id: String, reason: CloseReason): Boolean = synchronized(lock) {
+        val entry = entries[id] ?: return@synchronized false
+        if (entry.terminal.get()) return@synchronized false
+        entry.reservedReason?.let { return@synchronized it == reason }
+        val activity = entry.activity.get()
+        if (activity != null && !activity.claimFromService(reason)) return@synchronized false
+        entry.reservedReason = reason
+        entry.reservationReady = false
+        true
+    }
+
+    fun releaseDismissalReservation(id: String, reason: CloseReason) {
+        val activity = synchronized(lock) {
+            val entry = entries[id] ?: return
+            if (entry.reservedReason != reason || entry.reservationReady) return
+            entry.reservedReason = null
+            entry.activity.get()
+        }
+        activity?.releaseServiceClaim(reason)
+    }
+
     fun dismiss(id: String, reason: CloseReason) {
         var callback: ((CloseReason) -> Unit)? = null
         val activity = synchronized(lock) {
             val entry = entries[id] ?: return
+            val reserved = entry.reservedReason
+            if (reserved != null && reserved != reason) return
+            if (reserved == reason) entry.reservationReady = true
             val attached = entry.activity.get()
             if (attached == null) {
                 entries.remove(id)
                 if (entry.terminal.compareAndSet(false, true)) callback = entry.onDismissed
                 null
-            } else if (attached.claimFromService(reason)) {
+            } else if (attached.claimFromService(reason) || attached.claimedCloseReason() == reason) {
                 attached
             } else {
                 null
@@ -228,7 +265,9 @@ internal class ExperiencePresentationService(
     private val scope: CoroutineScope,
     private val runtimeAvailable: () -> Boolean,
     private val launch: (String) -> Unit,
-    private val reportOutcome: suspend (PresentationOutcome) -> Unit = {},
+    private val reportOutcome: suspend (PresentationOutcome) -> Boolean = { true },
+    private val reserveHostDismissal: suspend (PresentationOutcome) -> Boolean = { true },
+    private val releaseHostDismissalReservation: suspend (PresentationOutcome) -> Unit = {},
     private val firstFrameTimeoutMillis: Long = FIRST_FRAME_TIMEOUT_MILLIS,
 ) {
     constructor(
@@ -238,7 +277,9 @@ internal class ExperiencePresentationService(
         emit: (String, Map<String, Any?>) -> Unit,
         scope: CoroutineScope,
         runtimeAvailable: () -> Boolean,
-        reportOutcome: suspend (PresentationOutcome) -> Unit = {},
+        reportOutcome: suspend (PresentationOutcome) -> Boolean = { true },
+        reserveHostDismissal: suspend (PresentationOutcome) -> Boolean = { true },
+        releaseHostDismissalReservation: suspend (PresentationOutcome) -> Unit = {},
     ) : this(
         releases = releases,
         acquire = { admitted -> acquirer.acquire(admitted.release, admitted.delivery) },
@@ -247,6 +288,8 @@ internal class ExperiencePresentationService(
         runtimeAvailable = runtimeAvailable,
         launch = AndroidPresentationLauncher(context.applicationContext ?: context),
         reportOutcome = reportOutcome,
+        reserveHostDismissal = reserveHostDismissal,
+        releaseHostDismissalReservation = releaseHostDismissalReservation,
         firstFrameTimeoutMillis = FIRST_FRAME_TIMEOUT_MILLIS,
     )
 
@@ -254,17 +297,29 @@ internal class ExperiencePresentationService(
         val id: String,
         val ref: ExperienceRef,
         val acquired: AcquiredRelease,
+        val ownerDistinctId: String?,
         val firstFrame: CompletableDeferred<ExperienceRef>,
         val closed: AtomicBoolean = AtomicBoolean(false),
         val shown: AtomicBoolean = AtomicBoolean(false),
+        val semanticReported: AtomicBoolean = AtomicBoolean(false),
         val finished: CompletableDeferred<Unit> = CompletableDeferred(),
     )
 
     private val presentationMutex = Mutex()
     private val stateLock = Any()
     private var current: ActivePresentation? = null
+    private var hostDismissalAttempt: HostDismissalAttempt? = null
 
-    suspend fun present(experienceVersionId: String, journeyId: String? = null): ExperienceRef {
+    private data class HostDismissalAttempt(
+        val active: ActivePresentation,
+        val completion: CompletableDeferred<Unit> = CompletableDeferred(),
+    )
+
+    suspend fun present(
+        experienceVersionId: String,
+        journeyId: String? = null,
+        ownerDistinctId: String? = null,
+    ): ExperienceRef {
         val active = presentationMutex.withLock {
             if (!runtimeAvailable()) {
                 throw ExperiencePresentationException(
@@ -296,7 +351,13 @@ internal class ExperiencePresentationService(
             val identity = admitted.release.identity
             val ref = ExperienceRef(identity.experienceId, identity.experienceVersionId, journeyId)
             val id = UUID.randomUUID().toString()
-            val pending = ActivePresentation(id, ref, acquired, CompletableDeferred())
+            val pending = ActivePresentation(
+                id,
+                ref,
+                acquired,
+                ownerDistinctId,
+                CompletableDeferred(),
+            )
             synchronized(stateLock) { current = pending }
 
             PresentationRegistry.register(
@@ -336,6 +397,61 @@ internal class ExperiencePresentationService(
         synchronized(stateLock) { current }?.let { PresentationRegistry.dismiss(it.id, reason) }
     }
 
+    suspend fun dismissFromHost(initiatingDistinctId: String) {
+        val (attempt, ownsAttempt) = synchronized(stateLock) {
+            val active = current ?: return
+            val existing = hostDismissalAttempt
+            if (existing?.active === active) {
+                existing to false
+            } else {
+                HostDismissalAttempt(active).also { hostDismissalAttempt = it } to true
+            }
+        }
+        if (!ownsAttempt) {
+            attempt.completion.await()
+            return
+        }
+        val active = attempt.active
+        var teardownStarted = false
+        var journeyReservationAcquired = false
+        var journeyReservationRetained = false
+        val outcome = PresentationOutcome(
+            ref = active.ref,
+            reason = CloseReason.HostDismissed,
+            ownerDistinctId = active.ownerDistinctId,
+            initiatingDistinctId = initiatingDistinctId,
+        )
+        try {
+            if (!PresentationRegistry.reserveDismissal(active.id, CloseReason.HostDismissed)) return
+            if (!reserveHostDismissal(outcome)) return
+            journeyReservationAcquired = true
+            if (synchronized(stateLock) { current } !== active) return
+            journeyReservationRetained = true
+            val terminalized = runCatching {
+                reportOutcome(outcome)
+            }.getOrDefault(false)
+            if (!terminalized) return
+            active.semanticReported.set(true)
+            teardownStarted = true
+            PresentationRegistry.dismiss(active.id, CloseReason.HostDismissed)
+            active.finished.await()
+        } finally {
+            if (!teardownStarted) {
+                PresentationRegistry.releaseDismissalReservation(
+                    active.id,
+                    CloseReason.HostDismissed,
+                )
+            }
+            if (journeyReservationAcquired && !journeyReservationRetained) {
+                releaseHostDismissalReservation(outcome)
+            }
+            synchronized(stateLock) {
+                if (hostDismissalAttempt === attempt) hostDismissalAttempt = null
+            }
+            attempt.completion.complete(Unit)
+        }
+    }
+
     fun close() = dismiss(CloseReason.UserDismissed)
 
     private fun firstFrame(active: ActivePresentation) {
@@ -367,14 +483,23 @@ internal class ExperiencePresentationService(
         }
         active.firstFrame.completeExceptionally(typed)
         if (active.shown.get()) emitCloseFact(active.ref, CloseReason.Error(typed))
-        scope.launch { reportOutcome(PresentationOutcome(active.ref, CloseReason.Error(typed))) }
+        scope.launch {
+            if (active.semanticReported.compareAndSet(false, true)) {
+                reportOutcome(
+                    PresentationOutcome(
+                        ref = active.ref,
+                        reason = CloseReason.Error(typed),
+                        ownerDistinctId = active.ownerDistinctId,
+                    ),
+                )
+            }
+        }
     }
 
     private fun ended(active: ActivePresentation, reason: CloseReason) {
         if (!active.closed.compareAndSet(false, true)) return
         clearCurrent(active)
         active.acquired.close()
-        active.finished.complete(Unit)
         if (!active.firstFrame.isCompleted) {
             active.firstFrame.completeExceptionally(
                 ExperiencePresentationException(
@@ -384,7 +509,18 @@ internal class ExperiencePresentationService(
             )
         }
         if (active.shown.get()) emitCloseFact(active.ref, reason)
-        scope.launch { reportOutcome(PresentationOutcome(active.ref, reason)) }
+        active.finished.complete(Unit)
+        scope.launch {
+            if (active.semanticReported.compareAndSet(false, true)) {
+                reportOutcome(
+                    PresentationOutcome(
+                        ref = active.ref,
+                        reason = reason,
+                        ownerDistinctId = active.ownerDistinctId,
+                    ),
+                )
+            }
+        }
     }
 
     private fun clearCurrent(active: ActivePresentation) {
@@ -401,11 +537,13 @@ internal class ExperiencePresentationService(
         )
         when (reason) {
             CloseReason.UserDismissed -> properties["reason"] = "user"
+            CloseReason.HostDismissed -> properties["reason"] = "host"
             CloseReason.GoalMet -> properties["reason"] = "goal_met"
             else -> Unit
         }
         val name = when (reason) {
-            CloseReason.UserDismissed, CloseReason.GoalMet -> SystemEventNames.EXPERIENCE_DISMISSED
+            CloseReason.UserDismissed, CloseReason.HostDismissed, CloseReason.GoalMet ->
+                SystemEventNames.EXPERIENCE_DISMISSED
             CloseReason.PurchaseCompleted -> {
                 properties["product_id"] = null
                 SystemEventNames.EXPERIENCE_PURCHASED

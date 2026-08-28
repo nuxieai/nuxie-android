@@ -2,6 +2,7 @@ package ai.nuxie.sdk.journey
 
 import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.StoredEvent
+import ai.nuxie.sdk.util.IsoDates
 import java.security.MessageDigest
 import kotlinx.serialization.json.JsonObject
 
@@ -48,6 +49,36 @@ internal class JourneyLedger(private val eventLog: EventLog) {
             "at" to atMillis,
         ),
     )
+
+    suspend fun hostExited(run: JourneyRun, atMillis: Long): Boolean =
+        eventLog.captureIdempotently(
+            name = JourneyEventNames.EXITED,
+            properties = mapOf(
+                "journey_id" to run.id,
+                "experience_id" to run.experienceId,
+                "experience_version" to run.experienceVersion,
+                "epoch" to run.epoch,
+                "reason" to "dismissed",
+                "at" to IsoDates.formatMillis(atMillis),
+                "dismissed_by" to "host",
+            ),
+            eventId = "journey-exited:${run.id}:${run.epoch}",
+            distinctId = run.distinctId,
+        )
+
+    suspend fun userExited(run: JourneyRun, atMillis: Long): Boolean =
+        eventLog.captureForTrigger(
+            JourneyEventNames.EXITED,
+            mapOf(
+                "journey_id" to run.id,
+                "experience_id" to run.experienceId,
+                "experience_version" to run.experienceVersion,
+                "epoch" to run.epoch,
+                "reason" to "cancelled",
+                "at" to IsoDates.formatMillis(atMillis),
+                "dismissed_by" to "user",
+            ),
+        ) != null
 
     fun effectRequested(
         run: JourneyRun,

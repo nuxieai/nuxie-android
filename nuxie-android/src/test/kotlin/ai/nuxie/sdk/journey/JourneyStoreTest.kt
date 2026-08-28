@@ -30,4 +30,58 @@ class JourneyStoreTest {
             root.deleteRecursively()
         }
     }
+
+    @Test
+    fun completionAccountingIsIdempotentByJourneyId() {
+        val root = createTempDir(prefix = "nuxie-journey-completion-")
+        try {
+            val store = JourneyStore(root)
+            store.recordCompletion(
+                "customer-1",
+                JourneyCompletion("experience-1", "journey-1", 10L),
+            )
+            store.recordCompletion(
+                "customer-1",
+                JourneyCompletion("experience-1", "journey-1", 20L),
+            )
+
+            assertEquals(1, store.completionCount("customer-1", "experience-1"))
+            assertEquals(20L, store.lastCompletionAtMillis("customer-1", "experience-1"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun pendingHostDismissalsAreDiscoveredAcrossCustomers() {
+        val root = createTempDir(prefix = "nuxie-journey-recovery-")
+        try {
+            val store = JourneyStore(root)
+            listOf("customer-1", "customer-2").forEachIndexed { index, distinctId ->
+                store.save(
+                    JourneyRun(
+                        id = "journey-$index",
+                        distinctId = distinctId,
+                        experienceId = "experience-1",
+                        experienceVersion = "version-1",
+                        epoch = index.toLong(),
+                        plane = JourneyPlane.DEVICE,
+                        settingsSnapshot = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        state = JourneyRunState.TERMINAL,
+                        terminalReason = "dismissed",
+                        completedAtMillis = index.toLong(),
+                        pendingHostExitCapture = true,
+                        pendingHostCompletion = true,
+                    ),
+                )
+            }
+
+            assertEquals(
+                setOf("customer-1", "customer-2"),
+                store.loadPendingHostDismissals().map(JourneyRun::distinctId).toSet(),
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
 }

@@ -50,8 +50,46 @@ internal class JourneyStore(
         ?: emptyList()
 
     @Synchronized
+    fun loadPendingHostDismissals(distinctId: String): List<JourneyRun> = runsDirectory(distinctId)
+        .listFiles()
+        ?.asSequence()
+        ?.filter { it.extension == "json" }
+        ?.mapNotNull(::decodeRun)
+        ?.filter {
+            it.pendingHostExitCapture ||
+                it.pendingHostCompletion ||
+                it.pendingHostTriggerCompletion
+        }
+        ?.sortedBy { it.id }
+        ?.toList()
+        ?: emptyList()
+
+    @Synchronized
+    fun loadPendingHostDismissals(): List<JourneyRun> = File(root, "runs")
+        .listFiles()
+        ?.asSequence()
+        ?.filter(File::isDirectory)
+        ?.flatMap { directory -> directory.listFiles()?.asSequence() ?: emptySequence() }
+        ?.filter { it.extension == "json" }
+        ?.mapNotNull(::decodeRun)
+        ?.filter {
+            it.pendingHostExitCapture ||
+                it.pendingHostCompletion ||
+                it.pendingHostTriggerCompletion
+        }
+        ?.sortedWith(compareBy(JourneyRun::distinctId, JourneyRun::id))
+        ?.toList()
+        ?: emptyList()
+
+    @Synchronized
+    fun delete(run: JourneyRun) {
+        File(runsDirectory(run.distinctId), "${run.id}.json").delete()
+    }
+
+    @Synchronized
     fun recordCompletion(distinctId: String, completion: JourneyCompletion) {
         val completions = completions(distinctId, completion.experienceId)
+            .filterNot { it.journeyId == completion.journeyId }
             .plus(completion)
             .takeLast(MAX_COMPLETIONS_PER_EXPERIENCE)
         val directory = completionsDirectory(distinctId)
@@ -69,6 +107,10 @@ internal class JourneyStore(
     @Synchronized
     fun lastCompletionAtMillis(distinctId: String, experienceId: String): Long? =
         completions(distinctId, experienceId).maxOfOrNull { it.completedAtMillis }
+
+    @Synchronized
+    internal fun completionCount(distinctId: String, experienceId: String): Int =
+        completions(distinctId, experienceId).size
 
     private fun decodeRun(file: File): JourneyRun? = runCatching {
         val value = json.parseToJsonElement(file.readText()).jsonObject
@@ -90,6 +132,11 @@ internal class JourneyStore(
             isGhost = value["is_ghost"]?.let { (it as? JsonPrimitive)?.content == "true" } ?: false,
             convertedAtMillis = value.long("converted_at"),
             terminalReason = value.string("terminal_reason"),
+            triggerRef = value.string("trigger_ref"),
+            completedAtMillis = value.long("completed_at"),
+            pendingHostExitCapture = value.boolean("pending_host_exit_capture"),
+            pendingHostCompletion = value.boolean("pending_host_completion"),
+            pendingHostTriggerCompletion = value.boolean("pending_host_trigger_completion"),
         )
     }.getOrNull()
 
@@ -100,7 +147,9 @@ internal class JourneyStore(
                 val value = element as? JsonObject ?: return@mapNotNull null
                 val id = value.string("experience_id") ?: return@mapNotNull null
                 val completedAt = value.long("completed_at") ?: return@mapNotNull null
-                JourneyCompletion(id, completedAt)
+                val journeyId = value.string("journey_id")
+                    ?: "legacy:$id:$completedAt"
+                JourneyCompletion(id, journeyId, completedAt)
             }
         }.getOrDefault(emptyList())
     }
@@ -145,10 +194,16 @@ internal class JourneyStore(
         put("is_ghost", JsonPrimitive(run.isGhost))
         put("converted_at", run.convertedAtMillis?.let(::JsonPrimitive) ?: JsonNull)
         put("terminal_reason", run.terminalReason?.let(::JsonPrimitive) ?: JsonNull)
+        put("trigger_ref", run.triggerRef?.let(::JsonPrimitive) ?: JsonNull)
+        put("completed_at", run.completedAtMillis?.let(::JsonPrimitive) ?: JsonNull)
+        put("pending_host_exit_capture", JsonPrimitive(run.pendingHostExitCapture))
+        put("pending_host_completion", JsonPrimitive(run.pendingHostCompletion))
+        put("pending_host_trigger_completion", JsonPrimitive(run.pendingHostTriggerCompletion))
     }
 
     private fun encodeCompletion(completion: JourneyCompletion): JsonObject = buildJsonObject {
         put("experience_id", JsonPrimitive(completion.experienceId))
+        put("journey_id", JsonPrimitive(completion.journeyId))
         put("completed_at", JsonPrimitive(completion.completedAtMillis))
     }
 
@@ -157,6 +212,9 @@ internal class JourneyStore(
 
     private fun JsonObject.long(key: String): Long? =
         (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toLongOrNull()
+
+    private fun JsonObject.boolean(key: String): Boolean =
+        (this[key] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() ?: false
 
     private companion object {
         const val MAX_COMPLETIONS_PER_EXPERIENCE = 10

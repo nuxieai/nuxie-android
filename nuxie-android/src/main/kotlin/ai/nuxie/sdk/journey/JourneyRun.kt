@@ -16,6 +16,11 @@ internal data class JourneyRun(
     val isGhost: Boolean = false,
     val convertedAtMillis: Long? = null,
     val terminalReason: String? = null,
+    val triggerRef: String? = null,
+    val completedAtMillis: Long? = null,
+    val pendingHostExitCapture: Boolean = false,
+    val pendingHostCompletion: Boolean = false,
+    val pendingHostTriggerCompletion: Boolean = false,
 )
 
 internal enum class JourneyPlane { DEVICE, SERVER }
@@ -29,5 +34,6 @@ internal data class JourneyResumePoint(
 
 internal data class JourneyCompletion(
     val experienceId: String,
+    val journeyId: String,
     val completedAtMillis: Long,
 )

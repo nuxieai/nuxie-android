@@ -300,9 +300,10 @@ object Nuxie {
 
     // MARK: Presentation
 
-    /** Dismiss the active engine-owned Experience, if any. */
-    fun dismiss() {
-        core?.presentations?.dismiss()
+    /** Dismiss the active engine-owned Experience and await local semantic completion. */
+    suspend fun dismiss() {
+        val core = core ?: return
+        core.presentations.dismissFromHost(core.identity.distinctId())
     }
 
     /**
