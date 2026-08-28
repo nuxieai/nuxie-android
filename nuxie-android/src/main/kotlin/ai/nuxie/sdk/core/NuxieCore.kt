@@ -224,20 +224,11 @@ internal class NuxieCore(
 
     private val reportPresentationOutcome: suspend (PresentationOutcome) -> Unit = { outcome ->
         outcome.ref.journeyId?.let { journeyId ->
-            val currentDistinctId = identity.distinctId()
-            val ownerDistinctId = outcome.ownerDistinctId
-            if (outcome.reason != CloseReason.HostDismissed &&
-                ownerDistinctId != null &&
-                ownerDistinctId != currentDistinctId
-            ) {
-                Unit
-            } else {
-                journeys.presentationEnded(
-                    ownerDistinctId ?: currentDistinctId,
-                    journeyId,
-                    outcome.reason,
-                )
-            }
+            journeys.presentationEnded(
+                outcome.ownerDistinctId ?: identity.distinctId(),
+                journeyId,
+                outcome.reason,
+            )
         }
     }
 

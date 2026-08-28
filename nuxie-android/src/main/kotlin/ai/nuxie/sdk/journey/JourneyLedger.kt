@@ -38,7 +38,7 @@ internal class JourneyLedger(private val eventLog: EventLog) {
         mapOf("journey_id" to run.id, "epoch" to run.epoch, "milestone_id" to milestoneId),
     )
 
-    fun exited(run: JourneyRun, reason: String, atMillis: Long) = capture(
+    fun exited(run: JourneyRun, reason: String, atMillis: Long) = eventLog.capture(
         JourneyEventNames.EXITED,
         mapOf(
             "journey_id" to run.id,
@@ -48,6 +48,7 @@ internal class JourneyLedger(private val eventLog: EventLog) {
             "reason" to reason,
             "at" to atMillis,
         ),
+        run.distinctId,
     )
 
     suspend fun hostExited(run: JourneyRun, atMillis: Long): Boolean =
