@@ -5,11 +5,18 @@ import ai.nuxie.sdk.experiences.AcquiredRelease
 import ai.nuxie.sdk.experiences.AuthenticatedRelease
 import ai.nuxie.sdk.experiences.Delivery
 import ai.nuxie.sdk.experiences.ExperienceReleaseIdentity
+import ai.nuxie.sdk.runtime.NuxieRuntimeFile
+import ai.nuxie.sdk.runtime.NuxieRuntimeLane
+import ai.nuxie.sdk.runtime.NuxieTypedRuntimeNative
 import android.content.Intent
 import android.os.Bundle
 import java.io.Closeable
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.SupervisorJob
@@ -605,6 +612,101 @@ class ExperiencePresentationServiceTest {
         claim.reportAtTeardown(isChangingConfigurations = false)
 
         assertEquals(listOf<CloseReason>(CloseReason.UserDismissed), reported)
+    }
+
+    @Test
+    fun activityTeardownPublishesDismissalOnlyAfterQueuedNativeHandleRelease() {
+        val presentationId = "await-runtime-release"
+        val lane = NuxieRuntimeLane()
+        val laneBlocked = CountDownLatch(1)
+        val unblockLane = CountDownLatch(1)
+        val releaseThread = AtomicReference<String?>()
+        val file = NuxieRuntimeFile(
+            handle = 42L,
+            native = object : NuxieTypedRuntimeNative {
+                override fun freeFile(handle: Long) {
+                    assertEquals(42L, handle)
+                    releaseThread.set(Thread.currentThread().name)
+                }
+            },
+        )
+        assertTrue(lane.enqueue {
+            laneBlocked.countDown()
+            check(unblockLane.await(2, TimeUnit.SECONDS)) { "runtime lane was not released" }
+        })
+        assertTrue(laneBlocked.await(2, TimeUnit.SECONDS))
+        assertTrue(lane.enqueue(file::close))
+
+        val dismissed = CountDownLatch(1)
+        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        setActivityField(activity, "presentationId", presentationId)
+        setActivityField(activity, "lane", lane)
+        PresentationRegistry.register(
+            id = presentationId,
+            content = PreparedPresentation(
+                File("does-not-exist"),
+                null,
+                0,
+                PresentationShell.FullScreen,
+            ),
+            onFirstFrame = {},
+            onFailure = { throw AssertionError(it) },
+            onDismissed = {
+                assertEquals(CloseReason.HostDismissed, it)
+                assertEquals(
+                    "com.nuxie.runtime.android.native",
+                    releaseThread.get(),
+                )
+                dismissed.countDown()
+            },
+        )
+        assertTrue(PresentationRegistry.attach(presentationId, activity))
+        assertTrue(activity.claimFromService(CloseReason.HostDismissed))
+
+        val teardownFailure = AtomicReference<Throwable?>()
+        val teardownFinished = CountDownLatch(1)
+        val teardownThread = thread(name = "activity-teardown-test") {
+            try {
+                NuxieExperienceActivity::class.java
+                    .getDeclaredMethod("onDestroy")
+                    .apply { isAccessible = true }
+                    .invoke(activity)
+            } catch (error: Throwable) {
+                teardownFailure.set(error)
+            } finally {
+                teardownFinished.countDown()
+            }
+        }
+
+        try {
+            assertFalse(
+                "dismissal must remain pending while native release is queued",
+                dismissed.await(100, TimeUnit.MILLISECONDS),
+            )
+            assertFalse(
+                "Activity teardown must await the runtime lane",
+                teardownFinished.await(0, TimeUnit.MILLISECONDS),
+            )
+        } finally {
+            unblockLane.countDown()
+        }
+
+        assertTrue("Activity teardown did not finish", teardownFinished.await(2, TimeUnit.SECONDS))
+        teardownThread.join(2_000)
+        teardownFailure.get()?.let { throw AssertionError("Activity teardown failed", it) }
+        assertTrue("dismissal was not published", dismissed.await(0, TimeUnit.MILLISECONDS))
+        assertEquals("com.nuxie.runtime.android.native", releaseThread.get())
+    }
+
+    private fun setActivityField(
+        activity: NuxieExperienceActivity,
+        name: String,
+        value: Any?,
+    ) {
+        NuxieExperienceActivity::class.java.getDeclaredField(name).apply {
+            isAccessible = true
+            set(activity, value)
+        }
     }
 
     private fun service(

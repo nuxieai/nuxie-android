@@ -73,6 +73,23 @@ internal class NuxieRuntimeLane {
         }
     }
 
+    /**
+     * After [shutdown], wait until every already-accepted task has finished.
+     * Interruption is restored only after the lane terminates so callers that
+     * publish semantic completion cannot outrun lane-confined native cleanup.
+     */
+    fun awaitQuiescence() {
+        var interrupted = false
+        while (!executor.isTerminated) {
+            try {
+                executor.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
+            } catch (_: InterruptedException) {
+                interrupted = true
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt()
+    }
+
     private companion object {
         const val LOG_TAG = "Nuxie"
         const val THREAD_NAME = "com.nuxie.runtime.android.native"

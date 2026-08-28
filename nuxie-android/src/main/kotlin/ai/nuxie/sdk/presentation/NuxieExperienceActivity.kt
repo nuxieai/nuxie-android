@@ -122,6 +122,7 @@ internal class NuxieExperienceActivity : Activity() {
         terminal.prepareForTeardown(isChangingConfigurations)
         host?.release()
         lane?.shutdown()
+        lane?.awaitQuiescence()
         unregisterPredictiveBack()
         super.onDestroy()
         // Publish terminal completion only after the renderer and its lane
