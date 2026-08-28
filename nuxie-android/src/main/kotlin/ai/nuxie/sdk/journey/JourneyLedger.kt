@@ -67,9 +67,9 @@ internal class JourneyLedger(private val eventLog: EventLog) {
         )
 
     suspend fun userExited(run: JourneyRun, atMillis: Long): Boolean =
-        eventLog.captureForTrigger(
-            JourneyEventNames.EXITED,
-            mapOf(
+        eventLog.captureSystemEvent(
+            name = JourneyEventNames.EXITED,
+            properties = mapOf(
                 "journey_id" to run.id,
                 "experience_id" to run.experienceId,
                 "experience_version" to run.experienceVersion,
@@ -78,7 +78,9 @@ internal class JourneyLedger(private val eventLog: EventLog) {
                 "at" to IsoDates.formatMillis(atMillis),
                 "dismissed_by" to "user",
             ),
-        ) != null
+            eventId = "journey-exited:${run.id}:${run.epoch}",
+            distinctId = run.distinctId,
+        )
 
     fun effectRequested(
         run: JourneyRun,
