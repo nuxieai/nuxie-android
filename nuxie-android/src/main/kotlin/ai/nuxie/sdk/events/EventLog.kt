@@ -333,7 +333,7 @@ internal class EventLog(
             properties = contextBuilder.buildEnrichedProperties(sanitized),
             timestampMillis = nowMillis(),
         )
-        val transformed = applyBeforeSend(original)
+        val transformed = applyBeforeSendPreservingTransform(original)
         if (transformed == null) {
             store.recordStableDrop(original.id, original.timestampMillis)
             return true
@@ -358,8 +358,7 @@ internal class EventLog(
     }
 
     private fun applyBeforeSend(original: NuxieEvent): NuxieEvent? {
-        val hook = beforeSend ?: return original
-        val transformed = hook(original) ?: return null
+        val transformed = applyBeforeSendPreservingTransform(original) ?: return null
         // Recovery owns identity: pin id, distinctId, and timestamp.
         return NuxieEvent(
             id = original.id,
@@ -368,6 +367,11 @@ internal class EventLog(
             properties = transformed.properties,
             timestampMillis = original.timestampMillis,
         )
+    }
+
+    private fun applyBeforeSendPreservingTransform(original: NuxieEvent): NuxieEvent? {
+        val hook = beforeSend ?: return original
+        return hook(original)
     }
 
     private companion object {
