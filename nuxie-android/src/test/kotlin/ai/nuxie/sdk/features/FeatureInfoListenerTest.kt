@@ -48,6 +48,18 @@ class FeatureInfoListenerTest {
         assertEquals(second, info.all.value.getValue("credits"))
     }
 
+    @Test
+    fun signedZeroBalanceDoesNotEmitAPhantomFeatureTransition() = runBlocking {
+        val info = FeatureInfo()
+        val transitions = mutableListOf<Pair<FeatureAccess?, FeatureAccess>>()
+        info.onFeatureChange = { _, oldAccess, newAccess -> transitions += oldAccess to newAccess }
+
+        info.update(mapOf("credits" to access(allowed = false, balance = -0.0)), emptyMap())
+        info.update(mapOf("credits" to access(allowed = false, balance = 0.0)), emptyMap())
+
+        assertEquals(1, transitions.size)
+    }
+
     private fun access(allowed: Boolean, balance: Double) = FeatureAccess(
         allowed = allowed,
         unlimited = false,

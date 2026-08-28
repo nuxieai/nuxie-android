@@ -693,18 +693,6 @@ public final class ai/nuxie/sdk/PermissionKind : java/lang/Enum {
 }
 
 public final class ai/nuxie/sdk/PurchaseInfo {
-	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lai/nuxie/sdk/ExperienceRef;Ljava/math/BigDecimal;Ljava/lang/String;Ljava/lang/String;Z)V
-	public final fun component1 ()Ljava/lang/String;
-	public final fun component2 ()Ljava/lang/String;
-	public final fun component3 ()Ljava/lang/String;
-	public final fun component4 ()Lai/nuxie/sdk/ExperienceRef;
-	public final fun component5 ()Ljava/math/BigDecimal;
-	public final fun component6 ()Ljava/lang/String;
-	public final fun component7 ()Ljava/lang/String;
-	public final fun component8 ()Z
-	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lai/nuxie/sdk/ExperienceRef;Ljava/math/BigDecimal;Ljava/lang/String;Ljava/lang/String;Z)Lai/nuxie/sdk/PurchaseInfo;
-	public static synthetic fun copy$default (Lai/nuxie/sdk/PurchaseInfo;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lai/nuxie/sdk/ExperienceRef;Ljava/math/BigDecimal;Ljava/lang/String;Ljava/lang/String;ZILjava/lang/Object;)Lai/nuxie/sdk/PurchaseInfo;
-	public fun equals (Ljava/lang/Object;)Z
 	public final fun getDisplayPrice ()Ljava/lang/String;
 	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
 	public final fun getPlacementId ()Ljava/lang/String;
@@ -712,9 +700,7 @@ public final class ai/nuxie/sdk/PurchaseInfo {
 	public final fun getProductId ()Ljava/lang/String;
 	public final fun getStoreProductId ()Ljava/lang/String;
 	public final fun getTransactionId ()Ljava/lang/String;
-	public fun hashCode ()I
 	public final fun isTestStore ()Z
-	public fun toString ()Ljava/lang/String;
 }
 
 public final class ai/nuxie/sdk/SuppressReason : java/lang/Enum {

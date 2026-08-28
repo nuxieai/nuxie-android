@@ -75,7 +75,7 @@ class FeatureInfo {
             val oldFeatures = mutableAll.value
             features.forEach { (featureId, newAccess) ->
                 val oldAccess = oldFeatures[featureId]
-                if (oldAccess != newAccess) {
+                if (!oldAccess.hasSameFieldsAs(newAccess)) {
                     runCatching { onFeatureChange(featureId, oldAccess, newAccess) }
                 }
             }
@@ -89,7 +89,7 @@ class FeatureInfo {
 
     internal fun stageUpdate(featureId: String, access: FeatureAccess, entityId: String?): Mutation = stage {
             val oldAccess = mutableAll.value[featureId]
-            if (oldAccess != access) {
+            if (!oldAccess.hasSameFieldsAs(access)) {
                 runCatching { onFeatureChange(featureId, oldAccess, access) }
             }
             // iOS has one reactive Feature map: an entity check publishes its
@@ -109,7 +109,7 @@ class FeatureInfo {
                 allowed = current.unlimited || balance >= 1.0,
                 balance = balance,
             )
-            if (current != updated) {
+            if (!current.hasSameFieldsAs(updated)) {
                 runCatching { onFeatureChange(featureId, current, updated) }
             }
             // Match the same iOS reactive publication after entity-scoped use.
@@ -153,4 +153,21 @@ class FeatureInfo {
         val completed = CompletableDeferred<Unit>()
         Mutation(mutationTail, completed, apply).also { mutationTail = completed }
     }
+}
+
+private fun FeatureAccess?.hasSameFieldsAs(other: FeatureAccess): Boolean =
+    this != null &&
+        allowed == other.allowed &&
+        unlimited == other.unlimited &&
+        balance.sameFieldValueAs(other.balance) &&
+        type == other.type
+
+private fun Double?.sameFieldValueAs(other: Double?): Boolean {
+    if (this == null || other == null) return this == null && other == null
+    if (isNaN() || other.isNaN()) return false
+    val magnitudeMask = Long.MAX_VALUE
+    val bothZero = (toRawBits() and magnitudeMask) == 0L &&
+        (other.toRawBits() and magnitudeMask) == 0L
+    if (bothZero) return true
+    return toRawBits() == other.toRawBits()
 }
