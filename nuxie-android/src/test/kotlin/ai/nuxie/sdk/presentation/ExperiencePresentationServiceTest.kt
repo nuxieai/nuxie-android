@@ -44,7 +44,11 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 @OptIn(ExperimentalCoroutinesApi::class)
 class ExperiencePresentationServiceTest {
-    private data class Emitted(val name: String, val properties: Map<String, Any?>)
+    private data class Emitted(
+        val name: String,
+        val properties: Map<String, Any?>,
+        val distinctId: String? = null,
+    )
 
     private class Lease : Closeable {
         val closed = AtomicBoolean(false)
@@ -84,6 +88,33 @@ class ExperiencePresentationServiceTest {
 
         service.dismiss()
         assertTrue(lease.closed.get())
+    }
+
+    @Test
+    fun shownEmissionKeepsItsOwnerAfterIdentityChanges() = runTest {
+        val emitted = mutableListOf<Emitted>()
+        val launched = mutableListOf<String>()
+        var currentDistinctId = "customer-1"
+        val service = service(
+            emit = { name, properties, distinctIdOverride ->
+                emitted += Emitted(
+                    name,
+                    properties,
+                    distinctIdOverride ?: currentDistinctId,
+                )
+            },
+            launch = launched::add,
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+
+        currentDistinctId = "customer-2"
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        val event = emitted.single()
+        assertEquals("\$experience_shown", event.name)
+        assertEquals("customer-1", event.distinctId)
     }
 
     @Test
@@ -254,6 +285,94 @@ class ExperiencePresentationServiceTest {
 
         assertEquals("journey-7", outcomes.single().ref.journeyId)
         assertEquals(CloseReason.GoalMet, outcomes.single().reason)
+    }
+
+    @Test
+    fun purchaseCloseEmissionKeepsItsOwnerAfterIdentityChanges() = runTest {
+        val emitted = mutableListOf<Emitted>()
+        val launched = mutableListOf<String>()
+        var currentDistinctId = "customer-1"
+        val service = service(
+            emit = { name, properties, distinctIdOverride ->
+                emitted += Emitted(
+                    name,
+                    properties,
+                    distinctIdOverride ?: currentDistinctId,
+                )
+            },
+            launch = launched::add,
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        currentDistinctId = "customer-2"
+        service.dismiss(CloseReason.PurchaseCompleted)
+
+        val close = emitted.last()
+        assertEquals("\$experience_purchased", close.name)
+        assertEquals("customer-1", close.distinctId)
+    }
+
+    @Test
+    fun timeoutCloseEmissionKeepsItsOwnerAfterIdentityChanges() = runTest {
+        val emitted = mutableListOf<Emitted>()
+        val launched = mutableListOf<String>()
+        var currentDistinctId = "customer-1"
+        val service = service(
+            emit = { name, properties, distinctIdOverride ->
+                emitted += Emitted(
+                    name,
+                    properties,
+                    distinctIdOverride ?: currentDistinctId,
+                )
+            },
+            launch = launched::add,
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        currentDistinctId = "customer-2"
+        service.dismiss(CloseReason.Timeout)
+
+        val close = emitted.last()
+        assertEquals("\$experience_timed_out", close.name)
+        assertEquals("customer-1", close.distinctId)
+    }
+
+    @Test
+    fun errorCloseEmissionKeepsItsOwnerAfterIdentityChanges() = runTest {
+        val emitted = mutableListOf<Emitted>()
+        val launched = mutableListOf<String>()
+        var currentDistinctId = "customer-1"
+        val service = service(
+            emit = { name, properties, distinctIdOverride ->
+                emitted += Emitted(
+                    name,
+                    properties,
+                    distinctIdOverride ?: currentDistinctId,
+                )
+            },
+            launch = launched::add,
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        val presentationId = launched.single()
+        PresentationRegistry.reportFirstFrame(presentationId)
+        shown.await()
+
+        currentDistinctId = "customer-2"
+        PresentationRegistry.reportFailure(
+            presentationId,
+            IllegalStateException("renderer failed"),
+        )
+
+        val close = emitted.last()
+        assertEquals("\$experience_errored", close.name)
+        assertEquals("customer-1", close.distinctId)
     }
 
     @Test
