@@ -8,6 +8,7 @@ import ai.nuxie.sdk.journey.JourneyEventNames
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import java.math.BigDecimal
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -87,6 +88,51 @@ class ActivityCurationTest {
         assertTrue(truthy.isHoldout)
         assertFalse(falsey.isHoldout)
     }
+
+    @Test
+    fun booleanDoubleIsAccepted() {
+        val truthy = ActivityCuration.activity(
+            SystemEventNames.FEATURE_USED,
+            featureUsedProperties(JsonPrimitive(true)),
+        ) as NuxieActivity.FeatureUsed
+        val falsey = ActivityCuration.activity(
+            SystemEventNames.FEATURE_USED,
+            featureUsedProperties(JsonPrimitive(false)),
+        ) as NuxieActivity.FeatureUsed
+
+        assertEquals(1.0, truthy.amount, 0.0)
+        assertEquals(0.0, falsey.amount, 0.0)
+    }
+
+    @Test
+    fun booleanDecimalIsAccepted() {
+        val truthy = ActivityCuration.activity(
+            SystemEventNames.PURCHASE_COMPLETED,
+            purchaseProperties(JsonPrimitive(true)),
+        ) as NuxieActivity.PurchaseCompleted
+        val falsey = ActivityCuration.activity(
+            SystemEventNames.PURCHASE_COMPLETED,
+            purchaseProperties(JsonPrimitive(false)),
+        ) as NuxieActivity.PurchaseCompleted
+
+        assertEquals(BigDecimal.ONE, truthy.info.price)
+        assertEquals(BigDecimal.ZERO, falsey.info.price)
+    }
+
+    private fun featureUsedProperties(amount: JsonPrimitive) = JsonObject(
+        mapOf(
+            "feature_id" to JsonPrimitive("feature-1"),
+            "amount" to amount,
+        ),
+    )
+
+    private fun purchaseProperties(price: JsonPrimitive) = JsonObject(
+        mapOf(
+            "product_id" to JsonPrimitive("product-1"),
+            "store_product_id" to JsonPrimitive("store-product-1"),
+            "price" to price,
+        ),
+    )
 
     private fun experimentExposureProperties(isHoldout: JsonPrimitive) = JsonObject(
         mapOf(
