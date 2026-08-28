@@ -386,6 +386,48 @@ class EventLogTest {
     }
 
     @Test
+    fun ordinaryBeforeSendCannotDeleteScopedDistinctIdProperty() = runBlocking {
+        val store = RecordingStore()
+        val eventLog = log(store) { event ->
+            NuxieEvent(
+                id = event.id,
+                name = event.name,
+                distinctId = event.distinctId,
+                properties = event.properties - "\$distinct_id",
+                timestampMillis = event.timestampMillis,
+            )
+        }
+
+        eventLog.capture("original")
+        eventLog.awaitBarrier()
+
+        val stored = store.pending.single()
+        assertEquals("anon-1", stored.distinctId)
+        assertEquals("anon-1", stored.properties.stringValue("\$distinct_id"))
+    }
+
+    @Test
+    fun ordinaryBeforeSendCannotSpoofScopedDistinctIdProperty() = runBlocking {
+        val store = RecordingStore()
+        val eventLog = log(store) { event ->
+            NuxieEvent(
+                id = event.id,
+                name = event.name,
+                distinctId = "spoofed-field",
+                properties = event.properties + ("\$distinct_id" to "spoofed-property"),
+                timestampMillis = event.timestampMillis,
+            )
+        }
+
+        eventLog.capture("original")
+        eventLog.awaitBarrier()
+
+        val stored = store.pending.single()
+        assertEquals("anon-1", stored.distinctId)
+        assertEquals("anon-1", stored.properties.stringValue("\$distinct_id"))
+    }
+
+    @Test
     fun forwardingTimestampPrecedesBeforeSendButAdmissionFollowsIt() = runBlocking {
         val store = RecordingStore()
         var enabled = false
