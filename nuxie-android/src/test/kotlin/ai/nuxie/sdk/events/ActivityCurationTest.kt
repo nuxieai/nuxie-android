@@ -9,7 +9,9 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ActivityCurationTest {
@@ -45,4 +47,53 @@ class ActivityCurationTest {
     fun malformedCuratedActivityIsSuppressed() {
         assertNull(ActivityCuration.activity(SystemEventNames.PURCHASE_COMPLETED, JsonObject(emptyMap())))
     }
+
+    @Test
+    fun stringifiedDoubleIsSuppressedAsMalformed() {
+        assertNull(
+            ActivityCuration.activity(
+                SystemEventNames.FEATURE_USED,
+                JsonObject(
+                    mapOf(
+                        "feature_id" to JsonPrimitive("feature-1"),
+                        "amount" to JsonPrimitive("1.5"),
+                    ),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun stringifiedBooleanIsSuppressedAsMalformed() {
+        assertNull(
+            ActivityCuration.activity(
+                JourneyEventNames.EXPERIMENT_EXPOSURE,
+                experimentExposureProperties(JsonPrimitive("true")),
+            ),
+        )
+    }
+
+    @Test
+    fun numericBooleanIsAccepted() {
+        val truthy = ActivityCuration.activity(
+            JourneyEventNames.EXPERIMENT_EXPOSURE,
+            experimentExposureProperties(JsonPrimitive(1)),
+        ) as NuxieActivity.ExperimentExposure
+        val falsey = ActivityCuration.activity(
+            JourneyEventNames.EXPERIMENT_EXPOSURE,
+            experimentExposureProperties(JsonPrimitive(0)),
+        ) as NuxieActivity.ExperimentExposure
+
+        assertTrue(truthy.isHoldout)
+        assertFalse(falsey.isHoldout)
+    }
+
+    private fun experimentExposureProperties(isHoldout: JsonPrimitive) = JsonObject(
+        mapOf(
+            "experience_id" to JsonPrimitive("experience-1"),
+            "experiment_key" to JsonPrimitive("experiment-1"),
+            "variant_key" to JsonPrimitive("variant-1"),
+            "is_holdout" to isHoldout,
+        ),
+    )
 }

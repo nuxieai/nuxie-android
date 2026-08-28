@@ -225,14 +225,16 @@ internal object ActivityCuration {
         (get(key) as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content
 
     private fun JsonObject.nonemptyString(key: String): String? = string(key)?.takeIf(String::isNotEmpty)
-    private fun JsonObject.double(key: String): Double? = (get(key) as? JsonPrimitive)?.doubleOrNull
+    private fun JsonObject.double(key: String): Double? = (get(key) as? JsonPrimitive)
+        ?.takeUnless(JsonPrimitive::isString)
+        ?.doubleOrNull
     private fun JsonObject.decimal(key: String) = (get(key) as? JsonPrimitive)
         ?.takeUnless(JsonPrimitive::isString)
         ?.content
         ?.toBigDecimalOrNull()
 
     private fun JsonObject.bool(key: String): Boolean? {
-        val primitive = get(key) as? JsonPrimitive ?: return null
+        val primitive = (get(key) as? JsonPrimitive)?.takeUnless(JsonPrimitive::isString) ?: return null
         return primitive.booleanOrNull ?: primitive.doubleOrNull?.let { it != 0.0 }
     }
 
