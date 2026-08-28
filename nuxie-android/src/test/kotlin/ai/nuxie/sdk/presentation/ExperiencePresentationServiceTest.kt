@@ -695,6 +695,50 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun firstFrameFailureRacingHostDismissalWaitsForActivityTeardown() = runTest {
+        val launched = mutableListOf<String>()
+        val failure = IllegalStateException("first frame failed")
+        val service = service(
+            launch = launched::add,
+            markOutcomeInMemory = {
+                PresentationRegistry.reportFailure(launched.single(), failure)
+                true
+            },
+        )
+        val presentation = async(SupervisorJob()) { service.present("v1", ownerDistinctId = "customer-1") }
+        runCurrent()
+        val presentationId = launched.single()
+        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        setActivityField(activity, "presentationId", presentationId)
+        assertTrue(PresentationRegistry.attach(presentationId, activity))
+
+        val dismissal = async { service.dismissFromHost("customer-1") }
+        runCurrent()
+
+        assertFalse("dismissal completed before Activity teardown", dismissal.isCompleted)
+        assertEquals(CloseReason.Error(failure), activity.claimedCloseReason())
+        assertTrue("Activity finish was not delivered", activity.isFinishing)
+        assertTrue("registry completed before Activity teardown", PresentationRegistry.resolve(presentationId) != null)
+
+        NuxieExperienceActivity::class.java
+            .getDeclaredMethod("onDestroy")
+            .apply { isAccessible = true }
+            .invoke(activity)
+
+        dismissal.await()
+        assertEquals(null, PresentationRegistry.resolve(presentationId))
+        val error = try {
+            presentation.await()
+            fail("first-frame failure should fail presentation")
+            error("unreachable")
+        } catch (error: ExperiencePresentationException) {
+            error
+        }
+        assertEquals(ExperiencePresentationException.Reason.HOST_FAILED, error.reason)
+        assertEquals(failure, error.cause)
+    }
+
+    @Test
     fun hostDismissalWithoutAPresentationIsANoop() = runTest {
         var semanticCalls = 0
         val service = service(

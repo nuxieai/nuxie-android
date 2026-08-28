@@ -194,12 +194,7 @@ internal object PresentationRegistry {
     }
 
     fun reportFailure(id: String, error: Throwable) {
-        val callback = synchronized(lock) {
-            val entry = entries.remove(id) ?: return
-            if (!entry.terminal.compareAndSet(false, true)) return
-            entry.onFailure
-        }
-        callback(error)
+        dismiss(id, CloseReason.Error(error))
     }
 
     fun reportDismissed(id: String, reason: CloseReason) {
@@ -213,13 +208,19 @@ internal object PresentationRegistry {
     }
 
     fun dismiss(id: String, reason: CloseReason) {
-        var callback: ((CloseReason) -> Unit)? = null
+        var dismissed: ((CloseReason) -> Unit)? = null
+        var failed: ((Throwable) -> Unit)? = null
         val activity = synchronized(lock) {
             val entry = entries[id] ?: return
             val attached = entry.activity.get()
             if (attached == null) {
                 entries.remove(id)
-                if (entry.terminal.compareAndSet(false, true)) callback = entry.onDismissed
+                if (entry.terminal.compareAndSet(false, true)) {
+                    when (reason) {
+                        is CloseReason.Error -> failed = entry.onFailure
+                        else -> dismissed = entry.onDismissed
+                    }
+                }
                 null
             } else if (attached.claimFromService(reason) || attached.claimedCloseReason() == reason) {
                 entry.dismissalSelected = true
@@ -228,7 +229,10 @@ internal object PresentationRegistry {
                 null
             }
         }
-        callback?.invoke(reason)
+        when (reason) {
+            is CloseReason.Error -> failed?.invoke(reason.cause)
+            else -> dismissed?.invoke(reason)
+        }
         activity?.finishAfterServiceClaim()
     }
 
