@@ -2,6 +2,7 @@ package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
+import ai.nuxie.sdk.SuppressReason
 import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.JsonValueConverter
@@ -14,9 +15,11 @@ import ai.nuxie.sdk.experiences.Delivery
 import ai.nuxie.sdk.experiences.ExperienceReleaseIdentity
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.identity.IdentityProvider
+import ai.nuxie.sdk.journey.AdmittedJourneyRelease
 import ai.nuxie.sdk.journey.JourneyEventNames
 import ai.nuxie.sdk.journey.JourneyLedger
 import ai.nuxie.sdk.journey.JourneyPlane
+import ai.nuxie.sdk.journey.JourneyReentry
 import ai.nuxie.sdk.journey.JourneyReleaseProvider
 import ai.nuxie.sdk.journey.JourneyRun
 import ai.nuxie.sdk.journey.JourneyRunState
@@ -33,6 +36,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -44,6 +48,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -169,6 +174,129 @@ class DismissalFixtureTest {
         } finally {
             scope.cancel()
             PresentationRegistry.clearForTesting()
+        }
+    }
+
+    @Test
+    fun markedHostDismissalWinsBookkeepingAgainstACompetingTerminalReport() = runBlocking {
+        val root = createTempDirectory("nuxie-dismiss-race-").toFile()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            val distinctId = "race-customer"
+            val journeyId = "race-journey"
+            val identity = Identity(distinctId)
+            val eventStore = Store()
+            val eventLog = EventLog(
+                store = eventStore,
+                contextBuilder = NuxieContextBuilder(
+                    RuntimeEnvironment.getApplication(),
+                    NuxieEnvironment.DEVELOPMENT,
+                    LogLevel.NONE,
+                    identity,
+                ),
+                identity = identity,
+                beforeSend = null,
+                scope = scope,
+            )
+            val runStore = JourneyStore(root)
+            runStore.save(
+                JourneyRun(
+                    id = journeyId,
+                    distinctId = distinctId,
+                    experienceId = "experience-1",
+                    experienceVersion = "flow-version-1",
+                    epoch = 1,
+                    plane = JourneyPlane.DEVICE,
+                    settingsSnapshot = JsonObject(emptyMap()),
+                    state = JourneyRunState.ACTIVE,
+                ),
+            )
+            val journeys = JourneyService(
+                store = runStore,
+                ledger = JourneyLedger(eventLog),
+                releases = JourneyReleaseProvider { _, _ -> emptyList() },
+            )
+            val launched = mutableListOf<String>()
+            val reported = mutableListOf<CloseReason>()
+            val bookkeepingCompleted = CompletableDeferred<Unit>()
+            var bookkeepingFailure: Throwable? = null
+            val presentations = ExperiencePresentationService(
+                releases = PresentationReleaseProvider { release() },
+                acquire = { acquired() },
+                emit = { _, _, _ -> },
+                scope = scope,
+                runtimeAvailable = { true },
+                launch = launched::add,
+                markOutcomeInMemory = { outcome ->
+                    val marked = journeys.markHostDismissedInMemory(
+                        ownerDistinctId = requireNotNull(outcome.ownerDistinctId),
+                        journeyId = requireNotNull(outcome.ref.journeyId),
+                        experienceId = outcome.ref.experienceId,
+                        initiatingDistinctId = requireNotNull(outcome.initiatingDistinctId),
+                    )
+                    PresentationRegistry.reportFailure(
+                        launched.single(),
+                        IllegalStateException("competing terminal report"),
+                    )
+                    marked
+                },
+                reportOutcome = { outcome ->
+                    reported += outcome.reason
+                    runCatching {
+                        journeys.presentationEnded(
+                            requireNotNull(outcome.ownerDistinctId),
+                            requireNotNull(outcome.ref.journeyId),
+                            outcome.reason,
+                        )
+                    }.onFailure { bookkeepingFailure = it }
+                        .also { bookkeepingCompleted.complete(Unit) }
+                        .getOrThrow()
+                },
+            )
+
+            val shown = scope.async {
+                presentations.present("flow-version-1", journeyId, distinctId)
+            }
+            PresentationRegistry.reportFirstFrame(launched.single())
+            shown.await()
+
+            presentations.dismissFromHost(distinctId)
+            withTimeout(2_000) { bookkeepingCompleted.await() }
+            bookkeepingFailure?.let { throw it }
+
+            assertEquals(listOf<CloseReason>(CloseReason.HostDismissed), reported)
+            assertEquals(null, runStore.load(distinctId, journeyId))
+            assertTrue(runStore.hasCompleted(distinctId, "experience-1"))
+            assertEquals(
+                1,
+                eventStore.events.values.count { it.name == JourneyEventNames.EXITED },
+            )
+
+            val oneTimeRelease = AdmittedJourneyRelease(
+                experienceId = "experience-1",
+                experienceVersion = "flow-version-1",
+                triggerEventName = "race-trigger",
+                reentry = JourneyReentry.OneTime,
+                settingsTemplate = JsonObject(emptyMap()),
+            )
+            val restartedJourneys = JourneyService(
+                store = JourneyStore(root),
+                ledger = JourneyLedger(eventLog),
+                releases = JourneyReleaseProvider { _, _ -> listOf(oneTimeRelease) },
+            )
+            val admission = restartedJourneys.handleEventForTrigger(
+                StoredEvent(
+                    id = "race-retrigger",
+                    name = "race-trigger",
+                    timestampMillis = System.currentTimeMillis(),
+                    distinctId = distinctId,
+                ),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed
+            assertEquals(SuppressReason.REENTRY_LIMITED, admission.reason)
+        } finally {
+            scope.cancel()
+            PresentationRegistry.clearForTesting()
+            root.deleteRecursively()
         }
     }
 
