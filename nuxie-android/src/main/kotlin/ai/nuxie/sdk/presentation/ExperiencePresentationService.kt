@@ -285,39 +285,36 @@ internal class ExperiencePresentationService(
     private val presentationMutex = Mutex()
     private val stateLock = Any()
     private var current: ActivePresentation? = null
-    private var identityEpoch = 0L
-    private var acquisitionAdmission: AcquisitionAdmission? = null
+    private val identityEpochByOwner = mutableMapOf<String, Long>()
 
-    private data class AcquisitionAdmission(
+    private data class PresentationRequest(
         val ownerDistinctId: String?,
         val identityEpoch: Long,
     )
 
-    private suspend fun <T> withAcquisitionAdmission(
-        ownerDistinctId: String?,
-        block: suspend (AcquisitionAdmission) -> T,
-    ): T {
-        val admission = synchronized(stateLock) {
-            AcquisitionAdmission(ownerDistinctId, identityEpoch).also {
-                acquisitionAdmission = it
-            }
+    private fun captureRequest(ownerDistinctId: String?): PresentationRequest =
+        synchronized(stateLock) {
+            PresentationRequest(
+                ownerDistinctId = ownerDistinctId,
+                identityEpoch = ownerDistinctId?.let { identityEpochByOwner[it] } ?: 0L,
+            )
         }
-        return try {
-            block(admission)
-        } finally {
-            synchronized(stateLock) {
-                if (acquisitionAdmission === admission) acquisitionAdmission = null
-            }
-        }
-    }
+
+    private fun isCurrentIdentity(request: PresentationRequest): Boolean =
+        request.ownerDistinctId == null ||
+            (identityEpochByOwner[request.ownerDistinctId] ?: 0L) == request.identityEpoch
 
     suspend fun present(
         experienceVersionId: String,
         journeyId: String? = null,
         ownerDistinctId: String? = null,
     ): ExperienceRef {
+        val request = captureRequest(ownerDistinctId)
         val active = presentationMutex.withLock {
-            withAcquisitionAdmission(ownerDistinctId) { admission ->
+            if (!synchronized(stateLock) { isCurrentIdentity(request) }) {
+                throw supersededByIdentityTransition()
+            }
+            run {
                 if (!runtimeAvailable()) {
                     throw ExperiencePresentationException(
                         ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE,
@@ -356,11 +353,11 @@ internal class ExperiencePresentationService(
                     id,
                     ref,
                     acquired,
-                    ownerDistinctId,
+                    request.ownerDistinctId,
                     CompletableDeferred(),
                 )
                 val launched = synchronized(stateLock) {
-                    if (identityEpoch != admission.identityEpoch) {
+                    if (!isCurrentIdentity(request)) {
                         false
                     } else {
                         // Identity shutdown and late launch admission share this
@@ -391,10 +388,7 @@ internal class ExperiencePresentationService(
                 }
                 if (!launched) {
                     acquired.close()
-                    throw ExperiencePresentationException(
-                        ExperiencePresentationException.Reason.SUPERSEDED,
-                        "Experience presentation was superseded by an identity transition",
-                    )
+                    throw supersededByIdentityTransition()
                 }
                 pending
             }
@@ -445,9 +439,8 @@ internal class ExperiencePresentationService(
      */
     suspend fun shutdownOwnedBy(ownerDistinctId: String) {
         synchronized(stateLock) {
-            if (acquisitionAdmission?.ownerDistinctId == ownerDistinctId) {
-                identityEpoch += 1L
-            }
+            identityEpochByOwner[ownerDistinctId] =
+                (identityEpochByOwner[ownerDistinctId] ?: 0L) + 1L
         }
         val active = synchronized(stateLock) {
             current?.takeIf { it.ownerDistinctId == ownerDistinctId }
@@ -457,6 +450,11 @@ internal class ExperiencePresentationService(
     }
 
     fun close() = dismiss(CloseReason.UserDismissed)
+
+    private fun supersededByIdentityTransition() = ExperiencePresentationException(
+        ExperiencePresentationException.Reason.SUPERSEDED,
+        "Experience presentation was superseded by an identity transition",
+    )
 
     private fun firstFrame(active: ActivePresentation) {
         if (active.closed.get() || !active.shown.compareAndSet(false, true)) return

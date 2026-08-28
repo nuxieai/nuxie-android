@@ -536,6 +536,63 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun identityShutdownRejectsSameOwnerPresentationQueuedBeforeTeardown() = runTest {
+        val firstAcquisitionStarted = CompletableDeferred<Unit>()
+        val continueFirstAcquisition = CompletableDeferred<Unit>()
+        val launched = mutableListOf<String>()
+        var acquisitionCount = 0
+        val service = service(
+            launch = launched::add,
+            acquire = { admitted ->
+                acquisitionCount += 1
+                if (acquisitionCount == 1) {
+                    firstAcquisitionStarted.complete(Unit)
+                    continueFirstAcquisition.await()
+                }
+                acquired(
+                    admitted.release.identity.experienceId,
+                    admitted.release.identity.experienceVersionId,
+                    Lease(),
+                )
+            },
+        )
+        val mutexHolder = async(SupervisorJob()) {
+            service.present("v1", "journey-7", "customer-2")
+        }
+
+        firstAcquisitionStarted.await()
+        val queuedOldOwner = async(SupervisorJob()) {
+            service.present("v1", "journey-7", "customer-1")
+        }
+
+        try {
+            runCurrent()
+            service.shutdownOwnedBy("customer-1")
+
+            continueFirstAcquisition.complete(Unit)
+            runCurrent()
+
+            assertEquals("queued old-owner request launched after identity teardown", 1, launched.size)
+            assertTrue("queued old-owner request must finish", queuedOldOwner.isCompleted)
+            val error = try {
+                queuedOldOwner.await()
+                fail("queued old-owner request should be superseded")
+                error("unreachable")
+            } catch (error: ExperiencePresentationException) {
+                error
+            }
+            assertEquals(ExperiencePresentationException.Reason.SUPERSEDED, error.reason)
+        } finally {
+            continueFirstAcquisition.complete(Unit)
+            runCurrent()
+            service.shutdownOwnedBy("customer-1")
+            service.shutdownOwnedBy("customer-2")
+            queuedOldOwner.cancelAndJoin()
+            mutexHolder.cancelAndJoin()
+        }
+    }
+
+    @Test
     fun identityShutdownLeavesDifferentOwnerPresentationAcquiring() = runTest {
         val acquisitionStarted = CompletableDeferred<Unit>()
         val continueAcquisition = CompletableDeferred<Unit>()
