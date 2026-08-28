@@ -21,10 +21,11 @@ import kotlinx.coroutines.launch
  * - Forwarding admission is sampled before persistence, then successful
  *   commits enter a separate FIFO worker. Slow forwarding never blocks the
  *   commit worker, and a listener attached after admission receives no replay.
- * - beforeSend applies to every capture. Recovery owns identity: the
- *   transformed event keeps the original id, distinctId, and timestamp; hosts
- *   may rename the event or redact properties. Returning null terminally
- *   drops the event and records a stable drop so recovery never resurrects it.
+ * - beforeSend applies to every capture. Ordinary captures retain their
+ *   scoped distinctId while preserving the hook's id, name, properties, and
+ *   timestamp. Stable recovery captures additionally retain their replay id
+ *   and timestamp. Returning null terminally drops the event and records a
+ *   stable drop so recovery never resurrects it.
  * - Delivery is a later PR: events accumulate as pending.
  */
 internal class EventLog(
@@ -297,7 +298,7 @@ internal class EventLog(
             properties = enriched,
             timestampMillis = nowMillis(),
         )
-        val transformed = applyBeforeSend(original)
+        val transformed = applyBeforeSendForOrdinaryCapture(original)
         if (transformed == null) {
             // Terminal beforeSend drop: record it so recovery never resurrects
             // the id (iOS commits a stable capture with a nil event).
@@ -306,11 +307,7 @@ internal class EventLog(
             return null
         }
 
-        val stored = StoredEvent.from(
-            transformed,
-            forwardingName = original.name,
-            forwardingReceivedAtMillis = forwardingAdmission(original.timestampMillis),
-        )
+        val stored = projectPostTransform(original, transformed)
         store.insertPending(stored)
         resolveForwarding(stored)
         subscribers.forEach { subscriber ->
@@ -342,17 +339,13 @@ internal class EventLog(
             properties = contextBuilder.buildEnrichedProperties(sanitized),
             timestampMillis = nowMillis(),
         )
-        val transformed = applyBeforeSend(original)
+        val transformed = applyBeforeSendPreservingStableIdentity(original)
         if (transformed == null) {
             store.recordStableDrop(original.id, original.timestampMillis)
             Log.d(LOG_TAG, "Event '$name' terminally dropped by beforeSend hook")
             return true
         }
-        val stored = StoredEvent.from(
-            transformed,
-            forwardingName = original.name,
-            forwardingReceivedAtMillis = forwardingAdmission(original.timestampMillis),
-        )
+        val stored = projectPostTransform(original, transformed)
         val inserted = store.insertPendingIfAbsent(stored)
         if (inserted) {
             resolveForwarding(stored)
@@ -400,16 +393,12 @@ internal class EventLog(
             properties = contextBuilder.buildEnrichedProperties(sanitized),
             timestampMillis = nowMillis(),
         )
-        val transformed = applyBeforeSendPreservingTransform(original)
+        val transformed = applyBeforeSendTransform(original)
         if (transformed == null) {
             store.recordStableDrop(original.id, original.timestampMillis)
             return true
         }
-        val stored = StoredEvent.from(
-            transformed,
-            forwardingName = original.name,
-            forwardingReceivedAtMillis = forwardingAdmission(transformed.timestampMillis),
-        )
+        val stored = projectPostTransform(original, transformed)
         val inserted = store.insertDeliveredIfAbsent(stored)
         if (inserted) {
             resolveForwarding(stored)
@@ -438,9 +427,22 @@ internal class EventLog(
         }
     }
 
-    private fun applyBeforeSend(original: NuxieEvent): NuxieEvent? {
-        val transformed = applyBeforeSendPreservingTransform(original) ?: return null
-        // Recovery owns identity: pin id, distinctId, and timestamp.
+    private fun applyBeforeSendForOrdinaryCapture(original: NuxieEvent): NuxieEvent? {
+        val transformed = applyBeforeSendTransform(original) ?: return null
+        // iOS keeps ordinary captures attributed to the identity snapshotted
+        // before the hook while preserving the hook's other event fields.
+        return NuxieEvent(
+            id = transformed.id,
+            name = transformed.name,
+            distinctId = original.distinctId,
+            properties = transformed.properties,
+            timestampMillis = transformed.timestampMillis,
+        )
+    }
+
+    private fun applyBeforeSendPreservingStableIdentity(original: NuxieEvent): NuxieEvent? {
+        val transformed = applyBeforeSendTransform(original) ?: return null
+        // Recovery owns stable identity: pin the replay id, distinctId, and timestamp.
         return NuxieEvent(
             id = original.id,
             name = transformed.name,
@@ -450,10 +452,22 @@ internal class EventLog(
         )
     }
 
-    private fun applyBeforeSendPreservingTransform(original: NuxieEvent): NuxieEvent? {
+    private fun applyBeforeSendTransform(original: NuxieEvent): NuxieEvent? {
         val hook = beforeSend ?: return original
         return hook(original)
     }
+
+    /**
+     * The single post-beforeSend projection for every locally captured event.
+     * Forwarding classification belongs to the original capture, while the
+     * durable event and forwarding receipt time belong to the prepared result.
+     */
+    private fun projectPostTransform(original: NuxieEvent, transformed: NuxieEvent): StoredEvent =
+        StoredEvent.from(
+            transformed,
+            forwardingName = original.name,
+            forwardingReceivedAtMillis = forwardingAdmission(transformed.timestampMillis),
+        )
 
     private companion object {
         const val LOG_TAG = "Nuxie"
