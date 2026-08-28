@@ -408,14 +408,21 @@ internal class ExperiencePresentationService(
                 HostDismissalAttempt(active).also { hostDismissalAttempt = it } to true
             }
         }
-        if (!ownsAttempt) {
-            attempt.completion.await()
-            return
+        if (ownsAttempt) {
+            scope.launch { runHostDismissalAttempt(attempt, initiatingDistinctId) }
         }
+        attempt.completion.await()
+    }
+
+    private suspend fun runHostDismissalAttempt(
+        attempt: HostDismissalAttempt,
+        initiatingDistinctId: String,
+    ) {
         val active = attempt.active
         var teardownStarted = false
         var journeyReservationAcquired = false
         var journeyReservationRetained = false
+        var failure: Throwable? = null
         val outcome = PresentationOutcome(
             ref = active.ref,
             reason = CloseReason.HostDismissed,
@@ -436,20 +443,27 @@ internal class ExperiencePresentationService(
             teardownStarted = true
             PresentationRegistry.dismiss(active.id, CloseReason.HostDismissed)
             active.finished.await()
+        } catch (error: Throwable) {
+            failure = error
         } finally {
-            if (!teardownStarted) {
-                PresentationRegistry.releaseDismissalReservation(
-                    active.id,
-                    CloseReason.HostDismissed,
-                )
-            }
-            if (journeyReservationAcquired && !journeyReservationRetained) {
-                releaseHostDismissalReservation(outcome)
+            try {
+                if (!teardownStarted) {
+                    PresentationRegistry.releaseDismissalReservation(
+                        active.id,
+                        CloseReason.HostDismissed,
+                    )
+                }
+                if (journeyReservationAcquired && !journeyReservationRetained) {
+                    releaseHostDismissalReservation(outcome)
+                }
+            } catch (cleanupError: Throwable) {
+                failure?.addSuppressed(cleanupError) ?: run { failure = cleanupError }
             }
             synchronized(stateLock) {
                 if (hostDismissalAttempt === attempt) hostDismissalAttempt = null
             }
-            attempt.completion.complete(Unit)
+            failure?.let(attempt.completion::completeExceptionally)
+                ?: attempt.completion.complete(Unit)
         }
     }
 
