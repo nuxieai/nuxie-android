@@ -884,6 +884,30 @@ class JourneyServiceTest {
     }
 
     @Test
+    fun inMemoryHostExitImmediatelyAllowsEveryTimeReentryBeforeBookkeeping() = runBlocking {
+        val h = harness(JourneyReentry.EveryTime)
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = requireNotNull(started.ref.journeyId)
+
+            markHostDismissed(h, journeyId)
+
+            assertEquals(
+                JourneyRunState.ACTIVE,
+                JourneyStore(h.root).load("customer-1", journeyId)?.state,
+            )
+            val retrigger = h.service.handleEventForTrigger(
+                StoredEvent("trigger-2", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            assertTrue(retrigger.ref.journeyId != journeyId)
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun reentryAndAlreadyActiveAdmissionsAreSuppressed() = runBlocking {
         val h = harness(JourneyReentry.OncePerWindow(1_000))
         try {

@@ -359,7 +359,7 @@ internal class JourneyService(
             if (isReentryLimited(event.distinctId, release)) {
                 return TriggerService.JourneyTriggerResult.Suppressed(SuppressReason.REENTRY_LIMITED)
             }
-            if (store.loadActive(event.distinctId).any { it.experienceId == release.experienceId }) {
+            if (activeRunsForAdmission(event.distinctId).any { it.experienceId == release.experienceId }) {
                 return TriggerService.JourneyTriggerResult.Suppressed(SuppressReason.ALREADY_ACTIVE)
             }
             val now = nowMillis()
@@ -428,6 +428,15 @@ internal class JourneyService(
                 }
             }
         }
+
+    private fun activeRunsForAdmission(distinctId: String): List<JourneyRun> {
+        val persistedActiveRuns = store.loadActive(distinctId)
+        return synchronized(inMemoryHostExits) {
+            persistedActiveRuns.filterNot { run ->
+                HostDismissalKey(distinctId, run.id) in inMemoryHostExits
+            }
+        }
+    }
 
     private fun hasInMemoryHostExit(distinctId: String, journeyId: String): Boolean =
         synchronized(inMemoryHostExits) {
