@@ -285,11 +285,7 @@ class TriggerServiceTest {
         val started = ExperienceRef("exp-composed", "v-composed", journeyId)
         val launched = mutableListOf<String>()
         val rivFile = temporaryFolder.newFile("composed.riv").apply { writeBytes(byteArrayOf(1)) }
-        val factory = NuxieCore.PresentationFactory {
-                reportOutcome,
-                reserveHostDismissal,
-                releaseHostDismissalReservation,
-            ->
+        val factory = NuxieCore.PresentationFactory { markOutcomeInMemory, reportOutcome ->
             ExperiencePresentationService(
                 releases = PresentationReleaseProvider { presentationRelease(started) },
                 acquire = {
@@ -304,9 +300,8 @@ class TriggerServiceTest {
                 scope = CoroutineScope(Dispatchers.Unconfined),
                 runtimeAvailable = { true },
                 launch = launched::add,
+                markOutcomeInMemory = markOutcomeInMemory,
                 reportOutcome = reportOutcome,
-                reserveHostDismissal = reserveHostDismissal,
-                releaseHostDismissalReservation = releaseHostDismissalReservation,
             )
         }
         val core = core(

@@ -55,13 +55,6 @@ class NuxieIdentityPresentationTest {
     }
 
     @Test
-    fun identifyShutsDownPresentationHeldForFailedHostTerminalizationRetry() = runBlocking {
-        assertIdentityTransitionShutsDownPresentation(failHostTerminalization = true) {
-            Nuxie.identify("identified-customer")
-        }
-    }
-
-    @Test
     fun resetShutsDownPresentationOwnedByPreviousIdentity() = runBlocking {
         assertIdentityTransitionShutsDownPresentation(initiallyIdentified = true) {
             Nuxie.reset()
@@ -70,7 +63,6 @@ class NuxieIdentityPresentationTest {
 
     private suspend fun assertIdentityTransitionShutsDownPresentation(
         initiallyIdentified: Boolean = false,
-        failHostTerminalization: Boolean = false,
         transition: () -> Unit,
     ) {
         val launched = mutableListOf<String>()
@@ -79,7 +71,7 @@ class NuxieIdentityPresentationTest {
         val lease = Lease()
         Nuxie.overridesForTesting = NuxieCore.Overrides(
             transport = FakeTransport(),
-            presentationFactory = NuxieCore.PresentationFactory { _, _, releaseReservation ->
+            presentationFactory = NuxieCore.PresentationFactory { markOutcomeInMemory, _ ->
                 ExperiencePresentationService(
                     releases = PresentationReleaseProvider { release(it) },
                     acquire = { acquired(it, lease) },
@@ -87,14 +79,10 @@ class NuxieIdentityPresentationTest {
                     scope = CoroutineScope(Dispatchers.Unconfined),
                     runtimeAvailable = { true },
                     launch = launched::add,
+                    markOutcomeInMemory = markOutcomeInMemory,
                     reportOutcome = {
                         semanticOutcomes += 1
-                        !failHostTerminalization
                     },
-                    reserveHostDismissal = { outcome ->
-                        outcome.ownerDistinctId == outcome.initiatingDistinctId
-                    },
-                    releaseHostDismissalReservation = releaseReservation,
                 )
             },
         )
@@ -114,21 +102,13 @@ class NuxieIdentityPresentationTest {
         PresentationRegistry.reportFirstFrame(launched.single())
         shown.await()
 
-        if (failHostTerminalization) {
-            Nuxie.dismiss()
-            assertTrue(
-                "failed host terminalization must preserve the presentation for recovery",
-                !lease.closed.get(),
-            )
-        }
-
         transition()
         withTimeout(2_000) { core.userTransitions.drain() }
         Nuxie.dismiss()
 
         assertTrue("identity transition must dismiss the old presentation", lease.closed.get())
         assertEquals(listOf("\$experience_shown"), emitted)
-        assertEquals(if (failHostTerminalization) 1 else 0, semanticOutcomes)
+        assertEquals(0, semanticOutcomes)
     }
 
     private fun release(version: String): PresentationRelease {

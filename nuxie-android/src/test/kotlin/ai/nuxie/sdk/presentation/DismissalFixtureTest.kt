@@ -221,6 +221,8 @@ class DismissalFixtureTest {
             val launched = mutableListOf<String>()
             var semanticFailure: Throwable? = null
             val semanticCompletion = CompletableDeferred<Unit>()
+            val hostBookkeepingStarted = CompletableDeferred<Unit>()
+            val continueHostBookkeeping = CompletableDeferred<Unit>()
             val presentations = ExperiencePresentationService(
                 releases = PresentationReleaseProvider { release() },
                 acquire = { acquired() },
@@ -228,7 +230,19 @@ class DismissalFixtureTest {
                 scope = scope,
                 runtimeAvailable = { true },
                 launch = launched::add,
+                markOutcomeInMemory = { outcome ->
+                    journeys.markHostDismissedInMemory(
+                        ownerDistinctId = requireNotNull(outcome.ownerDistinctId),
+                        journeyId = requireNotNull(outcome.ref.journeyId),
+                        experienceId = outcome.ref.experienceId,
+                        initiatingDistinctId = requireNotNull(outcome.initiatingDistinctId),
+                    )
+                },
                 reportOutcome = { outcome ->
+                    if (outcome.reason == CloseReason.HostDismissed) {
+                        hostBookkeepingStarted.complete(Unit)
+                        continueHostBookkeeping.await()
+                    }
                     runCatching {
                         journeys.presentationEnded(
                             outcome.ownerDistinctId ?: distinctId,
@@ -239,19 +253,6 @@ class DismissalFixtureTest {
                         .also { semanticCompletion.complete(Unit) }
                         .getOrThrow()
                 },
-                reserveHostDismissal = { outcome ->
-                    journeys.reserveHostDismissal(
-                        ownerDistinctId = requireNotNull(outcome.ownerDistinctId),
-                        journeyId = requireNotNull(outcome.ref.journeyId),
-                        initiatingDistinctId = requireNotNull(outcome.initiatingDistinctId),
-                    )
-                },
-                releaseHostDismissalReservation = { outcome ->
-                    journeys.releaseHostDismissalReservation(
-                        ownerDistinctId = requireNotNull(outcome.ownerDistinctId),
-                        journeyId = requireNotNull(outcome.ref.journeyId),
-                    )
-                },
             )
 
             val shown = scope.async {
@@ -260,13 +261,26 @@ class DismissalFixtureTest {
             PresentationRegistry.reportFirstFrame(launched.single())
             shown.await()
             when (vector.getValue("dismissedBy").jsonPrimitive.content) {
-                "host" -> presentations.dismissFromHost(distinctId)
+                "host" -> {
+                    presentations.dismissFromHost(distinctId)
+                    hostBookkeepingStarted.await()
+                    assertEquals(null, PresentationRegistry.resolve(launched.single()))
+                    assertEquals(
+                        JourneyRunState.ACTIVE,
+                        runStore.load(distinctId, journeyId)?.state,
+                    )
+                    assertEquals(
+                        0,
+                        eventStore.events.values.count { it.name == JourneyEventNames.EXITED },
+                    )
+                    continueHostBookkeeping.complete(Unit)
+                }
                 "user" -> {
                     presentations.dismiss(CloseReason.UserDismissed)
-                    semanticCompletion.await()
                 }
                 else -> error("unknown dismissal source")
             }
+            semanticCompletion.await()
             semanticFailure?.let { throw it }
 
             val expected = vector.getValue("expected").jsonObject
