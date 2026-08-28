@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.features
 
+import ai.nuxie.sdk.hasSameDoubleValueAs
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.NonCancellable
@@ -159,15 +160,5 @@ private fun FeatureAccess?.hasSameFieldsAs(other: FeatureAccess): Boolean =
     this != null &&
         allowed == other.allowed &&
         unlimited == other.unlimited &&
-        balance.sameFieldValueAs(other.balance) &&
+        balance.hasSameDoubleValueAs(other.balance) &&
         type == other.type
-
-private fun Double?.sameFieldValueAs(other: Double?): Boolean {
-    if (this == null || other == null) return this == null && other == null
-    if (isNaN() || other.isNaN()) return false
-    val magnitudeMask = Long.MAX_VALUE
-    val bothZero = (toRawBits() and magnitudeMask) == 0L &&
-        (other.toRawBits() and magnitudeMask) == 0L
-    if (bothZero) return true
-    return toRawBits() == other.toRawBits()
-}

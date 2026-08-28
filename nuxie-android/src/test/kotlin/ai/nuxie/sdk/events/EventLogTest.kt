@@ -190,6 +190,37 @@ class EventLogTest {
     }
 
     @Test
+    fun acceptedFeatureUsePreservesBeforeSendIdentityAndTimestamp() = runBlocking {
+        val store = RecordingStore()
+        val eventLog = log(store) {
+            NuxieEvent(
+                id = "transformed-id",
+                name = "transformed-feature-use",
+                distinctId = "transformed-user",
+                properties = mapOf("transformed" to "yes"),
+                timestampMillis = 1_234L,
+            )
+        }
+
+        assertTrue(
+            eventLog.captureDeliveredIdempotently(
+                SystemEventNames.FEATURE_USED,
+                mapOf("feature_id" to "credits", "amount" to 1.0),
+                "accepted-event",
+                "owner-1",
+            ),
+        )
+
+        val stored = store.delivered.single()
+        assertEquals("transformed-id", stored.id)
+        assertEquals("transformed-feature-use", stored.name)
+        assertEquals("transformed-user", stored.distinctId)
+        assertEquals(1_234L, stored.timestampMillis)
+        assertEquals("yes", stored.properties.stringValue("transformed"))
+        assertEquals(SystemEventNames.FEATURE_USED, stored.forwardingName)
+    }
+
+    @Test
     fun beforeSendRenameKeepsIdentityAndTimestamp() = runBlocking {
         val store = RecordingStore()
         val eventLog = log(store) { event ->

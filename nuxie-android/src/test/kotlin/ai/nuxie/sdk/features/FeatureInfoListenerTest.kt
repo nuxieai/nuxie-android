@@ -60,6 +60,18 @@ class FeatureInfoListenerTest {
         assertEquals(1, transitions.size)
     }
 
+    @Test
+    fun nanBalanceRemainsUnequalLikeSwift() = runBlocking {
+        val info = FeatureInfo()
+        val transitions = mutableListOf<Pair<FeatureAccess?, FeatureAccess>>()
+        info.onFeatureChange = { _, oldAccess, newAccess -> transitions += oldAccess to newAccess }
+
+        info.update(mapOf("credits" to access(allowed = false, balance = Double.NaN)), emptyMap())
+        info.update(mapOf("credits" to access(allowed = false, balance = Double.NaN)), emptyMap())
+
+        assertEquals(2, transitions.size)
+    }
+
     private fun access(allowed: Boolean, balance: Double) = FeatureAccess(
         allowed = allowed,
         unlimited = false,

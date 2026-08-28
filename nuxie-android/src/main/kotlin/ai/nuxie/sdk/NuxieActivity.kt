@@ -26,7 +26,12 @@ data class NuxieActivityInfo internal constructor(
 sealed interface NuxieActivityValue {
     data class String(val value: kotlin.String) : NuxieActivityValue
     data class Int(val value: Long) : NuxieActivityValue
-    data class Double(val value: kotlin.Double) : NuxieActivityValue
+    data class Double(val value: kotlin.Double) : NuxieActivityValue {
+        override fun equals(other: Any?): Boolean =
+            other is Double && value.hasSameDoubleValueAs(other.value)
+
+        override fun hashCode(): kotlin.Int = value.doubleValueHashCode()
+    }
     data class Bool(val value: Boolean) : NuxieActivityValue
 }
 
@@ -61,7 +66,20 @@ sealed interface NuxieActivity {
         val experience: ExperienceRef?,
     ) : NuxieActivity
 
-    data class FeatureUsed(val featureId: String, val amount: Double, val entityId: String?) : NuxieActivity
+    data class FeatureUsed(val featureId: String, val amount: Double, val entityId: String?) : NuxieActivity {
+        override fun equals(other: Any?): Boolean =
+            other is FeatureUsed &&
+                featureId == other.featureId &&
+                amount.hasSameDoubleValueAs(other.amount) &&
+                entityId == other.entityId
+
+        override fun hashCode(): Int {
+            var result = featureId.hashCode()
+            result = 31 * result + amount.doubleValueHashCode()
+            result = 31 * result + (entityId?.hashCode() ?: 0)
+            return result
+        }
+    }
 
     data class ExperimentExposure(
         val experience: ExperienceRef,
