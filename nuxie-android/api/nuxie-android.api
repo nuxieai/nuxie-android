@@ -693,6 +693,7 @@ public final class ai/nuxie/sdk/PermissionKind : java/lang/Enum {
 }
 
 public final class ai/nuxie/sdk/PurchaseInfo {
+	public fun equals (Ljava/lang/Object;)Z
 	public final fun getDisplayPrice ()Ljava/lang/String;
 	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
 	public final fun getPlacementId ()Ljava/lang/String;
@@ -700,6 +701,7 @@ public final class ai/nuxie/sdk/PurchaseInfo {
 	public final fun getProductId ()Ljava/lang/String;
 	public final fun getStoreProductId ()Ljava/lang/String;
 	public final fun getTransactionId ()Ljava/lang/String;
+	public fun hashCode ()I
 	public final fun isTestStore ()Z
 }
 

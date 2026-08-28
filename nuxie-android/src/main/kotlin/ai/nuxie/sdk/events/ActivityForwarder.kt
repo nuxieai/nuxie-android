@@ -2,6 +2,7 @@ package ai.nuxie.sdk.events
 
 import ai.nuxie.sdk.ExperienceRef
 import ai.nuxie.sdk.NuxieActivityInfo
+import ai.nuxie.sdk.journey.JourneyEventNames
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -14,7 +15,11 @@ internal class ActivityForwarder(
     suspend fun onCommitted(event: StoredEvent) {
         val receivedAtMillis = event.forwardingReceivedAtMillis ?: return
         if (event.forwardingName !in ActivityCuration.curatedNames) return
-        val properties = enrichJourneyReference(event)
+        val properties = if (event.forwardingName == JourneyEventNames.SUPERSEDED) {
+            enrichJourneyReference(event)
+        } else {
+            event.properties
+        }
         val activity = ActivityCuration.activity(event.forwardingName, properties) ?: return
         deliver(
             NuxieActivityInfo(

@@ -105,7 +105,38 @@ class PurchaseInfo internal constructor(
     val displayPrice: String?,
     val transactionId: String?,
     val isTestStore: Boolean,
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is PurchaseInfo) return false
+
+        return productId == other.productId &&
+            storeProductId == other.storeProductId &&
+            placementId == other.placementId &&
+            experience == other.experience &&
+            price.hasSameValueAs(other.price) &&
+            displayPrice == other.displayPrice &&
+            transactionId == other.transactionId &&
+            isTestStore == other.isTestStore
+    }
+
+    override fun hashCode(): Int {
+        var result = productId?.hashCode() ?: 0
+        result = 31 * result + (storeProductId?.hashCode() ?: 0)
+        result = 31 * result + (placementId?.hashCode() ?: 0)
+        result = 31 * result + (experience?.hashCode() ?: 0)
+        result = 31 * result + (price?.stripTrailingZeros()?.hashCode() ?: 0)
+        result = 31 * result + (displayPrice?.hashCode() ?: 0)
+        result = 31 * result + (transactionId?.hashCode() ?: 0)
+        result = 31 * result + isTestStore.hashCode()
+        return result
+    }
+}
+
+private fun BigDecimal?.hasSameValueAs(other: BigDecimal?): Boolean {
+    if (this == null || other == null) return this == null && other == null
+    return compareTo(other) == 0
+}
 
 /** Permission family resolved by an Experience request. */
 enum class PermissionKind { NOTIFICATIONS, TRACKING, OTHER }
