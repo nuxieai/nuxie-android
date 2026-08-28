@@ -25,6 +25,9 @@ internal class TerminalCloseClaim(
 
     fun release(reason: CloseReason): Boolean = claimed.compareAndSet(reason, null)
 
+    fun replace(expected: CloseReason, replacement: CloseReason): Boolean =
+        claimed.compareAndSet(expected, replacement)
+
     fun prepareForTeardown(isChangingConfigurations: Boolean) {
         if (reason == null && isChangingConfigurations) return
         tryClaim(CloseReason.UserDismissed)
@@ -140,6 +143,11 @@ internal class NuxieExperienceActivity : Activity(), PresentationActivityHandle 
     override fun claimedCloseReason(): CloseReason? = terminal.reason
 
     override fun releaseServiceClaim(reason: CloseReason): Boolean = terminal.release(reason)
+
+    override fun replaceServiceClaim(
+        expected: CloseReason,
+        replacement: CloseReason,
+    ): Boolean = terminal.replace(expected, replacement)
 
     override fun finishAfterServiceClaim() {
         runOnUiThread { finish() }

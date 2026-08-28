@@ -111,6 +111,8 @@ internal interface PresentationActivityHandle {
 
     fun releaseServiceClaim(reason: CloseReason): Boolean
 
+    fun replaceServiceClaim(expected: CloseReason, replacement: CloseReason): Boolean
+
     fun finishAfterServiceClaim()
 }
 
@@ -253,14 +255,15 @@ internal object PresentationRegistry {
             var reserved = entry.reservedReason
             if (reserved != null && reserved != reason) {
                 // Identity teardown is authoritative over a failed host
-                // terminalization retry. Revoke the Activity claim and the
-                // registry reservation under one lock before selecting the
-                // identity close, matching iOS shutdown semantics.
+                // terminalization retry. Replace the Activity claim and
+                // revoke the registry reservation in one lock-held transition,
+                // matching iOS shutdown semantics.
                 if (reason != CloseReason.IdentityChanged ||
                     reserved != CloseReason.HostDismissed ||
                     entry.reservationReady
                 ) return
-                entry.activity.get()?.releaseServiceClaim(reserved)
+                val activity = entry.activity.get()
+                if (activity != null && !activity.replaceServiceClaim(reserved, reason)) return
                 entry.reservedReason = null
                 reserved = null
             }
