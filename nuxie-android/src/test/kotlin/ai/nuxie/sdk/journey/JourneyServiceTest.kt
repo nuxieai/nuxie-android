@@ -22,7 +22,11 @@ import ai.nuxie.sdk.experiences.SupportedRuntime
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.presentation.CloseReason
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -433,56 +437,148 @@ class JourneyServiceTest {
     }
 
     @Test
-    fun hostDismissalWinsWhenItMakesTheFirstTerminalRunTransition() = runBlocking {
-        val h = harness(reentry = JourneyReentry.OneTime)
+    fun hostDismissalWinsConcurrentTerminalRacesAndWriteBehindConvergesUnderLoad() = runBlocking {
+        val blockNextJourneyClockRead = AtomicBoolean(false)
+        var hostWriterInsideTransition = CountDownLatch(0)
+        var releaseHostWriter = CountDownLatch(0)
+        val h = harness(
+            reentry = JourneyReentry.OneTime,
+            onJourneyClockRead = {
+                if (blockNextJourneyClockRead.compareAndSet(true, false)) {
+                    hostWriterInsideTransition.countDown()
+                    check(releaseHostWriter.await(5, TimeUnit.SECONDS))
+                }
+            },
+        )
         try {
-            val distinctId = "customer-1"
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = distinctId),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = requireNotNull(started.ref.journeyId)
+            repeat(32) { attempt ->
+                val distinctId = "host-winner-customer-$attempt"
+                val started = h.service.handleEventForTrigger(
+                    StoredEvent(
+                        "host-winner-trigger-$attempt",
+                        "opened",
+                        timestampMillis = now,
+                        distinctId = distinctId,
+                    ),
+                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+                val journeyId = requireNotNull(started.ref.journeyId)
+                hostWriterInsideTransition = CountDownLatch(1)
+                releaseHostWriter = CountDownLatch(1)
+                blockNextJourneyClockRead.set(true)
 
-            markHostDismissed(h, journeyId)
-            h.service.exit(distinctId, journeyId, "error")
+                val hostWriter = async(Dispatchers.Default) {
+                    h.service.markHostDismissedInMemory(distinctId, journeyId, distinctId)
+                }
+                assertTrue(hostWriterInsideTransition.await(5, TimeUnit.SECONDS))
+                // Undispatched startup makes both detached lanes reach the
+                // held run lock before the winning transition is released.
+                val competingWriter = async(
+                    context = Dispatchers.Default,
+                    start = CoroutineStart.UNDISPATCHED,
+                ) {
+                    h.service.exit(distinctId, journeyId, "error")
+                }
+                val writeBehind = async(
+                    context = Dispatchers.Default,
+                    start = CoroutineStart.UNDISPATCHED,
+                ) {
+                    h.service.presentationEnded(distinctId, journeyId, CloseReason.HostDismissed)
+                }
 
-            assertTrue(h.service.presentationEnded(distinctId, journeyId, CloseReason.HostDismissed))
-            assertNull(JourneyStore(h.root).load(distinctId, journeyId))
-            assertTrue(JourneyStore(h.root).hasCompleted(distinctId, "experience-1"))
-            val admission = h.service.handleEventForTrigger(
-                StoredEvent("trigger-2", "opened", timestampMillis = now, distinctId = distinctId),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed
-            assertEquals(SuppressReason.REENTRY_LIMITED, admission.reason)
+                releaseHostWriter.countDown()
+
+                assertTrue("attempt $attempt: host writer did not win in memory", hostWriter.await())
+                competingWriter.await()
+                assertTrue("attempt $attempt: write-behind rejected the in-memory winner", writeBehind.await())
+                assertNull(JourneyStore(h.root).load(distinctId, journeyId))
+                assertTrue(JourneyStore(h.root).hasCompleted(distinctId, "experience-1"))
+                val admission = h.service.handleEventForTrigger(
+                    StoredEvent(
+                        "host-winner-retrigger-$attempt",
+                        "opened",
+                        timestampMillis = now,
+                        distinctId = distinctId,
+                    ),
+                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed
+                assertEquals(SuppressReason.REENTRY_LIMITED, admission.reason)
+            }
         } finally {
+            releaseHostWriter.countDown()
             h.root.deleteRecursively()
         }
     }
 
     @Test
-    fun competingExitWinsWhenItMakesTheFirstTerminalRunTransition() = runBlocking {
-        val h = harness(reentry = JourneyReentry.OneTime)
+    fun competingExitWinsConcurrentTerminalRacesAndLoserWriteBehindCannotOverwriteUnderLoad() = runBlocking {
+        val blockNextJourneyClockRead = AtomicBoolean(false)
+        var competingWriterInsideTransition = CountDownLatch(0)
+        var releaseCompetingWriter = CountDownLatch(0)
+        val h = harness(
+            reentry = JourneyReentry.OneTime,
+            onJourneyClockRead = {
+                if (blockNextJourneyClockRead.compareAndSet(true, false)) {
+                    competingWriterInsideTransition.countDown()
+                    check(releaseCompetingWriter.await(5, TimeUnit.SECONDS))
+                }
+            },
+        )
         try {
-            val distinctId = "customer-1"
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = distinctId),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = requireNotNull(started.ref.journeyId)
+            repeat(32) { attempt ->
+                val distinctId = "exit-winner-customer-$attempt"
+                val started = h.service.handleEventForTrigger(
+                    StoredEvent(
+                        "exit-winner-trigger-$attempt",
+                        "opened",
+                        timestampMillis = now,
+                        distinctId = distinctId,
+                    ),
+                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+                val journeyId = requireNotNull(started.ref.journeyId)
+                competingWriterInsideTransition = CountDownLatch(1)
+                releaseCompetingWriter = CountDownLatch(1)
+                blockNextJourneyClockRead.set(true)
 
-            h.service.exit(distinctId, journeyId, "error")
-            assertFalse(
-                h.service.markHostDismissedInMemory(distinctId, journeyId, distinctId),
-            )
+                val competingWriter = async(Dispatchers.Default) {
+                    h.service.exit(distinctId, journeyId, "error")
+                }
+                assertTrue(competingWriterInsideTransition.await(5, TimeUnit.SECONDS))
+                // Both losing host lanes are queued before the winner exits
+                // the critical section, including its detached write-behind.
+                val hostWriter = async(
+                    context = Dispatchers.Default,
+                    start = CoroutineStart.UNDISPATCHED,
+                ) {
+                    h.service.markHostDismissedInMemory(distinctId, journeyId, distinctId)
+                }
+                val loserWriteBehind = async(
+                    context = Dispatchers.Default,
+                    start = CoroutineStart.UNDISPATCHED,
+                ) {
+                    h.service.presentationEnded(distinctId, journeyId, CloseReason.HostDismissed)
+                }
 
-            assertFalse(h.service.presentationEnded(distinctId, journeyId, CloseReason.HostDismissed))
-            val durableRun = requireNotNull(JourneyStore(h.root).load(distinctId, journeyId))
-            assertEquals(JourneyRunState.TERMINAL, durableRun.state)
-            assertEquals("error", durableRun.terminalReason)
-            assertFalse(JourneyStore(h.root).hasCompleted(distinctId, "experience-1"))
-            assertTrue(
-                h.service.handleEventForTrigger(
-                    StoredEvent("trigger-2", "opened", timestampMillis = now, distinctId = distinctId),
-                ).single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started,
-            )
+                releaseCompetingWriter.countDown()
+
+                competingWriter.await()
+                assertFalse("attempt $attempt: both terminal writers won in memory", hostWriter.await())
+                assertFalse("attempt $attempt: loser write-behind accepted the winner", loserWriteBehind.await())
+                val durableRun = requireNotNull(JourneyStore(h.root).load(distinctId, journeyId))
+                assertEquals(JourneyRunState.TERMINAL, durableRun.state)
+                assertEquals("error", durableRun.terminalReason)
+                assertFalse(JourneyStore(h.root).hasCompleted(distinctId, "experience-1"))
+                assertTrue(
+                    h.service.handleEventForTrigger(
+                        StoredEvent(
+                            "exit-winner-retrigger-$attempt",
+                            "opened",
+                            timestampMillis = now,
+                            distinctId = distinctId,
+                        ),
+                    ).single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started,
+                )
+            }
         } finally {
+            releaseCompetingWriter.countDown()
             h.root.deleteRecursively()
         }
     }
