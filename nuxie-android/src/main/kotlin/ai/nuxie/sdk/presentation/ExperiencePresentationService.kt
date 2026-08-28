@@ -103,6 +103,17 @@ internal sealed interface PresentationShell {
     }
 }
 
+/** Claim operations the registry coordinates with its attached host Activity. */
+internal interface PresentationActivityHandle {
+    fun claimFromService(reason: CloseReason): Boolean
+
+    fun claimedCloseReason(): CloseReason?
+
+    fun releaseServiceClaim(reason: CloseReason): Boolean
+
+    fun finishAfterServiceClaim()
+}
+
 /**
  * Process-local handoff between [ExperiencePresentationService] and the one
  * engine-owned Activity. Absence after process death is deliberate: content
@@ -117,7 +128,7 @@ internal object PresentationRegistry {
     ) {
         val terminal = AtomicBoolean(false)
         val firstFrame = AtomicBoolean(false)
-        var activity = WeakReference<NuxieExperienceActivity>(null)
+        var activity = WeakReference<PresentationActivityHandle>(null)
         var reservedReason: CloseReason? = null
         var reservationReady = false
         var dismissalSelected = false
@@ -141,14 +152,14 @@ internal object PresentationRegistry {
 
     fun resolve(id: String): PreparedPresentation? = synchronized(lock) { entries[id]?.content }
 
-    fun attach(id: String, activity: NuxieExperienceActivity): Boolean = synchronized(lock) {
+    fun attach(id: String, activity: PresentationActivityHandle): Boolean = synchronized(lock) {
         val entry = entries[id] ?: return@synchronized false
         if (entry.dismissalSelected) return@synchronized false
         entry.activity = WeakReference(activity)
         true
     }
 
-    fun detach(id: String, activity: NuxieExperienceActivity) {
+    fun detach(id: String, activity: PresentationActivityHandle) {
         var dismissed: ((CloseReason) -> Unit)? = null
         var failed: ((Throwable) -> Unit)? = null
         var detachedReason: CloseReason? = null
@@ -224,13 +235,15 @@ internal object PresentationRegistry {
     }
 
     fun releaseDismissalReservation(id: String, reason: CloseReason) {
-        val activity = synchronized(lock) {
+        synchronized(lock) {
             val entry = entries[id] ?: return
             if (entry.reservedReason != reason || entry.reservationReady) return
+            // Keep registry ownership until the Activity claim is gone. A
+            // concurrent detach must observe either both or neither; otherwise
+            // it can publish the rejected reservation as HostDismissed.
+            entry.activity.get()?.releaseServiceClaim(reason)
             entry.reservedReason = null
-            entry.activity.get()
         }
-        activity?.releaseServiceClaim(reason)
     }
 
     fun dismiss(id: String, reason: CloseReason) {
