@@ -135,7 +135,6 @@ internal class NuxieCore(
         scope = scope,
         nowMillis = nowMillis,
         sessionIdProvider = { sessions.getSessionId() },
-        forwardingEnabled = forwardingEnabled,
     )
 
     private val journeyCatalog = JourneyReleaseCatalog(
@@ -295,7 +294,10 @@ internal class NuxieCore(
             resolveExperience = journeys::forwardingExperienceRef,
             deliver = forwardActivity,
         )
-        eventLog.subscribeCommitted(handler = activityForwarder::onCommitted)
+        eventLog.subscribeForwarding(
+            isEnabled = forwardingEnabled,
+            handler = activityForwarder::onCommitted,
+        )
         // Every committed capture nudges the delivery threshold check.
         eventLog.subscribeCommitted { delivery.kick() }
         userTransitions.addObserver(UserTransitionCoordinator.Observer { _, from, to ->

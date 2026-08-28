@@ -13,11 +13,14 @@ import kotlinx.coroutines.launch
  * capture -> sanitize -> enrich -> beforeSend -> persist pending -> announce.
  *
  * Contract (identical to iOS, tested):
- * - A single worker coroutine serializes every capture, so persistence and
- *   subscriber announcement happen in capture order.
+ * - A single commit worker coroutine serializes every capture, so persistence
+ *   and committed-subscriber announcement happen in capture order.
  * - Committed subscribers run serially, in subscription order, AFTER the
  *   event is persisted pending delivery. Subscribers registered before the
  *   first capture observe every committed event.
+ * - Forwarding admission is sampled before persistence, then successful
+ *   commits enter a separate FIFO worker. Slow forwarding never blocks the
+ *   commit worker, and a listener attached after admission receives no replay.
  * - beforeSend applies to every capture. Recovery owns identity: the
  *   transformed event keeps the original id, distinctId, and timestamp; hosts
  *   may rename the event or redact properties. Returning null terminally
@@ -33,16 +36,23 @@ internal class EventLog(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     /** Stamps \$session_id and touches the session; null until sessions exist. */
     private val sessionIdProvider: (() -> String?)? = null,
-    /** Sampled before persistence so listener attachment never replays prior captures. */
-    private val forwardingEnabled: () -> Boolean = { false },
 ) {
     internal fun interface CommittedSubscription {
         suspend fun onCommitted(event: StoredEvent)
     }
 
+    internal fun interface ForwardingSubscription {
+        suspend fun onForwarding(event: StoredEvent)
+    }
+
     private data class Subscriber(
         val predicate: (StoredEvent) -> Boolean,
         val handler: CommittedSubscription,
+    )
+
+    private data class ForwardingSubscriber(
+        val isEnabled: () -> Boolean,
+        val handler: ForwardingSubscription,
     )
 
     private sealed interface Command {
@@ -74,10 +84,18 @@ internal class EventLog(
         data class Barrier(val done: CompletableDeferred<Unit>) : Command
     }
 
+    private sealed interface ForwardingCommand {
+        data class Event(val event: StoredEvent) : ForwardingCommand
+        data class Barrier(val done: CompletableDeferred<Unit>) : ForwardingCommand
+    }
+
     private val commands = Channel<Command>(capacity = Channel.UNLIMITED)
+    private val forwardingCommands = Channel<ForwardingCommand>(capacity = Channel.UNLIMITED)
 
     /** Guarded by the worker: subscribers are read only on the worker coroutine. */
     private val subscribers = java.util.concurrent.CopyOnWriteArrayList<Subscriber>()
+    private val forwardingSubscribers =
+        java.util.concurrent.CopyOnWriteArrayList<ForwardingSubscriber>()
 
     private val worker = scope.launch {
         for (command in commands) {
@@ -122,6 +140,20 @@ internal class EventLog(
         }
     }
 
+    private val forwardingWorker = scope.launch {
+        for (command in forwardingCommands) {
+            when (command) {
+                is ForwardingCommand.Event -> forwardingSubscribers.forEach { subscriber ->
+                    if (subscriber.isEnabled()) {
+                        runCatching { subscriber.handler.onForwarding(command.event) }
+                            .onFailure { Log.w(LOG_TAG, "Forwarding subscriber failed", it) }
+                    }
+                }
+                is ForwardingCommand.Barrier -> command.done.complete(Unit)
+            }
+        }
+    }
+
     /** Enqueue a capture; safe from any thread, never blocks the caller. */
     fun capture(name: String, properties: Map<String, Any?>? = null) {
         if (name.isEmpty()) {
@@ -147,10 +179,35 @@ internal class EventLog(
         subscribers.add(Subscriber(predicate, handler))
     }
 
+    /**
+     * Register a forwarding-only subscriber. Presence is sampled before the
+     * store await and checked again by the FIFO forwarding worker immediately
+     * before last-mile delivery.
+     */
+    fun subscribeForwarding(
+        isEnabled: () -> Boolean = { true },
+        handler: ForwardingSubscription,
+    ) {
+        forwardingSubscribers.add(ForwardingSubscriber(isEnabled, handler))
+    }
+
     /** Await everything enqueued before this call. Internal/testing only. */
     suspend fun awaitBarrier() {
+        awaitCommitBarrier()
+        awaitForwardingBarrier()
+        // A forwarding callback can synchronously enqueue another capture.
+        awaitCommitBarrier()
+    }
+
+    private suspend fun awaitCommitBarrier() {
         val done = CompletableDeferred<Unit>()
         if (commands.trySend(Command.Barrier(done)).isFailure) return
+        done.await()
+    }
+
+    private suspend fun awaitForwardingBarrier() {
+        val done = CompletableDeferred<Unit>()
+        if (forwardingCommands.trySend(ForwardingCommand.Barrier(done)).isFailure) return
         done.await()
     }
 
@@ -158,6 +215,8 @@ internal class EventLog(
         awaitBarrier()
         commands.close()
         worker.join()
+        forwardingCommands.close()
+        forwardingWorker.join()
         store.close()
     }
 
@@ -250,9 +309,10 @@ internal class EventLog(
         val stored = StoredEvent.from(
             transformed,
             forwardingName = original.name,
-            forwardingReceivedAtMillis = original.timestampMillis.takeIf { forwardingEnabled() },
+            forwardingReceivedAtMillis = forwardingAdmission(original.timestampMillis),
         )
         store.insertPending(stored)
+        resolveForwarding(stored)
         subscribers.forEach { subscriber ->
             if (subscriber.predicate(stored)) {
                 runCatching { subscriber.handler.onCommitted(stored) }
@@ -291,10 +351,11 @@ internal class EventLog(
         val stored = StoredEvent.from(
             transformed,
             forwardingName = original.name,
-            forwardingReceivedAtMillis = original.timestampMillis.takeIf { forwardingEnabled() },
+            forwardingReceivedAtMillis = forwardingAdmission(original.timestampMillis),
         )
         val inserted = store.insertPendingIfAbsent(stored)
         if (inserted) {
+            resolveForwarding(stored)
             subscribers.forEach { subscriber ->
                 if (subscriber.predicate(stored)) {
                     runCatching { subscriber.handler.onCommitted(stored) }
@@ -306,9 +367,10 @@ internal class EventLog(
     }
 
     private suspend fun commitServerFactNow(event: StoredEvent, receivedAtMillis: Long): Boolean {
-        val admitted = event.withForwardingAdmission(receivedAtMillis.takeIf { forwardingEnabled() })
+        val admitted = event.withForwardingAdmission(forwardingAdmission(receivedAtMillis))
         val inserted = runCatching { store.insertDeliveredIfAbsent(admitted) }.getOrElse { return false }
         if (!inserted) return false
+        resolveForwarding(admitted)
         subscribers.forEach { subscriber ->
             if (subscriber.predicate(admitted)) {
                 runCatching { subscriber.handler.onCommitted(admitted) }
@@ -341,11 +403,25 @@ internal class EventLog(
         val stored = StoredEvent.from(
             transformed,
             forwardingName = original.name,
-            forwardingReceivedAtMillis = transformed.timestampMillis.takeIf { forwardingEnabled() },
+            forwardingReceivedAtMillis = forwardingAdmission(transformed.timestampMillis),
         )
         val inserted = store.insertDeliveredIfAbsent(stored)
-        if (inserted) announce(stored)
+        if (inserted) {
+            resolveForwarding(stored)
+            announce(stored)
+        }
         return true
+    }
+
+    private fun forwardingAdmission(receivedAtMillis: Long): Long? =
+        receivedAtMillis.takeIf { forwardingSubscribers.any { it.isEnabled() } }
+
+    private fun resolveForwarding(event: StoredEvent) {
+        if (event.forwardingReceivedAtMillis == null) return
+        val result = forwardingCommands.trySend(ForwardingCommand.Event(event))
+        if (result.isFailure) {
+            Log.w(LOG_TAG, "Committed event '${event.name}' dropped: forwarding pipeline is closed.")
+        }
     }
 
     private suspend fun announce(event: StoredEvent) {
