@@ -421,7 +421,7 @@ internal class ExperiencePresentationService(
         val active = attempt.active
         var teardownStarted = false
         var journeyReservationAcquired = false
-        var journeyReservationRetained = false
+        var retryOwnershipRetained = false
         var failure: Throwable? = null
         val outcome = PresentationOutcome(
             ref = active.ref,
@@ -434,11 +434,13 @@ internal class ExperiencePresentationService(
             if (!reserveHostDismissal(outcome)) return
             journeyReservationAcquired = true
             if (synchronized(stateLock) { current } !== active) return
-            journeyReservationRetained = true
             val terminalized = runCatching {
                 reportOutcome(outcome)
             }.getOrDefault(false)
-            if (!terminalized) return
+            if (!terminalized) {
+                retryOwnershipRetained = true
+                return
+            }
             active.semanticReported.set(true)
             teardownStarted = true
             PresentationRegistry.dismiss(active.id, CloseReason.HostDismissed)
@@ -447,13 +449,13 @@ internal class ExperiencePresentationService(
             failure = error
         } finally {
             try {
-                if (!teardownStarted) {
+                if (!teardownStarted && !retryOwnershipRetained) {
                     PresentationRegistry.releaseDismissalReservation(
                         active.id,
                         CloseReason.HostDismissed,
                     )
                 }
-                if (journeyReservationAcquired && !journeyReservationRetained) {
+                if (journeyReservationAcquired && !teardownStarted) {
                     releaseHostDismissalReservation(outcome)
                 }
             } catch (cleanupError: Throwable) {
