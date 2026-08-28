@@ -1334,6 +1334,62 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun cacheFirstSupersededCheckFallsBackToRawResultAfterCommittedEntryIsReconciledAway() = runBlocking {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checkStarted.countDown()
+                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "credit-wallet",
+                            requiredBalance = 2.0,
+                            balance = "5",
+                            type = "creditSystem",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+
+        val check = async(Dispatchers.Default) {
+            core.features.checkWithCache(
+                "exports",
+                requiredBalance = 2.0,
+                forceRefresh = true,
+            )
+        }
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+        core.features.applyLocalPurchase(
+            listOf(LocalPurchaseGrant("exports", FeatureType.BOOLEAN)),
+            "mid-check-token",
+        )
+        core.features.hydrateProfile(
+            core.identity.distinctId(),
+            Json.parseToJsonElement(
+                profile("""[{"id":"exports","type":"metered","balance":0,"unlimited":false}]"""),
+            ).jsonObject,
+        )
+        assertFalse(core.features.getCached("exports", null)!!.allowed)
+        releaseCheck.countDown()
+
+        val access = check.await()
+        assertTrue(access.allowed)
+        assertFalse(access.unlimited)
+        assertEquals(5.0, access.balance)
+        assertEquals(FeatureType.CREDIT_SYSTEM, access.type)
+        core.stop()
+    }
+
+    @Test
     fun expiredRealTimeCacheForcesAnotherCheck() = runBlocking {
         var checks = 0
         val transport = FakeTransport().apply {

@@ -520,7 +520,7 @@ internal class FeatureService(
             (purchaseRevisionChanged && entityId == null) ||
                 (committedMutationRevisions[key] ?: Long.MIN_VALUE) > requestMutationRevision
         val effectiveAccess = if (supersededByMutation) {
-            committedCachedAccess(featureId, requiredBalance, entityId) ?: requestedAccess
+            committedCachedAccess(featureId, requiredBalance, entityId) ?: serverAccess
         } else {
             requestedAccess
         }
