@@ -341,7 +341,7 @@ internal class EventLog(
         val stored = StoredEvent.from(
             transformed,
             forwardingName = original.name,
-            forwardingReceivedAtMillis = original.timestampMillis.takeIf { forwardingEnabled() },
+            forwardingReceivedAtMillis = transformed.timestampMillis.takeIf { forwardingEnabled() },
         )
         val inserted = store.insertDeliveredIfAbsent(stored)
         if (inserted) announce(stored)

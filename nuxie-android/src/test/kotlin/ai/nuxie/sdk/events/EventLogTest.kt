@@ -221,6 +221,42 @@ class EventLogTest {
     }
 
     @Test
+    fun deliveredEventUsesBeforeSendTimestampForForwardingEnvelope() = runBlocking {
+        val store = RecordingStore()
+        val forwardedTimestamps = mutableListOf<Pair<Long, Long>>()
+        val eventLog = log(
+            store = store,
+            forwardingEnabled = { true },
+            nowMillis = { 1_000L },
+            beforeSend = { event ->
+                NuxieEvent(
+                    id = event.id,
+                    name = event.name,
+                    distinctId = event.distinctId,
+                    properties = event.properties,
+                    timestampMillis = 2_000L,
+                )
+            },
+        )
+        val forwarder = ActivityForwarder(
+            resolveExperience = { _, _ -> null },
+            deliver = { forwardedTimestamps += it.timestampMillis to it.receivedAtMillis },
+        )
+        eventLog.subscribeCommitted { event -> forwarder.onCommitted(event) }
+
+        assertTrue(
+            eventLog.captureDeliveredIdempotently(
+                SystemEventNames.APP_OPENED,
+                emptyMap(),
+                "accepted-event",
+                "owner-1",
+            ),
+        )
+
+        assertEquals(listOf(2_000L to 2_000L), forwardedTimestamps)
+    }
+
+    @Test
     fun beforeSendRenameKeepsIdentityAndTimestamp() = runBlocking {
         val store = RecordingStore()
         val eventLog = log(store) { event ->
