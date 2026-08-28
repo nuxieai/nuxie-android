@@ -468,7 +468,7 @@ internal class ExperiencePresentationService(
                     "experience_id" to active.ref.experienceId,
                     "experience_version" to active.ref.experienceVersion,
                 ),
-                null,
+                active.ownerDistinctId,
             )
         }
         active.firstFrame.complete(active.ref)
@@ -565,12 +565,7 @@ internal class ExperiencePresentationService(
                 SystemEventNames.EXPERIENCE_ERRORED
             }
         }
-        val distinctIdOverride = when (reason) {
-            CloseReason.UserDismissed, CloseReason.HostDismissed, CloseReason.GoalMet ->
-                active.ownerDistinctId
-            else -> null
-        }
-        runCatching { emit(name, properties, distinctIdOverride) }
+        runCatching { emit(name, properties, active.ownerDistinctId) }
     }
 
     private class AndroidPresentationLauncher(private val context: Context) : (String) -> Unit {
