@@ -80,7 +80,7 @@ internal class NuxieCore(
 
     internal fun interface PresentationFactory {
         fun create(
-            markOutcomeInMemory: (PresentationOutcome) -> Boolean,
+            markOutcomeInMemory: suspend (PresentationOutcome) -> Boolean,
             reportOutcome: suspend (PresentationOutcome) -> Unit,
         ): ExperiencePresentationService
     }
@@ -205,7 +205,7 @@ internal class NuxieCore(
         scope = scope,
     )
 
-    private val markPresentationOutcomeInMemory: (PresentationOutcome) -> Boolean = { outcome ->
+    private val markPresentationOutcomeInMemory: suspend (PresentationOutcome) -> Boolean = { outcome ->
         val journeyId = outcome.ref.journeyId
         val ownerDistinctId = outcome.ownerDistinctId
         val initiatingDistinctId = outcome.initiatingDistinctId

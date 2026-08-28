@@ -1242,7 +1242,7 @@ class ExperiencePresentationServiceTest {
         },
         emit: (String, Map<String, Any?>, String?) -> Unit = { _, _, _ -> },
         launch: (String) -> Unit = {},
-        markOutcomeInMemory: (PresentationOutcome) -> Boolean = { true },
+        markOutcomeInMemory: suspend (PresentationOutcome) -> Boolean = { true },
         reportOutcome: suspend (PresentationOutcome) -> Unit = {},
         firstFrameTimeoutMillis: Long = 30_000,
     ) = ExperiencePresentationService(

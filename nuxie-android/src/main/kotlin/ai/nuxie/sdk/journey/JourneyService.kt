@@ -177,20 +177,29 @@ internal class JourneyService(
         }
     }
 
-    fun markHostDismissedInMemory(
+    suspend fun markHostDismissedInMemory(
         ownerDistinctId: String,
         journeyId: String,
         experienceId: String,
         initiatingDistinctId: String,
     ): Boolean {
         if (ownerDistinctId != initiatingDistinctId) return false
-        synchronized(inMemoryHostExits) {
+        return runLock.withLock {
             val key = HostDismissalKey(ownerDistinctId, journeyId)
-            if (key !in inMemoryHostExits) {
-                inMemoryHostExits[key] = InMemoryHostExit(experienceId, nowMillis())
+            val run = withContext(Dispatchers.IO) { store.load(ownerDistinctId, journeyId) }
+            if (run == null || run.state != JourneyRunState.ACTIVE) {
+                // A competing terminal save won the shared-lock arbitration;
+                // its durable state supersedes any earlier in-memory mark.
+                synchronized(inMemoryHostExits) { inMemoryHostExits.remove(key) }
+            } else {
+                synchronized(inMemoryHostExits) {
+                    if (key !in inMemoryHostExits) {
+                        inMemoryHostExits[key] = InMemoryHostExit(experienceId, nowMillis())
+                    }
+                }
             }
+            true
         }
-        return true
     }
 
     private suspend fun userDismiss(distinctId: String, journeyId: String): Boolean = runLock.withLock {
@@ -243,6 +252,8 @@ internal class JourneyService(
             else -> return@withLock false
         }
         withContext(Dispatchers.IO) { store.save(terminal) }
+        // Admission can now derive the same result from the durable tombstone.
+        synchronized(inMemoryHostExits) { inMemoryHostExits.remove(key) }
         val completedAtMillis = terminal.completedAtMillis ?: return@withLock true
         if (terminal.pendingHostExitCapture) {
             val captured = runCatching {
@@ -284,7 +295,6 @@ internal class JourneyService(
             !terminal.pendingHostTriggerCompletion
         ) {
             withContext(Dispatchers.IO) { store.delete(terminal) }
-            synchronized(inMemoryHostExits) { inMemoryHostExits.remove(key) }
         }
         true
     }

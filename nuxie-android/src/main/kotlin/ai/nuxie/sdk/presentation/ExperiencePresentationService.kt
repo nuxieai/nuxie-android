@@ -249,7 +249,7 @@ internal class ExperiencePresentationService(
     private val scope: CoroutineScope,
     private val runtimeAvailable: () -> Boolean,
     private val launch: (String) -> Unit,
-    private val markOutcomeInMemory: (PresentationOutcome) -> Boolean = { true },
+    private val markOutcomeInMemory: suspend (PresentationOutcome) -> Boolean = { true },
     private val reportOutcome: suspend (PresentationOutcome) -> Unit = {},
     private val firstFrameTimeoutMillis: Long = FIRST_FRAME_TIMEOUT_MILLIS,
 ) {
@@ -260,7 +260,7 @@ internal class ExperiencePresentationService(
         emit: (String, Map<String, Any?>, String?) -> Unit,
         scope: CoroutineScope,
         runtimeAvailable: () -> Boolean,
-        markOutcomeInMemory: (PresentationOutcome) -> Boolean = { true },
+        markOutcomeInMemory: suspend (PresentationOutcome) -> Boolean = { true },
         reportOutcome: suspend (PresentationOutcome) -> Unit = {},
     ) : this(
         releases = releases,
