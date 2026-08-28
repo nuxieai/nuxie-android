@@ -136,6 +136,7 @@ internal class JourneyService(
         val exitReason = when (reason) {
             CloseReason.UserDismissed -> error("handled above")
             CloseReason.HostDismissed -> error("handled above")
+            CloseReason.IdentityChanged -> return true
             CloseReason.GoalMet -> "goal_met"
             CloseReason.PurchaseCompleted -> "completed"
             CloseReason.Timeout -> "completed"
