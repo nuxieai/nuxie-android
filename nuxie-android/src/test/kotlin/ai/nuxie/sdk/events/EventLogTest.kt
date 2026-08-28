@@ -320,7 +320,48 @@ class EventLogTest {
     }
 
     @Test
-    fun beforeSendRenameKeepsIdentityAndTimestamp() = runBlocking {
+    fun ordinaryCapturePreservesBeforeSendIdAndTimestampThroughForwarding() = runBlocking {
+        val store = RecordingStore()
+        val forwarded = mutableListOf<ai.nuxie.sdk.NuxieActivityInfo>()
+        val eventLog = log(
+            store = store,
+            forwardingEnabled = { true },
+            nowMillis = { 1_000L },
+            beforeSend = {
+                NuxieEvent(
+                    id = "transformed-id",
+                    name = "transformed-name",
+                    distinctId = "transformed-user",
+                    properties = emptyMap(),
+                    timestampMillis = 2_000L,
+                )
+            },
+        )
+        val forwarder = ActivityForwarder(
+            resolveExperience = { _, _ -> null },
+            deliver = { forwarded += it },
+        )
+        eventLog.subscribeForwarding { event -> forwarder.onCommitted(event) }
+
+        eventLog.capture(SystemEventNames.APP_OPENED)
+        eventLog.awaitBarrier()
+
+        val stored = store.pending.single()
+        assertEquals("transformed-id", stored.id)
+        assertEquals("transformed-name", stored.name)
+        assertEquals("anon-1", stored.distinctId)
+        assertEquals(2_000L, stored.timestampMillis)
+        assertEquals(SystemEventNames.APP_OPENED, stored.forwardingName)
+        assertEquals(2_000L, stored.forwardingReceivedAtMillis)
+
+        val info = forwarded.single()
+        assertEquals("transformed-id", info.id)
+        assertEquals(2_000L, info.timestampMillis)
+        assertEquals(2_000L, info.receivedAtMillis)
+    }
+
+    @Test
+    fun ordinaryBeforeSendRenameKeepsScopedIdentityAndTransformedEventFields() = runBlocking {
         val store = RecordingStore()
         val eventLog = log(store) { event ->
             NuxieEvent(
@@ -338,10 +379,10 @@ class EventLogTest {
         val stored = store.pending.single()
         assertEquals("renamed", stored.name)
         assertEquals("original", stored.forwardingName)
-        // Recovery owns identity: id, distinctId, and timestamp are pinned.
+        // Ordinary captures keep scoped attribution but preserve other hook fields.
         assertEquals("anon-1", stored.distinctId)
-        assertEquals(1_784_462_400_000L, stored.timestampMillis)
-        assertTrue(stored.id != "attacker-controlled-id")
+        assertEquals(1L, stored.timestampMillis)
+        assertEquals("attacker-controlled-id", stored.id)
     }
 
     @Test
