@@ -6,6 +6,7 @@ import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.NuxieActivityInfo
+import ai.nuxie.sdk.NuxieEvent
 import ai.nuxie.sdk.SuppressReason
 import ai.nuxie.sdk.TriggerUpdate
 import ai.nuxie.sdk.events.ActivityForwarder
@@ -50,8 +51,10 @@ class JourneyServiceTest {
     private var now = 1_784_462_400_000L
 
     private class Identity : IdentityProvider {
-        override fun distinctId() = "customer-1"
-        override fun anonymousId() = "customer-1"
+        var currentDistinctId = "customer-1"
+
+        override fun distinctId() = currentDistinctId
+        override fun anonymousId() = currentDistinctId
         override fun rawDistinctId(): String? = null
         override val isIdentified = false
     }
@@ -103,15 +106,17 @@ class JourneyServiceTest {
     private fun harness(
         reentry: JourneyReentry = JourneyReentry.EveryTime,
         forwardingEnabled: () -> Boolean = { false },
+        identity: Identity = Identity(),
+        beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
+        onJourneyClockRead: () -> Unit = {},
     ): Harness {
         val root = createTempDir(prefix = "nuxie-journey-")
         val eventStore = Store()
-        val identity = Identity()
         val eventLog = EventLog(
             store = eventStore,
             contextBuilder = NuxieContextBuilder(RuntimeEnvironment.getApplication(), NuxieEnvironment.DEVELOPMENT, LogLevel.NONE, identity),
             identity = identity,
-            beforeSend = null,
+            beforeSend = beforeSend,
             scope = scope,
             nowMillis = { now },
         ).also { log ->
@@ -141,7 +146,10 @@ class JourneyServiceTest {
                 JourneyStore(root),
                 JourneyLedger(eventLog),
                 releases,
-                { now },
+                {
+                    onJourneyClockRead()
+                    now
+                },
                 triggerBroker = broker,
             ),
             broker,
@@ -314,6 +322,52 @@ class JourneyServiceTest {
             assertTrue(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
             val completion = updates.single() as TriggerUpdate.Journey
             assertEquals(JourneyExitReason.DISMISSED, completion.update.exitReason)
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun userDismissalPersistsOwnerAttributedExitWhenBeforeSendDropsAndIdentityChanges() = runBlocking {
+        val identity = Identity()
+        var changeIdentityOnJourneyClockRead = false
+        val h = harness(
+            identity = identity,
+            beforeSend = { event ->
+                if (event.name == JourneyEventNames.EXITED) null else event
+            },
+            onJourneyClockRead = {
+                if (changeIdentityOnJourneyClockRead) {
+                    identity.currentDistinctId = "customer-2"
+                }
+            },
+        )
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent(
+                    "trigger-1",
+                    "opened",
+                    timestampMillis = now,
+                    distinctId = "customer-1",
+                ),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            changeIdentityOnJourneyClockRead = true
+
+            assertTrue(
+                h.service.presentationEnded(
+                    "customer-1",
+                    started.ref.journeyId!!,
+                    CloseReason.UserDismissed,
+                ),
+            )
+
+            assertEquals("customer-2", identity.currentDistinctId)
+            val exit = h.store.events.values.single { it.name == JourneyEventNames.EXITED }
+            assertEquals("journey-exited:${started.ref.journeyId}:0", exit.id)
+            assertEquals("customer-1", exit.distinctId)
+            assertEquals("customer-1", exit.properties.stringValue("\$distinct_id"))
+            assertEquals("cancelled", exit.properties.stringValue("reason"))
+            assertEquals("user", exit.properties.stringValue("dismissed_by"))
         } finally {
             h.root.deleteRecursively()
         }

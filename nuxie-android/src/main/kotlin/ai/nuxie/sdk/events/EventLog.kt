@@ -21,11 +21,13 @@ import kotlinx.coroutines.launch
  * - Forwarding admission is sampled before persistence, then successful
  *   commits enter a separate FIFO worker. Slow forwarding never blocks the
  *   commit worker, and a listener attached after admission receives no replay.
- * - beforeSend applies to every capture. Ordinary captures retain their
- *   scoped distinctId while preserving the hook's id, name, properties, and
- *   timestamp. Stable recovery captures additionally retain their replay id
- *   and timestamp. Returning null terminally drops the event and records a
- *   stable drop so recovery never resurrects it.
+ * - beforeSend governs ordinary captures and host-governed stable captures.
+ *   Ordinary captures retain their scoped distinctId while preserving the
+ *   hook's id, name, properties, and timestamp. Governed stable captures
+ *   additionally retain their replay id and timestamp. Returning null
+ *   terminally drops the event and records a stable drop so recovery never
+ *   resurrects it. Required SDK-authored system events use an owner-scoped
+ *   stable lane that bypasses beforeSend.
  * - Delivery is a later PR: events accumulate as pending.
  */
 internal class EventLog(
@@ -72,6 +74,7 @@ internal class EventLog(
             val properties: Map<String, Any?>,
             val eventId: String,
             val distinctId: String,
+            val applyBeforeSend: Boolean,
             val done: CompletableDeferred<Boolean>,
         ) : Command
         data class CaptureDeliveredIdempotently(
@@ -122,6 +125,7 @@ internal class EventLog(
                             command.properties,
                             command.eventId,
                             command.distinctId,
+                            command.applyBeforeSend,
                         )
                     }.onFailure { Log.w(LOG_TAG, "Idempotent event capture failed", it) }
                         .getOrDefault(false)
@@ -257,10 +261,45 @@ internal class EventLog(
         properties: Map<String, Any?>,
         eventId: String,
         distinctId: String,
+    ): Boolean = captureIdempotently(
+        name,
+        properties,
+        eventId,
+        distinctId,
+        applyBeforeSend = true,
+    )
+
+    /** Durably captures a required SDK-authored system event without host interception. */
+    suspend fun captureSystemEvent(
+        name: String,
+        properties: Map<String, Any?>,
+        eventId: String,
+        distinctId: String,
+    ): Boolean = captureIdempotently(
+        name,
+        properties,
+        eventId,
+        distinctId,
+        applyBeforeSend = false,
+    )
+
+    private suspend fun captureIdempotently(
+        name: String,
+        properties: Map<String, Any?>,
+        eventId: String,
+        distinctId: String,
+        applyBeforeSend: Boolean,
     ): Boolean {
         if (name.isEmpty() || eventId.isEmpty() || distinctId.isEmpty()) return false
         val done = CompletableDeferred<Boolean>()
-        val command = Command.CaptureIdempotently(name, properties, eventId, distinctId, done)
+        val command = Command.CaptureIdempotently(
+            name,
+            properties,
+            eventId,
+            distinctId,
+            applyBeforeSend,
+            done,
+        )
         if (commands.trySend(command).isFailure) return false
         return done.await()
     }
@@ -343,6 +382,7 @@ internal class EventLog(
         commandProperties: Map<String, Any?>,
         eventId: String,
         distinctId: String,
+        applyBeforeSend: Boolean,
     ): Boolean {
         if (store.hasStableOutcome(eventId)) return true
         var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties)
@@ -358,7 +398,11 @@ internal class EventLog(
             properties = contextBuilder.buildEnrichedProperties(sanitized),
             timestampMillis = nowMillis(),
         )
-        val transformed = applyBeforeSendPreservingStableIdentity(original)
+        val transformed = if (applyBeforeSend) {
+            applyBeforeSendPreservingStableIdentity(original)
+        } else {
+            original
+        }
         if (transformed == null) {
             store.recordStableDrop(original.id, original.timestampMillis)
             Log.d(LOG_TAG, "Event '$name' terminally dropped by beforeSend hook")
