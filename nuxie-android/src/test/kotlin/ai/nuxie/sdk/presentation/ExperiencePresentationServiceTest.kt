@@ -455,6 +455,55 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun failedHostTerminalizationKeepsRetryOwnershipThroughActivityTeardown() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        var terminalizationAttempts = 0
+        var journeyReservations = 0
+        var journeyReservationReleases = 0
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+            reserveHostDismissal = {
+                journeyReservations += 1
+                true
+            },
+            releaseHostDismissalReservation = {
+                journeyReservationReleases += 1
+            },
+            reportOutcome = {
+                terminalizationAttempts += 1
+                terminalizationAttempts > 1
+            },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        val presentationId = launched.single()
+        PresentationRegistry.reportFirstFrame(presentationId)
+        shown.await()
+        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        setActivityField(activity, "presentationId", presentationId)
+        assertTrue(PresentationRegistry.attach(presentationId, activity))
+
+        service.dismissFromHost("customer-1")
+        NuxieExperienceActivity::class.java
+            .getDeclaredMethod("onDestroy")
+            .apply { isAccessible = true }
+            .invoke(activity)
+
+        assertFalse("retry ownership must reject competing teardown", lease.closed.get())
+        assertTrue(PresentationRegistry.resolve(presentationId) != null)
+        assertEquals(1, journeyReservationReleases)
+
+        service.dismissFromHost("customer-1")
+
+        assertTrue(lease.closed.get())
+        assertEquals(2, journeyReservations)
+        assertEquals(2, terminalizationAttempts)
+        assertEquals(1, journeyReservationReleases)
+    }
+
+    @Test
     fun hostDismissalReservationWinsACompetingUserDismissal() = runTest {
         val launched = mutableListOf<String>()
         val lease = Lease()
