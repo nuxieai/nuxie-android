@@ -387,7 +387,12 @@ internal class EventLog(
         distinctId: String,
     ): Boolean {
         if (store.hasStableOutcome(eventId)) return true
-        val sanitized = EventSanitizer.sanitizeDataTypes(commandProperties)
+        var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties)
+        if (!sanitized.containsKey(SESSION_ID_PROPERTY)) {
+            sessionIdProvider?.invoke()?.let { sessionId ->
+                sanitized = sanitized + (SESSION_ID_PROPERTY to sessionId)
+            }
+        }
         val original = NuxieEvent(
             id = eventId,
             name = name,
