@@ -80,7 +80,7 @@ internal class NuxieCore(
 
     internal fun interface PresentationFactory {
         fun create(
-            markOutcomeInMemory: suspend (PresentationOutcome) -> Boolean,
+            transitionOutcome: suspend (PresentationOutcome) -> Boolean,
             reportOutcome: suspend (PresentationOutcome) -> Unit,
         ): ExperiencePresentationService
     }
@@ -205,35 +205,32 @@ internal class NuxieCore(
         scope = scope,
     )
 
-    private val markPresentationOutcomeInMemory: suspend (PresentationOutcome) -> Boolean = { outcome ->
+    private val transitionPresentationOutcome: suspend (PresentationOutcome) -> Boolean = { outcome ->
         val journeyId = outcome.ref.journeyId
         val ownerDistinctId = outcome.ownerDistinctId
-        val initiatingDistinctId = outcome.initiatingDistinctId
-        if (outcome.reason != CloseReason.HostDismissed ||
-            journeyId == null || ownerDistinctId == null || initiatingDistinctId == null
-        ) {
-            true
+        if (journeyId == null || ownerDistinctId == null) {
+            false
         } else {
-            journeys.markHostDismissedInMemory(
+            journeys.transitionPresentationOutcome(
                 ownerDistinctId = ownerDistinctId,
                 journeyId = journeyId,
-                initiatingDistinctId = initiatingDistinctId,
+                reason = outcome.reason,
+                initiatingDistinctId = outcome.initiatingDistinctId,
             )
         }
     }
 
     private val reportPresentationOutcome: suspend (PresentationOutcome) -> Unit = { outcome ->
         outcome.ref.journeyId?.let { journeyId ->
-            journeys.presentationEnded(
+            journeys.completePresentationOutcome(
                 outcome.ownerDistinctId ?: identity.distinctId(),
                 journeyId,
-                outcome.reason,
             )
         }
     }
 
     val presentations = overrides.presentationFactory?.create(
-        markPresentationOutcomeInMemory,
+        transitionPresentationOutcome,
         reportPresentationOutcome,
     )
         ?: ExperiencePresentationService(
@@ -243,7 +240,7 @@ internal class NuxieCore(
             emit = eventLog::capture,
             scope = scope,
             runtimeAvailable = AndroidRenderCapability::isAvailable,
-            markOutcomeInMemory = markPresentationOutcomeInMemory,
+            transitionOutcome = transitionPresentationOutcome,
             reportOutcome = reportPresentationOutcome,
         )
 

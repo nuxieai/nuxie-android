@@ -10,22 +10,22 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
-import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
-internal class TerminalCloseClaim(
+internal class ScreenCloseState(
     private val report: (CloseReason) -> Unit = {},
 ) {
-    private val claimed = AtomicReference<CloseReason?>(null)
+    private val selected = AtomicReference<CloseReason?>(null)
     private val reported = AtomicBoolean(false)
 
-    val reason: CloseReason? get() = claimed.get()
+    val reason: CloseReason? get() = selected.get()
 
-    fun tryClaim(reason: CloseReason): Boolean = claimed.compareAndSet(null, reason)
+    fun select(reason: CloseReason): Boolean = selected.compareAndSet(null, reason)
 
     fun prepareForTeardown(isChangingConfigurations: Boolean) {
         if (reason == null && isChangingConfigurations) return
-        tryClaim(CloseReason.UserDismissed)
+        select(CloseReason.UserDismissed)
     }
 
     fun reportAtTeardown(isChangingConfigurations: Boolean) {
@@ -48,7 +48,7 @@ internal class NuxieExperienceActivity : Activity(), PresentationActivityHandle 
     private var host: ExperienceSurfaceHost? = null
     private var lane: NuxieRuntimeLane? = null
     private var presentationId: String? = null
-    private val terminal = TerminalCloseClaim(::reportClaimedTerminal)
+    private val screenClose = ScreenCloseState(::reportSelectedClose)
     private var dismissible = true
     private var predictiveBackCallback: android.window.OnBackInvokedCallback? = null
 
@@ -118,7 +118,7 @@ internal class NuxieExperienceActivity : Activity(), PresentationActivityHandle 
 
     override fun onDestroy() {
         val changingConfigurations = isChangingConfigurations
-        terminal.prepareForTeardown(changingConfigurations)
+        screenClose.prepareForTeardown(changingConfigurations)
         host?.release()
         unregisterPredictiveBack()
         super.onDestroy()
@@ -127,30 +127,33 @@ internal class NuxieExperienceActivity : Activity(), PresentationActivityHandle 
         // off ordered cleanup. Suspend dismissal joins the registry completion
         // published after the lane has released every native handle.
         val completeTeardown = {
+            screenClose.reportAtTeardown(changingConfigurations)
             presentationId?.let { PresentationRegistry.detach(it, this) }
-            terminal.reportAtTeardown(changingConfigurations)
+            Unit
         }
         lane?.shutdown(completeTeardown) ?: completeTeardown()
     }
 
-    override fun claimFromService(reason: CloseReason): Boolean = terminal.tryClaim(reason)
+    override fun requestCloseFromService(reason: CloseReason): Boolean = screenClose.select(reason)
 
-    override fun claimedCloseReason(): CloseReason? = terminal.reason
+    override fun screenCloseReason(): CloseReason? = screenClose.reason
 
-    override fun finishAfterServiceClaim() {
+    override fun finishAfterServiceClose() {
         runOnUiThread { finish() }
     }
 
     private fun fail(error: Throwable) {
-        if (!terminal.tryClaim(CloseReason.Error(error))) return
-        runOnUiThread { finish() }
+        val reason = CloseReason.Error(error)
+        if (screenClose.select(reason)) runOnUiThread { finish() }
+        presentationId?.let { PresentationRegistry.reportOutcome(it, reason) }
     }
 
     private fun finishTerminal(reason: CloseReason) {
-        if (terminal.tryClaim(reason)) finish()
+        if (screenClose.select(reason)) finish()
+        presentationId?.let { PresentationRegistry.reportOutcome(it, reason) }
     }
 
-    private fun reportClaimedTerminal(reason: CloseReason) {
+    private fun reportSelectedClose(reason: CloseReason) {
         presentationId?.let { id ->
             when (reason) {
                 is CloseReason.Error -> PresentationRegistry.reportFailure(id, reason.cause)

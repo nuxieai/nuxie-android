@@ -15,12 +15,12 @@ import java.util.IdentityHashMap
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
@@ -107,13 +107,13 @@ internal sealed interface PresentationShell {
     }
 }
 
-/** Claim operations the registry coordinates with its attached host Activity. */
+/** Physical close operations coordinated with the attached host Activity. */
 internal interface PresentationActivityHandle {
-    fun claimFromService(reason: CloseReason): Boolean
+    fun requestCloseFromService(reason: CloseReason): Boolean
 
-    fun claimedCloseReason(): CloseReason?
+    fun screenCloseReason(): CloseReason?
 
-    fun finishAfterServiceClaim()
+    fun finishAfterServiceClose()
 }
 
 /**
@@ -127,6 +127,7 @@ internal object PresentationRegistry {
         val onFirstFrame: () -> Unit,
         val onFailure: (Throwable) -> Unit,
         val onDismissed: (CloseReason) -> Unit,
+        val onOutcome: (CloseReason) -> Unit,
     ) {
         val terminal = AtomicBoolean(false)
         val firstFrame = AtomicBoolean(false)
@@ -147,10 +148,11 @@ internal object PresentationRegistry {
         onFirstFrame: () -> Unit,
         onFailure: (Throwable) -> Unit,
         onDismissed: (CloseReason) -> Unit,
+        onOutcome: (CloseReason) -> Unit,
     ) {
         synchronized(lock) {
             check(id !in entries) { "duplicate presentation id" }
-            entries[id] = Entry(content, onFirstFrame, onFailure, onDismissed)
+            entries[id] = Entry(content, onFirstFrame, onFailure, onDismissed, onOutcome)
         }
     }
 
@@ -172,7 +174,7 @@ internal object PresentationRegistry {
                 entry.latestActivity = WeakReference(null)
             }
             if (entry.dismissalReason == null) {
-                entry.dismissalReason = activity.claimedCloseReason()
+                entry.dismissalReason = activity.screenCloseReason()
             }
             completionIfReady(id, entry)
         }
@@ -189,16 +191,26 @@ internal object PresentationRegistry {
     }
 
     fun reportFailure(id: String, error: Throwable) {
+        val outcome = synchronized(lock) { entries[id]?.onOutcome }
         dismiss(id, CloseReason.Error(error))
+        outcome?.invoke(CloseReason.Error(error))
     }
 
     fun reportDismissed(id: String, reason: CloseReason) {
+        var outcome: ((CloseReason) -> Unit)? = null
         val completion = synchronized(lock) {
             val entry = entries[id] ?: return
+            outcome = entry.onOutcome
             if (entry.dismissalReason == null) entry.dismissalReason = reason
             completionIfReady(id, entry)
         }
         completion?.invoke()
+        outcome?.invoke(reason)
+    }
+
+    fun reportOutcome(id: String, reason: CloseReason) {
+        val callback = synchronized(lock) { entries[id]?.onOutcome } ?: return
+        callback(reason)
     }
 
     fun dismiss(id: String, reason: CloseReason) {
@@ -209,14 +221,14 @@ internal object PresentationRegistry {
             val selected = entry.dismissalReason
             when {
                 selected != null -> {
-                    if (attached?.claimedCloseReason() == selected) attached else null
+                    if (attached?.screenCloseReason() == selected) attached else null
                 }
                 attached == null -> {
                     entry.dismissalReason = reason
                     completion = completionIfReady(id, entry)
                     null
                 }
-                attached.claimFromService(reason) || attached.claimedCloseReason() == reason -> {
+                attached.requestCloseFromService(reason) || attached.screenCloseReason() == reason -> {
                     entry.dismissalReason = reason
                     attached
                 }
@@ -224,7 +236,7 @@ internal object PresentationRegistry {
             }
         }
         completion?.invoke()
-        activityToFinish?.finishAfterServiceClaim()
+        activityToFinish?.finishAfterServiceClose()
     }
 
     private fun completionIfReady(id: String, entry: Entry): (() -> Unit)? {
@@ -251,10 +263,10 @@ internal class ExperiencePresentationService(
     private val scope: CoroutineScope,
     private val runtimeAvailable: () -> Boolean,
     private val launch: (String) -> Unit,
-    private val markOutcomeInMemory: suspend (PresentationOutcome) -> Boolean = { true },
+    private val transitionOutcome: suspend (PresentationOutcome) -> Boolean = { true },
     private val reportOutcome: suspend (PresentationOutcome) -> Unit = {},
     private val firstFrameTimeoutMillis: Long = FIRST_FRAME_TIMEOUT_MILLIS,
-    private val beforeHostSemanticClaimForTesting: () -> Unit = {},
+    private val beforeHostTeardownForTesting: () -> Unit = {},
 ) {
     constructor(
         context: Context,
@@ -263,7 +275,7 @@ internal class ExperiencePresentationService(
         emit: (String, Map<String, Any?>, String?) -> Unit,
         scope: CoroutineScope,
         runtimeAvailable: () -> Boolean,
-        markOutcomeInMemory: suspend (PresentationOutcome) -> Boolean = { true },
+        transitionOutcome: suspend (PresentationOutcome) -> Boolean = { true },
         reportOutcome: suspend (PresentationOutcome) -> Unit = {},
     ) : this(
         releases = releases,
@@ -272,7 +284,7 @@ internal class ExperiencePresentationService(
         scope = scope,
         runtimeAvailable = runtimeAvailable,
         launch = AndroidPresentationLauncher(context.applicationContext ?: context),
-        markOutcomeInMemory = markOutcomeInMemory,
+        transitionOutcome = transitionOutcome,
         reportOutcome = reportOutcome,
         firstFrameTimeoutMillis = FIRST_FRAME_TIMEOUT_MILLIS,
     )
@@ -285,12 +297,8 @@ internal class ExperiencePresentationService(
         val firstFrame: CompletableDeferred<ExperienceRef>,
         val closed: AtomicBoolean = AtomicBoolean(false),
         val shown: AtomicBoolean = AtomicBoolean(false),
-        val semanticReported: AtomicBoolean = AtomicBoolean(false),
         val finished: CompletableDeferred<Unit> = CompletableDeferred(),
-        val hostTransitionStarted: AtomicBoolean = AtomicBoolean(false),
-        // A host that lost the semantic claim may fall back only when its winner reports failure.
-        val semanticReportFailed: CompletableDeferred<Unit> = CompletableDeferred(),
-        // One host dismissal applies the run transition; every concurrent caller awaits it.
+        // Every close path observes the same first-terminal run transition.
         val runTransitionFinished: CompletableDeferred<Unit> = CompletableDeferred(),
     )
 
@@ -336,6 +344,14 @@ internal class ExperiencePresentationService(
 
                 synchronized(stateLock) { current }?.let {
                     PresentationRegistry.dismiss(it.id, CloseReason.UserDismissed)
+                    attemptOutcome(
+                        it,
+                        PresentationOutcome(
+                            ref = it.ref,
+                            reason = CloseReason.UserDismissed,
+                            ownerDistinctId = it.ownerDistinctId,
+                        ),
+                    )
                     it.finished.await()
                 }
 
@@ -389,6 +405,16 @@ internal class ExperiencePresentationService(
                             onFirstFrame = { firstFrame(pending) },
                             onFailure = { error -> failed(pending, error) },
                             onDismissed = { reason -> ended(pending, reason) },
+                            onOutcome = { reason ->
+                                attemptOutcome(
+                                    pending,
+                                    PresentationOutcome(
+                                        ref = pending.ref,
+                                        reason = reason,
+                                        ownerDistinctId = pending.ownerDistinctId,
+                                    ),
+                                )
+                            },
                         )
                         try {
                             launch(id)
@@ -418,61 +444,44 @@ internal class ExperiencePresentationService(
     }
 
     fun dismiss(reason: CloseReason = CloseReason.UserDismissed) {
-        synchronized(stateLock) { current }?.let { PresentationRegistry.dismiss(it.id, reason) }
+        synchronized(stateLock) { current }?.let { active ->
+            PresentationRegistry.dismiss(active.id, reason)
+            attemptOutcome(
+                active,
+                PresentationOutcome(
+                    ref = active.ref,
+                    reason = reason,
+                    ownerDistinctId = active.ownerDistinctId,
+                ),
+            )
+        }
     }
 
     suspend fun dismissFromHost(initiatingDistinctId: String) {
         val active = synchronized(stateLock) { current } ?: return
-        val outcome = PresentationOutcome(
-            ref = active.ref,
-            reason = CloseReason.HostDismissed,
-            ownerDistinctId = active.ownerDistinctId,
-            initiatingDistinctId = initiatingDistinctId,
-        )
-        // Reserve the matching durable reporter before requesting teardown so
-        // a synchronous terminal callback cannot claim semantic reporting.
-        beforeHostSemanticClaimForTesting()
-        val reportsOutcome = active.semanticReported.compareAndSet(false, true)
         val teardownReason = if (active.ownerDistinctId == initiatingDistinctId) {
             CloseReason.HostDismissed
         } else {
             CloseReason.IdentityChanged
         }
+        // Screen teardown is unconditional and starts before outcome work.
+        beforeHostTeardownForTesting()
         PresentationRegistry.dismiss(active.id, teardownReason)
-        if (reportsOutcome) {
-            startHostRunTransition(active, outcome)
-        } else {
-            val winnerFailed = select {
-                active.runTransitionFinished.onAwait { false }
-                active.semanticReportFailed.onAwait { true }
-            }
-            if (winnerFailed) startHostRunTransition(active, outcome)
-        }
+        attemptOutcome(
+            active,
+            PresentationOutcome(
+                ref = active.ref,
+                reason = teardownReason,
+                ownerDistinctId = active.ownerDistinctId,
+                initiatingDistinctId = initiatingDistinctId,
+            ),
+        )
         joinAll(active.finished, active.runTransitionFinished)
     }
 
-    private fun startHostRunTransition(
-        active: ActivePresentation,
-        outcome: PresentationOutcome,
-    ) {
-        if (!active.hostTransitionStarted.compareAndSet(false, true)) return
-        scope.launch {
-            val hostTransitionSelected = markOutcomeInMemory(outcome)
-            // For a matching owner, a normal return means memory is now
-            // terminal: true selected this host outcome; false observed an
-            // earlier first-terminal winner. Identity-change teardown does
-            // not require a Journey transition.
-            active.runTransitionFinished.complete(Unit)
-            if (hostTransitionSelected) {
-                scope.launch { runCatching { reportOutcome(outcome) } }
-            }
-        }
-    }
-
     /**
-     * Tears down a presentation owned by the departing customer without
-     * attributing a dismissal or terminal Journey outcome to either identity.
-     * Mirrors iOS identity-transition presentation shutdown (`reason: nil`).
+     * Tears down a presentation owned by the departing customer and attempts
+     * an owner-attributed identity terminal transition without a close fact.
      */
     suspend fun shutdownOwnedBy(ownerDistinctId: String) {
         synchronized(stateLock) {
@@ -483,7 +492,16 @@ internal class ExperiencePresentationService(
             current?.takeIf { it.ownerDistinctId == ownerDistinctId }
         } ?: return
         PresentationRegistry.dismiss(active.id, CloseReason.IdentityChanged)
-        active.finished.await()
+        attemptOutcome(
+            active,
+            PresentationOutcome(
+                ref = active.ref,
+                reason = CloseReason.IdentityChanged,
+                ownerDistinctId = active.ownerDistinctId,
+                initiatingDistinctId = ownerDistinctId,
+            ),
+        )
+        joinAll(active.finished, active.runTransitionFinished)
     }
 
     fun close() = dismiss(CloseReason.UserDismissed)
@@ -522,18 +540,8 @@ internal class ExperiencePresentationService(
             )
         }
         active.firstFrame.completeExceptionally(typed)
-        if (active.shown.get()) emitCloseFact(active, CloseReason.Error(typed))
-        scope.launch {
-            if (active.semanticReported.compareAndSet(false, true)) {
-                reportTerminalOutcome(
-                    active,
-                    PresentationOutcome(
-                        ref = active.ref,
-                        reason = CloseReason.Error(typed),
-                        ownerDistinctId = active.ownerDistinctId,
-                    ),
-                )
-            }
+        if (active.shown.get() && active.ref.journeyId == null) {
+            emitCloseFact(active, CloseReason.Error(typed))
         }
     }
 
@@ -549,34 +557,28 @@ internal class ExperiencePresentationService(
                 ),
             )
         }
-        val reportsSemanticOutcome = reason != CloseReason.IdentityChanged
-        if (active.shown.get() && reportsSemanticOutcome) emitCloseFact(active, reason)
-        active.finished.complete(Unit)
-        if (reportsSemanticOutcome) {
-            scope.launch {
-                if (active.semanticReported.compareAndSet(false, true)) {
-                    reportTerminalOutcome(
-                        active,
-                        PresentationOutcome(
-                            ref = active.ref,
-                            reason = reason,
-                            ownerDistinctId = active.ownerDistinctId,
-                        ),
-                    )
-                }
-            }
+        if (active.shown.get() && active.ref.journeyId == null) {
+            emitCloseFact(active, reason)
         }
+        active.finished.complete(Unit)
     }
 
-    private suspend fun reportTerminalOutcome(
+    private fun attemptOutcome(
         active: ActivePresentation,
         outcome: PresentationOutcome,
     ) {
-        try {
-            reportOutcome(outcome)
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            val won = try {
+                transitionOutcome(outcome)
+            } catch (_: Throwable) {
+                return@launch
+            }
             active.runTransitionFinished.complete(Unit)
-        } catch (_: Throwable) {
-            active.semanticReportFailed.complete(Unit)
+            if (!won) return@launch
+            if (active.shown.get() && outcome.reason != CloseReason.IdentityChanged) {
+                emitCloseFact(active, outcome.reason)
+            }
+            scope.launch { runCatching { reportOutcome(outcome) } }
         }
     }
 

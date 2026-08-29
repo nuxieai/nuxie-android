@@ -226,7 +226,12 @@ class JourneyServiceTest {
                 StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
             ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
 
-            h.service.presentationEnded("customer-1", started.ref.journeyId!!, CloseReason.UserDismissed)
+            transitionAndComplete(
+                h,
+                "customer-1",
+                started.ref.journeyId!!,
+                CloseReason.UserDismissed,
+            )
             h.log.awaitBarrier()
 
             assertEquals(
@@ -255,11 +260,7 @@ class JourneyServiceTest {
                 }
             }
 
-            val completed = h.service.presentationEnded(
-                "customer-1",
-                journeyId,
-                CloseReason.HostDismissed,
-            )
+            val completed = h.service.completePresentationOutcome("customer-1", journeyId)
 
             assertTrue(completed)
             val durableTombstone = requireNotNull(persistedAtCapture)
@@ -304,11 +305,7 @@ class JourneyServiceTest {
             markHostDismissed(h, journeyId)
 
             assertTrue(
-                h.service.presentationEnded(
-                    "customer-1",
-                    journeyId,
-                    CloseReason.HostDismissed,
-                ),
+                h.service.completePresentationOutcome("customer-1", journeyId),
             )
 
             val exit = h.store.events.values.single { it.name == JourneyEventNames.EXITED }
@@ -330,7 +327,8 @@ class JourneyServiceTest {
             ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
 
             assertTrue(
-                h.service.presentationEnded(
+                transitionAndComplete(
+                    h,
                     "customer-1",
                     started.ref.journeyId!!,
                     CloseReason.UserDismissed,
@@ -380,7 +378,8 @@ class JourneyServiceTest {
             changeIdentityOnJourneyClockRead = true
 
             assertTrue(
-                h.service.presentationEnded(
+                transitionAndComplete(
+                    h,
                     "customer-1",
                     started.ref.journeyId!!,
                     CloseReason.UserDismissed,
@@ -394,6 +393,51 @@ class JourneyServiceTest {
             assertEquals("customer-1", exit.properties.stringValue("\$distinct_id"))
             assertEquals("cancelled", exit.properties.stringValue("reason"))
             assertEquals("user", exit.properties.stringValue("dismissed_by"))
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun runTransitionRecordsExactIdentityWinnerAndRejectsEveryLaterOutcome() = runBlocking {
+        val h = harness()
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = requireNotNull(started.ref.journeyId)
+
+            assertTrue(
+                h.service.transitionPresentationOutcome(
+                    ownerDistinctId = "customer-1",
+                    journeyId = journeyId,
+                    reason = CloseReason.IdentityChanged,
+                    initiatingDistinctId = "customer-2",
+                ),
+            )
+            assertFalse(
+                h.service.transitionPresentationOutcome(
+                    ownerDistinctId = "customer-1",
+                    journeyId = journeyId,
+                    reason = CloseReason.GoalMet,
+                    initiatingDistinctId = "customer-1",
+                ),
+            )
+            h.service.completePresentationOutcome("customer-1", journeyId)
+
+            val terminal = requireNotNull(JourneyStore(h.root).load("customer-1", journeyId))
+            assertEquals(JourneyRunState.TERMINAL, terminal.state)
+            assertEquals("identity_changed", terminal.terminalReason)
+            assertEquals(
+                JourneyRunPresentationOutcome.IDENTITY_CHANGED,
+                terminal.terminalPresentationOutcome,
+            )
+            assertEquals("customer-1", terminal.distinctId)
+            assertEquals("customer-2", terminal.terminalInitiatingDistinctId)
+            assertEquals(
+                0,
+                h.store.events.values.count { it.name == JourneyEventNames.EXITED },
+            )
         } finally {
             h.root.deleteRecursively()
         }
@@ -426,11 +470,7 @@ class JourneyServiceTest {
             markHostDismissed(h, journeyId)
 
             assertTrue(
-                h.service.presentationEnded(
-                    "customer-1",
-                    started.ref.journeyId!!,
-                    CloseReason.HostDismissed,
-                ),
+                h.service.completePresentationOutcome("customer-1", started.ref.journeyId!!),
             )
 
             val completion = updates.single() as TriggerUpdate.Journey
@@ -473,7 +513,12 @@ class JourneyServiceTest {
                 blockNextJourneyClockRead.set(true)
 
                 val hostWriter = async(Dispatchers.Default) {
-                    h.service.markHostDismissedInMemory(distinctId, journeyId, distinctId)
+                    h.service.transitionPresentationOutcome(
+                        distinctId,
+                        journeyId,
+                        CloseReason.HostDismissed,
+                        distinctId,
+                    )
                 }
                 assertTrue(hostWriterInsideTransition.await(5, TimeUnit.SECONDS))
                 // Undispatched startup makes both detached lanes reach the
@@ -488,7 +533,7 @@ class JourneyServiceTest {
                     context = Dispatchers.Default,
                     start = CoroutineStart.UNDISPATCHED,
                 ) {
-                    h.service.presentationEnded(distinctId, journeyId, CloseReason.HostDismissed)
+                    h.service.completePresentationOutcome(distinctId, journeyId)
                 }
 
                 releaseHostWriter.countDown()
@@ -554,13 +599,18 @@ class JourneyServiceTest {
                     context = Dispatchers.Default,
                     start = CoroutineStart.UNDISPATCHED,
                 ) {
-                    h.service.markHostDismissedInMemory(distinctId, journeyId, distinctId)
+                    h.service.transitionPresentationOutcome(
+                        distinctId,
+                        journeyId,
+                        CloseReason.HostDismissed,
+                        distinctId,
+                    )
                 }
                 val loserWriteBehind = async(
                     context = Dispatchers.Default,
                     start = CoroutineStart.UNDISPATCHED,
                 ) {
-                    h.service.presentationEnded(distinctId, journeyId, CloseReason.HostDismissed)
+                    h.service.completePresentationOutcome(distinctId, journeyId)
                 }
 
                 releaseCompetingWriter.countDown()
@@ -695,11 +745,7 @@ class JourneyServiceTest {
             assertTrue(blockedTemporary.mkdir())
 
             val bookkeeping = async {
-                h.service.presentationEnded(
-                    "customer-1",
-                    journeyId,
-                    CloseReason.HostDismissed,
-                )
+                h.service.completePresentationOutcome("customer-1", journeyId)
             }
             assertEquals(1_000L, retryDelays.receive())
             assertEquals(
@@ -750,11 +796,7 @@ class JourneyServiceTest {
             val blockedTemporary = File(runFile.parentFile, ".$journeyId.json.new")
             assertTrue(blockedTemporary.mkdir())
             val bookkeeping = async {
-                h.service.presentationEnded(
-                    "customer-1",
-                    journeyId,
-                    CloseReason.HostDismissed,
-                )
+                h.service.completePresentationOutcome("customer-1", journeyId)
             }
             assertEquals(1_000L, retryDelays.receive())
 
@@ -812,7 +854,7 @@ class JourneyServiceTest {
             h.store.failNextPendingInsert = true
 
             assertTrue(
-                h.service.presentationEnded("customer-1", journeyId, CloseReason.HostDismissed),
+                h.service.completePresentationOutcome("customer-1", journeyId),
             )
             assertEquals(1, updates.size)
             assertTrue(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
@@ -850,11 +892,7 @@ class JourneyServiceTest {
             markHostDismissed(h, started.ref.journeyId!!)
             h.store.failNextPendingInsert = true
             assertTrue(
-                h.service.presentationEnded(
-                    "customer-1",
-                    started.ref.journeyId!!,
-                    CloseReason.HostDismissed,
-                ),
+                h.service.completePresentationOutcome("customer-1", started.ref.journeyId!!),
             )
 
             h.service.recoverPendingHostDismissals()
@@ -990,7 +1028,7 @@ class JourneyServiceTest {
             }
 
             assertTrue(
-                h.service.presentationEnded("customer-1", journeyId, CloseReason.HostDismissed),
+                h.service.completePresentationOutcome("customer-1", journeyId),
             )
             val tombstone = requireNotNull(JourneyStore(h.root).load("customer-1", journeyId))
             assertTrue(tombstone.pendingHostCompletion)
@@ -1038,7 +1076,7 @@ class JourneyServiceTest {
             }
 
             assertTrue(
-                h.service.presentationEnded("customer-1", journeyId, CloseReason.HostDismissed),
+                h.service.completePresentationOutcome("customer-1", journeyId),
             )
             val whilePending = h.service.handleEventForTrigger(
                 StoredEvent("trigger-2", "opened", timestampMillis = now, distinctId = "customer-1"),
@@ -1167,7 +1205,12 @@ class JourneyServiceTest {
                     context = Dispatchers.Default,
                     start = CoroutineStart.UNDISPATCHED,
                 ) {
-                    h.service.markHostDismissedInMemory(distinctId, journeyId, distinctId)
+                    h.service.transitionPresentationOutcome(
+                        distinctId,
+                        journeyId,
+                        CloseReason.HostDismissed,
+                        distinctId,
+                    )
                 }
                 releaseStoreMonitor.countDown()
 
@@ -1492,11 +1535,23 @@ class JourneyServiceTest {
 
     private suspend fun markHostDismissed(h: Harness, journeyId: String) {
         assertTrue(
-            h.service.markHostDismissedInMemory(
+            h.service.transitionPresentationOutcome(
                 ownerDistinctId = "customer-1",
                 journeyId = journeyId,
+                reason = CloseReason.HostDismissed,
                 initiatingDistinctId = "customer-1",
             ),
         )
+    }
+
+    private suspend fun transitionAndComplete(
+        h: Harness,
+        distinctId: String,
+        journeyId: String,
+        reason: CloseReason,
+    ): Boolean {
+        val won = h.service.transitionPresentationOutcome(distinctId, journeyId, reason)
+        if (won) h.service.completePresentationOutcome(distinctId, journeyId)
+        return won
     }
 }

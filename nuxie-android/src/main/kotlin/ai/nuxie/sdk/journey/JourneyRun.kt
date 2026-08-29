@@ -16,6 +16,8 @@ internal data class JourneyRun(
     val isGhost: Boolean = false,
     val convertedAtMillis: Long? = null,
     val terminalReason: String? = null,
+    val terminalPresentationOutcome: JourneyRunPresentationOutcome? = null,
+    val terminalInitiatingDistinctId: String? = null,
     val triggerRef: String? = null,
     val completedAtMillis: Long? = null,
     val pendingHostExitCapture: Boolean = false,
@@ -26,6 +28,17 @@ internal data class JourneyRun(
 internal enum class JourneyPlane { DEVICE, SERVER }
 
 internal enum class JourneyRunState { ACTIVE, TRANSFERRED, TERMINAL }
+
+/** Exact presentation outcome selected by the run's first terminal transition. */
+internal enum class JourneyRunPresentationOutcome {
+    USER_DISMISSED,
+    HOST_DISMISSED,
+    IDENTITY_CHANGED,
+    GOAL_MET,
+    PURCHASE_COMPLETED,
+    TIMEOUT,
+    ERROR,
+}
 
 internal data class JourneyResumePoint(
     val nodeId: String,

@@ -67,11 +67,11 @@ class NuxieIdentityPresentationTest {
     ) {
         val launched = mutableListOf<String>()
         val emitted = mutableListOf<String>()
-        var semanticOutcomes = 0
+        var outcomeReports = 0
         val lease = Lease()
         Nuxie.overridesForTesting = NuxieCore.Overrides(
             transport = FakeTransport(),
-            presentationFactory = NuxieCore.PresentationFactory { markOutcomeInMemory, _ ->
+            presentationFactory = NuxieCore.PresentationFactory { transitionOutcome, _ ->
                 ExperiencePresentationService(
                     releases = PresentationReleaseProvider { release(it) },
                     acquire = { acquired(it, lease) },
@@ -79,9 +79,9 @@ class NuxieIdentityPresentationTest {
                     scope = CoroutineScope(Dispatchers.Unconfined),
                     runtimeAvailable = { true },
                     launch = launched::add,
-                    markOutcomeInMemory = markOutcomeInMemory,
+                    transitionOutcome = transitionOutcome,
                     reportOutcome = {
-                        semanticOutcomes += 1
+                        outcomeReports += 1
                     },
                 )
             },
@@ -108,7 +108,7 @@ class NuxieIdentityPresentationTest {
 
         assertTrue("identity transition must dismiss the old presentation", lease.closed.get())
         assertEquals(listOf("\$experience_shown"), emitted)
-        assertEquals(0, semanticOutcomes)
+        assertEquals(0, outcomeReports)
     }
 
     private fun release(version: String): PresentationRelease {
