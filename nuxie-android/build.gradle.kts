@@ -98,13 +98,14 @@ val compileHostRenderBridge by tasks.registering(Exec::class) {
     val capi = hostCapiLibrary.orNull?.let(::file)?.canonicalFile
       ?: throw GradleException(
         "Set NUXIE_HOST_CAPI_LIB to nux_capi built with " +
-          "`cargo build -p nux-capi --features android-vulkan,scripting`."
+          "`cargo build -p nux-capi --features android-authored-wgsl,android-vulkan,scripting`."
       )
     if (!capi.isFile) {
       throw GradleException("NUXIE_HOST_CAPI_LIB is not a file: $capi")
     }
     val requiredScriptingSymbols = listOf(
       "nux_file_import_trusted_with_host_commands",
+      "nux_file_import_android_vulkan_with_trusted_wgsl",
       "nux_player_step_result_host_command",
       "nux_player_step_result_host_value",
       "nux_player_step_result_host_value_child",
@@ -121,7 +122,7 @@ val compileHostRenderBridge by tasks.registering(Exec::class) {
       throw GradleException(
         "NUXIE_HOST_CAPI_LIB lacks required scripting symbols " +
           "${missingSymbols.joinToString()}. Build it with " +
-          "`cargo build -p nux-capi --features android-vulkan,scripting`."
+          "`cargo build -p nux-capi --features android-authored-wgsl,android-vulkan,scripting`."
       )
     }
     val output = hostBridgeLibrary.get().asFile
@@ -136,6 +137,7 @@ val compileHostRenderBridge by tasks.registering(Exec::class) {
       "-fPIC",
       "-O2",
       "-DNUX_CAPI_ANDROID_VULKAN",
+      "-DNUX_CAPI_ANDROID_AUTHORED_WGSL",
       "-I${javaHome.resolve("include")}",
       "-I${javaHome.resolve("include/$platformInclude")}",
       "-I${rootProject.file("runtime/prebuilt/include")}",

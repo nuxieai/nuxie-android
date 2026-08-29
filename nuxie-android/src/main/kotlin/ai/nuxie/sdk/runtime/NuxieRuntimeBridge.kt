@@ -256,14 +256,12 @@ internal object NuxieRuntimeBridge {
         fitContainCenter: Boolean,
     ): NuxieCpuFrame?
 
-    external fun nativeRendererResetPlayerDomain(renderer: Long, player: Long): Int
-
     external fun nativeRendererFree(renderer: Long)
 
     /** Engine build/compatibility facts (nux_capi_runtime_info) as JSON. */
     external fun nativeRuntimeInfo(): String
 
     private const val HOST_BUILD_COMMAND =
-        "cargo build -p nux-capi --features android-vulkan,scripting"
+        "cargo build -p nux-capi --features android-authored-wgsl,android-vulkan,scripting"
     private const val NUX_STATUS_OK = 0
 }

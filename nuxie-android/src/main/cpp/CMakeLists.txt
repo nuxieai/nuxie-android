@@ -16,5 +16,7 @@ set_target_properties(nux_capi PROPERTIES
 
 add_library(nuxie_runtime_android SHARED nuxie_runtime_android.c)
 target_include_directories(nuxie_runtime_android PRIVATE "${NUXIE_PREBUILT_DIR}/include")
-target_compile_definitions(nuxie_runtime_android PRIVATE NUX_CAPI_ANDROID_VULKAN)
+target_compile_definitions(nuxie_runtime_android PRIVATE
+    NUX_CAPI_ANDROID_VULKAN
+    NUX_CAPI_ANDROID_AUTHORED_WGSL)
 target_link_libraries(nuxie_runtime_android nux_capi android log)

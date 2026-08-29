@@ -120,7 +120,6 @@ class HostRenderHarnessTest {
             clearColor: Int,
             fitContainCenter: Boolean,
         ) = NuxieCpuFrame(4, 2, ByteArray(32) { (it + steps.size).toByte() })
-        override fun resetPlayerDomain(rendererHandle: Long, playerHandle: Long): Int = 0
         override fun freeRenderer(handle: Long) = Unit
     }
 

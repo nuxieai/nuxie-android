@@ -43,7 +43,7 @@ release/
 Build the host runtime from a `nuxie-runtime` checkout:
 
 ```bash
-cargo build -p nux-capi --features android-vulkan,scripting
+cargo build -p nux-capi --features android-authored-wgsl,android-vulkan,scripting
 export NUXIE_HOST_CAPI_LIB=/absolute/path/to/nuxie-runtime/target/debug/libnux_capi.dylib
 ```
 

@@ -281,10 +281,7 @@ internal class ExperienceSurfaceHost(
             attached = false
             window?.close()
             window = null
-            player?.let { loadedPlayer ->
-                renderer?.resetPlayerDomain(loadedPlayer)
-                loadedPlayer.close()
-            }
+            player?.close()
             player = null
             artboard?.close()
             artboard = null

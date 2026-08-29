@@ -137,8 +137,8 @@ internal data class NuxieCpuFrame(
 }
 
 /**
- * Lane-confined owned Android Vulkan renderer. [close] frees once; resize,
- * render/present, and player-domain reset all reject use after close.
+ * Lane-confined owned Android Vulkan renderer. [close] frees once; resize and
+ * render/present reject use after close.
  */
 internal class NuxieAndroidVulkanRenderer internal constructor(
     handle: Long,
@@ -172,9 +172,6 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
         clearColor,
         fitContainCenter,
     )
-
-    fun resetPlayerDomain(player: NuxieRuntimePlayer): Int =
-        native.resetPlayerDomain(owned.require(), player.requireHandle())
 
     fun close() = owned.close()
 
