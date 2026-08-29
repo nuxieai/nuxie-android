@@ -2,7 +2,9 @@ package ai.nuxie.sdk.runtime
 
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -13,6 +15,24 @@ import org.junit.Test
  * platform surface.
  */
 class NuxieRuntimeLaneTest {
+    @Test
+    fun `nested calls execute inline on the owning lane`() = runBlocking {
+        val lane = NuxieRuntimeLane()
+        try {
+            val threads = lane.call {
+                listOf(
+                    Thread.currentThread(),
+                    runBlocking { lane.call { Thread.currentThread() } },
+                )
+            }
+
+            assertSame(threads[0], threads[1])
+            assertTrue(threads[0].name.startsWith("com.nuxie.runtime.android.native"))
+        } finally {
+            lane.shutdown()
+        }
+    }
+
     @Test
     fun `enqueue accepts before shutdown and rejects after`() {
         val lane = NuxieRuntimeLane()

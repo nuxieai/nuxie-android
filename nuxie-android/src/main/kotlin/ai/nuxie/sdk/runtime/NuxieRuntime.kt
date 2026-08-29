@@ -69,6 +69,18 @@ internal class NuxieRuntimeFile(
             ?.let { NuxieRuntimeArtboard(it, native) }
     }
 
+    fun viewModels(
+        lane: NuxieRuntimeLane,
+        artboard: NuxieRuntimeArtboard,
+        player: NuxieRuntimePlayer,
+    ): NuxieRuntimeViewModels = NuxieRuntimeViewModels(
+        lane = lane,
+        fileHandle = owned.require(),
+        artboardHandle = artboard.requireHandle(),
+        playerHandle = player.requireHandle(),
+        native = native,
+    )
+
     fun close() = owned.close()
 }
 
@@ -95,6 +107,8 @@ internal class NuxieRuntimeArtboard internal constructor(
     }
 
     fun close() = owned.close()
+
+    internal fun requireHandle(): Long = owned.require()
 }
 
 /**

@@ -35,10 +35,17 @@ The input directory must contain:
 ```text
 release/
 ├── release-descriptor.json
+├── release-entry.json       # optional; profile.json may wrap it instead
 ├── experience.riv
 └── assets/
     └── ... files at their descriptor keys, relative to release/
 ```
+
+When `release-entry.json` is present, the harness decodes its embedded release
+descriptor and applies the selected screen's signed Journey values through the
+same presentation step used by the SDK before rendering. A `profile.json` with
+exactly one `active` release is accepted instead. If both files are absent, the
+harness retains its descriptor-only behavior.
 
 Build the host runtime from a `nuxie-runtime` checkout:
 

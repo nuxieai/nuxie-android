@@ -2,6 +2,7 @@ package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
 import ai.nuxie.sdk.runtime.NuxieAndroidVulkanRenderer
+import ai.nuxie.sdk.runtime.NuxieBoundViewModel
 import ai.nuxie.sdk.runtime.NuxieRuntime
 import ai.nuxie.sdk.runtime.NuxieRuntimeArtboard
 import ai.nuxie.sdk.runtime.NuxieRuntimeFile
@@ -17,6 +18,7 @@ import android.view.SurfaceView
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 
 /**
@@ -48,6 +50,7 @@ internal class ExperienceSurfaceHost(
     private var player: NuxieRuntimePlayer? = null
     private var file: NuxieRuntimeFile? = null
     private var artboard: NuxieRuntimeArtboard? = null
+    private var boundViewModel: NuxieBoundViewModel? = null
 
     /**
      * Lane-confined surface attachment. Jobs already queued when the
@@ -138,8 +141,9 @@ internal class ExperienceSurfaceHost(
                 onLoaded?.invoke(false)
                 return@enqueue
             }
-            player = loadedArtboard.newPlayer()
-            if (player == null) {
+            val loadedPlayer = loadedArtboard.newPlayer()
+            player = loadedPlayer
+            if (loadedPlayer == null) {
                 Log.w(LOG_TAG, "Player creation failed")
                 reportFailure(
                     ExperiencePresentationException.Reason.HOST_FAILED,
@@ -147,6 +151,25 @@ internal class ExperienceSurfaceHost(
                 )
                 onLoaded?.invoke(false)
                 return@enqueue
+            }
+            if (descriptor != null) {
+                boundViewModel = runCatching {
+                    runBlocking {
+                        ExperiencePresentationData.apply(
+                            descriptor,
+                            loadedFile.viewModels(lane, loadedArtboard, loadedPlayer),
+                        )
+                    }
+                }.getOrElse { error ->
+                    Log.w(LOG_TAG, "Experience initial data application failed", error)
+                    reportFailure(
+                        ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                        "Experience initial data application failed",
+                        error,
+                    )
+                    onLoaded?.invoke(false)
+                    return@enqueue
+                }
             }
             onLoaded?.invoke(true)
         }
@@ -268,6 +291,11 @@ internal class ExperienceSurfaceHost(
             attached = false
             window?.close()
             window = null
+            boundViewModel?.let { bound ->
+                runCatching { runBlocking { bound.close() } }
+                    .onFailure { Log.w(LOG_TAG, "Experience view model release failed", it) }
+            }
+            boundViewModel = null
             player?.let { loadedPlayer ->
                 renderer?.resetPlayerDomain(loadedPlayer)
                 loadedPlayer.close()

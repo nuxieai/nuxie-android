@@ -1,13 +1,17 @@
 package ai.nuxie.sdk.hostrender
 
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
+import ai.nuxie.sdk.presentation.ExperiencePresentationData
 import ai.nuxie.sdk.runtime.DecodedImage
 import ai.nuxie.sdk.runtime.NuxImageDecoder
 import ai.nuxie.sdk.runtime.NuxieRuntime
+import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.InputStream
 import java.security.MessageDigest
+import java.util.Base64
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -37,11 +41,28 @@ internal class HostRenderHarness(
     private val wireExternalAssets: (Map<Int, ByteArray>) -> Map<Int, ByteArray> = { it },
 ) {
     fun run(options: HostRenderOptions): HostRenderResult {
+        val lane = NuxieRuntimeLane()
+        return try {
+            runBlocking { lane.call { runOnLane(options, lane) } }
+        } finally {
+            lane.shutdown()
+        }
+    }
+
+    private fun runOnLane(
+        options: HostRenderOptions,
+        lane: NuxieRuntimeLane,
+    ): HostRenderResult {
         val input = options.inputDirectory.canonicalFile
         require(input.isDirectory) { "--input is not a directory: $input" }
         val descriptorFile = File(input, DESCRIPTOR_FILE)
         require(descriptorFile.isFile) { "Input is missing $DESCRIPTOR_FILE" }
         val descriptor = Json.parseToJsonElement(descriptorFile.readText()).jsonObject
+        val presentationDescriptor = releaseEntryDescriptor(input)?.also { releaseDescriptor ->
+            require(releaseDescriptor == descriptor) {
+                "Release entry descriptor differs from $DESCRIPTOR_FILE"
+            }
+        }
         val render = descriptor["render"] as? JsonObject
             ?: error("Experience release render is missing")
         require(render.string("renderer") == "rive") {
@@ -72,12 +93,21 @@ internal class HostRenderHarness(
         var artboard: ai.nuxie.sdk.runtime.NuxieRuntimeArtboard? = null
         var player: ai.nuxie.sdk.runtime.NuxieRuntimePlayer? = null
         var renderer: ai.nuxie.sdk.runtime.NuxieAndroidVulkanRenderer? = null
+        var boundViewModel: ai.nuxie.sdk.runtime.NuxieBoundViewModel? = null
         try {
             artboard = checkNotNull(file.newArtboard(render.defaultArtboardName())) {
                 "Experience artboard is unavailable"
             }
             player = checkNotNull(artboard.newPlayer()) {
                 "Experience player is unavailable"
+            }
+            if (presentationDescriptor != null) {
+                boundViewModel = runBlocking {
+                    ExperiencePresentationData.apply(
+                        presentationDescriptor,
+                        file.viewModels(lane, artboard, player),
+                    )
+                }
             }
             renderer = checkNotNull(runtime.newAndroidVulkanRenderer(size.width, size.height)) {
                 "Headless Android Vulkan renderer creation failed"
@@ -113,10 +143,50 @@ internal class HostRenderHarness(
             return HostRenderResult(frames)
         } finally {
             renderer?.close()
+            boundViewModel?.let { bound -> runBlocking { bound.close() } }
             player?.close()
             artboard?.close()
             file.close()
         }
+    }
+
+    private fun releaseEntryDescriptor(input: File): JsonObject? {
+        val entryFile = File(input, RELEASE_ENTRY_FILE)
+        val profileFile = File(input, PROFILE_FILE)
+        if (!entryFile.exists() && !profileFile.exists()) return null
+        val entry = if (entryFile.exists()) {
+            require(entryFile.isFile) { "Input $RELEASE_ENTRY_FILE path is not a file" }
+            Json.parseToJsonElement(entryFile.readText()).jsonObject
+        } else {
+            require(profileFile.isFile) { "Input $PROFILE_FILE path is not a file" }
+            val profile = Json.parseToJsonElement(profileFile.readText()).jsonObject
+            val active = profile["active"] as? JsonArray
+                ?: error("Input $PROFILE_FILE has no active releases")
+            require(active.size == 1) {
+                "Input $PROFILE_FILE must contain exactly one active release"
+            }
+            active.single().jsonObject
+        }
+        val encodedEnvelope = entry.string("envelopeBytesBase64")
+            ?: error("Release entry envelope bytes are missing")
+        val envelopeBytes = runCatching { Base64.getDecoder().decode(encodedEnvelope) }
+            .getOrElse { error("Release entry envelope bytes are invalid base64") }
+        val envelope = Json.parseToJsonElement(envelopeBytes.decodeToString()).jsonObject
+        val encodedDescriptor = envelope.string("descriptorBytesBase64")
+            ?: error("Release entry descriptor bytes are missing")
+        val descriptorBytes = runCatching { Base64.getDecoder().decode(encodedDescriptor) }
+            .getOrElse { error("Release entry descriptor bytes are invalid base64") }
+        envelope.string("descriptorSha256")?.let { declared ->
+            require(sha256(descriptorBytes) == declared) {
+                "Release entry descriptor digest does not match its bytes"
+            }
+        }
+        entry.string("descriptorSha256")?.let { declared ->
+            require(sha256(descriptorBytes) == declared) {
+                "Release entry descriptor digest does not match its locator"
+            }
+        }
+        return Json.parseToJsonElement(descriptorBytes.decodeToString()).jsonObject
     }
 
     private fun resolveRiv(input: File, render: JsonObject): File {
@@ -201,6 +271,8 @@ internal class HostRenderHarness(
 
     private companion object {
         const val DESCRIPTOR_FILE = "release-descriptor.json"
+        const val RELEASE_ENTRY_FILE = "release-entry.json"
+        const val PROFILE_FILE = "profile.json"
         const val MANIFEST_FILE = "manifest.json"
         const val NUX_STATUS_OK = 0
         const val OPAQUE_BLACK = 0xFF000000.toInt()

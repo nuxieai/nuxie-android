@@ -16,24 +16,32 @@ import kotlin.coroutines.resumeWithException
  * back from arbitrary threads.
  */
 internal class NuxieRuntimeLane {
+    @Volatile
+    private var laneThread: Thread? = null
     private val executor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, THREAD_NAME).apply { isDaemon = true }
+        Thread(runnable, THREAD_NAME).apply {
+            isDaemon = true
+            laneThread = this
+        }
     }
 
     /** Run [block] on the runtime lane and await its result. */
-    suspend fun <T> call(block: () -> T): T = suspendCancellableCoroutine { continuation ->
-        try {
-            executor.execute {
-                val result = runCatching(block)
-                result.fold(
-                    onSuccess = { continuation.resume(it) },
-                    onFailure = { continuation.resumeWithException(it) },
+    suspend fun <T> call(block: () -> T): T {
+        if (Thread.currentThread() === laneThread) return block()
+        return suspendCancellableCoroutine { continuation ->
+            try {
+                executor.execute {
+                    val result = runCatching(block)
+                    result.fold(
+                        onSuccess = { continuation.resume(it) },
+                        onFailure = { continuation.resumeWithException(it) },
+                    )
+                }
+            } catch (rejected: RejectedExecutionException) {
+                continuation.resumeWithException(
+                    IllegalStateException("Runtime lane is shut down", rejected),
                 )
             }
-        } catch (rejected: RejectedExecutionException) {
-            continuation.resumeWithException(
-                IllegalStateException("Runtime lane is shut down", rejected),
-            )
         }
     }
 

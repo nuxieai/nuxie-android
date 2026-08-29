@@ -11,6 +11,9 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -18,6 +21,27 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 class HostRenderSmokeTest {
+    @Test
+    fun `signed release data changes real data-bound content`() {
+        assumeHostRuntime()
+        val seededInput = prepareFontConverterInput(includeReleaseEntry = true)
+        val unseededInput = prepareFontConverterInput(includeReleaseEntry = false)
+        val seededOutput = Files.createTempDirectory("host-render-seeded-output-").toFile()
+        val unseededOutput = Files.createTempDirectory("host-render-unseeded-output-").toFile()
+
+        val seeded = HostRenderHarness().run(
+            HostRenderOptions(seededInput, seededOutput),
+        ).frames.single()
+        val unseeded = HostRenderHarness().run(
+            HostRenderOptions(unseededInput, unseededOutput),
+        ).frames.single()
+
+        assertFalse(
+            "Skipping the signed release entry must change the data-bound frame",
+            seeded.sha256 == unseeded.sha256,
+        )
+    }
+
     @Test
     fun `script-dependent interpolator changes the rendered frame`() {
         assumeHostRuntime()
@@ -172,6 +196,37 @@ class HostRenderSmokeTest {
         File(input, "release-descriptor.json").writeText(
             JSON.encodeToString(JsonElement.serializer(), descriptor),
         )
+        return input
+    }
+
+    /** Exact production-generated fixture copied from the iOS reference corpus. */
+    private fun prepareFontConverterInput(includeReleaseEntry: Boolean): File {
+        val entryBytes = fixtureBytes("font-converter.release-entry.json.base64")
+        val entry = JSON.parseToJsonElement(entryBytes.decodeToString()).jsonObject
+        val envelopeBytes = Base64.getDecoder().decode(
+            entry.getValue("envelopeBytesBase64").jsonPrimitive.content,
+        )
+        val envelope = JSON.parseToJsonElement(envelopeBytes.decodeToString()).jsonObject
+        val descriptorBytes = Base64.getDecoder().decode(
+            envelope.getValue("descriptorBytesBase64").jsonPrimitive.content,
+        )
+        val descriptor = JSON.parseToJsonElement(descriptorBytes.decodeToString()).jsonObject
+        val render = descriptor.getValue("render").jsonObject
+        val rivKey = render.getValue("riv").jsonObject.getValue("key").jsonPrimitive.content
+        val fontKey = render.getValue("assets").jsonArray.single()
+            .jsonObject.getValue("key").jsonPrimitive.content
+        val input = Files.createTempDirectory("host-render-font-converter-input-").toFile()
+
+        File(input, "release-descriptor.json").writeBytes(descriptorBytes)
+        if (includeReleaseEntry) File(input, "release-entry.json").writeBytes(entryBytes)
+        File(input, rivKey).apply {
+            requireNotNull(parentFile).mkdirs()
+            writeBytes(fixtureBytes("font-converter.riv.base64"))
+        }
+        File(input, fontKey).apply {
+            requireNotNull(parentFile).mkdirs()
+            writeBytes(fixtureBytes("font-converter.ttf.base64"))
+        }
         return input
     }
 
