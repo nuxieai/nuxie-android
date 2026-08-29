@@ -82,14 +82,15 @@ internal object NuxieRuntimeBridge {
 
     // MARK: portable core (nux_capi)
 
-    /** nux_file_new over verified release bytes -> file handle (0 = failure). */
-    external fun nativeFileNew(bytes: ByteArray): Long
+    /** Factory-first import over verified release bytes -> file handle (0 = failure). */
+    external fun nativeFileNew(renderer: Long, bytes: ByteArray): Long
 
     /** Script-inert import followed by an exact copy of the authored catalog. */
     private external fun nativeFileInspectAssets(bytes: ByteArray): Array<NativeExpectedFileAsset>?
 
     /** Configured product import carrying host commands, asset hooks, and exact catalog. */
     private external fun nativeFileNewConfigured(
+        renderer: Long,
         bytes: ByteArray,
         ordinals: IntArray,
         kinds: IntArray,
@@ -120,13 +121,14 @@ internal object NuxieRuntimeBridge {
         }
 
     fun fileNew(
+        renderer: Long,
         bytes: ByteArray,
         expectedAssets: List<ExpectedFileAsset> = emptyList(),
         externalAssets: Map<Int, ByteArray> = emptyMap(),
         imageDecoder: NuxImageDecoder = AndroidImageDecoder,
     ): Long {
         if (expectedAssets.isEmpty()) {
-            return if (externalAssets.isEmpty()) nativeFileNew(bytes) else 0L
+            return if (externalAssets.isEmpty()) nativeFileNew(renderer, bytes) else 0L
         }
         if (!expectedAssets.withIndex().all { (index, asset) -> asset.ordinal == index } ||
             !externalAssets.keys.all { it in expectedAssets.indices }
@@ -135,6 +137,7 @@ internal object NuxieRuntimeBridge {
         }
         val external = externalAssets.toSortedMap()
         return nativeFileNewConfigured(
+            renderer = renderer,
             bytes = bytes,
             ordinals = expectedAssets.map(ExpectedFileAsset::ordinal).toIntArray(),
             kinds = expectedAssets.map { it.kind.nativeValue }.toIntArray(),

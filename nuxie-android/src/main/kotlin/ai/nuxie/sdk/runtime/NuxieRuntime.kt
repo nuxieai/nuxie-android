@@ -16,11 +16,13 @@ internal class NuxieRuntime(
         native.inspectFileAssets(bytes)
 
     fun importFile(
+        renderer: NuxieAndroidVulkanRenderer,
         bytes: ByteArray,
         expectedAssets: List<ExpectedFileAsset> = emptyList(),
         externalAssets: Map<Int, ByteArray> = emptyMap(),
         imageDecoder: NuxImageDecoder = AndroidImageDecoder,
     ): NuxieRuntimeFile? = native.newFile(
+        renderer.requireHandle(),
         bytes,
         expectedAssets,
         externalAssets,
@@ -175,6 +177,8 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
         native.resetPlayerDomain(owned.require(), player.requireHandle())
 
     fun close() = owned.close()
+
+    internal fun requireHandle(): Long = owned.require()
 }
 
 /**

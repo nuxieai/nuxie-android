@@ -98,7 +98,7 @@ internal enum class NuxieViewModelMutationKind(val nativeValue: Int) {
     FIRE_TRIGGER(5),
 }
 
-/** Fixed Kotlin-side encoding of one ABI-v3 `NuxViewModelMutation`. */
+/** Fixed Kotlin-side encoding of one ABI-v4 `NuxViewModelMutation`. */
 internal data class NativeViewModelWrite(
     val kind: NuxieViewModelMutationKind,
     val path: String,
@@ -120,6 +120,7 @@ internal interface NuxieTypedRuntimeNative {
         error("inspectFileAssets is not implemented")
 
     fun newFile(
+        rendererHandle: Long,
         bytes: ByteArray,
         expectedAssets: List<ExpectedFileAsset>,
         externalAssets: Map<Int, ByteArray>,
@@ -215,11 +216,18 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         NuxieRuntimeBridge.inspectFileAssets(bytes)
 
     override fun newFile(
+        rendererHandle: Long,
         bytes: ByteArray,
         expectedAssets: List<ExpectedFileAsset>,
         externalAssets: Map<Int, ByteArray>,
         imageDecoder: NuxImageDecoder,
-    ): Long = NuxieRuntimeBridge.fileNew(bytes, expectedAssets, externalAssets, imageDecoder)
+    ): Long = NuxieRuntimeBridge.fileNew(
+        rendererHandle,
+        bytes,
+        expectedAssets,
+        externalAssets,
+        imageDecoder,
+    )
 
     override fun freeFile(handle: Long) {
         NuxieRuntimeBridge.nativeFileFree(handle)

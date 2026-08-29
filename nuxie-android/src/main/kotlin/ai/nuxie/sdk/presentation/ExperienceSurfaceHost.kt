@@ -79,8 +79,17 @@ internal class ExperienceSurfaceHost(
         onLoaded: ((Boolean) -> Unit)? = null,
     ) {
         lane.enqueue {
+            val activeRenderer = ensureRenderer(1, 1)
+            if (activeRenderer == null) {
+                reportFailure(
+                    ExperiencePresentationException.Reason.HOST_FAILED,
+                    "Experience renderer creation failed",
+                )
+                onLoaded?.invoke(false)
+                return@enqueue
+            }
             file = if (descriptor == null) {
-                runtime.importFile(rivBytes)
+                runtime.importFile(activeRenderer, rivBytes)
             } else {
                 val inspectedCatalog = runtime.inspectFileAssets(rivBytes)
                 if (inspectedCatalog == null) {
@@ -108,6 +117,7 @@ internal class ExperienceSurfaceHost(
                     return@enqueue
                 }
                 runtime.importFile(
+                    renderer = activeRenderer,
                     bytes = rivBytes,
                     expectedAssets = import.expectedAssets,
                     externalAssets = import.externalAssets,
@@ -160,18 +170,21 @@ internal class ExperienceSurfaceHost(
         lane.enqueue {
             // Attach only once both the headless renderer and this surface's
             // window exist; a failed create/acquire keeps the frame gate shut.
-            if (renderer == null) {
-                renderer = runtime.newAndroidVulkanRenderer(
-                    width, height,
+            val activeRenderer = ensureRenderer(width, height)
+            if (activeRenderer == null) {
+                reportFailure(
+                    ExperiencePresentationException.Reason.HOST_FAILED,
+                    "Experience renderer creation failed",
                 )
-                if (renderer == null) {
-                    Log.w(LOG_TAG, "Android Vulkan renderer creation failed")
-                    reportFailure(
-                        ExperiencePresentationException.Reason.HOST_FAILED,
-                        "Experience renderer creation failed",
-                    )
-                    return@enqueue
-                }
+                return@enqueue
+            }
+            if (activeRenderer.resize(width, height) != NUX_STATUS_OK) {
+                Log.w(LOG_TAG, "Android Vulkan renderer resize failed")
+                reportFailure(
+                    ExperiencePresentationException.Reason.HOST_FAILED,
+                    "Experience renderer resize failed",
+                )
+                return@enqueue
             }
             window = runtime.acquireWindow(surface)
             if (window == null) {
@@ -290,9 +303,23 @@ internal class ExperienceSurfaceHost(
         listener?.onFailure(ExperiencePresentationException(reason, message, cause))
     }
 
+    /**
+     * Exact upstream import is factory-first. A renderer therefore exists
+     * before the file is decoded, and its retained Vulkan factory is the one
+     * used by every resource created for that file.
+     */
+    private fun ensureRenderer(pixelWidth: Int, pixelHeight: Int): NuxieAndroidVulkanRenderer? {
+        renderer?.let { return it }
+        return runtime.newAndroidVulkanRenderer(pixelWidth, pixelHeight).also { created ->
+            renderer = created
+            if (created == null) Log.w(LOG_TAG, "Android Vulkan renderer creation failed")
+        }
+    }
+
     private companion object {
         const val LOG_TAG = "Nuxie"
         const val CLEAR_COLOR_OPAQUE_BLACK = 0xFF000000.toInt()
+        const val NUX_STATUS_OK = 0
 
         /**
          * Bound on the surfaceDestroyed drain. A frame takes milliseconds;
