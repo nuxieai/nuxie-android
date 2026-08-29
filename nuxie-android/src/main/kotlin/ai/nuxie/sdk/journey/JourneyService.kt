@@ -386,10 +386,17 @@ internal class JourneyService(
             if (!admissions.add(key)) return TriggerService.JourneyTriggerResult.Suppressed(SuppressReason.ALREADY_ACTIVE)
         }
         try {
-            if (isReentryLimited(event.distinctId, release)) {
+            val runSnapshot = runLock.withLock {
+                runsForAdmissionSnapshot(event.distinctId)
+            }
+            if (isReentryLimited(event.distinctId, release, runSnapshot)) {
                 return TriggerService.JourneyTriggerResult.Suppressed(SuppressReason.REENTRY_LIMITED)
             }
-            if (activeRunsForAdmission(event.distinctId).any { it.experienceId == release.experienceId }) {
+            if (runSnapshot.any {
+                    it.state == JourneyRunState.ACTIVE &&
+                        it.experienceId == release.experienceId
+                }
+            ) {
                 return TriggerService.JourneyTriggerResult.Suppressed(SuppressReason.ALREADY_ACTIVE)
             }
             val now = nowMillis()
@@ -425,20 +432,24 @@ internal class JourneyService(
         }
     }
 
-    private fun isReentryLimited(distinctId: String, release: AdmittedJourneyRelease): Boolean = when (val policy = release.reentry) {
+    private fun isReentryLimited(
+        distinctId: String,
+        release: AdmittedJourneyRelease,
+        runSnapshot: List<JourneyRun>,
+    ): Boolean = when (val policy = release.reentry) {
         JourneyReentry.EveryTime -> false
         JourneyReentry.OneTime ->
-            terminalCompletionTimes(distinctId, release.experienceId).isNotEmpty() ||
-                pendingHostCompletionTombstones(distinctId, release.experienceId).isNotEmpty() ||
+            terminalCompletionTimes(runSnapshot, release.experienceId).isNotEmpty() ||
+                pendingHostCompletionTombstones(runSnapshot, release.experienceId).isNotEmpty() ||
                 store.hasCompleted(distinctId, release.experienceId)
         is JourneyReentry.OncePerWindow -> {
             val now = nowMillis()
             val pendingCompletionAtMillis = pendingHostCompletionTombstones(
-                distinctId,
+                runSnapshot,
                 release.experienceId,
             ).maxOfOrNull { it.completedAtMillis ?: now }
             val lastCompletionAtMillis = listOfNotNull(
-                terminalCompletionTimes(distinctId, release.experienceId).maxOrNull(),
+                terminalCompletionTimes(runSnapshot, release.experienceId).maxOrNull(),
                 pendingCompletionAtMillis,
                 store.lastCompletionAtMillis(distinctId, release.experienceId),
             ).maxOrNull()
@@ -447,22 +458,27 @@ internal class JourneyService(
     }
 
     private fun pendingHostCompletionTombstones(
-        distinctId: String,
+        runSnapshot: List<JourneyRun>,
         experienceId: String,
-    ): List<JourneyRun> = store.loadPendingHostDismissals(distinctId).filter { run ->
+    ): List<JourneyRun> = runSnapshot.filter { run ->
         run.experienceId == experienceId && run.pendingHostCompletion
     }
 
-    private fun terminalCompletionTimes(distinctId: String, experienceId: String): List<Long> =
-        inMemoryRuns(distinctId).mapNotNull { run ->
+    private fun terminalCompletionTimes(
+        runSnapshot: List<JourneyRun>,
+        experienceId: String,
+    ): List<Long> =
+        runSnapshot.mapNotNull { run ->
             run.completedAtMillis?.takeIf {
                 run.state == JourneyRunState.TERMINAL && run.experienceId == experienceId
             }
         }
 
-    private fun activeRunsForAdmission(distinctId: String): List<JourneyRun> {
+    /** Called under [runLock]; both admission gates consume the returned state snapshot. */
+    private fun runsForAdmissionSnapshot(distinctId: String): List<JourneyRun> {
         store.loadActive(distinctId).forEach(::rememberRunIfAbsent)
-        return inMemoryRuns(distinctId).filter { it.state == JourneyRunState.ACTIVE }
+        store.loadPendingHostDismissals(distinctId).forEach(::rememberPendingRecoveryRun)
+        return inMemoryRuns(distinctId)
     }
 
     private fun routeDownFact(distinctId: String, name: String, properties: JsonObject) {
