@@ -25,6 +25,7 @@ import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CompletableDeferred
@@ -108,6 +109,7 @@ class JourneyServiceTest {
         val service: JourneyService,
         val broker: TriggerBroker,
         val releases: JourneyReleaseProvider,
+        val journeyStore: JourneyStore,
     )
 
     private fun harness(
@@ -116,6 +118,7 @@ class JourneyServiceTest {
         identity: Identity = Identity(),
         beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
         onJourneyClockRead: () -> Unit = {},
+        onJourneyReleaseRead: () -> Unit = {},
         hostDismissRetrySleep: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
     ): Harness {
         val root = createTempDir(prefix = "nuxie-journey-")
@@ -144,14 +147,16 @@ class JourneyServiceTest {
         )
         val broker = TriggerBroker()
         val releases = JourneyReleaseProvider { _, name ->
+            onJourneyReleaseRead()
             if (name == "opened") listOf(release) else emptyList()
         }
+        val journeyStore = JourneyStore(root)
         return Harness(
             root,
             eventStore,
             eventLog,
             JourneyService(
-                JourneyStore(root),
+                journeyStore,
                 JourneyLedger(eventLog),
                 releases,
                 {
@@ -163,6 +168,7 @@ class JourneyServiceTest {
             ),
             broker,
             releases,
+            journeyStore,
         )
     }
 
@@ -1098,6 +1104,82 @@ class JourneyServiceTest {
                 StoredEvent("trigger-2", "opened", timestampMillis = now, distinctId = "customer-1"),
             ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed
             assertEquals(SuppressReason.REENTRY_LIMITED, retrigger.reason)
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun racingAdmissionAgainstHostDismissalNeverDoubleAdmitsAOneTimeJourney() = runBlocking {
+        val admissionReachedPolicy = AtomicReference(CountDownLatch(0))
+        val admissionThread = AtomicReference<Thread>()
+        val h = harness(
+            reentry = JourneyReentry.OneTime,
+            onJourneyReleaseRead = {
+                admissionThread.set(Thread.currentThread())
+                admissionReachedPolicy.get().countDown()
+            },
+        )
+        try {
+            repeat(32) { attempt ->
+                val distinctId = "host-dismiss-admission-race-$attempt"
+                val started = h.service.handleEventForTrigger(
+                    StoredEvent(
+                        "initial-trigger-$attempt",
+                        "opened",
+                        timestampMillis = now,
+                        distinctId = distinctId,
+                    ),
+                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+                val journeyId = requireNotNull(started.ref.journeyId)
+                val storeMonitorHeld = CountDownLatch(1)
+                val releaseStoreMonitor = CountDownLatch(1)
+                val storeBlocker = Thread {
+                    synchronized(h.journeyStore) {
+                        storeMonitorHeld.countDown()
+                        check(releaseStoreMonitor.await(5, TimeUnit.SECONDS))
+                    }
+                }.apply { start() }
+                assertTrue(storeMonitorHeld.await(5, TimeUnit.SECONDS))
+
+                admissionReachedPolicy.set(CountDownLatch(1))
+                val admission = async(Dispatchers.Default) {
+                    h.service.handleEventForTrigger(
+                        StoredEvent(
+                            "racing-trigger-$attempt",
+                            "opened",
+                            timestampMillis = now,
+                            distinctId = distinctId,
+                        ),
+                    ).single()
+                }
+                assertTrue(admissionReachedPolicy.get().await(5, TimeUnit.SECONDS))
+                val blockedAdmissionThread = requireNotNull(admissionThread.get())
+                val blockedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                while (blockedAdmissionThread.state != Thread.State.BLOCKED &&
+                    System.nanoTime() < blockedDeadline
+                ) {
+                    Thread.yield()
+                }
+                assertEquals(Thread.State.BLOCKED, blockedAdmissionThread.state)
+
+                val dismissal = async(
+                    context = Dispatchers.Default,
+                    start = CoroutineStart.UNDISPATCHED,
+                ) {
+                    h.service.markHostDismissedInMemory(distinctId, journeyId, distinctId)
+                }
+                releaseStoreMonitor.countDown()
+
+                val result = admission.await()
+                assertTrue(
+                    "attempt $attempt double-admitted a OneTime Journey",
+                    result is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed,
+                )
+                assertTrue(dismissal.await())
+                storeBlocker.join(5_000)
+                assertFalse("attempt $attempt left the JourneyStore monitor blocked", storeBlocker.isAlive)
+            }
         } finally {
             h.root.deleteRecursively()
         }
