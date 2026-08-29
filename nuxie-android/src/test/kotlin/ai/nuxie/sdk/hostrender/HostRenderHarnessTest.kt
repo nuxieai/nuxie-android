@@ -54,6 +54,7 @@ class HostRenderHarnessTest {
         assertEquals(listOf(0.02, 0.02), native.steps)
         assertEquals("Main", native.artboardName)
         assertEquals(HostRenderSize(4, 2), native.rendererSize)
+        assertEquals(listOf("renderer", "import:4"), native.factoryLifecycle.take(2))
         assertArrayEquals(asset.readBytes(), native.externalAssets.getValue(0))
         assertEquals(listOf("frame-0.rgba", "frame-1.rgba"), output.list()!!.filter {
             it.endsWith(".rgba")
@@ -75,6 +76,7 @@ class HostRenderHarnessTest {
         var artboardName: String? = null
         var rendererSize: HostRenderSize? = null
         var externalAssets = emptyMap<Int, ByteArray>()
+        val factoryLifecycle = mutableListOf<String>()
 
         override val isAvailable = true
         override fun runtimeInfo(): String = "runtime-info"
@@ -82,11 +84,13 @@ class HostRenderHarnessTest {
             ExpectedFileAsset(0, FileAssetKind.IMAGE, 7, "hero", "png", false, false, 1),
         )
         override fun newFile(
+            rendererHandle: Long,
             bytes: ByteArray,
             expectedAssets: List<ExpectedFileAsset>,
             externalAssets: Map<Int, ByteArray>,
             imageDecoder: NuxImageDecoder,
         ): Long {
+            factoryLifecycle += "import:$rendererHandle"
             this.externalAssets = externalAssets
             return 1
         }
@@ -105,6 +109,7 @@ class HostRenderHarnessTest {
         }
         override fun freePlayer(handle: Long) = Unit
         override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long {
+            factoryLifecycle += "renderer"
             rendererSize = HostRenderSize(pixelWidth, pixelHeight)
             return 4
         }

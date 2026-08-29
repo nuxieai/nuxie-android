@@ -60,27 +60,27 @@ internal class HostRenderHarness(
             "Runtime could not inspect the Experience asset catalog"
         }
         val prepared = ExperienceAssetImportBuilder.build(descriptor, artifacts, inspected)
-        val file = checkNotNull(
-            runtime.importFile(
-                bytes = rivBytes,
-                expectedAssets = prepared.expectedAssets,
-                externalAssets = wireExternalAssets(prepared.externalAssets),
-                imageDecoder = imageDecoder,
-            ),
-        ) { "Runtime rejected the configured Experience import" }
-
+        var file: ai.nuxie.sdk.runtime.NuxieRuntimeFile? = null
         var artboard: ai.nuxie.sdk.runtime.NuxieRuntimeArtboard? = null
         var player: ai.nuxie.sdk.runtime.NuxieRuntimePlayer? = null
-        var renderer: ai.nuxie.sdk.runtime.NuxieAndroidVulkanRenderer? = null
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(size.width, size.height)) {
+            "Headless Android Vulkan renderer creation failed"
+        }
         try {
+            file = checkNotNull(
+                runtime.importFile(
+                    renderer = renderer,
+                    bytes = rivBytes,
+                    expectedAssets = prepared.expectedAssets,
+                    externalAssets = wireExternalAssets(prepared.externalAssets),
+                    imageDecoder = imageDecoder,
+                ),
+            ) { "Runtime rejected the configured Experience import" }
             artboard = checkNotNull(file.newArtboard(render.defaultArtboardName())) {
                 "Experience artboard is unavailable"
             }
             player = checkNotNull(artboard.newPlayer()) {
                 "Experience player is unavailable"
-            }
-            renderer = checkNotNull(runtime.newAndroidVulkanRenderer(size.width, size.height)) {
-                "Headless Android Vulkan renderer creation failed"
             }
 
             val output = options.outputDirectory.canonicalFile
@@ -112,10 +112,10 @@ internal class HostRenderHarness(
             File(output, MANIFEST_FILE).writeText(manifest(frames, runtime.info()))
             return HostRenderResult(frames)
         } finally {
-            renderer?.close()
             player?.close()
             artboard?.close()
-            file.close()
+            file?.close()
+            renderer.close()
         }
     }
 

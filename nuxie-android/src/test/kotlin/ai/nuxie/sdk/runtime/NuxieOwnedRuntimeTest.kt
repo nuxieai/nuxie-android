@@ -23,11 +23,13 @@ class NuxieOwnedRuntimeTest {
             requiredProviderFlags = 1,
         )
         native.inspectedAssets = listOf(asset)
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(1, 1))
 
         assertTrue(runtime.isAvailable)
         assertEquals("{\"sourceRevision\":\"abc\"}", runtime.info())
         assertEquals(listOf(asset), runtime.inspectFileAssets(byteArrayOf(9)))
         checkNotNull(runtime.importFile(
+            renderer = renderer,
             bytes = byteArrayOf(1),
             expectedAssets = listOf(asset),
             externalAssets = mapOf(0 to byteArrayOf(2)),
@@ -35,6 +37,7 @@ class NuxieOwnedRuntimeTest {
         ))
 
         assertEquals(listOf(asset), native.importedExpectedAssets)
+        assertEquals(50L, native.importedRendererHandle)
         assertEquals(setOf(0), native.importedExternalAssets.keys)
         assertSame(decoder, native.importedImageDecoder)
     }
@@ -43,7 +46,8 @@ class NuxieOwnedRuntimeTest {
     fun `file close frees once and rejects artboard creation after close`() {
         val native = RecordingNative()
         val runtime = NuxieRuntime(native)
-        val file = checkNotNull(runtime.importFile(byteArrayOf(1, 2, 3)))
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(1, 1))
+        val file = checkNotNull(runtime.importFile(renderer, byteArrayOf(1, 2, 3)))
 
         file.close()
         file.close()
@@ -56,9 +60,24 @@ class NuxieOwnedRuntimeTest {
     }
 
     @Test
+    fun `file import rejects a closed renderer factory`() {
+        val native = RecordingNative()
+        val runtime = NuxieRuntime(native)
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(1, 1))
+        renderer.close()
+
+        assertThrows(IllegalStateException::class.java) {
+            runtime.importFile(renderer, byteArrayOf(1))
+        }
+        assertEquals(null, native.importedRendererHandle)
+    }
+
+    @Test
     fun `artboard close frees once and rejects player creation after close`() {
         val native = RecordingNative()
-        val file = checkNotNull(NuxieRuntime(native).importFile(byteArrayOf(1)))
+        val runtime = NuxieRuntime(native)
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(1, 1))
+        val file = checkNotNull(runtime.importFile(renderer, byteArrayOf(1)))
         val artboard = checkNotNull(file.newArtboard("Main"))
 
         artboard.close()
@@ -74,7 +93,9 @@ class NuxieOwnedRuntimeTest {
     @Test
     fun `player close frees once and rejects frame steps after close`() {
         val native = RecordingNative()
-        val file = checkNotNull(NuxieRuntime(native).importFile(byteArrayOf(1)))
+        val runtime = NuxieRuntime(native)
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(1, 1))
+        val file = checkNotNull(runtime.importFile(renderer, byteArrayOf(1)))
         val artboard = checkNotNull(file.newArtboard())
         val player = checkNotNull(artboard.newPlayer("Idle"))
 
@@ -93,10 +114,10 @@ class NuxieOwnedRuntimeTest {
     fun `renderer and window free once and reject rendering after close`() {
         val native = RecordingNative()
         val runtime = NuxieRuntime(native)
-        val file = checkNotNull(runtime.importFile(byteArrayOf(1)))
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(100, 200))
+        val file = checkNotNull(runtime.importFile(renderer, byteArrayOf(1)))
         val artboard = checkNotNull(file.newArtboard())
         val player = checkNotNull(artboard.newPlayer())
-        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(100, 200))
         val window = NuxieRuntimeWindow(40L, native)
 
         assertEquals(5, renderer.resize(300, 400))
@@ -122,10 +143,10 @@ class NuxieOwnedRuntimeTest {
     fun `renderer returns an owned CPU frame and rejects rendering after close`() {
         val native = RecordingNative()
         val runtime = NuxieRuntime(native)
-        val file = checkNotNull(runtime.importFile(byteArrayOf(1)))
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(2, 1))
+        val file = checkNotNull(runtime.importFile(renderer, byteArrayOf(1)))
         val artboard = checkNotNull(file.newArtboard())
         val player = checkNotNull(artboard.newPlayer())
-        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(2, 1))
 
         val frame = renderer.renderToCpuFrame(
             player = player,
@@ -150,6 +171,7 @@ class NuxieOwnedRuntimeTest {
         var importedExpectedAssets = emptyList<ExpectedFileAsset>()
         var importedExternalAssets = emptyMap<Int, ByteArray>()
         var importedImageDecoder: NuxImageDecoder? = null
+        var importedRendererHandle: Long? = null
         val freedFiles = mutableListOf<Long>()
         val freedArtboards = mutableListOf<Long>()
         val freedPlayers = mutableListOf<Long>()
@@ -160,11 +182,13 @@ class NuxieOwnedRuntimeTest {
         var defaultPlayerCreations = 0
 
         override fun newFile(
+            rendererHandle: Long,
             bytes: ByteArray,
             expectedAssets: List<ExpectedFileAsset>,
             externalAssets: Map<Int, ByteArray>,
             imageDecoder: NuxImageDecoder,
         ): Long {
+            importedRendererHandle = rendererHandle
             importedExpectedAssets = expectedAssets
             importedExternalAssets = externalAssets
             importedImageDecoder = imageDecoder

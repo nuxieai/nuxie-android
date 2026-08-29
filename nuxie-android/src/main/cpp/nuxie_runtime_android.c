@@ -608,14 +608,14 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileInspectAssets(
 
 JNIEXPORT jlong JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNewConfigured(
-    JNIEnv *env, jobject self, jbyteArray bytes, jintArray ordinal_array,
+    JNIEnv *env, jobject self, jlong renderer, jbyteArray bytes, jintArray ordinal_array,
     jintArray kind_array, jbooleanArray has_id_array, jlongArray id_array,
     jobjectArray name_array, jobjectArray extension_array,
     jbooleanArray embedded_array, jbooleanArray contents_array,
     jintArray flags_array, jintArray external_ordinal_array,
     jobjectArray external_payload_array, jobject decoder) {
   (void)self;
-  if (bytes == NULL || ordinal_array == NULL || kind_array == NULL ||
+  if (renderer == 0 || bytes == NULL || ordinal_array == NULL || kind_array == NULL ||
       has_id_array == NULL || id_array == NULL || name_array == NULL ||
       extension_array == NULL || embedded_array == NULL ||
       contents_array == NULL || flags_array == NULL ||
@@ -887,9 +887,9 @@ cleanup_configured_import:
 
 JNIEXPORT jlong JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNew(
-    JNIEnv *env, jobject self, jbyteArray bytes) {
+    JNIEnv *env, jobject self, jlong renderer, jbyteArray bytes) {
   (void)self;
-  if (bytes == NULL) return 0;
+  if (renderer == 0 || bytes == NULL) return 0;
   jsize length = (*env)->GetArrayLength(env, bytes);
   jbyte *data = (*env)->GetByteArrayElements(env, bytes, NULL);
   if (data == NULL) return 0;
