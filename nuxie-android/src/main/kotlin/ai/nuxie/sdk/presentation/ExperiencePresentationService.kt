@@ -298,6 +298,8 @@ internal class ExperiencePresentationService(
         val closed: AtomicBoolean = AtomicBoolean(false),
         val shown: AtomicBoolean = AtomicBoolean(false),
         val finished: CompletableDeferred<Unit> = CompletableDeferred(),
+        // Shown and the run-terminal observation are one fact-pairing decision.
+        val factLock: Any = Any(),
         // Every close path observes the same first-terminal run transition.
         val runTransitionFinished: CompletableDeferred<Unit> = CompletableDeferred(),
     )
@@ -512,17 +514,23 @@ internal class ExperiencePresentationService(
     )
 
     private fun firstFrame(active: ActivePresentation) {
-        if (active.closed.get() || !active.shown.compareAndSet(false, true)) return
-        runCatching {
-            emit(
-                SystemEventNames.EXPERIENCE_SHOWN,
-                mapOf(
-                    "journey_id" to active.ref.journeyId,
-                    "experience_id" to active.ref.experienceId,
-                    "experience_version" to active.ref.experienceVersion,
-                ),
-                active.ownerDistinctId,
-            )
+        synchronized(active.factLock) {
+            if (
+                active.closed.get() ||
+                active.runTransitionFinished.isCompleted ||
+                !active.shown.compareAndSet(false, true)
+            ) return
+            runCatching {
+                emit(
+                    SystemEventNames.EXPERIENCE_SHOWN,
+                    mapOf(
+                        "journey_id" to active.ref.journeyId,
+                        "experience_id" to active.ref.experienceId,
+                        "experience_version" to active.ref.experienceVersion,
+                    ),
+                    active.ownerDistinctId,
+                )
+            }
         }
         active.firstFrame.complete(active.ref)
     }
@@ -573,9 +581,12 @@ internal class ExperiencePresentationService(
             } catch (_: Throwable) {
                 return@launch
             }
-            active.runTransitionFinished.complete(Unit)
+            val emitClose = synchronized(active.factLock) {
+                active.runTransitionFinished.complete(Unit)
+                won && active.shown.get() && outcome.reason != CloseReason.IdentityChanged
+            }
             if (!won) return@launch
-            if (active.shown.get() && outcome.reason != CloseReason.IdentityChanged) {
+            if (emitClose) {
                 emitCloseFact(active, outcome.reason)
             }
             scope.launch { runCatching { reportOutcome(outcome) } }

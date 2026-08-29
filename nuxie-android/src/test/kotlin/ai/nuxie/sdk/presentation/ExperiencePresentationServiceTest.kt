@@ -315,6 +315,45 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun journeyOutcomeBeforeQueuedFirstFrameEmitsNoExperienceFacts() = runTest {
+        val emitted = mutableListOf<String>()
+        val launched = mutableListOf<String>()
+        val outcomeWon = AtomicBoolean(false)
+        val service = service(
+            emit = { name, _, _ -> emitted += name },
+            launch = launched::add,
+            transitionOutcome = { outcomeWon.compareAndSet(false, true) },
+        )
+        val presentation = async(SupervisorJob()) {
+            service.present("v1", "journey-7", "customer-1")
+        }
+        runCurrent()
+        val presentationId = launched.single()
+        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        setActivityField(activity, "presentationId", presentationId)
+        assertTrue(PresentationRegistry.attach(presentationId, activity))
+
+        service.dismiss(CloseReason.GoalMet)
+        runCurrent()
+        assertTrue("winning outcome did not request teardown", activity.isFinishing)
+
+        PresentationRegistry.reportFirstFrame(presentationId)
+        runCurrent()
+        invokeOnDestroy(activity)
+        runCurrent()
+
+        assertEquals("a terminal Journey emitted an orphan Experience fact", emptyList<String>(), emitted)
+        val error = try {
+            presentation.await()
+            fail("presentation should end before its first frame")
+            error("unreachable")
+        } catch (error: ExperiencePresentationException) {
+            error
+        }
+        assertEquals(ExperiencePresentationException.Reason.SUPERSEDED, error.reason)
+    }
+
+    @Test
     fun purchaseCloseEmissionKeepsItsOwnerAfterIdentityChanges() = runTest {
         val emitted = mutableListOf<Emitted>()
         val launched = mutableListOf<String>()
