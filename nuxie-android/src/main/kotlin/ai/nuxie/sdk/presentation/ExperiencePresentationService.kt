@@ -286,6 +286,7 @@ internal class ExperiencePresentationService(
         val shown: AtomicBoolean = AtomicBoolean(false),
         val semanticReported: AtomicBoolean = AtomicBoolean(false),
         val finished: CompletableDeferred<Unit> = CompletableDeferred(),
+        val hostTransitionStarted: AtomicBoolean = AtomicBoolean(false),
         // One host dismissal applies the run transition; every concurrent caller awaits it.
         val runTransitionFinished: CompletableDeferred<Unit> = CompletableDeferred(),
     )
@@ -428,24 +429,35 @@ internal class ExperiencePresentationService(
         // Reserve the matching durable reporter before requesting teardown so
         // a synchronous terminal callback cannot claim semantic reporting.
         beforeHostSemanticClaimForTesting()
-        val reportsOutcome = active.semanticReported.compareAndSet(false, true)
+        active.semanticReported.compareAndSet(false, true)
         val teardownReason = if (active.ownerDistinctId == initiatingDistinctId) {
             CloseReason.HostDismissed
         } else {
             CloseReason.IdentityChanged
         }
         PresentationRegistry.dismiss(active.id, teardownReason)
-        if (reportsOutcome) {
-            val transition = scope.launch {
-                if (runCatching { markOutcomeInMemory(outcome) }.getOrDefault(false)) {
-                    scope.launch { runCatching { reportOutcome(outcome) } }
-                }
-            }
-            transition.invokeOnCompletion {
-                active.runTransitionFinished.complete(Unit)
-            }
+        if (!active.runTransitionFinished.isCompleted) {
+            startHostRunTransition(active, outcome)
         }
         joinAll(active.finished, active.runTransitionFinished)
+    }
+
+    private fun startHostRunTransition(
+        active: ActivePresentation,
+        outcome: PresentationOutcome,
+    ) {
+        if (!active.hostTransitionStarted.compareAndSet(false, true)) return
+        scope.launch {
+            val hostTransitionSelected = markOutcomeInMemory(outcome)
+            // For a matching owner, a normal return means memory is now
+            // terminal: true selected this host outcome; false observed an
+            // earlier first-terminal winner. Identity-change teardown does
+            // not require a Journey transition.
+            active.runTransitionFinished.complete(Unit)
+            if (hostTransitionSelected) {
+                scope.launch { runCatching { reportOutcome(outcome) } }
+            }
+        }
     }
 
     /**
@@ -505,7 +517,6 @@ internal class ExperiencePresentationService(
         scope.launch {
             if (active.semanticReported.compareAndSet(false, true)) {
                 reportTerminalOutcome(
-                    active,
                     PresentationOutcome(
                         ref = active.ref,
                         reason = CloseReason.Error(typed),
@@ -535,7 +546,6 @@ internal class ExperiencePresentationService(
             scope.launch {
                 if (active.semanticReported.compareAndSet(false, true)) {
                     reportTerminalOutcome(
-                        active,
                         PresentationOutcome(
                             ref = active.ref,
                             reason = reason,
@@ -548,14 +558,9 @@ internal class ExperiencePresentationService(
     }
 
     private suspend fun reportTerminalOutcome(
-        active: ActivePresentation,
         outcome: PresentationOutcome,
     ) {
-        try {
-            reportOutcome(outcome)
-        } finally {
-            active.runTransitionFinished.complete(Unit)
-        }
+        runCatching { reportOutcome(outcome) }
     }
 
     private fun clearCurrent(active: ActivePresentation) {

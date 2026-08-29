@@ -178,6 +178,108 @@ class DismissalFixtureTest {
     }
 
     @Test
+    fun failedNonHostWinnerFallsBackToDurableHostDismissalTombstone() = runBlocking {
+        val root = createTempDirectory("nuxie-dismiss-fallback-").toFile()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            val distinctId = "fallback-customer"
+            val journeyId = "fallback-journey"
+            val eventStore = Store()
+            val identity = Identity(distinctId)
+            val eventLog = EventLog(
+                store = eventStore,
+                contextBuilder = NuxieContextBuilder(
+                    RuntimeEnvironment.getApplication(),
+                    NuxieEnvironment.DEVELOPMENT,
+                    LogLevel.NONE,
+                    identity,
+                ),
+                identity = identity,
+                beforeSend = null,
+                scope = scope,
+            )
+            val runStore = JourneyStore(root)
+            runStore.save(
+                JourneyRun(
+                    id = journeyId,
+                    distinctId = distinctId,
+                    experienceId = "experience-1",
+                    experienceVersion = "flow-version-1",
+                    epoch = 1,
+                    plane = JourneyPlane.DEVICE,
+                    settingsSnapshot = JsonObject(emptyMap()),
+                    state = JourneyRunState.ACTIVE,
+                ),
+            )
+            val blockedCompletionsDirectory = File(root, "nuxie/journeys/completions").apply {
+                parentFile!!.mkdirs()
+                writeText("blocked")
+            }
+            val journeys = JourneyService(
+                store = runStore,
+                ledger = JourneyLedger(eventLog),
+                releases = JourneyReleaseProvider { _, _ -> emptyList() },
+                initialDistinctId = distinctId,
+            )
+            val launched = mutableListOf<String>()
+            val hostBookkeepingFinished = CompletableDeferred<Unit>()
+            val presentations = ExperiencePresentationService(
+                releases = PresentationReleaseProvider { release() },
+                acquire = { acquired() },
+                emit = { _, _, _ -> },
+                scope = scope,
+                runtimeAvailable = { true },
+                launch = launched::add,
+                markOutcomeInMemory = { outcome ->
+                    journeys.markHostDismissedInMemory(
+                        ownerDistinctId = requireNotNull(outcome.ownerDistinctId),
+                        journeyId = requireNotNull(outcome.ref.journeyId),
+                        initiatingDistinctId = requireNotNull(outcome.initiatingDistinctId),
+                    )
+                },
+                reportOutcome = { outcome ->
+                    if (outcome.reason is CloseReason.Error) {
+                        error("failed before the run transition")
+                    }
+                    try {
+                        journeys.presentationEnded(
+                            requireNotNull(outcome.ownerDistinctId),
+                            requireNotNull(outcome.ref.journeyId),
+                            outcome.reason,
+                        )
+                    } finally {
+                        hostBookkeepingFinished.complete(Unit)
+                    }
+                },
+                beforeHostSemanticClaimForTesting = {
+                    PresentationRegistry.reportFailure(
+                        launched.single(),
+                        IllegalStateException("renderer failed"),
+                    )
+                },
+            )
+            val shown = scope.async {
+                presentations.present("flow-version-1", journeyId, distinctId)
+            }
+            PresentationRegistry.reportFirstFrame(launched.single())
+            shown.await()
+
+            presentations.dismissFromHost(distinctId)
+            withTimeout(2_000) { hostBookkeepingFinished.await() }
+
+            val tombstone = requireNotNull(runStore.load(distinctId, journeyId))
+            assertEquals(JourneyRunState.TERMINAL, tombstone.state)
+            assertEquals("dismissed", tombstone.terminalReason)
+            assertTrue(tombstone.pendingHostCompletion)
+            assertTrue(blockedCompletionsDirectory.isFile)
+        } finally {
+            scope.cancel()
+            root.deleteRecursively()
+            PresentationRegistry.clearForTesting()
+        }
+    }
+
+    @Test
     fun markedHostDismissalWinsBookkeepingAgainstACompetingTerminalReport() = runBlocking {
         val root = createTempDirectory("nuxie-dismiss-race-").toFile()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)

@@ -468,7 +468,10 @@ class ExperiencePresentationServiceTest {
         val service = service(
             launch = launched::add,
             acquire = { acquired("exp-1", "v1", lease) },
-            reportOutcome = { outcomes += it.reason },
+            markOutcomeInMemory = { false },
+            reportOutcome = {
+                outcomes += it.reason
+            },
             beforeHostSemanticClaimForTesting = {
                 PresentationRegistry.reportDismissed(
                     launched.single(),
@@ -498,7 +501,10 @@ class ExperiencePresentationServiceTest {
         val service = service(
             launch = launched::add,
             acquire = { acquired("exp-1", "v1", lease) },
-            reportOutcome = { outcomes += it.reason },
+            markOutcomeInMemory = { false },
+            reportOutcome = {
+                outcomes += it.reason
+            },
             beforeHostSemanticClaimForTesting = {
                 PresentationRegistry.reportFailure(launched.single(), failure)
             },
@@ -515,6 +521,45 @@ class ExperiencePresentationServiceTest {
         assertTrue(lease.closed.get())
         val reason = outcomes.single() as CloseReason.Error
         assertEquals(failure, reason.cause.cause)
+    }
+
+    @Test
+    fun hostDismissalFallsBackToHostTombstoneWhenFailedWinnerDoesNotTransitionRun() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        var runIsActive = true
+        var hasRecoverableHostTombstone = false
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+            markOutcomeInMemory = { outcome ->
+                assertEquals(CloseReason.HostDismissed, outcome.reason)
+                runIsActive = false
+                hasRecoverableHostTombstone = true
+                true
+            },
+            reportOutcome = { outcome ->
+                if (outcome.reason is CloseReason.Error) {
+                    throw IllegalStateException("failed before the run transition")
+                }
+            },
+            beforeHostSemanticClaimForTesting = {
+                PresentationRegistry.reportFailure(
+                    launched.single(),
+                    IllegalStateException("renderer failed"),
+                )
+            },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        service.dismissFromHost("customer-1")
+
+        assertFalse("dismiss() returned with the Journey still active", runIsActive)
+        assertTrue("host fallback did not leave a recoverable tombstone", hasRecoverableHostTombstone)
+        assertTrue(lease.closed.get())
     }
 
     @Test
