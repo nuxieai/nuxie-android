@@ -181,8 +181,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeHostScriptingProbe(
   struct NuxFile *file = NULL;
   struct NuxCapiResult *result = NULL;
   NuxStatus status = nux_file_import_trusted_with_host_commands(
-      host_scripting_probe_file, sizeof(host_scripting_probe_file), &host,
-      &file, &result);
+      host_scripting_probe_file, sizeof(host_scripting_probe_file), NULL,
+      &host, &file, &result);
   log_and_free_result("host_scripting_probe", status, result);
   if (file != NULL) {
     log_cleanup_failure("host_scripting_probe_file_free", nux_file_free(file));
@@ -519,7 +519,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileInspectAssets(
   }
   if (data == NULL) return NULL;
   struct NuxFile *file = NULL;
-  NuxStatus status = nux_file_import((const uint8_t *)data, (size_t)length, &file);
+  NuxStatus status =
+      nux_file_import((const uint8_t *)data, (size_t)length, NULL, &file);
   (*env)->ReleaseByteArrayElements(env, bytes, data, JNI_ABORT);
   if (status != NUX_STATUS_OK || file == NULL) return NULL;
 
@@ -842,16 +843,21 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNewConfigured(
   if (clear_jni_exception(env) || file_bytes == NULL) {
     goto cleanup_configured_import;
   }
-  status = nux_file_import_configured((const uint8_t *)file_bytes,
-                                      (size_t)file_len, &config, &file, &result);
-  log_and_free_result("file_import_configured", status, result);
+  status = nux_file_import_android_vulkan_with_trusted_wgsl(
+      (struct NuxAndroidVulkanRenderer *)from_handle(renderer),
+      (const uint8_t *)file_bytes, (size_t)file_len, &config, &file, &result);
+  log_and_free_result("file_import_android_vulkan_with_trusted_wgsl", status,
+                      result);
   result = NULL;
 
 cleanup_configured_import:
   if (file_bytes != NULL) {
     (*env)->ReleaseByteArrayElements(env, bytes, file_bytes, JNI_ABORT);
   }
-  if (result != NULL) log_and_free_result("file_import_configured", status, result);
+  if (result != NULL) {
+    log_and_free_result("file_import_android_vulkan_with_trusted_wgsl", status,
+                        result);
+  }
   if (status != NUX_STATUS_OK && file != NULL) {
     nux_file_free(file);
     file = NULL;
@@ -894,8 +900,12 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNew(
   jbyte *data = (*env)->GetByteArrayElements(env, bytes, NULL);
   if (data == NULL) return 0;
   struct NuxFile *file = NULL;
-  NuxStatus status = nux_file_import((const uint8_t *)data, (size_t)length, &file);
+  struct NuxCapiResult *result = NULL;
+  NuxStatus status = nux_file_import_android_vulkan(
+      (struct NuxAndroidVulkanRenderer *)from_handle(renderer),
+      (const uint8_t *)data, (size_t)length, NULL, &file, &result);
   (*env)->ReleaseByteArrayElements(env, bytes, data, JNI_ABORT);
+  log_and_free_result("file_import_android_vulkan", status, result);
   return status == NUX_STATUS_OK ? as_handle(file) : 0;
 }
 
@@ -2147,21 +2157,6 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererRenderPlayerToCpuFram
 cpu_frame_cleanup:
   nux_android_vulkan_frame_free(frame);
   return output;
-}
-
-JNIEXPORT jint JNICALL
-Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererResetPlayerDomain(
-    JNIEnv *env, jobject self, jlong renderer, jlong player) {
-  (void)env;
-  (void)self;
-  if (renderer == 0 || player == 0) return (jint)NUX_STATUS_NULL_ARGUMENT;
-  struct NuxCapiResult *result = NULL;
-  NuxStatus status = nux_renderer_android_vulkan_reset_player_domain(
-      (const struct NuxAndroidVulkanRenderer *)from_handle(renderer),
-      (struct NuxPlayer *)from_handle(player), &result);
-  log_and_free_result("renderer_android_vulkan_reset_player_domain", status,
-                      result);
-  return (jint)status;
 }
 
 JNIEXPORT void JNICALL

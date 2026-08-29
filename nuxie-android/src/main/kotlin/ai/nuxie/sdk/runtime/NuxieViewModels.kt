@@ -169,9 +169,6 @@ internal interface NuxieTypedRuntimeNative {
         fitContainCenter: Boolean,
     ): NuxieCpuFrame = error("renderToCpuFrame is not implemented")
 
-    fun resetPlayerDomain(rendererHandle: Long, playerHandle: Long): Int =
-        error("resetPlayerDomain is not implemented")
-
     fun freeRenderer(handle: Long): Unit = error("freeRenderer is not implemented")
 
     fun acquireWindow(surface: android.view.Surface): Long =
@@ -289,9 +286,6 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
             fitContainCenter,
         ),
     ) { "Android Vulkan renderer did not return a CPU frame" }
-
-    override fun resetPlayerDomain(rendererHandle: Long, playerHandle: Long): Int =
-        NuxieRuntimeBridge.nativeRendererResetPlayerDomain(rendererHandle, playerHandle)
 
     override fun freeRenderer(handle: Long) {
         NuxieRuntimeBridge.nativeRendererFree(handle)

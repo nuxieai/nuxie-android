@@ -122,7 +122,6 @@ class NuxieOwnedRuntimeTest {
 
         assertEquals(5, renderer.resize(300, 400))
         assertEquals(1, renderer.renderAndPresent(player, window, 0xFF000000.toInt(), true))
-        assertEquals(6, renderer.resetPlayerDomain(player))
 
         window.close()
         window.close()
@@ -255,8 +254,6 @@ class NuxieOwnedRuntimeTest {
             height = 1,
             rgba = byteArrayOf(0, 0, 0, 0, 0x7F, 0, 0, 0),
         )
-
-        override fun resetPlayerDomain(rendererHandle: Long, playerHandle: Long): Int = 6
 
         override fun freeRenderer(handle: Long) {
             freedRenderers += handle
