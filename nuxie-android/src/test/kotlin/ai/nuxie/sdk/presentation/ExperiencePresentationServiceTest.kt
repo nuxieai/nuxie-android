@@ -15,6 +15,7 @@ import android.os.Looper
 import java.io.Closeable
 import java.io.File
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -115,6 +116,61 @@ class ExperiencePresentationServiceTest {
 
         assertEquals(listOf<CloseReason>(CloseReason.UserDismissed), transitionAttempts)
         assertEquals(1, emitted.count { it == "\$experience_dismissed" })
+    }
+
+    @Test
+    fun standaloneCloseRacingFirstFrameEmitsShownBeforeClose() = runTest {
+        val emitted = CopyOnWriteArrayList<String>()
+        val launched = mutableListOf<String>()
+        val shownEmissionStarted = CountDownLatch(1)
+        val releaseShownEmission = CountDownLatch(1)
+        val closeEmissionStarted = CountDownLatch(1)
+        val service = service(
+            emit = { name, _, _ ->
+                if (name == "\$experience_shown") {
+                    shownEmissionStarted.countDown()
+                    check(releaseShownEmission.await(2, TimeUnit.SECONDS)) {
+                        "SHOWN emission was not released"
+                    }
+                } else {
+                    closeEmissionStarted.countDown()
+                }
+                emitted += name
+            },
+            launch = launched::add,
+            transitionOutcome = { false },
+        )
+        val presentation = async(SupervisorJob()) { service.present("v1") }
+        runCurrent()
+        val firstFrame = Thread {
+            PresentationRegistry.reportFirstFrame(launched.single())
+        }
+        val close = Thread(service::dismiss)
+
+        firstFrame.start()
+        assertTrue(
+            "first frame did not reach SHOWN emission",
+            shownEmissionStarted.await(2, TimeUnit.SECONDS),
+        )
+        close.start()
+        try {
+            assertFalse(
+                "standalone CLOSE overtook an in-flight SHOWN emission",
+                closeEmissionStarted.await(250, TimeUnit.MILLISECONDS),
+            )
+        } finally {
+            releaseShownEmission.countDown()
+            firstFrame.join(2_000)
+            close.join(2_000)
+        }
+
+        assertFalse("first-frame callback remained blocked", firstFrame.isAlive)
+        assertFalse("standalone close remained blocked", close.isAlive)
+        assertEquals(
+            listOf("\$experience_shown", "\$experience_dismissed"),
+            emitted,
+        )
+        presentation.cancelAndJoin()
     }
 
     @Test

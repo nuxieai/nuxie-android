@@ -548,9 +548,7 @@ internal class ExperiencePresentationService(
             )
         }
         active.firstFrame.completeExceptionally(typed)
-        if (active.shown.get() && active.ref.journeyId == null) {
-            emitCloseFact(active, CloseReason.Error(typed))
-        }
+        emitStandaloneCloseFactIfShown(active, CloseReason.Error(typed))
     }
 
     private fun ended(active: ActivePresentation, reason: CloseReason) {
@@ -565,9 +563,7 @@ internal class ExperiencePresentationService(
                 ),
             )
         }
-        if (active.shown.get() && active.ref.journeyId == null) {
-            emitCloseFact(active, reason)
-        }
+        emitStandaloneCloseFactIfShown(active, reason)
         active.finished.complete(Unit)
     }
 
@@ -596,6 +592,17 @@ internal class ExperiencePresentationService(
     private fun clearCurrent(active: ActivePresentation) {
         synchronized(stateLock) {
             if (current === active) current = null
+        }
+    }
+
+    private fun emitStandaloneCloseFactIfShown(
+        active: ActivePresentation,
+        reason: CloseReason,
+    ) {
+        synchronized(active.factLock) {
+            if (active.shown.get() && active.ref.journeyId == null) {
+                emitCloseFact(active, reason)
+            }
         }
     }
 
