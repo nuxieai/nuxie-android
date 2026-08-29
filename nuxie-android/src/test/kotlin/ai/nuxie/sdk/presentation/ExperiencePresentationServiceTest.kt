@@ -524,6 +524,66 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun hostDismissalDoesNotOverwriteHealthyClaimedWinnerBeforeMemoryTransition() = runTest {
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val userReportStarted = CompletableDeferred<Unit>()
+        val releaseUserReport = CompletableDeferred<Unit>()
+        val outcomes = mutableListOf<CloseReason>()
+        var runIsActive = true
+        val service = service(
+            launch = launched::add,
+            acquire = { acquired("exp-1", "v1", lease) },
+            markOutcomeInMemory = { outcome ->
+                if (!runIsActive) {
+                    false
+                } else {
+                    runIsActive = false
+                    outcomes += outcome.reason
+                    true
+                }
+            },
+            reportOutcome = { outcome ->
+                if (outcome.reason == CloseReason.UserDismissed) {
+                    userReportStarted.complete(Unit)
+                    releaseUserReport.await()
+                    if (runIsActive) {
+                        runIsActive = false
+                        outcomes += outcome.reason
+                    }
+                }
+            },
+            beforeHostSemanticClaimForTesting = {
+                PresentationRegistry.reportDismissed(
+                    launched.single(),
+                    CloseReason.UserDismissed,
+                )
+            },
+        )
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        val hostDismissal = async { service.dismissFromHost("customer-1") }
+        userReportStarted.await()
+        runCurrent()
+
+        try {
+            assertTrue("healthy winner had not transitioned memory", runIsActive)
+            assertEquals(emptyList<CloseReason>(), outcomes)
+            assertFalse("host dismissal returned before the winner's transition", hostDismissal.isCompleted)
+        } finally {
+            releaseUserReport.complete(Unit)
+        }
+
+        hostDismissal.await()
+        assertFalse("healthy winner did not transition memory", runIsActive)
+        assertEquals(listOf<CloseReason>(CloseReason.UserDismissed), outcomes)
+        assertTrue(lease.closed.get())
+    }
+
+    @Test
     fun hostDismissalFallsBackToHostTombstoneWhenFailedWinnerDoesNotTransitionRun() = runTest {
         val launched = mutableListOf<String>()
         val lease = Lease()

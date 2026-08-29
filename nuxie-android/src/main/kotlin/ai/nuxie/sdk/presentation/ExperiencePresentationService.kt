@@ -20,9 +20,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -287,6 +288,8 @@ internal class ExperiencePresentationService(
         val semanticReported: AtomicBoolean = AtomicBoolean(false),
         val finished: CompletableDeferred<Unit> = CompletableDeferred(),
         val hostTransitionStarted: AtomicBoolean = AtomicBoolean(false),
+        // A host that lost the semantic claim may fall back only when its winner reports failure.
+        val semanticReportFailed: CompletableDeferred<Unit> = CompletableDeferred(),
         // One host dismissal applies the run transition; every concurrent caller awaits it.
         val runTransitionFinished: CompletableDeferred<Unit> = CompletableDeferred(),
     )
@@ -429,15 +432,21 @@ internal class ExperiencePresentationService(
         // Reserve the matching durable reporter before requesting teardown so
         // a synchronous terminal callback cannot claim semantic reporting.
         beforeHostSemanticClaimForTesting()
-        active.semanticReported.compareAndSet(false, true)
+        val reportsOutcome = active.semanticReported.compareAndSet(false, true)
         val teardownReason = if (active.ownerDistinctId == initiatingDistinctId) {
             CloseReason.HostDismissed
         } else {
             CloseReason.IdentityChanged
         }
         PresentationRegistry.dismiss(active.id, teardownReason)
-        if (!active.runTransitionFinished.isCompleted) {
+        if (reportsOutcome) {
             startHostRunTransition(active, outcome)
+        } else {
+            val winnerFailed = select {
+                active.runTransitionFinished.onAwait { false }
+                active.semanticReportFailed.onAwait { true }
+            }
+            if (winnerFailed) startHostRunTransition(active, outcome)
         }
         joinAll(active.finished, active.runTransitionFinished)
     }
@@ -517,6 +526,7 @@ internal class ExperiencePresentationService(
         scope.launch {
             if (active.semanticReported.compareAndSet(false, true)) {
                 reportTerminalOutcome(
+                    active,
                     PresentationOutcome(
                         ref = active.ref,
                         reason = CloseReason.Error(typed),
@@ -546,6 +556,7 @@ internal class ExperiencePresentationService(
             scope.launch {
                 if (active.semanticReported.compareAndSet(false, true)) {
                     reportTerminalOutcome(
+                        active,
                         PresentationOutcome(
                             ref = active.ref,
                             reason = reason,
@@ -558,9 +569,15 @@ internal class ExperiencePresentationService(
     }
 
     private suspend fun reportTerminalOutcome(
+        active: ActivePresentation,
         outcome: PresentationOutcome,
     ) {
-        runCatching { reportOutcome(outcome) }
+        try {
+            reportOutcome(outcome)
+            active.runTransitionFinished.complete(Unit)
+        } catch (_: Throwable) {
+            active.semanticReportFailed.complete(Unit)
+        }
     }
 
     private fun clearCurrent(active: ActivePresentation) {
