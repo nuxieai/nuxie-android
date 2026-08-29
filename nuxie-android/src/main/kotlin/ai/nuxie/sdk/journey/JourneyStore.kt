@@ -130,6 +130,9 @@ internal class JourneyStore(
             isGhost = value["is_ghost"]?.let { (it as? JsonPrimitive)?.content == "true" } ?: false,
             convertedAtMillis = value.long("converted_at"),
             terminalReason = value.string("terminal_reason"),
+            terminalPresentationOutcome = value.string("terminal_presentation_outcome")
+                ?.let(JourneyRunPresentationOutcome::valueOf),
+            terminalInitiatingDistinctId = value.string("terminal_initiating_distinct_id"),
             triggerRef = value.string("trigger_ref"),
             completedAtMillis = value.long("completed_at"),
             pendingHostExitCapture = value.boolean("pending_host_exit_capture"),
@@ -198,6 +201,14 @@ internal class JourneyStore(
         put("is_ghost", JsonPrimitive(run.isGhost))
         put("converted_at", run.convertedAtMillis?.let(::JsonPrimitive) ?: JsonNull)
         put("terminal_reason", run.terminalReason?.let(::JsonPrimitive) ?: JsonNull)
+        put(
+            "terminal_presentation_outcome",
+            run.terminalPresentationOutcome?.name?.let(::JsonPrimitive) ?: JsonNull,
+        )
+        put(
+            "terminal_initiating_distinct_id",
+            run.terminalInitiatingDistinctId?.let(::JsonPrimitive) ?: JsonNull,
+        )
         put("trigger_ref", run.triggerRef?.let(::JsonPrimitive) ?: JsonNull)
         put("completed_at", run.completedAtMillis?.let(::JsonPrimitive) ?: JsonNull)
         put("pending_host_exit_capture", JsonPrimitive(run.pendingHostExitCapture))

@@ -132,24 +132,82 @@ internal class JourneyService(
         }
     }
 
-    /** Receives the presentation-scoped close outcome for a linked Journey. */
-    suspend fun presentationEnded(distinctId: String, journeyId: String, reason: CloseReason): Boolean {
-        if (reason == CloseReason.HostDismissed) {
-            return hostDismissWithRetry(distinctId, journeyId)
+    /**
+     * The sole presentation-outcome arbiter. Every path attempts this same
+     * lock-held ACTIVE -> TERMINAL transition; only the winner is recorded.
+     */
+    suspend fun transitionPresentationOutcome(
+        ownerDistinctId: String,
+        journeyId: String,
+        reason: CloseReason,
+        initiatingDistinctId: String? = null,
+    ): Boolean = runLock.withLock {
+        val run = loadRun(ownerDistinctId, journeyId) ?: return@withLock false
+        if (run.state != JourneyRunState.ACTIVE) return@withLock false
+
+        val outcome = reason.toRunPresentationOutcome()
+        val completedAtMillis = when (outcome) {
+            JourneyRunPresentationOutcome.USER_DISMISSED,
+            JourneyRunPresentationOutcome.HOST_DISMISSED,
+            JourneyRunPresentationOutcome.GOAL_MET,
+            JourneyRunPresentationOutcome.PURCHASE_COMPLETED,
+            JourneyRunPresentationOutcome.TIMEOUT,
+            -> nowMillis()
+            JourneyRunPresentationOutcome.IDENTITY_CHANGED,
+            JourneyRunPresentationOutcome.ERROR,
+            -> null
         }
-        if (reason == CloseReason.UserDismissed) {
-            return userDismiss(distinctId, journeyId)
+        rememberRun(
+            run.copy(
+                state = JourneyRunState.TERMINAL,
+                terminalReason = outcome.terminalReason,
+                terminalPresentationOutcome = outcome,
+                terminalInitiatingDistinctId = initiatingDistinctId,
+                completedAtMillis = completedAtMillis,
+                pendingHostExitCapture = outcome == JourneyRunPresentationOutcome.HOST_DISMISSED,
+                pendingHostCompletion = outcome == JourneyRunPresentationOutcome.HOST_DISMISSED,
+                pendingHostTriggerCompletion = outcome == JourneyRunPresentationOutcome.HOST_DISMISSED,
+            ),
+        )
+        true
+    }
+
+    /** Performs bookkeeping only for the outcome already selected on the run. */
+    suspend fun completePresentationOutcome(distinctId: String, journeyId: String): Boolean {
+        val selected = runLock.withLock {
+            inMemoryRun(distinctId, journeyId)?.terminalPresentationOutcome
+        } ?: return false
+        if (selected == JourneyRunPresentationOutcome.HOST_DISMISSED) {
+            hostDismissWithRetry(distinctId, journeyId)
+            return true
         }
-        val exitReason = when (reason) {
-            CloseReason.UserDismissed -> error("handled above")
-            CloseReason.HostDismissed -> error("handled above")
-            CloseReason.IdentityChanged -> return true
-            CloseReason.GoalMet -> "goal_met"
-            CloseReason.PurchaseCompleted -> "completed"
-            CloseReason.Timeout -> "completed"
-            is CloseReason.Error -> "error"
+        runLock.withLock {
+            val terminal = inMemoryRun(distinctId, journeyId)
+                ?.takeIf { it.state == JourneyRunState.TERMINAL }
+                ?: return@withLock
+            withContext(Dispatchers.IO) { store.save(terminal) }
+            if (selected == JourneyRunPresentationOutcome.IDENTITY_CHANGED || terminal.isGhost) {
+                return@withLock
+            }
+            val completedAtMillis = terminal.completedAtMillis
+            if (selected == JourneyRunPresentationOutcome.USER_DISMISSED) {
+                if (completedAtMillis == null) return@withLock
+                ledger.userExited(terminal, completedAtMillis)
+            } else {
+                ledger.exited(terminal, requireNotNull(terminal.terminalReason), nowMillis())
+            }
+            completedAtMillis?.let {
+                withContext(Dispatchers.IO) {
+                    store.recordCompletion(
+                        distinctId,
+                        JourneyCompletion(terminal.experienceId, terminal.id, it),
+                    )
+                }
+            }
+            if (selected == JourneyRunPresentationOutcome.USER_DISMISSED) {
+                emitDismissedTrigger(terminal)
+            }
         }
-        exit(distinctId, journeyId, exitReason)
         return true
     }
 
@@ -167,59 +225,6 @@ internal class JourneyService(
                     .coerceAtMost(MAX_HOST_DISMISS_RETRY_DELAY_MILLIS)
             }
         }
-    }
-
-    suspend fun markHostDismissedInMemory(
-        ownerDistinctId: String,
-        journeyId: String,
-        initiatingDistinctId: String,
-    ): Boolean {
-        if (ownerDistinctId != initiatingDistinctId) return false
-        return runLock.withLock {
-            val run = inMemoryRun(ownerDistinctId, journeyId) ?: return@withLock true
-            if (run.state != JourneyRunState.ACTIVE) {
-                return@withLock run.terminalReason == "dismissed" &&
-                    (run.pendingHostExitCapture ||
-                        run.pendingHostCompletion ||
-                        run.pendingHostTriggerCompletion)
-            }
-            rememberRun(
-                run.copy(
-                    state = JourneyRunState.TERMINAL,
-                    terminalReason = "dismissed",
-                    completedAtMillis = nowMillis(),
-                    pendingHostExitCapture = true,
-                    pendingHostCompletion = true,
-                    pendingHostTriggerCompletion = true,
-                ),
-            )
-            true
-        }
-    }
-
-    private suspend fun userDismiss(distinctId: String, journeyId: String): Boolean = runLock.withLock {
-        val run = loadRun(distinctId, journeyId) ?: return@withLock true
-        if (run.state != JourneyRunState.ACTIVE) {
-            return@withLock false
-        }
-        val completedAtMillis = nowMillis()
-        val terminal = run.copy(
-            state = JourneyRunState.TERMINAL,
-            terminalReason = "dismissed",
-            completedAtMillis = completedAtMillis,
-        )
-        withContext(Dispatchers.IO) { store.save(terminal) }
-        rememberRun(terminal)
-        if (run.isGhost) return@withLock true
-        ledger.userExited(run, completedAtMillis)
-        withContext(Dispatchers.IO) {
-            store.recordCompletion(
-                distinctId,
-                JourneyCompletion(run.experienceId, run.id, completedAtMillis),
-            )
-        }
-        emitDismissedTrigger(run)
-        true
     }
 
     private suspend fun hostDismiss(distinctId: String, journeyId: String): Boolean =
@@ -559,6 +564,29 @@ internal class JourneyService(
     }
 
     private fun JourneyRun.key(): RunKey = RunKey(distinctId, id)
+
+    private fun CloseReason.toRunPresentationOutcome(): JourneyRunPresentationOutcome = when (this) {
+        CloseReason.UserDismissed -> JourneyRunPresentationOutcome.USER_DISMISSED
+        CloseReason.HostDismissed -> JourneyRunPresentationOutcome.HOST_DISMISSED
+        CloseReason.IdentityChanged -> JourneyRunPresentationOutcome.IDENTITY_CHANGED
+        CloseReason.GoalMet -> JourneyRunPresentationOutcome.GOAL_MET
+        CloseReason.PurchaseCompleted -> JourneyRunPresentationOutcome.PURCHASE_COMPLETED
+        CloseReason.Timeout -> JourneyRunPresentationOutcome.TIMEOUT
+        is CloseReason.Error -> JourneyRunPresentationOutcome.ERROR
+    }
+
+    private val JourneyRunPresentationOutcome.terminalReason: String
+        get() = when (this) {
+            JourneyRunPresentationOutcome.USER_DISMISSED,
+            JourneyRunPresentationOutcome.HOST_DISMISSED,
+            -> "dismissed"
+            JourneyRunPresentationOutcome.IDENTITY_CHANGED -> "identity_changed"
+            JourneyRunPresentationOutcome.GOAL_MET -> "goal_met"
+            JourneyRunPresentationOutcome.PURCHASE_COMPLETED,
+            JourneyRunPresentationOutcome.TIMEOUT,
+            -> "completed"
+            JourneyRunPresentationOutcome.ERROR -> "error"
+        }
 
     private data class AdmissionKey(val distinctId: String, val experienceId: String)
     private data class RunKey(val distinctId: String, val journeyId: String)

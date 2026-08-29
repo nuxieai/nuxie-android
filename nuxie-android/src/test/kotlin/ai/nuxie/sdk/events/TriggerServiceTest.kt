@@ -288,7 +288,7 @@ class TriggerServiceTest {
         val started = ExperienceRef("exp-composed", "v-composed", journeyId)
         val launched = mutableListOf<String>()
         val rivFile = temporaryFolder.newFile("composed.riv").apply { writeBytes(byteArrayOf(1)) }
-        val factory = NuxieCore.PresentationFactory { markOutcomeInMemory, reportOutcome ->
+        val factory = NuxieCore.PresentationFactory { transitionOutcome, reportOutcome ->
             ExperiencePresentationService(
                 releases = PresentationReleaseProvider { presentationRelease(started) },
                 acquire = {
@@ -303,7 +303,7 @@ class TriggerServiceTest {
                 scope = CoroutineScope(Dispatchers.Unconfined),
                 runtimeAvailable = { true },
                 launch = launched::add,
-                markOutcomeInMemory = markOutcomeInMemory,
+                transitionOutcome = transitionOutcome,
                 reportOutcome = reportOutcome,
             )
         }
@@ -342,6 +342,9 @@ class TriggerServiceTest {
 
         PresentationRegistry.reportDismissed(launched.single(), CloseReason.GoalMet)
 
+        withTimeout(2_000) {
+            while (store.load(distinctId, journeyId)?.state != JourneyRunState.TERMINAL) yield()
+        }
         val ended = requireNotNull(store.load(distinctId, journeyId))
         assertEquals(JourneyRunState.TERMINAL, ended.state)
         assertEquals("goal_met", ended.terminalReason)
@@ -358,7 +361,7 @@ class TriggerServiceTest {
         val rivFile = temporaryFolder.newFile("identity-race.riv").apply {
             writeBytes(byteArrayOf(1))
         }
-        val factory = NuxieCore.PresentationFactory { markOutcomeInMemory, reportOutcome ->
+        val factory = NuxieCore.PresentationFactory { transitionOutcome, reportOutcome ->
             ExperiencePresentationService(
                 releases = PresentationReleaseProvider { presentationRelease(ref) },
                 acquire = {
@@ -373,7 +376,7 @@ class TriggerServiceTest {
                 scope = CoroutineScope(Dispatchers.Unconfined),
                 runtimeAvailable = { true },
                 launch = launched::add,
-                markOutcomeInMemory = markOutcomeInMemory,
+                transitionOutcome = transitionOutcome,
                 reportOutcome = { outcome ->
                     outcomeSelected.complete(Unit)
                     continueReporting.await()

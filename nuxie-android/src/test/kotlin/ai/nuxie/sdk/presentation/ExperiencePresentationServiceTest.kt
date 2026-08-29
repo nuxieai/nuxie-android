@@ -93,6 +93,31 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun standaloneExperienceEmitsOneCloseFactWithoutInventingARunWinner() = runTest {
+        val emitted = mutableListOf<String>()
+        val transitionAttempts = mutableListOf<CloseReason>()
+        val launched = mutableListOf<String>()
+        val service = service(
+            emit = { name, _, _ -> emitted += name },
+            launch = launched::add,
+            transitionOutcome = { outcome ->
+                transitionAttempts += outcome.reason
+                false
+            },
+        )
+        val shown = async { service.present("v1") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+
+        service.dismiss()
+        runCurrent()
+
+        assertEquals(listOf<CloseReason>(CloseReason.UserDismissed), transitionAttempts)
+        assertEquals(1, emitted.count { it == "\$experience_dismissed" })
+    }
+
+    @Test
     fun shownEmissionKeepsItsOwnerAfterIdentityChanges() = runTest {
         val emitted = mutableListOf<Emitted>()
         val launched = mutableListOf<String>()
@@ -384,7 +409,7 @@ class ExperiencePresentationServiceTest {
         val releaseTransition = CompletableDeferred<Unit>()
         val service = service(
             launch = launched::add,
-            markOutcomeInMemory = {
+            transitionOutcome = {
                 transitionStarted.complete(Unit)
                 releaseTransition.await()
                 true
@@ -403,7 +428,7 @@ class ExperiencePresentationServiceTest {
         transitionStarted.await()
 
         try {
-            assertEquals(CloseReason.HostDismissed, activity.claimedCloseReason())
+            assertEquals(CloseReason.HostDismissed, activity.screenCloseReason())
             assertTrue("blocked run transition kept the screen open", activity.isFinishing)
             assertFalse("dismissal completed before the run transition", dismissal.isCompleted)
         } finally {
@@ -424,7 +449,7 @@ class ExperiencePresentationServiceTest {
         val service = service(
             launch = launched::add,
             acquire = { acquired("exp-1", "v1", lease) },
-            markOutcomeInMemory = {
+            transitionOutcome = {
                 transitionStarted.complete(Unit)
                 releaseTransition.await()
                 true
@@ -461,179 +486,127 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun hostDismissalReturnsWhenEndedWinsSemanticRace() = runTest {
+    fun inFlightUserRunTransitionCannotBeSuppressedByHostTeardown() = runTest {
         val launched = mutableListOf<String>()
         val lease = Lease()
-        val outcomes = mutableListOf<CloseReason>()
+        val transitionAttempts = mutableListOf<CloseReason>()
+        val reports = mutableListOf<CloseReason>()
+        val emitted = mutableListOf<String>()
+        val userTransitionStarted = CompletableDeferred<Unit>()
+        val releaseUserTransition = CompletableDeferred<Unit>()
+        var winner: CloseReason? = null
+        lateinit var activity: NuxieExperienceActivity
         val service = service(
+            emit = { name, _, _ -> emitted += name },
             launch = launched::add,
             acquire = { acquired("exp-1", "v1", lease) },
-            markOutcomeInMemory = { false },
-            reportOutcome = {
-                outcomes += it.reason
-            },
-            beforeHostSemanticClaimForTesting = {
-                PresentationRegistry.reportDismissed(
-                    launched.single(),
-                    CloseReason.GoalMet,
-                )
-            },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-
-        withTimeout(1_000) {
-            service.dismissFromHost("customer-1")
-        }
-
-        assertTrue(lease.closed.get())
-        assertEquals(listOf<CloseReason>(CloseReason.GoalMet), outcomes)
-    }
-
-    @Test
-    fun hostDismissalReturnsWhenFailedWinsSemanticRace() = runTest {
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val outcomes = mutableListOf<CloseReason>()
-        val failure = IllegalStateException("renderer failed")
-        val service = service(
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-            markOutcomeInMemory = { false },
-            reportOutcome = {
-                outcomes += it.reason
-            },
-            beforeHostSemanticClaimForTesting = {
-                PresentationRegistry.reportFailure(launched.single(), failure)
-            },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-
-        withTimeout(1_000) {
-            service.dismissFromHost("customer-1")
-        }
-
-        assertTrue(lease.closed.get())
-        val reason = outcomes.single() as CloseReason.Error
-        assertEquals(failure, reason.cause.cause)
-    }
-
-    @Test
-    fun hostDismissalDoesNotOverwriteHealthyClaimedWinnerBeforeMemoryTransition() = runTest {
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val userReportStarted = CompletableDeferred<Unit>()
-        val releaseUserReport = CompletableDeferred<Unit>()
-        val outcomes = mutableListOf<CloseReason>()
-        var runIsActive = true
-        val service = service(
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-            markOutcomeInMemory = { outcome ->
-                if (!runIsActive) {
-                    false
-                } else {
-                    runIsActive = false
-                    outcomes += outcome.reason
-                    true
-                }
-            },
-            reportOutcome = { outcome ->
-                if (outcome.reason == CloseReason.UserDismissed) {
-                    userReportStarted.complete(Unit)
-                    releaseUserReport.await()
-                    if (runIsActive) {
-                        runIsActive = false
-                        outcomes += outcome.reason
+            transitionOutcome = { outcome ->
+                transitionAttempts += outcome.reason
+                when (outcome.reason) {
+                    CloseReason.UserDismissed -> {
+                        userTransitionStarted.complete(Unit)
+                        releaseUserTransition.await()
+                        if (winner == null) {
+                            winner = CloseReason.UserDismissed
+                            true
+                        } else {
+                            false
+                        }
                     }
+                    CloseReason.HostDismissed -> {
+                        releaseUserTransition.await()
+                        false
+                    }
+                    else -> false
                 }
             },
-            beforeHostSemanticClaimForTesting = {
-                PresentationRegistry.reportDismissed(
-                    launched.single(),
-                    CloseReason.UserDismissed,
-                )
+            reportOutcome = { reports += it.reason },
+            beforeHostTeardownForTesting = {
+                invokeOnDestroy(activity)
             },
         )
         val shown = async { service.present("v1", "journey-7", "customer-1") }
         runCurrent()
-        PresentationRegistry.reportFirstFrame(launched.single())
+        val presentationId = launched.single()
+        PresentationRegistry.reportFirstFrame(presentationId)
         shown.await()
+        activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        setActivityField(activity, "presentationId", presentationId)
+        assertTrue(PresentationRegistry.attach(presentationId, activity))
+        activity.onBackPressed()
 
         val hostDismissal = async { service.dismissFromHost("customer-1") }
-        userReportStarted.await()
+        userTransitionStarted.await()
+        runCurrent()
+        assertFalse(hostDismissal.isCompleted)
+
+        releaseUserTransition.complete(Unit)
+        hostDismissal.await()
         runCurrent()
 
-        try {
-            assertTrue("healthy winner had not transitioned memory", runIsActive)
-            assertEquals(emptyList<CloseReason>(), outcomes)
-            assertFalse("host dismissal returned before the winner's transition", hostDismissal.isCompleted)
-        } finally {
-            releaseUserReport.complete(Unit)
-        }
-
-        hostDismissal.await()
-        assertFalse("healthy winner did not transition memory", runIsActive)
-        assertEquals(listOf<CloseReason>(CloseReason.UserDismissed), outcomes)
+        assertEquals(CloseReason.UserDismissed, winner)
+        assertTrue(CloseReason.UserDismissed in transitionAttempts)
+        assertTrue(CloseReason.HostDismissed in transitionAttempts)
+        assertEquals(listOf<CloseReason>(CloseReason.UserDismissed), reports)
+        assertEquals(1, emitted.count { it == "\$experience_dismissed" })
         assertTrue(lease.closed.get())
     }
 
     @Test
-    fun hostDismissalFallsBackToHostTombstoneWhenFailedWinnerDoesNotTransitionRun() = runTest {
+    fun failureBeforeRunTransitionNeverWinsAndHostAttemptWinsNormally() = runTest {
         val launched = mutableListOf<String>()
         val lease = Lease()
-        var runIsActive = true
-        var hasRecoverableHostTombstone = false
+        val attempts = mutableListOf<CloseReason>()
+        val reports = mutableListOf<CloseReason>()
+        val failure = IllegalStateException("renderer failed")
+        lateinit var activity: NuxieExperienceActivity
         val service = service(
             launch = launched::add,
             acquire = { acquired("exp-1", "v1", lease) },
-            markOutcomeInMemory = { outcome ->
+            transitionOutcome = { outcome ->
+                attempts += outcome.reason
+                if (outcome.reason is CloseReason.Error) {
+                    error("failed before the run transition")
+                }
                 assertEquals(CloseReason.HostDismissed, outcome.reason)
-                runIsActive = false
-                hasRecoverableHostTombstone = true
                 true
             },
-            reportOutcome = { outcome ->
-                if (outcome.reason is CloseReason.Error) {
-                    throw IllegalStateException("failed before the run transition")
-                }
-            },
-            beforeHostSemanticClaimForTesting = {
-                PresentationRegistry.reportFailure(
-                    launched.single(),
-                    IllegalStateException("renderer failed"),
-                )
+            reportOutcome = { reports += it.reason },
+            beforeHostTeardownForTesting = {
+                PresentationRegistry.reportFailure(launched.single(), failure)
+                invokeOnDestroy(activity)
             },
         )
         val shown = async { service.present("v1", "journey-7", "customer-1") }
         runCurrent()
-        PresentationRegistry.reportFirstFrame(launched.single())
+        val presentationId = launched.single()
+        PresentationRegistry.reportFirstFrame(presentationId)
         shown.await()
+        activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
+        setActivityField(activity, "presentationId", presentationId)
+        assertTrue(PresentationRegistry.attach(presentationId, activity))
 
         service.dismissFromHost("customer-1")
+        runCurrent()
 
-        assertFalse("dismiss() returned with the Journey still active", runIsActive)
-        assertTrue("host fallback did not leave a recoverable tombstone", hasRecoverableHostTombstone)
         assertTrue(lease.closed.get())
+        assertTrue(attempts.any { it is CloseReason.Error })
+        assertTrue(CloseReason.HostDismissed in attempts)
+        assertEquals(listOf<CloseReason>(CloseReason.HostDismissed), reports)
     }
 
     @Test
     fun hostDismissalReturnsAfterPresentationTeardownWithoutAwaitingBookkeeping() = runTest {
         val launched = mutableListOf<String>()
         val lease = Lease()
-        val semanticStarted = CompletableDeferred<PresentationOutcome>()
-        val releaseSemanticCompletion = CompletableDeferred<Unit>()
+        val bookkeepingStarted = CompletableDeferred<PresentationOutcome>()
+        val releaseBookkeepingCompletion = CompletableDeferred<Unit>()
         val service = service(
             launch = launched::add,
             acquire = { acquired("exp-1", "v1", lease) },
             reportOutcome = { outcome ->
-                semanticStarted.complete(outcome)
-                releaseSemanticCompletion.await()
+                bookkeepingStarted.complete(outcome)
+                releaseBookkeepingCompletion.await()
                 true
             },
         )
@@ -645,13 +618,13 @@ class ExperiencePresentationServiceTest {
         try {
             service.dismissFromHost("customer-1")
 
-            val pendingOutcome = semanticStarted.await()
+            val pendingOutcome = bookkeepingStarted.await()
             assertEquals(CloseReason.HostDismissed, pendingOutcome.reason)
             assertEquals("customer-1", pendingOutcome.ownerDistinctId)
             assertEquals("customer-1", pendingOutcome.initiatingDistinctId)
             assertTrue(lease.closed.get())
         } finally {
-            releaseSemanticCompletion.complete(Unit)
+            releaseBookkeepingCompletion.complete(Unit)
         }
     }
 
@@ -677,22 +650,22 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun hostDismissalAfterIdentityChangedClosesWithoutAttributingTheOldPresentation() = runTest {
+    fun hostDismissalAfterIdentityChangedTransitionsAsOwnerAttributedIdentityOutcome() = runTest {
         val launched = mutableListOf<String>()
         val emitted = mutableListOf<String>()
         val lease = Lease()
-        var semanticCalls = 0
+        var outcomeReports = 0
         val marks = mutableListOf<PresentationOutcome>()
         val service = service(
             emit = { name, _, _ -> emitted += name },
             launch = launched::add,
             acquire = { acquired("exp-1", "v1", lease) },
-            markOutcomeInMemory = { outcome ->
+            transitionOutcome = { outcome ->
                 marks += outcome
-                outcome.ownerDistinctId == outcome.initiatingDistinctId
+                true
             },
             reportOutcome = {
-                semanticCalls += 1
+                outcomeReports += 1
                 true
             },
         )
@@ -705,7 +678,8 @@ class ExperiencePresentationServiceTest {
 
         assertEquals("customer-1", marks.single().ownerDistinctId)
         assertEquals("customer-2", marks.single().initiatingDistinctId)
-        assertEquals(0, semanticCalls)
+        assertEquals(CloseReason.IdentityChanged, marks.single().reason)
+        assertEquals(1, outcomeReports)
         assertFalse("identity transition emitted a dismissal", "\$experience_dismissed" in emitted)
         assertTrue(lease.closed.get())
         assertEquals(null, PresentationRegistry.resolve(launched.single()))
@@ -716,13 +690,13 @@ class ExperiencePresentationServiceTest {
         val emitted = mutableListOf<String>()
         val launched = mutableListOf<String>()
         val lease = Lease()
-        var semanticCalls = 0
+        var outcomeReports = 0
         val service = service(
             emit = { name, _, _ -> emitted += name },
             launch = launched::add,
             acquire = { acquired("exp-1", "v1", lease) },
             reportOutcome = {
-                semanticCalls += 1
+                outcomeReports += 1
                 true
             },
         )
@@ -741,7 +715,7 @@ class ExperiencePresentationServiceTest {
         assertTrue(lease.closed.get())
         assertEquals(null, PresentationRegistry.resolve(launched.single()))
         assertEquals(listOf("\$experience_shown"), emitted)
-        assertEquals(0, semanticCalls)
+        assertEquals(1, outcomeReports)
     }
 
     @Test
@@ -886,7 +860,7 @@ class ExperiencePresentationServiceTest {
         var currentDistinctId = "customer-1"
         val service = service(
             launch = launched::add,
-            markOutcomeInMemory = { outcome ->
+            transitionOutcome = { outcome ->
                 val admitted = outcome.ownerDistinctId == currentDistinctId &&
                     outcome.initiatingDistinctId == currentDistinctId
                 currentDistinctId = "customer-2"
@@ -913,33 +887,33 @@ class ExperiencePresentationServiceTest {
     fun hostDismissalSelectionWinsACompetingUserDismissal() = runTest {
         val launched = mutableListOf<String>()
         val lease = Lease()
-        val semanticStarted = CompletableDeferred<Unit>()
-        val finishSemantic = CompletableDeferred<Unit>()
+        val bookkeepingStarted = CompletableDeferred<Unit>()
+        val finishBookkeeping = CompletableDeferred<Unit>()
         val outcomes = mutableListOf<CloseReason>()
         val service = service(
             launch = launched::add,
             acquire = { acquired("exp-1", "v1", lease) },
             reportOutcome = { outcome ->
                 outcomes += outcome.reason
-                semanticStarted.complete(Unit)
-                finishSemantic.await()
+                bookkeepingStarted.complete(Unit)
+                finishBookkeeping.await()
                 true
             },
         )
-        val shown = async { service.present("v1", "journey-7") }
+        val shown = async { service.present("v1", "journey-7", "customer-1") }
         runCurrent()
         PresentationRegistry.reportFirstFrame(launched.single())
         shown.await()
 
         val hostDismissal = async { service.dismissFromHost("customer-1") }
-        semanticStarted.await()
+        bookkeepingStarted.await()
         service.dismiss(CloseReason.UserDismissed)
         runCurrent()
 
         assertTrue(lease.closed.get())
         assertEquals(listOf<CloseReason>(CloseReason.HostDismissed), outcomes)
 
-        finishSemantic.complete(Unit)
+        finishBookkeeping.complete(Unit)
         hostDismissal.await()
         assertEquals(listOf<CloseReason>(CloseReason.HostDismissed), outcomes)
     }
@@ -950,7 +924,7 @@ class ExperiencePresentationServiceTest {
         val failure = IllegalStateException("first frame failed")
         val service = service(
             launch = launched::add,
-            markOutcomeInMemory = {
+            transitionOutcome = {
                 PresentationRegistry.reportFailure(launched.single(), failure)
                 true
             },
@@ -966,7 +940,7 @@ class ExperiencePresentationServiceTest {
         runCurrent()
 
         assertFalse("dismissal completed before Activity teardown", dismissal.isCompleted)
-        assertEquals(CloseReason.HostDismissed, activity.claimedCloseReason())
+        assertEquals(CloseReason.HostDismissed, activity.screenCloseReason())
         assertTrue("Activity finish was not delivered", activity.isFinishing)
         assertTrue("registry completed before Activity teardown", PresentationRegistry.resolve(presentationId) != null)
 
@@ -989,17 +963,17 @@ class ExperiencePresentationServiceTest {
 
     @Test
     fun hostDismissalWithoutAPresentationIsANoop() = runTest {
-        var semanticCalls = 0
+        var outcomeReports = 0
         val service = service(
             reportOutcome = {
-                semanticCalls += 1
+                outcomeReports += 1
                 true
             },
         )
 
         service.dismissFromHost("customer-1")
 
-        assertEquals(0, semanticCalls)
+        assertEquals(0, outcomeReports)
     }
 
     @Test
@@ -1066,6 +1040,7 @@ class ExperiencePresentationServiceTest {
             onFirstFrame = {},
             onFailure = {},
             onDismissed = {},
+            onOutcome = {},
         )
 
         assertFalse(
@@ -1093,6 +1068,7 @@ class ExperiencePresentationServiceTest {
             onFirstFrame = {},
             onFailure = {},
             onDismissed = dismissed::add,
+            onOutcome = {},
         )
         assertTrue(PresentationRegistry.attach(presentationId, oldActivity))
 
@@ -1104,7 +1080,7 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun claimedReasonIsPublishedAtomicallyWithConfigurationDetach() {
+    fun screenCloseReasonIsPublishedAtomicallyWithConfigurationDetach() {
         val presentationId = "configuration-terminal"
         val dismissed = mutableListOf<CloseReason>()
         val oldActivity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
@@ -1119,9 +1095,10 @@ class ExperiencePresentationServiceTest {
             onFirstFrame = {},
             onFailure = {},
             onDismissed = dismissed::add,
+            onOutcome = {},
         )
         assertTrue(PresentationRegistry.attach(presentationId, oldActivity))
-        assertTrue(oldActivity.claimFromService(CloseReason.GoalMet))
+        assertTrue(oldActivity.requestCloseFromService(CloseReason.GoalMet))
 
         PresentationRegistry.detach(presentationId, oldActivity)
         PresentationRegistry.dismiss(presentationId, CloseReason.Timeout)
@@ -1146,7 +1123,7 @@ class ExperiencePresentationServiceTest {
 
         val dismissal = async { service.dismissFromHost("customer-1") }
         runCurrent()
-        assertEquals(CloseReason.HostDismissed, oldActivity.claimedCloseReason())
+        assertEquals(CloseReason.HostDismissed, oldActivity.screenCloseReason())
         assertFalse("dismissal completed before Activity teardown", dismissal.isCompleted)
 
         val attachCandidate = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
@@ -1174,16 +1151,16 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun firstTerminalCloseReasonWinsAtomically() {
+    fun screenCloseReasonSelectionIsAtomic() {
         val reported = mutableListOf<CloseReason>()
-        val claim = TerminalCloseClaim(reported::add)
+        val screenClose = ScreenCloseState(reported::add)
 
-        assertTrue(claim.tryClaim(CloseReason.UserDismissed))
-        assertFalse(claim.tryClaim(CloseReason.GoalMet))
-        assertEquals(CloseReason.UserDismissed, claim.reason)
+        assertTrue(screenClose.select(CloseReason.UserDismissed))
+        assertFalse(screenClose.select(CloseReason.GoalMet))
+        assertEquals(CloseReason.UserDismissed, screenClose.reason)
         assertEquals(emptyList<CloseReason>(), reported)
 
-        claim.reportAtTeardown(isChangingConfigurations = false)
+        screenClose.reportAtTeardown(isChangingConfigurations = false)
 
         assertEquals(listOf<CloseReason>(CloseReason.UserDismissed), reported)
     }
@@ -1259,7 +1236,7 @@ class ExperiencePresentationServiceTest {
 
         val dismissal = async { service.dismissFromHost("customer-1") }
         runCurrent()
-        assertEquals(CloseReason.HostDismissed, activity.claimedCloseReason())
+        assertEquals(CloseReason.HostDismissed, activity.screenCloseReason())
 
         try {
             NuxieExperienceActivity::class.java
@@ -1348,7 +1325,7 @@ class ExperiencePresentationServiceTest {
 
         val dismissal = async { service.dismissFromHost("customer-1") }
         runCurrent()
-        assertEquals(CloseReason.HostDismissed, recreatedActivity.claimedCloseReason())
+        assertEquals(CloseReason.HostDismissed, recreatedActivity.screenCloseReason())
         invokeOnDestroy(recreatedActivity)
 
         try {
@@ -1490,10 +1467,10 @@ class ExperiencePresentationServiceTest {
         },
         emit: (String, Map<String, Any?>, String?) -> Unit = { _, _, _ -> },
         launch: (String) -> Unit = {},
-        markOutcomeInMemory: suspend (PresentationOutcome) -> Boolean = { true },
+        transitionOutcome: suspend (PresentationOutcome) -> Boolean = { true },
         reportOutcome: suspend (PresentationOutcome) -> Unit = {},
         firstFrameTimeoutMillis: Long = 30_000,
-        beforeHostSemanticClaimForTesting: () -> Unit = {},
+        beforeHostTeardownForTesting: () -> Unit = {},
     ) = ExperiencePresentationService(
         releases = provider,
         acquire = acquire,
@@ -1501,10 +1478,10 @@ class ExperiencePresentationServiceTest {
         scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined),
         runtimeAvailable = { runtimeAvailable },
         launch = launch,
-        markOutcomeInMemory = markOutcomeInMemory,
+        transitionOutcome = transitionOutcome,
         reportOutcome = reportOutcome,
         firstFrameTimeoutMillis = firstFrameTimeoutMillis,
-        beforeHostSemanticClaimForTesting = beforeHostSemanticClaimForTesting,
+        beforeHostTeardownForTesting = beforeHostTeardownForTesting,
     )
 
     private suspend fun expectPresentationFailure(

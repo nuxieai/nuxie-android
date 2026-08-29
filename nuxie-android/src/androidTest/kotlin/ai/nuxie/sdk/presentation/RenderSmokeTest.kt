@@ -68,6 +68,7 @@ class RenderSmokeTest {
             onFirstFrame = {},
             onFailure = { throw AssertionError("Experience host failed", it) },
             onDismissed = {},
+            onOutcome = {},
         )
 
         try {
