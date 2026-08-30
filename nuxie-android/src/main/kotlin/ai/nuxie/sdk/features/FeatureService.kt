@@ -231,10 +231,27 @@ internal class FeatureService(
         authoritativeMutationRevision
     }
 
+    /**
+     * Apply an already available profile using revisions captured at this call site.
+     * Keep this three-argument shape stable because Kotlin callers that omit the
+     * revision link against its generated default-argument method.
+     */
     suspend fun hydrateProfile(
         distinctId: String,
         body: JsonObject,
         snapshotPurchaseRevision: Long = capturePurchaseRevision(),
+    ) = hydrateProfile(
+        distinctId,
+        body,
+        snapshotPurchaseRevision,
+        reserveAuthoritativeRevision(),
+    )
+
+    /** Apply a profile using revisions reserved before profile I/O began. */
+    suspend fun hydrateProfile(
+        distinctId: String,
+        body: JsonObject,
+        snapshotPurchaseRevision: Long,
         snapshotAuthoritativeRevision: Long = reserveAuthoritativeRevision(),
     ) {
         val hydrationGeneration = synchronized(lock) { scopeGeneration }
