@@ -355,7 +355,7 @@ class NuxieMeteredUseTest {
         )
 
         assertTrue(result.success)
-        assertEquals(8.0, core.featureInfo.balance("credits")!!, 0.0)
+        assertEquals(18.0, core.featureInfo.balance("credits")!!, 0.0)
         assertEquals(2, transport.requests.count { it.url.path == "/event" })
         assertEquals(0, transport.requests.count { it.url.path == "/entitled" })
         val body = Json.parseToJsonElement(
@@ -363,6 +363,8 @@ class NuxieMeteredUseTest {
         ).jsonObject
         assertTrue(body.getValue("properties").jsonObject.getValue("setUsage").jsonPrimitive.boolean)
         assertFalse(store.load().getValue("token-1").synced)
+        core.features.applyOptimisticPurchaseProjection("customer-a", null)
+        assertEquals(8.0, core.featureInfo.balance("credits")!!, 0.0)
         core.stop()
     }
 

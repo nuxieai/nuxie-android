@@ -46,8 +46,10 @@ internal class ProfileService(
         distinctId: String,
         body: JsonObject,
         purchaseRevision: Long,
-    ) -> Unit = { _, _, _ -> },
+        authoritativeRevision: Long,
+    ) -> Unit = { _, _, _, _ -> },
     private val captureFeaturePurchaseRevision: () -> Long = { 0L },
+    private val reserveFeatureAuthoritativeRevision: () -> Long = { 0L },
     scope: CoroutineScope,
     private val localeProvider: () -> String?,
     private val nowMillis: () -> Long = System::currentTimeMillis,
@@ -126,10 +128,11 @@ internal class ProfileService(
 
     private suspend fun handleUserChange(newDistinctId: String) {
         val featurePurchaseRevision = captureFeaturePurchaseRevision()
+        val featureAuthoritativeRevision = reserveFeatureAuthoritativeRevision()
         val cached = synchronized(lock) { loadCached(newDistinctId) }
         if (cached != null && isFresh(cached)) {
             synchronized(lock) { resident = cached }
-            applyProfile(cached, featurePurchaseRevision)
+            applyProfile(cached, featurePurchaseRevision, featureAuthoritativeRevision)
             // Fresh enough to skip an immediate network hit?
             if (nowMillis() - cached.cachedAtMillis < BACKGROUND_REFRESH_AGE_MILLIS) return
         } else if (cached != null) {
@@ -142,10 +145,11 @@ internal class ProfileService(
     private suspend fun loadFromDisk() {
         val distinctId = identity.distinctId()
         val featurePurchaseRevision = captureFeaturePurchaseRevision()
+        val featureAuthoritativeRevision = reserveFeatureAuthoritativeRevision()
         val cached = synchronized(lock) { loadCached(distinctId) }
         if (cached != null && isFresh(cached)) {
             synchronized(lock) { resident = cached }
-            applyProfile(cached, featurePurchaseRevision)
+            applyProfile(cached, featurePurchaseRevision, featureAuthoritativeRevision)
         } else if (cached != null) {
             synchronized(lock) { fileFor(distinctId).delete() }
         }
@@ -155,6 +159,7 @@ internal class ProfileService(
         val distinctId = identity.distinctId()
         val locale = localeProvider()
         val featurePurchaseRevision = captureFeaturePurchaseRevision()
+        val featureAuthoritativeRevision = reserveFeatureAuthoritativeRevision()
         val previous = synchronized(lock) {
             resident?.takeIf { it.distinctId == distinctId && isFresh(it) }
         }
@@ -208,11 +213,15 @@ internal class ProfileService(
             resident = cached
             persist(cached)
         }
-        applyProfile(cached, featurePurchaseRevision)
+        applyProfile(cached, featurePurchaseRevision, featureAuthoritativeRevision)
         return true
     }
 
-    private suspend fun applyProfile(cached: CachedProfile, featurePurchaseRevision: Long) {
+    private suspend fun applyProfile(
+        cached: CachedProfile,
+        featurePurchaseRevision: Long,
+        featureAuthoritativeRevision: Long,
+    ) {
         (cached.body["userProperties"] as? JsonObject)?.let { properties ->
             applyUserProperties(properties.mapValues { (_, value) -> value })
         }
@@ -221,7 +230,12 @@ internal class ProfileService(
             cached.body["segmentMemberships"] as? JsonObject,
         )
         applyJourneyProfile(cached.distinctId, cached.body)
-        applyFeatureProfile(cached.distinctId, cached.body, featurePurchaseRevision)
+        applyFeatureProfile(
+            cached.distinctId,
+            cached.body,
+            featurePurchaseRevision,
+            featureAuthoritativeRevision,
+        )
     }
 
     private fun clearCache(distinctId: String) {

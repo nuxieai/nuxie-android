@@ -285,10 +285,16 @@ internal class NuxieCore(
             journeyCatalog.applyProfile(distinctId, body)
             scope.launch { journeys.applyDownFacts(body, distinctId) }
         },
-        applyFeatureProfile = { distinctId, body, purchaseRevision ->
-            features.hydrateProfile(distinctId, body, purchaseRevision)
+        applyFeatureProfile = { distinctId, body, purchaseRevision, authoritativeRevision ->
+            features.hydrateProfile(
+                distinctId,
+                body,
+                purchaseRevision,
+                authoritativeRevision,
+            )
         },
         captureFeaturePurchaseRevision = features::capturePurchaseRevision,
+        reserveFeatureAuthoritativeRevision = features::reserveAuthoritativeRevision,
         scope = scope,
         localeProvider = { null },  // locale override arrives with setLocaleIdentifier
         nowMillis = nowMillis,
