@@ -235,7 +235,14 @@ internal class PurchaseService(
                     if (!evidenceStore.upsert(accepted)) {
                         throw IllegalStateException("Could not persist accepted purchase evidence.")
                     }
-                    if (this.distinctId() != distinctId) throw kotlinx.coroutines.CancellationException()
+                    val currentDistinctId = this.distinctId()
+                    if (currentDistinctId != distinctId) {
+                        features.applyOptimisticPurchaseProjection(
+                            currentDistinctId,
+                            deriveOptimisticProjection(currentDistinctId),
+                        )
+                        throw kotlinx.coroutines.CancellationException()
+                    }
                     features.applyAuthoritativeUse(
                         response,
                         requestedFeatureId = featureId,
@@ -601,7 +608,13 @@ internal class PurchaseService(
             existing?.ownerDistinctId != ownerDistinctId &&
             (existing?.ownerDistinctId ?: existing?.syncAttributionDistinctId) == currentOwner
         ) {
-            refreshOptimisticProjection()
+            projectionRefresh.withLock {
+                features.reassignPurchaseAuthority(
+                    currentOwner,
+                    evidence.purchaseToken,
+                    deriveOptimisticProjection(currentOwner),
+                )
+            }
         }
         if (purchase.state == StoredPurchaseState.PENDING) {
             complete(purchase, PurchaseResult.Pending)

@@ -163,15 +163,17 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
-    fun fileStoreMigratesCachedAllowanceDescriptorsFromThePreviousKey() {
-        val directory = Files.createTempDirectory("nuxie-product-mapping-migration").toFile()
+    fun fileStoreIgnoresRetiredAllowanceKeys() {
+        // Pre-GA hard cut: the retired localFeatureGrants key is not migrated;
+        // a mapping carrying only the old key decodes with no allowances.
+        val directory = Files.createTempDirectory("nuxie-product-mapping-retired").toFile()
         try {
             directory.resolve("purchase-catalog.json").writeText(
                 """[{"storeProductId":"play-pro","nuxieProductId":"pro","productType":"inapp","consumable":false,"localFeatureGrants":[{"featureId":"exports","type":"METERED","unlimited":false,"allowance":3.5}]}]""",
             )
 
             assertEquals(
-                listOf(StoredFeatureAllowance("exports", "METERED", false, 3.5)),
+                emptyList<StoredFeatureAllowance>(),
                 FilePurchaseEvidenceStore(directory).loadProductMappings().single().featureAllowances,
             )
         } finally {
