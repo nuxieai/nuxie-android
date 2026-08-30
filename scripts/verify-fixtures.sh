@@ -77,6 +77,22 @@ if invalid_checksums:
         print(f"Invalid checksum in manifest: {path}", file=sys.stderr)
     raise SystemExit(1)
 
+source_commit_overrides = manifest.get("sourceCommitOverrides", {})
+if not isinstance(source_commit_overrides, dict):
+    fail("Fixture manifest sourceCommitOverrides must be an object when present.")
+invalid_source_overrides = sorted(
+    path
+    for path, commit in source_commit_overrides.items()
+    if path not in expected_files
+    or not isinstance(path, str)
+    or not isinstance(commit, str)
+    or re.fullmatch(r"[0-9a-fA-F]{40,64}", commit) is None
+)
+if invalid_source_overrides:
+    for path in invalid_source_overrides:
+        print(f"Invalid source commit override in manifest: {path}", file=sys.stderr)
+    raise SystemExit(1)
+
 actual_files = {}
 for path in sorted(
     fixture_root.rglob("*"),
@@ -117,6 +133,7 @@ if missing_paths or extra_paths or mismatched_paths:
 
 print(
     f"Verified {len(actual_files)} fixture files from "
-    f"{manifest['sourceRepo']}@{source_commit}."
+    f"{manifest['sourceRepo']}@{source_commit} "
+    f"with {len(source_commit_overrides)} source commit override(s)."
 )
 PY

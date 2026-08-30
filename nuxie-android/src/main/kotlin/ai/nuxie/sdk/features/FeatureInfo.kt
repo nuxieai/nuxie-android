@@ -23,7 +23,7 @@ import kotlinx.coroutines.withContext
  */
 class FeatureInfo {
     /** Whether server-backed Feature access is available and fully reconciled. */
-    internal sealed interface State {
+    sealed interface State {
         /** No profile has hydrated access for the current customer yet. */
         object Unknown : State
 
@@ -55,11 +55,11 @@ class FeatureInfo {
         internal val apply: suspend () -> Unit,
     )
 
-    internal val state: StateFlow<State> = mutableState
+    val state: StateFlow<State> = mutableState
     val all: StateFlow<Map<String, FeatureAccess>> = mutableAll
 
     /** Suspends until profile-backed Feature access is available. */
-    internal suspend fun awaitReady() {
+    suspend fun awaitReady() {
         state.filterIsInstance<State.Ready>().first()
     }
 

@@ -185,6 +185,80 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun authoritativeUsageBalanceRecomposesBeneathTheOptimisticOverlay() = runBlocking {
+        val core = core(FakeTransport())
+        val customer = core.identity.distinctId()
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement(
+                profile(
+                    """[{"id":"credits","type":"creditSystem","balance":5,"unlimited":false}]""",
+                ),
+            ).jsonObject,
+        )
+        core.features.applyOptimisticPurchaseProjection(
+            customer,
+            mapOf("credits" to OptimisticFeatureOverlay(FeatureType.CREDIT_SYSTEM, false, 10.0)),
+        )
+
+        core.features.applyAuthoritativeUsageBalance("credits", balance = 4.0, entityId = null)
+
+        assertEquals(14.0, core.featureInfo.balance("credits")!!, 0.0)
+        core.features.applyOptimisticPurchaseProjection(customer, null)
+        assertEquals(4.0, core.featureInfo.balance("credits")!!, 0.0)
+        core.stop()
+    }
+
+    @Test
+    fun authoritativeUsageBalanceRevisionFencesAnOlderInFlightCheck() = runBlocking {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checkStarted.countDown()
+                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "credits",
+                            requiredBalance = 1.0,
+                            balance = "3",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+        val customer = core.identity.distinctId()
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement(
+                profile(
+                    """[{"id":"credits","type":"metered","balance":5,"unlimited":false}]""",
+                ),
+            ).jsonObject,
+        )
+        core.features.applyOptimisticPurchaseProjection(
+            customer,
+            mapOf("credits" to OptimisticFeatureOverlay(FeatureType.METERED, false, 10.0)),
+        )
+
+        val olderCheck = async(Dispatchers.Default) { runCatching { core.features.check("credits") } }
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+        core.features.applyAuthoritativeUsageBalance("credits", balance = 4.0, entityId = null)
+        releaseCheck.countDown()
+
+        assertTrue(olderCheck.await().exceptionOrNull() is CancellationException)
+        assertEquals(14.0, core.featureInfo.balance("credits")!!, 0.0)
+        core.stop()
+    }
+
+    @Test
     fun authoritativeUseRevisionGuardsRejectOlderInFlightCheckWrites() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
@@ -642,7 +716,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun remoteCheckCommitsBeneathProfileAndOverlayWithoutAdvancingTheirFence() = runBlocking {
+    fun profileSnapshotRevisionFencesAnOlderRemoteCheck() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
         lateinit var core: NuxieCore
@@ -683,7 +757,7 @@ class FeatureServiceTest {
         )
         releaseCheck.countDown()
 
-        assertFalse(check.await().allowed)
+        assertTrue(runCatching { check.await() }.exceptionOrNull() is CancellationException)
         assertTrue(core.features.getCached("pro", null)!!.allowed)
         core.stop()
     }
@@ -732,7 +806,7 @@ class FeatureServiceTest {
         core.features.hydrateProfile(customer, allowedProfile)
         releaseCheck.countDown()
 
-        assertFalse(check.await().allowed)
+        assertTrue(check.await().allowed)
         assertTrue(core.features.getCached("pro", null)!!.allowed)
         core.stop()
     }
@@ -1136,7 +1210,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun cacheFirstCheckCommitsBeneathTheOverlayAboveHydratedProfile() = runBlocking {
+    fun cacheFirstCheckReturnsTheProfileAndOverlayThatSupersededIt() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
         lateinit var core: NuxieCore
@@ -1186,8 +1260,8 @@ class FeatureServiceTest {
         val access = check.await()
         assertTrue(access.allowed)
         assertFalse(access.unlimited)
-        assertEquals(5.0, access.balance)
-        assertEquals(FeatureType.CREDIT_SYSTEM, access.type)
+        assertEquals(0.0, access.balance)
+        assertEquals(FeatureType.METERED, access.type)
         assertTrue(core.featureInfo.isAllowed("exports"))
         core.stop()
     }
@@ -1310,25 +1384,29 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun transitiveBalanceSourceCommitSupersedesPendingSourceCheck() = runBlocking {
+    fun newerBalanceSourceCommitSupersedesOlderDependentResponse() = runBlocking {
         val exportsStarted = CountDownLatch(1)
         val walletStarted = CountDownLatch(1)
         val releaseExports = CountDownLatch(1)
         val releaseWallet = CountDownLatch(1)
+        val exportsChecks = AtomicInteger()
         lateinit var core: NuxieCore
         val transport = FakeTransport().apply {
             respond = { request ->
                 val body = request.body.decodeToString()
                 if (body.contains("\"featureId\":\"exports\"")) {
-                    exportsStarted.countDown()
-                    assertTrue(releaseExports.await(5, TimeUnit.SECONDS))
+                    val checkNumber = exportsChecks.incrementAndGet()
+                    if (checkNumber == 1) {
+                        exportsStarted.countDown()
+                        assertTrue(releaseExports.await(5, TimeUnit.SECONDS))
+                    }
                     HttpTransport.Response(
                         200,
                         featureResponse(
                             customerId = core.identity.distinctId(),
                             featureId = "wallet",
                             requiredBalance = 2.0,
-                            balance = "8",
+                            balance = if (checkNumber == 1) "8" else "1",
                             type = "creditSystem",
                         ).encodeToByteArray(),
                     )
@@ -1351,17 +1429,81 @@ class FeatureServiceTest {
         core = core(transport)
 
         val exports = async(Dispatchers.Default) {
-            core.features.check("exports", requiredBalance = 2.0)
+            core.features.checkWithCache(
+                "exports",
+                requiredBalance = 2.0,
+                forceRefresh = true,
+            )
         }
         assertTrue(exportsStarted.await(5, TimeUnit.SECONDS))
         val wallet = async(Dispatchers.Default) { core.features.check("wallet") }
         assertTrue(walletStarted.await(5, TimeUnit.SECONDS))
-        releaseExports.countDown()
-        exports.await()
         releaseWallet.countDown()
+        assertEquals(1.0, wallet.await().balance!!, 0.0)
+        releaseExports.countDown()
 
-        assertTrue(runCatching { wallet.await() }.exceptionOrNull() is CancellationException)
-        assertEquals(8.0, core.features.getCached("wallet", null)!!.balance!!, 0.0)
+        assertTrue(runCatching { exports.await() }.exceptionOrNull() is CancellationException)
+        assertEquals(1.0, core.features.getCached("wallet", null)!!.balance!!, 0.0)
+        assertEquals(
+            1.0,
+            core.features.checkWithCache("exports", requiredBalance = 2.0).balance!!,
+            0.0,
+        )
+        assertEquals(2, exportsChecks.get())
+        core.stop()
+    }
+
+    @Test
+    fun newerPurchaseAuthoritySupersedesOlderDependentResponse() = runBlocking {
+        val exportsStarted = CountDownLatch(1)
+        val releaseExports = CountDownLatch(1)
+        val exportsChecks = AtomicInteger()
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = respond@{ request ->
+                if (request.url.path != "/entitled") {
+                    return@respond HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+                val checkNumber = exportsChecks.incrementAndGet()
+                if (checkNumber == 1) {
+                    exportsStarted.countDown()
+                    assertTrue(releaseExports.await(5, TimeUnit.SECONDS))
+                }
+                HttpTransport.Response(
+                    200,
+                    featureResponse(
+                        customerId = core.identity.distinctId(),
+                        featureId = "wallet",
+                        requiredBalance = 2.0,
+                        balance = if (checkNumber == 1) "8" else "1",
+                        type = "creditSystem",
+                    ).encodeToByteArray(),
+                )
+            }
+        }
+        core = core(transport)
+
+        val exports = async(Dispatchers.Default) {
+            core.features.check("exports", requiredBalance = 2.0)
+        }
+        assertTrue(exportsStarted.await(5, TimeUnit.SECONDS))
+        core.features.updateFromPurchase(
+            core.identity.distinctId(),
+            Json.parseToJsonElement(
+                """{"success":true,"features":[{"id":"internal-wallet","ext_id":"wallet","type":"creditSystem","allowed":true,"unlimited":false,"balance":1}]}""",
+            ).jsonObject,
+            "newer-wallet-purchase",
+        )
+        releaseExports.countDown()
+
+        assertTrue(runCatching { exports.await() }.exceptionOrNull() is CancellationException)
+        assertEquals(1.0, core.features.getCached("wallet", null)!!.balance!!, 0.0)
+        assertEquals(
+            1.0,
+            core.features.checkWithCache("exports", requiredBalance = 2.0).balance!!,
+            0.0,
+        )
+        assertEquals(2, exportsChecks.get())
         core.stop()
     }
 
