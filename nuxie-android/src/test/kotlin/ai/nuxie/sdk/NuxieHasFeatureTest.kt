@@ -1,9 +1,9 @@
 package ai.nuxie.sdk
 
+import ai.nuxie.sdk.commerce.OptimisticFeatureOverlay
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.features.FeatureCheckPolicy
 import ai.nuxie.sdk.features.FeatureType
-import ai.nuxie.sdk.features.LocalPurchaseGrant
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.testsupport.FakeTransport
 import kotlinx.coroutines.runBlocking
@@ -150,7 +150,7 @@ class NuxieHasFeatureTest {
     }
 
     @Test
-    fun remoteReconcilesOptimisticAccessAndReturnsTheServerResult() = runBlocking {
+    fun remoteReturnsTheServerResultWithoutFlickeringTheVisibleOverlay() = runBlocking {
         val transport = FakeTransport().apply {
             respond = { request ->
                 when (request.url.path) {
@@ -168,16 +168,17 @@ class NuxieHasFeatureTest {
             }
         }
         setup(transport)
-        requireNotNull(Nuxie.core).features.applyLocalPurchase(
-            grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
-            transactionId = "optimistic-token",
+        val core = requireNotNull(Nuxie.core)
+        core.features.applyOptimisticPurchaseProjection(
+            core.identity.distinctId(),
+            mapOf("pro" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null)),
         )
         assertTrue(Nuxie.features.isAllowed("pro"))
 
         val access = Nuxie.hasFeature("pro", policy = FeatureCheckPolicy.REMOTE)
 
         assertFalse(access.allowed)
-        assertFalse(Nuxie.features.isAllowed("pro"))
+        assertTrue(Nuxie.features.isAllowed("pro"))
     }
 
     @Test

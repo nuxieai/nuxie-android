@@ -37,9 +37,10 @@ enum class FeatureCheckPolicy {
     REMOTE,
 }
 
-/** Immutable server-catalog mapping used for optimistic purchase access. */
-internal data class LocalPurchaseGrant(
+/** Immutable signed-product allowance used to derive optimistic Feature access. */
+internal data class FeatureAllowance(
     val featureId: String,
     val type: FeatureType,
     val unlimited: Boolean = false,
+    val allowance: Double? = null,
 )

@@ -228,7 +228,7 @@ class PurchaseFeatureUseTest {
 
     @Test
     fun evidenceWithoutTheRequestedFeatureIsNotEligible() = assertDisqualified(
-        evidence(featureId = "other-feature"),
+        evidence(storeProductIds = listOf("play-other-pack")),
     )
 
     @Test
@@ -376,26 +376,28 @@ class PurchaseFeatureUseTest {
             PurchaseSyncOutcome.Rejected(permanent = false)
         },
         billing: PlayBillingGateway = NoopBilling,
-    ) = PurchaseService(
-        billing = billing,
-        evidenceStore = store,
-        synchronizer = synchronizer,
-        features = core.features,
-        distinctId = core.identity::distinctId,
-        emit = { _, _ -> },
-        settings = PurchaseSettings(null, PurchaseHandlingMode.NUXIE_MANAGED),
-        scope = core.scope,
-        nowMillis = { 1_784_462_400_000L },
-        api = core.api,
-        purchaseStorageScope = "scope-a",
-        capturePurchaseSynced = capture,
-    )
+    ): PurchaseService {
+        store.upsertProductMapping(featureDescriptor())
+        return PurchaseService(
+            billing = billing,
+            evidenceStore = store,
+            synchronizer = synchronizer,
+            features = core.features,
+            distinctId = core.identity::distinctId,
+            emit = { _, _ -> },
+            settings = PurchaseSettings(null, PurchaseHandlingMode.NUXIE_MANAGED),
+            scope = core.scope,
+            nowMillis = { 1_784_462_400_000L },
+            api = core.api,
+            purchaseStorageScope = "scope-a",
+            capturePurchaseSynced = capture,
+        )
+    }
 
     private fun evidence(
         token: String = "token-1",
         authorityScope: String = "scope-a",
         ownerDistinctId: String = "customer-a",
-        featureId: String = "credits",
         packageName: String = "com.example.app",
         storeProductIds: List<String> = listOf("play-credit-pack"),
         purchaseState: StoredPurchaseState = StoredPurchaseState.PURCHASED,
@@ -405,7 +407,7 @@ class PurchaseFeatureUseTest {
         synced: Boolean = false,
         backendSyncedAtMillis: Long? = null,
         signatureVerificationRequired: Boolean = false,
-        signatureVerified: Boolean = false,
+        signatureVerified: Boolean = true,
         context: StoredPurchaseContext? = null,
     ) = PurchaseEvidence(
         purchaseToken = token,
@@ -420,9 +422,6 @@ class PurchaseFeatureUseTest {
         acknowledged = false,
         synced = synced,
         firstSeenMillis = 1_784_462_300_000L,
-        localFeatureGrants = listOf(
-            StoredLocalPurchaseGrant(featureId, FeatureType.CREDIT_SYSTEM.name, false),
-        ),
         catalogResolved = true,
         nuxieManaged = nuxieManaged,
         revoked = revoked,
@@ -431,6 +430,16 @@ class PurchaseFeatureUseTest {
         signatureVerificationRequired = signatureVerificationRequired,
         signatureVerified = signatureVerified,
         context = context,
+    )
+
+    private fun featureDescriptor() = StoredProductMapping(
+        storeProductId = "play-credit-pack",
+        nuxieProductId = "credit-pack",
+        productType = BillingClient.ProductType.INAPP,
+        consumable = true,
+        featureAllowances = listOf(
+            StoredFeatureAllowance("credits", FeatureType.CREDIT_SYSTEM.name, false, allowance = 1.0),
+        ),
     )
 
     private fun assertDisqualified(disqualified: PurchaseEvidence) = runTest {
@@ -553,6 +562,15 @@ class PurchaseFeatureUseTest {
         override fun upsert(evidence: PurchaseEvidence): Boolean = synchronized(entries) {
             entries[evidence.purchaseToken] = evidence
             true
+        }
+
+        private var mapping: StoredProductMapping? = null
+
+        override fun loadProductMappings(): List<StoredProductMapping> = listOfNotNull(mapping)
+
+        override fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
+            this.mapping = mapping
+            return true
         }
     }
 

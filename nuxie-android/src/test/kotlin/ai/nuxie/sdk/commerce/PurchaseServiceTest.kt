@@ -7,7 +7,7 @@ import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.events.ActivityCuration
 import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.features.FeatureType
-import ai.nuxie.sdk.features.LocalPurchaseGrant
+import ai.nuxie.sdk.features.FeatureAllowance
 import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.testsupport.FakeTransport
 import android.app.Activity
@@ -41,15 +41,15 @@ import org.robolectric.RuntimeEnvironment
 @OptIn(ExperimentalCoroutinesApi::class)
 class PurchaseServiceTest {
     @Test
-    fun purchasedPersistsAndGrantsBeforeSyncThenAcknowledgesAfterAcceptance() = runTest {
+    fun purchasedPersistsAndProjectsBeforeSyncThenAcknowledgesAfterAcceptance() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(this, actions = actions)
         val product = product(
-            grants = listOf(
-                LocalPurchaseGrant("pro", FeatureType.BOOLEAN),
-                LocalPurchaseGrant("exports", FeatureType.METERED),
-                LocalPurchaseGrant("unlimited", FeatureType.METERED, unlimited = true),
-                LocalPurchaseGrant("credits", FeatureType.CREDIT_SYSTEM),
+            allowances = listOf(
+                FeatureAllowance("pro", FeatureType.BOOLEAN),
+                FeatureAllowance("exports", FeatureType.METERED),
+                FeatureAllowance("unlimited", FeatureType.METERED, unlimited = true),
+                FeatureAllowance("credits", FeatureType.CREDIT_SYSTEM),
             ),
         )
         fixture.synchronizer = { evidence ->
@@ -158,7 +158,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun pendingPersistsButDoesNotGrantSyncOrAcknowledge() = runTest {
+    fun pendingPersistsButDoesNotProjectSyncOrAcknowledge() = runTest {
         val actions = mutableListOf<String>()
         val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
         val fixture = fixture(this, actions = actions, emissions = emissions)
@@ -166,7 +166,7 @@ class PurchaseServiceTest {
             fixture.service.purchase(
                 activity(),
                 product(
-                    grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+                    allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
                     rawProduct = oneTimeProductDetails(),
                 ),
                 null,
@@ -229,7 +229,7 @@ class PurchaseServiceTest {
         val purchase = async {
             fixture.service.purchase(
                 activity(),
-                product(grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN))),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
                 null,
             )
         }
@@ -260,18 +260,18 @@ class PurchaseServiceTest {
         )
         assertTrue(restarted.core.featureInfo.isAllowed("pro"))
         restarted.service.recover()
-        assertFalse(restarted.core.featureInfo.isAllowed("pro"))
+        assertTrue(restarted.core.featureInfo.isAllowed("pro"))
         restarted.close()
     }
 
     @Test
-    fun recoveredAbsenceFromPlayRevokesAnUnsyncedManagedOptimisticGrant() = runTest {
+    fun recoveredAbsenceFromPlayRevokesAnUnsyncedManagedOptimisticOverlay() = runTest {
         val fixture = fixture(this)
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
         val checkout = async {
             fixture.service.purchase(
                 activity(),
-                product(grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN))),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
                 null,
             )
         }
@@ -310,10 +310,10 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun unsolicitedTokenWithoutBindingSyncsButGrantsOnlyForAMatchingCustomer() = runTest {
+    fun unsolicitedTokenWithoutBindingSyncsButProjectsOnlyForAMatchingCustomer() = runTest {
         val unmatched = fixture(this)
         unmatched.service.rememberProduct(
-            product(grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN))),
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
         )
         unmatched.synchronizer = {
             assertFalse(unmatched.core.featureInfo.isAllowed("pro"))
@@ -330,7 +330,7 @@ class PurchaseServiceTest {
 
         val matching = fixture(this)
         matching.service.rememberProduct(
-            product(grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN))),
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
         )
         matching.synchronizer = {
             assertTrue(matching.core.featureInfo.isAllowed("pro"))
@@ -361,7 +361,7 @@ class PurchaseServiceTest {
             obfuscatedAccountId = accountHash(provenOwner),
         )
         fixture.service.rememberProduct(
-            product(grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN))),
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
         )
 
         fixture.service.onPurchasesUpdated(okUpdate(purchase))
@@ -395,7 +395,7 @@ class PurchaseServiceTest {
             obfuscatedAccountId = accountHash(provenOwner),
         )
         fixture.service.rememberProduct(
-            product(grants = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN))),
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
         )
         val syncStarted = CountDownLatch(1)
         val releaseAcceptance = CountDownLatch(1)
@@ -424,7 +424,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun recoverySyncsProvisionallyAttributedEvidenceWithoutOptimisticGrant() = runTest {
+    fun recoverySyncsProvisionallyAttributedEvidenceWithoutOptimisticOverlay() = runTest {
         val fixture = fixture(this)
         fixture.store.upsert(
             PurchaseEvidence(
@@ -435,9 +435,6 @@ class PurchaseServiceTest {
                 syncAttributionDistinctId = fixture.core.identity.distinctId(),
                 acknowledged = false,
                 firstSeenMillis = 1L,
-                localFeatureGrants = listOf(
-                    StoredLocalPurchaseGrant("pro", FeatureType.BOOLEAN.name, unlimited = false),
-                ),
             ),
         )
         fixture.synchronizer = {
@@ -456,7 +453,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun recoveryDoesNotGrantEvidenceWhoseRequiredSignatureWasNeverVerified() = runTest {
+    fun recoveryDoesNotProjectEvidenceWhoseRequiredSignatureWasNeverVerified() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()
         fixture.store.upsert(
@@ -469,9 +466,6 @@ class PurchaseServiceTest {
                 ownerDistinctId = owner,
                 acknowledged = false,
                 firstSeenMillis = 1L,
-                localFeatureGrants = listOf(
-                    StoredLocalPurchaseGrant("pro", FeatureType.BOOLEAN.name, unlimited = false),
-                ),
                 catalogResolved = true,
                 signatureVerificationRequired = true,
                 signatureVerified = false,
@@ -501,9 +495,6 @@ class PurchaseServiceTest {
                 ownerDistinctId = fixture.core.identity.distinctId(),
                 acknowledged = false,
                 firstSeenMillis = 1L,
-                localFeatureGrants = listOf(
-                    StoredLocalPurchaseGrant("pro", FeatureType.BOOLEAN.name, unlimited = false),
-                ),
                 catalogResolved = true,
             ),
         )
@@ -684,7 +675,11 @@ class PurchaseServiceTest {
             PurchaseResult.Purchased,
             fixture.service.purchase(
                 activity(),
-                product(subscription = true, rawProduct = subscriptionProductDetails()),
+                product(
+                    subscription = true,
+                    allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
+                    rawProduct = subscriptionProductDetails(),
+                ),
                 null,
             ),
         )
@@ -704,6 +699,8 @@ class PurchaseServiceTest {
             "€9.99",
         )
         assertEquals(null, fixture.billing.launched)
+        assertTrue(fixture.store.load().isEmpty())
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
     }
 
@@ -746,23 +743,41 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun storedEvidenceSurvivesRestartAndCompletesInterruptedSync() = runTest {
+    fun storedEvidenceRehydratesProjectionAfterRestartAndCompletesInterruptedSync() = runTest {
         val shared = RecordingEvidenceStore()
         val first = fixture(this, store = shared)
         first.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
-        val purchase = async { first.service.purchase(activity(), product(), null) }
+        val purchase = async {
+            first.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
         runCurrent()
         first.service.onPurchasesUpdated(okUpdate(playPurchase("restart-token").forCheckout(first)))
         assertEquals(PurchaseResult.Purchased, purchase.await())
         assertFalse(shared.load().getValue("restart-token").synced)
+        assertTrue(first.core.featureInfo.isAllowed("pro"))
 
         val actions = mutableListOf<String>()
         val second = fixture(this, store = shared, actions = actions)
+        second.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase(
+                "restart-token",
+                obfuscatedAccountId = accountHash(second.core.identity.distinctId()),
+            ),
+        )
+        second.synchronizer = {
+            assertTrue(second.core.featureInfo.isAllowed("pro"))
+            accepted(it.syncAttributionDistinctId)
+        }
         second.service.recover()
 
         assertTrue(shared.load().getValue("restart-token").synced)
         assertTrue(shared.load().getValue("restart-token").acknowledged)
         assertTrue("ack" in actions)
+        assertTrue(second.core.featureInfo.isAllowed("pro"))
         first.close()
         second.close()
     }
@@ -863,7 +878,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun unknownAccountPurchaseSyncsForCurrentCustomerWithoutOptimisticGrant() = runTest {
+    fun unknownAccountPurchaseSyncsForCurrentCustomerWithoutOptimisticOverlay() = runTest {
         val fixture = fixture(this)
 
         fixture.service.onPurchasesUpdated(
@@ -914,6 +929,7 @@ class PurchaseServiceTest {
             scope = scope.backgroundScope,
             initialRetryDelayMillis = initialRetryDelayMillis,
             maxRetryDelayMillis = maxRetryDelayMillis,
+            verifyPurchaseSignature = { _, _, _ -> true },
         )
         fixture = Fixture(core, billing, store, service, settings) { accepted(core.identity.distinctId()) }
         return fixture
@@ -999,8 +1015,8 @@ class PurchaseServiceTest {
     private fun product(
         subscription: Boolean = false,
         consumable: Boolean = false,
-        grants: List<LocalPurchaseGrant> = emptyList(),
-        licensingPublicKey: String? = null,
+        allowances: List<FeatureAllowance> = emptyList(),
+        licensingPublicKey: String? = "test-public-key",
         rawProduct: ProductDetails? = null,
     ) = StoreProduct(
         productId = "nuxie-pro",
@@ -1013,7 +1029,7 @@ class PurchaseServiceTest {
         isOfferPersonalized = true,
         productType = if (subscription) BillingClient.ProductType.SUBS else BillingClient.ProductType.INAPP,
         consumable = consumable,
-        localFeatureGrants = grants,
+        featureAllowances = allowances,
         licensingPublicKey = licensingPublicKey,
         purchaseContext = PurchaseContext("experience-1", "v1"),
     )
@@ -1110,8 +1126,8 @@ class PurchaseServiceTest {
             purchaseContext?.experienceId,
             purchaseContext?.experienceVersion,
         ),
-        localFeatureGrants = localFeatureGrants.map {
-            StoredLocalPurchaseGrant(it.featureId, it.type.name, it.unlimited)
+        featureAllowances = featureAllowances.map {
+            StoredFeatureAllowance(it.featureId, it.type.name, it.unlimited, it.allowance)
         },
         licensingPublicKey = licensingPublicKey,
         nuxieManaged = nuxieManaged,

@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.features
 
+import ai.nuxie.sdk.commerce.OptimisticFeatureOverlay
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.network.NuxieApi
 import kotlinx.serialization.json.JsonArray
@@ -18,7 +19,6 @@ internal class FeatureService(
     private val identity: IdentityProvider,
     private val featureInfo: FeatureInfo,
     private val cacheTtlMillis: Long,
-    private val revocationStore: DurableFeatureRevocationStore,
     private val nowMillis: () -> Long = System::currentTimeMillis,
 ) {
     internal data class AuthoritativeUseScope(
@@ -38,7 +38,7 @@ internal class FeatureService(
         val supersededByMutation: Boolean,
     )
     private data class PurchaseProjection(
-        val grants: Map<String, FeatureAccess>,
+        val access: Map<String, FeatureAccess>,
         val committedRevision: Long,
     )
     private companion object {
@@ -52,8 +52,8 @@ internal class FeatureService(
     private var durableEntities: Map<String, Map<String, FeatureAccess>> = emptyMap()
     private val realTimeCache = mutableMapOf<CacheKey, TimedAccess>()
     private val purchaseUpdates = mutableMapOf<String, PurchaseProjection>()
-    private val localPurchases = mutableMapOf<String, PurchaseProjection>()
-    private val revokedPurchases = mutableMapOf<String, PurchaseProjection>()
+    private var optimisticOverlay: Map<String, OptimisticFeatureOverlay> = emptyMap()
+    private var profileAdmitted = false
     private var purchaseMutationRevision = 0L
     private val featurePurchaseMutationRevisions = mutableMapOf<String, Long>()
     private var scopeGeneration = 0L
@@ -98,6 +98,8 @@ internal class FeatureService(
         distinctId: String,
         entityId: String?,
         expectedScope: AuthoritativeUseScope,
+        reconciledOptimisticProjection: Map<String, OptimisticFeatureOverlay>? = null,
+        reconcileOptimisticProjection: Boolean = false,
     ): FeatureAccess {
         synchronizeCustomerScopeIfNeeded()
         if (identity.distinctId() != distinctId || result.customerId != distinctId ||
@@ -111,6 +113,9 @@ internal class FeatureService(
             ) {
                 throw kotlinx.coroutines.CancellationException()
             }
+            if (reconcileOptimisticProjection) {
+                optimisticOverlay = reconciledOptimisticProjection.orEmpty()
+            }
 
             val affectedFeatureIds = linkedSetOf(requestedFeatureId, result.featureId)
             val mutationRevisions = affectedFeatureIds.associateWith { featureId ->
@@ -121,25 +126,6 @@ internal class FeatureService(
             val publishedAccess = affectedFeatureIds.associateWith { featureId ->
                 if (featureId == requestedFeatureId) requestedAccess else balanceSourceAccess
             }
-            val allowedFeatureIds = publishedAccess
-                .filterValues { it.allowed }
-                .keys
-
-            reconcileLocalPurchases(affectedFeatureIds)
-            if (allowedFeatureIds.isNotEmpty() &&
-                !revocationStore.retireRevokedGrants(distinctId, allowedFeatureIds)
-            ) {
-                return@synchronized requestedAccess to emptyList()
-            }
-            if (identity.distinctId() != distinctId || cacheDistinctId != distinctId ||
-                scopeGeneration != expectedScope.generation
-            ) {
-                throw kotlinx.coroutines.CancellationException()
-            }
-            if (allowedFeatureIds.isNotEmpty()) {
-                reconcileRevokedPurchases(allowedFeatureIds)
-            }
-
             val cachedAt = nowMillis()
             val committed = affectedFeatureIds.map { featureId ->
                 val access = publishedAccess.getValue(featureId)
@@ -152,12 +138,57 @@ internal class FeatureService(
                         featureId == requestedFeatureId && result.featureId != requestedFeatureId
                     },
                 )
-                featureInfo.stageUpdate(featureId, access, entityId)
+                featureInfo.stageUpdate(
+                    featureId,
+                    visibleAccess(featureId, access, entityId) ?: access,
+                    entityId,
+                )
             }
             requestedAccess to committed
         }
         publications.forEach { featureInfo.publish(it) }
         return access
+    }
+
+    /** Apply an ordinary server-confirmed usage balance without consuming the overlay. */
+    suspend fun applyAuthoritativeUsageBalance(featureId: String, balance: Double, entityId: String?) {
+        synchronizeCustomerScopeIfNeeded()
+        val publication = synchronized(lock) {
+            val visible = visibleAccess(
+                featureId,
+                realTimeCache[CacheKey(featureId, entityId)]?.access
+                    ?: entityAccess(featureId, entityId),
+                entityId,
+            ) ?: return
+            if (entityId == null && featureId in optimisticOverlay) {
+                // Match iOS: an accepted ordinary spend updates what the customer
+                // sees, while the evidence-derived overlay itself remains pure.
+                return@synchronized featureInfo.stageUpdate(
+                    featureId,
+                    visible.copy(
+                        allowed = visible.unlimited || balance >= DEFAULT_REQUIRED_BALANCE,
+                        balance = balance,
+                    ),
+                    entityId,
+                )
+            }
+            val authoritative = realTimeCache[CacheKey(featureId, entityId)]?.access
+                ?: entityAccess(featureId, entityId)
+                ?: return
+            val updated = authoritative.copy(
+                allowed = authoritative.unlimited || balance >= DEFAULT_REQUIRED_BALANCE,
+                balance = balance,
+            )
+            val key = CacheKey(featureId, entityId)
+            realTimeCache[key] = TimedAccess(updated, nowMillis())
+            committedMutationRevisions[key] = advanceFeatureMutationRevision(featureId)
+            featureInfo.stageUpdate(
+                featureId,
+                visibleAccess(featureId, updated, entityId) ?: updated,
+                entityId,
+            )
+        }
+        featureInfo.publish(publication)
     }
 
     suspend fun checkWithCache(
@@ -167,7 +198,6 @@ internal class FeatureService(
         forceRefresh: Boolean = false,
     ): FeatureAccess {
         if (!forceRefresh) {
-            getPurchaseCached(featureId, requiredBalance, entityId)?.let { return it }
             getExactOpaqueCached(featureId, requiredBalance, entityId)?.let { return it }
             getCached(featureId, requiredBalance, entityId)?.let { cached ->
                 if (cached.type == FeatureType.BOOLEAN) return cached
@@ -180,26 +210,14 @@ internal class FeatureService(
         return if (checked.supersededByMutation) checked.effective else checked.authoritative
     }
 
-    private suspend fun getPurchaseCached(
-        featureId: String,
-        requiredBalance: Double?,
-        entityId: String?,
-    ): FeatureAccess? {
-        synchronizeCustomerScopeIfNeeded()
-        return synchronized(lock) {
-            purchaseAccess(featureId, entityId)?.forRequiredBalance(requiredBalance)
-        }
-    }
-
     suspend fun clearCache() {
         synchronizeCustomerScopeIfNeeded()
         val publication = synchronized(lock) {
             realTimeCache.clear()
-            featureInfo.stageClear()
+            checkNotNull(stageCurrentLocked())
         }
-        // Profile remains the durable source for future cache reads. Clearing
-        // the reactive projection matches iOS: a later profile hydration is
-        // what republishes that durable snapshot.
+        // Clearing the short-lived check cache must not erase admitted profile
+        // access or the evidence-derived widening overlay.
         featureInfo.publish(publication)
     }
 
@@ -212,8 +230,8 @@ internal class FeatureService(
             durableEntities = emptyMap()
             realTimeCache.clear()
             purchaseUpdates.clear()
-            localPurchases.clear()
-            revokedPurchases.clear()
+            optimisticOverlay = emptyMap()
+            profileAdmitted = false
             featureMutationRevisions.clear()
             committedMutationRevisions.clear()
             scopeGeneration += 1
@@ -238,94 +256,66 @@ internal class FeatureService(
             cacheDistinctId = distinctId
             durableAccess = parsed.first
             durableEntities = parsed.second
+            profileAdmitted = true
             purchaseUpdates.entries.removeAll {
                 it.value.committedRevision <= snapshotPurchaseRevision
             }
-            // A fresh server snapshot is authoritative over earlier optimistic
-            // access and revocation tombstones for the Features it contains.
-            val reconciled = parsed.first.keys
-            localPurchases.toMap().forEach { (transactionId, projection) ->
-                if (projection.committedRevision <= snapshotPurchaseRevision) {
-                    localPurchases[transactionId] = projection.copy(grants = projection.grants - reconciled)
-                }
-            }
-            revokedPurchases.toMap().forEach { (transactionId, projection) ->
-                if (projection.committedRevision <= snapshotPurchaseRevision) {
-                    revokedPurchases[transactionId] = projection.copy(grants = projection.grants - reconciled)
-                }
-            }
-            localPurchases.entries.removeAll { it.value.grants.isEmpty() }
-            revokedPurchases.entries.removeAll { it.value.grants.isEmpty() }
-            stageCurrentLocked(ready = true, expectedGeneration = hydrationGeneration)
+            stageCurrentLocked(expectedGeneration = hydrationGeneration)
         }
         publication?.let { featureInfo.publish(it) }
     }
 
-    suspend fun syncFeatureInfo() = publishCurrent(ready = true)
-
-    suspend fun applyLocalPurchase(grants: List<LocalPurchaseGrant>, transactionId: String) {
+    /** Replace the entire pure evidence-derived overlay for [distinctId]. */
+    suspend fun applyOptimisticPurchaseProjection(
+        distinctId: String,
+        projection: Map<String, OptimisticFeatureOverlay>?,
+    ) {
         synchronizeCustomerScopeIfNeeded()
-        val optimistic = grants.filter { it.type == FeatureType.BOOLEAN || it.unlimited }
-            .associate { grant ->
-                grant.featureId to FeatureAccess(
-                    allowed = true,
-                    unlimited = grant.unlimited,
-                    balance = null,
-                    type = grant.type,
-                )
-            }
-        if (optimistic.isEmpty()) return
         val publication = synchronized(lock) {
-            if (localPurchases.containsKey(transactionId)) return
-            val replacedRevocation = revokedPurchases.remove(transactionId)?.grants.orEmpty()
-            optimistic.keys.forEach { featureId ->
-                realTimeCache.keys.removeAll { it.featureId == featureId }
-            }
-            val revision = advancePurchaseMutationRevision(optimistic.keys + replacedRevocation.keys)
-            localPurchases[transactionId] = PurchaseProjection(optimistic, revision)
-            optimistic.keys.forEach { featureId ->
-                committedMutationRevisions[CacheKey(featureId, null)] = advanceFeatureMutationRevision(featureId)
-            }
+            if (identity.distinctId() != distinctId || cacheDistinctId != distinctId) return
+            val replacement = projection.orEmpty()
+            if (optimisticOverlay == replacement) return
+            optimisticOverlay = replacement
             stageCurrentLocked()
         }
         publication?.let { featureInfo.publish(it) }
     }
 
-    suspend fun removePurchase(transactionId: String) {
-        synchronizeCustomerScopeIfNeeded()
-        val publication = synchronized(lock) {
-            val optimistic = localPurchases.remove(transactionId)?.grants.orEmpty()
-            val accepted = purchaseUpdates.remove(transactionId)?.grants.orEmpty()
-            val removed = optimistic + accepted
-            if (removed.isEmpty()) return
-            val revision = advancePurchaseMutationRevision(removed.keys)
-            // iOS checks revokedPurchaseCache before localPurchaseCache,
-            // realTimeCache, and durable profile access (FeatureService.swift).
-            val tombstones = removed.mapValues { (_, access) ->
-                FeatureAccess(false, false, access.balance, access.type)
-            }
-            revokedPurchases[transactionId] = PurchaseProjection(tombstones, revision)
-            stageCurrentLocked()
-        }
-        publication?.let { featureInfo.publish(it) }
-    }
-
-    /** Merge the incremental Feature grants returned by /purchase. */
+    /** Merge the incremental Feature access returned by /purchase. */
     suspend fun updateFromPurchase(distinctId: String, body: JsonObject, transactionId: String) {
+        updateFromPurchaseAndProjection(distinctId, body, transactionId, null, false)
+    }
+
+    /** Commit backend purchase authority and its evidence-derived overlay removal atomically. */
+    suspend fun reconcilePurchase(
+        distinctId: String,
+        body: JsonObject,
+        transactionId: String,
+        projection: Map<String, OptimisticFeatureOverlay>?,
+    ) {
+        updateFromPurchaseAndProjection(distinctId, body, transactionId, projection, true)
+    }
+
+    private suspend fun updateFromPurchaseAndProjection(
+        distinctId: String,
+        body: JsonObject,
+        transactionId: String,
+        projection: Map<String, OptimisticFeatureOverlay>?,
+        reconcileProjection: Boolean,
+    ) {
         val hydrationGeneration = synchronized(lock) { scopeGeneration }
         if (identity.distinctId() != distinctId) return
         val updates = parsePurchaseFeatures(body)
         val publication = synchronized(lock) {
             if (identity.distinctId() != distinctId || scopeGeneration != hydrationGeneration) return
-            val replaced = purchaseUpdates[transactionId]?.grants.orEmpty() +
-                localPurchases.remove(transactionId)?.grants.orEmpty() +
-                revokedPurchases.remove(transactionId)?.grants.orEmpty()
+            if (reconcileProjection) optimisticOverlay = projection.orEmpty()
+            val replaced = purchaseUpdates[transactionId]?.access.orEmpty()
             val revision = advancePurchaseMutationRevision(replaced.keys + updates.keys)
             updates.keys.forEach { featureId ->
                 realTimeCache.keys.removeAll { it.featureId == featureId }
             }
             purchaseUpdates[transactionId] = PurchaseProjection(updates, revision)
-            stageCurrentLocked(ready = true, expectedGeneration = hydrationGeneration)
+            stageCurrentLocked(expectedGeneration = hydrationGeneration)
         }
         publication?.let { featureInfo.publish(it) }
     }
@@ -347,18 +337,17 @@ internal class FeatureService(
         entityId: String?,
     ): FeatureAccess? {
         val key = CacheKey(featureId, entityId)
-        return purchaseAccess(featureId, entityId)?.forRequiredBalance(requiredBalance) ?: run {
-            when (val cached = realTimeCache[key]?.takeIf(::isFresh)) {
-                null -> entityAccess(featureId, entityId)?.forRequiredBalance(requiredBalance)
-                else -> if (cached.opaqueRequiredBalance == null) {
-                    cached.access.forRequiredBalance(requiredBalance)
-                } else if (cached.opaqueRequiredBalance == (requiredBalance ?: DEFAULT_REQUIRED_BALANCE)) {
-                    cached.access
-                } else {
-                    null
-                }
+        val authoritative = when (val cached = realTimeCache[key]?.takeIf(::isFresh)) {
+            null -> entityAccess(featureId, entityId)
+            else -> if (cached.opaqueRequiredBalance == null) {
+                cached.access
+            } else if (cached.opaqueRequiredBalance == (requiredBalance ?: DEFAULT_REQUIRED_BALANCE)) {
+                cached.access
+            } else {
+                null
             }
         }
+        return visibleAccess(featureId, authoritative, entityId)?.forRequiredBalance(requiredBalance)
     }
 
     /**
@@ -371,28 +360,30 @@ internal class FeatureService(
         requiredBalance: Double?,
         entityId: String?,
     ): FeatureAccess? {
-        purchaseAccess(featureId, entityId)
-            ?.forRequiredBalance(requiredBalance)
-            ?.let { return it }
         realTimeCache[CacheKey(featureId, entityId)]
             ?.takeIf(::isFresh)
             ?.let { cached ->
                 val opaqueRequiredBalance = cached.opaqueRequiredBalance
                 if (opaqueRequiredBalance == null) {
-                    return cached.access.forRequiredBalance(requiredBalance)
+                    return visibleAccess(featureId, cached.access, entityId)?.forRequiredBalance(requiredBalance)
                 }
                 val matchesRequirement =
                     opaqueRequiredBalance == (requiredBalance ?: DEFAULT_REQUIRED_BALANCE)
-                return cached.access.copy(
+                return visibleAccess(featureId, cached.access.copy(
                     allowed = matchesRequirement && cached.access.allowed,
                     unlimited = matchesRequirement && cached.access.unlimited,
                     balance = null,
-                )
+                ), entityId)
             }
         if (entityId == null) {
-            purchaseUpdates.values.mapNotNull { it.grants[featureId] }.lastOrNull()
+            purchaseUpdates.values.mapNotNull { it.access[featureId] }.lastOrNull()
+                ?.let { visibleAccess(featureId, it, entityId) }
                 ?.forRequiredBalance(requiredBalance)
                 ?.let { return it }
+            if (featureId in optimisticOverlay) {
+                return visibleAccess(featureId, durableGlobalAccess()[featureId], entityId)
+                    ?.forRequiredBalance(requiredBalance)
+            }
         }
         return null
     }
@@ -411,6 +402,7 @@ internal class FeatureService(
                         it.opaqueRequiredBalance == (requiredBalance ?: DEFAULT_REQUIRED_BALANCE)
                 }
                 ?.access
+                ?.let { visibleAccess(featureId, it, entityId) }
         }
     }
 
@@ -444,8 +436,6 @@ internal class FeatureService(
         val publishedAccess = affectedFeatureIds.associateWith { affectedFeatureId ->
             if (affectedFeatureId == featureId) requestedAccess else balanceSourceAccess
         }
-        val allowedFeatureIds = publishedAccess.filterValues { it.allowed }.keys
-
         return withContext(Dispatchers.IO) {
             val (checked, publications) = synchronized(lock) {
                 // Identity flips synchronously while handleUserChange (which
@@ -464,13 +454,6 @@ internal class FeatureService(
                     serverAccess = serverAccess,
                     requestedAccess = requestedAccess,
                 )?.let { return@synchronized it to emptyList() }
-                // iOS performs this synchronous ledger write on its actor.
-                // Keep it serialized with the supersession guard and commit.
-                if (allowedFeatureIds.isNotEmpty() &&
-                    !revocationStore.retireRevokedGrants(distinctId, allowedFeatureIds)
-                ) {
-                    throw kotlinx.coroutines.CancellationException()
-                }
                 val mutationRevisions = affectedFeatureIds.associateWith { affectedFeatureId ->
                     if (affectedFeatureId == featureId) {
                         requestMutationRevision
@@ -478,9 +461,6 @@ internal class FeatureService(
                         advanceFeatureMutationRevision(affectedFeatureId)
                     }
                 }
-                reconcileLocalPurchases(affectedFeatureIds)
-                if (allowedFeatureIds.isNotEmpty()) reconcileRevokedPurchases(allowedFeatureIds)
-
                 val cachedAt = nowMillis()
                 val committed = affectedFeatureIds.map { affectedFeatureId ->
                     val access = publishedAccess.getValue(affectedFeatureId)
@@ -493,9 +473,13 @@ internal class FeatureService(
                         },
                     )
                     committedMutationRevisions[affectedKey] = mutationRevisions.getValue(affectedFeatureId)
-                    featureInfo.stageUpdate(affectedFeatureId, access, entityId)
+                    featureInfo.stageUpdate(
+                        affectedFeatureId,
+                        visibleAccess(affectedFeatureId, access, entityId) ?: access,
+                        entityId,
+                    )
                 }
-                val effectiveAccess = purchaseAccess(featureId, entityId)
+                val effectiveAccess = visibleAccess(featureId, requestedAccess, entityId)
                     ?.forRequiredBalance(requiredBalance)
                     ?: requestedAccess
                 CheckedAccess(serverAccess, effectiveAccess, supersededByMutation = false) to committed
@@ -547,8 +531,8 @@ internal class FeatureService(
                 durableEntities = emptyMap()
                 realTimeCache.clear()
                 purchaseUpdates.clear()
-                localPurchases.clear()
-                revokedPurchases.clear()
+                optimisticOverlay = emptyMap()
+                profileAdmitted = false
                 featureMutationRevisions.clear()
                 committedMutationRevisions.clear()
                 scopeGeneration += 1
@@ -558,16 +542,8 @@ internal class FeatureService(
         publication?.let { featureInfo.publish(it) }
     }
 
-    private suspend fun publishCurrent(ready: Boolean = false, expectedGeneration: Long? = null) {
-        val publication = synchronized(lock) {
-            stageCurrentLocked(ready, expectedGeneration)
-        }
-        publication?.let { featureInfo.publish(it) }
-    }
-
     /** Must be called while [lock] is held so reservation order equals commit order. */
     private fun stageCurrentLocked(
-        ready: Boolean = false,
         expectedGeneration: Long? = null,
     ): FeatureInfo.Mutation? {
         if (expectedGeneration != null && scopeGeneration != expectedGeneration) return null
@@ -576,9 +552,9 @@ internal class FeatureService(
             .mapValues { it.value.access }
             .mapKeys { it.key.featureId }
         return featureInfo.stageUpdate(
-            mergePurchaseAccess(durableGlobalAccess() + fresh),
+            mergeOptimisticOverlay(durableGlobalAccess() + fresh),
             durableEntities,
-            ready,
+            readinessState(),
         )
     }
 
@@ -587,26 +563,63 @@ internal class FeatureService(
             .filter { (key, timed) -> key.entityId == null && isFresh(timed) }
             .mapValues { it.value.access }
             .mapKeys { it.key.featureId }
-        return mergePurchaseAccess(durableGlobalAccess() + fresh)
+        return mergeOptimisticOverlay(durableGlobalAccess() + fresh)
     }
 
     private fun durableGlobalAccess(): Map<String, FeatureAccess> {
         var merged = durableAccess
-        purchaseUpdates.values.forEach { merged = merged + it.grants }
+        purchaseUpdates.values.forEach { merged = merged + it.access }
         return merged
     }
 
-    private fun mergePurchaseAccess(base: Map<String, FeatureAccess>): Map<String, FeatureAccess> {
+    private fun mergeOptimisticOverlay(base: Map<String, FeatureAccess>): Map<String, FeatureAccess> {
         var merged = base
-        localPurchases.values.forEach { merged = merged + it.grants }
-        revokedPurchases.values.forEach { merged = merged + it.grants }
+        optimisticOverlay.forEach { (featureId, overlay) ->
+            merged = merged + (featureId to overlay.widen(merged[featureId]))
+        }
         return merged
     }
 
-    private fun purchaseAccess(featureId: String, entityId: String?): FeatureAccess? {
-        if (entityId != null) return null
-        revokedPurchases.values.mapNotNull { it.grants[featureId] }.lastOrNull()?.let { return it }
-        return localPurchases.values.mapNotNull { it.grants[featureId] }.lastOrNull()
+    private fun visibleAccess(
+        featureId: String,
+        authoritative: FeatureAccess?,
+        entityId: String?,
+    ): FeatureAccess? = if (entityId == null) {
+        optimisticOverlay[featureId]?.widen(authoritative) ?: authoritative
+    } else {
+        authoritative
+    }
+
+    private fun OptimisticFeatureOverlay.widen(authoritative: FeatureAccess?): FeatureAccess = when {
+        type == FeatureType.BOOLEAN || authoritative?.type == FeatureType.BOOLEAN -> FeatureAccess(
+            allowed = true,
+            unlimited = authoritative?.unlimited == true || unlimited,
+            balance = authoritative?.balance,
+            type = authoritative?.type ?: type,
+        )
+        unlimited -> FeatureAccess(
+            allowed = true,
+            unlimited = true,
+            balance = authoritative?.balance,
+            type = authoritative?.type ?: type,
+        )
+        else -> {
+            val visibleBalance = (authoritative?.balance ?: 0.0) + (balanceIncrease ?: 0.0)
+            FeatureAccess(
+                allowed = authoritative?.allowed == true ||
+                    authoritative?.unlimited == true ||
+                    visibleBalance >= DEFAULT_REQUIRED_BALANCE,
+                unlimited = authoritative?.unlimited ?: false,
+                balance = visibleBalance,
+                type = authoritative?.type ?: type,
+            )
+        }
+    }
+
+    private fun readinessState(): FeatureInfo.State = when {
+        !profileAdmitted -> FeatureInfo.State.Unknown
+        optimisticOverlay.isNotEmpty() -> FeatureInfo.State.Reconciling
+        else -> FeatureInfo.State.Ready
     }
 
     private fun advanceFeatureMutationRevision(featureId: String): Long {
@@ -625,20 +638,6 @@ internal class FeatureService(
 
     private fun purchaseRevision(featureId: String): Long? =
         featurePurchaseMutationRevisions[featureId]
-
-    private fun reconcileLocalPurchases(featureIds: Set<String>) {
-        localPurchases.toMap().forEach { (transactionId, projection) ->
-            localPurchases[transactionId] = projection.copy(grants = projection.grants - featureIds)
-        }
-        localPurchases.entries.removeAll { it.value.grants.isEmpty() }
-    }
-
-    private fun reconcileRevokedPurchases(featureIds: Set<String>) {
-        revokedPurchases.toMap().forEach { (transactionId, projection) ->
-            revokedPurchases[transactionId] = projection.copy(grants = projection.grants - featureIds)
-        }
-        revokedPurchases.entries.removeAll { it.value.grants.isEmpty() }
-    }
 
     private fun entityAccess(featureId: String, entityId: String?): FeatureAccess? = when (entityId) {
         null -> durableGlobalAccess()[featureId]

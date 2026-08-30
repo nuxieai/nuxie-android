@@ -2,9 +2,8 @@ package ai.nuxie.sdk.commerce
 
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.features.FeatureService
-import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.features.FeatureUsageResult
-import ai.nuxie.sdk.features.LocalPurchaseGrant
+import ai.nuxie.sdk.features.FeatureAllowance
 import ai.nuxie.sdk.network.NuxieApi
 import android.app.Activity
 import com.android.billingclient.api.BillingClient
@@ -109,6 +108,8 @@ internal class PurchaseService(
         eventId: String,
         distinctId: String,
     ) -> Boolean = { _, _, _, _ -> false },
+    private val verifyPurchaseSignature: (String, String, String) -> Boolean =
+        PlayPurchaseSignatureVerifier::verify,
 ) {
     private data class InFlightPurchase(
         val result: CompletableDeferred<PurchaseResult>,
@@ -128,12 +129,22 @@ internal class PurchaseService(
     private val products = ConcurrentHashMap<String, StoreProduct>()
     private val inFlight = ConcurrentHashMap<String, InFlightPurchase>()
     private val processing = Mutex()
+    private val projectionRefresh = Mutex()
     private val syncRetryJobs = ConcurrentHashMap<String, Job>()
     private val completionRetryJobs = ConcurrentHashMap<String, Job>()
     private val usageCoordinationLock = Any()
     private val syncOperations = mutableMapOf<String, CompletableDeferred<Boolean>>()
     private val purchaseUsageClaims = mutableSetOf<String>()
     private val purchaseUsageWaiters = mutableMapOf<String, MutableList<CompletableDeferred<Unit>>>()
+
+    init {
+        // Projection is a local derivation and must not wait for Play Billing
+        // connectivity during a cold start.
+        evidenceStore.setProductMappingsChangedListener {
+            scope.launch { refreshOptimisticProjection() }
+        }
+        scope.launch { refreshOptimisticProjection() }
+    }
 
     suspend fun useFeatureWithPendingPurchase(
         distinctId: String,
@@ -211,27 +222,32 @@ internal class PurchaseService(
                     throw IllegalStateException("Could not durably capture the purchase synchronization event.")
                 }
                 val current = evidenceStore.load()[evidence.purchaseToken]
-                val accepted = current?.copy(
+                if (current == null || !current.matchesAtomicUsePayload(evidence, distinctId)) {
+                    throw IllegalStateException("Could not persist accepted purchase evidence.")
+                }
+                val accepted = current.copy(
                     synced = true,
                     syncedCustomerId = distinctId,
                     syncedEventEmitted = true,
                     backendSyncedAtMillis = nowMillis(),
                 )
-                if (current == null || !current.matchesAtomicUsePayload(evidence, distinctId) ||
-                    accepted == null || !evidenceStore.upsert(accepted)
-                ) {
-                    throw IllegalStateException("Could not persist accepted purchase evidence.")
+                val access = projectionRefresh.withLock {
+                    if (!evidenceStore.upsert(accepted)) {
+                        throw IllegalStateException("Could not persist accepted purchase evidence.")
+                    }
+                    if (this.distinctId() != distinctId) throw kotlinx.coroutines.CancellationException()
+                    features.applyAuthoritativeUse(
+                        response,
+                        requestedFeatureId = featureId,
+                        distinctId = distinctId,
+                        entityId = entityId,
+                        expectedScope = featureScope,
+                        reconciledOptimisticProjection = deriveOptimisticProjection(),
+                        reconcileOptimisticProjection = true,
+                    )
                 }
                 releasePurchaseUsageClaim(evidence.purchaseToken)
                 completeManaged(accepted)
-                if (this.distinctId() != distinctId) throw kotlinx.coroutines.CancellationException()
-                val access = features.applyAuthoritativeUse(
-                    response,
-                    requestedFeatureId = featureId,
-                    distinctId = distinctId,
-                    entityId = entityId,
-                    expectedScope = featureScope,
-                )
                 return FeatureUsageResult(
                     success = true,
                     featureId = featureId,
@@ -246,8 +262,10 @@ internal class PurchaseService(
         }
     }
 
-    private fun eligibleEvidence(distinctId: String, featureId: String): List<PurchaseEvidence> =
-        evidenceStore.load().values.filter { evidence ->
+    private fun eligibleEvidence(distinctId: String, featureId: String): List<PurchaseEvidence> {
+        val descriptors = evidenceStore.loadProductMappings()
+        val bindings = evidenceStore.loadBindings()
+        return evidenceStore.load().values.filter { evidence ->
             evidence.authorityScope == purchaseStorageScope &&
                 evidence.ownerDistinctId == distinctId &&
                 evidence.purchaseState == StoredPurchaseState.PURCHASED &&
@@ -258,9 +276,10 @@ internal class PurchaseService(
                 evidence.purchaseToken.isNotBlank() &&
                 evidence.packageName.isNotBlank() &&
                 evidence.storeProductIds.firstOrNull()?.isNotBlank() == true &&
-                (!evidence.signatureVerificationRequired || evidence.signatureVerified) &&
-                evidence.localFeatureGrants.any { it.featureId == featureId }
+                evidence.signatureVerified &&
+                featureAllowancesForEvidence(evidence, descriptors, bindings).any { it.featureId == featureId }
         }
+    }
 
     private fun PurchaseEvidence.matchesAtomicUsePayload(
         sent: PurchaseEvidence,
@@ -444,6 +463,7 @@ internal class PurchaseService(
     /** Billing connect and app foreground share one recovery lane. */
     suspend fun recover() {
         processing.withLock {
+            refreshOptimisticProjection()
             val active = mutableListOf<PlayPurchase>()
             var allQueriesSucceeded = true
             for (type in listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP)) {
@@ -483,17 +503,6 @@ internal class PurchaseService(
                         (!it.synced || !it.syncedEventEmitted || it.needsManagedCompletion())
                 }
                 .forEach { evidence ->
-                    if (!evidence.synced && evidence.canGrantTo(distinctId())) {
-                        val noLongerActive = allQueriesSucceeded && evidence.purchaseToken !in activeTokens
-                        if (noLongerActive) {
-                            features.removePurchase(evidence.purchaseToken)
-                        } else {
-                            features.applyLocalPurchase(
-                                evidence.localFeatureGrants.toFeatureGrants(),
-                                evidence.purchaseToken,
-                            )
-                        }
-                    }
                     if (evidence.synced) {
                         val current = emitPurchaseSyncedIfNeeded(evidence)
                         completeManaged(current)
@@ -537,7 +546,7 @@ internal class PurchaseService(
         val signatureVerificationRequired = existing?.signatureVerificationRequired == true ||
             licensingPublicKey != null
         val signatureVerified = existing?.signatureVerified == true ||
-            (licensingPublicKey != null && PlayPurchaseSignatureVerifier.verify(
+            (licensingPublicKey != null && verifyPurchaseSignature(
                 licensingPublicKey,
                 purchase.originalJson,
                 purchase.signature,
@@ -568,10 +577,6 @@ internal class PurchaseService(
             firstSeenMillis = existing?.firstSeenMillis ?: nowMillis(),
             consumable = existing?.consumable ?: product?.consumable
                 ?: catalogBinding?.consumable ?: catalogMapping?.consumable ?: false,
-            localFeatureGrants = existing?.localFeatureGrants
-                ?: product?.localFeatureGrants?.toStoredGrants()
-                ?: catalogBinding?.localFeatureGrants
-                ?: catalogMapping?.localFeatureGrants.orEmpty(),
             catalogResolved = existing?.catalogResolved == true || product != null ||
                 catalogBinding != null || catalogMapping != null,
             completionEmitted = existing?.completionEmitted == true,
@@ -587,7 +592,7 @@ internal class PurchaseService(
             revoked = false,
             backendSyncedAtMillis = existing?.backendSyncedAtMillis,
         )
-        // D2: evidence is durable before grants, facts, sync, acknowledge, or consume.
+        // D2: evidence is durable before projection, facts, sync, acknowledge, or consume.
         if (!evidenceStore.upsert(evidence)) {
             complete(purchase, PurchaseResult.Failed(IllegalStateException("Could not persist purchase evidence.")))
             return
@@ -596,7 +601,7 @@ internal class PurchaseService(
             existing?.ownerDistinctId != ownerDistinctId &&
             (existing?.ownerDistinctId ?: existing?.syncAttributionDistinctId) == currentOwner
         ) {
-            features.removePurchase(evidence.purchaseToken)
+            refreshOptimisticProjection()
         }
         if (purchase.state == StoredPurchaseState.PENDING) {
             complete(purchase, PurchaseResult.Pending)
@@ -614,9 +619,9 @@ internal class PurchaseService(
             return
         }
 
+        refreshOptimisticProjection()
         var currentEvidence = evidence
-        if (evidence.canGrantTo(distinctId())) {
-            features.applyLocalPurchase(evidence.localFeatureGrants.toFeatureGrants(), purchase.purchaseToken)
+        if (evidence.canProjectTo(distinctId())) {
             evidence.acceptedResponseBody?.let { body ->
                 features.updateFromPurchase(evidence.ownerDistinctId!!, body, purchase.purchaseToken)
             }
@@ -684,15 +689,20 @@ internal class PurchaseService(
                     acceptedResponseBody = outcome.response.body,
                     backendSyncedAtMillis = nowMillis(),
                 )
-                if (!evidenceStore.upsert(accepted)) return false
                 val projectionOwner = provenOwner ?: accepted.syncAttributionDistinctId
-                if (projectionOwner == distinctId()) {
-                    features.updateFromPurchase(
-                        projectionOwner,
-                        outcome.response.body,
-                        accepted.purchaseToken,
-                    )
+                val persisted = projectionRefresh.withLock {
+                    if (!evidenceStore.upsert(accepted)) return@withLock false
+                    if (projectionOwner == distinctId()) {
+                        features.reconcilePurchase(
+                            projectionOwner,
+                            outcome.response.body,
+                            accepted.purchaseToken,
+                            deriveOptimisticProjection(),
+                        )
+                    }
+                    true
                 }
+                if (!persisted) return false
                 completeManaged(emitPurchaseSyncedIfNeeded(accepted))
                 return true
             }
@@ -747,9 +757,9 @@ internal class PurchaseService(
     private fun PurchaseEvidence.needsManagedCompletion(): Boolean =
         nuxieManaged && catalogResolved && !acknowledged && !consumed
 
-    private fun PurchaseEvidence.canGrantTo(currentDistinctId: String): Boolean =
+    private fun PurchaseEvidence.canProjectTo(currentDistinctId: String): Boolean =
         ownerDistinctId == currentDistinctId &&
-            (!signatureVerificationRequired || signatureVerified)
+            signatureVerified
 
     private fun hasConfiguredLicensingKey(
         evidence: PurchaseEvidence,
@@ -764,12 +774,7 @@ internal class PurchaseService(
     private suspend fun revokeEvidence(evidence: PurchaseEvidence) {
         val current = evidenceStore.load()[evidence.purchaseToken] ?: evidence
         evidenceStore.upsert(current.copy(revoked = true))
-        if (evidence.ownerDistinctId != distinctId()) return
-        features.applyLocalPurchase(
-            evidence.localFeatureGrants.toFeatureGrants(),
-            evidence.purchaseToken,
-        )
-        features.removePurchase(evidence.purchaseToken)
+        refreshOptimisticProjection()
     }
 
     private suspend fun revokeMissingOptimistic(activeTokens: Set<String>) {
@@ -779,7 +784,8 @@ internal class PurchaseService(
                     it.purchaseState == StoredPurchaseState.PURCHASED &&
                     it.purchaseToken !in activeTokens
             }
-            .forEach { features.removePurchase(it.purchaseToken) }
+            .forEach { evidenceStore.upsert(it.copy(revoked = true)) }
+        refreshOptimisticProjection()
     }
 
     private fun scheduleSyncRetry(token: String, attempt: Int) {
@@ -935,13 +941,15 @@ internal class PurchaseService(
         productType = productType,
         consumable = consumable,
         context = toStoredContext(),
-        localFeatureGrants = localFeatureGrants.toStoredGrants(),
+        featureAllowances = featureAllowances.toStoredAllowances(),
         licensingPublicKey = licensingPublicKey,
         nuxieManaged = settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED,
     )
 
     internal fun rememberProduct(product: StoreProduct): Boolean =
-        evidenceStore.upsertProductMapping(product.toMapping())
+        evidenceStore.upsertProductMapping(product.toMapping()).also { persisted ->
+            if (persisted) scope.launch { refreshOptimisticProjection() }
+        }
 
     private fun StoreProduct.toMapping() = StoredProductMapping(
         storeProductId = storeProductId,
@@ -951,7 +959,7 @@ internal class PurchaseService(
         productType = productType,
         consumable = consumable,
         context = toStoredContext(),
-        localFeatureGrants = localFeatureGrants.toStoredGrants(),
+        featureAllowances = featureAllowances.toStoredAllowances(),
         licensingPublicKey = licensingPublicKey,
     )
 
@@ -966,14 +974,28 @@ internal class PurchaseService(
         )
     }
 
-    private fun List<LocalPurchaseGrant>.toStoredGrants() = map {
-        StoredLocalPurchaseGrant(it.featureId, it.type.name, it.unlimited)
+    private fun List<FeatureAllowance>.toStoredAllowances() = map {
+        StoredFeatureAllowance(it.featureId, it.type.name, it.unlimited, it.allowance)
     }
 
-    private fun List<StoredLocalPurchaseGrant>.toFeatureGrants(): List<LocalPurchaseGrant> = mapNotNull {
-        val type = runCatching { FeatureType.valueOf(it.type) }.getOrNull() ?: return@mapNotNull null
-        LocalPurchaseGrant(it.featureId, type, it.unlimited)
+    private suspend fun refreshOptimisticProjection() {
+        projectionRefresh.withLock {
+            val currentDistinctId = distinctId()
+            features.applyOptimisticPurchaseProjection(
+                currentDistinctId,
+                deriveOptimisticProjection(currentDistinctId),
+            )
+        }
     }
+
+    private fun deriveOptimisticProjection(currentDistinctId: String = distinctId()) =
+        optimisticFeatureProjection(
+            distinctId = currentDistinctId,
+            authorityScope = purchaseStorageScope,
+            evidence = evidenceStore.load().values,
+            descriptors = evidenceStore.loadProductMappings(),
+            bindings = evidenceStore.loadBindings(),
+        )
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.encodeToByteArray())

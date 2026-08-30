@@ -2,7 +2,8 @@ package ai.nuxie.sdk
 
 import ai.nuxie.sdk.commerce.InMemoryPurchaseEvidenceStore
 import ai.nuxie.sdk.commerce.PurchaseEvidence
-import ai.nuxie.sdk.commerce.StoredLocalPurchaseGrant
+import ai.nuxie.sdk.commerce.StoredFeatureAllowance
+import ai.nuxie.sdk.commerce.StoredProductMapping
 import ai.nuxie.sdk.commerce.StoredPurchaseState
 import ai.nuxie.sdk.commerce.purchaseAuthorityScope
 import ai.nuxie.sdk.core.NuxieCore
@@ -16,7 +17,9 @@ import ai.nuxie.sdk.testsupport.FakeTransport
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.double
@@ -260,10 +263,26 @@ class NuxieMeteredUseTest {
     }
 
     @Test
-    fun setUsageAlwaysUsesTheOrdinaryPathEvenWithEligiblePurchaseEvidence() = runBlocking {
+    fun setUsageOnlyAppliesAcceptedServerBalanceWithoutConsumingProjectedEvidence() = runBlocking {
         val application = RuntimeEnvironment.getApplication()
         val identity = IdentityService(application).also { it.setDistinctId("customer-a") }
         val store = InMemoryPurchaseEvidenceStore().also {
+            it.upsertProductMapping(
+                StoredProductMapping(
+                    storeProductId = "play-credit-pack",
+                    nuxieProductId = "credit-pack",
+                    productType = "inapp",
+                    consumable = true,
+                    featureAllowances = listOf(
+                        StoredFeatureAllowance(
+                            "credits",
+                            FeatureType.CREDIT_SYSTEM.name,
+                            false,
+                            allowance = 10.0,
+                        ),
+                    ),
+                ),
+            )
             it.upsert(
                 PurchaseEvidence(
                     purchaseToken = "token-1",
@@ -274,11 +293,9 @@ class NuxieMeteredUseTest {
                     ownerDistinctId = "customer-a",
                     acknowledged = false,
                     firstSeenMillis = 1_784_462_300_000L,
-                    localFeatureGrants = listOf(
-                        StoredLocalPurchaseGrant("credits", FeatureType.CREDIT_SYSTEM.name, false),
-                    ),
                     catalogResolved = true,
                     nuxieManaged = true,
+                    signatureVerified = true,
                     authorityScope = purchaseAuthorityScope(
                         "pk_test_set_usage",
                         NuxieEnvironment.DEVELOPMENT,
@@ -286,7 +303,22 @@ class NuxieMeteredUseTest {
                 ),
             )
         }
-        val transport = usageTransport()
+        var eventRequests = 0
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/event") {
+                    eventRequests += 1
+                    val body = if (eventRequests == 1) {
+                        """{"status":"rejected","message":"denied","usage":{"current":3,"limit":10,"remaining":7}}"""
+                    } else {
+                        """{"status":"ok","message":"recorded","usage":{"current":2,"limit":10,"remaining":8}}"""
+                    }
+                    HttpTransport.Response(200, body.encodeToByteArray())
+                } else {
+                    HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
+                }
+            }
+        }
         val core = NuxieCore(
             context = application,
             apiKey = "pk_test_set_usage",
@@ -301,6 +333,19 @@ class NuxieMeteredUseTest {
             ),
         )
 
+        withTimeout(5_000) {
+            core.featureInfo.all.first { it["credits"]?.balance == 10.0 }
+        }
+        val rejected = core.featureUsage.useFeatureAndWait(
+            featureId = "credits",
+            amount = 10.0,
+            entityId = null,
+            setUsage = true,
+            metadata = null,
+        )
+        assertFalse(rejected.success)
+        assertEquals(10.0, core.featureInfo.balance("credits")!!, 0.0)
+
         val result = core.featureUsage.useFeatureAndWait(
             featureId = "credits",
             amount = 10.0,
@@ -310,10 +355,11 @@ class NuxieMeteredUseTest {
         )
 
         assertTrue(result.success)
-        assertEquals(1, transport.requests.count { it.url.path == "/event" })
+        assertEquals(8.0, core.featureInfo.balance("credits")!!, 0.0)
+        assertEquals(2, transport.requests.count { it.url.path == "/event" })
         assertEquals(0, transport.requests.count { it.url.path == "/entitled" })
         val body = Json.parseToJsonElement(
-            transport.requests.single { it.url.path == "/event" }.body.decodeToString(),
+            transport.requests.last { it.url.path == "/event" }.body.decodeToString(),
         ).jsonObject
         assertTrue(body.getValue("properties").jsonObject.getValue("setUsage").jsonPrimitive.boolean)
         assertFalse(store.load().getValue("token-1").synced)
