@@ -8,12 +8,15 @@ import ai.nuxie.sdk.network.NuxieApi
 import android.app.Activity
 import com.android.billingclient.api.BillingClient
 import java.security.MessageDigest
+import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonObject
@@ -126,12 +129,14 @@ internal class PurchaseService(
         data object Claimed : UsageCoordination
     }
 
-    private val products = ConcurrentHashMap<String, StoreProduct>()
+    private val products = ConcurrentHashMap<StoredProductIdentity, StoreProduct>()
     private val inFlight = ConcurrentHashMap<String, InFlightPurchase>()
     private val processing = Mutex()
     private val projectionRefresh = Mutex()
     private val syncRetryJobs = ConcurrentHashMap<String, Job>()
     private val completionRetryJobs = ConcurrentHashMap<String, Job>()
+    private val locallyRevokedTokens: MutableSet<String> =
+        Collections.newSetFromMap(ConcurrentHashMap())
     private val usageCoordinationLock = Any()
     private val syncOperations = mutableMapOf<String, CompletableDeferred<Boolean>>()
     private val purchaseUsageClaims = mutableSetOf<String>()
@@ -221,20 +226,23 @@ internal class PurchaseService(
                 ) {
                     throw IllegalStateException("Could not durably capture the purchase synchronization event.")
                 }
-                val current = evidenceStore.load()[evidence.purchaseToken]
-                if (current == null || !current.matchesAtomicUsePayload(evidence, distinctId)) {
-                    throw IllegalStateException("Could not persist accepted purchase evidence.")
-                }
-                val accepted = current.copy(
-                    synced = true,
-                    syncedCustomerId = distinctId,
-                    syncedEventEmitted = true,
-                    backendSyncedAtMillis = nowMillis(),
-                )
-                val access = projectionRefresh.withLock {
-                    if (!evidenceStore.upsert(accepted)) {
+                val (accepted, access) = projectionRefresh.withLock {
+                    val current = evidenceStore.load()[evidence.purchaseToken]
+                    if (current == null || current.revoked || current.permanentlyRejected ||
+                        !current.matchesAtomicUsePayload(evidence, distinctId)
+                    ) {
                         throw IllegalStateException("Could not persist accepted purchase evidence.")
                     }
+                    val accepted = current.copy(
+                        synced = true,
+                        syncedCustomerId = distinctId,
+                        syncedEventEmitted = true,
+                        backendSyncedAtMillis = nowMillis(),
+                    )
+                    val persistedAccepted = upsertEvidenceLocked(
+                        accepted,
+                        rejectIfTerminal = true,
+                    ) ?: throw IllegalStateException("Could not persist accepted purchase evidence.")
                     val currentDistinctId = this.distinctId()
                     if (currentDistinctId != distinctId) {
                         features.applyOptimisticPurchaseProjection(
@@ -243,8 +251,8 @@ internal class PurchaseService(
                         )
                         throw kotlinx.coroutines.CancellationException()
                     }
-                    features.applyAuthoritativeUse(
-                        response,
+                    persistedAccepted to features.applyAuthoritativeUse(
+                        result = response,
                         requestedFeatureId = featureId,
                         distinctId = distinctId,
                         entityId = entityId,
@@ -279,6 +287,7 @@ internal class PurchaseService(
                 !evidence.revoked &&
                 !evidence.permanentlyRejected &&
                 !evidence.synced &&
+                evidence.purchaseToken !in locallyRevokedTokens &&
                 evidence.backendSyncedAtMillis == null &&
                 evidence.purchaseToken.isNotBlank() &&
                 evidence.packageName.isNotBlank() &&
@@ -367,7 +376,7 @@ internal class PurchaseService(
             }
             return outcome
         }
-        products[product.storeProductId] = product
+        products[product.productIdentity()] = product
         val owner = initiatingOwner
         val accountId = sha256(owner)
         if (!evidenceStore.upsertProductMapping(product.toMapping()) ||
@@ -440,7 +449,11 @@ internal class PurchaseService(
                 ).also { outcome -> emitRestoreOutcome(outcome, initiatingOwner) }
             }
         }
-        revokeMissingOptimistic(found.mapTo(mutableSetOf()) { it.purchaseToken })
+        if (!revokeMissingOptimistic(found.mapTo(mutableSetOf()) { it.purchaseToken })) {
+            return RestoreResult.Failed(
+                IllegalStateException("Could not durably revoke missing purchase evidence."),
+            ).also { emitRestoreOutcome(it, initiatingOwner) }
+        }
         if (found.isEmpty()) {
             return RestoreResult.NoPurchases.also { emitRestoreOutcome(it, initiatingOwner) }
         }
@@ -483,7 +496,9 @@ internal class PurchaseService(
             }
             active.forEach { processPurchase(it) }
             val activeTokens = active.mapTo(mutableSetOf()) { it.purchaseToken }
-            if (allQueriesSucceeded) revokeMissingOptimistic(activeTokens)
+            if (allQueriesSucceeded && !revokeMissingOptimistic(activeTokens)) {
+                throw IllegalStateException("Could not durably revoke missing purchase evidence.")
+            }
             val bindings = evidenceStore.loadBindings()
             val mappings = evidenceStore.loadProductMappings()
             val evidenceRecords = evidenceStore.load().values.mapNotNull { storedEvidence ->
@@ -494,18 +509,23 @@ internal class PurchaseService(
                 } else {
                     storedEvidence
                 }
-                if (normalized != storedEvidence && !evidenceStore.upsert(normalized)) null else normalized
+                if (normalized != storedEvidence) upsertEvidence(normalized) else normalized
             }
             evidenceRecords
                 .filter {
                     it.permanentlyRejected &&
                         it.purchaseState == StoredPurchaseState.PURCHASED
                 }
-                .forEach { revokeEvidence(it) }
+                .forEach {
+                    if (!revokeEvidence(it)) {
+                        throw IllegalStateException("Could not durably revoke rejected purchase evidence.")
+                    }
+                }
             evidenceRecords
                 .filter {
                     !it.permanentlyRejected &&
                         !it.revoked &&
+                        it.purchaseToken !in locallyRevokedTokens &&
                         it.purchaseState == StoredPurchaseState.PURCHASED &&
                         (!it.synced || !it.syncedEventEmitted || it.needsManagedCompletion())
                 }
@@ -530,13 +550,34 @@ internal class PurchaseService(
         val mappings = evidenceStore.loadProductMappings()
         val matchingFlight = purchase.products.firstNotNullOfOrNull(inFlight::get)
         val isCheckoutOutcome = matchingFlight?.matches(purchase) == true
-        val product = purchase.products.firstNotNullOfOrNull(products::get) ?: matchingFlight?.product
-        val exactBinding = bindings.firstOrNull { binding ->
+        val existingProductIdentity = existing?.nuxieProductId?.let { nuxieProductId ->
+            existing.storeProductIds.firstOrNull { it in purchase.products }?.let { storeProductId ->
+                StoredProductIdentity(
+                    storeProductId,
+                    nuxieProductId,
+                    existing.basePlanId,
+                    existing.offerId,
+                )
+            }
+        }
+        val product = matchingFlight?.product?.takeIf { isCheckoutOutcome }
+            ?: existingProductIdentity?.let(products::get)
+        val knownProductIdentity = existingProductIdentity ?: product?.productIdentity()
+        val accountBindings = bindings.filter { binding ->
             binding.obfuscatedAccountId == purchase.obfuscatedAccountId &&
                 binding.storeProductId in purchase.products
         }
-        val catalogBinding = exactBinding ?: bindings.firstOrNull { it.storeProductId in purchase.products }
-        val catalogMapping = mappings.firstOrNull { it.storeProductId in purchase.products }
+        val exactBinding = selectFullProductMatch(accountBindings, knownProductIdentity) {
+            it.productIdentity
+        }
+        val catalogBinding = exactBinding ?: selectFullProductMatch(
+            bindings.filter { it.storeProductId in purchase.products },
+            knownProductIdentity,
+        ) { it.productIdentity }
+        val catalogMapping = selectFullProductMatch(
+            mappings.filter { it.storeProductId in purchase.products },
+            knownProductIdentity,
+        ) { it.productIdentity }
         val currentOwner = distinctId()
         val ownerDistinctId = exactBinding?.distinctId
             ?: currentOwner.takeIf { purchase.obfuscatedAccountId == sha256(it) }
@@ -558,7 +599,7 @@ internal class PurchaseService(
                 purchase.originalJson,
                 purchase.signature,
             ))
-        val evidence = PurchaseEvidence(
+        val evidenceCandidate = PurchaseEvidence(
             purchaseToken = purchase.purchaseToken,
             packageName = purchase.packageName,
             storeProductIds = purchase.products,
@@ -600,7 +641,8 @@ internal class PurchaseService(
             backendSyncedAtMillis = existing?.backendSyncedAtMillis,
         )
         // D2: evidence is durable before projection, facts, sync, acknowledge, or consume.
-        if (!evidenceStore.upsert(evidence)) {
+        val evidence = upsertEvidence(evidenceCandidate)
+        if (evidence == null) {
             complete(purchase, PurchaseResult.Failed(IllegalStateException("Could not persist purchase evidence.")))
             return
         }
@@ -625,10 +667,13 @@ internal class PurchaseService(
             return
         }
         if (evidence.signatureVerificationRequired && !evidence.signatureVerified) {
-            revokeEvidence(evidence)
-            val current = evidenceStore.load()[evidence.purchaseToken] ?: evidence
-            evidenceStore.upsert(current.copy(permanentlyRejected = true, revoked = true))
+            revokeEvidence(evidence.copy(permanentlyRejected = true))
             complete(purchase, PurchaseResult.Failed(SecurityException("Play purchase signature is invalid.")))
+            return
+        }
+        if (evidence.revoked) {
+            refreshOptimisticProjection()
+            complete(purchase, PurchaseResult.Purchased)
             return
         }
 
@@ -639,8 +684,7 @@ internal class PurchaseService(
                 features.updateFromPurchase(evidence.ownerDistinctId!!, body, purchase.purchaseToken)
             }
             if (isCheckoutOutcome && !evidence.completionEmitted && emitPurchaseCompleted(evidence)) {
-                currentEvidence = evidence.copy(completionEmitted = true)
-                evidenceStore.upsert(currentEvidence)
+                currentEvidence = upsertEvidence(evidence.copy(completionEmitted = true)) ?: evidence
             }
         }
         complete(purchase, PurchaseResult.Purchased)
@@ -680,31 +724,41 @@ internal class PurchaseService(
     }
 
     private suspend fun performSyncEvidence(original: PurchaseEvidence): Boolean {
-        val attempted = original.copy(syncAttempts = original.syncAttempts + 1)
-        if (!evidenceStore.upsert(attempted)) return false
+        val attempted = projectionRefresh.withLock {
+            val current = evidenceStore.load()[original.purchaseToken] ?: original
+            upsertEvidenceLocked(
+                current.copy(syncAttempts = current.syncAttempts + 1),
+                rejectIfTerminal = true,
+            )
+        } ?: return false
         when (val outcome = runCatching { synchronizer.sync(attempted) }
             .getOrElse { PurchaseSyncOutcome.Rejected(permanent = false) }) {
             is PurchaseSyncOutcome.Rejected -> {
                 if (outcome.permanent) {
-                    evidenceStore.upsert(attempted.copy(permanentlyRejected = true, revoked = true))
-                    revokeEvidence(attempted)
+                    revokeEvidence(attempted.copy(permanentlyRejected = true))
                 } else {
                     scheduleSyncRetry(attempted.purchaseToken, attempted.syncAttempts)
                 }
                 return false
             }
             is PurchaseSyncOutcome.Accepted -> {
-                val provenOwner = currentProvenOwner(attempted)
-                val accepted = attempted.copy(
-                    ownerDistinctId = provenOwner ?: attempted.ownerDistinctId,
-                    synced = true,
-                    syncedCustomerId = outcome.response.customerId,
-                    acceptedResponseBody = outcome.response.body,
-                    backendSyncedAtMillis = nowMillis(),
-                )
-                val projectionOwner = provenOwner ?: accepted.syncAttributionDistinctId
-                val persisted = projectionRefresh.withLock {
-                    if (!evidenceStore.upsert(accepted)) return@withLock false
+                val accepted = projectionRefresh.withLock {
+                    val current = evidenceStore.load()[attempted.purchaseToken]
+                        ?: return@withLock null
+                    if (current.revoked || current.permanentlyRejected) return@withLock null
+                    val provenOwner = currentProvenOwner(current)
+                    val accepted = current.copy(
+                        ownerDistinctId = provenOwner ?: current.ownerDistinctId,
+                        synced = true,
+                        syncedCustomerId = outcome.response.customerId,
+                        acceptedResponseBody = outcome.response.body,
+                        backendSyncedAtMillis = nowMillis(),
+                    )
+                    val persistedAccepted = upsertEvidenceLocked(
+                        accepted,
+                        rejectIfTerminal = true,
+                    ) ?: return@withLock null
+                    val projectionOwner = provenOwner ?: accepted.syncAttributionDistinctId
                     if (projectionOwner == distinctId()) {
                         features.reconcilePurchase(
                             projectionOwner,
@@ -713,9 +767,8 @@ internal class PurchaseService(
                             deriveOptimisticProjection(),
                         )
                     }
-                    true
-                }
-                if (!persisted) return false
+                    persistedAccepted
+                } ?: return false
                 completeManaged(emitPurchaseSyncedIfNeeded(accepted))
                 return true
             }
@@ -726,42 +779,61 @@ internal class PurchaseService(
         val boundOwner = evidence.obfuscatedAccountId?.let { accountId ->
             evidenceStore.loadBindings().firstOrNull { binding ->
                 binding.obfuscatedAccountId == accountId &&
-                    binding.storeProductId in evidence.storeProductIds
+                    evidence.matchesProductIdentity(binding.productIdentity)
             }?.distinctId
         }
         return boundOwner ?: evidenceStore.load()[evidence.purchaseToken]?.ownerDistinctId
     }
 
-    private fun emitPurchaseSyncedIfNeeded(evidence: PurchaseEvidence): PurchaseEvidence {
-        if (evidence.syncedEventEmitted || evidence.syncAttributionDistinctId != distinctId()) return evidence
-        val properties = buildMap<String, Any?> {
-            put("transaction_id", evidence.purchaseToken)
-            put("original_transaction_id", evidence.purchaseToken)
-            put("product_id", evidence.storeProductIds.firstOrNull().orEmpty())
-            put("customer_id", evidence.syncedCustomerId.orEmpty())
-            evidence.context?.experienceId?.let { put("experience_id", it) }
-            evidence.context?.experienceVersion?.let { put("experience_version", it) }
+    private suspend fun emitPurchaseSyncedIfNeeded(evidence: PurchaseEvidence): PurchaseEvidence =
+        projectionRefresh.withLock {
+            val current = evidenceStore.load()[evidence.purchaseToken] ?: evidence
+            if (current.revoked || current.permanentlyRejected || current.syncedEventEmitted ||
+                current.syncAttributionDistinctId != distinctId()
+            ) {
+                return@withLock current
+            }
+            val properties = buildMap<String, Any?> {
+                put("transaction_id", current.purchaseToken)
+                put("original_transaction_id", current.purchaseToken)
+                put("product_id", current.storeProductIds.firstOrNull().orEmpty())
+                put("customer_id", current.syncedCustomerId.orEmpty())
+                current.context?.experienceId?.let { put("experience_id", it) }
+                current.context?.experienceVersion?.let { put("experience_version", it) }
+            }
+            emit(SystemEventNames.PURCHASE_SYNCED, properties)
+            upsertEvidenceLocked(
+                current.copy(syncedEventEmitted = true),
+                rejectIfTerminal = true,
+            ) ?: current
         }
-        emit(SystemEventNames.PURCHASE_SYNCED, properties)
-        val emitted = evidence.copy(syncedEventEmitted = true)
-        return if (evidenceStore.upsert(emitted)) emitted else evidence
-    }
 
     private suspend fun completeManaged(evidence: PurchaseEvidence) {
-        if (!evidence.needsManagedCompletion()) return
         if (completionRetryJobs[evidence.purchaseToken]?.isActive == true) return
-        val attempted = evidence.copy(completionAttempts = evidence.completionAttempts + 1)
-        if (!evidenceStore.upsert(attempted)) return
+        val attempted = projectionRefresh.withLock {
+            val current = evidenceStore.load()[evidence.purchaseToken] ?: evidence
+            if (!current.needsManagedCompletion() || current.revoked || current.permanentlyRejected) {
+                return@withLock null
+            }
+            upsertEvidenceLocked(
+                current.copy(completionAttempts = current.completionAttempts + 1),
+                rejectIfTerminal = true,
+            )
+        } ?: return
         val completion = if (attempted.consumable) {
             billing.consume(evidence.purchaseToken)
         } else {
             billing.acknowledge(evidence.purchaseToken)
         }
         if (completion.responseCode == BillingClient.BillingResponseCode.OK) {
-            evidenceStore.upsert(
-                if (attempted.consumable) attempted.copy(consumed = true)
-                else attempted.copy(acknowledged = true),
-            )
+            projectionRefresh.withLock {
+                val current = evidenceStore.load()[attempted.purchaseToken] ?: return@withLock
+                upsertEvidenceLocked(
+                    if (attempted.consumable) current.copy(consumed = true)
+                    else current.copy(acknowledged = true),
+                    rejectIfTerminal = true,
+                )
+            }
         } else {
             scheduleCompletionRetry(evidence.purchaseToken, attempted.completionAttempts)
         }
@@ -779,27 +851,102 @@ internal class PurchaseService(
         bindings: List<StoredPurchaseBinding>,
         mappings: List<StoredProductMapping>,
     ): Boolean = bindings.any {
-        it.licensingPublicKey != null && it.storeProductId in evidence.storeProductIds
+        it.licensingPublicKey != null && evidence.matchesProductIdentity(it.productIdentity)
     } || mappings.any {
-        it.licensingPublicKey != null && it.storeProductId in evidence.storeProductIds
+        it.licensingPublicKey != null && evidence.matchesProductIdentity(it.productIdentity)
     }
 
-    private suspend fun revokeEvidence(evidence: PurchaseEvidence) {
-        val current = evidenceStore.load()[evidence.purchaseToken] ?: evidence
-        evidenceStore.upsert(current.copy(revoked = true))
-        refreshOptimisticProjection()
+    private fun <T> selectFullProductMatch(
+        candidates: List<T>,
+        knownIdentity: StoredProductIdentity?,
+        identity: (T) -> StoredProductIdentity,
+    ): T? = if (knownIdentity == null) {
+        candidates.singleOrNull()
+    } else {
+        candidates.firstOrNull { identity(it) == knownIdentity }
     }
 
-    private suspend fun revokeMissingOptimistic(activeTokens: Set<String>) {
-        evidenceStore.load().values
-            .filter {
-                !it.synced && it.ownerDistinctId == distinctId() &&
-                    it.purchaseState == StoredPurchaseState.PURCHASED &&
-                    it.purchaseToken !in activeTokens
+    private suspend fun upsertEvidence(
+        candidate: PurchaseEvidence,
+        rejectIfTerminal: Boolean = false,
+    ): PurchaseEvidence? = projectionRefresh.withLock {
+        upsertEvidenceLocked(candidate, rejectIfTerminal)
+    }
+
+    /** Merge monotonic evidence facts; called only while [projectionRefresh] is held. */
+    private fun upsertEvidenceLocked(
+        candidate: PurchaseEvidence,
+        rejectIfTerminal: Boolean = false,
+    ): PurchaseEvidence? {
+        val current = evidenceStore.load()[candidate.purchaseToken]
+        if (rejectIfTerminal && (candidate.purchaseToken in locallyRevokedTokens ||
+                current?.revoked == true || current?.permanentlyRejected == true)
+        ) {
+            return null
+        }
+        val merged = candidate.copy(
+            purchaseState = if (candidate.purchaseState == StoredPurchaseState.PURCHASED ||
+                current?.purchaseState == StoredPurchaseState.PURCHASED
+            ) {
+                StoredPurchaseState.PURCHASED
+            } else {
+                StoredPurchaseState.PENDING
+            },
+            acknowledged = candidate.acknowledged || current?.acknowledged == true,
+            consumed = candidate.consumed || current?.consumed == true,
+            synced = candidate.synced || current?.synced == true,
+            revoked = candidate.revoked || current?.revoked == true ||
+                candidate.purchaseToken in locallyRevokedTokens,
+            permanentlyRejected = candidate.permanentlyRejected || current?.permanentlyRejected == true,
+            syncAttempts = maxOf(candidate.syncAttempts, current?.syncAttempts ?: 0),
+            completionAttempts = maxOf(candidate.completionAttempts, current?.completionAttempts ?: 0),
+            firstSeenMillis = minOf(candidate.firstSeenMillis, current?.firstSeenMillis ?: Long.MAX_VALUE),
+            catalogResolved = candidate.catalogResolved || current?.catalogResolved == true,
+            completionEmitted = candidate.completionEmitted || current?.completionEmitted == true,
+            syncedEventEmitted = candidate.syncedEventEmitted || current?.syncedEventEmitted == true,
+            syncedCustomerId = candidate.syncedCustomerId ?: current?.syncedCustomerId,
+            acceptedResponseBody = candidate.acceptedResponseBody ?: current?.acceptedResponseBody,
+            nuxieManaged = candidate.nuxieManaged || current?.nuxieManaged == true,
+            signatureVerificationRequired = candidate.signatureVerificationRequired ||
+                current?.signatureVerificationRequired == true,
+            signatureVerified = candidate.signatureVerified || current?.signatureVerified == true,
+            backendSyncedAtMillis = candidate.backendSyncedAtMillis ?: current?.backendSyncedAtMillis,
+        )
+        return merged.takeIf(evidenceStore::upsert)
+    }
+
+    private suspend fun revokeEvidence(evidence: PurchaseEvidence): Boolean =
+        withContext(NonCancellable) {
+            projectionRefresh.withLock {
+                locallyRevokedTokens += evidence.purchaseToken
+                val current = evidenceStore.load()[evidence.purchaseToken] ?: evidence
+                val persisted = evidenceStore.upsert(
+                    current.copy(
+                        revoked = true,
+                        permanentlyRejected = current.permanentlyRejected || evidence.permanentlyRejected,
+                    ),
+                )
+                publishOptimisticProjectionLocked()
+                persisted
             }
-            .forEach { evidenceStore.upsert(it.copy(revoked = true)) }
-        refreshOptimisticProjection()
-    }
+        }
+
+    private suspend fun revokeMissingOptimistic(activeTokens: Set<String>): Boolean =
+        withContext(NonCancellable) {
+            projectionRefresh.withLock {
+                val currentDistinctId = distinctId()
+                val missing = evidenceStore.load().values
+                    .filter {
+                        !it.synced && it.ownerDistinctId == currentDistinctId &&
+                            it.purchaseState == StoredPurchaseState.PURCHASED &&
+                            it.purchaseToken !in activeTokens
+                    }
+                locallyRevokedTokens += missing.map { it.purchaseToken }
+                val persisted = missing.map { evidenceStore.upsert(it.copy(revoked = true)) }.all { it }
+                publishOptimisticProjectionLocked()
+                persisted
+            }
+        }
 
     private fun scheduleSyncRetry(token: String, attempt: Int) {
         if (syncRetryJobs[token]?.isActive == true) return
@@ -807,7 +954,10 @@ internal class PurchaseService(
             delay(retryDelay(attempt))
             syncRetryJobs.remove(token)
             evidenceStore.load()[token]
-                ?.takeIf { !it.permanentlyRejected && !it.revoked && !it.synced }
+                ?.takeIf {
+                    token !in locallyRevokedTokens &&
+                        !it.permanentlyRejected && !it.revoked && !it.synced
+                }
                 ?.let {
                     processing.withLock {
                         syncEvidence(it)
@@ -822,7 +972,11 @@ internal class PurchaseService(
             delay(retryDelay(attempt))
             completionRetryJobs.remove(token)
             evidenceStore.load()[token]
-                ?.takeIf { !it.permanentlyRejected && it.synced && it.needsManagedCompletion() }
+                ?.takeIf {
+                    token !in locallyRevokedTokens &&
+                        !it.permanentlyRejected && !it.revoked &&
+                        it.synced && it.needsManagedCompletion()
+                }
                 ?.let {
                     processing.withLock {
                         completeManaged(emitPurchaseSyncedIfNeeded(it))
@@ -991,21 +1145,35 @@ internal class PurchaseService(
         StoredFeatureAllowance(it.featureId, it.type.name, it.unlimited, it.allowance)
     }
 
+    private fun StoreProduct.productIdentity() = StoredProductIdentity(
+        storeProductId,
+        productId,
+        basePlanId,
+        offerId,
+    )
+
     private suspend fun refreshOptimisticProjection() {
         projectionRefresh.withLock {
-            val currentDistinctId = distinctId()
-            features.applyOptimisticPurchaseProjection(
-                currentDistinctId,
-                deriveOptimisticProjection(currentDistinctId),
-            )
+            publishOptimisticProjectionLocked()
         }
+    }
+
+    /** Called only while [projectionRefresh] is held. */
+    private suspend fun publishOptimisticProjectionLocked() {
+        val currentDistinctId = distinctId()
+        features.applyOptimisticPurchaseProjection(
+            currentDistinctId,
+            deriveOptimisticProjection(currentDistinctId),
+        )
     }
 
     private fun deriveOptimisticProjection(currentDistinctId: String = distinctId()) =
         optimisticFeatureProjection(
             distinctId = currentDistinctId,
             authorityScope = purchaseStorageScope,
-            evidence = evidenceStore.load().values,
+            evidence = evidenceStore.load().values.filter {
+                it.purchaseToken !in locallyRevokedTokens
+            },
             descriptors = evidenceStore.loadProductMappings(),
             bindings = evidenceStore.loadBindings(),
         )

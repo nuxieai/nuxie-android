@@ -76,6 +76,30 @@ internal data class StoredProductMapping(
     val licensingPublicKey: String? = null,
 )
 
+internal data class StoredProductIdentity(
+    val storeProductId: String,
+    val nuxieProductId: String,
+    val basePlanId: String?,
+    val offerId: String?,
+)
+
+internal val StoredPurchaseBinding.productIdentity: StoredProductIdentity
+    get() = StoredProductIdentity(storeProductId, nuxieProductId, basePlanId, offerId)
+
+internal val StoredProductMapping.productIdentity: StoredProductIdentity
+    get() = StoredProductIdentity(storeProductId, nuxieProductId, basePlanId, offerId)
+
+internal fun PurchaseEvidence.matchesProductIdentity(identity: StoredProductIdentity): Boolean =
+    identity.storeProductId in storeProductIds &&
+        identity.nuxieProductId == nuxieProductId &&
+        identity.basePlanId == basePlanId &&
+        identity.offerId == offerId
+
+private data class StoredPurchaseBindingKey(
+    val obfuscatedAccountId: String,
+    val productIdentity: StoredProductIdentity,
+)
+
 /** Minimal Play evidence retained until /purchase and managed completion succeed. */
 internal data class PurchaseEvidence(
     val purchaseToken: String,
@@ -155,9 +179,9 @@ internal class FilePurchaseEvidenceStore(
 
     override fun upsertBinding(binding: StoredPurchaseBinding): Boolean = synchronized(lock) {
         val entries = loadBindingsUnlocked().associateByTo(linkedMapOf()) {
-            "${it.obfuscatedAccountId}:${it.storeProductId}"
+            StoredPurchaseBindingKey(it.obfuscatedAccountId, it.productIdentity)
         }
-        entries["${binding.obfuscatedAccountId}:${binding.storeProductId}"] = binding
+        entries[StoredPurchaseBindingKey(binding.obfuscatedAccountId, binding.productIdentity)] = binding
         runCatching {
             val temporary = File(bindingsFile.parentFile, "${bindingsFile.name}.tmp")
             val encoded = JsonArray(entries.values.map(::encodeBinding))
@@ -174,8 +198,8 @@ internal class FilePurchaseEvidenceStore(
 
     override fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
         val persisted = synchronized(lock) {
-            val entries = loadMappingsUnlocked().associateByTo(linkedMapOf()) { it.storeProductId }
-            entries[mapping.storeProductId] = mapping
+            val entries = loadMappingsUnlocked().associateByTo(linkedMapOf()) { it.productIdentity }
+            entries[mapping.productIdentity] = mapping
             saveArray(catalogFile, entries.values.map(::encodeMapping), "catalog mapping")
         }
         if (persisted) productMappingsChangedListener?.invoke()
@@ -405,8 +429,8 @@ internal class FilePurchaseEvidenceStore(
 
 internal class InMemoryPurchaseEvidenceStore : PurchaseEvidenceStore {
     private val entries = linkedMapOf<String, PurchaseEvidence>()
-    private val bindings = linkedMapOf<String, StoredPurchaseBinding>()
-    private val mappings = linkedMapOf<String, StoredProductMapping>()
+    private val bindings = linkedMapOf<StoredPurchaseBindingKey, StoredPurchaseBinding>()
+    private val mappings = linkedMapOf<StoredProductIdentity, StoredProductMapping>()
     @Volatile private var productMappingsChangedListener: (() -> Unit)? = null
     override fun load(): Map<String, PurchaseEvidence> = synchronized(entries) { entries.toMap() }
     override fun upsert(evidence: PurchaseEvidence): Boolean = synchronized(entries) {
@@ -417,14 +441,14 @@ internal class InMemoryPurchaseEvidenceStore : PurchaseEvidenceStore {
         bindings.values.toList()
     }
     override fun upsertBinding(binding: StoredPurchaseBinding): Boolean = synchronized(bindings) {
-        bindings["${binding.obfuscatedAccountId}:${binding.storeProductId}"] = binding
+        bindings[StoredPurchaseBindingKey(binding.obfuscatedAccountId, binding.productIdentity)] = binding
         true
     }
     override fun loadProductMappings(): List<StoredProductMapping> = synchronized(mappings) {
         mappings.values.toList()
     }
     override fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
-        synchronized(mappings) { mappings[mapping.storeProductId] = mapping }
+        synchronized(mappings) { mappings[mapping.productIdentity] = mapping }
         productMappingsChangedListener?.invoke()
         return true
     }

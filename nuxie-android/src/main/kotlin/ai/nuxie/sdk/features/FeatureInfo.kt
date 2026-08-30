@@ -18,8 +18,7 @@ import kotlinx.coroutines.withContext
 /**
  * Reactive snapshot of the current customer's Feature access. StateFlow
  * publication is thread-safe, so updates arrive from any thread; a
- * main-thread hop here would deadlock callers that hold the main thread
- * (identity transitions under runBlocking).
+ * main-thread hop here would deadlock callers that hold the main thread.
  */
 class FeatureInfo {
     /** Whether server-backed Feature access is available and fully reconciled. */
@@ -38,7 +37,10 @@ class FeatureInfo {
     private val mutableAll = MutableFeatureAccessFlow()
     private val mutationLock = Mutex()
     private val stagingLock = Any()
+    private val publicationLock = Any()
     private var mutationTail = CompletableDeferred<Unit>().also { it.complete(Unit) }
+    @Volatile
+    private var publicationGeneration = 0L
     @Volatile
     private var entityAccess: Map<String, Map<String, FeatureAccess>> = emptyMap()
 
@@ -79,27 +81,38 @@ class FeatureInfo {
         features: Map<String, FeatureAccess>,
         entities: Map<String, Map<String, FeatureAccess>>,
         state: State? = null,
-    ): Mutation = stage {
-            val oldFeatures = mutableAll.value
-            features.forEach { (featureId, newAccess) ->
-                val oldAccess = oldFeatures[featureId]
-                if (!oldAccess.hasSameFieldsAs(newAccess)) {
-                    runCatching { onFeatureChange(featureId, oldAccess, newAccess) }
-                }
+        isCurrent: () -> Boolean = { true },
+    ): Mutation = stage { generation ->
+        if (!isPublicationCurrent(generation) || !isCurrent()) return@stage
+        val oldFeatures = mutableAll.value
+        features.forEach { (featureId, newAccess) ->
+            val oldAccess = oldFeatures[featureId]
+            if (!oldAccess.hasSameFieldsAs(newAccess)) {
+                runCatching { onFeatureChange(featureId, oldAccess, newAccess) }
             }
+        }
+        if (!isCurrent()) return@stage
+        publishIfCurrent(generation) {
             entityAccess = entities
             mutableAll.publish(features)
             state?.let { mutableState.value = it }
+        }
     }
 
     internal suspend fun update(featureId: String, access: FeatureAccess, entityId: String?) =
         publish(stageUpdate(featureId, access, entityId))
 
-    internal fun stageUpdate(featureId: String, access: FeatureAccess, entityId: String?): Mutation = stage {
-            val oldAccess = mutableAll.value[featureId]
-            if (!oldAccess.hasSameFieldsAs(access)) {
-                runCatching { onFeatureChange(featureId, oldAccess, access) }
-            }
+    internal fun stageUpdate(
+        featureId: String,
+        access: FeatureAccess,
+        entityId: String?,
+    ): Mutation = stage { generation ->
+        if (!isPublicationCurrent(generation)) return@stage
+        val oldAccess = mutableAll.value[featureId]
+        if (!oldAccess.hasSameFieldsAs(access)) {
+            runCatching { onFeatureChange(featureId, oldAccess, access) }
+        }
+        publishIfCurrent(generation) {
             // iOS has one reactive Feature map: an entity check publishes its
             // result there even though its reusable cache entry stays scoped.
             mutableAll.publish(mutableAll.value + (featureId to access))
@@ -108,21 +121,34 @@ class FeatureInfo {
                     featureId to (entityAccess[featureId].orEmpty() + (entityId to access))
                 )
             }
+        }
     }
 
     internal suspend fun clear() = publish(stageClear())
 
-    internal fun stageClear(): Mutation = stage {
+    internal fun stageClear(): Mutation = stage { generation ->
+        publishIfCurrent(generation) {
             entityAccess = emptyMap()
             mutableAll.publish(emptyMap())
+        }
     }
 
     internal suspend fun reset() = publish(stageReset())
 
-    internal fun stageReset(): Mutation = stage {
+    internal fun stageReset(): Mutation = stage { generation ->
+        publishIfCurrent(generation) {
             entityAccess = emptyMap()
             mutableAll.publish(emptyMap())
             mutableState.value = State.Unknown
+        }
+    }
+
+    /** Invalidate older queued mutations and clear the visible customer synchronously. */
+    internal fun resetImmediately() = synchronized(publicationLock) {
+        publicationGeneration += 1
+        entityAccess = emptyMap()
+        mutableAll.publish(emptyMap())
+        mutableState.value = State.Unknown
     }
 
     internal suspend fun publish(mutation: Mutation) {
@@ -138,9 +164,19 @@ class FeatureInfo {
         }
     }
 
-    private fun stage(apply: suspend () -> Unit): Mutation = synchronized(stagingLock) {
+    private fun stage(apply: suspend (Long) -> Unit): Mutation = synchronized(stagingLock) {
         val completed = CompletableDeferred<Unit>()
-        Mutation(mutationTail, completed, apply).also { mutationTail = completed }
+        val generation = publicationGeneration
+        Mutation(mutationTail, completed) { apply(generation) }.also { mutationTail = completed }
+    }
+
+    private fun isPublicationCurrent(generation: Long): Boolean =
+        publicationGeneration == generation
+
+    private inline fun publishIfCurrent(generation: Long, publish: () -> Unit) {
+        synchronized(publicationLock) {
+            if (publicationGeneration == generation) publish()
+        }
     }
 }
 

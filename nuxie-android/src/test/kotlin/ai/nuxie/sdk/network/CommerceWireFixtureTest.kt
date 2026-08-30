@@ -543,6 +543,8 @@ private object CommerceWireFixtures {
                 StoredProductMapping(
                     storeProductId = "fixture-credit-pack-full",
                     nuxieProductId = "fixture-credit-pack",
+                    basePlanId = "annual",
+                    offerId = "introductory",
                     productType = BillingClient.ProductType.INAPP,
                     consumable = true,
                     featureAllowances = listOf(

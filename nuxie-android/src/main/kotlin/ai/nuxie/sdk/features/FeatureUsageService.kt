@@ -9,6 +9,7 @@ import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.TimeBasedEpochGenerator
 import ai.nuxie.sdk.identity.IdentityProvider
+import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.network.NuxieApi
 import android.util.Log
 import java.io.IOException
@@ -74,7 +75,8 @@ internal class FeatureUsageService(
         setUsage: Boolean,
         metadata: JsonObject?,
     ): FeatureUsageResult = withContext(Dispatchers.IO) {
-        val distinctId = identity.distinctId()
+        val identityScope = identity.captureScope()
+        val distinctId = identityScope.distinctId
         if (!setUsage) {
             purchases.useFeatureWithPendingPurchase(
                 distinctId = distinctId,
@@ -96,7 +98,7 @@ internal class FeatureUsageService(
                 return@withContext result
             }
         }
-        ensureIdentity(distinctId)
+        ensureIdentity(identityScope)
 
         val properties = linkedMapOf<String, Any?>("feature_extId" to featureId)
         if (setUsage) properties["setUsage"] = true
@@ -113,7 +115,7 @@ internal class FeatureUsageService(
         val response = Json.parseToJsonElement(
             api.postEvent(BatchItemWireEncoder.encode(stored)),
         ).jsonObject
-        ensureIdentity(distinctId)
+        ensureIdentity(identityScope)
 
         val status = response.string("status")
             ?: throw IOException("/event response is missing status")
@@ -127,7 +129,9 @@ internal class FeatureUsageService(
         }
         val accepted = status == "ok" || status == "success"
         if (accepted) {
-            usage?.remaining?.let { features.applyAuthoritativeUsageBalance(featureId, it, entityId) }
+            usage?.remaining?.let {
+                features.applyAuthoritativeUsageBalance(featureId, it, entityId, identityScope)
+            }
             captureAcceptedUse(
                 featureId,
                 amount,
@@ -168,8 +172,8 @@ internal class FeatureUsageService(
         )
     }
 
-    private fun ensureIdentity(expected: String) {
-        if (identity.distinctId() != expected) throw CancellationException()
+    private fun ensureIdentity(expected: IdentityScope) {
+        if (!identity.isCurrentScope(expected)) throw CancellationException()
     }
 
     private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)

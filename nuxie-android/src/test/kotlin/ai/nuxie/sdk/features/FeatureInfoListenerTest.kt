@@ -1,12 +1,15 @@
 package ai.nuxie.sdk.features
 
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class FeatureInfoListenerTest {
@@ -50,6 +53,28 @@ class FeatureInfoListenerTest {
 
         assertEquals(listOf(null to first, first to second), transitions)
         assertEquals(second, info.all.value.getValue("credits"))
+    }
+
+    @Test
+    fun immediateResetInvalidatesAnOlderPublicationWaitingInAListener() = runBlocking {
+        val info = FeatureInfo()
+        val listenerStarted = CompletableDeferred<Unit>()
+        val releaseListener = CompletableDeferred<Unit>()
+        info.onFeatureChange = { _, _, _ ->
+            listenerStarted.complete(Unit)
+            releaseListener.await()
+        }
+        val update = async {
+            info.update(mapOf("credits" to access(allowed = true, balance = 2.0)), emptyMap())
+        }
+        listenerStarted.await()
+
+        info.resetImmediately()
+
+        assertFalse(info.isAllowed("credits"))
+        releaseListener.complete(Unit)
+        update.await()
+        assertFalse(info.isAllowed("credits"))
     }
 
     @Test

@@ -25,6 +25,7 @@ internal fun optimisticFeatureProjection(
         val allowances = featureAllowancesForEvidence(purchase, descriptors, bindings)
         if (allowances.isEmpty()) return null
         for (allowance in allowances) {
+            if (allowance.featureId.isBlank()) continue
             val type = runCatching { FeatureType.valueOf(allowance.type) }.getOrNull() ?: continue
             val increase = allowance.allowance?.takeIf(Double::isFinite)?.coerceAtLeast(0.0) ?: 0.0
             val next = OptimisticFeatureOverlay(
@@ -43,12 +44,13 @@ internal fun featureAllowancesForEvidence(
     descriptors: Collection<StoredProductMapping>,
     bindings: Collection<StoredPurchaseBinding> = emptyList(),
 ): List<StoredFeatureAllowance> {
-    val descriptorsByStoreProductId = descriptors.associateBy(StoredProductMapping::storeProductId)
-    evidence.storeProductIds.firstNotNullOfOrNull(descriptorsByStoreProductId::get)
+    descriptors.firstOrNull { descriptor ->
+        evidence.matchesProductIdentity(descriptor.productIdentity)
+    }
         ?.let { return it.featureAllowances }
     return bindings.firstOrNull { binding ->
         binding.obfuscatedAccountId == evidence.obfuscatedAccountId &&
-            binding.storeProductId in evidence.storeProductIds
+            evidence.matchesProductIdentity(binding.productIdentity)
     }?.featureAllowances.orEmpty()
 }
 

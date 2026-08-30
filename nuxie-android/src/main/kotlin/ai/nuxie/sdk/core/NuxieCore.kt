@@ -336,8 +336,7 @@ internal class NuxieCore(
         userTransitions.addObserver(UserTransitionCoordinator.Observer { _, from, _ ->
             presentations.shutdownOwnedBy(from)
         })
-        userTransitions.addObserver(UserTransitionCoordinator.Observer { _, from, to ->
-            features.handleUserChange(from, to)
+        userTransitions.addObserver(UserTransitionCoordinator.Observer { _, _, _ ->
             purchases.recover()
         })
         userTransitions.addObserver(profile.transitionObserver)
