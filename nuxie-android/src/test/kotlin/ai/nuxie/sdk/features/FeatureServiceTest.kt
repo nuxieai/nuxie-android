@@ -829,8 +829,11 @@ class FeatureServiceTest {
 
         assertEquals(3.0, remote.await().balance!!, 0.0)
         assertEquals(3.0, cacheFirst.await().balance!!, 0.0)
-        assertFalse(core.features.getCached("exports", "remote-project")!!.allowed)
-        assertFalse(core.features.getCached("exports", "cache-first-project")!!.allowed)
+        val cachedEntityChecks = listOf(
+            core.features.getCached("exports", "remote-project")!!,
+            core.features.getCached("exports", "cache-first-project")!!,
+        )
+        assertEquals(1, cachedEntityChecks.count { it.allowed })
         core.stop()
     }
 

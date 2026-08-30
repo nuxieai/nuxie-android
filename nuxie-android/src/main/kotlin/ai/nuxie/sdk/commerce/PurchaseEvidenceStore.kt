@@ -324,9 +324,8 @@ internal class FilePurchaseEvidenceStore(
             productType = raw.string("productType") ?: return null,
             consumable = raw.boolean("consumable"),
             context = (raw["context"] as? JsonObject)?.let(::decodeContext),
-            featureAllowances = (
-                (raw["featureAllowances"] ?: raw["localFeatureGrants"]) as? JsonArray
-            ).orEmpty().mapNotNull(::decodeAllowance),
+            featureAllowances = (raw["featureAllowances"] as? JsonArray)
+                .orEmpty().mapNotNull(::decodeAllowance),
             licensingPublicKey = raw.string("licensingPublicKey"),
             nuxieManaged = raw.boolean("nuxieManaged"),
         )
@@ -349,19 +348,20 @@ internal class FilePurchaseEvidenceStore(
         ),
     )
 
-    private fun decodeMapping(raw: JsonObject): StoredProductMapping? = decodeBinding(raw)?.let {
+    private fun decodeMapping(raw: JsonObject): StoredProductMapping? = runCatching {
         StoredProductMapping(
-            storeProductId = it.storeProductId,
-            nuxieProductId = it.nuxieProductId,
-            basePlanId = it.basePlanId,
-            offerId = it.offerId,
-            productType = it.productType,
-            consumable = it.consumable,
-            context = it.context,
-            featureAllowances = it.featureAllowances,
-            licensingPublicKey = it.licensingPublicKey,
+            storeProductId = raw.string("storeProductId") ?: return null,
+            nuxieProductId = raw.string("nuxieProductId") ?: return null,
+            basePlanId = raw.string("basePlanId"),
+            offerId = raw.string("offerId"),
+            productType = raw.string("productType") ?: return null,
+            consumable = raw.boolean("consumable"),
+            context = (raw["context"] as? JsonObject)?.let(::decodeContext),
+            featureAllowances = (raw["featureAllowances"] as? JsonArray)
+                .orEmpty().mapNotNull(::decodeAllowance),
+            licensingPublicKey = raw.string("licensingPublicKey"),
         )
-    }
+    }.getOrNull()
 
     private fun JsonObject.string(key: String): String? =
         (this[key] as? JsonPrimitive)?.contentOrNull

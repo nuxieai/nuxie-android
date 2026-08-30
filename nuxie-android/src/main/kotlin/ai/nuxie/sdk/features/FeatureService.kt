@@ -281,6 +281,23 @@ internal class FeatureService(
         publication?.let { featureInfo.publish(it) }
     }
 
+    /** Remove authority that was accepted for a purchase before its exact owner was known. */
+    suspend fun reassignPurchaseAuthority(
+        distinctId: String,
+        transactionId: String,
+        projection: Map<String, OptimisticFeatureOverlay>?,
+    ) {
+        synchronizeCustomerScopeIfNeeded()
+        val publication = synchronized(lock) {
+            if (identity.distinctId() != distinctId || cacheDistinctId != distinctId) return
+            optimisticOverlay = projection.orEmpty()
+            val removed = purchaseUpdates.remove(transactionId)?.access.orEmpty()
+            if (removed.isNotEmpty()) advancePurchaseMutationRevision(removed.keys)
+            stageCurrentLocked()
+        }
+        publication?.let { featureInfo.publish(it) }
+    }
+
     /** Merge the incremental Feature access returned by /purchase. */
     suspend fun updateFromPurchase(distinctId: String, body: JsonObject, transactionId: String) {
         updateFromPurchaseAndProjection(distinctId, body, transactionId, null, false)
@@ -347,7 +364,7 @@ internal class FeatureService(
                 null
             }
         }
-        return visibleAccess(featureId, authoritative, entityId)?.forRequiredBalance(requiredBalance)
+        return visibleAccessForRequiredBalance(featureId, authoritative, entityId, requiredBalance)
     }
 
     /**
@@ -365,7 +382,7 @@ internal class FeatureService(
             ?.let { cached ->
                 val opaqueRequiredBalance = cached.opaqueRequiredBalance
                 if (opaqueRequiredBalance == null) {
-                    return visibleAccess(featureId, cached.access, entityId)?.forRequiredBalance(requiredBalance)
+                    return visibleAccessForRequiredBalance(featureId, cached.access, entityId, requiredBalance)
                 }
                 val matchesRequirement =
                     opaqueRequiredBalance == (requiredBalance ?: DEFAULT_REQUIRED_BALANCE)
@@ -377,12 +394,15 @@ internal class FeatureService(
             }
         if (entityId == null) {
             purchaseUpdates.values.mapNotNull { it.access[featureId] }.lastOrNull()
-                ?.let { visibleAccess(featureId, it, entityId) }
-                ?.forRequiredBalance(requiredBalance)
+                ?.let { visibleAccessForRequiredBalance(featureId, it, entityId, requiredBalance) }
                 ?.let { return it }
             if (featureId in optimisticOverlay) {
-                return visibleAccess(featureId, durableGlobalAccess()[featureId], entityId)
-                    ?.forRequiredBalance(requiredBalance)
+                return visibleAccessForRequiredBalance(
+                    featureId,
+                    durableGlobalAccess()[featureId],
+                    entityId,
+                    requiredBalance,
+                )
             }
         }
         return null
@@ -479,8 +499,12 @@ internal class FeatureService(
                         entityId,
                     )
                 }
-                val effectiveAccess = visibleAccess(featureId, requestedAccess, entityId)
-                    ?.forRequiredBalance(requiredBalance)
+                val effectiveAccess = visibleAccessForRequiredBalance(
+                    featureId,
+                    requestedAccess,
+                    entityId,
+                    requiredBalance,
+                )
                     ?: requestedAccess
                 CheckedAccess(serverAccess, effectiveAccess, supersededByMutation = false) to committed
             }
@@ -588,6 +612,20 @@ internal class FeatureService(
         optimisticOverlay[featureId]?.widen(authoritative) ?: authoritative
     } else {
         authoritative
+    }
+
+    private fun visibleAccessForRequiredBalance(
+        featureId: String,
+        authoritative: FeatureAccess?,
+        entityId: String?,
+        requiredBalance: Double?,
+    ): FeatureAccess? {
+        val visible = visibleAccess(featureId, authoritative, entityId)
+        return if (entityId == null && optimisticOverlay[featureId]?.type == FeatureType.BOOLEAN) {
+            visible
+        } else {
+            visible?.forRequiredBalance(requiredBalance)
+        }
     }
 
     private fun OptimisticFeatureOverlay.widen(authoritative: FeatureAccess?): FeatureAccess = when {
