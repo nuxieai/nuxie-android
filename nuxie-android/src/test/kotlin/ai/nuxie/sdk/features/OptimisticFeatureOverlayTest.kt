@@ -76,6 +76,29 @@ class OptimisticFeatureOverlayTest {
     }
 
     @Test
+    fun finiteOverlayPreservesAuthoritativeUnlimitedAccess() = runBlocking {
+        val core = core()
+        val customer = core.identity.distinctId()
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement(
+                """{"segments":[],"features":[{"id":"exports","type":"metered","balance":null,"unlimited":true}]}""",
+            ).jsonObject,
+        )
+
+        core.features.applyOptimisticPurchaseProjection(
+            customer,
+            mapOf("exports" to OptimisticFeatureOverlay(FeatureType.METERED, false, 3.0)),
+        )
+
+        val visible = core.featureInfo.all.value.getValue("exports")
+        assertTrue(visible.allowed)
+        assertTrue(visible.unlimited)
+        assertEquals(null, visible.balance)
+        core.stop()
+    }
+
+    @Test
     fun awaitReadyWaitsForReconciliationToFinish() = runBlocking {
         val core = core()
         val customer = core.identity.distinctId()
@@ -126,6 +149,7 @@ class OptimisticFeatureOverlayTest {
                     purchaseToken = "token-1",
                     packageName = "com.example.app",
                     storeProductIds = listOf("play-credit-pack"),
+                    nuxieProductId = "credit-pack",
                     purchaseState = StoredPurchaseState.PURCHASED,
                     syncAttributionDistinctId = "customer-a",
                     ownerDistinctId = "customer-a",

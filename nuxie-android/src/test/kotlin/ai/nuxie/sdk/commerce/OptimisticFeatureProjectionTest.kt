@@ -145,10 +145,103 @@ class OptimisticFeatureProjectionTest {
         assertEquals(4.0, projection?.get("exports")?.balanceIncrease!!, 0.0)
     }
 
+    @Test
+    fun blankFeatureIdsAreExcludedFromProjection() {
+        val projection = optimisticFeatureProjection(
+            distinctId = "customer-a",
+            authorityScope = AUTHORITY_SCOPE,
+            evidence = listOf(evidence(owner = "customer-a")),
+            descriptors = listOf(
+                descriptor(
+                    FeatureAllowance(" ", FeatureType.BOOLEAN),
+                    FeatureAllowance("pro", FeatureType.BOOLEAN),
+                ),
+            ),
+        )
+
+        assertEquals(setOf("pro"), projection?.keys)
+    }
+
+    @Test
+    fun blankFeatureIdsAloneDoNotCreateAProjection() {
+        assertNull(
+            optimisticFeatureProjection(
+                distinctId = "customer-a",
+                authorityScope = AUTHORITY_SCOPE,
+                evidence = listOf(evidence(owner = "customer-a")),
+                descriptors = listOf(descriptor(FeatureAllowance("", FeatureType.BOOLEAN))),
+            ),
+        )
+    }
+
+    @Test
+    fun descriptorAllowanceMatchesTheFullProductIdentity() {
+        val unrelated = descriptor(FeatureAllowance("wrong-feature", FeatureType.BOOLEAN)).copy(
+            nuxieProductId = "other-nuxie-product",
+            basePlanId = "monthly",
+            offerId = "standard",
+        )
+        val purchased = descriptor(FeatureAllowance("right-feature", FeatureType.BOOLEAN)).copy(
+            basePlanId = "annual",
+            offerId = "launch",
+        )
+        val purchaseEvidence = evidence(owner = "customer-a").copy(
+            basePlanId = "annual",
+            offerId = "launch",
+        )
+
+        val projection = optimisticFeatureProjection(
+            distinctId = "customer-a",
+            authorityScope = AUTHORITY_SCOPE,
+            evidence = listOf(purchaseEvidence),
+            descriptors = listOf(unrelated, purchased),
+        )
+
+        assertEquals(setOf("right-feature"), projection?.keys)
+    }
+
+    @Test
+    fun bindingAllowanceMatchesAccountAndFullProductIdentity() {
+        val purchaseEvidence = evidence(owner = "customer-a").copy(
+            obfuscatedAccountId = "account-a",
+            basePlanId = "annual",
+            offerId = "launch",
+        )
+        val unrelated = StoredPurchaseBinding(
+            obfuscatedAccountId = "account-a",
+            distinctId = "customer-a",
+            storeProductId = "play-product",
+            nuxieProductId = "other-nuxie-product",
+            basePlanId = "monthly",
+            offerId = "standard",
+            productType = "subs",
+            consumable = false,
+            featureAllowances = listOf(StoredFeatureAllowance("wrong-feature", "BOOLEAN", false)),
+            nuxieManaged = true,
+        )
+        val purchased = unrelated.copy(
+            nuxieProductId = "nuxie-product",
+            basePlanId = "annual",
+            offerId = "launch",
+            featureAllowances = listOf(StoredFeatureAllowance("right-feature", "BOOLEAN", false)),
+        )
+
+        val projection = optimisticFeatureProjection(
+            distinctId = "customer-a",
+            authorityScope = AUTHORITY_SCOPE,
+            evidence = listOf(purchaseEvidence),
+            descriptors = emptyList(),
+            bindings = listOf(unrelated, purchased),
+        )
+
+        assertEquals(setOf("right-feature"), projection?.keys)
+    }
+
     private fun evidence(owner: String) = PurchaseEvidence(
         purchaseToken = "token-1",
         packageName = "com.example.app",
         storeProductIds = listOf("play-product"),
+        nuxieProductId = "nuxie-product",
         purchaseState = StoredPurchaseState.PURCHASED,
         syncAttributionDistinctId = owner,
         ownerDistinctId = owner,
@@ -180,6 +273,7 @@ class OptimisticFeatureProjectionTest {
                 purchaseToken = transactionId,
                 packageName = "com.example.fixture",
                 storeProductIds = listOf(transactionId),
+                nuxieProductId = transactionId,
                 purchaseState = StoredPurchaseState.PURCHASED,
                 syncAttributionDistinctId = owner,
                 ownerDistinctId = owner,

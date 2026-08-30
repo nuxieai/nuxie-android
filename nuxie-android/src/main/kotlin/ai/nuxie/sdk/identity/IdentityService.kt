@@ -24,6 +24,7 @@ import kotlinx.serialization.json.buildJsonObject
 internal class IdentityService(
     context: Context,
 ) : IdentityProvider {
+    private val decisionLock = Any()
     private val lock = Any()
     private val file: File
 
@@ -31,6 +32,7 @@ internal class IdentityService(
     private var identifiedId: String? = null
     private var anonymousIdValue: String? = null
     private var userPropertiesById: MutableMap<String, JsonObject> = linkedMapOf()
+    private var identityRevision = 0L
 
     init {
         val baseDir = File((context.applicationContext ?: context).filesDir, "nuxie")
@@ -55,7 +57,7 @@ internal class IdentityService(
         get() = synchronized(lock) { identifiedId != null }
 
     /** Identify. Migrates anonymous properties on the anon -> identified edge. */
-    fun setDistinctId(distinctId: String) {
+    fun setDistinctId(distinctId: String) = synchronized(decisionLock) {
         synchronized(lock) {
             val oldEffectiveId = effectiveIdLocked()
             val wasIdentified = identifiedId != null
@@ -73,11 +75,12 @@ internal class IdentityService(
                 userPropertiesById.remove(oldEffectiveId)
             }
             persistLocked()
+            if (effectiveIdLocked() != oldEffectiveId) identityRevision += 1
         }
     }
 
     /** Reset to anonymous. Clears the previous identity's property bag. */
-    fun reset(keepAnonymousId: Boolean) {
+    fun reset(keepAnonymousId: Boolean) = synchronized(decisionLock) {
         synchronized(lock) {
             val previousEffectiveId = effectiveIdLocked()
             userPropertiesById.remove(previousEffectiveId)
@@ -87,8 +90,22 @@ internal class IdentityService(
                 anonymousIdValue = TimeBasedEpochGenerator.shared.next()
             }
             persistLocked()
+            if (effectiveIdLocked() != previousEffectiveId) identityRevision += 1
         }
     }
+
+    override fun captureScope(): IdentityScope = synchronized(decisionLock) {
+        IdentityScope(distinctId(), identityRevision)
+    }
+
+    override fun isCurrentScope(scope: IdentityScope): Boolean = synchronized(decisionLock) {
+        identityRevision == scope.revision && distinctId() == scope.distinctId
+    }
+
+    override fun <T> withCurrentScope(scope: IdentityScope, block: () -> T): T? =
+        synchronized(decisionLock) {
+            if (identityRevision == scope.revision && distinctId() == scope.distinctId) block() else null
+        }
 
     fun setUserProperties(properties: Map<String, Any?>) {
         if (properties.isEmpty()) return

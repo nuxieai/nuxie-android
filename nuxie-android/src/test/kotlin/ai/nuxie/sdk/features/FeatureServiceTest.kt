@@ -259,6 +259,63 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun authoritativeUsageBalanceRejectsAStaleIdentityScopeAfterAnIdentityRoundTrip() = runBlocking {
+        val core = core(FakeTransport())
+        val originalId = core.identity.distinctId()
+        val staleScope = core.identity.captureScope()
+
+        core.identity.setDistinctId("customer-b")
+        core.features.handleUserChange(originalId, "customer-b")
+        core.identity.setDistinctId(originalId)
+        core.features.handleUserChange("customer-b", originalId)
+
+        val result = runCatching {
+            core.features.applyAuthoritativeUsageBalance(
+                featureId = "credits",
+                balance = 4.0,
+                entityId = null,
+                expectedScope = staleScope,
+            )
+        }
+
+        assertTrue(result.exceptionOrNull() is CancellationException)
+        assertEquals(null, core.featureInfo.all.value["credits"])
+        core.stop()
+    }
+
+    @Test
+    fun authoritativeUsagePublicationRunsOutsideTheIdentityFenceAndDropsWhenStale() = runBlocking {
+        val core = core(FakeTransport())
+        val originalId = core.identity.distinctId()
+        core.features.hydrateProfile(
+            originalId,
+            Json.parseToJsonElement(
+                profile(
+                    """[{"id":"credits","type":"creditSystem","balance":5,"unlimited":false}]""",
+                ),
+            ).jsonObject,
+        )
+        val expectedScope = core.identity.captureScope()
+        core.featureInfo.onFeatureChange = { featureId, _, access ->
+            if (featureId == "credits" && access.balance == 4.0) {
+                core.identity.setDistinctId("customer-b")
+                core.features.handleUserChange(originalId, "customer-b")
+            }
+        }
+
+        core.features.applyAuthoritativeUsageBalance(
+            featureId = "credits",
+            balance = 4.0,
+            entityId = null,
+            expectedScope = expectedScope,
+        )
+
+        assertEquals("customer-b", core.identity.distinctId())
+        assertEquals(null, core.featureInfo.all.value["credits"])
+        core.stop()
+    }
+
+    @Test
     fun authoritativeUseRevisionGuardsRejectOlderInFlightCheckWrites() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
@@ -851,7 +908,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun globalPurchaseDoesNotSupersedeEntityScopedChecks() = runBlocking {
+    fun globalPurchaseWidensEntityScopedChecksWithoutSupersedingTheirAuthority() = runBlocking {
         val checksStarted = CountDownLatch(2)
         val releaseChecks = CountDownLatch(1)
         lateinit var core: NuxieCore
@@ -907,7 +964,8 @@ class FeatureServiceTest {
             core.features.getCached("exports", "remote-project")!!,
             core.features.getCached("exports", "cache-first-project")!!,
         )
-        assertEquals(1, cachedEntityChecks.count { it.allowed })
+        assertEquals(2, cachedEntityChecks.count { it.allowed })
+        assertTrue(cachedEntityChecks.all { it.unlimited })
         core.stop()
     }
 
@@ -947,6 +1005,48 @@ class FeatureServiceTest {
         assertFalse(entityAccess.allowed)
         assertFalse(core.featureInfo.all.value.getValue("pro").allowed)
         assertFalse(core.featureInfo.isAllowed("pro"))
+        core.stop()
+    }
+
+    @Test
+    fun entityScopedDenialCannotNarrowAnActiveOptimisticOverlay() = runBlocking {
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            allowed = false,
+                            balance = "null",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+        val customer = core.identity.distinctId()
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement(profile("[]")).jsonObject,
+        )
+        applyTestPurchase(
+            core,
+            listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
+            "entity-overlay-token",
+        )
+
+        val authoritative = core.features.check("pro", entityId = "workspace-1")
+
+        assertFalse(authoritative.allowed)
+        assertTrue(core.featureInfo.isAllowed("pro"))
+        assertEquals(FeatureInfo.State.Reconciling, core.featureInfo.state.value)
         core.stop()
     }
 

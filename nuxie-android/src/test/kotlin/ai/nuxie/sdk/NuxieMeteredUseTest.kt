@@ -288,6 +288,7 @@ class NuxieMeteredUseTest {
                     purchaseToken = "token-1",
                     packageName = "com.example.app",
                     storeProductIds = listOf("play-credit-pack"),
+                    nuxieProductId = "credit-pack",
                     purchaseState = StoredPurchaseState.PURCHASED,
                     syncAttributionDistinctId = "customer-a",
                     ownerDistinctId = "customer-a",

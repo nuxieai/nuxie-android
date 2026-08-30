@@ -163,6 +163,67 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
+    fun fileStoreRetainsBindingsAndMappingsForEveryFullProductIdentity() {
+        val directory = Files.createTempDirectory("nuxie-product-identity").toFile()
+        try {
+            val store = FilePurchaseEvidenceStore(directory)
+            val annualBinding = StoredPurchaseBinding(
+                obfuscatedAccountId = "account-hash",
+                distinctId = "customer-1",
+                storeProductId = "play-pro",
+                nuxieProductId = "pro-annual",
+                basePlanId = "annual",
+                offerId = "launch",
+                productType = "subs",
+                consumable = false,
+                featureAllowances = listOf(StoredFeatureAllowance("annual-feature", "BOOLEAN", false)),
+                nuxieManaged = true,
+            )
+            val monthlyBinding = annualBinding.copy(
+                nuxieProductId = "pro-monthly",
+                basePlanId = "monthly",
+                offerId = null,
+                featureAllowances = listOf(StoredFeatureAllowance("monthly-feature", "BOOLEAN", false)),
+            )
+            val annualMapping = StoredProductMapping(
+                storeProductId = annualBinding.storeProductId,
+                nuxieProductId = annualBinding.nuxieProductId,
+                basePlanId = annualBinding.basePlanId,
+                offerId = annualBinding.offerId,
+                productType = annualBinding.productType,
+                consumable = false,
+                featureAllowances = annualBinding.featureAllowances,
+            )
+            val monthlyMapping = annualMapping.copy(
+                nuxieProductId = monthlyBinding.nuxieProductId,
+                basePlanId = monthlyBinding.basePlanId,
+                offerId = monthlyBinding.offerId,
+                featureAllowances = monthlyBinding.featureAllowances,
+            )
+
+            assertTrue(store.upsertBinding(annualBinding))
+            assertTrue(store.upsertBinding(monthlyBinding))
+            assertTrue(store.upsertProductMapping(annualMapping))
+            assertTrue(store.upsertProductMapping(monthlyMapping))
+
+            assertEquals(
+                setOf("pro-annual", "pro-monthly"),
+                FilePurchaseEvidenceStore(directory).loadBindings().mapTo(mutableSetOf()) {
+                    it.nuxieProductId
+                },
+            )
+            assertEquals(
+                setOf("pro-annual", "pro-monthly"),
+                FilePurchaseEvidenceStore(directory).loadProductMappings().mapTo(mutableSetOf()) {
+                    it.nuxieProductId
+                },
+            )
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun fileStoreIgnoresRetiredAllowanceKeys() {
         // Pre-GA hard cut: the retired localFeatureGrants key is not migrated;
         // a mapping carrying only the old key decodes with no allowances.

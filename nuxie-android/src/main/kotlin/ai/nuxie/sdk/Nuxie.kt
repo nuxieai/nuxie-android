@@ -221,6 +221,7 @@ object Nuxie {
      * is a full no-op; a different id migrates anonymous history (first
      * identify only), starts a new session, and captures `$identify`.
      */
+    @Synchronized
     fun identify(
         distinctId: String,
         userProperties: Map<String, Any?>? = null,
@@ -241,6 +242,10 @@ object Nuxie {
         // (anonymous-event migration included). A rapid second identify() or
         // reset() queues behind this one instead of cancelling it mid-fan-out.
         if (hasDifferentDistinctId) {
+            // The public identity and visible Feature projection switch as one
+            // synchronous facade operation. Durable purchase evidence remains
+            // retained and the queued recovery derives the new customer's view.
+            core.features.handleUserChange(oldDistinctId, currentDistinctId)
             core.userTransitions.enqueue(
                 UserTransitionCoordinator.Transition(
                     kind = UserTransitionCoordinator.Kind.IDENTIFY,
@@ -270,6 +275,7 @@ object Nuxie {
     }
 
     /** End the identified session and return to a (new or kept) anonymous id. */
+    @Synchronized
     fun reset(keepAnonymousId: Boolean = false) {
         val core = core ?: return
         val identity = core.identity
@@ -278,6 +284,7 @@ object Nuxie {
         identity.reset(keepAnonymousId)
 
         val newDistinctId = identity.distinctId()
+        core.features.handleUserChange(previousDistinctId, newDistinctId)
         core.userTransitions.enqueue(
             UserTransitionCoordinator.Transition(
                 kind = UserTransitionCoordinator.Kind.RESET,

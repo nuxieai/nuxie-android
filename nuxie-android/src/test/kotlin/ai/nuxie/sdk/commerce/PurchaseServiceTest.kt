@@ -287,6 +287,133 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun failedDurableRevocationStillNarrowsTheProjectionAndReportsFailure() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+        fixture.service.onPurchasesUpdated(
+            okUpdate(playPurchase("failed-revocation").forCheckout(fixture)),
+        )
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.store.failEvidenceUpserts = true
+
+        val result = fixture.service.restorePurchases()
+
+        assertTrue(result is RestoreResult.Failed)
+        assertFalse(fixture.store.load().getValue("failed-revocation").revoked)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.service.rememberProduct(
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+        )
+        runCurrent()
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        assertEquals(
+            null,
+            fixture.service.useFeatureWithPendingPurchase(
+                distinctId = owner,
+                featureId = "pro",
+                amount = 1.0,
+                entityId = null,
+                metadata = null,
+            ),
+        )
+        fixture.close()
+    }
+
+    @Test
+    fun cancelledRevocationCannotLeaveAnOlderRefreshVisible() = runTest {
+        val fixture = fixture(this)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("revoked-token").forCheckout(fixture)))
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        val staleRefreshStartedPublishing = CompletableDeferred<Unit>()
+        val releaseStaleRefresh = CompletableDeferred<Unit>()
+        fixture.core.featureInfo.onFeatureChange = { featureId, _, _ ->
+            if (featureId == "refresh-blocker") {
+                staleRefreshStartedPublishing.complete(Unit)
+                releaseStaleRefresh.await()
+            }
+        }
+        fixture.service.rememberProduct(
+            product(
+                allowances = listOf(
+                    FeatureAllowance("pro", FeatureType.BOOLEAN),
+                    FeatureAllowance("refresh-blocker", FeatureType.BOOLEAN),
+                ),
+            ),
+        )
+        runCurrent()
+        staleRefreshStartedPublishing.await()
+
+        val restore = async { fixture.service.restorePurchases() }
+        runCurrent()
+        restore.cancel()
+        releaseStaleRefresh.complete(Unit)
+        runCurrent()
+
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        assertTrue(fixture.store.load().getValue("revoked-token").revoked)
+        fixture.close()
+    }
+
+    @Test
+    fun acceptedSyncCannotResurrectEvidenceRevokedWhileTheRequestWasInFlight() = runTest {
+        val fixture = fixture(this)
+        val syncStarted = CompletableDeferred<Unit>()
+        val finishSync = CompletableDeferred<Unit>()
+        fixture.synchronizer = { evidence ->
+            syncStarted.complete(Unit)
+            finishSync.await()
+            accepted(evidence.syncAttributionDistinctId)
+        }
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+        val purchaseUpdate = async {
+            fixture.service.onPurchasesUpdated(
+                okUpdate(playPurchase("revoked-during-sync").forCheckout(fixture)),
+            )
+        }
+        syncStarted.await()
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        assertEquals(RestoreResult.NoPurchases, fixture.service.restorePurchases())
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        finishSync.complete(Unit)
+        purchaseUpdate.await()
+
+        assertTrue(fixture.store.load().getValue("revoked-during-sync").revoked)
+        assertFalse(fixture.store.load().getValue("revoked-during-sync").synced)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
     fun unsolicitedUpdateRunsPipelineAndAppManagedNeverCompletesPlayPurchase() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(this, mode = PurchaseHandlingMode.APP_MANAGED, actions = actions)
@@ -349,6 +476,101 @@ class PurchaseServiceTest {
         assertTrue(matching.core.featureInfo.isAllowed("pro"))
         unmatched.close()
         matching.close()
+    }
+
+    @Test
+    fun ambiguousCatalogEntriesForOnePlayProductDoNotResolveOrProject() = runTest {
+        val fixture = fixture(this)
+        fixture.service.rememberProduct(
+            product(
+                subscription = true,
+                productId = "nuxie-monthly",
+                basePlanId = "monthly",
+                offerId = "monthly-launch",
+                allowances = listOf(FeatureAllowance("monthly-feature", FeatureType.BOOLEAN)),
+            ),
+        )
+        fixture.service.rememberProduct(
+            product(
+                subscription = true,
+                productId = "nuxie-annual",
+                basePlanId = "annual",
+                offerId = "annual-launch",
+                allowances = listOf(FeatureAllowance("annual-feature", FeatureType.BOOLEAN)),
+            ),
+        )
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+
+        fixture.service.onPurchasesUpdated(
+            okUpdate(
+                playPurchase(
+                    "ambiguous-catalog",
+                    obfuscatedAccountId = accountHash(fixture.core.identity.distinctId()),
+                ),
+            ),
+        )
+
+        val evidence = fixture.store.load().getValue("ambiguous-catalog")
+        assertEquals(null, evidence.nuxieProductId)
+        assertEquals(null, evidence.basePlanId)
+        assertEquals(null, evidence.offerId)
+        assertFalse(evidence.catalogResolved)
+        assertFalse(fixture.core.featureInfo.isAllowed("monthly-feature"))
+        assertFalse(fixture.core.featureInfo.isAllowed("annual-feature"))
+        fixture.close()
+    }
+
+    @Test
+    fun stalePurchaseSnapshotCannotEraseConcurrentBackendAcknowledgement() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(
+            PurchaseEvidence(
+                purchaseToken = "stale-purchase-snapshot",
+                packageName = "com.example.app",
+                storeProductIds = listOf("play-pro"),
+                nuxieProductId = "nuxie-pro",
+                purchaseState = StoredPurchaseState.PURCHASED,
+                obfuscatedAccountId = accountHash(owner),
+                syncAttributionDistinctId = owner,
+                ownerDistinctId = owner,
+                acknowledged = false,
+                firstSeenMillis = 1L,
+                catalogResolved = true,
+                signatureVerified = true,
+            ),
+        )
+        fixture.store.afterNextLoad = { snapshot ->
+            fixture.store.replaceWithoutRecording(
+                snapshot.getValue("stale-purchase-snapshot").copy(
+                    synced = true,
+                    syncedCustomerId = owner,
+                    backendSyncedAtMillis = 42L,
+                ),
+            )
+        }
+        var syncCalled = false
+        fixture.synchronizer = {
+            syncCalled = true
+            accepted(owner)
+        }
+
+        fixture.service.onPurchasesUpdated(
+            okUpdate(
+                playPurchase(
+                    "stale-purchase-snapshot",
+                    state = StoredPurchaseState.PENDING,
+                    obfuscatedAccountId = accountHash(owner),
+                ),
+            ),
+        )
+
+        val evidence = fixture.store.load().getValue("stale-purchase-snapshot")
+        assertEquals(StoredPurchaseState.PURCHASED, evidence.purchaseState)
+        assertTrue(evidence.synced)
+        assertEquals(42L, evidence.backendSyncedAtMillis)
+        assertFalse(syncCalled)
+        fixture.close()
     }
 
     @Test
@@ -929,6 +1151,7 @@ class PurchaseServiceTest {
             scope = scope.backgroundScope,
             initialRetryDelayMillis = initialRetryDelayMillis,
             maxRetryDelayMillis = maxRetryDelayMillis,
+            api = core.api,
             verifyPurchaseSignature = { _, _, _ -> true },
         )
         fixture = Fixture(core, billing, store, service, settings) { accepted(core.identity.distinctId()) }
@@ -941,30 +1164,43 @@ class PurchaseServiceTest {
         val store: RecordingEvidenceStore,
         val service: PurchaseService,
         val settings: PurchaseSettings,
-        var synchronizer: (PurchaseEvidence) -> PurchaseSyncOutcome,
+        var synchronizer: suspend (PurchaseEvidence) -> PurchaseSyncOutcome,
     ) {
         fun close() = core.stop()
     }
 
     private class RecordingEvidenceStore : PurchaseEvidenceStore {
         private val entries = linkedMapOf<String, PurchaseEvidence>()
-        private val bindings = linkedMapOf<String, StoredPurchaseBinding>()
-        private val mappings = linkedMapOf<String, StoredProductMapping>()
+        private val bindings =
+            linkedMapOf<Pair<String, StoredProductIdentity>, StoredPurchaseBinding>()
+        private val mappings = linkedMapOf<StoredProductIdentity, StoredProductMapping>()
         var actions: MutableList<String> = mutableListOf()
-        override fun load(): Map<String, PurchaseEvidence> = entries.toMap()
+        var failEvidenceUpserts = false
+        var afterNextLoad: ((Map<String, PurchaseEvidence>) -> Unit)? = null
+        override fun load(): Map<String, PurchaseEvidence> {
+            val snapshot = entries.toMap()
+            val callback = afterNextLoad
+            afterNextLoad = null
+            callback?.invoke(snapshot)
+            return snapshot
+        }
         override fun upsert(evidence: PurchaseEvidence): Boolean {
             actions += "persist"
+            if (failEvidenceUpserts) return false
             entries[evidence.purchaseToken] = evidence
             return true
         }
+        fun replaceWithoutRecording(evidence: PurchaseEvidence) {
+            entries[evidence.purchaseToken] = evidence
+        }
         override fun loadBindings(): List<StoredPurchaseBinding> = bindings.values.toList()
         override fun upsertBinding(binding: StoredPurchaseBinding): Boolean {
-            bindings["${binding.obfuscatedAccountId}:${binding.storeProductId}"] = binding
+            bindings[binding.obfuscatedAccountId to binding.productIdentity] = binding
             return true
         }
         override fun loadProductMappings(): List<StoredProductMapping> = mappings.values.toList()
         override fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
-            mappings[mapping.storeProductId] = mapping
+            mappings[mapping.productIdentity] = mapping
             return true
         }
     }
@@ -1014,15 +1250,19 @@ class PurchaseServiceTest {
 
     private fun product(
         subscription: Boolean = false,
+        productId: String = "nuxie-pro",
+        storeProductId: String = "play-pro",
+        basePlanId: String? = if (subscription) "annual" else null,
+        offerId: String? = if (subscription) "launch" else null,
         consumable: Boolean = false,
         allowances: List<FeatureAllowance> = emptyList(),
         licensingPublicKey: String? = "test-public-key",
         rawProduct: ProductDetails? = null,
     ) = StoreProduct(
-        productId = "nuxie-pro",
-        storeProductId = "play-pro",
-        basePlanId = if (subscription) "annual" else null,
-        offerId = if (subscription) "launch" else null,
+        productId = productId,
+        storeProductId = storeProductId,
+        basePlanId = basePlanId,
+        offerId = offerId,
         placementId = "primary",
         rawProduct = rawProduct,
         offerToken = "offer-token",

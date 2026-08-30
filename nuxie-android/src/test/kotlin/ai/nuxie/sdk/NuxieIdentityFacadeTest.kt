@@ -1,9 +1,11 @@
 package ai.nuxie.sdk
 
+import ai.nuxie.sdk.commerce.OptimisticFeatureOverlay
+import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.features.FeatureType
+import ai.nuxie.sdk.testsupport.FakeTransport
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonPrimitive
-import ai.nuxie.sdk.core.NuxieCore
-import ai.nuxie.sdk.testsupport.FakeTransport
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -123,6 +125,48 @@ class NuxieIdentityFacadeTest {
         assertFalse(Nuxie.isIdentified)
         assertNotEquals("user-1", Nuxie.distinctId)
         assertNotEquals(anonBefore, Nuxie.anonymousId)
+    }
+
+    @Test
+    fun identifyAndResetHideThePreviousCustomersOverlayBeforeReturning() = runBlocking {
+        val core = requireNotNull(Nuxie.core)
+        val anonymous = Nuxie.distinctId
+        core.features.applyOptimisticPurchaseProjection(
+            anonymous,
+            mapOf("pro" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null)),
+        )
+        assertTrue(Nuxie.features.isAllowed("pro"))
+
+        Nuxie.identify("user-1")
+
+        assertFalse(Nuxie.features.isAllowed("pro"))
+        core.userTransitions.drain()
+        core.features.applyOptimisticPurchaseProjection(
+            "user-1",
+            mapOf("pro" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null)),
+        )
+        assertTrue(Nuxie.features.isAllowed("pro"))
+
+        Nuxie.reset()
+
+        assertFalse(Nuxie.features.isAllowed("pro"))
+    }
+
+    @Test
+    fun identifyFromAFeatureListenerInvalidatesThePublishingMutationWithoutDeadlock() = runBlocking {
+        val core = requireNotNull(Nuxie.core)
+        val anonymous = Nuxie.distinctId
+        core.featureInfo.onFeatureChange = { featureId, _, _ ->
+            if (featureId == "pro") Nuxie.identify("listener-user")
+        }
+
+        core.features.applyOptimisticPurchaseProjection(
+            anonymous,
+            mapOf("pro" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null)),
+        )
+
+        assertEquals("listener-user", Nuxie.distinctId)
+        assertFalse(Nuxie.features.isAllowed("pro"))
     }
 
     @Test
