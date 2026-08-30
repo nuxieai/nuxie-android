@@ -82,7 +82,7 @@ Verify the live harness separately from the default unit test suite:
 ./gradlew :nuxie-android:hostRenderSmoke
 ```
 
-This dedicated task runs only the three host render smoke tests in a fresh
+This dedicated task runs only the four host render smoke tests in a fresh
 worker JVM. The default `:nuxie-android:test` task excludes them and is
 insensitive to host harness environment variables. When `NUXIE_HOST_CAPI_LIB`
 is unset, the dedicated task skips them with the named assumption

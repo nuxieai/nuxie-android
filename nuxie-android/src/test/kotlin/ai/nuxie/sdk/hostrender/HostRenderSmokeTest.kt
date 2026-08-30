@@ -12,12 +12,41 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 class HostRenderSmokeTest {
+    @Test
+    fun `plain file import supplies an inert sized config`() {
+        assumeHostRuntime()
+        val runtime = NuxieRuntime.shared
+        assertTrue("Host nux_capi and JNI adapter must load", runtime.isAvailable)
+        val bytes = File(
+            System.getProperty("nuxie.repo.root"),
+            "nuxie-android/src/androidTest/assets/data_binding_test.riv",
+        ).readBytes()
+        checkNotNull(runtime.inspectFileAssets(bytes)) {
+            "Asset inspection must pass a valid inert render callback table"
+        }
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(64, 64))
+        try {
+            val file = checkNotNull(runtime.importFile(renderer, bytes)) {
+                "Plain JNI import must pass a valid config even without optional capabilities"
+            }
+            try {
+                val artboard = checkNotNull(file.newArtboard())
+                artboard.close()
+            } finally {
+                file.close()
+            }
+        } finally {
+            renderer.close()
+        }
+    }
+
     @Test
     fun `script-dependent interpolator changes the rendered frame`() {
         assumeHostRuntime()
@@ -32,14 +61,21 @@ class HostRenderSmokeTest {
                 size = HostRenderSize(100, 100),
             ),
         )
-        val secondFrame = File(output, "frame-1.rgba").readBytes().asPixels()
-
-        assertTrue(
-            "The script must drive the second frame to the authored black-and-magenta state",
-            secondFrame.all { pixel ->
-                pixel.contentEquals(OPAQUE_BLACK_RGBA) || pixel.contentEquals(MAGENTA_RGBA)
-            },
-        )
+        // This is fixtures/p2d/scripted_interpolator.riv from nuxie-runtime.
+        // Its transform is factor² + (calls - 1) * 0.005. Pinned C++
+        // 4ac7b327 keyframe_color.cpp uses the stateful interpolator and
+        // shapes/paint/color.cpp rounds colorLerp to bytes: at 16/32 ms,
+        // round(255 * .016²) = 0; round(255 * (.032² + .005)) = 2.
+        // Sample inside the moving rectangle, not its antialiased edges.
+        for ((index, expected) in listOf(OPAQUE_BLACK_RGBA, byteArrayOf(2, 2, 2, -1)).withIndex()) {
+            val pixels = File(output, "frame-$index.rgba").readBytes().asPixels()
+            for ((x, y) in listOf(5 to 2, 10 to 5, 15 to 8)) {
+                assertArrayEquals("Scripted interior at frame $index ($x,$y)", expected, pixels[y * 100 + x])
+            }
+            for ((x, y) in listOf(50 to 25, 50 to 50, 75 to 75)) {
+                assertArrayEquals("Clear background at frame $index ($x,$y)", MAGENTA_RGBA, pixels[y * 100 + x])
+            }
+        }
         assertFalse(
             "The script must change the rendered frame",
             result.frames[0].sha256 == result.frames[1].sha256,

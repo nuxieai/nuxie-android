@@ -180,8 +180,11 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeHostScriptingProbe(
   configure_host_commands(&host);
   struct NuxFile *file = NULL;
   struct NuxCapiResult *result = NULL;
+  struct NuxRenderCallbacks callbacks;
+  memset(&callbacks, 0, sizeof(callbacks));
+  callbacks.struct_size = (uint32_t)sizeof(callbacks);
   NuxStatus status = nux_file_import_trusted_with_host_commands(
-      host_scripting_probe_file, sizeof(host_scripting_probe_file), NULL,
+      host_scripting_probe_file, sizeof(host_scripting_probe_file), &callbacks,
       &host, &file, &result);
   log_and_free_result("host_scripting_probe", status, result);
   if (file != NULL) {
@@ -519,8 +522,11 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileInspectAssets(
   }
   if (data == NULL) return NULL;
   struct NuxFile *file = NULL;
+  struct NuxRenderCallbacks callbacks;
+  memset(&callbacks, 0, sizeof(callbacks));
+  callbacks.struct_size = (uint32_t)sizeof(callbacks);
   NuxStatus status =
-      nux_file_import((const uint8_t *)data, (size_t)length, NULL, &file);
+      nux_file_import((const uint8_t *)data, (size_t)length, &callbacks, &file);
   (*env)->ReleaseByteArrayElements(env, bytes, data, JNI_ABORT);
   if (status != NUX_STATUS_OK || file == NULL) return NULL;
 
@@ -901,9 +907,12 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNew(
   if (data == NULL) return 0;
   struct NuxFile *file = NULL;
   struct NuxCapiResult *result = NULL;
+  struct NuxFileImportConfig config;
+  memset(&config, 0, sizeof(config));
+  config.struct_size = (uint32_t)sizeof(config);
   NuxStatus status = nux_file_import_android_vulkan(
       (struct NuxAndroidVulkanRenderer *)from_handle(renderer),
-      (const uint8_t *)data, (size_t)length, NULL, &file, &result);
+      (const uint8_t *)data, (size_t)length, &config, &file, &result);
   (*env)->ReleaseByteArrayElements(env, bytes, data, JNI_ABORT);
   log_and_free_result("file_import_android_vulkan", status, result);
   return status == NUX_STATUS_OK ? as_handle(file) : 0;
