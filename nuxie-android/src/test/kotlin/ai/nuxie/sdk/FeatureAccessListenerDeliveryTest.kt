@@ -1,9 +1,9 @@
 package ai.nuxie.sdk
 
+import ai.nuxie.sdk.commerce.OptimisticFeatureOverlay
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.features.FeatureAccess
 import ai.nuxie.sdk.features.FeatureType
-import ai.nuxie.sdk.features.LocalPurchaseGrant
 import ai.nuxie.sdk.testsupport.FakeTransport
 import android.os.Looper
 import java.util.concurrent.CountDownLatch
@@ -67,9 +67,10 @@ class FeatureAccessListenerDeliveryTest {
 
         Thread {
             runBlocking {
-                requireNotNull(Nuxie.core).features.applyLocalPurchase(
-                    listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
-                    "transaction-1",
+                val core = requireNotNull(Nuxie.core)
+                core.features.applyOptimisticPurchaseProjection(
+                    core.identity.distinctId(),
+                    mapOf("pro" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null)),
                 )
             }
             workerFinished.countDown()

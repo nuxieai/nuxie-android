@@ -1,7 +1,6 @@
 package ai.nuxie.sdk.commerce
 
 import ai.nuxie.sdk.NuxieEnvironment
-import ai.nuxie.sdk.features.DurableFeatureRevocationStore
 import android.util.Log
 import java.io.File
 import java.math.BigDecimal
@@ -13,6 +12,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -41,10 +41,11 @@ internal data class StoredPurchaseContext(
     val displayPrice: String? = null,
 )
 
-internal data class StoredLocalPurchaseGrant(
+internal data class StoredFeatureAllowance(
     val featureId: String,
     val type: String,
     val unlimited: Boolean,
+    val allowance: Double? = null,
 )
 
 /** Durable signed-catalog mapping plus the customer account used for checkout. */
@@ -58,7 +59,7 @@ internal data class StoredPurchaseBinding(
     val productType: String,
     val consumable: Boolean,
     val context: StoredPurchaseContext? = null,
-    val localFeatureGrants: List<StoredLocalPurchaseGrant> = emptyList(),
+    val featureAllowances: List<StoredFeatureAllowance> = emptyList(),
     val licensingPublicKey: String? = null,
     val nuxieManaged: Boolean,
 )
@@ -71,7 +72,7 @@ internal data class StoredProductMapping(
     val productType: String,
     val consumable: Boolean,
     val context: StoredPurchaseContext? = null,
-    val localFeatureGrants: List<StoredLocalPurchaseGrant> = emptyList(),
+    val featureAllowances: List<StoredFeatureAllowance> = emptyList(),
     val licensingPublicKey: String? = null,
 )
 
@@ -96,7 +97,6 @@ internal data class PurchaseEvidence(
     val completionAttempts: Int = 0,
     val firstSeenMillis: Long,
     val consumable: Boolean = false,
-    val localFeatureGrants: List<StoredLocalPurchaseGrant> = emptyList(),
     val catalogResolved: Boolean = false,
     val completionEmitted: Boolean = false,
     val syncedEventEmitted: Boolean = false,
@@ -110,21 +110,14 @@ internal data class PurchaseEvidence(
     val backendSyncedAtMillis: Long? = null,
 )
 
-internal interface PurchaseEvidenceStore : DurableFeatureRevocationStore {
+internal interface PurchaseEvidenceStore {
     fun load(): Map<String, PurchaseEvidence>
     fun upsert(evidence: PurchaseEvidence): Boolean
-    override fun retireRevokedGrants(distinctId: String, featureIds: Set<String>): Boolean =
-        load().values
-            .filter { it.revoked && it.ownerDistinctId == distinctId }
-            .all { evidence ->
-                val retained = evidence.localFeatureGrants.filterNot { it.featureId in featureIds }
-                retained.size == evidence.localFeatureGrants.size ||
-                    upsert(evidence.copy(localFeatureGrants = retained))
-            }
     fun loadBindings(): List<StoredPurchaseBinding> = emptyList()
     fun upsertBinding(binding: StoredPurchaseBinding): Boolean = true
     fun loadProductMappings(): List<StoredProductMapping> = emptyList()
     fun upsertProductMapping(mapping: StoredProductMapping): Boolean = true
+    fun setProductMappingsChangedListener(listener: (() -> Unit)?) = Unit
 }
 
 /** Scope-private atomic JSON store. Purchase tokens are keys, never logs or preferences. */
@@ -136,6 +129,7 @@ internal class FilePurchaseEvidenceStore(
     private val catalogFile = File(directory, "purchase-catalog.json")
     private val lock = Any()
     private val json = Json { ignoreUnknownKeys = true }
+    @Volatile private var productMappingsChangedListener: (() -> Unit)? = null
 
     init {
         directory.mkdirs()
@@ -147,20 +141,6 @@ internal class FilePurchaseEvidenceStore(
         val entries = loadUnlocked().toMutableMap()
         entries[evidence.purchaseToken] = evidence
         saveUnlocked(entries)
-    }
-
-    override fun retireRevokedGrants(distinctId: String, featureIds: Set<String>): Boolean = synchronized(lock) {
-        val entries = loadUnlocked().toMutableMap()
-        var changed = false
-        entries.toMap().forEach { (token, evidence) ->
-            if (!evidence.revoked || evidence.ownerDistinctId != distinctId) return@forEach
-            val retained = evidence.localFeatureGrants.filterNot { it.featureId in featureIds }
-            if (retained.size != evidence.localFeatureGrants.size) {
-                entries[token] = evidence.copy(localFeatureGrants = retained)
-                changed = true
-            }
-        }
-        !changed || saveUnlocked(entries)
     }
 
     override fun loadBindings(): List<StoredPurchaseBinding> = synchronized(lock) {
@@ -192,10 +172,18 @@ internal class FilePurchaseEvidenceStore(
         loadMappingsUnlocked()
     }
 
-    override fun upsertProductMapping(mapping: StoredProductMapping): Boolean = synchronized(lock) {
-        val entries = loadMappingsUnlocked().associateByTo(linkedMapOf()) { it.storeProductId }
-        entries[mapping.storeProductId] = mapping
-        saveArray(catalogFile, entries.values.map(::encodeMapping), "catalog mapping")
+    override fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
+        val persisted = synchronized(lock) {
+            val entries = loadMappingsUnlocked().associateByTo(linkedMapOf()) { it.storeProductId }
+            entries[mapping.storeProductId] = mapping
+            saveArray(catalogFile, entries.values.map(::encodeMapping), "catalog mapping")
+        }
+        if (persisted) productMappingsChangedListener?.invoke()
+        return persisted
+    }
+
+    override fun setProductMappingsChangedListener(listener: (() -> Unit)?) {
+        productMappingsChangedListener = listener
     }
 
     private fun loadBindingsUnlocked(): List<StoredPurchaseBinding> = runCatching {
@@ -258,13 +246,6 @@ internal class FilePurchaseEvidenceStore(
             put("completionAttempts", JsonPrimitive(evidence.completionAttempts))
             put("firstSeenMillis", JsonPrimitive(evidence.firstSeenMillis))
             put("consumable", JsonPrimitive(evidence.consumable))
-            put("localFeatureGrants", JsonArray(evidence.localFeatureGrants.map { grant ->
-                JsonObject(mapOf(
-                    "featureId" to JsonPrimitive(grant.featureId),
-                    "type" to JsonPrimitive(grant.type),
-                    "unlimited" to JsonPrimitive(grant.unlimited),
-                ))
-            }))
             put("catalogResolved", JsonPrimitive(evidence.catalogResolved))
             put("completionEmitted", JsonPrimitive(evidence.completionEmitted))
             put("syncedEventEmitted", JsonPrimitive(evidence.syncedEventEmitted))
@@ -301,14 +282,6 @@ internal class FilePurchaseEvidenceStore(
             completionAttempts = (raw["completionAttempts"] as? JsonPrimitive)?.intOrNull ?: 0,
             firstSeenMillis = (raw["firstSeenMillis"] as? JsonPrimitive)?.longOrNull ?: return null,
             consumable = raw.boolean("consumable"),
-            localFeatureGrants = (raw["localFeatureGrants"] as? JsonArray).orEmpty().mapNotNull {
-                val grant = it as? JsonObject ?: return@mapNotNull null
-                StoredLocalPurchaseGrant(
-                    grant.string("featureId") ?: return@mapNotNull null,
-                    grant.string("type") ?: return@mapNotNull null,
-                    grant.boolean("unlimited"),
-                )
-            },
             catalogResolved = raw.boolean("catalogResolved"),
             completionEmitted = raw.boolean("completionEmitted"),
             syncedEventEmitted = raw.boolean("syncedEventEmitted"),
@@ -334,13 +307,7 @@ internal class FilePurchaseEvidenceStore(
             put("productType", JsonPrimitive(binding.productType))
             put("consumable", JsonPrimitive(binding.consumable))
             binding.context?.let { put("context", encodeContext(it)) }
-            put("localFeatureGrants", JsonArray(binding.localFeatureGrants.map { grant ->
-                JsonObject(mapOf(
-                    "featureId" to JsonPrimitive(grant.featureId),
-                    "type" to JsonPrimitive(grant.type),
-                    "unlimited" to JsonPrimitive(grant.unlimited),
-                ))
-            }))
+            put("featureAllowances", JsonArray(binding.featureAllowances.map(::encodeAllowance)))
             binding.licensingPublicKey?.let { put("licensingPublicKey", JsonPrimitive(it)) }
             put("nuxieManaged", JsonPrimitive(binding.nuxieManaged))
         },
@@ -357,14 +324,9 @@ internal class FilePurchaseEvidenceStore(
             productType = raw.string("productType") ?: return null,
             consumable = raw.boolean("consumable"),
             context = (raw["context"] as? JsonObject)?.let(::decodeContext),
-            localFeatureGrants = (raw["localFeatureGrants"] as? JsonArray).orEmpty().mapNotNull {
-                val grant = it as? JsonObject ?: return@mapNotNull null
-                StoredLocalPurchaseGrant(
-                    grant.string("featureId") ?: return@mapNotNull null,
-                    grant.string("type") ?: return@mapNotNull null,
-                    grant.boolean("unlimited"),
-                )
-            },
+            featureAllowances = (
+                (raw["featureAllowances"] ?: raw["localFeatureGrants"]) as? JsonArray
+            ).orEmpty().mapNotNull(::decodeAllowance),
             licensingPublicKey = raw.string("licensingPublicKey"),
             nuxieManaged = raw.boolean("nuxieManaged"),
         )
@@ -381,7 +343,7 @@ internal class FilePurchaseEvidenceStore(
             productType = mapping.productType,
             consumable = mapping.consumable,
             context = mapping.context,
-            localFeatureGrants = mapping.localFeatureGrants,
+            featureAllowances = mapping.featureAllowances,
             licensingPublicKey = mapping.licensingPublicKey,
             nuxieManaged = false,
         ),
@@ -396,13 +358,30 @@ internal class FilePurchaseEvidenceStore(
             productType = it.productType,
             consumable = it.consumable,
             context = it.context,
-            localFeatureGrants = it.localFeatureGrants,
+            featureAllowances = it.featureAllowances,
             licensingPublicKey = it.licensingPublicKey,
         )
     }
 
     private fun JsonObject.string(key: String): String? =
         (this[key] as? JsonPrimitive)?.contentOrNull
+
+    private fun encodeAllowance(allowance: StoredFeatureAllowance): JsonObject = JsonObject(buildMap {
+        put("featureId", JsonPrimitive(allowance.featureId))
+        put("type", JsonPrimitive(allowance.type))
+        put("unlimited", JsonPrimitive(allowance.unlimited))
+        allowance.allowance?.let { put("allowance", JsonPrimitive(it)) }
+    })
+
+    private fun decodeAllowance(raw: kotlinx.serialization.json.JsonElement): StoredFeatureAllowance? {
+        val allowance = raw as? JsonObject ?: return null
+        return StoredFeatureAllowance(
+            featureId = allowance.string("featureId") ?: return null,
+            type = allowance.string("type") ?: return null,
+            unlimited = allowance.boolean("unlimited"),
+            allowance = (allowance["allowance"] as? JsonPrimitive)?.doubleOrNull,
+        )
+    }
 
     private fun encodeContext(context: StoredPurchaseContext): JsonObject = JsonObject(buildMap {
         context.placementId?.let { put("placementId", JsonPrimitive(it)) }
@@ -428,24 +407,12 @@ internal class InMemoryPurchaseEvidenceStore : PurchaseEvidenceStore {
     private val entries = linkedMapOf<String, PurchaseEvidence>()
     private val bindings = linkedMapOf<String, StoredPurchaseBinding>()
     private val mappings = linkedMapOf<String, StoredProductMapping>()
+    @Volatile private var productMappingsChangedListener: (() -> Unit)? = null
     override fun load(): Map<String, PurchaseEvidence> = synchronized(entries) { entries.toMap() }
     override fun upsert(evidence: PurchaseEvidence): Boolean = synchronized(entries) {
         entries[evidence.purchaseToken] = evidence
         true
     }
-    override fun retireRevokedGrants(distinctId: String, featureIds: Set<String>): Boolean =
-        synchronized(entries) {
-            entries.toMap().forEach { (token, evidence) ->
-                if (evidence.revoked && evidence.ownerDistinctId == distinctId) {
-                    entries[token] = evidence.copy(
-                        localFeatureGrants = evidence.localFeatureGrants.filterNot {
-                            it.featureId in featureIds
-                        },
-                    )
-                }
-            }
-            true
-        }
     override fun loadBindings(): List<StoredPurchaseBinding> = synchronized(bindings) {
         bindings.values.toList()
     }
@@ -456,8 +423,12 @@ internal class InMemoryPurchaseEvidenceStore : PurchaseEvidenceStore {
     override fun loadProductMappings(): List<StoredProductMapping> = synchronized(mappings) {
         mappings.values.toList()
     }
-    override fun upsertProductMapping(mapping: StoredProductMapping): Boolean = synchronized(mappings) {
-        mappings[mapping.storeProductId] = mapping
-        true
+    override fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
+        synchronized(mappings) { mappings[mapping.storeProductId] = mapping }
+        productMappingsChangedListener?.invoke()
+        return true
+    }
+    override fun setProductMappingsChangedListener(listener: (() -> Unit)?) {
+        productMappingsChangedListener = listener
     }
 }

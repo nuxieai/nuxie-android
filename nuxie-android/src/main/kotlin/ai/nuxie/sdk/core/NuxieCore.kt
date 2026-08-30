@@ -166,7 +166,6 @@ internal class NuxieCore(
         identity = identity,
         featureInfo = featureInfo,
         cacheTtlMillis = featureCacheTtlMillis,
-        revocationStore = purchaseEvidenceStore,
         nowMillis = nowMillis,
     )
 
@@ -200,7 +199,7 @@ internal class NuxieCore(
         api = api,
         purchases = purchases,
         identity = identity,
-        featureInfo = featureInfo,
+        features = features,
         eventLog = eventLog,
         scope = scope,
     )

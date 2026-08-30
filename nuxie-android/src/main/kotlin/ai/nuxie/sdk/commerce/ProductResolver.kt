@@ -2,7 +2,7 @@ package ai.nuxie.sdk.commerce
 
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.ProductDetails
-import ai.nuxie.sdk.features.LocalPurchaseGrant
+import ai.nuxie.sdk.features.FeatureAllowance
 
 internal sealed interface OfferSelection {
     data object None : OfferSelection
@@ -19,7 +19,7 @@ internal data class CatalogProductRequest(
     val placementId: String? = null,
     val isOfferPersonalized: Boolean = false,
     val consumable: Boolean = false,
-    val localFeatureGrants: List<LocalPurchaseGrant> = emptyList(),
+    val featureAllowances: List<FeatureAllowance> = emptyList(),
     val licensingPublicKey: String? = null,
     val experienceId: String? = null,
     val experienceVersion: String? = null,
@@ -162,7 +162,7 @@ internal class ProductResolver(
                 isOfferPersonalized = request.isOfferPersonalized,
                 productType = request.productType,
                 consumable = request.consumable,
-                localFeatureGrants = request.localFeatureGrants,
+                featureAllowances = request.featureAllowances,
                 licensingPublicKey = request.licensingPublicKey,
                 purchaseContext = PurchaseContext(request.experienceId, request.experienceVersion),
             )
@@ -194,7 +194,7 @@ internal class ProductResolver(
             isOfferPersonalized = request.isOfferPersonalized,
             productType = request.productType,
             consumable = false,
-            localFeatureGrants = request.localFeatureGrants,
+            featureAllowances = request.featureAllowances,
             licensingPublicKey = request.licensingPublicKey,
             purchaseContext = PurchaseContext(request.experienceId, request.experienceVersion),
         )
@@ -215,8 +215,8 @@ internal class ProductResolver(
             purchaseContext?.experienceId,
             purchaseContext?.experienceVersion,
         ),
-        localFeatureGrants = localFeatureGrants.map {
-            StoredLocalPurchaseGrant(it.featureId, it.type.name, it.unlimited)
+        featureAllowances = featureAllowances.map {
+            StoredFeatureAllowance(it.featureId, it.type.name, it.unlimited, it.allowance)
         },
         licensingPublicKey = licensingPublicKey,
     )

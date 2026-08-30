@@ -29,7 +29,7 @@ internal class FeatureUsageService(
     private val api: NuxieApi,
     private val purchases: PurchaseService,
     private val identity: IdentityProvider,
-    private val featureInfo: FeatureInfo,
+    private val features: FeatureService,
     private val eventLog: EventLog,
     private val scope: CoroutineScope,
 ) {
@@ -125,9 +125,9 @@ internal class FeatureUsageService(
                 remaining = raw.double("remaining"),
             )
         }
-        usage?.remaining?.let { featureInfo.setBalance(featureId, it, entityId) }
         val accepted = status == "ok" || status == "success"
         if (accepted) {
+            usage?.remaining?.let { features.applyAuthoritativeUsageBalance(featureId, it, entityId) }
             captureAcceptedUse(
                 featureId,
                 amount,

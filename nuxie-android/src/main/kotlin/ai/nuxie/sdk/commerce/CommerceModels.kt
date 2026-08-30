@@ -1,6 +1,6 @@
 package ai.nuxie.sdk.commerce
 
-import ai.nuxie.sdk.features.LocalPurchaseGrant
+import ai.nuxie.sdk.features.FeatureAllowance
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.ProductDetails
 import java.math.BigDecimal
@@ -17,7 +17,7 @@ class StoreProduct internal constructor(
     internal val isOfferPersonalized: Boolean,
     internal val productType: String,
     internal val consumable: Boolean = false,
-    internal val localFeatureGrants: List<LocalPurchaseGrant> = emptyList(),
+    internal val featureAllowances: List<FeatureAllowance> = emptyList(),
     internal val licensingPublicKey: String? = null,
     internal val purchaseContext: PurchaseContext? = null,
 )

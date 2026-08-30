@@ -13,7 +13,8 @@ import ai.nuxie.sdk.commerce.PurchaseService
 import ai.nuxie.sdk.commerce.PurchaseSettings
 import ai.nuxie.sdk.commerce.PurchaseSynchronizer
 import ai.nuxie.sdk.commerce.PurchaseSyncOutcome
-import ai.nuxie.sdk.commerce.StoredLocalPurchaseGrant
+import ai.nuxie.sdk.commerce.StoredFeatureAllowance
+import ai.nuxie.sdk.commerce.StoredProductMapping
 import ai.nuxie.sdk.commerce.StoredPurchaseState
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.features.FeatureType
@@ -533,11 +534,25 @@ private object CommerceWireFixtures {
                     ownerDistinctId = FULL_CUSTOMER_ID,
                     acknowledged = false,
                     firstSeenMillis = 1L,
-                    localFeatureGrants = listOf(
-                        StoredLocalPurchaseGrant(FULL_FEATURE_ID, FeatureType.CREDIT_SYSTEM.name, false),
-                    ),
                     catalogResolved = true,
                     nuxieManaged = true,
+                    signatureVerified = true,
+                ),
+            )
+            evidenceStore.upsertProductMapping(
+                StoredProductMapping(
+                    storeProductId = "fixture-credit-pack-full",
+                    nuxieProductId = "fixture-credit-pack",
+                    productType = BillingClient.ProductType.INAPP,
+                    consumable = true,
+                    featureAllowances = listOf(
+                        StoredFeatureAllowance(
+                            FULL_FEATURE_ID,
+                            FeatureType.CREDIT_SYSTEM.name,
+                            false,
+                            allowance = 1.0,
+                        ),
+                    ),
                 ),
             )
         }

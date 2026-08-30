@@ -117,7 +117,7 @@ class PurchaseEvidenceStoreTest {
                     BigDecimal("9.990000"),
                     "€9.99",
                 ),
-                localFeatureGrants = listOf(StoredLocalPurchaseGrant("pro", "BOOLEAN", false)),
+                featureAllowances = listOf(StoredFeatureAllowance("pro", "BOOLEAN", false)),
                 licensingPublicKey = "public-key",
                 nuxieManaged = true,
             )
@@ -148,13 +148,32 @@ class PurchaseEvidenceStoreTest {
                     BigDecimal("9.990000"),
                     "€9.99",
                 ),
-                localFeatureGrants = listOf(StoredLocalPurchaseGrant("pro", "BOOLEAN", false)),
+                featureAllowances = listOf(
+                    StoredFeatureAllowance("exports", "METERED", false, allowance = 3.5),
+                ),
                 licensingPublicKey = "public-key",
             )
 
             assertTrue(FilePurchaseEvidenceStore(directory).upsertProductMapping(mapping))
 
             assertEquals(mapping, FilePurchaseEvidenceStore(directory).loadProductMappings().single())
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun fileStoreMigratesCachedAllowanceDescriptorsFromThePreviousKey() {
+        val directory = Files.createTempDirectory("nuxie-product-mapping-migration").toFile()
+        try {
+            directory.resolve("purchase-catalog.json").writeText(
+                """[{"storeProductId":"play-pro","nuxieProductId":"pro","productType":"inapp","consumable":false,"localFeatureGrants":[{"featureId":"exports","type":"METERED","unlimited":false,"allowance":3.5}]}]""",
+            )
+
+            assertEquals(
+                listOf(StoredFeatureAllowance("exports", "METERED", false, 3.5)),
+                FilePurchaseEvidenceStore(directory).loadProductMappings().single().featureAllowances,
+            )
         } finally {
             directory.deleteRecursively()
         }

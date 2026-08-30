@@ -2,17 +2,12 @@ package ai.nuxie.sdk.features
 
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
-import ai.nuxie.sdk.commerce.InMemoryPurchaseEvidenceStore
-import ai.nuxie.sdk.commerce.PurchaseEvidence
-import ai.nuxie.sdk.commerce.PurchaseEvidenceStore
-import ai.nuxie.sdk.commerce.StoredLocalPurchaseGrant
-import ai.nuxie.sdk.commerce.StoredPurchaseState
+import ai.nuxie.sdk.commerce.OptimisticFeatureOverlay
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.testsupport.FakeTransport
 import kotlinx.coroutines.async
-import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -26,14 +21,13 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(RobolectricTestRunner::class)
 class FeatureServiceTest {
     private var now = 1_784_462_400_000L
+    private val testPurchaseAllowances = mutableMapOf<Pair<NuxieCore, String>, List<FeatureAllowance>>()
 
     private fun core(transport: FakeTransport, ttlMillis: Long = 5 * 60 * 1000L): NuxieCore = NuxieCore(
         context = RuntimeEnvironment.getApplication(),
@@ -46,6 +40,51 @@ class FeatureServiceTest {
     )
 
     private fun profile(features: String): String = """{"segments":[],"features":$features}"""
+
+    private suspend fun applyTestPurchase(
+        core: NuxieCore,
+        allowances: List<FeatureAllowance>,
+        purchaseToken: String,
+    ) {
+        testPurchaseAllowances[core to purchaseToken] = allowances
+        publishTestProjection(core)
+    }
+
+    private suspend fun removeTestPurchase(core: NuxieCore, purchaseToken: String) {
+        testPurchaseAllowances.remove(core to purchaseToken)
+        publishTestProjection(core)
+    }
+
+    private suspend fun publishTestProjection(core: NuxieCore) {
+        val overlays = linkedMapOf<String, OptimisticFeatureOverlay>()
+        testPurchaseAllowances
+            .filterKeys { it.first === core }
+            .values
+            .flatten()
+            .forEach { allowance ->
+                val next = OptimisticFeatureOverlay(
+                    type = allowance.type,
+                    unlimited = allowance.unlimited,
+                    balanceIncrease = allowance.allowance,
+                )
+                val current = overlays[allowance.featureId]
+                overlays[allowance.featureId] = if (current == null || current.type != next.type) {
+                    next
+                } else {
+                    current.copy(
+                        unlimited = current.unlimited || next.unlimited,
+                        balanceIncrease = when {
+                            current.unlimited || next.unlimited -> null
+                            else -> (current.balanceIncrease ?: 0.0) + (next.balanceIncrease ?: 0.0)
+                        },
+                    )
+                }
+            }
+        core.features.applyOptimisticPurchaseProjection(
+            core.identity.distinctId(),
+            overlays.takeIf { it.isNotEmpty() },
+        )
+    }
 
     private fun featureResponse(
         customerId: String,
@@ -111,45 +150,37 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun authoritativeAllowRetiresDurableAndCachedRevocationsForAffectedFeature() = runBlocking {
-        val store = InMemoryPurchaseEvidenceStore()
-        val core = NuxieCore(
-            context = RuntimeEnvironment.getApplication(),
-            apiKey = "pk_test_features_revocation",
-            environment = NuxieEnvironment.DEVELOPMENT,
-            logLevel = LogLevel.NONE,
-            beforeSend = null,
-            overrides = NuxieCore.Overrides(
-                transport = FakeTransport(),
-                registerLifecycle = false,
-                purchaseEvidenceStore = store,
-            ),
-        )
+    fun backendAcknowledgementPublishesAuthorityAndOverlayRetirementAtomically() = runBlocking {
+        val core = core(FakeTransport())
         val customer = core.identity.distinctId()
+        core.features.applyOptimisticPurchaseProjection(
+            customer,
+            mapOf("credits" to OptimisticFeatureOverlay(FeatureType.CREDIT_SYSTEM, false, 10.0)),
+        )
+        assertEquals(10.0, core.featureInfo.balance("credits")!!, 0.0)
+        val observed = mutableListOf<Double?>()
+        core.featureInfo.onFeatureChange = { featureId, _, access ->
+            if (featureId == "credits") observed += access.balance
+        }
         val scope = core.features.captureAuthoritativeUseScope(customer)
-        store.upsert(revokedEvidence(customer, "restored"))
-        val grant = listOf(LocalPurchaseGrant("restored", FeatureType.BOOLEAN))
-        core.features.applyLocalPurchase(grant, "revoked-token")
-        core.features.removePurchase("revoked-token")
-        assertFalse(core.features.getCached("restored", null)!!.allowed)
 
         core.features.applyAuthoritativeUse(
             result = authoritativeResult(
                 customerId = customer,
-                featureId = "restored",
-                unlimited = true,
-                balance = null,
-                type = FeatureType.BOOLEAN,
+                featureId = "credits",
+                balance = 8.0,
+                type = FeatureType.CREDIT_SYSTEM,
             ),
-            requestedFeatureId = "restored",
+            requestedFeatureId = "credits",
             distinctId = customer,
             entityId = null,
             expectedScope = scope,
+            reconciledOptimisticProjection = null,
+            reconcileOptimisticProjection = true,
         )
 
-        assertTrue(core.features.getCached("restored", null)!!.allowed)
-        assertTrue(core.featureInfo.isAllowed("restored"))
-        assertTrue(store.load().getValue("revoked-token").localFeatureGrants.isEmpty())
+        assertEquals(listOf(8.0), observed)
+        assertEquals(8.0, core.featureInfo.balance("credits")!!, 0.0)
         core.stop()
     }
 
@@ -225,86 +256,6 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun authoritativeUseRetirementFailureDoesNotInventSupersession() = runBlocking {
-        val checkStarted = CountDownLatch(1)
-        val releaseCheck = CountDownLatch(1)
-        lateinit var core: NuxieCore
-        val transport = FakeTransport().apply {
-            respond = { request ->
-                if (request.url.path == "/entitled") {
-                    checkStarted.countDown()
-                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
-                    HttpTransport.Response(
-                        200,
-                        featureResponse(
-                            customerId = core.identity.distinctId(),
-                            featureId = "exports",
-                            requiredBalance = 1.0,
-                            allowed = false,
-                            balance = "0",
-                        ).encodeToByteArray(),
-                    )
-                } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
-                }
-            }
-        }
-        core = NuxieCore(
-            context = RuntimeEnvironment.getApplication(),
-            apiKey = "pk_test_features_retirement_failure",
-            environment = NuxieEnvironment.DEVELOPMENT,
-            logLevel = LogLevel.NONE,
-            beforeSend = null,
-            overrides = NuxieCore.Overrides(
-                transport = transport,
-                registerLifecycle = false,
-                purchaseEvidenceStore = FailingRevocationStore,
-            ),
-        )
-        val customer = core.identity.distinctId()
-        val olderCheck = async(Dispatchers.Default) { runCatching { core.features.check("exports") } }
-        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
-        val scope = core.features.captureAuthoritativeUseScope(customer)
-
-        core.features.applyAuthoritativeUse(
-            result = authoritativeResult(customer, "exports", balance = 5.0),
-            requestedFeatureId = "exports",
-            distinctId = customer,
-            entityId = null,
-            expectedScope = scope,
-        )
-        releaseCheck.countDown()
-
-        assertFalse(olderCheck.await().getOrThrow().allowed)
-        assertEquals(null, core.features.getCached("exports", null))
-        core.stop()
-    }
-
-    private fun revokedEvidence(distinctId: String, featureId: String) = PurchaseEvidence(
-        purchaseToken = "revoked-token",
-        packageName = "com.example.app",
-        storeProductIds = listOf("play-product"),
-        purchaseState = StoredPurchaseState.PURCHASED,
-        syncAttributionDistinctId = distinctId,
-        ownerDistinctId = distinctId,
-        acknowledged = true,
-        firstSeenMillis = now,
-        localFeatureGrants = listOf(
-            StoredLocalPurchaseGrant(featureId, FeatureType.BOOLEAN.name, false),
-        ),
-        catalogResolved = true,
-        nuxieManaged = true,
-        authorityScope = "scope-a",
-        revoked = true,
-    )
-
-    private object FailingRevocationStore : PurchaseEvidenceStore {
-        override fun load(): Map<String, PurchaseEvidence> = emptyMap()
-        override fun upsert(evidence: PurchaseEvidence): Boolean = true
-        override fun retireRevokedGrants(distinctId: String, featureIds: Set<String>): Boolean = false
-    }
-
-    @Test
     fun profileHydrationMakesFeatureInfoReadyAndPopulatesTheCache() = runBlocking {
         val core = core(FakeTransport())
         assertEquals(FeatureInfo.State.Unknown, core.featureInfo.state.value)
@@ -323,7 +274,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun optimisticPurchaseProjectsOnlyBooleanAndUnlimitedAndRevokesAboveProfile() = runBlocking {
+    fun optimisticPurchaseWidensDescriptorAllowancesAndClearsBackToProfile() = runBlocking {
         val core = core(FakeTransport())
         val customer = core.identity.distinctId()
         core.features.hydrateProfile(
@@ -335,29 +286,33 @@ class FeatureServiceTest {
             ).jsonObject,
         )
 
-        core.features.applyLocalPurchase(
+        applyTestPurchase(
+            core,
             listOf(
-                LocalPurchaseGrant("pro", FeatureType.BOOLEAN),
-                LocalPurchaseGrant("exports", FeatureType.METERED),
-                LocalPurchaseGrant("unlimited-exports", FeatureType.METERED, unlimited = true),
-                LocalPurchaseGrant("credits", FeatureType.CREDIT_SYSTEM),
+                FeatureAllowance("pro", FeatureType.BOOLEAN),
+                FeatureAllowance("exports", FeatureType.METERED, allowance = 3.0),
+                FeatureAllowance("unlimited-exports", FeatureType.METERED, unlimited = true),
+                FeatureAllowance("credits", FeatureType.CREDIT_SYSTEM, allowance = 2.5),
             ),
             "token-1",
         )
 
         assertTrue(core.featureInfo.isAllowed("pro"))
-        assertFalse(core.featureInfo.isAllowed("exports"))
+        assertTrue(core.featureInfo.isAllowed("exports"))
+        assertEquals(3.0, core.featureInfo.balance("exports")!!, 0.0)
         assertTrue(core.featureInfo.isAllowed("unlimited-exports"))
-        assertFalse(core.featureInfo.isAllowed("credits"))
+        assertTrue(core.featureInfo.isAllowed("credits"))
+        assertEquals(2.5, core.featureInfo.balance("credits")!!, 0.0)
 
-        core.features.removePurchase("token-1")
-        assertFalse(core.featureInfo.isAllowed("pro"))
+        removeTestPurchase(core, "token-1")
+        assertTrue(core.featureInfo.isAllowed("pro"))
+        assertFalse(core.featureInfo.isAllowed("exports"))
         assertFalse(core.featureInfo.isAllowed("unlimited-exports"))
         core.stop()
     }
 
     @Test
-    fun cachedAccessUsesRevokedThenLocalPurchaseThenRealTimeThenProfileOrdering() = runBlocking {
+    fun cachedAccessKeepsTheOverlayAboveRealTimeAndProfileAccess() = runBlocking {
         val transport = FakeTransport().apply {
             respond = { request ->
                 if (request.url.path == "/entitled") {
@@ -388,24 +343,24 @@ class FeatureServiceTest {
         core.features.check("exports")
         assertFalse(core.features.getCached("exports", null)!!.allowed)
 
-        val grant = listOf(LocalPurchaseGrant("exports", FeatureType.METERED, unlimited = true))
-        core.features.applyLocalPurchase(grant, "local-token")
+        val allowance = listOf(FeatureAllowance("exports", FeatureType.METERED, unlimited = true))
+        applyTestPurchase(core, allowance, "local-token")
         assertTrue(core.features.getCached("exports", null)!!.allowed)
         assertTrue(core.features.checkWithCache("exports").allowed)
 
         assertFalse(core.features.check("exports").allowed)
-        assertFalse(core.features.getCached("exports", null)!!.allowed)
-
-        core.features.applyLocalPurchase(grant, "other-token")
         assertTrue(core.features.getCached("exports", null)!!.allowed)
-        core.features.removePurchase("other-token")
-        core.features.applyLocalPurchase(grant, "new-token")
-        assertFalse(core.features.getCached("exports", null)!!.allowed)
+
+        applyTestPurchase(core, allowance, "other-token")
+        assertTrue(core.features.getCached("exports", null)!!.allowed)
+        removeTestPurchase(core, "other-token")
+        applyTestPurchase(core, allowance, "new-token")
+        assertTrue(core.features.getCached("exports", null)!!.allowed)
         core.stop()
     }
 
     @Test
-    fun profileFetchStartedBeforePurchaseDoesNotEraseTheNewerOptimisticGrant() = runBlocking {
+    fun profileFetchStartedBeforePurchaseDoesNotEraseTheNewerOptimisticOverlay() = runBlocking {
         val fetchStarted = CountDownLatch(1)
         val releaseFetch = CountDownLatch(1)
         val transport = FakeTransport().apply {
@@ -428,8 +383,8 @@ class FeatureServiceTest {
 
         val refresh = async(Dispatchers.Default) { core.profile.refreshAndWait() }
         assertTrue(fetchStarted.await(5, TimeUnit.SECONDS))
-        core.features.applyLocalPurchase(
-            listOf(LocalPurchaseGrant("exports", FeatureType.METERED, unlimited = true)),
+        applyTestPurchase(core,
+            listOf(FeatureAllowance("exports", FeatureType.METERED, unlimited = true)),
             "mid-fetch-token",
         )
         releaseFetch.countDown()
@@ -506,7 +461,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun remoteCheckCancelsWhenAnOptimisticGrantLandsMidRequest() = runBlocking {
+    fun remoteCheckCommitsBeneathAnOverlayThatLandsMidRequest() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
         lateinit var core: NuxieCore
@@ -535,19 +490,19 @@ class FeatureServiceTest {
 
         val check = async(Dispatchers.Default) { core.features.check("pro") }
         assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
-        core.features.applyLocalPurchase(
-            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+        applyTestPurchase(core,
+            listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
             "mid-check-token",
         )
         releaseCheck.countDown()
 
-        assertTrue(runCatching { check.await() }.exceptionOrNull() is CancellationException)
+        assertFalse(check.await().allowed)
         assertTrue(core.featureInfo.isAllowed("pro"))
         core.stop()
     }
 
     @Test
-    fun remoteCheckCancelsWhenRevocationLandsMidRequest() = runBlocking {
+    fun remoteCheckCommitsAfterAnOverlayIsRemovedMidRequest() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
         lateinit var core: NuxieCore
@@ -573,18 +528,18 @@ class FeatureServiceTest {
             }
         }
         core = core(transport)
-        core.features.applyLocalPurchase(
-            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+        applyTestPurchase(core,
+            listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
             "mid-check-token",
         )
 
         val check = async(Dispatchers.Default) { core.features.check("pro") }
         assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
-        core.features.removePurchase("mid-check-token")
+        removeTestPurchase(core, "mid-check-token")
         releaseCheck.countDown()
 
-        assertTrue(runCatching { check.await() }.exceptionOrNull() is CancellationException)
-        assertFalse(core.features.getCached("pro", null)!!.allowed)
+        assertTrue(check.await().allowed)
+        assertTrue(core.features.getCached("pro", null)!!.allowed)
         core.stop()
     }
 
@@ -615,8 +570,8 @@ class FeatureServiceTest {
             }
         }
         core = core(transport)
-        core.features.applyLocalPurchase(
-            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+        applyTestPurchase(core,
+            listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
             "mid-check-token",
         )
 
@@ -687,7 +642,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun remoteCheckStillCancelsAfterProfileReconciliationRetiresTheMidRequestPurchase() = runBlocking {
+    fun remoteCheckCommitsBeneathProfileAndOverlayWithoutAdvancingTheirFence() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
         lateinit var core: NuxieCore
@@ -716,8 +671,8 @@ class FeatureServiceTest {
 
         val check = async(Dispatchers.Default) { core.features.check("pro") }
         assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
-        core.features.applyLocalPurchase(
-            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+        applyTestPurchase(core,
+            listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
             "mid-check-token",
         )
         core.features.hydrateProfile(
@@ -728,7 +683,7 @@ class FeatureServiceTest {
         )
         releaseCheck.countDown()
 
-        assertTrue(runCatching { check.await() }.exceptionOrNull() is CancellationException)
+        assertFalse(check.await().allowed)
         assertTrue(core.features.getCached("pro", null)!!.allowed)
         core.stop()
     }
@@ -770,8 +725,8 @@ class FeatureServiceTest {
             core.features.checkWithCache("pro", forceRefresh = true)
         }
         assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
-        core.features.applyLocalPurchase(
-            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+        applyTestPurchase(core,
+            listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
             "mid-check-token",
         )
         core.features.hydrateProfile(customer, allowedProfile)
@@ -810,8 +765,8 @@ class FeatureServiceTest {
 
         val check = async(Dispatchers.Default) { core.features.check("exports") }
         assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
-        core.features.applyLocalPurchase(
-            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+        applyTestPurchase(core,
+            listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
             "unrelated-token",
         )
         releaseCheck.countDown()
@@ -866,8 +821,8 @@ class FeatureServiceTest {
             )
         }
         assertTrue(checksStarted.await(5, TimeUnit.SECONDS))
-        core.features.applyLocalPurchase(
-            listOf(LocalPurchaseGrant("exports", FeatureType.METERED, unlimited = true)),
+        applyTestPurchase(core,
+            listOf(FeatureAllowance("exports", FeatureType.METERED, unlimited = true)),
             "global-purchase",
         )
         releaseChecks.countDown()
@@ -974,7 +929,7 @@ class FeatureServiceTest {
             ).balance!!,
             0.0,
         )
-        core.features.removePurchase("purchase-before-checks")
+        removeTestPurchase(core, "purchase-before-checks")
         releaseOlderCheck.countDown()
 
         assertEquals(2.0, older.await().balance!!, 0.0)
@@ -983,163 +938,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun allowedCheckRetiresRevocationsOnIo() = runBlocking {
-        val retirementStarted = CountDownLatch(1)
-        val releaseRetirement = CountDownLatch(1)
-        val callerThread = AtomicReference<Thread>()
-        val ledgerThread = AtomicReference<Thread>()
-        val store = object : PurchaseEvidenceStore {
-            override fun load(): Map<String, PurchaseEvidence> = emptyMap()
-            override fun upsert(evidence: PurchaseEvidence): Boolean = true
-            override fun retireRevokedGrants(distinctId: String, featureIds: Set<String>): Boolean {
-                ledgerThread.set(Thread.currentThread())
-                retirementStarted.countDown()
-                assertTrue(releaseRetirement.await(5, TimeUnit.SECONDS))
-                return true
-            }
-        }
-        lateinit var core: NuxieCore
-        val transport = FakeTransport().apply {
-            respond = { request ->
-                if (request.url.path == "/entitled") {
-                    HttpTransport.Response(
-                        200,
-                        featureResponse(
-                            customerId = core.identity.distinctId(),
-                            featureId = "pro",
-                            requiredBalance = 1.0,
-                            balance = "1",
-                            type = "boolean",
-                        ).encodeToByteArray(),
-                    )
-                } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
-                }
-            }
-        }
-        core = NuxieCore(
-            context = RuntimeEnvironment.getApplication(),
-            apiKey = "pk_test_features_retirement_io",
-            environment = NuxieEnvironment.DEVELOPMENT,
-            logLevel = LogLevel.NONE,
-            beforeSend = null,
-            overrides = NuxieCore.Overrides(
-                transport = transport,
-                registerLifecycle = false,
-                purchaseEvidenceStore = store,
-            ),
-        )
-
-        Executors.newSingleThreadExecutor { runnable ->
-            Thread(runnable, "feature-check-caller")
-        }.asCoroutineDispatcher().use { callerDispatcher ->
-            val check = async(callerDispatcher) {
-                callerThread.set(Thread.currentThread())
-                core.features.check("pro")
-            }
-            assertTrue(retirementStarted.await(5, TimeUnit.SECONDS))
-            val ledgerWasOffCaller = ledgerThread.get() !== callerThread.get()
-            releaseRetirement.countDown()
-
-            assertTrue(check.await().allowed)
-            assertTrue(ledgerWasOffCaller)
-        }
-        core.stop()
-    }
-
-    @Test
-    fun concurrentNewerRevocationDuringRetirementSurvivesDurably() = runBlocking {
-        val retirementStarted = CountDownLatch(1)
-        val releaseRetirement = CountDownLatch(1)
-        val newerRevocationPersisted = CountDownLatch(1)
-        val entries = linkedMapOf<String, PurchaseEvidence>()
-        val store = object : PurchaseEvidenceStore {
-            override fun load(): Map<String, PurchaseEvidence> = synchronized(entries) {
-                entries.toMap()
-            }
-
-            override fun upsert(evidence: PurchaseEvidence): Boolean = synchronized(entries) {
-                entries[evidence.purchaseToken] = evidence
-                true
-            }
-
-            override fun retireRevokedGrants(distinctId: String, featureIds: Set<String>): Boolean {
-                retirementStarted.countDown()
-                assertTrue(releaseRetirement.await(5, TimeUnit.SECONDS))
-                synchronized(entries) {
-                    entries.replaceAll { _, evidence ->
-                        if (evidence.revoked && evidence.ownerDistinctId == distinctId) {
-                            evidence.copy(
-                                localFeatureGrants = evidence.localFeatureGrants.filterNot {
-                                    it.featureId in featureIds
-                                },
-                            )
-                        } else {
-                            evidence
-                        }
-                    }
-                }
-                return true
-            }
-        }
-        lateinit var core: NuxieCore
-        val transport = FakeTransport().apply {
-            respond = { request ->
-                if (request.url.path == "/entitled") {
-                    HttpTransport.Response(
-                        200,
-                        featureResponse(
-                            customerId = core.identity.distinctId(),
-                            featureId = "pro",
-                            requiredBalance = 1.0,
-                            balance = "1",
-                            type = "boolean",
-                        ).encodeToByteArray(),
-                    )
-                } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
-                }
-            }
-        }
-        core = NuxieCore(
-            context = RuntimeEnvironment.getApplication(),
-            apiKey = "pk_test_features_concurrent_revocation_retirement",
-            environment = NuxieEnvironment.DEVELOPMENT,
-            logLevel = LogLevel.NONE,
-            beforeSend = null,
-            overrides = NuxieCore.Overrides(
-                transport = transport,
-                registerLifecycle = false,
-                purchaseEvidenceStore = store,
-            ),
-        )
-        val customer = core.identity.distinctId()
-        val grant = listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN))
-        val evidence = revokedEvidence(customer, "pro").copy(purchaseToken = "newer-revocation")
-
-        val check = async(Dispatchers.Default) { runCatching { core.features.check("pro") } }
-        assertTrue(retirementStarted.await(5, TimeUnit.SECONDS))
-        val newerRevocation = async(Dispatchers.Default) {
-            core.features.applyLocalPurchase(grant, evidence.purchaseToken)
-            assertTrue(store.upsert(evidence))
-            newerRevocationPersisted.countDown()
-            core.features.removePurchase(evidence.purchaseToken)
-        }
-        newerRevocationPersisted.await(1, TimeUnit.SECONDS)
-        releaseRetirement.countDown()
-
-        check.await()
-        newerRevocation.await()
-        assertFalse(core.features.getCached("pro", null)!!.allowed)
-        assertEquals(
-            listOf("pro"),
-            store.load().getValue(evidence.purchaseToken).localFeatureGrants.map { it.featureId },
-        )
-        core.stop()
-    }
-
-    @Test
-    fun revocationLandingMidForcedRefreshOutranksTheCompletedResponse() = runBlocking {
+    fun overlayRemovalLetsTheCompletedAuthoritativeResponseStand() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
         lateinit var core: NuxieCore
@@ -1165,8 +964,8 @@ class FeatureServiceTest {
             }
         }
         core = core(transport)
-        core.features.applyLocalPurchase(
-            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+        applyTestPurchase(core,
+            listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
             "mid-check-token",
         )
 
@@ -1174,16 +973,16 @@ class FeatureServiceTest {
             core.features.checkWithCache("pro", forceRefresh = true)
         }
         assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
-        core.features.removePurchase("mid-check-token")
+        removeTestPurchase(core, "mid-check-token")
         releaseCheck.countDown()
 
-        assertFalse(check.await().allowed)
-        assertFalse(core.featureInfo.isAllowed("pro"))
+        assertTrue(check.await().allowed)
+        assertTrue(core.featureInfo.isAllowed("pro"))
         core.stop()
     }
 
     @Test
-    fun purchaseResponseReconcilesItsGrantWithoutReplacingUnrelatedProfileFeatures() = runBlocking {
+    fun purchaseResponseReconcilesItsAccessWithoutReplacingUnrelatedProfileFeatures() = runBlocking {
         val core = core(FakeTransport())
         val customer = core.identity.distinctId()
         core.features.hydrateProfile(
@@ -1192,8 +991,8 @@ class FeatureServiceTest {
                 profile("""[{"id":"existing","type":"boolean","unlimited":false}]"""),
             ).jsonObject,
         )
-        core.features.applyLocalPurchase(
-            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+        applyTestPurchase(core,
+            listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
             "token-1",
         )
 
@@ -1207,9 +1006,9 @@ class FeatureServiceTest {
 
         assertTrue(core.featureInfo.isAllowed("existing"))
         assertTrue(core.featureInfo.isAllowed("pro"))
-        core.features.removePurchase("token-1")
+        removeTestPurchase(core, "token-1")
         assertTrue(core.featureInfo.isAllowed("existing"))
-        assertFalse(core.featureInfo.isAllowed("pro"))
+        assertTrue(core.featureInfo.isAllowed("pro"))
         core.stop()
     }
 
@@ -1217,8 +1016,8 @@ class FeatureServiceTest {
     fun userChangeDropsOptimisticPurchaseProjection() = runBlocking {
         val core = core(FakeTransport())
         val oldId = core.identity.distinctId()
-        core.features.applyLocalPurchase(
-            listOf(LocalPurchaseGrant("pro", FeatureType.BOOLEAN)),
+        applyTestPurchase(core,
+            listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
             "token-1",
         )
         assertTrue(core.featureInfo.isAllowed("pro"))
@@ -1334,7 +1133,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun cacheFirstSupersededCheckFallsBackToRawResultAfterCommittedEntryIsReconciledAway() = runBlocking {
+    fun cacheFirstCheckCommitsBeneathTheOverlayAboveHydratedProfile() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
         lateinit var core: NuxieCore
@@ -1368,8 +1167,8 @@ class FeatureServiceTest {
             )
         }
         assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
-        core.features.applyLocalPurchase(
-            listOf(LocalPurchaseGrant("exports", FeatureType.BOOLEAN)),
+        applyTestPurchase(core,
+            listOf(FeatureAllowance("exports", FeatureType.BOOLEAN)),
             "mid-check-token",
         )
         core.features.hydrateProfile(
@@ -1378,7 +1177,7 @@ class FeatureServiceTest {
                 profile("""[{"id":"exports","type":"metered","balance":0,"unlimited":false}]"""),
             ).jsonObject,
         )
-        assertFalse(core.features.getCached("exports", null)!!.allowed)
+        assertTrue(core.features.getCached("exports", null)!!.allowed)
         releaseCheck.countDown()
 
         val access = check.await()
@@ -1386,6 +1185,7 @@ class FeatureServiceTest {
         assertFalse(access.unlimited)
         assertEquals(5.0, access.balance)
         assertEquals(FeatureType.CREDIT_SYSTEM, access.type)
+        assertTrue(core.featureInfo.isAllowed("exports"))
         core.stop()
     }
 

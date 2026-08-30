@@ -22,11 +22,15 @@ import kotlinx.coroutines.withContext
  * (identity transitions under runBlocking).
  */
 class FeatureInfo {
+    /** Whether server-backed Feature access is available and fully reconciled. */
     internal sealed interface State {
         /** No profile has hydrated access for the current customer yet. */
         object Unknown : State
 
-        /** At least one profile hydration has completed for the current customer. */
+        /** Visible access currently includes an optimistic verified-purchase overlay. */
+        object Reconciling : State
+
+        /** A profile is admitted and no optimistic purchase overlay is active. */
         object Ready : State
     }
 
@@ -68,13 +72,13 @@ class FeatureInfo {
     internal suspend fun update(
         features: Map<String, FeatureAccess>,
         entities: Map<String, Map<String, FeatureAccess>>,
-        ready: Boolean = false,
-    ) = publish(stageUpdate(features, entities, ready))
+        state: State? = null,
+    ) = publish(stageUpdate(features, entities, state))
 
     internal fun stageUpdate(
         features: Map<String, FeatureAccess>,
         entities: Map<String, Map<String, FeatureAccess>>,
-        ready: Boolean = false,
+        state: State? = null,
     ): Mutation = stage {
             val oldFeatures = mutableAll.value
             features.forEach { (featureId, newAccess) ->
@@ -85,7 +89,7 @@ class FeatureInfo {
             }
             entityAccess = entities
             mutableAll.publish(features)
-            if (ready) mutableState.value = State.Ready
+            state?.let { mutableState.value = it }
     }
 
     internal suspend fun update(featureId: String, access: FeatureAccess, entityId: String?) =
@@ -105,25 +109,6 @@ class FeatureInfo {
                 )
             }
     }
-
-    internal suspend fun setBalance(featureId: String, balance: Double, entityId: String?) =
-        publish(stage {
-            val current = mutableAll.value[featureId] ?: return@stage
-            val updated = current.copy(
-                allowed = current.unlimited || balance >= 1.0,
-                balance = balance,
-            )
-            if (!current.hasSameFieldsAs(updated)) {
-                runCatching { onFeatureChange(featureId, current, updated) }
-            }
-            // Match the same iOS reactive publication after entity-scoped use.
-            mutableAll.publish(mutableAll.value + (featureId to updated))
-            if (entityId != null) {
-                entityAccess = entityAccess + (
-                    featureId to (entityAccess[featureId].orEmpty() + (entityId to updated))
-                )
-            }
-        })
 
     internal suspend fun clear() = publish(stageClear())
 
