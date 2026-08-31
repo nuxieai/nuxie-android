@@ -3,6 +3,9 @@ package ai.nuxie.sdk.profile
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
+import ai.nuxie.sdk.experiences.SupportedRuntime
+import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.identity.IdentityService
@@ -11,6 +14,7 @@ import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.segments.SegmentService
 import ai.nuxie.sdk.testsupport.FakeTransport
+import android.util.Base64
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.CopyOnWriteArrayList
@@ -21,6 +25,9 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,7 +39,12 @@ import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -51,6 +63,7 @@ class ProfileServiceTest {
         transport: HttpTransport,
         localeIdentifier: String? = null,
         deviceLocaleIdentifier: String = "device_TEST",
+        journeyRuntime: (() -> SupportedRuntime?)? = null,
     ): NuxieCore = NuxieCore(
         context = RuntimeEnvironment.getApplication(),
         apiKey = "pk_test_profile",
@@ -63,6 +76,7 @@ class ProfileServiceTest {
             nowMillis = { now },
             registerLifecycle = false,
             deviceLocaleIdentifier = { deviceLocaleIdentifier },
+            journeySupportedRuntime = journeyRuntime,
         ),
     )
 
@@ -410,6 +424,83 @@ class ProfileServiceTest {
         etag?.let { mapOf("ETag" to it) } ?: emptyMap(),
     )
 
+    private fun planeProfileFixture(): Pair<String, SupportedRuntime> {
+        val fixture = Json.parseToJsonElement(
+            FixtureRunner.fixturesRoot().resolve("journeys/planes/release.json").readText(),
+        ).jsonObject
+        val entry = fixture.getValue("entry").jsonObject
+        val locator = entry.getValue("locator").jsonObject
+        val envelope = entry.getValue("envelope").jsonObject
+        val descriptor = Json.parseToJsonElement(
+            Base64.decode(
+                envelope.getValue("descriptorBytesBase64").jsonPrimitive.content,
+                Base64.NO_WRAP,
+            ).decodeToString(),
+        ).jsonObject
+        val requirements = descriptor["requirements"] as? JsonObject
+        val runtime = if (requirements == null) {
+            SupportedRuntime("0.1.0", emptySet(), emptyMap(), 1, 0, "unused", "unused", emptySet())
+        } else {
+            fun JsonObject.string(key: String) = getValue(key).jsonPrimitive.content
+            val luau = requirements.getValue("luau").jsonObject
+            val scene = requirements.getValue("sceneFormat").jsonObject
+            val timezone = requirements.getValue("timezoneData").jsonObject
+            SupportedRuntime(
+                currentSdkVersion = requirements.string("minimumSdkVersion"),
+                supportedRuntimeRevisions = setOf(requirements.string("runtimeRevision")),
+                supportedLuauRevisions = mapOf(
+                    luau.string("revision") to luau.getValue("bytecodeVersions").jsonArray
+                        .map { it.jsonPrimitive.int }
+                        .toSet(),
+                ),
+                sceneFormatMajor = scene.getValue("major").jsonPrimitive.int,
+                sceneFormatMinor = scene.getValue("minor").jsonPrimitive.int,
+                timezoneDataRevision = timezone.string("revision"),
+                timezoneDataSha256 = timezone.string("sha256"),
+                supportedCapabilities = requirements.getValue("requiredCapabilities").jsonArray
+                    .map { it.jsonPrimitive.content }
+                    .toSet(),
+            )
+        }
+        val body = buildJsonObject {
+            put("schemaVersion", "nuxie.journey-plane-profile.v1")
+            put("status", "ok")
+            putJsonObject("delivery") {
+                put("renderBaseUrl", "https://renders.example.com/")
+                put("assetBaseUrl", "https://assets.example.com/")
+            }
+            putJsonArray("features") {}
+            putJsonObject("facts") {
+                putJsonObject("properties") {
+                    putJsonObject("ready") {
+                        put("present", true)
+                        put("value", true)
+                    }
+                }
+                putJsonObject("memberships") {}
+                putJsonObject("assignments") {}
+            }
+            put("releases", JsonArray(listOf(entry)))
+            putJsonArray("armedLegs") {
+                addJsonObject {
+                    putJsonObject("reference") {
+                        put("experienceId", locator.getValue("experienceId"))
+                        put("versionId", locator.getValue("experienceVersionId"))
+                        put("legId", locator.getValue("legId"))
+                        put("descriptorSha256", envelope.getValue("descriptorSha256"))
+                    }
+                    putJsonObject("binding") { put("type", "new") }
+                    putJsonObject("entryCondition") { put("type", "app_foregrounded") }
+                    putJsonObject("context") {
+                        putJsonObject("event") {}
+                        putJsonObject("responses") {}
+                    }
+                }
+            }
+        }
+        return body.toString() to runtime
+    }
+
     private fun JsonObject.snapshotLabel(): String =
         (getValue("snapshot") as JsonPrimitive).content
 
@@ -490,6 +581,139 @@ class ProfileServiceTest {
         val core = core(transport)
         assertFalse(core.profile.refreshAndWait())
         assertNull(core.profile.currentProfile())
+        core.stop()
+    }
+
+    @Test
+    fun planeProfilePublishesAuthenticatedDeviceLegAuthorityAtProfileCommit() = runBlocking {
+        val fixture = planeProfileFixture()
+        val transport = profileTransport(body = fixture.first, etag = "\"plane-v1\"")
+        val core = core(
+            transport,
+            journeyRuntime = { fixture.second },
+        )
+        assertTrue(core.profile.refreshAndWait())
+        assertTrue(core.profile.refreshAndWait())
+
+        val snapshot = requireNotNull(core.deviceLegProfiles.snapshot(core.identity.distinctId()))
+        assertEquals(1, snapshot.profile.armedLegs.size)
+        assertEquals(1, snapshot.releasesByDigest.size)
+        assertEquals(
+            snapshot.profile.armedLegs.single().reference.getValue("descriptorSha256"),
+            JsonPrimitive(snapshot.releasesByDigest.keys.single()),
+        )
+        val profileRequests = transport.requests.filter { it.url.path == "/profile" }
+        assertEquals("\"plane-v1\"", profileRequests.single { "If-None-Match" in it.headers }
+            .headers["If-None-Match"])
+        core.stop()
+    }
+
+    @Test
+    fun cachedPlaneProfileRehydratesAuthenticatedDeviceLegAuthorityOffline() = runBlocking {
+        val fixture = planeProfileFixture()
+        val context = RuntimeEnvironment.getApplication()
+        val distinctId = IdentityService(context).distinctId()
+        val profileFile = File(
+            context.cacheDir,
+            "nuxie/profiles/" + distinctId.map {
+                if (it.isLetterOrDigit() || it == '-' || it == '_') it else '_'
+            }.joinToString("") + ".json",
+        )
+        profileFile.delete()
+
+        val writer = core(
+            profileTransport(body = fixture.first, etag = "\"plane-v1\""),
+            journeyRuntime = { fixture.second },
+        )
+        assertTrue(writer.profile.refreshAndWait())
+        writer.stop()
+
+        val offline = FakeTransport().apply {
+            respond = { throw IOException("offline") }
+        }
+        val reader = core(offline, journeyRuntime = { fixture.second })
+        assertFalse(reader.profile.refreshAndWait())
+        val snapshot = requireNotNull(reader.deviceLegProfiles.snapshot(distinctId))
+        assertEquals(1, snapshot.profile.armedLegs.size)
+        assertEquals(1, snapshot.releasesByDigest.size)
+        reader.stop()
+        profileFile.delete()
+        Unit
+    }
+
+    @Test
+    fun rejectedPlaneProfileReplacementPreservesCurrentAuthorityAndReplayFloor() = runBlocking {
+        val fixture = planeProfileFixture()
+        val root = Json.parseToJsonElement(fixture.first).jsonObject
+        val entry = root.getValue("releases").jsonArray.single().jsonObject
+        val envelope = entry.getValue("envelope").jsonObject
+        val signature = envelope.getValue("signature").jsonObject
+        val encoded = signature.getValue("signatureBase64").jsonPrimitive.content
+        val changed = (if (encoded.first() == 'A') "B" else "A") + encoded.drop(1)
+        val badSignature = JsonObject(signature + ("signatureBase64" to JsonPrimitive(changed)))
+        val badEnvelope = JsonObject(envelope + ("signature" to badSignature))
+        val badEntry = JsonObject(entry + ("envelope" to badEnvelope))
+        val badBody = JsonObject(root + ("releases" to JsonArray(listOf(badEntry)))).toString()
+        val request = AtomicInteger()
+        val transport = FakeTransport().apply {
+            respond = { httpRequest ->
+                if (httpRequest.url.path == "/profile") {
+                    val body = when (request.getAndIncrement()) {
+                        0 -> fixture.first
+                        1 -> badBody
+                        else -> profileBody("legacy")
+                    }
+                    HttpTransport.Response(200, body.encodeToByteArray())
+                } else {
+                    HttpTransport.Response(200, ByteArray(0))
+                }
+            }
+        }
+        val core = core(transport, journeyRuntime = { fixture.second })
+        assertTrue(core.profile.refreshAndWait())
+
+        val distinctId = core.identity.distinctId()
+        val currentProfile = requireNotNull(core.profile.currentProfile())
+        val currentAuthority = requireNotNull(core.deviceLegProfiles.snapshot(distinctId))
+        val authenticated = currentAuthority.releasesByDigest.values.single()
+        val highWater = ReleaseHighWaterStore(RuntimeEnvironment.getApplication())
+        val currentFloor = highWater.floor(authenticated.identity.streamKey)
+
+        assertFalse(core.profile.refreshAndWait())
+        assertEquals(currentProfile.body, core.profile.currentProfile()?.body)
+        assertEquals(currentAuthority, core.deviceLegProfiles.snapshot(distinctId))
+        assertEquals(currentFloor, highWater.floor(authenticated.identity.streamKey))
+
+        assertTrue(core.profile.refreshAndWait())
+        assertNull(core.deviceLegProfiles.snapshot(distinctId))
+        assertEquals(currentFloor, highWater.floor(authenticated.identity.streamKey))
+        core.stop()
+    }
+
+    @Test
+    fun expiredPlaneProfileDropsDeviceLegAuthorityBeforeOfflineRefresh() = runBlocking {
+        val fixture = planeProfileFixture()
+        val request = AtomicInteger()
+        val transport = FakeTransport().apply {
+            respond = { httpRequest ->
+                if (httpRequest.url.path != "/profile") {
+                    HttpTransport.Response(200, ByteArray(0))
+                } else if (request.getAndIncrement() == 0) {
+                    HttpTransport.Response(200, fixture.first.encodeToByteArray())
+                } else {
+                    throw IOException("offline")
+                }
+            }
+        }
+        val core = core(transport, journeyRuntime = { fixture.second })
+        assertTrue(core.profile.refreshAndWait())
+        val distinctId = core.identity.distinctId()
+        assertNotNull(core.deviceLegProfiles.snapshot(distinctId))
+
+        now += 25L * 60L * 60L * 1000L
+        assertFalse(core.profile.refreshAndWait())
+        assertNull(core.profile.currentProfile())
+        assertNull(core.deviceLegProfiles.snapshot(distinctId))
         core.stop()
     }
 

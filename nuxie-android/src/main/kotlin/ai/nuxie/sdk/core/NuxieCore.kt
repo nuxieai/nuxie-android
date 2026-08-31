@@ -29,6 +29,7 @@ import ai.nuxie.sdk.commerce.purchaseEvidenceDirectory
 import ai.nuxie.sdk.commerce.purchaseAuthorityScope
 import ai.nuxie.sdk.commerce.registerAuthenticatedReleaseProductMappings
 import ai.nuxie.sdk.experiences.AuthenticatedRelease
+import ai.nuxie.sdk.experiences.DeviceLegProfileCatalog
 import ai.nuxie.sdk.experiences.ExperienceReleaseProfile
 import ai.nuxie.sdk.experiences.ExperienceTrustRoots
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
@@ -161,14 +162,23 @@ internal class NuxieCore(
             purchaseEvidenceDirectory(appContext.filesDir, apiKey, environment),
         )
 
+    private val releaseTrustRoots = ExperienceTrustRoots.keys(environment)
+    private val releaseHighWater = ReleaseHighWaterStore(appContext)
+
     private val journeyCatalog = JourneyReleaseCatalog(
-        trustedKeys = ExperienceTrustRoots.keys(environment),
-        highWater = ReleaseHighWaterStore(appContext),
+        trustedKeys = releaseTrustRoots,
+        highWater = releaseHighWater,
         supportedRuntime = overrides.journeySupportedRuntime ?: ::journeySupportedRuntime,
         authenticate = overrides.authenticateRelease,
         onReleaseAdmitted = { release ->
             purchaseEvidenceStore.registerAuthenticatedReleaseProductMappings(release)
         },
+    )
+
+    val deviceLegProfiles = DeviceLegProfileCatalog(
+        trustedKeys = releaseTrustRoots,
+        highWater = releaseHighWater,
+        supportedRuntime = overrides.journeySupportedRuntime ?: ::journeySupportedRuntime,
     )
 
     private val triggerBroker = TriggerBroker()
@@ -317,6 +327,7 @@ internal class NuxieCore(
         applyJourneyProfile = { distinctId, body ->
             journeyCatalog.applyProfile(distinctId, body)
         },
+        deviceLegProfiles = deviceLegProfiles,
         applyJourneyFacts = { distinctId, body ->
             journeys.applyDownFacts(body, distinctId)
         },
