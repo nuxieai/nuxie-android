@@ -187,8 +187,9 @@ internal class ProfileService(
             // Fresh enough to skip an immediate network hit?
             if (nowMillis() - cached.cachedAtMillis < BACKGROUND_REFRESH_AGE_MILLIS) return
         } else if (cached != null) {
-            // Expired: evict before any use.
-            if (!isFresh(cached)) evictCache(newDistinctId, admission)
+            // Expired OR from another locale: evict before any use so a cold
+            // start cannot rehydrate old-locale state (segments included).
+            evictCache(newDistinctId, admission)
         }
         refreshNow()
     }
@@ -200,7 +201,9 @@ internal class ProfileService(
         if (cached != null && cached.locale == admission.localeScope.identifier && isFresh(cached)) {
             applyProfile(cached, admission)
         } else if (cached != null) {
-            if (!isFresh(cached)) evictCache(distinctId, admission)
+            // Expired OR from another locale: evict before any use so a cold
+            // start cannot rehydrate old-locale state (segments included).
+            evictCache(distinctId, admission)
         }
     }
 
@@ -389,6 +392,9 @@ internal class ProfileService(
                 latestAppliedGeneration = admission.generation
                 if (resident?.distinctId == distinctId) resident = null
                 fileFor(distinctId).delete()
+                // The persisted segment mirror is locale-scoped state admitted
+                // with the profile; it must not survive the profile's eviction.
+                segments.clearSegments(distinctId)
             }
         }
     }

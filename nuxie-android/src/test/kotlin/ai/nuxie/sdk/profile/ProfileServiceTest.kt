@@ -331,6 +331,7 @@ class ProfileServiceTest {
                         expect["customerScopedCommitted"]?.let {
                             val committed = (it as JsonPrimitive).content.toBoolean()
                             assertEquals(name, committed, fixture.fanout.facts.isNotEmpty())
+                            assertEquals(name, committed, fixture.fanout.properties.isNotEmpty())
                         }
                         expect["nextRequestLocale"]?.let { next ->
                             val replacement = async(Dispatchers.Default) {
@@ -381,6 +382,15 @@ class ProfileServiceTest {
                             localeScopedAdmitted,
                             reader.service.currentProfile() != null,
                         )
+                        if ((expect["diskEvicted"] as? JsonPrimitive)?.content?.toBoolean() == true) {
+                            assertFalse(name, reader.hasDiskProfile())
+                        }
+                        if ((expect["segmentsCleared"] as? JsonPrimitive)?.content?.toBoolean() == true) {
+                            assertFalse(
+                                name,
+                                reader.segments.isMember(distinctId, "segment-fixture"),
+                            )
+                        }
                     } finally {
                         reader.close()
                     }
