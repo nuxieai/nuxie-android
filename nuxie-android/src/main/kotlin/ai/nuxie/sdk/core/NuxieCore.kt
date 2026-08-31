@@ -118,7 +118,7 @@ internal class NuxieCore(
 
     private val nowMillis: () -> Long = overrides.nowMillis ?: System::currentTimeMillis
 
-    val profileLocale = ProfileLocaleSettings(
+    private val profileLocale = ProfileLocaleSettings(
         localeIdentifier = localeIdentifier,
         deviceLocaleIdentifier = overrides.deviceLocaleIdentifier ?: { Locale.getDefault().toString() },
     )
@@ -316,8 +316,8 @@ internal class NuxieCore(
         applyJourneyProfile = { distinctId, body ->
             journeyCatalog.applyProfile(distinctId, body)
         },
-        applyJourneyFacts = { distinctId, body, isCurrent ->
-            journeys.applyDownFacts(body, distinctId, isCurrent)
+        applyJourneyFacts = { distinctId, body ->
+            journeys.applyDownFacts(body, distinctId)
         },
         stageFeatureProfile = { distinctId, body, purchaseRevision, authoritativeRevision, isCurrent ->
             features.stageProfile(

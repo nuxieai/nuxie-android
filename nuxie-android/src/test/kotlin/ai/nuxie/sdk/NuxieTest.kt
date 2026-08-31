@@ -82,14 +82,10 @@ class NuxieTest {
         assertTrue(core.profile.refreshAndWait())
         assertEquals("en_US", lastProfileLocale(transport))
 
-        // Locale changes after setup go through the internal settings seam;
-        // the public surface matches iOS (configuration-only).
-        core.profileLocale.setLocaleIdentifier("fr_FR")
-        assertTrue(core.profile.refreshAndWait())
+        Nuxie.setLocaleIdentifier("fr_FR")
         assertEquals("fr_FR", lastProfileLocale(transport))
 
-        core.profileLocale.setLocaleIdentifier(null)
-        assertTrue(core.profile.refreshAndWait())
+        Nuxie.setLocaleIdentifier(null)
         assertEquals("device_TEST", lastProfileLocale(transport))
     }
 

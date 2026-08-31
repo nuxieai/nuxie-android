@@ -169,6 +169,7 @@ public final class ai/nuxie/sdk/Nuxie {
 	public static synthetic fun reset$default (Lai/nuxie/sdk/Nuxie;ZILjava/lang/Object;)V
 	public final fun restorePurchases (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun setListener (Lai/nuxie/sdk/NuxieListener;)V
+	public final fun setLocaleIdentifier (Ljava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun setPurchaseDelegate (Lai/nuxie/sdk/commerce/NuxiePurchaseDelegate;)V
 	public final fun setPurchaseHandlingMode (Lai/nuxie/sdk/commerce/PurchaseHandlingMode;)V
 	public final fun setup (Landroid/content/Context;Lai/nuxie/sdk/NuxieConfiguration;)V
