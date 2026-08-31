@@ -90,53 +90,38 @@ class FeatureInfoListenerTest {
     }
 
     @Test
-    fun identityInvalidationWaitsForAnInProgressEmissionCommit() = runBlocking {
+    fun identityInvalidationDuringAnEmissionLeavesTheNewCustomerSnapshot() = runBlocking {
         val info = FeatureInfo()
-        val emissionCheckCount = AtomicInteger()
-        val oldEmissionHasLock = CountDownLatch(1)
-        val releaseOldEmission = CountDownLatch(1)
-        val identityThreadStarted = CountDownLatch(1)
-        val stagedIdentity = AtomicReference<FeatureInfo.Mutation>()
+        val emissionEntered = CountDownLatch(1)
+        val releaseEmission = CountDownLatch(1)
+        val checks = AtomicInteger()
         val oldMutation = info.stageUpdate(
             features = mapOf("credits" to access(allowed = true, balance = 2.0)),
             entities = emptyMap(),
             isCurrent = {
-                if (emissionCheckCount.incrementAndGet() == 3) {
-                    oldEmissionHasLock.countDown()
-                    check(releaseOldEmission.await(5, TimeUnit.SECONDS))
+                if (checks.incrementAndGet() == 2) {
+                    emissionEntered.countDown()
+                    check(releaseEmission.await(5, TimeUnit.SECONDS))
                 }
                 true
             },
         )
         val oldPublisher = async(Dispatchers.Default) { info.publish(oldMutation) }
-        assertTrue(oldEmissionHasLock.await(5, TimeUnit.SECONDS))
-        val identityThread = Thread {
-            identityThreadStarted.countDown()
-            stagedIdentity.set(
-                info.stageIdentityChange(emptyMap(), emptyMap(), FeatureInfo.State.Unknown),
-            )
-        }
+        assertTrue(emissionEntered.await(5, TimeUnit.SECONDS))
 
-        try {
-            identityThread.start()
-            assertTrue(identityThreadStarted.await(5, TimeUnit.SECONDS))
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-            while (identityThread.isAlive &&
-                identityThread.state != Thread.State.BLOCKED &&
-                System.nanoTime() < deadline
-            ) {
-                Thread.yield()
-            }
-
-            assertEquals(Thread.State.BLOCKED, identityThread.state)
-        } finally {
-            releaseOldEmission.countDown()
-            identityThread.join(5_000)
-        }
-
+        // Invalidation never waits for an in-progress emission: emissions
+        // hold no lock across the store (that lock is what deadlocked
+        // reentrant identify), and the identity snapshot simply wins the
+        // CAS-committed container.
+        val stagedIdentity =
+            info.stageIdentityChange(emptyMap(), emptyMap(), FeatureInfo.State.Unknown)
+        releaseEmission.countDown()
         oldPublisher.await()
-        info.publish(checkNotNull(stagedIdentity.get()))
+        info.publish(stagedIdentity)
+
         assertFalse(info.isAllowed("credits"))
+        assertEquals(emptyMap<String, FeatureAccess>(), info.all.value)
+        assertEquals(FeatureInfo.State.Unknown, info.state.value)
     }
 
     @Test

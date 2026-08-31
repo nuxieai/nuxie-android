@@ -31,14 +31,20 @@ class FeatureInfo {
         object Ready : State
     }
 
-    private val mutableState = MutableStateFlow<State>(State.Unknown)
-    private val mutableAll = MutableFeatureAccessFlow()
+    private val published = MutableStateFlow(
+        PublishedSnapshot(
+            features = emptyMap(),
+            entities = emptyMap(),
+            state = State.Unknown,
+            featuresRevision = 0L,
+        )
+    )
     private val stagingLock = Any()
     private val emissionLock = Any()
     @Volatile
     private var currentGeneration = Generation()
-    @Volatile
-    private var entityAccess: Map<String, Map<String, FeatureAccess>> = emptyMap()
+    private val entityAccess: Map<String, Map<String, FeatureAccess>>
+        get() = published.value.entities
 
     @Volatile
     internal var onFeatureChange: suspend (
@@ -51,16 +57,18 @@ class FeatureInfo {
     /** One FIFO lane per customer-visible publication generation. */
     private class Generation {
         var tail = CompletableDeferred<Unit>().also { it.complete(Unit) }
-
-        /** Last snapshot fully published for this generation (repair source). */
-        @Volatile
-        var latestSnapshot: PublishedSnapshot? = null
     }
 
+    /**
+     * The one atomically published unit: values, entity scopes, and readiness
+     * commit together (a scope change can never leave Ready paired with stale
+     * values, and entity scopes cannot drift from the values they rode with).
+     */
     private class PublishedSnapshot(
         val features: Map<String, FeatureAccess>,
         val entities: Map<String, Map<String, FeatureAccess>>,
         val state: State,
+        val featuresRevision: Long,
     )
 
     /** Fence shared by readiness, values, and every last-mile callback. */
@@ -77,10 +85,7 @@ class FeatureInfo {
             state: State?,
         ) {
             if (!isCurrent()) return
-            val oldFeatures = synchronized(emissionLock) {
-                if (!isCurrent()) return
-                mutableAll.value
-            }
+            val oldFeatures = published.value.features
             val observer = onFeatureChange
             val callbacks = (oldFeatures.keys + features.keys).toSortedSet().mapNotNull { featureId ->
                 val oldAccess = oldFeatures[featureId]
@@ -92,48 +97,16 @@ class FeatureInfo {
                 }
             }
 
-            // Readiness and values are one staged publication. A scope change
-            // may supersede the whole snapshot, but cannot commit only one
-            // half and leave Ready paired with stale or empty Feature values.
-            var lastStored: PublishedFeatures? = null
-            if (!emitIfCurrent(this) {
-                    if (state != null) mutableState.value = state
-                    entityAccess = entities
-                    lastStored = mutableAll.publish(features)
-                }
-            ) {
-                // An unconfined collector may have reentered mid-emission and
-                // published a replacement generation inline; our stale sets
-                // then overwrote it. Restore the replacement's snapshot.
-                repairClobberedReplacement()
-                return
-            }
-            val recorded = PublishedSnapshot(
-                features,
-                entities,
-                state ?: mutableState.value,
-            )
-            var stored = lastStored
-            while (true) {
-                synchronized(emissionLock) {
-                    if (!isCurrent()) {
-                        repairClobberedReplacement()
-                        return
-                    }
-                    generation.latestSnapshot = recorded
-                }
-                // A stale repairer may have overwritten the flows between the
-                // emission and the record; re-set until the flow holds this
-                // publication's exact container (identity, not field
-                // equality: NaN balances never field-compare equal, and a
-                // deduped publish returns the surviving equal container).
-                val settled = mutableAll.currentPublished === stored &&
-                    mutableState.value == recorded.state
-                if (settled) break
-                mutableState.value = recorded.state
-                entityAccess = recorded.entities
-                stored = mutableAll.publish(recorded.features)
-            }
+            // One CAS-committed container: values, entity scopes, and
+            // readiness commit atomically, with the fence re-checked every
+            // iteration and NO lock held across the store. StateFlow resumes
+            // unconfined collectors inline from the store, and a collector
+            // may reenter the facade; committing lock-free is what makes
+            // that reentry safe (the historical AB-BA deadlock). A stale
+            // writer either observes its dead fence and exits, or its
+            // committed container is immediately replaced by the live
+            // writer's own CAS retry.
+            if (commitSnapshot(features, entities, state) == null) return
 
             callbacks.forEach { callback ->
                 if (!isCurrent()) return
@@ -146,6 +119,32 @@ class FeatureInfo {
                     )
                 }
                 if (!isCurrent()) return
+            }
+        }
+
+        private fun commitSnapshot(
+            features: Map<String, FeatureAccess>,
+            entities: Map<String, Map<String, FeatureAccess>>,
+            state: State?,
+        ): PublishedSnapshot? {
+            while (true) {
+                if (!isCurrent()) return null
+                val current = published.value
+                val resolvedState = state ?: current.state
+                val featuresChanged = !current.features.hasSameFieldsAs(features)
+                val stateChanged = current.state != resolvedState
+                val entitiesChanged = current.entities != entities
+                if (!featuresChanged && !stateChanged && !entitiesChanged) {
+                    return current
+                }
+                val next = PublishedSnapshot(
+                    features = features,
+                    entities = entities,
+                    state = resolvedState,
+                    featuresRevision = current.featuresRevision +
+                        (if (featuresChanged) 1L else 0L),
+                )
+                if (published.compareAndSet(current, next)) return next
             }
         }
     }
@@ -163,8 +162,16 @@ class FeatureInfo {
         internal val apply: suspend () -> Unit,
     )
 
-    val state: StateFlow<State> = mutableState
-    val all: StateFlow<Map<String, FeatureAccess>> = mutableAll
+    val state: StateFlow<State> = ProjectedStateFlow(
+        source = published,
+        project = PublishedSnapshot::state,
+        distinctBy = { it.state },
+    )
+    val all: StateFlow<Map<String, FeatureAccess>> = ProjectedStateFlow(
+        source = published,
+        project = PublishedSnapshot::features,
+        distinctBy = { it.featuresRevision },
+    )
 
     /** Suspends until profile-backed Feature access is available. */
     suspend fun awaitReady() {
@@ -219,16 +226,17 @@ class FeatureInfo {
         access: FeatureAccess,
         entityId: String?,
     ): Mutation = stage { fence ->
+        val snapshot = published.value
         val entities = if (entityId == null) {
-            entityAccess
+            snapshot.entities
         } else {
-            entityAccess + (
-                featureId to (entityAccess[featureId].orEmpty() + (entityId to access))
+            snapshot.entities + (
+                featureId to (snapshot.entities[featureId].orEmpty() + (entityId to access))
             )
         }
         // iOS has one reactive Feature map: an entity check publishes its
         // result there even though its reusable cache entry stays scoped.
-        fence.publishSnapshot(mutableAll.value + (featureId to access), entities, state = null)
+        fence.publishSnapshot(snapshot.features + (featureId to access), entities, state = null)
     }
 
     internal suspend fun clear() = publish(stageClear())
@@ -280,49 +288,6 @@ class FeatureInfo {
         return Mutation(previous, completed) { apply(fence) }
     }
 
-    private fun repairClobberedReplacement() {
-        // Loop: another swap, or a newer same-generation publication, can
-        // land during the repair itself. Exit only when the snapshot the
-        // repair restored is still the generation's recorded latest.
-        while (true) {
-            val (generation, snapshot) = synchronized(emissionLock) {
-                currentGeneration to currentGeneration.latestSnapshot
-            }
-            // No completed publication for the replacement yet: its recorder
-            // verifies the flows after recording and re-sets if this repair
-            // (or any stale writer) clobbered its emission.
-            if (snapshot == null) return
-            mutableState.value = snapshot.state
-            entityAccess = snapshot.entities
-            mutableAll.publish(snapshot.features)
-            synchronized(emissionLock) {
-                if (currentGeneration === generation &&
-                    generation.latestSnapshot === snapshot
-                ) {
-                    return
-                }
-            }
-        }
-    }
-
-    private inline fun emitIfCurrent(
-        fence: PublicationFence,
-        emit: () -> Unit,
-    ): Boolean {
-        // Decide under the lock, emit after releasing it: StateFlow.setValue
-        // resumes unconfined collectors inline, and a collector may reenter
-        // the facade (identify/reset), which takes the facade monitor while
-        // the facade's own identity path wants this lock (AB-BA deadlock).
-        // The FIFO publication lane serializes publishers, so values cannot
-        // interleave; a generation swap that lands mid-emission is repaired
-        // by its own queued publication, and the post-emission check makes
-        // the caller abandon its remaining callbacks.
-        synchronized(emissionLock) {
-            if (!fence.isCurrent()) return false
-        }
-        emit()
-        return synchronized(emissionLock) { fence.isCurrent() }
-    }
 
     private companion object {
         val FEATURE_NOT_FOUND = FeatureAccess(
@@ -347,39 +312,28 @@ private fun Map<String, FeatureAccess>.hasSameFieldsAs(
     other[featureId]?.let(access::hasSameFieldsAs) == true
 }
 
-private data class PublishedFeatures(
-    val revision: Long,
-    val features: Map<String, FeatureAccess>,
-)
-
 /**
- * Publishes Feature maps using Swift field equality instead of Kotlin data-class equality.
- * The revision makes every comparator-approved transition visible to MutableStateFlow,
- * including NaN-to-NaN changes.
+ * A read-only StateFlow projecting one field of the published snapshot,
+ * emitting only when its projection's distinct key changes.
  */
 @OptIn(ExperimentalForInheritanceCoroutinesApi::class)
-private class MutableFeatureAccessFlow : StateFlow<Map<String, FeatureAccess>> {
-    private val published = MutableStateFlow(PublishedFeatures(0L, emptyMap()))
-
-    override val value: Map<String, FeatureAccess>
-        get() = published.value.features
-
-    override val replayCache: List<Map<String, FeatureAccess>>
-        get() = published.replayCache.map(PublishedFeatures::features)
-
-    override suspend fun collect(collector: FlowCollector<Map<String, FeatureAccess>>): Nothing =
-        published.collect { collector.emit(it.features) }
-
-    @Suppress("MemberVisibilityCanBePrivate")
-    fun publish(features: Map<String, FeatureAccess>): PublishedFeatures {
-        val current = published.value
-        if (current.features.hasSameFieldsAs(features)) return current
-        val next = PublishedFeatures(current.revision + 1, features)
-        published.value = next
-        return next
+private class ProjectedStateFlow<S, T>(
+    private val source: StateFlow<S>,
+    private val project: (S) -> T,
+    private val distinctBy: (S) -> Any?,
+) : StateFlow<T> {
+    override val value: T get() = project(source.value)
+    override val replayCache: List<T> get() = source.replayCache.map(project)
+    override suspend fun collect(collector: FlowCollector<T>): Nothing {
+        var lastKey: Any? = Unset
+        source.collect { snapshot ->
+            val key = distinctBy(snapshot)
+            if (lastKey === Unset || lastKey != key) {
+                lastKey = key
+                collector.emit(project(snapshot))
+            }
+        }
     }
 
-    /** The exact published container, for identity-based clobber detection. */
-    val currentPublished: PublishedFeatures
-        get() = published.value
+    private object Unset
 }
