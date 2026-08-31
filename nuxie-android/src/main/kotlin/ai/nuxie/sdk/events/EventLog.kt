@@ -2,6 +2,7 @@ package ai.nuxie.sdk.events
 
 import ai.nuxie.sdk.NuxieEvent
 import ai.nuxie.sdk.identity.IdentityProvider
+import ai.nuxie.sdk.journey.JourneyEventNames
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
@@ -389,6 +390,11 @@ internal class EventLog(
     ): Boolean {
         if (store.hasStableOutcome(eventId)) return true
         var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties)
+        // Leg outputs are validated JSON. Keep their exact values through
+        // analytics sanitization; beforeSend still governs the full event.
+        if (name == JourneyEventNames.LEG_COMPLETED && commandProperties.containsKey("outputs")) {
+            sanitized = sanitized + ("outputs" to commandProperties["outputs"])
+        }
         if (!sanitized.containsKey(SESSION_ID_PROPERTY)) {
             sessionIdProvider?.invoke()?.let { sessionId ->
                 sanitized = sanitized + (SESSION_ID_PROPERTY to sessionId)

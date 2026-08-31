@@ -345,6 +345,38 @@ public final class ai/nuxie/sdk/NuxieActivity$JourneyEnded : ai/nuxie/sdk/NuxieA
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class ai/nuxie/sdk/NuxieActivity$JourneyLegCompleted : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;JLjava/lang/String;)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()J
+	public final fun component4 ()Ljava/lang/String;
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;JLjava/lang/String;)Lai/nuxie/sdk/NuxieActivity$JourneyLegCompleted;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$JourneyLegCompleted;Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;JLjava/lang/String;ILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$JourneyLegCompleted;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun getGeneration ()J
+	public final fun getLegId ()Ljava/lang/String;
+	public final fun getOutcome ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class ai/nuxie/sdk/NuxieActivity$JourneyLegStarted : ai/nuxie/sdk/NuxieActivity {
+	public fun <init> (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;J)V
+	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()J
+	public final fun copy (Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;J)Lai/nuxie/sdk/NuxieActivity$JourneyLegStarted;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/NuxieActivity$JourneyLegStarted;Lai/nuxie/sdk/ExperienceRef;Ljava/lang/String;JILjava/lang/Object;)Lai/nuxie/sdk/NuxieActivity$JourneyLegStarted;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExperience ()Lai/nuxie/sdk/ExperienceRef;
+	public final fun getGeneration ()J
+	public final fun getLegId ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class ai/nuxie/sdk/NuxieActivity$JourneyStarted : ai/nuxie/sdk/NuxieActivity {
 	public fun <init> (Lai/nuxie/sdk/ExperienceRef;)V
 	public final fun component1 ()Lai/nuxie/sdk/ExperienceRef;

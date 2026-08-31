@@ -52,6 +52,8 @@ class ForwardedActivityEncodingConformanceTest {
             fixture("experienceDismissed", NuxieActivity.ExperienceDismissed(ref, DismissReason.USER)),
             fixture("experienceErrored", NuxieActivity.ExperienceErrored(ref, "render failed")),
             fixture("journeyStarted", NuxieActivity.JourneyStarted(ref)),
+            fixture("journeyLegStarted", NuxieActivity.JourneyLegStarted(ref, "leg-1", 2)),
+            fixture("journeyLegCompleted", NuxieActivity.JourneyLegCompleted(ref, "leg-1", 2, "continue")),
             fixture("milestoneReached", NuxieActivity.MilestoneReached(ref, "milestone-1")),
             fixture("journeyConverted", NuxieActivity.JourneyConverted(ref, "journey-1")),
             fixture("journeyEnded", NuxieActivity.JourneyEnded(ref, JourneyExitReason.COMPLETED)),
