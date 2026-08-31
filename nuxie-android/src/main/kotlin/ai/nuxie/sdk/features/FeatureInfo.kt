@@ -51,7 +51,17 @@ class FeatureInfo {
     /** One FIFO lane per customer-visible publication generation. */
     private class Generation {
         var tail = CompletableDeferred<Unit>().also { it.complete(Unit) }
+
+        /** Last snapshot fully published for this generation (repair source). */
+        @Volatile
+        var latestSnapshot: PublishedSnapshot? = null
     }
+
+    private class PublishedSnapshot(
+        val features: Map<String, FeatureAccess>,
+        val entities: Map<String, Map<String, FeatureAccess>>,
+        val state: State,
+    )
 
     /** Fence shared by readiness, values, and every last-mile callback. */
     private inner class PublicationFence(
@@ -91,7 +101,20 @@ class FeatureInfo {
                     mutableAll.publish(features)
                 }
             ) {
+                // An unconfined collector may have reentered mid-emission and
+                // published a replacement generation inline; our stale sets
+                // then overwrote it. Restore the replacement's snapshot.
+                repairClobberedReplacement()
                 return
+            }
+            synchronized(emissionLock) {
+                if (isCurrent()) {
+                    generation.latestSnapshot = PublishedSnapshot(
+                        features,
+                        entities,
+                        state ?: mutableState.value,
+                    )
+                }
             }
 
             callbacks.forEach { callback ->
@@ -237,6 +260,24 @@ class FeatureInfo {
         generation.tail = completed
         val fence = PublicationFence(generation, isCurrent)
         return Mutation(previous, completed) { apply(fence) }
+    }
+
+    private fun repairClobberedReplacement() {
+        // Loop: another reentrant swap can land during the repair itself.
+        while (true) {
+            val (generation, snapshot) = synchronized(emissionLock) {
+                currentGeneration to currentGeneration.latestSnapshot
+            }
+            // No completed publication for the replacement yet: its own
+            // queued publication will land through the FIFO lane.
+            if (snapshot == null) return
+            mutableState.value = snapshot.state
+            entityAccess = snapshot.entities
+            mutableAll.publish(snapshot.features)
+            synchronized(emissionLock) {
+                if (currentGeneration === generation) return
+            }
+        }
     }
 
     private inline fun emitIfCurrent(
