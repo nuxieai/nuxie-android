@@ -3,6 +3,7 @@ package ai.nuxie.sdk.events
 import ai.nuxie.sdk.ExperienceRef
 import ai.nuxie.sdk.NuxieActivityInfo
 import ai.nuxie.sdk.journey.JourneyEventNames
+import ai.nuxie.sdk.util.IsoDates
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -24,11 +25,20 @@ internal class ActivityForwarder(
         deliver(
             NuxieActivityInfo(
                 id = event.id,
-                timestampMillis = event.timestampMillis,
+                timestampMillis = occurrenceTime(event),
                 receivedAtMillis = receivedAtMillis,
                 activity = activity,
             ),
         )
+    }
+
+    private fun occurrenceTime(event: StoredEvent): Long {
+        val key = when (event.forwardingName) {
+            JourneyEventNames.LEG_STARTED -> "started_at"
+            JourneyEventNames.LEG_COMPLETED -> "completed_at"
+            else -> return event.timestampMillis
+        }
+        return event.properties.string(key)?.let(IsoDates::parseMillis) ?: event.timestampMillis
     }
 
     private fun enrichJourneyReference(event: StoredEvent): JsonObject {

@@ -90,6 +90,14 @@ is unset, the dedicated task skips them with the named assumption
 
 ## Wrapper contract
 
+Device leg reporting adds `JourneyLegStarted` and `JourneyLegCompleted`
+activities, with flat names `journey_leg_started` and `journey_leg_completed`.
+They carry the experience/version, journey, leg ID, and generation; completion
+also carries the outcome. Leg completion does not imply the journey ended.
+Activity timestamps preserve occurrence time; `receivedAtMillis` records local
+capture. Buffered answers stay in the ordinary report and are not copied into
+the flat activity view. Host `beforeSend` privacy policy applies to both reports.
+
 The [`nuxie-android/api/nuxie-android.api`](nuxie-android/api/nuxie-android.api)
 `apiCheck` dump is the Android binding wrapper contract, sibling to the
 `nuxie-ios` `api/public-api.txt`. Wrappers may bind only symbols listed in that

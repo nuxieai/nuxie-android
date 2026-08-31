@@ -31,6 +31,8 @@ internal object ActivityCuration {
         SystemEventNames.FEATURE_USED,
         JourneyEventNames.CONVERTED,
         JourneyEventNames.ENROLLED,
+        JourneyEventNames.LEG_STARTED,
+        JourneyEventNames.LEG_COMPLETED,
         JourneyEventNames.EXITED,
         JourneyEventNames.MILESTONE,
         JourneyEventNames.SUPERSEDED,
@@ -67,6 +69,20 @@ internal object ActivityCuration {
         } ?: missing(internalName)
         JourneyEventNames.ENROLLED -> experienceRef(properties)
             ?.let(NuxieActivity::JourneyStarted) ?: missing(internalName)
+        JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED -> {
+            val ref = experienceRef(properties, requireVersion = true)
+            val legId = properties.nonemptyString("leg_id")
+            val generation = properties.double("leg_generation")?.takeIf {
+                it.isFinite() && it >= 0 && it <= 9_007_199_254_740_991.0 && kotlin.math.floor(it) == it
+            }?.toLong()
+            val outcome = properties.nonemptyString("outcome")
+            when {
+                ref?.journeyId == null || legId == null || generation == null -> missing(internalName)
+                internalName == JourneyEventNames.LEG_STARTED -> NuxieActivity.JourneyLegStarted(ref, legId, generation)
+                outcome == null -> missing(internalName)
+                else -> NuxieActivity.JourneyLegCompleted(ref, legId, generation, outcome)
+            }
+        }
         JourneyEventNames.MILESTONE -> {
             val ref = experienceRef(properties)
             val milestoneId = properties.string("milestone_id")

@@ -48,6 +48,10 @@ sealed interface NuxieActivity {
     data class ExperienceErrored(val experience: ExperienceRef, val message: String) : NuxieActivity
 
     data class JourneyStarted(val experience: ExperienceRef) : NuxieActivity
+    /** This device started one leg of a pinned journey. */
+    data class JourneyLegStarted(val experience: ExperienceRef, val legId: String, val generation: Long) : NuxieActivity
+    /** Queued leg completion; the server may continue the journey chain. */
+    data class JourneyLegCompleted(val experience: ExperienceRef, val legId: String, val generation: Long, val outcome: String) : NuxieActivity
     data class MilestoneReached(val experience: ExperienceRef, val milestoneId: String) : NuxieActivity
     data class JourneyConverted(val experience: ExperienceRef, val journeyId: String) : NuxieActivity
     data class JourneyEnded(val experience: ExperienceRef, val exitReason: JourneyExitReason) : NuxieActivity
@@ -164,6 +168,8 @@ private fun NuxieActivity.wireName(): String = when (this) {
         is NuxieActivity.ExperienceDismissed -> "experience_dismissed"
         is NuxieActivity.ExperienceErrored -> "experience_errored"
         is NuxieActivity.JourneyStarted -> "journey_started"
+        is NuxieActivity.JourneyLegStarted -> "journey_leg_started"
+        is NuxieActivity.JourneyLegCompleted -> "journey_leg_completed"
         is NuxieActivity.MilestoneReached -> "milestone_reached"
         is NuxieActivity.JourneyConverted -> "journey_converted"
         is NuxieActivity.JourneyEnded -> "journey_ended"
@@ -201,6 +207,17 @@ private fun NuxieActivity.wireProperties(): Map<String, NuxieActivityValue> = bu
                 put("message", activity.message.activityValue())
             }
             is NuxieActivity.JourneyStarted -> add(activity.experience)
+            is NuxieActivity.JourneyLegStarted -> {
+                add(activity.experience)
+                put("leg_id", activity.legId.activityValue())
+                put("leg_generation", NuxieActivityValue.Int(activity.generation))
+            }
+            is NuxieActivity.JourneyLegCompleted -> {
+                add(activity.experience)
+                put("leg_id", activity.legId.activityValue())
+                put("leg_generation", NuxieActivityValue.Int(activity.generation))
+                put("outcome", activity.outcome.activityValue())
+            }
             is NuxieActivity.MilestoneReached -> {
                 add(activity.experience)
                 put("milestone_id", activity.milestoneId.activityValue())
