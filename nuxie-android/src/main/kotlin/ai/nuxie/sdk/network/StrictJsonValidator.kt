@@ -7,8 +7,8 @@ import kotlinx.serialization.json.Json
  * Duplicate-JSON-key rejection, ported from the iOS
  * `StrictJSONDuplicateKeyValidator`: kotlinx (like Foundation) silently keeps
  * the last duplicate, which can smuggle conflicting server state past
- * validation. This is a structural scan only — full parsing stays with
- * kotlinx afterwards.
+ * validation. Validate JSON tokens as well: kotlinx can preserve unquoted
+ * primitives and non-finite numbers inside otherwise opaque JsonElements.
  */
 internal object StrictJsonValidator {
     class DuplicateKeyException(val key: String) :
@@ -18,8 +18,9 @@ internal object StrictJsonValidator {
     fun requireNoDuplicateKeys(text: String) {
         val scanner = Scanner(text)
         scanner.skipWhitespace()
-        if (scanner.done()) return
         scanner.scanValue()
+        scanner.skipWhitespace()
+        if (!scanner.done()) throw IOException("Trailing JSON content")
     }
 
     private class Scanner(private val text: String) {
@@ -30,7 +31,7 @@ internal object StrictJsonValidator {
         fun scanValue(depth: Int = 0) {
             if (depth > 64) throw IOException("JSON nesting exceeds the supported depth")
             skipWhitespace()
-            if (done()) return
+            if (done()) throw IOException("Missing JSON value")
             when (text[index]) {
                 '{' -> scanObject(depth + 1)
                 '[' -> scanArray(depth + 1)
@@ -49,16 +50,17 @@ internal object StrictJsonValidator {
                 val key = scanString()
                 if (!seen.add(key)) throw DuplicateKeyException(key)
                 skipWhitespace()
-                if (!done() && text[index] == ':') index++
+                consume(':')
                 scanValue(depth)
                 skipWhitespace()
-                if (done()) return
+                if (done()) throw IOException("Unterminated JSON object")
                 when (text[index]) {
                     ',' -> index++
                     '}' -> { index++; return }
-                    else -> index++ // malformed; kotlinx will reject properly
+                    else -> throw IOException("Invalid JSON object separator")
                 }
             }
+            throw IOException("Unterminated JSON object")
         }
 
         private fun scanArray(depth: Int) {
@@ -68,13 +70,14 @@ internal object StrictJsonValidator {
             while (!done()) {
                 scanValue(depth)
                 skipWhitespace()
-                if (done()) return
+                if (done()) throw IOException("Unterminated JSON array")
                 when (text[index]) {
                     ',' -> index++
                     ']' -> { index++; return }
-                    else -> index++
+                    else -> throw IOException("Invalid JSON array separator")
                 }
             }
+            throw IOException("Unterminated JSON array")
         }
 
         /**
@@ -82,32 +85,54 @@ internal object StrictJsonValidator {
          * JSON member and must not carry conflicting authority.
          */
         private fun scanString(): String {
-            if (done() || text[index] != '"') {
-                scanScalar()
-                return ""
-            }
-            index++ // consume opening quote
+            consume('"')
             val start = index
             while (!done()) {
                 when (text[index]) {
-                    '\\' -> index += 2
+                    '\\' -> {
+                        index++
+                        if (done()) throw IOException("Unterminated JSON escape")
+                        when (text[index++]) {
+                            '"', '\\', '/', 'b', 'f', 'n', 'r', 't' -> Unit
+                            'u' -> repeat(4) {
+                                if (done() || text[index++].digitToIntOrNull(16) == null) throw IOException("Invalid JSON Unicode escape")
+                            }
+                            else -> throw IOException("Invalid JSON escape")
+                        }
+                    }
                     '"' -> {
                         val raw = text.substring(start, index)
                         index++
                         return Json.decodeFromString<String>("\"$raw\"")
                     }
-                    else -> index++
+                    else -> {
+                        if (text[index].code < 0x20) throw IOException("Unescaped JSON control character")
+                        index++
+                    }
                 }
             }
-            return text.substring(start.coerceAtMost(text.length))
+            throw IOException("Unterminated JSON string")
         }
 
         fun skipWhitespace() {
-            while (!done() && text[index].isWhitespace()) index++
+            while (!done() && text[index] in " \t\r\n") index++
         }
 
         private fun scanScalar() {
-            while (!done() && text[index] !in ",}]" && !text[index].isWhitespace()) index++
+            val start = index
+            while (!done() && text[index] !in ",}] \t\r\n") index++
+            val value = text.substring(start, index)
+            if (value in setOf("true", "false", "null")) return
+            if (!NUMBER.matches(value) || value.toDoubleOrNull()?.isFinite() != true) throw IOException("Invalid JSON primitive")
+        }
+
+        private fun consume(expected: Char) {
+            if (done() || text[index] != expected) throw IOException("Expected JSON '$expected'")
+            index++
+        }
+
+        private companion object {
+            val NUMBER = Regex("-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
         }
     }
 }

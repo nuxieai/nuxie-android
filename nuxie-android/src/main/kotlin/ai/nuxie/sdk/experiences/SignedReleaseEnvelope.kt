@@ -28,6 +28,23 @@ internal class SignedReleaseEnvelope private constructor(
             trustedKeys: Map<String, ByteArray>,
             format: Format,
         ): SignedReleaseEnvelope {
+            val envelope = decode(envelopeBytes, format)
+            val key = trustedKeys[envelope.keyId] ?: fail("unknown signing key: ${envelope.keyId}")
+            if (key.size != 32) fail("invalid trust root")
+            if (!Ed25519Verifier.verify(key, format.signatureDomain.encodeToByteArray() + envelope.bytes, envelope.signature)) {
+                fail("invalid signature")
+            }
+            return SignedReleaseEnvelope(envelope.keyId, envelope.sha, envelope.bytes)
+        }
+
+        /** Shape/digest checking for profile staging; this does not authenticate. */
+        fun validateShape(envelopeBytes: ByteArray, format: Format) {
+            decode(envelopeBytes, format)
+        }
+
+        private data class Decoded(val keyId: String, val sha: String, val bytes: ByteArray, val signature: ByteArray)
+
+        private fun decode(envelopeBytes: ByteArray, format: Format): Decoded {
             if (envelopeBytes.size > ExperienceReleaseLimits.ENVELOPE_BYTES) fail("envelope exceeds size limit")
             val envelope = parseObject(envelopeBytes)
             exact(envelope, setOf("mediaType", "encoding", "descriptorSha256", "descriptorSizeBytes", "descriptorBytesBase64", "signature"))
@@ -45,14 +62,9 @@ internal class SignedReleaseEnvelope private constructor(
             if (bytes.isEmpty() || envelope.integer("descriptorSizeBytes") != bytes.size.toLong()) fail("descriptor size mismatch")
             val sha = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
             if (envelope.string("descriptorSha256") != sha) fail("descriptor sha mismatch")
-            val key = trustedKeys[keyId] ?: fail("unknown signing key: $keyId")
-            if (key.size != 32) fail("invalid trust root")
             val signatureBytes = ExperienceReleaseVerifier.canonicalBase64Decode(signature.string("signatureBase64"), 64)
                 ?.takeIf { it.size == 64 } ?: fail("signature encoding")
-            if (!Ed25519Verifier.verify(key, format.signatureDomain.encodeToByteArray() + bytes, signatureBytes)) {
-                fail("invalid signature")
-            }
-            return SignedReleaseEnvelope(keyId, sha, bytes)
+            return Decoded(keyId, sha, bytes, signatureBytes)
         }
 
         /** Invoke only after authentication for descriptor bytes. */

@@ -1,15 +1,15 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "b16f339a0a1fd4af4cee820c9476991af4b1ae74",
+  "sourceCommit": "b15f24682f53043fd796ac3a2fb95fb834ad4692",
   "files": {
-    "README.md": "e5254caf9373e8493b5f19ff06f3db1660660743cb2659c1003e014d55d07ba0",
+    "README.md": "84e206b4dec26406c6094f0d4be6a37fe0de76ed90e33741fb1bf472c0e43b19",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
     "encodings/feature-usage.json": "2606a5062e041237fb7245dd919e921c383d94735d537e509aab429855b17c69",
     "encodings/forwarded-activity.json": "16b02be158da485629812236129380156d5425ba43a10fb36717ce5cb1709a36",
     "encodings/trigger-result.json": "dc4d52dbbb24cd7c08997671aa36449e9d73c20bde0621f23d030181d09fcc45",
     "events/atomic-purchase-sync.json": "00ad8a8acfcc8b5531de8312a6ad9e13cae2ec6fc386a4b3263fde3d574f0764",
     "events/batch-item-encoding.json": "2eff88659c755cc7029030ff6162dc4af95c4a37ff1ac46897aa73deb91ae37c",
-    "events/catalog.json": "05554b4dce75567465c654446bade6a5469cd5960e619f14eec4e867dd56b5ed",
+    "events/catalog.json": "ad036c02cb81a89dbb8829f0d4ce4b19111cd64af174bfdb32f57bbab3f7b4a0",
     "events/delivery-disposition.json": "bf2e48165a90e6bf568f00ba804cfa8c2f1efcdc9a5867533a24bbf99a31575d",
     "events/down-facts/converted.json": "f9c5ae6514cab17f4c8622998f7e9d4646306cb2f05ff76fef4684f38d3d3466",
     "events/experience-events.json": "c27bf587fb43fe2e19733aa40453160407e89352ffcdc03b8aa59a1f928babef",
@@ -33,6 +33,7 @@
     "journeys/handler-host-dispatch/lifecycle.json": "5ebf00eb123b41f7c995ebbc9ff43adf2ba55390d5c83d61e99d1e691ebf9bc2",
     "journeys/handoff/claim.json": "ed69bc408c32ea5d142595c99c74e575b18e3e7fa66a69728c955145c9337ce1",
     "journeys/parking/emission.json": "fb51b042ba3b8be9df94f55e824ba2205eda612c9a0d83e28c9c1c1920b73782",
+    "journeys/planes/admission.json": "b303234e4c0d0d2c2217e3e33bafb9f307f8d05b2fd1f7b24c887a2bca8f41e2",
     "journeys/planes/entry-evaluation.json": "86b177667a593689650924cb1b82635ed08687f2e2c5977b096741f4976ffcd5",
     "journeys/planes/history-coverage.json": "c0310ff558b10c646bfb437fb6b1e02d49c9a9f42e294c03ef014cb97e5a4f09",
     "journeys/planes/occurrence-evaluation.json": "a9895e6774a75305270255f1670364872bef51d147da2f0db68830804205f03c",
@@ -42,11 +43,7 @@
     "journeys/takeover/claimable.json": "332aedb7e66566c433af4b8b2dc48dd5e9cac652075c3a4fdb2b68e2ba6cf837",
     "journeys/time-window/cross-plane.json": "5896275d61a52cc150fb34eb131331566f810dff621464e9b7b4c53ab94f80e4",
     "journeys/transitions/basic.json": "4460073a4055be574650c503a58dc05ddfa210844a49e0ce2dc4b2c5e9e1b06e",
-    "segments/seed-mirror/server-mode.json": "fd71fc809795d39f96c5ce186559336ffcb38f881a5ceab835184751c0564c0a",
-    "profile/locale-admission.json": "a3df581ff611f480b4e75d194a54a33cb99e8f199f4c1d8df128ea0056a93176"
-  },
-  "sourceCommitOverrides": {
-    "features/optimistic-entitlement-projection.json": "a1efb57b860b2b8bc28c31785eb1deb22cb94348",
-    "profile/locale-admission.json": "649cdfea2ee55e56e2c9726f50a88b164ef4b382"
+    "profile/locale-admission.json": "a3df581ff611f480b4e75d194a54a33cb99e8f199f4c1d8df128ea0056a93176",
+    "segments/seed-mirror/server-mode.json": "fd71fc809795d39f96c5ce186559336ffcb38f881a5ceab835184751c0564c0a"
   }
 }

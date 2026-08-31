@@ -2,6 +2,9 @@
 
 These language-neutral vectors pin the cross-plane experience-execution contract:
 
+- `journeys/planes/admission.json`: local-program admission mutations over the
+  signed release goldens: cursor and render closure, flat controls, fact proof,
+  boundary schemas, and host-dismissal safety, shared by native validators.
 - `journeys/planes/occurrence-evaluation.json`: horizon-fenced occurrence counts,
   predicates, numeric aggregates, relative windows, and unknown propagation.
 - `journeys/planes/history-coverage.json`: durable count/age retention fences,
@@ -23,6 +26,11 @@ These language-neutral vectors pin the cross-plane experience-execution contract
 - `journeys/effects`: deterministic request ids, server completion facts, result binding, timeout, late-arrival, and offline-delivery semantics.
 - `segments/seed-mirror`: admitted profile snapshots replace the read-only membership value;
   missing membership rejects the response and explicit empty membership clears it.
+- `profile/locale-admission`: locale participates in profile admission by
+  invalidating the admission generation at the locale-change entry point;
+  locale-scoped state (releases, segments, cached profile) rejects stale
+  responses while customer-scoped payloads (facts, properties, mailbox)
+  commit from a locale-flip discard and a round trip discards wholesale.
 - `events/down-facts`: repeated server facts commit once, never upload, and route once to subscribers.
 - `events/experience-events`: canonical `$experience_*` names and the
   experience identity/version properties carried by presentation facts and
