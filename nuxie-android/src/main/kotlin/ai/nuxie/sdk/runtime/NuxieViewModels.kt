@@ -188,6 +188,9 @@ internal interface NuxieTypedRuntimeNative {
     fun newDefaultViewModel(artboardHandle: Long): NativeCallResult<Long> =
         error("newDefaultViewModel is not implemented")
 
+    fun viewModelRootSchemaIndex(viewModelHandle: Long): NativeCallResult<Long> =
+        error("viewModelRootSchemaIndex is not implemented")
+
     fun bindViewModel(artboardHandle: Long, viewModelHandle: Long): Int =
         error("bindViewModel is not implemented")
 
@@ -323,6 +326,12 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
         val handle = NuxieRuntimeBridge.nativeViewModelInstanceNewDefault(artboardHandle, status)
         return NativeCallResult(status.single(), handle.takeUnless { it == 0L })
+    }
+
+    override fun viewModelRootSchemaIndex(viewModelHandle: Long): NativeCallResult<Long> {
+        val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
+        val index = NuxieRuntimeBridge.nativeViewModelRootSchemaIndex(viewModelHandle, status)
+        return NativeCallResult(status.single(), index.takeIf { status.single() == NUX_STATUS_OK })
     }
 
     override fun bindViewModel(artboardHandle: Long, viewModelHandle: Long): Int =

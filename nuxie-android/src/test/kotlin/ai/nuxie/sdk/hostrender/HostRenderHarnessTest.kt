@@ -4,6 +4,9 @@ import ai.nuxie.sdk.runtime.DecodedImage
 import ai.nuxie.sdk.runtime.ExpectedFileAsset
 import ai.nuxie.sdk.runtime.FileAssetKind
 import ai.nuxie.sdk.runtime.NuxImageDecoder
+import ai.nuxie.sdk.runtime.NativeCallResult
+import ai.nuxie.sdk.runtime.NativeViewModelCatalog
+import ai.nuxie.sdk.runtime.NativeViewModelSchema
 import ai.nuxie.sdk.runtime.NuxieCpuFrame
 import ai.nuxie.sdk.runtime.NuxieRuntime
 import ai.nuxie.sdk.runtime.NuxieTypedRuntimeNative
@@ -16,34 +19,15 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class HostRenderHarnessTest {
     @Test
     fun `release descriptor drives configured import fixed steps and CPU frame manifest`() {
-        val input = Files.createTempDirectory("host-render-input-").toFile()
+        val input = prepareInput()
         val output = Files.createTempDirectory("host-render-output-").toFile()
-        val asset = File(input, "assets/hero.png").apply {
-            requireNotNull(parentFile).mkdirs()
-            writeBytes(byteArrayOf(1, 2, 3, 4))
-        }
-        File(input, "scene.riv").writeBytes(byteArrayOf(82, 73, 86, 69))
-        File(input, "release-descriptor.json").writeText(
-            """
-            {
-              "presentation":{"backgroundColor":"#102030FF"},
-              "render":{
-                "renderer":"rive",
-                "riv":{"key":"scene.riv"},
-                "assets":[{
-                  "kind":"image","key":"assets/hero.png","riveAssetId":7,
-                  "riveUniqueName":"hero-7","required":true
-                }],
-                "screens":[{"artboardName":"Main","width":4,"height":2}]
-              }
-            }
-            """.trimIndent(),
-        )
+        val asset = File(input, "assets/hero.png")
         val native = RecordingNative()
 
         val result = HostRenderHarness(NuxieRuntime(native), PASS_THROUGH_DECODER).run(
@@ -55,6 +39,7 @@ class HostRenderHarnessTest {
         assertEquals("Main", native.artboardName)
         assertEquals(HostRenderSize(4, 2), native.rendererSize)
         assertEquals(listOf("renderer", "import:4"), native.factoryLifecycle.take(2))
+        assertEquals(0, native.factoryLifecycle.count { it == "default" })
         assertArrayEquals(asset.readBytes(), native.externalAssets.getValue(0))
         assertEquals(listOf("frame-0.rgba", "frame-1.rgba"), output.list()!!.filter {
             it.endsWith(".rgba")
@@ -71,12 +56,71 @@ class HostRenderHarnessTest {
         )
     }
 
+    @Test
+    fun `selected signed default binds before player and cleans up in ownership order`() {
+        val native = RecordingNative()
+        HostRenderHarness(NuxieRuntime(native), PASS_THROUGH_DECODER).run(
+            HostRenderOptions(prepareInput(declaredDefault = true),
+                Files.createTempDirectory("host-render-bound-").toFile(), frameCount = 1),
+        )
+        assertEquals(listOf("renderer", "import:4", "artboard", "default", "root-schema",
+            "catalog", "bind", "player", "free-player", "free-default", "free-artboard",
+            "free-file", "free-renderer"), native.factoryLifecycle)
+    }
+
+    @Test
+    fun `declared default failures stop before player and release every acquired owner`() {
+        for (failure in listOf("missing-default", "wrong-schema", "bind")) {
+            val native = RecordingNative().apply { bindingFailure = failure }
+            assertThrows(Exception::class.java) {
+                HostRenderHarness(NuxieRuntime(native), PASS_THROUGH_DECODER).run(
+                    HostRenderOptions(prepareInput(declaredDefault = true),
+                        Files.createTempDirectory("host-render-failed-").toFile(), frameCount = 1),
+                )
+            }
+            assertEquals(0, native.factoryLifecycle.count { it == "player" })
+            assertEquals(listOf("free-artboard", "free-file", "free-renderer"),
+                native.factoryLifecycle.takeLast(3))
+            assertEquals(if (failure == "missing-default") 0 else 1,
+                native.factoryLifecycle.count { it == "free-default" })
+        }
+    }
+
+    private fun prepareInput(declaredDefault: Boolean = false): File {
+        val input = Files.createTempDirectory("host-render-input-").toFile()
+        File(input, "assets/hero.png").apply {
+            requireNotNull(parentFile).mkdirs()
+            writeBytes(byteArrayOf(1, 2, 3, 4))
+        }
+        File(input, "scene.riv").writeBytes(byteArrayOf(82, 73, 86, 69))
+        val defaultDeclaration = if (declaredDefault) ",\"defaultViewModelName\":\"Root\"" else ""
+        File(input, "release-descriptor.json").writeText(
+            """
+            {
+              "presentation":{"backgroundColor":"#102030FF"},
+              "render":{
+                "renderer":"rive",
+                "riv":{"key":"scene.riv"},
+                "assets":[{
+                  "kind":"image","key":"assets/hero.png","riveAssetId":7,
+                  "riveUniqueName":"hero-7","required":true
+                }],
+                "screens":[{"id":"main","artboardName":"Main","width":4,"height":2}]
+              },
+              "journey":{"screens":[{"id":"main"$defaultDeclaration}]}
+            }
+            """.trimIndent(),
+        )
+        return input
+    }
+
     private class RecordingNative : NuxieTypedRuntimeNative {
         val steps = mutableListOf<Double>()
         var artboardName: String? = null
         var rendererSize: HostRenderSize? = null
         var externalAssets = emptyMap<Int, ByteArray>()
         val factoryLifecycle = mutableListOf<String>()
+        var bindingFailure: String? = null
 
         override val isAvailable = true
         override fun runtimeInfo(): String = "runtime-info"
@@ -94,20 +138,47 @@ class HostRenderHarnessTest {
             this.externalAssets = externalAssets
             return 1
         }
-        override fun freeFile(handle: Long) = Unit
+        override fun freeFile(handle: Long) { factoryLifecycle += "free-file" }
         override fun newDefaultArtboard(fileHandle: Long): Long = 2
         override fun newNamedArtboard(fileHandle: Long, name: String): Long {
+            factoryLifecycle += "artboard"
             artboardName = name
             return 2
         }
-        override fun freeArtboard(handle: Long) = Unit
-        override fun newDefaultPlayer(artboardHandle: Long): Long = 3
+        override fun freeArtboard(handle: Long) { factoryLifecycle += "free-artboard" }
+        override fun newDefaultPlayer(artboardHandle: Long): Long {
+            factoryLifecycle += "player"
+            return 3
+        }
+        override fun newDefaultViewModel(artboardHandle: Long): NativeCallResult<Long> {
+            factoryLifecycle += "default"
+            return if (bindingFailure == "missing-default") NativeCallResult(3, null) else NativeCallResult(0, 5L)
+        }
+        override fun viewModelRootSchemaIndex(viewModelHandle: Long): NativeCallResult<Long> {
+            factoryLifecycle += "root-schema"
+            return NativeCallResult(0, if (bindingFailure == "wrong-schema") 1 else 0)
+        }
+        override fun viewModelCatalog(fileHandle: Long): NativeCallResult<NativeViewModelCatalog> {
+            factoryLifecycle += "catalog"
+            return NativeCallResult(0, NativeViewModelCatalog(arrayOf(
+                NativeViewModelSchema(0, "Root", 0, 0, 0, 0, -1, false),
+                NativeViewModelSchema(1, "Other", 0, 0, 0, 0, -1, false),
+            ), emptyArray(), emptyArray()))
+        }
+        override fun bindViewModel(artboardHandle: Long, viewModelHandle: Long): Int {
+            factoryLifecycle += "bind"
+            return if (bindingFailure == "bind") 4 else 0
+        }
+        override fun freeViewModel(handle: Long): Int {
+            factoryLifecycle += "free-default"
+            return 0
+        }
         override fun newNamedStateMachinePlayer(artboardHandle: Long, name: String): Long = 3
         override fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int {
             steps += elapsedSeconds
             return 0
         }
-        override fun freePlayer(handle: Long) = Unit
+        override fun freePlayer(handle: Long) { factoryLifecycle += "free-player" }
         override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long {
             factoryLifecycle += "renderer"
             rendererSize = HostRenderSize(pixelWidth, pixelHeight)
@@ -120,7 +191,7 @@ class HostRenderHarnessTest {
             clearColor: Int,
             fitContainCenter: Boolean,
         ) = NuxieCpuFrame(4, 2, ByteArray(32) { (it + steps.size).toByte() })
-        override fun freeRenderer(handle: Long) = Unit
+        override fun freeRenderer(handle: Long) { factoryLifecycle += "free-renderer" }
     }
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")

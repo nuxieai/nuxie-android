@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.hostrender
 
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
+import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
 import ai.nuxie.sdk.runtime.DecodedImage
 import ai.nuxie.sdk.runtime.NuxImageDecoder
 import ai.nuxie.sdk.runtime.NuxieRuntime
@@ -76,8 +77,12 @@ internal class HostRenderHarness(
                     imageDecoder = imageDecoder,
                 ),
             ) { "Runtime rejected the configured Experience import" }
-            artboard = checkNotNull(file.newArtboard(render.defaultArtboardName())) {
+            val artboardName = render.defaultArtboardName()
+            artboard = checkNotNull(file.newArtboard(artboardName)) {
                 "Experience artboard is unavailable"
+            }
+            ExperienceViewModelBinding.defaultSchemaName(descriptor, artboardName)?.let {
+                artboard.bindDefaultViewModel(it)
             }
             player = checkNotNull(artboard.newPlayer()) {
                 "Experience player is unavailable"
@@ -112,10 +117,19 @@ internal class HostRenderHarness(
             File(output, MANIFEST_FILE).writeText(manifest(frames, runtime.info()))
             return HostRenderResult(frames)
         } finally {
-            player?.close()
-            artboard?.close()
-            file?.close()
-            renderer.close()
+            try {
+                player?.close()
+            } finally {
+                try {
+                    artboard?.close()
+                } finally {
+                    try {
+                        file?.close()
+                    } finally {
+                        renderer.close()
+                    }
+                }
+            }
         }
     }
 

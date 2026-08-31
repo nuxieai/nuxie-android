@@ -1317,6 +1317,50 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelInstanceNewDefault(
   return status == NUX_STATUS_OK ? as_handle(instance) : 0;
 }
 
+JNIEXPORT jlong JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelRootSchemaIndex(
+    JNIEnv *env, jobject self, jlong view_model, jintArray status_out) {
+  (void)self;
+  if (status_out == NULL) return 0;
+  if (view_model == 0) {
+    set_status_out(env, status_out, NUX_STATUS_NULL_ARGUMENT);
+    return 0;
+  }
+  struct NuxViewModelSnapshot *snapshot = NULL;
+  NuxStatus status = nux_view_model_instance_snapshot(
+      (const struct NuxViewModelInstance *)from_handle(view_model), &snapshot);
+  jlong schema_index = 0;
+  if (status == NUX_STATUS_OK && snapshot == NULL) status = NUX_STATUS_RUNTIME_ERROR;
+  if (status == NUX_STATUS_OK) {
+    struct NuxViewModelSnapshotInfo info;
+    memset(&info, 0, sizeof(info));
+    info.struct_size = (uint32_t)sizeof(info);
+    status = nux_view_model_snapshot_info(snapshot, &info);
+    int found_root = 0;
+    for (size_t index = 0; status == NUX_STATUS_OK && index < info.instance_count; ++index) {
+      struct NuxViewModelSnapshotInstanceView instance;
+      memset(&instance, 0, sizeof(instance));
+      instance.struct_size = (uint32_t)sizeof(instance);
+      status = nux_view_model_snapshot_instance(snapshot, index, &instance);
+      if (status == NUX_STATUS_OK && instance.instance_id == info.root_instance_id) {
+        if (instance.schema_index > INT64_MAX || found_root) {
+          status = NUX_STATUS_RUNTIME_ERROR;
+        } else {
+          schema_index = (jlong)instance.schema_index;
+          found_root = 1;
+        }
+      }
+    }
+    if (status == NUX_STATUS_OK && !found_root) status = NUX_STATUS_RUNTIME_ERROR;
+  }
+  if (snapshot != NULL) {
+    NuxStatus free_status = nux_view_model_snapshot_free(snapshot);
+    if (status == NUX_STATUS_OK) status = free_status;
+  }
+  if (!set_status_out(env, status_out, status)) return 0;
+  return status == NUX_STATUS_OK ? schema_index : 0;
+}
+
 JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeArtboardInstanceBindViewModel(
     JNIEnv *env, jobject self, jlong artboard, jlong view_model) {
