@@ -37,6 +37,7 @@ import ai.nuxie.sdk.journey.JourneyLedger
 import ai.nuxie.sdk.journey.JourneyReleaseCatalog
 import ai.nuxie.sdk.journey.JourneyService
 import ai.nuxie.sdk.journey.JourneyStore
+import ai.nuxie.sdk.journey.SignedTimezoneBundle
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.HttpUrlConnectionTransport
 import ai.nuxie.sdk.network.NuxieApi
@@ -425,8 +426,8 @@ internal class NuxieCore(
             supportedLuauRevisions = mapOf("rive_0_36" to setOf(3, 6)),
             sceneFormatMajor = 7,
             sceneFormatMinor = 0,
-            timezoneDataRevision = "2026c",
-            timezoneDataSha256 = "d4ad5c12a6be491076f333c9b4f96f60cb8ab552495bbfae0d8cdc9730ecb198",
+            timezoneDataRevision = SignedTimezoneBundle.REVISION,
+            timezoneDataSha256 = SignedTimezoneBundle.SHA256,
             supportedCapabilities = setOf("rive", "text-input"),
         )
     }
