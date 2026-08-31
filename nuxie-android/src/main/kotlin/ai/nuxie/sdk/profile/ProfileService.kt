@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.profile
 
 import ai.nuxie.sdk.features.FeatureInfo
+import ai.nuxie.sdk.experiences.DeviceLegProfileCatalog
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
@@ -45,6 +46,7 @@ internal class ProfileService(
     private val segments: SegmentService,
     private val applyUserProperties: (Map<String, Any?>) -> Unit,
     private val applyJourneyProfile: (distinctId: String, body: JsonObject) -> Unit = { _, _ -> },
+    private val deviceLegProfiles: DeviceLegProfileCatalog? = null,
     private val applyJourneyFacts: suspend (
         distinctId: String,
         body: JsonObject,
@@ -211,10 +213,14 @@ internal class ProfileService(
         val admission = beginAdmission() ?: return false
         val distinctId = admission.identityScope.distinctId
         val locale = admission.localeScope.identifier
-        val previous = synchronized(lock) {
+        val scopedResident = synchronized(lock) {
             resident?.takeIf {
-                it.distinctId == distinctId && it.locale == locale && isFresh(it)
+                it.distinctId == distinctId && it.locale == locale
             }
+        }
+        val previous = scopedResident?.takeIf(::isFresh)
+        if (scopedResident != null && previous == null) {
+            evictCache(distinctId, admission)
         }
         val validator = previous
             ?.validator
@@ -267,6 +273,16 @@ internal class ProfileService(
         cached: CachedProfile,
         admission: Admission,
     ): Boolean {
+        val schemaVersion = (cached.body["schemaVersion"] as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+        val planePrepared = if (schemaVersion == "nuxie.journey-plane-profile.v1") {
+            val catalog = deviceLegProfiles ?: return false
+            runCatching { catalog.prepare(cached.body) }.getOrElse {
+                Log.w(LOG_TAG, "Device leg plane profile rejected", it)
+                return false
+            }
+        } else null
 
         var featurePublication: FeatureInfo.Mutation? = null
         val admitted = withCurrentScope(admission.identityScope, admission.localeScope) {
@@ -278,13 +294,23 @@ internal class ProfileService(
                 }
                 latestAppliedGeneration = admission.generation
 
+                if (planePrepared != null) {
+                    runCatching {
+                        deviceLegProfiles?.commit(cached.distinctId, planePrepared)
+                    }.getOrElse {
+                        Log.w(LOG_TAG, "Device leg plane profile commit failed", it)
+                        return@synchronized false
+                    }
+                } else {
+                    deviceLegProfiles?.clear(cached.distinctId)
+                }
                 resident = cached
                 persist(cached)
                 segments.applySnapshot(
                     cached.distinctId,
                     cached.body["segmentMemberships"] as? JsonObject,
                 )
-                applyJourneyProfile(cached.distinctId, cached.body)
+                if (planePrepared == null) applyJourneyProfile(cached.distinctId, cached.body)
                 featurePublication = stageFeatureProfile(
                     cached.distinctId,
                     cached.body,
@@ -312,7 +338,7 @@ internal class ProfileService(
             localeSettings.captureScope().identifier != admission.localeScope.identifier
         if (admitted || (localeFlipDiscard && isCustomerAdmissionCurrent(admission))) {
             applyCustomerProperties(cached, admission)
-            if (isCustomerAdmissionCurrent(admission)) {
+            if (planePrepared == null && isCustomerAdmissionCurrent(admission)) {
                 applyJourneyFacts(cached.distinctId, cached.body)
             }
         }
@@ -379,6 +405,7 @@ internal class ProfileService(
             fileFor(distinctId).delete()
         }
         segments.clearSegments(distinctId)
+        deviceLegProfiles?.clear(distinctId)
     }
 
     private fun evictCache(distinctId: String, admission: Admission) {
@@ -395,6 +422,7 @@ internal class ProfileService(
                 // The persisted segment mirror is locale-scoped state admitted
                 // with the profile; it must not survive the profile's eviction.
                 segments.clearSegments(distinctId)
+                deviceLegProfiles?.clear(distinctId)
             }
         }
     }
