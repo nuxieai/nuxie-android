@@ -9,11 +9,14 @@ import ai.nuxie.sdk.features.FeatureService
 import ai.nuxie.sdk.features.FeatureUsageResult
 import ai.nuxie.sdk.network.NuxieApi
 import android.app.Activity
+import android.util.Log
 import com.android.billingclient.api.BillingClient
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -25,6 +28,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+
+private const val MAX_EXTERNAL_PURCHASE_CAPTURE_RETRIES = 3
 
 internal class PurchaseSettings(
     delegate: NuxiePurchaseDelegate?,
@@ -126,6 +131,9 @@ internal class PurchaseService(
     private val newExternalOperationId: () -> String = TimeBasedEpochGenerator.shared::next,
     private val verifyPurchaseSignature: (String, String, String) -> Boolean =
         PlayPurchaseSignatureVerifier::verify,
+    private val logWarning: (String, Throwable) -> Unit = { message, failure ->
+        Log.w("NuxieBilling", message, failure)
+    },
 ) {
     private data class InFlightPurchase(
         val result: CompletableDeferred<PurchaseResult>,
@@ -174,6 +182,17 @@ internal class PurchaseService(
         val outcome: PurchaseOutcome,
     )
 
+    /**
+     * Raw BillingClient delivery before the SDK's verification policy runs.
+     * With no configured licensing key, Play's PURCHASED delivery is the
+     * local trust boundary. With a key, signature verification must succeed
+     * before this observation can construct [PurchaseOutcome.Verified].
+     */
+    private data class PlayPurchaseObservation(
+        val purchase: PlayPurchase,
+        val source: PurchaseOutcomeSource,
+    )
+
     private sealed interface PurchaseCommitIdentity {
         data class Evidence(val purchaseToken: String) : PurchaseCommitIdentity
         data class External(val operationId: String) : PurchaseCommitIdentity
@@ -181,22 +200,20 @@ internal class PurchaseService(
 
     private data class PendingPurchaseCommit(
         val identity: PurchaseCommitIdentity,
+        val operation: CompletableDeferred<Unit>,
         val eventName: String,
         val eventId: String,
         val ownerDistinctId: String,
         val properties: Map<String, Any?>,
-        val afterCapture: suspend () -> Unit = {},
+        val afterCapture: suspend (ProcessingEffects) -> Unit = {},
         val onFailure: () -> Unit = {},
+        val bestEffort: Boolean = false,
+        val captureAttempt: Int = 1,
     )
-
-    private sealed interface PurchaseCommitDrainResult {
-        data object Succeeded : PurchaseCommitDrainResult
-        data class Failed(val reason: Throwable) : PurchaseCommitDrainResult
-    }
 
     private data class OwnedPurchaseCommit(
         val identity: PurchaseCommitIdentity,
-        val completion: CompletableDeferred<PurchaseCommitDrainResult>,
+        val completion: CompletableDeferred<Unit>,
     )
 
     private data class AllowanceResolutionIdentity(
@@ -216,7 +233,7 @@ internal class PurchaseService(
     private class ProcessingEffects {
         val purchaseCommits = mutableListOf<PendingPurchaseCommit>()
         val ownedPurchaseCommits = mutableListOf<OwnedPurchaseCommit>()
-        val purchaseCommitWaits = mutableListOf<CompletableDeferred<PurchaseCommitDrainResult>>()
+        val purchaseCommitWaits = mutableListOf<CompletableDeferred<Unit>>()
         val publications = mutableListOf<FeatureInfo.Mutation>()
         val purchaseCompletions = mutableListOf<PendingPurchaseCompletion>()
         val directCheckoutCompletions = mutableListOf<PendingDirectCheckoutCompletion>()
@@ -225,10 +242,11 @@ internal class PurchaseService(
 
     /**
      * [processing] serializes local outcome decisions. Durable event capture and
-     * FeatureInfo publication drain after the mutex is released; a successful
-     * capture briefly re-enters the decision lane to stage its projection and
-     * checkout continuation. Duplicate evidence observations wait for the whole
-     * commit drain without blocking reentrant event or Feature callbacks.
+     * FeatureInfo publication drain after the mutex is released. Commit owners
+     * publish a decision-ready latch before either operation can call back into
+     * the facade. The in-flight identity remains installed through capture and
+     * publication, so duplicates join the decision and become no-ops instead of
+     * forming a cycle with event or Feature callbacks.
      */
     private suspend fun <T> withProcessingDecision(
         decide: suspend (ProcessingEffects) -> T,
@@ -239,57 +257,59 @@ internal class PurchaseService(
         } catch (failure: Throwable) {
             Result.failure(failure)
         }
+
+        // These latches mean "the serialized decision is complete", not "all
+        // callback-bearing effects drained". Completing them here lets a
+        // reentrant same-token observation return while the owner identity
+        // stays installed through the work below.
+        effects.ownedPurchaseCommits.forEach { it.completion.complete(Unit) }
+        effects.purchaseCommitWaits.forEach { it.await() }
+
         var purchaseCommitFailure: Throwable? = null
-        if (effects.purchaseCommits.isNotEmpty()) {
-            purchaseCommitDrain.withLock {
-                effects.purchaseCommits.forEach { commit ->
-                    runCatching {
-                        capturePurchaseCommit(commit)
-                        processing.withLock { commit.afterCapture() }
-                    }.onFailure { failure ->
-                        commit.onFailure()
-                        val aggregate = purchaseCommitFailure
-                        if (aggregate == null) {
-                            purchaseCommitFailure = failure
-                        } else if (aggregate !== failure) {
-                            aggregate.addSuppressed(failure)
-                        }
-                    }
-                }
+        effects.purchaseCommits.forEach { commit ->
+            drainPurchaseCommit(commit)?.let { failure ->
+                purchaseCommitFailure = aggregateFailure(purchaseCommitFailure, failure)
             }
         }
-        var publicationFailure: Throwable? = null
+
+        val callbackFailure = drainCallbackEffects(effects)
+        val stagedOperations = effects.purchaseCommits.mapTo(mutableSetOf()) { it.operation }
+        processing.withLock {
+            // A decision can reserve an identity and then terminate before it
+            // needs a durable capture (pending, rejected, or already emitted).
+            // Keep that ready operation installed through its callbacks, then
+            // release it without calling it a completed verified commit.
+            effects.ownedPurchaseCommits
+                .filter { it.completion !in stagedOperations }
+                .forEach { owned ->
+                    purchaseCommitOperations.remove(owned.identity, owned.completion)
+                }
+        }
+
+        outcome.exceptionOrNull()?.let { decisionFailure ->
+            purchaseCommitFailure?.takeIf { it !== decisionFailure }
+                ?.let(decisionFailure::addSuppressed)
+            callbackFailure?.takeIf { it !== decisionFailure }
+                ?.let(decisionFailure::addSuppressed)
+            throw decisionFailure
+        }
+        purchaseCommitFailure?.let { failure ->
+            callbackFailure?.takeIf { it !== failure }?.let(failure::addSuppressed)
+            throw failure
+        }
+        callbackFailure?.let { throw it }
+        outcome.getOrThrow()
+    }
+
+    /** Drain only callback-bearing effects. No purchase decision lock is held. */
+    private suspend fun drainCallbackEffects(effects: ProcessingEffects): Throwable? {
+        var failure: Throwable? = null
         effects.publications.forEach { publication ->
             runCatching { features.publishStaged(publication) }
-                .onFailure { failure ->
-                    publicationFailure?.addSuppressed(failure)
-                        ?: run { publicationFailure = failure }
+                .onFailure { publicationFailure ->
+                    failure = aggregateFailure(failure, publicationFailure)
                 }
         }
-        val commitDrainFailure = outcome.exceptionOrNull()
-            ?: purchaseCommitFailure
-            ?: publicationFailure
-        effects.ownedPurchaseCommits.forEach { commit ->
-            commit.completion.complete(
-                commitDrainFailure?.let { PurchaseCommitDrainResult.Failed(it) }
-                    ?: PurchaseCommitDrainResult.Succeeded,
-            )
-            purchaseCommitOperations.remove(commit.identity, commit.completion)
-        }
-        effects.purchaseCommitWaits.forEach { completion ->
-            when (val result = completion.await()) {
-                PurchaseCommitDrainResult.Succeeded -> Unit
-                is PurchaseCommitDrainResult.Failed -> {
-                    val aggregate = purchaseCommitFailure
-                    if (aggregate == null) {
-                        purchaseCommitFailure = result.reason
-                    } else if (aggregate !== result.reason) {
-                        aggregate.addSuppressed(result.reason)
-                    }
-                }
-            }
-        }
-        var completionFailure: Throwable? = null
         effects.purchaseCompletions.forEach { completion ->
             runCatching {
                 try {
@@ -298,9 +318,8 @@ internal class PurchaseService(
                     claimedCheckoutCompletions.remove(completion.checkout)
                 }
             }
-                .onFailure { failure ->
-                    completionFailure?.addSuppressed(failure)
-                        ?: run { completionFailure = failure }
+                .onFailure { completionFailure ->
+                    failure = aggregateFailure(failure, completionFailure)
                 }
         }
         effects.directCheckoutCompletions.forEach { completion ->
@@ -311,9 +330,8 @@ internal class PurchaseService(
                     completion.checkout.owner,
                 )
                 completion.checkout.result.complete(completion.outcome.toPurchaseResult())
-            }.onFailure { failure ->
-                completionFailure?.addSuppressed(failure)
-                    ?: run { completionFailure = failure }
+            }.onFailure { completionFailure ->
+                failure = aggregateFailure(failure, completionFailure)
             }
         }
         effects.outcomeEmissions.forEach { emission ->
@@ -323,31 +341,17 @@ internal class PurchaseService(
                     emission.outcome,
                     emission.ownerDistinctId,
                 )
-            }.onFailure { failure ->
-                completionFailure?.addSuppressed(failure)
-                    ?: run { completionFailure = failure }
+            }.onFailure { completionFailure ->
+                failure = aggregateFailure(failure, completionFailure)
             }
         }
-        outcome.exceptionOrNull()?.let { decisionFailure ->
-            purchaseCommitFailure?.takeIf { it !== decisionFailure }
-                ?.let(decisionFailure::addSuppressed)
-            publicationFailure?.takeIf { it !== decisionFailure }
-                ?.let(decisionFailure::addSuppressed)
-            completionFailure?.takeIf { it !== decisionFailure }
-                ?.let(decisionFailure::addSuppressed)
-            throw decisionFailure
-        }
-        purchaseCommitFailure?.let { failure ->
-            publicationFailure?.takeIf { it !== failure }?.let(failure::addSuppressed)
-            completionFailure?.takeIf { it !== failure }?.let(failure::addSuppressed)
-            throw failure
-        }
-        publicationFailure?.let { failure ->
-            completionFailure?.takeIf { it !== failure }?.let(failure::addSuppressed)
-            throw failure
-        }
-        completionFailure?.let { throw it }
-        outcome.getOrThrow()
+        return failure
+    }
+
+    private fun aggregateFailure(current: Throwable?, next: Throwable): Throwable {
+        if (current == null) return next
+        if (current !== next) current.addSuppressed(next)
+        return current
     }
 
     private fun ProcessingEffects.completeCheckoutAfterPublications(
@@ -380,8 +384,77 @@ internal class PurchaseService(
             is PurchaseCommitIdentity.Evidence -> check(markCompletionCaptured(identity.purchaseToken)) {
                 "Could not persist the purchase completion commit."
             }
-            is PurchaseCommitIdentity.External -> committedExternalOperations.add(identity.operationId)
+            is PurchaseCommitIdentity.External -> Unit
         }
+    }
+
+    /** Capture and publish one owned commit without holding a decision mutex. */
+    private suspend fun drainPurchaseCommit(commit: PendingPurchaseCommit): Throwable? {
+        val postCaptureEffects = ProcessingEffects()
+        val failure = try {
+            capturePurchaseCommit(commit)
+            processing.withLock {
+                if (purchaseCommitOperations[commit.identity] !== commit.operation) {
+                    return@withLock
+                }
+                commit.afterCapture(postCaptureEffects)
+            }
+            drainCallbackEffects(postCaptureEffects)?.let { throw it }
+            null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            failure
+        }
+
+        if (failure == null) {
+            processing.withLock {
+                if (purchaseCommitOperations[commit.identity] === commit.operation) {
+                    completedPurchaseCommits[commit.identity] = Unit
+                    purchaseCommitOperations.remove(commit.identity, commit.operation)
+                }
+            }
+            return null
+        }
+
+        commit.onFailure()
+        if (commit.bestEffort && commit.identity is PurchaseCommitIdentity.External) {
+            if (commit.captureAttempt <= MAX_EXTERNAL_PURCHASE_CAPTURE_RETRIES) {
+                scheduleExternalPurchaseCommitRetry(commit)
+            } else {
+                processing.withLock {
+                    purchaseCommitOperations.remove(commit.identity, commit.operation)
+                }
+                logWarning(
+                    "Dropping external purchase operation ${commit.identity.operationId} " +
+                        "after ${commit.captureAttempt} capture attempts.",
+                    failure,
+                )
+            }
+            return null
+        }
+
+        processing.withLock {
+            purchaseCommitOperations.remove(commit.identity, commit.operation)
+        }
+        return failure
+    }
+
+    private fun scheduleExternalPurchaseCommitRetry(commit: PendingPurchaseCommit) {
+        val identity = commit.identity as PurchaseCommitIdentity.External
+        if (externalPurchaseCommitRetryJobs[identity]?.isActive == true) return
+        val retry = scope.launch(start = CoroutineStart.LAZY) {
+            delay(retryDelay(commit.captureAttempt))
+            externalPurchaseCommitRetryJobs.remove(identity)
+            val retained = processing.withLock {
+                purchaseCommitOperations[identity] === commit.operation
+            }
+            if (retained) {
+                drainPurchaseCommit(commit.copy(captureAttempt = commit.captureAttempt + 1))
+            }
+        }
+        val existing = externalPurchaseCommitRetryJobs.putIfAbsent(identity, retry)
+        if (existing == null) retry.start() else retry.cancel()
     }
 
     private suspend fun markCompletionCaptured(purchaseToken: String): Boolean =
@@ -393,16 +466,17 @@ internal class PurchaseService(
     private val products = ConcurrentHashMap<StoredProductIdentity, StoreProduct>()
     private val inFlight = ConcurrentHashMap<String, InFlightPurchase>()
     private val processing = Mutex()
-    private val purchaseCommitDrain = Mutex()
     private val projectionRefresh = Mutex()
     private val syncRetryJobs = ConcurrentHashMap<String, Job>()
     private val completionRetryJobs = ConcurrentHashMap<String, Job>()
+    private val externalPurchaseCommitRetryJobs =
+        ConcurrentHashMap<PurchaseCommitIdentity.External, Job>()
     private val claimedCheckoutCompletions: MutableSet<InFlightPurchase> =
         Collections.newSetFromMap(ConcurrentHashMap())
     private val purchaseCommitOperations =
-        ConcurrentHashMap<PurchaseCommitIdentity, CompletableDeferred<PurchaseCommitDrainResult>>()
-    private val committedExternalOperations: MutableSet<String> =
-        Collections.newSetFromMap(ConcurrentHashMap())
+        ConcurrentHashMap<PurchaseCommitIdentity, CompletableDeferred<Unit>>()
+    /** Process-lifetime terminal identities; guarded by [processing]. */
+    private val completedPurchaseCommits = mutableMapOf<PurchaseCommitIdentity, Unit>()
     private val locallyRevokedTokens: MutableSet<String> =
         Collections.newSetFromMap(ConcurrentHashMap())
     private val usageCoordinationLock = Any()
@@ -801,7 +875,7 @@ internal class PurchaseService(
                     RestoreResult.Restored,
                     found.mapNotNull {
                         commitPurchaseOutcome(
-                            classifyPurchaseOutcome(it, PurchaseOutcomeSource.STARTUP_RECOVERY),
+                            classifyPurchaseObservation(it, PurchaseOutcomeSource.STARTUP_RECOVERY),
                             effects,
                         )
                     },
@@ -860,7 +934,7 @@ internal class PurchaseService(
         val purchaseFollowUps = withProcessingDecision { effects ->
             val prepared = active.mapNotNull {
                 commitPurchaseOutcome(
-                    classifyPurchaseOutcome(it, PurchaseOutcomeSource.STARTUP_RECOVERY),
+                    classifyPurchaseObservation(it, PurchaseOutcomeSource.STARTUP_RECOVERY),
                     effects,
                 )
             }
@@ -922,6 +996,17 @@ internal class PurchaseService(
                         !it.revoked &&
                         it.purchaseToken !in locallyRevokedTokens &&
                         it.purchaseState == StoredPurchaseState.PURCHASED &&
+                        !it.completionEmitted &&
+                        !it.ownerDistinctId.isNullOrBlank() &&
+                        it.hasEligiblePurchaseSignature
+                }
+                .forEach { effects.stageRetainedPurchaseCompletion(it) }
+            evidenceRecords
+                .filter {
+                    !it.permanentlyRejected &&
+                        !it.revoked &&
+                        it.purchaseToken !in locallyRevokedTokens &&
+                        it.purchaseState == StoredPurchaseState.PURCHASED &&
                         (!it.synced || !it.syncedEventEmitted || it.needsManagedCompletion())
                 }
         }
@@ -935,6 +1020,21 @@ internal class PurchaseService(
         }
     }
 
+    /** Recovery re-enters the same completion seam even after sync/Play completion is terminal. */
+    private fun ProcessingEffects.stageRetainedPurchaseCompletion(evidence: PurchaseEvidence) {
+        val identity = PurchaseCommitIdentity.Evidence(evidence.purchaseToken)
+        val operation = beginPurchaseCommit(identity) ?: return
+        purchaseCommits += purchaseCompletionCommit(
+            identity = identity,
+            operation = operation,
+            ownerDistinctId = checkNotNull(evidence.ownerDistinctId),
+            properties = purchaseCompletionProperties(
+                evidence,
+                PurchaseOutcomeSource.STARTUP_RECOVERY,
+            ),
+        )
+    }
+
     private suspend fun processPurchases(
         purchases: List<PlayPurchase>,
         observedSource: PurchaseOutcomeSource,
@@ -942,7 +1042,7 @@ internal class PurchaseService(
         val followUps = withProcessingDecision { effects ->
             purchases.mapNotNull { purchase ->
                 commitPurchaseOutcome(
-                    classifyPurchaseOutcome(purchase, observedSource),
+                    classifyPurchaseObservation(purchase, observedSource),
                     effects,
                 )
             }
@@ -955,10 +1055,10 @@ internal class PurchaseService(
         else PurchaseOutcomeSource.CHECKOUT
 
     /** Classify provenance while the serialized purchase decision is held. */
-    private fun classifyPurchaseOutcome(
+    private fun classifyPurchaseObservation(
         purchase: PlayPurchase,
         observedSource: PurchaseOutcomeSource,
-    ): PurchaseOutcome {
+    ): PlayPurchaseObservation {
         val existing = evidenceStore.load()[purchase.purchaseToken]
         val matchingCheckout = purchase.products.firstNotNullOfOrNull(inFlight::get)
             ?.matches(purchase) == true
@@ -971,11 +1071,20 @@ internal class PurchaseService(
                 PurchaseOutcomeSource.CHECKOUT
             else -> observedSource
         }
-        return if (purchase.state == StoredPurchaseState.PENDING) {
-            PurchaseOutcome.Pending(source, purchase)
-        } else {
-            PurchaseOutcome.Verified(purchase, source)
+        return PlayPurchaseObservation(purchase, source)
+    }
+
+    private suspend fun commitPurchaseOutcome(
+        observation: PlayPurchaseObservation,
+        effects: ProcessingEffects,
+    ): PurchaseEvidence? {
+        val identity = PurchaseCommitIdentity.Evidence(observation.purchase.purchaseToken)
+        if (completedPurchaseCommits.containsKey(identity)) return null
+        purchaseCommitOperations[identity]?.let { ongoing ->
+            effects.purchaseCommitWaits += ongoing
+            return null
         }
+        return commitStoreOutcome(observation.purchase, observation.source, effects)
     }
 
     /** The sole interpreter for conclusions from every purchase source. */
@@ -985,14 +1094,9 @@ internal class PurchaseService(
         directProduct: StoreProduct? = null,
         directOwner: String? = null,
     ): PurchaseEvidence? = when (outcome) {
-        is PurchaseOutcome.Verified -> {
-            val identity = PurchaseCommitIdentity.Evidence(outcome.evidence.purchaseToken)
-            if (!effects.beginPurchaseCommit(identity)) {
-                evidenceStore.load()[outcome.evidence.purchaseToken]
-            } else {
-                commitStoreOutcome(outcome.evidence, outcome.source, effects)
-            }
-        }
+        is PurchaseOutcome.Verified -> error(
+            "Verified outcomes are finalized only after a Play purchase observation is verified.",
+        )
         is PurchaseOutcome.Pending -> {
             val storeEvidence = outcome.evidence
             if (storeEvidence == null) {
@@ -1004,24 +1108,22 @@ internal class PurchaseService(
                 )
                 null
             } else {
-                val ongoing = purchaseCommitOperations[
-                    PurchaseCommitIdentity.Evidence(storeEvidence.purchaseToken)
-                ]
-                if (ongoing == null) {
-                    commitStoreOutcome(storeEvidence, outcome.source, effects)
-                } else {
+                val identity = PurchaseCommitIdentity.Evidence(storeEvidence.purchaseToken)
+                if (completedPurchaseCommits.containsKey(identity)) {
+                    null
+                } else if (purchaseCommitOperations[identity] != null) {
+                    val ongoing = purchaseCommitOperations.getValue(identity)
                     effects.purchaseCommitWaits += ongoing
                     null
+                } else {
+                    commitStoreOutcome(storeEvidence, outcome.source, effects)
                 }
             }
         }
         is PurchaseOutcome.External -> {
             val identity = PurchaseCommitIdentity.External(outcome.declaration.operationId)
-            if (outcome.declaration.ownerDistinctId == distinctId() &&
-                outcome.declaration.operationId !in committedExternalOperations &&
-                effects.beginPurchaseCommit(identity)
-            ) {
-                commitExternalDeclaration(outcome.declaration, identity, effects)
+            effects.beginPurchaseCommit(identity)?.let { operation ->
+                commitExternalDeclaration(outcome.declaration, identity, operation, effects)
             }
             null
         }
@@ -1044,19 +1146,23 @@ internal class PurchaseService(
     private fun commitExternalDeclaration(
         declaration: ExternalPurchaseDeclaration,
         identity: PurchaseCommitIdentity.External,
+        operation: CompletableDeferred<Unit>,
         effects: ProcessingEffects,
     ) {
         val commit = when (declaration) {
             is ExternalPurchaseDeclaration.Purchase -> purchaseCompletionCommit(
                 identity = identity,
+                operation = operation,
                 ownerDistinctId = declaration.ownerDistinctId,
                 properties = purchaseCompletionProperties(
                     declaration.product,
                     source = PurchaseOutcomeSource.EXTERNAL_DELEGATE,
                 ),
+                bestEffort = true,
             )
             is ExternalPurchaseDeclaration.Restore -> PendingPurchaseCommit(
                 identity = identity,
+                operation = operation,
                 eventName = SystemEventNames.RESTORE_COMPLETED,
                 eventId = purchaseCommitEventId(identity),
                 ownerDistinctId = declaration.ownerDistinctId,
@@ -1064,6 +1170,7 @@ internal class PurchaseService(
                     "source" to PurchaseOutcomeSource.EXTERNAL_DELEGATE.wireValue,
                     "test_store" to false,
                 ),
+                bestEffort = true,
             )
         }
         effects.purchaseCommits += commit
@@ -1071,16 +1178,17 @@ internal class PurchaseService(
 
     private fun ProcessingEffects.beginPurchaseCommit(
         identity: PurchaseCommitIdentity,
-    ): Boolean {
-        if (ownedPurchaseCommits.any { it.identity == identity }) return false
-        val completion = CompletableDeferred<PurchaseCommitDrainResult>()
+    ): CompletableDeferred<Unit>? {
+        if (completedPurchaseCommits.containsKey(identity)) return null
+        if (ownedPurchaseCommits.any { it.identity == identity }) return null
+        val completion = CompletableDeferred<Unit>()
         val existing = purchaseCommitOperations.putIfAbsent(identity, completion)
         if (existing != null) {
             purchaseCommitWaits += existing
-            return false
+            return null
         }
         ownedPurchaseCommits += OwnedPurchaseCommit(identity, completion)
-        return true
+        return completion
     }
 
     private suspend fun commitStandaloneOutcome(
@@ -1215,7 +1323,7 @@ internal class PurchaseService(
             )
             return null
         }
-        suspend fun stageAuthorityReassignment() {
+        suspend fun stageAuthorityReassignment(target: ProcessingEffects) {
             if (ownerDistinctId != null &&
                 existing?.ownerDistinctId != ownerDistinctId &&
                 (existing?.ownerDistinctId ?: existing?.syncAttributionDistinctId) == currentOwner
@@ -1227,11 +1335,11 @@ internal class PurchaseService(
                         deriveOptimisticProjection(currentOwner),
                     )
                 }
-                publication?.let(effects.publications::add)
+                publication?.let(target.publications::add)
             }
         }
         if (evidence.purchaseState == StoredPurchaseState.PENDING) {
-            stageAuthorityReassignment()
+            stageAuthorityReassignment(effects)
             effects.completeCheckoutAfterPublications(
                 purchase,
                 PurchaseOutcome.Pending(source, purchase),
@@ -1240,7 +1348,7 @@ internal class PurchaseService(
             return null
         }
         if (evidence.permanentlyRejected) {
-            stageAuthorityReassignment()
+            stageAuthorityReassignment(effects)
             stageEvidenceRevocation(evidence).publication?.let(effects.publications::add)
             effects.completeCheckoutAfterPublications(
                 purchase,
@@ -1253,7 +1361,7 @@ internal class PurchaseService(
             return null
         }
         if (evidence.signatureVerificationRequired && !evidence.signatureVerified) {
-            stageAuthorityReassignment()
+            stageAuthorityReassignment(effects)
             stageEvidenceRevocation(evidence.copy(permanentlyRejected = true)).publication
                 ?.let(effects.publications::add)
             effects.completeCheckoutAfterPublications(
@@ -1267,7 +1375,7 @@ internal class PurchaseService(
             return null
         }
         if (evidence.revoked) {
-            stageAuthorityReassignment()
+            stageAuthorityReassignment(effects)
             projectionRefresh.withLock { stageOptimisticProjectionLocked() }
                 ?.let(effects.publications::add)
             effects.completeCheckoutAfterPublications(
@@ -1278,13 +1386,16 @@ internal class PurchaseService(
             return null
         }
 
+        val identity = PurchaseCommitIdentity.Evidence(evidence.purchaseToken)
         val needsCompletionCapture = evidence.ownerDistinctId == distinctId() &&
             !evidence.completionEmitted
+        val operation = if (needsCompletionCapture) effects.beginPurchaseCommit(identity) else null
+        if (needsCompletionCapture && operation == null) return null
         val reservedCheckout = checkoutFlight?.takeIf {
             needsCompletionCapture && claimedCheckoutCompletions.add(it)
         }
-        suspend fun finalizeVerifiedOutcome() {
-            stageAuthorityReassignment()
+        suspend fun finalizeVerifiedOutcome(target: ProcessingEffects) {
+            stageAuthorityReassignment(target)
             val projectionPublication = projectionRefresh.withLock {
                 val acceptedBody = evidence.acceptedResponseBody
                 if (evidence.canProjectTo(distinctId()) && acceptedBody != null) {
@@ -1298,12 +1409,12 @@ internal class PurchaseService(
                     stageOptimisticProjectionLocked()
                 }
             }
-            projectionPublication?.let(effects.publications::add)
+            projectionPublication?.let(target.publications::add)
             val verifiedOutcome = PurchaseOutcome.Verified(purchase, source)
             if (reservedCheckout != null) {
-                effects.stageReservedCheckoutCompletion(verifiedOutcome, reservedCheckout)
+                target.stageReservedCheckoutCompletion(verifiedOutcome, reservedCheckout)
             } else {
-                effects.completeCheckoutAfterPublications(
+                target.completeCheckoutAfterPublications(
                     purchase,
                     verifiedOutcome,
                     checkoutFlight,
@@ -1312,7 +1423,8 @@ internal class PurchaseService(
         }
         if (needsCompletionCapture) {
             effects.purchaseCommits += purchaseCompletionCommit(
-                identity = PurchaseCommitIdentity.Evidence(evidence.purchaseToken),
+                identity = identity,
+                operation = checkNotNull(operation),
                 ownerDistinctId = evidence.ownerDistinctId!!,
                 properties = purchaseCompletionProperties(evidence, source),
                 afterCapture = ::finalizeVerifiedOutcome,
@@ -1321,7 +1433,10 @@ internal class PurchaseService(
                 },
             )
         } else {
-            finalizeVerifiedOutcome()
+            finalizeVerifiedOutcome(effects)
+            if (evidence.completionEmitted) {
+                completedPurchaseCommits[identity] = Unit
+            }
         }
         return evidence.takeUnless { it.permanentlyRejected }
     }
@@ -1700,18 +1815,22 @@ internal class PurchaseService(
     /** The only construction site for a `$purchase_completed` capture. */
     private fun purchaseCompletionCommit(
         identity: PurchaseCommitIdentity,
+        operation: CompletableDeferred<Unit>,
         ownerDistinctId: String,
         properties: Map<String, Any?>,
-        afterCapture: suspend () -> Unit = {},
+        afterCapture: suspend (ProcessingEffects) -> Unit = {},
         onFailure: () -> Unit = {},
+        bestEffort: Boolean = false,
     ): PendingPurchaseCommit = PendingPurchaseCommit(
         identity = identity,
+        operation = operation,
         eventName = SystemEventNames.PURCHASE_COMPLETED,
         eventId = purchaseCommitEventId(identity),
         ownerDistinctId = ownerDistinctId,
         properties = properties,
         afterCapture = afterCapture,
         onFailure = onFailure,
+        bestEffort = bestEffort,
     )
 
     private fun purchaseCommitEventId(identity: PurchaseCommitIdentity): String = stableEventId(
