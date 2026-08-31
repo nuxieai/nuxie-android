@@ -264,7 +264,6 @@ internal class ProfileService(
         cached: CachedProfile,
         admission: Admission,
     ): Boolean {
-        applyCustomerProperties(cached, admission)
 
         var featurePublication: FeatureInfo.Mutation? = null
         val admitted = withCurrentScope(admission.identityScope, admission.localeScope) {
@@ -299,10 +298,20 @@ internal class ProfileService(
             publishFeatureProfile(featurePublication)
         }
 
-        // Server facts are keyed to the captured customer and deliberately
-        // locale-independent; their durable idempotency owns supersession.
-        if (isCustomerAdmissionCurrent(admission)) {
-            applyJourneyFacts(cached.distinctId, cached.body)
+        // Customer-scoped payloads (properties, server facts) are locale-
+        // independent and still commit from a LOCALE-FLIP discard: the same
+        // payloads arrive under any locale and their dedupe is correct. A
+        // discard whose effective locale equals the admission's is
+        // indistinguishable from supersession by a newer fetch, and
+        // superseded responses contribute nothing (they redeliver on the
+        // replacement fetch).
+        val localeFlipDiscard = !admitted &&
+            localeSettings.captureScope().identifier != admission.localeScope.identifier
+        if (admitted || (localeFlipDiscard && isCustomerAdmissionCurrent(admission))) {
+            applyCustomerProperties(cached, admission)
+            if (isCustomerAdmissionCurrent(admission)) {
+                applyJourneyFacts(cached.distinctId, cached.body)
+            }
         }
         return admitted
     }

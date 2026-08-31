@@ -242,13 +242,20 @@ class FeatureInfo {
     private inline fun emitIfCurrent(
         fence: PublicationFence,
         emit: () -> Unit,
-    ): Boolean = synchronized(emissionLock) {
-        if (!fence.isCurrent()) {
-            false
-        } else {
-            emit()
-            fence.isCurrent()
+    ): Boolean {
+        // Decide under the lock, emit after releasing it: StateFlow.setValue
+        // resumes unconfined collectors inline, and a collector may reenter
+        // the facade (identify/reset), which takes the facade monitor while
+        // the facade's own identity path wants this lock (AB-BA deadlock).
+        // The FIFO publication lane serializes publishers, so values cannot
+        // interleave; a generation swap that lands mid-emission is repaired
+        // by its own queued publication, and the post-emission check makes
+        // the caller abandon its remaining callbacks.
+        synchronized(emissionLock) {
+            if (!fence.isCurrent()) return false
         }
+        emit()
+        return synchronized(emissionLock) { fence.isCurrent() }
     }
 
     private companion object {
