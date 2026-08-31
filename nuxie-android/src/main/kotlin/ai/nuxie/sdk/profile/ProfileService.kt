@@ -1,6 +1,8 @@
 package ai.nuxie.sdk.profile
 
+import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.identity.IdentityProvider
+import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.segments.SegmentService
@@ -24,13 +26,13 @@ import kotlinx.serialization.json.jsonObject
  * - 24-hour validity window: an expired cached profile is EVICTED, never
  *   served (evict-don't-serve-stale).
  * - Conditional refetch via the scoped ETag validator (locale-keyed).
- * - Staleness guard: a fetch whose user changed mid-flight is discarded so
- *   the old user's state never lands on the new user.
+ * - Atomic admission by identity decision, effective locale, and monotonic
+ *   profile generation before any cache or fanout side effect.
  * - 30-minute periodic refresh; on user change a fresh-enough cache
  *   (< 5 min) is served without an immediate network hit.
- * - Fanout on every applied profile: server userProperties -> identity,
- *   segmentMemberships -> the server-authoritative mirror. Releases, facts,
- *   and mailbox are parked for their own PRs (release pipeline, journeys).
+ * - Fanout on every applied profile: user properties, segment memberships,
+ *   release authority, Features, and server down-facts all retain the same
+ *   admission fence. Android has no profile-mailbox consumer in this slice.
  *
  * The profile body is retained as raw JSON (duplicate-key validated at the
  * network layer); typed models arrive with their consumers.
@@ -42,16 +44,23 @@ internal class ProfileService(
     private val segments: SegmentService,
     private val applyUserProperties: (Map<String, Any?>) -> Unit,
     private val applyJourneyProfile: (distinctId: String, body: JsonObject) -> Unit = { _, _ -> },
-    private val applyFeatureProfile: suspend (
+    private val applyJourneyFacts: suspend (
+        distinctId: String,
+        body: JsonObject,
+        isCurrent: () -> Boolean,
+    ) -> Unit = { _, _, _ -> },
+    private val stageFeatureProfile: (
         distinctId: String,
         body: JsonObject,
         purchaseRevision: Long,
         authoritativeRevision: Long,
-    ) -> Unit = { _, _, _, _ -> },
+        isCurrent: () -> Boolean,
+    ) -> FeatureInfo.Mutation? = { _, _, _, _, _ -> null },
+    private val publishFeatureProfile: suspend (FeatureInfo.Mutation?) -> Unit = {},
     private val captureFeaturePurchaseRevision: () -> Long = { 0L },
     private val reserveFeatureAuthoritativeRevision: () -> Long = { 0L },
     scope: CoroutineScope,
-    private val localeProvider: () -> String?,
+    private val localeSettings: ProfileLocaleSettings,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val refreshIntervalMillis: Long = REFRESH_INTERVAL_MILLIS,
 ) {
@@ -66,6 +75,19 @@ internal class ProfileService(
     private val lock = Any()
     private val baseDir = File((context.applicationContext ?: context).cacheDir, "nuxie/profiles")
     private var resident: CachedProfile? = null
+    @Volatile
+    private var nextProfileGeneration = 0L
+
+    @Volatile
+    private var latestAppliedGeneration = 0L
+
+    private data class Admission(
+        val identityScope: IdentityScope,
+        val localeScope: ProfileLocaleScope,
+        val generation: Long,
+        val featurePurchaseRevision: Long,
+        val featureAuthoritativeRevision: Long,
+    )
 
     private sealed interface Signal {
         data class Refresh(val done: kotlinx.coroutines.CompletableDeferred<Boolean>?) : Signal
@@ -95,8 +117,18 @@ internal class ProfileService(
     }
 
     /** The current, non-expired profile for the current user (or null). */
-    fun currentProfile(): CachedProfile? = synchronized(lock) {
-        resident?.takeIf { it.distinctId == identity.distinctId() && isFresh(it) }
+    fun currentProfile(): CachedProfile? {
+        val identityScope = identity.captureScope()
+        val localeScope = localeSettings.captureScope()
+        return withCurrentScope(identityScope, localeScope) {
+            synchronized(lock) {
+                resident?.takeIf {
+                    it.distinctId == identityScope.distinctId &&
+                        it.locale == localeScope.identifier &&
+                        isFresh(it)
+                }
+            }
+        }
     }
 
     /** Kick a refresh; used at setup and by the periodic timer. */
@@ -113,10 +145,15 @@ internal class ProfileService(
 
     /** User-transition observer: reset/refresh per the iOS coordinator rules. */
     val transitionObserver = UserTransitionCoordinator.Observer { kind, from, to ->
-        if (kind == UserTransitionCoordinator.Kind.RESET) {
-            clearCache(from)
+        val admission = beginAdmission(expectedDistinctId = to)
+        if (admission == null) {
+            Log.w(LOG_TAG, "Discarding superseded profile transition")
+            return@Observer
         }
-        handleUserChange(to)
+        if (kind == UserTransitionCoordinator.Kind.RESET) {
+            clearCache(from, admission)
+        }
+        handleUserChange(to, admission)
     }
 
     suspend fun close() {
@@ -126,45 +163,40 @@ internal class ProfileService(
 
     // MARK: internals
 
-    private suspend fun handleUserChange(newDistinctId: String) {
-        val featurePurchaseRevision = captureFeaturePurchaseRevision()
-        val featureAuthoritativeRevision = reserveFeatureAuthoritativeRevision()
+    private suspend fun handleUserChange(newDistinctId: String, admission: Admission) {
         val cached = synchronized(lock) { loadCached(newDistinctId) }
-        if (cached != null && isFresh(cached)) {
-            synchronized(lock) { resident = cached }
-            applyProfile(cached, featurePurchaseRevision, featureAuthoritativeRevision)
+        if (cached != null && cached.locale == admission.localeScope.identifier && isFresh(cached)) {
+            if (!applyProfile(cached, admission)) return
             // Fresh enough to skip an immediate network hit?
             if (nowMillis() - cached.cachedAtMillis < BACKGROUND_REFRESH_AGE_MILLIS) return
         } else if (cached != null) {
             // Expired: evict before any use.
-            synchronized(lock) { fileFor(newDistinctId).delete() }
+            if (!isFresh(cached)) evictCache(newDistinctId, admission)
         }
         refreshNow()
     }
 
     private suspend fun loadFromDisk() {
-        val distinctId = identity.distinctId()
-        val featurePurchaseRevision = captureFeaturePurchaseRevision()
-        val featureAuthoritativeRevision = reserveFeatureAuthoritativeRevision()
+        val admission = beginAdmission() ?: return
+        val distinctId = admission.identityScope.distinctId
         val cached = synchronized(lock) { loadCached(distinctId) }
-        if (cached != null && isFresh(cached)) {
-            synchronized(lock) { resident = cached }
-            applyProfile(cached, featurePurchaseRevision, featureAuthoritativeRevision)
+        if (cached != null && cached.locale == admission.localeScope.identifier && isFresh(cached)) {
+            applyProfile(cached, admission)
         } else if (cached != null) {
-            synchronized(lock) { fileFor(distinctId).delete() }
+            if (!isFresh(cached)) evictCache(distinctId, admission)
         }
     }
 
     private suspend fun refreshNow(): Boolean {
-        val distinctId = identity.distinctId()
-        val locale = localeProvider()
-        val featurePurchaseRevision = captureFeaturePurchaseRevision()
-        val featureAuthoritativeRevision = reserveFeatureAuthoritativeRevision()
+        val admission = beginAdmission() ?: return false
+        val distinctId = admission.identityScope.distinctId
+        val locale = admission.localeScope.identifier
         val previous = synchronized(lock) {
-            resident?.takeIf { it.distinctId == distinctId && isFresh(it) }
+            resident?.takeIf {
+                it.distinctId == distinctId && it.locale == locale && isFresh(it)
+            }
         }
         val validator = previous
-            ?.takeIf { it.locale == locale }
             ?.validator
             ?.let { NuxieApi.ProfileCacheValidator(it) }
 
@@ -175,9 +207,8 @@ internal class ProfileService(
             return false
         }
 
-        // Staleness guard: the user changed while the fetch was in flight.
-        if (identity.distinctId() != distinctId) {
-            Log.w(LOG_TAG, "Discarding stale profile fetch - user changed mid-flight")
+        if (!isScopeCurrent(admission)) {
+            Log.w(LOG_TAG, "Discarding stale profile fetch - customer scope changed mid-flight")
             return false
         }
 
@@ -209,41 +240,123 @@ internal class ProfileService(
             }
         }
 
-        synchronized(lock) {
-            resident = cached
-            persist(cached)
-        }
-        applyProfile(cached, featurePurchaseRevision, featureAuthoritativeRevision)
-        return true
+        return applyProfile(cached, admission)
     }
 
     private suspend fun applyProfile(
         cached: CachedProfile,
-        featurePurchaseRevision: Long,
-        featureAuthoritativeRevision: Long,
-    ) {
-        (cached.body["userProperties"] as? JsonObject)?.let { properties ->
-            applyUserProperties(properties.mapValues { (_, value) -> value })
+        admission: Admission,
+    ): Boolean {
+        var featurePublication: FeatureInfo.Mutation? = null
+        val admitted = withCurrentScope(admission.identityScope, admission.localeScope) {
+            synchronized(lock) {
+                if (admission.generation != nextProfileGeneration ||
+                    admission.generation < latestAppliedGeneration
+                ) {
+                    return@synchronized false
+                }
+                latestAppliedGeneration = admission.generation
+
+                resident = cached
+                persist(cached)
+                (cached.body["userProperties"] as? JsonObject)?.let { properties ->
+                    applyUserProperties(properties.mapValues { (_, value) -> value })
+                }
+                segments.applySnapshot(
+                    cached.distinctId,
+                    cached.body["segmentMemberships"] as? JsonObject,
+                )
+                applyJourneyProfile(cached.distinctId, cached.body)
+                featurePublication = stageFeatureProfile(
+                    cached.distinctId,
+                    cached.body,
+                    admission.featurePurchaseRevision,
+                    admission.featureAuthoritativeRevision,
+                    { isAdmissionCurrent(admission) },
+                )
+                true
+            }
+        } == true
+        if (!admitted) {
+            Log.w(LOG_TAG, "Discarding stale profile admission")
+            return false
         }
-        segments.applySnapshot(
-            cached.distinctId,
-            cached.body["segmentMemberships"] as? JsonObject,
-        )
-        applyJourneyProfile(cached.distinctId, cached.body)
-        applyFeatureProfile(
-            cached.distinctId,
-            cached.body,
-            featurePurchaseRevision,
-            featureAuthoritativeRevision,
-        )
+
+        publishFeatureProfile(featurePublication)
+        applyJourneyFacts(cached.distinctId, cached.body) { isAdmissionCurrent(admission) }
+        return true
     }
 
-    private fun clearCache(distinctId: String) {
-        synchronized(lock) {
-            if (resident?.distinctId == distinctId) resident = null
-            fileFor(distinctId).delete()
+    private fun beginAdmission(expectedDistinctId: String? = null): Admission? {
+        val identityScope = identity.captureScope()
+        if (expectedDistinctId != null && identityScope.distinctId != expectedDistinctId) return null
+        val localeScope = localeSettings.captureScope()
+        return synchronized(lock) {
+            if (!identity.isCurrentScope(identityScope) ||
+                !localeSettings.isCurrentScope(localeScope) ||
+                (expectedDistinctId != null && identityScope.distinctId != expectedDistinctId)
+            ) {
+                return@synchronized null
+            }
+            nextProfileGeneration += 1
+            Admission(
+                identityScope = identityScope,
+                localeScope = localeScope,
+                generation = nextProfileGeneration,
+                featurePurchaseRevision = captureFeaturePurchaseRevision(),
+                featureAuthoritativeRevision = reserveFeatureAuthoritativeRevision(),
+            )
         }
-        segments.clearSegments(distinctId)
+    }
+
+    private fun isScopeCurrent(admission: Admission): Boolean =
+        identity.isCurrentScope(admission.identityScope) &&
+            localeSettings.isCurrentScope(admission.localeScope)
+
+    private fun isAdmissionCurrent(admission: Admission): Boolean =
+        identity.isCurrentScope(admission.identityScope) &&
+            localeSettings.isCurrentScope(admission.localeScope) &&
+            nextProfileGeneration == admission.generation &&
+            latestAppliedGeneration == admission.generation
+
+    private fun <T> withCurrentScope(
+        identityScope: IdentityScope,
+        localeScope: ProfileLocaleScope,
+        block: () -> T,
+    ): T? = identity.withCurrentScope(identityScope) {
+        localeSettings.withCurrentScope(localeScope, block)
+    }
+
+    private fun clearCache(distinctId: String, admission: Admission) {
+        withCurrentScope(admission.identityScope, admission.localeScope) {
+            synchronized(lock) {
+                if (admission.generation != nextProfileGeneration ||
+                    admission.generation < latestAppliedGeneration
+                ) {
+                    return@synchronized false
+                }
+                latestAppliedGeneration = admission.generation
+                if (resident?.distinctId == distinctId) resident = null
+                fileFor(distinctId).delete()
+                segments.clearSegments(distinctId)
+                true
+            }
+        }
+    }
+
+    private fun evictCache(distinctId: String, admission: Admission) {
+        withCurrentScope(admission.identityScope, admission.localeScope) {
+            synchronized(lock) {
+                if (admission.generation != nextProfileGeneration ||
+                    admission.generation < latestAppliedGeneration
+                ) {
+                    return@synchronized
+                }
+                latestAppliedGeneration = admission.generation
+                if (resident?.distinctId == distinctId) resident = null
+                fileFor(distinctId).delete()
+            }
+        }
     }
 
     private fun isFresh(cached: CachedProfile): Boolean =

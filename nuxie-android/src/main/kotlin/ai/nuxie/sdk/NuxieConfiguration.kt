@@ -12,6 +12,13 @@ class NuxieConfiguration(val apiKey: String) {
     var featureCacheTTL: Long = 5L * 60L * 1000L
 
     /**
+     * Locale for profile requests. When null, the SDK follows the device
+     * locale. Matches the iOS configuration surface; changing locale after
+     * setup means a new setup, exactly as on iOS.
+     */
+    var localeIdentifier: String? = null
+
+    /**
      * Optionally transforms an event, or returns `null` to drop it.
      *
      * This hook is configuration-only in the current SDK slice and is not

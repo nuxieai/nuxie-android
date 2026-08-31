@@ -85,6 +85,7 @@ object Nuxie {
             beforeSend = configuration.beforeSend,
             featureInfo = featureInfoInstance,
             featureCacheTtlMillis = configuration.featureCacheTTL,
+            localeIdentifier = configuration.localeIdentifier,
             purchaseDelegate = configuration.purchaseDelegate,
             purchaseHandlingMode = configuration.purchaseHandlingMode,
             overrides = overridesForTesting ?: NuxieCore.Overrides(),
@@ -327,6 +328,8 @@ object Nuxie {
 
     val isIdentified: Boolean
         get() = core?.identity?.isIdentified ?: false
+
+    // MARK: Profile
 
     // MARK: Presentation
 

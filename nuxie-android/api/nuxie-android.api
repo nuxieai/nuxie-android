@@ -584,12 +584,14 @@ public final class ai/nuxie/sdk/NuxieConfiguration {
 	public final fun getBeforeSend ()Lkotlin/jvm/functions/Function1;
 	public final fun getEnvironment ()Lai/nuxie/sdk/NuxieEnvironment;
 	public final fun getFeatureCacheTTL ()J
+	public final fun getLocaleIdentifier ()Ljava/lang/String;
 	public final fun getLogLevel ()Lai/nuxie/sdk/LogLevel;
 	public final fun getPurchaseDelegate ()Lai/nuxie/sdk/commerce/NuxiePurchaseDelegate;
 	public final fun getPurchaseHandlingMode ()Lai/nuxie/sdk/commerce/PurchaseHandlingMode;
 	public final fun setBeforeSend (Lkotlin/jvm/functions/Function1;)V
 	public final fun setEnvironment (Lai/nuxie/sdk/NuxieEnvironment;)V
 	public final fun setFeatureCacheTTL (J)V
+	public final fun setLocaleIdentifier (Ljava/lang/String;)V
 	public final fun setLogLevel (Lai/nuxie/sdk/LogLevel;)V
 	public final fun setPurchaseDelegate (Lai/nuxie/sdk/commerce/NuxiePurchaseDelegate;)V
 	public final fun setPurchaseHandlingMode (Lai/nuxie/sdk/commerce/PurchaseHandlingMode;)V

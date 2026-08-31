@@ -87,6 +87,7 @@ internal class EventLog(
         data class CommitServerFact(
             val event: StoredEvent,
             val receivedAtMillis: Long,
+            val isCurrent: () -> Boolean,
             val done: CompletableDeferred<Boolean>,
         ) : Command
         data class Barrier(val done: CompletableDeferred<Unit>) : Command
@@ -144,7 +145,11 @@ internal class EventLog(
                     command.done.complete(captured)
                 }
                 is Command.CommitServerFact -> command.done.complete(
-                    commitServerFactNow(command.event, command.receivedAtMillis),
+                    if (command.isCurrent()) {
+                        commitServerFactNow(command.event, command.receivedAtMillis)
+                    } else {
+                        false
+                    },
                 )
                 is Command.Barrier -> command.done.complete(Unit)
             }
@@ -331,9 +336,10 @@ internal class EventLog(
     suspend fun commitServerFact(
         event: StoredEvent,
         receivedAtMillis: Long = nowMillis(),
+        isCurrent: () -> Boolean = { true },
     ): Boolean {
         val done = CompletableDeferred<Boolean>()
-        val command = Command.CommitServerFact(event, receivedAtMillis, done)
+        val command = Command.CommitServerFact(event, receivedAtMillis, isCurrent, done)
         if (commands.trySend(command).isFailure) return false
         return done.await()
     }

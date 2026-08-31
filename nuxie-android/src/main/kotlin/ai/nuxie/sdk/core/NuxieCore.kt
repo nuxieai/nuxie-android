@@ -41,6 +41,7 @@ import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.HttpUrlConnectionTransport
 import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.profile.ProfileService
+import ai.nuxie.sdk.profile.ProfileLocaleSettings
 import ai.nuxie.sdk.segments.SegmentService
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.session.SessionService
@@ -58,6 +59,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 /**
  * Constructor-injected composition root (iOS `NuxieCore` parity): concrete
@@ -73,6 +75,7 @@ internal class NuxieCore(
     beforeSend: ((NuxieEvent) -> NuxieEvent?)?,
     val featureInfo: FeatureInfo = FeatureInfo(),
     featureCacheTtlMillis: Long = 5L * 60L * 1000L,
+    localeIdentifier: String? = null,
     purchaseDelegate: NuxiePurchaseDelegate? = null,
     purchaseHandlingMode: PurchaseHandlingMode = PurchaseHandlingMode.NUXIE_MANAGED,
     overrides: Overrides = Overrides(),
@@ -104,6 +107,7 @@ internal class NuxieCore(
         val authenticateRelease: (
             (ExperienceReleaseProfile.Entry, SupportedRuntime) -> AuthenticatedRelease?
         )? = null,
+        val deviceLocaleIdentifier: (() -> String)? = null,
     )
 
     private val appContext = context.applicationContext ?: context
@@ -113,6 +117,11 @@ internal class NuxieCore(
     val identity: IdentityService = overrides.identity ?: IdentityService(appContext)
 
     private val nowMillis: () -> Long = overrides.nowMillis ?: System::currentTimeMillis
+
+    val profileLocale = ProfileLocaleSettings(
+        localeIdentifier = localeIdentifier,
+        deviceLocaleIdentifier = overrides.deviceLocaleIdentifier ?: { Locale.getDefault().toString() },
+    )
 
     val sessions = SessionService(nowMillis)
 
@@ -306,20 +315,24 @@ internal class NuxieCore(
         applyUserProperties = { properties -> identity.setUserProperties(properties) },
         applyJourneyProfile = { distinctId, body ->
             journeyCatalog.applyProfile(distinctId, body)
-            scope.launch { journeys.applyDownFacts(body, distinctId) }
         },
-        applyFeatureProfile = { distinctId, body, purchaseRevision, authoritativeRevision ->
-            features.hydrateProfile(
+        applyJourneyFacts = { distinctId, body, isCurrent ->
+            journeys.applyDownFacts(body, distinctId, isCurrent)
+        },
+        stageFeatureProfile = { distinctId, body, purchaseRevision, authoritativeRevision, isCurrent ->
+            features.stageProfile(
                 distinctId,
                 body,
                 purchaseRevision,
                 authoritativeRevision,
+                isCurrent,
             )
         },
+        publishFeatureProfile = features::publishStaged,
         captureFeaturePurchaseRevision = features::capturePurchaseRevision,
         reserveFeatureAuthoritativeRevision = features::reserveAuthoritativeRevision,
         scope = scope,
-        localeProvider = { null },  // locale override arrives with setLocaleIdentifier
+        localeSettings = profileLocale,
         nowMillis = nowMillis,
     )
 
