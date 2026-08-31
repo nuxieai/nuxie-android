@@ -92,7 +92,28 @@ class DeviceLegProfileCatalogTest {
         assertEquals(identity.publishedAtSeq + 1, highWater.floor(identity.streamKey))
     }
 
-    private fun profile(releaseEntry: JsonObject = entry): JsonObject {
+    @Test fun `a continuation-only release remains pinned behind a newer active floor`() {
+        val highWater = ReleaseHighWaterStore(context)
+        val catalog = DeviceLegProfileCatalog(keys, highWater) { runtime() }
+        val identity = ExperienceReleaseIdentity.fromJson(entry.getValue("locator").jsonObject)!!
+        highWater.promote(identity.streamKey, identity.publishedAtSeq + 1)
+        val continuation = buildJsonObject {
+            put("type", "continue")
+            put("journeyId", "00000000-0000-7000-8000-000000000001")
+            put("generation", 4)
+        }
+
+        catalog.commit("customer", catalog.prepare(profile(binding = continuation)))
+
+        assertEquals("continue", requireNotNull(catalog.snapshot("customer"))
+            .profile.armedLegs.single().binding.getValue("type").jsonPrimitive.content)
+        assertEquals(identity.publishedAtSeq + 1, highWater.floor(identity.streamKey))
+    }
+
+    private fun profile(
+        releaseEntry: JsonObject = entry,
+        binding: JsonObject = buildJsonObject { put("type", "new") },
+    ): JsonObject {
         val locator = releaseEntry.getValue("locator").jsonObject
         val envelope = releaseEntry.getValue("envelope").jsonObject
         return buildJsonObject {
@@ -117,7 +138,7 @@ class DeviceLegProfileCatalogTest {
                         put("legId", locator.getValue("legId"))
                         put("descriptorSha256", envelope.getValue("descriptorSha256"))
                     }
-                    putJsonObject("binding") { put("type", "new") }
+                    put("binding", binding)
                     putJsonObject("entryCondition") { put("type", "app_foregrounded") }
                     putJsonObject("context") { putJsonObject("event") {}; putJsonObject("responses") {} }
                 }
