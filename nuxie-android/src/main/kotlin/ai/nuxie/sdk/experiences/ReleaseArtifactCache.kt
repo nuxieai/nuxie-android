@@ -86,6 +86,11 @@ internal class ReleaseArtifactCache(
         }
     }
 
+    fun retainForRun(runKey: String, digests: Collection<String>): CacheProtectionLease =
+        protectionRegistry.retainRun(runKey, digests.toSet())
+
+    fun releaseRun(runKey: String) = protectionRegistry.releaseRun(runKey)
+
     fun cachedFile(sha256: String): File? {
         return filesystemLock.withTargetLock(sha256) {
             val file = fileFor(sha256)
