@@ -20,6 +20,8 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -30,6 +32,7 @@ import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -268,6 +271,122 @@ class ProfileServiceTest {
                 }
             } else {
                 HttpTransport.Response(200, ByteArray(0))
+            }
+        }
+    }
+
+    @Test
+    fun matchesTheCrossSdkLocaleAdmissionFixture() = runBlocking {
+        val fixtureJson = Json.parseToJsonElement(
+            File(
+                ai.nuxie.sdk.fixtures.FixtureRunner.fixturesRoot(),
+                "profile/locale-admission.json",
+            ).readText(),
+        ).jsonObject
+        assertEquals(
+            "profile/locale-admission",
+            (fixtureJson.getValue("suite") as JsonPrimitive).content,
+        )
+        assertEquals("1", (fixtureJson.getValue("version") as JsonPrimitive).content)
+
+        for (element in fixtureJson.getValue("cases").jsonArray) {
+            val case = element.jsonObject
+            val name = (case.getValue("name") as JsonPrimitive).content
+            val expect = case.getValue("expect").jsonObject
+            val localeScopedAdmitted =
+                (expect.getValue("localeScopedAdmitted") as JsonPrimitive).content.toBoolean()
+
+            when ((case.getValue("flow") as JsonPrimitive).content) {
+                "network" -> {
+                    val fetchLocale = (case.getValue("fetchLocale") as JsonPrimitive).content
+                    val changes = case["localeChangesDuringFetch"]?.jsonArray
+                        ?.map { (it as JsonPrimitive).content }
+                        .orEmpty()
+                    val transport = GatedProfileTransport(
+                        listOf(profileResponse("fixture"), profileResponse("fixture")),
+                    )
+                    val fixture = ProfileFixture(
+                        transport = transport,
+                        distinctId = "fixture_${name.hashCode().toUInt()}",
+                        localeIdentifier = fetchLocale,
+                    )
+                    try {
+                        val fetch = async(Dispatchers.Default) { fixture.service.refreshAndWait() }
+                        transport.awaitStarted(0)
+                        changes.forEach { fixture.service.setLocaleIdentifier(it) }
+                        transport.release(0)
+                        val admitted = withTimeout(5_000L) { fetch.await() }
+
+                        assertEquals(name, localeScopedAdmitted, admitted)
+                        assertEquals(
+                            name,
+                            localeScopedAdmitted,
+                            fixture.service.currentProfile() != null,
+                        )
+                        assertEquals(
+                            name,
+                            localeScopedAdmitted,
+                            fixture.fanout.releases.isNotEmpty(),
+                        )
+                        expect["customerScopedCommitted"]?.let {
+                            val committed = (it as JsonPrimitive).content.toBoolean()
+                            assertEquals(name, committed, fixture.fanout.facts.isNotEmpty())
+                        }
+                        expect["nextRequestLocale"]?.let { next ->
+                            val replacement = async(Dispatchers.Default) {
+                                fixture.service.refreshAndWait()
+                            }
+                            transport.awaitStarted(1)
+                            transport.release(1)
+                            assertTrue(name, withTimeout(5_000L) { replacement.await() })
+                            val body = transport.request(1).body.decodeToString()
+                            val locale = Regex("\"locale\":\"([^\"]+)\"")
+                                .find(body)?.groupValues?.get(1)
+                            assertEquals(name, (next as JsonPrimitive).content, locale)
+                        }
+                    } finally {
+                        transport.releaseAll()
+                        fixture.close()
+                    }
+                }
+
+                "disk" -> {
+                    val diskLocale = (case.getValue("diskLocale") as JsonPrimitive).content
+                    val effectiveLocale =
+                        (case.getValue("effectiveLocale") as JsonPrimitive).content
+                    val distinctId = "fixture_disk_${name.hashCode().toUInt()}"
+                    val writer = ProfileFixture(
+                        transport = profileTransport(
+                            body = profileBody("fixture"),
+                            etag = null,
+                        ),
+                        distinctId = distinctId,
+                        localeIdentifier = diskLocale,
+                    )
+                    assertTrue(name, writer.service.refreshAndWait())
+                    writer.close(deleteDisk = false)
+
+                    val reader = ProfileFixture(
+                        transport = FakeTransport().apply {
+                            respond = { throw IOException("offline") }
+                        },
+                        distinctId = distinctId,
+                        localeIdentifier = effectiveLocale,
+                        clearDisk = false,
+                    )
+                    try {
+                        reader.service.refreshAndWait()
+                        assertEquals(
+                            name,
+                            localeScopedAdmitted,
+                            reader.service.currentProfile() != null,
+                        )
+                    } finally {
+                        reader.close()
+                    }
+                }
+
+                else -> error("Unsupported fixture flow in $name")
             }
         }
     }
