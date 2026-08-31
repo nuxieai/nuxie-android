@@ -1,4 +1,4 @@
-package ai.nuxie.sdk.commerce
+package ai.nuxie.sdk.billing
 
 import android.util.Base64
 import java.security.KeyFactory

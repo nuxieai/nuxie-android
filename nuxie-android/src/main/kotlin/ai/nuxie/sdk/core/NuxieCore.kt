@@ -16,18 +16,18 @@ import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureService
 import ai.nuxie.sdk.features.FeatureUsageService
 import ai.nuxie.sdk.features.FeatureType
-import ai.nuxie.sdk.commerce.FilePurchaseEvidenceStore
-import ai.nuxie.sdk.commerce.GooglePlayBillingClientAdapter
-import ai.nuxie.sdk.commerce.NuxiePurchaseDelegate
-import ai.nuxie.sdk.commerce.NuxieApiPurchaseSynchronizer
-import ai.nuxie.sdk.commerce.PlayBillingConnection
-import ai.nuxie.sdk.commerce.PurchaseEvidenceStore
-import ai.nuxie.sdk.commerce.PurchaseHandlingMode
-import ai.nuxie.sdk.commerce.PurchaseService
-import ai.nuxie.sdk.commerce.PurchaseSettings
-import ai.nuxie.sdk.commerce.purchaseEvidenceDirectory
-import ai.nuxie.sdk.commerce.purchaseAuthorityScope
-import ai.nuxie.sdk.commerce.registerAuthenticatedReleaseProductMappings
+import ai.nuxie.sdk.billing.FilePurchaseEvidenceStore
+import ai.nuxie.sdk.billing.GooglePlayBillingClientAdapter
+import ai.nuxie.sdk.billing.NuxiePurchaseDelegate
+import ai.nuxie.sdk.billing.NuxieApiPurchaseSynchronizer
+import ai.nuxie.sdk.billing.PlayBillingConnection
+import ai.nuxie.sdk.billing.PurchaseEvidenceStore
+import ai.nuxie.sdk.billing.PurchaseHandlingMode
+import ai.nuxie.sdk.billing.PurchaseService
+import ai.nuxie.sdk.billing.PurchaseSettings
+import ai.nuxie.sdk.billing.purchaseEvidenceDirectory
+import ai.nuxie.sdk.billing.purchaseAuthorityScope
+import ai.nuxie.sdk.billing.registerAuthenticatedReleaseProductMappings
 import ai.nuxie.sdk.experiences.AuthenticatedRelease
 import ai.nuxie.sdk.experiences.DeviceLegProfileCatalog
 import ai.nuxie.sdk.experiences.ExperienceReleaseProfile
@@ -224,6 +224,7 @@ internal class NuxieCore(
         api = api,
         purchaseStorageScope = purchaseAuthorityScope(apiKey, environment),
         capturePurchaseSynced = eventLog::captureIdempotently,
+        capturePurchaseEvent = eventLog::captureIdempotently,
     ).also { purchaseService = it }
 
     /**

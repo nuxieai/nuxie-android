@@ -1,6 +1,6 @@
-# Commerce wire fixtures
+# Purchase wire fixtures
 
-These fixtures pin commerce requests replayed by the parent repository's
+These fixtures pin purchase requests replayed by the parent repository's
 workers. The Play cases export exact request bytes produced by the Android
 SDK. Each file contains the named case, endpoint, parsed JSON body, and the
 byte-for-byte UTF-8 body text sent through `HttpTransport`.
@@ -8,9 +8,9 @@ byte-for-byte UTF-8 body text sent through `HttpTransport`.
 Regenerate the request fixtures from the repository root with:
 
 ```sh
-NUXIE_GENERATE_COMMERCE_WIRE_FIXTURES=1 ./gradlew \
+NUXIE_GENERATE_PURCHASE_WIRE_FIXTURES=1 ./gradlew \
   :nuxie-android:testDebugUnitTest \
-  --tests ai.nuxie.sdk.network.CommerceWireFixtureTest.generateCommerceWireFixtures \
+  --tests ai.nuxie.sdk.network.PurchaseWireFixtureTest.generatePurchaseWireFixtures \
   --rerun-tasks
 ```
 

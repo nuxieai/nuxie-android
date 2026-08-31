@@ -99,8 +99,8 @@ for path in sorted(
     key=lambda candidate: candidate.relative_to(fixture_root).as_posix(),
 ):
     relative_path = path.relative_to(fixture_root).as_posix()
-    # commerce-wire is Android-authored and verified by its SDK unit tests.
-    if relative_path == "MANIFEST.json" or relative_path.startswith("commerce-wire/"):
+    # purchase-wire is Android-authored and verified by its SDK unit tests.
+    if relative_path == "MANIFEST.json" or relative_path.startswith("purchase-wire/"):
         continue
     if path.is_symlink():
         fail(f"Fixture symlinks are not supported: {relative_path}")

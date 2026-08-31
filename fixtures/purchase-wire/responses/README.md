@@ -42,7 +42,7 @@ Every response fixture has this shape:
 - Non-2xx fixtures are checked through the endpoint's real rejection mapping,
   including permanent-versus-retryable `/purchase` errors.
 
-`CommerceWireFixtureTest.everyCommittedWorkerResponseParsesThroughTheSdkResponsePath`
+`PurchaseWireFixtureTest.everyCommittedWorkerResponseParsesThroughTheSdkResponsePath`
 checks the complete request × lane matrix before parsing every response. A
 separate in-memory test keeps the success and error scaffolding executable
 while `PENDING` exists.

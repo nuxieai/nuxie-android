@@ -1,4 +1,4 @@
-package ai.nuxie.sdk.commerce
+package ai.nuxie.sdk.billing
 
 import ai.nuxie.sdk.NuxieEnvironment
 import android.util.Base64
@@ -111,7 +111,7 @@ class PurchaseEvidenceStoreTest {
 
     @Test
     fun authorityScopedDirectoryDoesNotReplayEvidenceAcrossEnvironments() {
-        val filesDirectory = Files.createTempDirectory("nuxie-commerce-authority").toFile()
+        val filesDirectory = Files.createTempDirectory("nuxie-billing-authority").toFile()
         val apiKey = "pk_secret_authority"
         try {
             val development = purchaseEvidenceDirectory(

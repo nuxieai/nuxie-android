@@ -1,4 +1,4 @@
-package ai.nuxie.sdk.commerce
+package ai.nuxie.sdk.billing
 
 import ai.nuxie.sdk.NuxieEnvironment
 import android.util.Log
@@ -25,6 +25,7 @@ internal fun purchaseEvidenceDirectory(
     apiKey: String,
     environment: NuxieEnvironment,
 ): File {
+    // Keep the pre-rename directory stable so existing purchase evidence remains discoverable.
     return File(File(filesDirectory, "nuxie-commerce"), purchaseAuthorityScope(apiKey, environment))
 }
 
@@ -192,7 +193,7 @@ internal class FilePurchaseEvidenceStore(
             temporary.writeText(json.encodeToString(JsonArray.serializer(), encoded))
             if (!temporary.renameTo(bindingsFile)) error("Could not publish purchase bindings")
             true
-        }.onFailure { Log.w("NuxieCommerce", "Could not persist purchase binding.", it) }
+        }.onFailure { Log.w("NuxieBilling", "Could not persist purchase binding.", it) }
             .getOrDefault(false)
     }
 
@@ -236,7 +237,7 @@ internal class FilePurchaseEvidenceStore(
         temporary.writeText(json.encodeToString(JsonArray.serializer(), JsonArray(values)))
         if (!temporary.renameTo(target)) error("Could not publish purchase $description")
         true
-    }.onFailure { Log.w("NuxieCommerce", "Could not persist purchase $description.", it) }
+    }.onFailure { Log.w("NuxieBilling", "Could not persist purchase $description.", it) }
         .getOrDefault(false)
 
     private fun loadUnlocked(): Map<String, PurchaseEvidence> = runCatching {
@@ -251,7 +252,7 @@ internal class FilePurchaseEvidenceStore(
         temporary.writeText(json.encodeToString(JsonObject.serializer(), encoded))
         if (!temporary.renameTo(file)) error("Could not publish purchase evidence")
         true
-    }.onFailure { Log.w("NuxieCommerce", "Could not persist purchase evidence.", it) }
+    }.onFailure { Log.w("NuxieBilling", "Could not persist purchase evidence.", it) }
         .getOrDefault(false)
 
     private fun encodeEvidence(evidence: PurchaseEvidence): JsonObject = JsonObject(

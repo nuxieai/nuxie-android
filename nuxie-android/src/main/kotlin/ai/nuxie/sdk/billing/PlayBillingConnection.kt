@@ -1,4 +1,4 @@
-package ai.nuxie.sdk.commerce
+package ai.nuxie.sdk.billing
 
 import android.app.Activity
 import android.content.Context
@@ -382,7 +382,7 @@ internal class PlayBillingConnection(
         }
 
     private companion object {
-        const val LOG_TAG = "NuxieCommerce"
+        const val LOG_TAG = "NuxieBilling"
 
         fun Int.isTransientSetupFailure(): Boolean = when (this) {
             BillingClient.BillingResponseCode.SERVICE_DISCONNECTED,

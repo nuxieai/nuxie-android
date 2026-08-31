@@ -2,7 +2,7 @@ package ai.nuxie.sdk.features
 
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
-import ai.nuxie.sdk.commerce.OptimisticFeatureOverlay
+import ai.nuxie.sdk.billing.OptimisticFeatureOverlay
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.NuxieApi

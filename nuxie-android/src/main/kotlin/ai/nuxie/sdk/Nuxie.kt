@@ -7,12 +7,12 @@ import ai.nuxie.sdk.features.FeatureCheckPolicy
 import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureUsageResult
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
-import ai.nuxie.sdk.commerce.NuxiePurchaseDelegate
-import ai.nuxie.sdk.commerce.PurchaseHandlingMode
-import ai.nuxie.sdk.commerce.PurchaseResult
-import ai.nuxie.sdk.commerce.RestoreResult
-import ai.nuxie.sdk.commerce.StoreProduct
-import ai.nuxie.sdk.commerce.SubscriptionReplacement
+import ai.nuxie.sdk.billing.NuxiePurchaseDelegate
+import ai.nuxie.sdk.billing.PurchaseHandlingMode
+import ai.nuxie.sdk.billing.PurchaseResult
+import ai.nuxie.sdk.billing.RestoreResult
+import ai.nuxie.sdk.billing.StoreProduct
+import ai.nuxie.sdk.billing.SubscriptionReplacement
 import android.app.Activity
 import android.content.Context
 import android.os.Handler
@@ -28,7 +28,7 @@ import kotlin.coroutines.resumeWithException
  * Entry point for the greenfield Nuxie Android SDK.
  *
  * Setup constructs the internal composition root (event log, lifecycle
- * capture). The trigger, Features, presentation, and commerce surfaces arrive
+ * capture). The trigger, Features, presentation, and purchase surfaces arrive
  * in subsequent PRs on the locked contract.
  */
 object Nuxie {
@@ -402,7 +402,7 @@ object Nuxie {
         }
     }
 
-    // MARK: Commerce
+    // MARK: Purchases
 
     /** Launch checkout for the exact StoreProduct that was shown. */
     suspend fun purchase(

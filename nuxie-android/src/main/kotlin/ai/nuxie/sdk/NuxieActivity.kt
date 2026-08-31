@@ -117,7 +117,7 @@ sealed interface NuxieActivity {
 /** Why an Experience presentation ended. */
 enum class DismissReason { USER, GOAL_MET, ERROR, HOST }
 
-/** Commerce details captured at the presentation seam. */
+/** Purchase details captured at the presentation seam. */
 class PurchaseInfo internal constructor(
     val productId: String?,
     val storeProductId: String?,

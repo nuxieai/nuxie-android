@@ -1,12 +1,12 @@
 package ai.nuxie.sdk
 
-import ai.nuxie.sdk.commerce.OptimisticFeatureOverlay
-import ai.nuxie.sdk.commerce.InMemoryPurchaseEvidenceStore
-import ai.nuxie.sdk.commerce.PurchaseEvidence
-import ai.nuxie.sdk.commerce.StoredFeatureAllowance
-import ai.nuxie.sdk.commerce.StoredProductMapping
-import ai.nuxie.sdk.commerce.StoredPurchaseState
-import ai.nuxie.sdk.commerce.purchaseAuthorityScope
+import ai.nuxie.sdk.billing.OptimisticFeatureOverlay
+import ai.nuxie.sdk.billing.InMemoryPurchaseEvidenceStore
+import ai.nuxie.sdk.billing.PurchaseEvidence
+import ai.nuxie.sdk.billing.StoredFeatureAllowance
+import ai.nuxie.sdk.billing.StoredProductMapping
+import ai.nuxie.sdk.billing.StoredPurchaseState
+import ai.nuxie.sdk.billing.purchaseAuthorityScope
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureType

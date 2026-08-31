@@ -1,8 +1,8 @@
-package ai.nuxie.sdk.commerce
+package ai.nuxie.sdk.billing
 
 import ai.nuxie.sdk.features.FeatureAllowance
 import ai.nuxie.sdk.features.FeatureType
-import ai.nuxie.sdk.commerce.ProjectionFixtureAdapters.unlessNull
+import ai.nuxie.sdk.billing.ProjectionFixtureAdapters.unlessNull
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import java.io.File
 import kotlinx.serialization.json.Json

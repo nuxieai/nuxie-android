@@ -8,7 +8,7 @@
 - Runtime dependencies are limited to Kotlin coroutines,
   `kotlinx-serialization-json`, and `androidx.sqlite` (the grilled spec's
   storage decision; no Room, no OkHttp). One sanctioned exception:
-  `com.android.billingclient:billing` for commerce, which cannot exist
+  `com.android.billingclient:billing` for Play purchases, which cannot exist
   without it. It is `api`-scoped because the locked `StoreProduct` shape
   exposes `ProductDetails` publicly, and it is the plain artifact, never
   `billing-ktx` (the KTX granule ships Kotlin metadata newer than this
