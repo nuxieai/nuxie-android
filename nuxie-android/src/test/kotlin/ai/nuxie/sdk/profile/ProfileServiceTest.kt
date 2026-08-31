@@ -3,6 +3,8 @@ package ai.nuxie.sdk.profile
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.experiences.DeviceLegProfileCatalog
+import ai.nuxie.sdk.experiences.ExperienceTrustRoots
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
 import ai.nuxie.sdk.experiences.SupportedRuntime
 import ai.nuxie.sdk.fixtures.FixtureRunner
@@ -34,6 +36,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeout
@@ -214,6 +217,8 @@ class ProfileServiceTest {
         val distinctId: String,
         localeIdentifier: String,
         clearDisk: Boolean = true,
+        deviceLegProfiles: DeviceLegProfileCatalog? = null,
+        refreshIntervalMillis: Long = 30L * 60L * 1000L,
     ) {
         private val context = RuntimeEnvironment.getApplication()
         val identity = IdentityService(context).apply { setDistinctId(distinctId) }
@@ -243,8 +248,13 @@ class ProfileServiceTest {
             applyJourneyFacts = { _, body ->
                 fanout.facts += body.snapshotLabel()
             },
+            deviceLegProfiles = deviceLegProfiles,
             stageFeatureProfile = { _, body, _, _, isCurrent ->
-                if (isCurrent()) fanout.features += body.snapshotLabel()
+                if (isCurrent()) {
+                    (body["snapshot"] as? JsonPrimitive)?.content?.let {
+                        fanout.features += it
+                    }
+                }
                 null
             },
             captureFeaturePurchaseRevision = { 0L },
@@ -252,6 +262,7 @@ class ProfileServiceTest {
             scope = scope,
             localeSettings = locales,
             nowMillis = { now },
+            refreshIntervalMillis = refreshIntervalMillis,
         )
 
         fun hasDiskProfile(): Boolean = profileFile.exists()
@@ -606,6 +617,61 @@ class ProfileServiceTest {
         assertEquals("\"plane-v1\"", profileRequests.single { "If-None-Match" in it.headers }
             .headers["If-None-Match"])
         core.stop()
+    }
+
+    @Test
+    fun canonicalPlaneProfileUsesOnlyExplicitLaunchAndForegroundRefreshSignals() = runBlocking {
+        val plane = planeProfileFixture()
+        val transport = profileTransport(body = plane.first, etag = "\"plane-v1\"")
+        val context = RuntimeEnvironment.getApplication()
+        val fixture = ProfileFixture(
+            transport = transport,
+            distinctId = "canonical-sync-points",
+            localeIdentifier = "en_US",
+            deviceLegProfiles = DeviceLegProfileCatalog(
+                trustedKeys = ExperienceTrustRoots.keys(NuxieEnvironment.DEVELOPMENT),
+                highWater = ReleaseHighWaterStore(context),
+                supportedRuntime = { plane.second },
+            ),
+            refreshIntervalMillis = 20L,
+        )
+        try {
+            assertTrue(withTimeout(5_000L) { fixture.service.refreshAndWait() })
+            delay(100L)
+            assertEquals(
+                1,
+                transport.requests.count { it.url.path == "/profile" },
+            )
+
+            assertTrue(withTimeout(5_000L) { fixture.service.refreshAndWait() })
+            assertEquals(
+                2,
+                transport.requests.count { it.url.path == "/profile" },
+            )
+        } finally {
+            withTimeout(5_000L) { fixture.close() }
+        }
+    }
+
+    @Test
+    fun legacyProfileRetainsPeriodicRefreshDuringTransition() = runBlocking {
+        val transport = profileTransport(body = profileBody("legacy-periodic-refresh"))
+        val fixture = ProfileFixture(
+            transport = transport,
+            distinctId = "legacy-periodic-refresh",
+            localeIdentifier = "en_US",
+            refreshIntervalMillis = 20L,
+        )
+        try {
+            assertTrue(withTimeout(5_000L) { fixture.service.refreshAndWait() })
+            withTimeout(2_000L) {
+                while (transport.requests.count { it.url.path == "/profile" } < 2) {
+                    delay(5L)
+                }
+            }
+        } finally {
+            withTimeout(5_000L) { fixture.close() }
+        }
     }
 
     @Test

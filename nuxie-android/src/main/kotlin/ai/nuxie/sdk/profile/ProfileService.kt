@@ -29,8 +29,9 @@ import kotlinx.serialization.json.jsonObject
  * - Conditional refetch via the scoped ETag validator (locale-keyed).
  * - Atomic admission by identity decision, effective locale, and monotonic
  *   profile generation before every locale-scoped mutation.
- * - 30-minute periodic refresh; on user change a fresh-enough cache
- *   (< 5 min) is served without an immediate network hit.
+ * - Canonical plane profiles synchronize at launch and foreground only;
+ *   legacy profiles retain the 30-minute transition refresh. On user change
+ *   a fresh-enough cache (< 5 min) is served without an immediate network hit.
  * - Locale-scoped profile cache, segment membership, release authority, and
  *   visible Features share one admission. User properties and server facts
  *   are customer-scoped instead; Android has no profile-mailbox consumer in
@@ -87,6 +88,10 @@ internal class ProfileService(
     @Volatile
     private var latestAppliedGeneration = 0L
 
+    /** Legacy payloads retain their periodic refresh during the transition.
+     * Canonical plane delivery synchronizes only at launch and foreground. */
+    private var periodicRefreshEnabled = true
+
     private data class Admission(
         val identityScope: IdentityScope,
         val localeScope: ProfileLocaleScope,
@@ -102,13 +107,15 @@ internal class ProfileService(
 
     private val signals = Channel<Signal>(capacity = Channel.UNLIMITED)
 
-    @kotlinx.coroutines.ExperimentalCoroutinesApi
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val worker = scope.launch {
         loadFromDisk()
         while (true) {
             val signal = select<Signal?> {
                 signals.onReceiveCatching { it.getOrNull() }
-                onTimeout(refreshIntervalMillis) { Signal.Refresh(null) }
+                if (synchronized(lock) { periodicRefreshEnabled }) {
+                    onTimeout(refreshIntervalMillis) { Signal.Refresh(null) }
+                }
             } ?: break
             when (signal) {
                 is Signal.Refresh -> {
@@ -138,7 +145,7 @@ internal class ProfileService(
         }
     }
 
-    /** Kick a refresh; used at setup and by the periodic timer. */
+    /** Kick an explicit launch/foreground refresh. */
     fun requestRefresh() {
         signals.trySend(Signal.Refresh(null))
     }
@@ -304,6 +311,7 @@ internal class ProfileService(
                 } else {
                     deviceLegProfiles?.clear(cached.distinctId)
                 }
+                periodicRefreshEnabled = planePrepared == null
                 resident = cached
                 persist(cached)
                 segments.applySnapshot(
