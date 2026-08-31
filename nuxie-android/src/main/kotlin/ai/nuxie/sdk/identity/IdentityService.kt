@@ -75,7 +75,7 @@ internal class IdentityService(
                 userPropertiesById.remove(oldEffectiveId)
             }
             persistLocked()
-            if (effectiveIdLocked() != oldEffectiveId) identityRevision += 1
+            if (!wasIdentified || effectiveIdLocked() != oldEffectiveId) identityRevision += 1
         }
     }
 
@@ -83,6 +83,7 @@ internal class IdentityService(
     fun reset(keepAnonymousId: Boolean) = synchronized(decisionLock) {
         synchronized(lock) {
             val previousEffectiveId = effectiveIdLocked()
+            val wasIdentified = identifiedId != null
             userPropertiesById.remove(previousEffectiveId)
             identifiedId = null
             if (!keepAnonymousId) anonymousIdValue = null
@@ -90,7 +91,7 @@ internal class IdentityService(
                 anonymousIdValue = TimeBasedEpochGenerator.shared.next()
             }
             persistLocked()
-            if (effectiveIdLocked() != previousEffectiveId) identityRevision += 1
+            if (wasIdentified || effectiveIdLocked() != previousEffectiveId) identityRevision += 1
         }
     }
 

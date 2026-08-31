@@ -159,11 +159,13 @@ class FeatureInfo {
         features: Map<String, FeatureAccess>,
         entities: Map<String, Map<String, FeatureAccess>>,
         state: State,
-    ): Mutation = synchronized(stagingLock) {
-        val generation = Generation()
-        currentGeneration = generation
-        stageLocked(generation, isCurrent = { true }) { fence ->
-            fence.publishSnapshot(features, entities, state)
+    ): Mutation = synchronized(emissionLock) {
+        synchronized(stagingLock) {
+            val generation = Generation()
+            currentGeneration = generation
+            stageLocked(generation, isCurrent = { true }) { fence ->
+                fence.publishSnapshot(features, entities, state)
+            }
         }
     }
 

@@ -298,6 +298,29 @@ class PurchaseFeatureUseTest {
     )
 
     @Test
+    fun noLicensingKeyEvidenceUsesThePendingPurchaseSpendPathWhenUnverified() = runTest {
+        val fixture = fallbackFixture()
+        fixture.transport.respond = { request ->
+            if (request.url.path == "/entitled") {
+                HttpTransport.Response(
+                    200,
+                    """{"customerId":"customer-a","featureId":"credits","code":"entitled","allowed":true,"unlimited":false,"balance":1,"type":"creditSystem"}"""
+                        .encodeToByteArray(),
+                )
+            } else {
+                HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
+            }
+        }
+        fixture.store.upsert(
+            evidence(signatureVerificationRequired = false, signatureVerified = false),
+        )
+
+        assertNotNull(fixture.use())
+        assertEquals(1, fixture.transport.requests.count { it.url.path == "/entitled" })
+        fixture.core.stop()
+    }
+
+    @Test
     fun singleEligiblePurchaseIsVerifiedAndSpentAtomically() = runTest {
         val contract = Json.parseToJsonElement(
             File(FixtureRunner.fixturesRoot(), "events/atomic-purchase-sync.json").readText(),

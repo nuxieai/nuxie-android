@@ -69,6 +69,7 @@ class ReleaseAuthenticationTest {
             """{
                 "products": [{
                     "id": "credit-pack",
+                    "type": "consumable",
                     "store": {
                         "platform": "google_play",
                         "productId": "play-credit-pack"
@@ -119,11 +120,13 @@ class ReleaseAuthenticationTest {
 
         assertEquals("credit-pack", product.productId)
         assertEquals("play-credit-pack", product.storeProductId)
+        assertEquals("consumable", product.productType)
         assertEquals(
             listOf(
                 Triple("pro", FeatureType.BOOLEAN, false),
                 Triple("credits", FeatureType.METERED, false),
                 Triple("exports", FeatureType.METERED, true),
+                Triple("not-a-feature-id", FeatureType.BOOLEAN, false),
             ),
             product.featureAllowances.map { Triple(it.featureId, it.type, it.unlimited) },
         )

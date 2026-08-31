@@ -90,4 +90,33 @@ class IdentityServiceTest {
         identity.reset(keepAnonymousId = false)
         assertNotEquals(anon, identity.anonymousId())
     }
+
+    @Test
+    fun identifyingAsTheCurrentAnonymousIdInvalidatesTheAnonymousScope() {
+        val identity = service()
+        identity.reset(keepAnonymousId = true)
+        val anonymousId = identity.anonymousId()
+        val anonymousScope = identity.captureScope()
+
+        identity.setDistinctId(anonymousId)
+
+        assertTrue(identity.isIdentified)
+        assertEquals(anonymousId, identity.distinctId())
+        assertFalse(identity.isCurrentScope(anonymousScope))
+    }
+
+    @Test
+    fun resettingAnIdentifiedAnonymousAliasInvalidatesTheIdentifiedScope() {
+        val identity = service()
+        identity.reset(keepAnonymousId = true)
+        val anonymousId = identity.anonymousId()
+        identity.setDistinctId(anonymousId)
+        val identifiedScope = identity.captureScope()
+
+        identity.reset(keepAnonymousId = true)
+
+        assertFalse(identity.isIdentified)
+        assertEquals(anonymousId, identity.distinctId())
+        assertFalse(identity.isCurrentScope(identifiedScope))
+    }
 }

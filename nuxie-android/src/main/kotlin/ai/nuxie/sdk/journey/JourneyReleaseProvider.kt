@@ -40,17 +40,8 @@ internal class JourneyReleaseCatalog(
     private val trustedKeys: Map<String, ByteArray>,
     private val highWater: ReleaseHighWaterStore,
     private val supportedRuntime: () -> SupportedRuntime?,
-    private val authenticate: (ExperienceReleaseProfile.Entry, SupportedRuntime) -> AuthenticatedRelease? = { entry, runtime ->
-        runCatching {
-            ExperienceReleaseVerifier.authenticate(
-                envelopeBytes = entry.envelopeBytes,
-                trustedKeys = trustedKeys,
-                expectedIdentity = entry.locator,
-                supportedRuntime = runtime,
-                replayPolicy = ReplayPolicy.Active(highWater.floor(entry.locator.streamKey)),
-            )
-        }.getOrNull()
-    },
+    private val authenticate: ((ExperienceReleaseProfile.Entry, SupportedRuntime) -> AuthenticatedRelease?)? = null,
+    private val onReleaseAdmitted: (AuthenticatedRelease) -> Unit = {},
 ) : JourneyReleaseProvider, PresentationReleaseProvider {
     private val lock = Any()
     private var releasesByDistinctId = emptyMap<String, Map<String, List<AdmittedJourneyRelease>>>()
@@ -72,7 +63,7 @@ internal class JourneyReleaseCatalog(
             return
         }
         val authenticated = profile.active.mapNotNull { entry ->
-            val authenticated = authenticate(entry, runtime) ?: return@mapNotNull null
+            val authenticated = authenticateEntry(entry, runtime) ?: return@mapNotNull null
             authenticated.publishedAtSeqToPromote?.let {
                 highWater.promote(authenticated.identity.streamKey, it)
             }
@@ -87,6 +78,24 @@ internal class JourneyReleaseCatalog(
                 release.identity.experienceVersionId to PresentationRelease(release, profile.delivery)
             }
         }
+        authenticated.forEach(onReleaseAdmitted)
+    }
+
+    private fun authenticateEntry(
+        entry: ExperienceReleaseProfile.Entry,
+        runtime: SupportedRuntime,
+    ): AuthenticatedRelease? = if (authenticate != null) {
+        authenticate.invoke(entry, runtime)
+    } else {
+        runCatching {
+            ExperienceReleaseVerifier.authenticate(
+                envelopeBytes = entry.envelopeBytes,
+                trustedKeys = trustedKeys,
+                expectedIdentity = entry.locator,
+                supportedRuntime = runtime,
+                replayPolicy = ReplayPolicy.Active(highWater.floor(entry.locator.streamKey)),
+            )
+        }.getOrNull()
     }
 
     override fun releasesFor(distinctId: String, triggerEventName: String): List<AdmittedJourneyRelease> =

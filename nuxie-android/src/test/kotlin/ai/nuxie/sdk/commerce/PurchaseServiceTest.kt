@@ -44,6 +44,34 @@ import org.robolectric.RuntimeEnvironment
 @OptIn(ExperimentalCoroutinesApi::class)
 class PurchaseServiceTest {
     @Test
+    fun purchasedWithoutLicensingKeyProjectsWhileBackendSyncIsPending() = runTest {
+        val fixture = fixture(this)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(
+                    allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
+                    licensingPublicKey = null,
+                ),
+                null,
+            )
+        }
+        runCurrent()
+
+        fixture.service.onPurchasesUpdated(
+            okUpdate(playPurchase("no-licensing-key").forCheckout(fixture)),
+        )
+
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        val retained = fixture.store.load().getValue("no-licensing-key")
+        assertFalse(retained.signatureVerificationRequired)
+        assertFalse(retained.signatureVerified)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
     fun purchasedPersistsAndProjectsBeforeSyncThenAcknowledgesAfterAcceptance() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(this, actions = actions)
