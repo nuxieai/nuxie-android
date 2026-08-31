@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.util
 
 import java.text.SimpleDateFormat
+import java.text.ParsePosition
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
@@ -10,22 +11,22 @@ import java.util.TimeZone
  * it forces minSdk<26 hosts into core-library desugaring).
  */
 internal object IsoDates {
-    private val patterns = listOf(
-        "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
-        "yyyy-MM-dd'T'HH:mm:ss'Z'",
-        "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
-        "yyyy-MM-dd'T'HH:mm:ssXXX",
-    )
+    private val timestamp = Regex("^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.([0-9]+))?(Z|[+-][0-9]{2}:[0-9]{2})$")
 
     fun parseMillis(iso: String): Long? {
-        for (pattern in patterns) {
-            val formatter = SimpleDateFormat(pattern, Locale.US).apply {
+        val match = timestamp.matchEntire(iso) ?: return null
+        val fraction = match.groupValues[2].padEnd(3, '0').take(3)
+        val offset = match.groupValues[3].let { if (it == "Z") "+0000" else it.replace(":", "") }
+        val normalized = "${match.groupValues[1]}.$fraction$offset"
+        return runCatching {
+            // RFC 822 Z is supported on API 23; ISO X requires API 24.
+            val formatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US).apply {
                 timeZone = TimeZone.getTimeZone("UTC")
                 isLenient = false
             }
-            runCatching { return formatter.parse(iso)?.time }
-        }
-        return null
+            val position = ParsePosition(0)
+            formatter.parse(normalized, position)?.takeIf { position.index == normalized.length }?.time
+        }.getOrNull()
     }
 
     fun formatMillis(timestampMillis: Long): String =
