@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "3f6fafb340ab446e34c9afd92defa302ec4875e6",
+  "sourceCommit": "b84bd8f77c7f6879e89f590062e2ad4f02a51119",
   "files": {
     "README.md": "583f71ca942832136dfff0a6b3fbb843ba983f8bd9131d7116a06821d49e9ef0",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
@@ -40,6 +40,7 @@
     "journeys/planes/release.json": "c8d745ef5468ba6983ba8f8c21f9143794f6c509fb33c9b19bad9105d386657e",
     "journeys/planes/reports.json": "bfb0482f91bf34a14d4909e475ba762d182f94c936eb1d3de66ab59a00cb1048",
     "journeys/planes/run-recovery.json": "dcb71dc017fe749b9927753fcce307bdc8b4362f0506bc92b253d8991eac8d2e",
+    "journeys/planes/values.json": "abfb8bb276907feb9fd92ab3193b5bd9a9d17a9701089c032c2207f8074a2d2a",
     "journeys/screen-emission-runtime/input-effect-persistence-replay.json": "260d63bab0740a286f6c61d223a1d3d3889b5dcacd55129c0cdfa29056316935",
     "journeys/seizure-race/device-handoff-wins.json": "4ec4902a324667138faa58e99cb69d7c7b61297ba82df142ec41d479c2481af9",
     "journeys/takeover/claimable.json": "332aedb7e66566c433af4b8b2dc48dd5e9cac652075c3a4fdb2b68e2ba6cf837",
