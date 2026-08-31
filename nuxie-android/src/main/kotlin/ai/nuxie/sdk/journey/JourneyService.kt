@@ -348,10 +348,19 @@ internal class JourneyService(
         }
     }
 
-    override suspend fun applyDownFacts(body: JsonObject, distinctId: String) {
+    override suspend fun applyDownFacts(body: JsonObject, distinctId: String) =
+        applyDownFacts(body, distinctId) { true }
+
+    internal suspend fun applyDownFacts(
+        body: JsonObject,
+        distinctId: String,
+        isCurrent: () -> Boolean,
+    ) {
+        if (!isCurrent()) return
         val facts = body["facts"] as? JsonArray ?: return
         val receivedAtMillis = nowMillis()
         facts.forEach { element ->
+            if (!isCurrent()) return
             val fact = element as? JsonObject ?: return@forEach
             val id = fact.string("id") ?: return@forEach
             val name = fact.string("event") ?: return@forEach
@@ -375,11 +384,11 @@ internal class JourneyService(
             val event = StoredEvent(id, name, serverProperties, timestamp, distinctId)
             if (name == JourneyEventNames.SUPERSEDED || name == JourneyEventNames.CONVERTED) {
                 runLock.withLock {
-                    if (ledger.serverFact(event, receivedAtMillis)) {
+                    if (ledger.serverFact(event, receivedAtMillis, isCurrent) && isCurrent()) {
                         routeDownFact(distinctId, name, serverProperties)
                     }
                 }
-            } else if (ledger.serverFact(event, receivedAtMillis)) {
+            } else if (ledger.serverFact(event, receivedAtMillis, isCurrent) && isCurrent()) {
                 routeDownFact(distinctId, name, serverProperties)
             }
         }

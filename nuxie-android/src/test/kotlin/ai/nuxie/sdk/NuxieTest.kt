@@ -4,6 +4,7 @@ import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.testsupport.FakeTransport
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -61,5 +62,43 @@ class NuxieTest {
     @Test
     fun dismissBeforeSetupIsANoop() = runBlocking {
         Nuxie.dismiss()
+    }
+
+    @Test
+    fun configuredAndRuntimeLocalesReachProfileRequests() = runBlocking {
+        val transport = FakeTransport()
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = transport,
+            registerLifecycle = false,
+            deviceLocaleIdentifier = { "device_TEST" },
+        )
+        val configuration = NuxieConfiguration("pk_test_locale").apply {
+            localeIdentifier = "en_US"
+        }
+        Nuxie.setup(RuntimeEnvironment.getApplication(), configuration)
+        val core = requireNotNull(Nuxie.core)
+
+        // Queue behind setup's initial refresh so every inspected request is complete.
+        assertTrue(core.profile.refreshAndWait())
+        assertEquals("en_US", lastProfileLocale(transport))
+
+        // Locale changes after setup go through the internal settings seam;
+        // the public surface matches iOS (configuration-only).
+        core.profileLocale.setLocaleIdentifier("fr_FR")
+        assertTrue(core.profile.refreshAndWait())
+        assertEquals("fr_FR", lastProfileLocale(transport))
+
+        core.profileLocale.setLocaleIdentifier(null)
+        assertTrue(core.profile.refreshAndWait())
+        assertEquals("device_TEST", lastProfileLocale(transport))
+    }
+
+    private fun lastProfileLocale(transport: FakeTransport): String {
+        val body = transport.requests.last { it.url.path == "/profile" }.body.decodeToString()
+        return Regex("\\\"locale\\\":\\\"([^\\\"]+)\\\"")
+            .find(body)
+            ?.groupValues
+            ?.get(1)
+            ?: error("Profile request did not contain a locale: $body")
     }
 }

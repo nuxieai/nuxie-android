@@ -940,6 +940,38 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun newerProfileRevisionFencesAnOlderProfileCommit() = runBlocking {
+        val core = core(FakeTransport())
+        val customer = core.identity.distinctId()
+        val purchaseRevision = core.features.capturePurchaseRevision()
+        val olderRevision = core.features.reserveAuthoritativeRevision()
+        val newerRevision = core.features.reserveAuthoritativeRevision()
+
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement(
+                profile("""[{"id":"newer","type":"boolean","unlimited":false}]"""),
+            ).jsonObject,
+            snapshotPurchaseRevision = purchaseRevision,
+            snapshotAuthoritativeRevision = newerRevision,
+        )
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement(
+                profile("""[{"id":"older","type":"boolean","unlimited":false}]"""),
+            ).jsonObject,
+            snapshotPurchaseRevision = purchaseRevision,
+            snapshotAuthoritativeRevision = olderRevision,
+        )
+
+        assertTrue(core.features.getCached("newer", null)!!.allowed)
+        assertEquals(null, core.features.getCached("older", null))
+        assertTrue(core.featureInfo.isAllowed("newer"))
+        assertFalse(core.featureInfo.isAllowed("older"))
+        core.stop()
+    }
+
+    @Test
     fun profileCommitMarkerFencesAnOlderCheckWhenANewerCheckOnlyMintsAToken() = runBlocking {
         val checks = AtomicInteger()
         val firstStarted = CountDownLatch(1)

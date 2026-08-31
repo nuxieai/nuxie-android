@@ -67,8 +67,11 @@ internal class FeatureService(
     private var profileAdmitted = false
     private var purchaseMutationRevision = 0L
     private val featurePurchaseMutationRevisions = mutableMapOf<String, Long>()
+    @Volatile
     private var scopeGeneration = 0L
     private var authoritativeMutationRevision = 0L
+    @Volatile
+    private var lastProfileAuthoritativeRevision = Long.MIN_VALUE
     private val featureMutationRevisions = mutableMapOf<String, Long>()
     private val committedMutationRevisions = mutableMapOf<CacheKey, Long>()
 
@@ -306,12 +309,35 @@ internal class FeatureService(
         body: JsonObject,
         snapshotPurchaseRevision: Long,
         snapshotAuthoritativeRevision: Long = reserveAuthoritativeRevision(),
-    ) {
+    ) = publishStaged(
+        stageProfile(
+            distinctId,
+            body,
+            snapshotPurchaseRevision,
+            snapshotAuthoritativeRevision,
+        ),
+    )
+
+    /** Stage profile authority while its caller still holds the aggregate admission fence. */
+    internal fun stageProfile(
+        distinctId: String,
+        body: JsonObject,
+        snapshotPurchaseRevision: Long,
+        snapshotAuthoritativeRevision: Long,
+        isCurrent: () -> Boolean = { true },
+    ): FeatureInfo.Mutation? {
         val hydrationGeneration = synchronized(lock) { scopeGeneration }
-        if (identity.distinctId() != distinctId) return
+        if (identity.distinctId() != distinctId || !isCurrent()) return null
         val parsed = parseProfileFeatures(body)
-        val publication = synchronized(lock) {
-            if (identity.distinctId() != distinctId || scopeGeneration != hydrationGeneration) return
+        return synchronized(lock) {
+            if (identity.distinctId() != distinctId ||
+                scopeGeneration != hydrationGeneration ||
+                !isCurrent() ||
+                snapshotAuthoritativeRevision <= lastProfileAuthoritativeRevision
+            ) {
+                return@synchronized null
+            }
+            lastProfileAuthoritativeRevision = snapshotAuthoritativeRevision
             val replacedFeatureIds = durableAccess.keys + durableEntities.keys
             cacheDistinctId = distinctId
             durableAccess = parsed.first
@@ -344,9 +370,16 @@ internal class FeatureService(
             purchaseUpdates.entries.removeAll {
                 it.value.committedRevision <= snapshotPurchaseRevision
             }
-            stageCurrentLocked(expectedGeneration = hydrationGeneration)
+            stageCurrentLocked(
+                expectedGeneration = hydrationGeneration,
+                publicationGuard = {
+                    isCurrent() &&
+                        identity.distinctId() == distinctId &&
+                        scopeGeneration == hydrationGeneration &&
+                        lastProfileAuthoritativeRevision == snapshotAuthoritativeRevision
+                },
+            )
         }
-        publication?.let { featureInfo.publish(it) }
     }
 
     /** Replace the entire pure evidence-derived overlay for [distinctId]. */
