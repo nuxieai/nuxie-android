@@ -6,6 +6,7 @@ import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -89,6 +90,27 @@ class CacheFilesystemLockTest {
         assertEquals(emptySet<String>(), reclaimer.protectedDigests())
         assertEquals(0, lock.protectionDirectory.listFiles()?.size ?: 0)
         protection.close()
+    }
+
+    @Test
+    fun parkedRunArtifactsRemainProtectedAfterTheirProcessDiesUntilReportQueueCommit() {
+        val root = temporaryFolder.newFolder("parked-run")
+        val first = CacheProtectionRegistry(CacheFilesystemLock(root), 123, { ProcessIdentity(it, 10) }, { true })
+        val digest = "a".repeat(64)
+        val lease = first.retainRun("customer/journey/generation", setOf(digest))
+        lease.close()
+        val restarted = CacheProtectionRegistry(CacheFilesystemLock(root), 456,
+            { pid -> if (pid == 456) ProcessIdentity(pid, 20) else null }, { it == 456 })
+        assertEquals(setOf(digest), restarted.protectedDigests())
+        val resumed = restarted.retainRun("customer/journey/generation", setOf(digest))
+        assertEquals(emptySet<String>(), restarted.protectedDigests(excludingOwnerId = resumed.ownerId))
+        assertThrows(java.io.IOException::class.java) {
+            restarted.retainRun("customer/journey/generation", setOf("b".repeat(64)))
+        }
+        assertEquals(setOf(digest), restarted.protectedDigests())
+        restarted.releaseRun("customer/journey/generation")
+        assertEquals(emptySet<String>(), restarted.protectedDigests())
+        restarted.releaseRun("customer/journey/generation")
     }
 
     private fun retainedScopeCount(): Int {

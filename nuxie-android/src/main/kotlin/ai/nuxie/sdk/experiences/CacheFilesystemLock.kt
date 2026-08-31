@@ -50,6 +50,7 @@ internal class CacheFilesystemLock(cacheRoot: File) {
     private val lockFile = File(namespace, "root.lock")
 
     internal val protectionDirectory = File(namespace, "protections")
+    internal val runProtectionDirectory = File(namespace, "run-protections")
 
     fun <T> withLock(block: () -> T): T = withFileLock(lockFile, block)
 
@@ -131,6 +132,14 @@ internal class CacheProtectionRegistry(
     private val processIdentity: (Int) -> ProcessIdentity? = ::platformProcessIdentity,
     private val processExists: (Int) -> Boolean = { pid -> File("/proc/$pid").isDirectory },
 ) {
+    private val runPins = RunArtifactPins(filesystemLock)
+
+    /** Unlike a presentation lease, a parked run's pin survives process death.
+     * Release it only after its durable completion event/checklist commit. */
+    fun retainRun(runKey: String, digests: Set<String>): CacheProtectionLease = runPins.retain(runKey, digests)
+
+    fun releaseRun(runKey: String) = runPins.release(runKey)
+
     fun register(digests: Set<String>): CacheProtectionLease {
         val ownerId = UUID.randomUUID().toString().lowercase()
         val marker = filesystemLock.withLock {
@@ -168,8 +177,8 @@ internal class CacheProtectionRegistry(
 
     fun protectedDigests(excludingOwnerId: String? = null): Set<String> = filesystemLock.withLock {
         val directory = filesystemLock.protectionDirectory
-        if (!directory.isDirectory) return@withLock emptySet()
-        val protected = mutableSetOf<String>()
+        val protected = runPins.digests(excludingOwnerId).toMutableSet()
+        if (!directory.isDirectory) return@withLock protected
         directory.listFiles { file -> file.extension == "json" }
             ?.forEach { markerFile ->
                 val marker = readMarker(markerFile)

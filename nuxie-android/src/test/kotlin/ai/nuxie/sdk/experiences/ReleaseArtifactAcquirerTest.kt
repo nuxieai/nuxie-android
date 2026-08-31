@@ -1076,6 +1076,32 @@ class ReleaseArtifactAcquirerTest {
     }
 
     @Test
+    fun parkedRunPinSurvivesAcquiredLeaseAndCacheReconstruction() = runTest {
+        val retainedBytes = "retained".encodeToByteArray()
+        val cacheDirectory = temporaryFolder.newFolder("parked-pin")
+        val cache = ReleaseArtifactCache(RuntimeEnvironment.getApplication(), HttpTransport {
+            HttpTransport.Response(200, retainedBytes, mapOf("Content-Type" to "application/vnd.rive"))
+        }, maxTotalBytes = 12, cacheDirectory = cacheDirectory)
+        val riv = artifact("renders/sha256/${sha256(retainedBytes)}.riv", retainedBytes, "application/vnd.rive")
+        val acquired = ReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
+        cache.retainForRun("customer/journey/generation", listOf(sha256(retainedBytes))).close()
+        acquired.close()
+        acquired.rivFile.setLastModified(System.currentTimeMillis() - 60_000)
+
+        var outsider = "outsider".encodeToByteArray()
+        val restarted = ReleaseArtifactCache(RuntimeEnvironment.getApplication(), HttpTransport {
+            HttpTransport.Response(200, outsider)
+        }, maxTotalBytes = 12, cacheDirectory = cacheDirectory)
+        restarted.acquire("first", sha256(outsider), 8, 8, "https://cdn.nuxie.test/")
+        assertArrayEquals(retainedBytes, acquired.rivFile.readBytes())
+
+        restarted.releaseRun("customer/journey/generation")
+        outsider = "another!".encodeToByteArray()
+        restarted.acquire("second", sha256(outsider), 8, 8, "https://cdn.nuxie.test/")
+        assertEquals(false, acquired.rivFile.exists())
+    }
+
+    @Test
     fun acquiredReleaseRemainsProtectedUntilItsLeaseIsClosed() = runTest {
         val rivBytes = "12345678".encodeToByteArray()
         val firstOutsiderBytes = "abcdefgh".encodeToByteArray()
