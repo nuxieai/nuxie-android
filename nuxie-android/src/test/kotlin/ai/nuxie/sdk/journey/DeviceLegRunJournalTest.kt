@@ -131,6 +131,25 @@ class DeviceLegRunJournalTest {
         assertNotNull(journal.admit(arm(), policy, "step", 200_000))
     }
 
+    @Test fun `executor transitions atomically persist cursors context and fixed timer anchors`() {
+        val journal = DeviceLegRunJournal(directory, "customer")
+        val run = requireNotNull(journal.admit(arm(), JourneyReentry.EveryTime, "condition", 1_000))
+        journal.markStartedQueued(run)
+        val changedContext = JsonObject(run.context + ("event" to JsonObject(mapOf("ready" to JsonPrimitive(true)))))
+        journal.transition(run.id, "wait", changedContext, DeviceLegControlExecutor.Checkpoint(2_000, 12_000))
+
+        val parked = DeviceLegRunJournal(directory, "customer").runs().single()
+        assertEquals("wait", parked.stepId)
+        assertEquals(changedContext, parked.context)
+        assertEquals(2_000L, parked.park?.anchorAtMillis)
+        assertEquals(12_000L, parked.park?.wakeAtMillis)
+
+        journal.transition(run.id, "present", changedContext)
+        val advanced = DeviceLegRunJournal(directory, "customer").runs().single()
+        assertEquals("present", advanced.stepId)
+        assertNull(advanced.park)
+    }
+
     @Test fun `admission is atomic across instances and scoped by customer`() = runBlocking {
         val first = DeviceLegRunJournal(directory, "../customer")
         val second = DeviceLegRunJournal(directory, "../customer")
