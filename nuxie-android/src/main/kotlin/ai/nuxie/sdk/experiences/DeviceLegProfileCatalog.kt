@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.experiences
 
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Authenticates a complete plane profile before publishing any arm, fact, or
@@ -30,19 +31,33 @@ internal class DeviceLegProfileCatalog(
         val profile = JourneyPlaneProfile.decode(body.toString().encodeToByteArray())
         val authenticated = LinkedHashMap<String, AuthenticatedDeviceLegRelease>(profile.releases.size)
         val promotions = mutableMapOf<String, Long>()
+        val activeDigests = profile.armedLegs.asSequence()
+            .filter { it.binding.getValue("type").jsonPrimitive.content == "new" }
+            .map { it.reference.getValue("descriptorSha256").jsonPrimitive.content }
+            .toSet()
         for (entry in profile.releases) {
+            val descriptorSha256 = entry.envelope.getValue("descriptorSha256").jsonPrimitive.content
+            val isActive = descriptorSha256 in activeDigests
             val release = DeviceLegReleaseVerifier.authenticate(
                 envelopeBytes = entry.envelope.toString().encodeToByteArray(),
                 trustedKeys = trustedKeys,
                 expectedIdentity = entry.locator,
                 expectedLegId = entry.legId,
                 supportedRuntime = runtime,
-                replayPolicy = ReplayPolicy.Active(highWater.floor(entry.locator.streamKey)),
+                replayPolicy = if (isActive) {
+                    ReplayPolicy.Active(highWater.floor(entry.locator.streamKey))
+                } else {
+                    ReplayPolicy.Pinned(
+                        entry.locator.experienceVersionId,
+                        entry.locator.buildId,
+                        descriptorSha256,
+                    )
+                },
             )
             if (authenticated.put(release.descriptorSha256, release) != null) {
                 throw ReleaseAuthenticationException("duplicate authenticated device leg")
             }
-            release.publishedAtSeqToPromote?.let { sequence ->
+            if (isActive) release.publishedAtSeqToPromote?.let { sequence ->
                 val previous = promotions.put(entry.locator.streamKey, sequence)
                 if (previous != null && previous != sequence) {
                     throw ReleaseAuthenticationException("conflicting release sequence")
