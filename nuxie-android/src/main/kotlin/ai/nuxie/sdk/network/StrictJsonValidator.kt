@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.network
 
 import java.io.IOException
+import kotlinx.serialization.json.Json
 
 /**
  * Duplicate-JSON-key rejection, ported from the iOS
@@ -26,18 +27,19 @@ internal object StrictJsonValidator {
 
         fun done(): Boolean = index >= text.length
 
-        fun scanValue() {
+        fun scanValue(depth: Int = 0) {
+            if (depth > 64) throw IOException("JSON nesting exceeds the supported depth")
             skipWhitespace()
             if (done()) return
             when (text[index]) {
-                '{' -> scanObject()
-                '[' -> scanArray()
+                '{' -> scanObject(depth + 1)
+                '[' -> scanArray(depth + 1)
                 '"' -> scanString()
                 else -> scanScalar()
             }
         }
 
-        private fun scanObject() {
+        private fun scanObject(depth: Int) {
             index++ // consume {
             val seen = HashSet<String>()
             skipWhitespace()
@@ -48,7 +50,7 @@ internal object StrictJsonValidator {
                 if (!seen.add(key)) throw DuplicateKeyException(key)
                 skipWhitespace()
                 if (!done() && text[index] == ':') index++
-                scanValue()
+                scanValue(depth)
                 skipWhitespace()
                 if (done()) return
                 when (text[index]) {
@@ -59,12 +61,12 @@ internal object StrictJsonValidator {
             }
         }
 
-        private fun scanArray() {
+        private fun scanArray(depth: Int) {
             index++ // consume [
             skipWhitespace()
             if (!done() && text[index] == ']') { index++; return }
             while (!done()) {
-                scanValue()
+                scanValue(depth)
                 skipWhitespace()
                 if (done()) return
                 when (text[index]) {
@@ -76,8 +78,8 @@ internal object StrictJsonValidator {
         }
 
         /**
-         * Returns the RAW string contents (escapes verbatim). Raw identity is
-         * sufficient for duplicate detection; kotlinx handles real unescaping.
+         * Decode keys before comparing them: `key` and `k\u0065y` name the same
+         * JSON member and must not carry conflicting authority.
          */
         private fun scanString(): String {
             if (done() || text[index] != '"') {
@@ -92,7 +94,7 @@ internal object StrictJsonValidator {
                     '"' -> {
                         val raw = text.substring(start, index)
                         index++
-                        return raw
+                        return Json.decodeFromString<String>("\"$raw\"")
                     }
                     else -> index++
                 }

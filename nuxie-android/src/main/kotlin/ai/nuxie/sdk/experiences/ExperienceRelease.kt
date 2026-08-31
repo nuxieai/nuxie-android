@@ -2,7 +2,6 @@ package ai.nuxie.sdk.experiences
 
 import ai.nuxie.sdk.features.FeatureAllowance
 import android.util.Base64
-import java.security.MessageDigest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -176,59 +175,14 @@ internal object ExperienceReleaseVerifier {
         supportedRuntime: SupportedRuntime,
         replayPolicy: ReplayPolicy,
     ): AuthenticatedRelease {
-        if (envelopeBytes.size > ExperienceReleaseLimits.ENVELOPE_BYTES) {
-            fail("envelope exceeds size limit")
-        }
-        val envelope = runCatching {
-            Json.parseToJsonElement(envelopeBytes.decodeToString()).jsonObject
-        }.getOrElse { fail("envelope is not JSON") }
-
-        requireExactKeys(
-            envelope,
-            setOf(
-                "mediaType", "encoding", "descriptorSha256",
-                "descriptorSizeBytes", "descriptorBytesBase64", "signature",
-            ),
+        val authenticated = SignedReleaseEnvelope.authenticate(
+            envelopeBytes, trustedKeys, SignedReleaseEnvelope.Format.EXPERIENCE,
         )
-        if (envelope.string("mediaType") != ExperienceReleaseLimits.MEDIA_TYPE) fail("media type")
-        if (envelope.string("encoding") != "base64") fail("encoding")
-
-        val signature = envelope["signature"] as? JsonObject ?: fail("signature missing")
-        requireExactKeys(signature, setOf("version", "algorithm", "keyId", "signatureBase64"))
-        if (signature.long("version") != 1L) fail("signature version")
-        if (signature.string("algorithm") != "ed25519") fail("signature algorithm")
-        val keyId = signature.string("keyId")
-            ?.takeIf { it.isNotEmpty() && it.length <= ExperienceReleaseLimits.KEY_ID_BYTES }
-            ?: fail("keyId")
-
-        val descriptorBase64 = envelope.string("descriptorBytesBase64") ?: fail("descriptor bytes")
-        val descriptorBytes = canonicalBase64Decode(
-            descriptorBase64,
-            ExperienceReleaseLimits.DESCRIPTOR_BYTES,
-        ) ?: fail("descriptor base64")
-
-        val declaredSize = envelope.long("descriptorSizeBytes") ?: fail("descriptor size")
-        if (declaredSize != descriptorBytes.size.toLong()) fail("descriptor size mismatch")
-        val declaredSha = envelope.string("descriptorSha256") ?: fail("descriptor sha")
-        if (sha256Hex(descriptorBytes) != declaredSha) fail("descriptor sha mismatch")
-
-        val keyBytes = trustedKeys[keyId] ?: fail("unknown signing key: $keyId")
-        if (keyBytes.size != 32) fail("invalid trust root")
-        val signatureBytes = canonicalBase64Decode(
-            signature.string("signatureBase64") ?: fail("signature bytes"),
-            64,
-        )?.takeIf { it.size == 64 } ?: fail("signature encoding")
-
-        val signedBytes =
-            ExperienceReleaseLimits.SIGNATURE_DOMAIN.encodeToByteArray() + descriptorBytes
-        if (!Ed25519Verifier.verify(keyBytes, signedBytes, signatureBytes)) {
-            fail("invalid signature")
-        }
-
-        // Authenticated: interpretation may begin.
-        val descriptor = runCatching {
-            Json.parseToJsonElement(descriptorBytes.decodeToString()).jsonObject
-        }.getOrElse { fail("descriptor is not JSON") }
+        val descriptorBytes = authenticated.descriptorBytes
+        val declaredSha = authenticated.sha256
+        val keyId = authenticated.keyId
+        // Authenticated: interpretation may begin, with duplicate-key rejection.
+        val descriptor = SignedReleaseEnvelope.parseObject(descriptorBytes)
         val actualKeys = descriptor.keys.toSet()
         if (!actualKeys.containsAll(DESCRIPTOR_TOP_KEYS) ||
             !(actualKeys - DESCRIPTOR_TOP_KEYS - DESCRIPTOR_OPTIONAL_KEYS).isEmpty()
@@ -342,14 +296,6 @@ internal object ExperienceReleaseVerifier {
         if (decoded.size > maximumBytes) return null
         val reEncoded = Base64.encodeToString(decoded, Base64.NO_WRAP)
         return decoded.takeIf { reEncoded == text }
-    }
-
-    private fun sha256Hex(bytes: ByteArray): String =
-        MessageDigest.getInstance("SHA-256").digest(bytes)
-            .joinToString("") { "%02x".format(it) }
-
-    private fun requireExactKeys(json: JsonObject, expected: Set<String>) {
-        if (json.keys.toSet() != expected) fail("unexpected keys: ${json.keys - expected}")
     }
 
     private fun JsonObject.string(key: String): String? =
