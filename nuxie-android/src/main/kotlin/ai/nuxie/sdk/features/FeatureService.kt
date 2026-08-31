@@ -221,22 +221,31 @@ internal class FeatureService(
         featureInfo.publish(publication)
     }
 
-    fun handleUserChange(_from: String, to: String) {
-        synchronized(lock) {
-            // A new customer must never inherit the prior customer's durable
-            // profile snapshot or short-lived check results.
-            cacheDistinctId = to
-            durableAccess = emptyMap()
-            durableEntities = emptyMap()
-            realTimeCache.clear()
-            purchaseUpdates.clear()
-            optimisticOverlay = emptyMap()
-            profileAdmitted = false
-            featureMutationRevisions.clear()
-            committedMutationRevisions.clear()
-            scopeGeneration += 1
-            featureInfo.resetImmediately()
-        }
+    fun handleUserChange(
+        _from: String,
+        to: String,
+        destinationProjection: Map<String, OptimisticFeatureOverlay>? = null,
+    ): FeatureInfo.Mutation = synchronized(lock) {
+        // A new customer must never inherit the prior customer's durable
+        // profile snapshot or short-lived check results. Retained purchase
+        // evidence is a separate pure input supplied for the destination
+        // customer, so returning to an owner restores its overlay without
+        // waiting for asynchronous Play recovery.
+        cacheDistinctId = to
+        durableAccess = emptyMap()
+        durableEntities = emptyMap()
+        realTimeCache.clear()
+        purchaseUpdates.clear()
+        optimisticOverlay = destinationProjection.orEmpty()
+        profileAdmitted = false
+        featureMutationRevisions.clear()
+        committedMutationRevisions.clear()
+        scopeGeneration += 1
+        featureInfo.stageIdentityChange(
+            features = mergeOptimisticOverlay(emptyMap()),
+            entities = emptyMap(),
+            state = FeatureInfo.State.Unknown,
+        )
     }
 
     /** Called by ProfileService whenever its raw profile body is applied. */
@@ -614,16 +623,11 @@ internal class FeatureService(
     /** Must be called while [lock] is held so reservation order equals commit order. */
     private fun stageCurrentLocked(
         expectedGeneration: Long? = null,
-        publishedEntityAccess: Map<String, FeatureAccess> = emptyMap(),
         publicationGuard: () -> Boolean = { true },
     ): FeatureInfo.Mutation? {
         if (expectedGeneration != null && scopeGeneration != expectedGeneration) return null
-        val fresh = realTimeCache
-            .filter { (key, timed) -> key.entityId == null && isFresh(timed) }
-            .mapValues { it.value.access }
-            .mapKeys { it.key.featureId }
         return featureInfo.stageUpdate(
-            mergeOptimisticOverlay(durableGlobalAccess() + fresh) + publishedEntityAccess,
+            mergeOptimisticOverlay(durableGlobalAccess() + freshPublishedAuthority()),
             durableEntities,
             readinessState(),
             publicationGuard,
@@ -648,16 +652,29 @@ internal class FeatureService(
         }
         return checkNotNull(
             stageCurrentLocked(
-                publishedEntityAccess = if (entityId == null) {
-                    emptyMap()
-                } else {
-                    updates.mapValues { (featureId, update) ->
-                        visibleAccess(featureId, update.access) ?: update.access
-                    }
-                },
                 publicationGuard = publicationGuard,
             ),
         )
+    }
+
+    /**
+     * FeatureInfo exposes one latest authoritative value per Feature. Entity
+     * scope controls cache reuse, not whether an accepted result remains the
+     * visible authority. Pick the freshest committed authority across global
+     * and entity keys so later overlay/profile recompositions cannot fall
+     * back to an older global value.
+     */
+    private fun freshPublishedAuthority(): Map<String, FeatureAccess> {
+        val selected = mutableMapOf<String, Pair<Long, FeatureAccess>>()
+        realTimeCache.forEach { (key, timed) ->
+            if (!isFresh(timed)) return@forEach
+            val revision = committedMutationRevisions[key] ?: Long.MIN_VALUE
+            val current = selected[key.featureId]
+            if (current == null || revision > current.first) {
+                selected[key.featureId] = revision to timed.access
+            }
+        }
+        return selected.mapValues { it.value.second }
     }
 
     private fun mergedGlobalAccess(): Map<String, FeatureAccess> {

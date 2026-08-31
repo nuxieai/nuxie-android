@@ -347,7 +347,7 @@ class PurchaseServiceTest {
 
         val staleRefreshStartedPublishing = CompletableDeferred<Unit>()
         val releaseStaleRefresh = CompletableDeferred<Unit>()
-        fixture.core.featureInfo.onFeatureChange = { featureId, _, _ ->
+        fixture.core.featureInfo.onFeatureChange = { featureId, _, _, _ ->
             if (featureId == "refresh-blocker") {
                 staleRefreshStartedPublishing.complete(Unit)
                 releaseStaleRefresh.await()
@@ -376,7 +376,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun acceptedSyncCannotResurrectEvidenceRevokedWhileTheRequestWasInFlight() = runTest {
+    fun restoreSnapshotWaitsForConcurrentPurchaseProcessingAndCannotRevokeIt() = runTest {
         val fixture = fixture(this)
         val syncStarted = CompletableDeferred<Unit>()
         val finishSync = CompletableDeferred<Unit>()
@@ -401,15 +401,19 @@ class PurchaseServiceTest {
         syncStarted.await()
         assertEquals(PurchaseResult.Purchased, checkout.await())
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        val queryCountBeforeRestore = fixture.billing.queries.size
 
-        assertEquals(RestoreResult.NoPurchases, fixture.service.restorePurchases())
-        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        val restore = async { fixture.service.restorePurchases() }
+        runCurrent()
+
+        assertEquals(queryCountBeforeRestore, fixture.billing.queries.size)
         finishSync.complete(Unit)
         purchaseUpdate.await()
+        assertEquals(RestoreResult.NoPurchases, restore.await())
 
-        assertTrue(fixture.store.load().getValue("revoked-during-sync").revoked)
-        assertFalse(fixture.store.load().getValue("revoked-during-sync").synced)
-        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        assertFalse(fixture.store.load().getValue("revoked-during-sync").revoked)
+        assertTrue(fixture.store.load().getValue("revoked-during-sync").synced)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
     }
 
@@ -599,7 +603,9 @@ class PurchaseServiceTest {
         assertFalse(fixture.core.featureInfo.isAllowed("unlimited"))
 
         fixture.core.identity.setDistinctId(provenOwner)
-        fixture.core.features.handleUserChange(provisionalOwner, provenOwner)
+        fixture.core.featureInfo.publish(
+            fixture.core.features.handleUserChange(provisionalOwner, provenOwner),
+        )
         fixture.service.onPurchasesUpdated(okUpdate(purchase))
 
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
@@ -633,7 +639,9 @@ class PurchaseServiceTest {
         assertTrue(syncStarted.await(5, TimeUnit.SECONDS))
         fixture.store.upsertBinding(product().bindingFor(provenOwner))
         fixture.core.identity.setDistinctId(provenOwner)
-        fixture.core.features.handleUserChange(provisionalOwner, provenOwner)
+        fixture.core.featureInfo.publish(
+            fixture.core.features.handleUserChange(provisionalOwner, provenOwner),
+        )
         releaseAcceptance.countDown()
         update.await()
 
@@ -961,6 +969,49 @@ class PurchaseServiceTest {
         assertEquals(PurchaseResult.Purchased, checkout.await())
         assertFalse("ack" in actions)
         assertFalse("consume" in actions)
+        fixture.close()
+    }
+
+    @Test
+    fun missingAppManagedConsumableRemainsEligibleForSyncAfterHostConsumption() = runTest {
+        val fixture = fixture(this, mode = PurchaseHandlingMode.APP_MANAGED)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(
+                    consumable = true,
+                    allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
+                ),
+                null,
+            )
+        }
+        runCurrent()
+        fixture.service.onPurchasesUpdated(
+            okUpdate(playPurchase("app-managed-consumable").forCheckout(fixture)),
+        )
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        val beforeRestore = fixture.store.load().getValue("app-managed-consumable")
+        assertTrue(beforeRestore.consumable)
+        assertFalse(beforeRestore.nuxieManaged)
+        assertFalse(beforeRestore.synced)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        // Host consumption removes an app-managed consumable from Play's
+        // active snapshot before Nuxie's server has necessarily accepted it.
+        assertEquals(RestoreResult.NoPurchases, fixture.service.restorePurchases())
+
+        val afterRestore = fixture.store.load().getValue("app-managed-consumable")
+        assertFalse(afterRestore.revoked)
+        assertFalse(afterRestore.synced)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        fixture.synchronizer = { accepted(it.syncAttributionDistinctId) }
+        fixture.service.recover()
+
+        val afterRecovery = fixture.store.load().getValue("app-managed-consumable")
+        assertFalse(afterRecovery.revoked)
+        assertTrue(afterRecovery.synced)
         fixture.close()
     }
 

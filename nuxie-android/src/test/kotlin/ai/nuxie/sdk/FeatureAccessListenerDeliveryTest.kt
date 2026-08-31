@@ -85,8 +85,82 @@ class FeatureAccessListenerDeliveryTest {
 
         assertTrue(workerFinished.await(100, TimeUnit.MILLISECONDS))
         val expected = FeatureAccess(true, false, null, FeatureType.BOOLEAN)
-        assertEquals(listOf(Callback("pro", null, expected, null, Looper.getMainLooper().thread)), callbacks)
+        assertEquals(
+            listOf(Callback("pro", null, expected, expected, Looper.getMainLooper().thread)),
+            callbacks,
+        )
         assertEquals(expected, Nuxie.features.all.value.getValue("pro"))
+    }
+
+    @Test
+    fun postedFeatureCallbackRechecksIdentityGenerationOnTheMainThread() {
+        val callbacks = mutableListOf<Callback>()
+        val listener = object : NuxieListener {
+            override fun onAppActionRequested(sdk: Nuxie, action: AppAction) = Unit
+
+            override fun featureAccessDidChange(
+                featureId: String,
+                oldAccess: FeatureAccess?,
+                newAccess: FeatureAccess,
+            ) {
+                callbacks += Callback(
+                    featureId,
+                    oldAccess,
+                    newAccess,
+                    Nuxie.features.all.value[featureId],
+                    Thread.currentThread(),
+                )
+            }
+        }
+        Nuxie.listener = listener
+        Nuxie.setup(
+            RuntimeEnvironment.getApplication(),
+            NuxieConfiguration("pk_test_feature_listener_fence").apply {
+                logLevel = LogLevel.NONE
+            },
+        )
+        drainCommittedEvents()
+        val workerFinished = CountDownLatch(1)
+        val granted = FeatureAccess(true, false, null, FeatureType.BOOLEAN)
+
+        Thread {
+            runBlocking {
+                val core = requireNotNull(Nuxie.core)
+                core.features.applyOptimisticPurchaseProjection(
+                    core.identity.distinctId(),
+                    mapOf("pro" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null)),
+                )
+            }
+            workerFinished.countDown()
+        }.start()
+
+        val mainLooper = shadowOf(Looper.getMainLooper())
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        while (mainLooper.isIdle && System.nanoTime() < deadline) {
+            Thread.yield()
+        }
+        assertFalse(mainLooper.isIdle)
+        assertEquals(granted, Nuxie.features.all.value.getValue("pro"))
+        assertFalse(workerFinished.await(10, TimeUnit.MILLISECONDS))
+
+        // The stale grant callback is already posted. Changing identity must
+        // publish the removal now and make that queued grant fail its last-mile fence.
+        Nuxie.identify("replacement-${System.nanoTime()}")
+        mainLooper.idle()
+
+        assertTrue(workerFinished.await(100, TimeUnit.MILLISECONDS))
+        assertEquals(
+            listOf(
+                Callback(
+                    "pro",
+                    granted,
+                    FeatureAccess(false, false, null, FeatureType.BOOLEAN),
+                    null,
+                    Looper.getMainLooper().thread,
+                ),
+            ),
+            callbacks,
+        )
     }
 
     private fun drainCommittedEvents() {

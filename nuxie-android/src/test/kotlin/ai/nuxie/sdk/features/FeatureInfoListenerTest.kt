@@ -14,12 +14,12 @@ import org.junit.Test
 
 class FeatureInfoListenerTest {
     @Test
-    fun changedFeaturesNotifyBeforeTheSameMutationPublishesWithoutCoalescing() = runBlocking {
+    fun changedFeaturesNotifyAfterTheSameMutationPublishesWithoutCoalescing() = runBlocking {
         val info = FeatureInfo()
         val first = access(allowed = true, balance = 2.0)
         val second = access(allowed = false, balance = 0.0)
         val callbacks = mutableListOf<Callback>()
-        info.onFeatureChange = { featureId, oldAccess, newAccess ->
+        info.onFeatureChange = { featureId, oldAccess, newAccess, _ ->
             callbacks += Callback(featureId, oldAccess, newAccess, info.all.value[featureId])
         }
 
@@ -29,8 +29,8 @@ class FeatureInfoListenerTest {
 
         assertEquals(
             listOf(
-                Callback("credits", null, first, null),
-                Callback("credits", first, second, first),
+                Callback("credits", null, first, first),
+                Callback("credits", first, second, second),
             ),
             callbacks,
         )
@@ -43,7 +43,9 @@ class FeatureInfoListenerTest {
         val first = access(allowed = true, balance = 2.0)
         val second = access(allowed = false, balance = 0.0)
         val transitions = mutableListOf<Pair<FeatureAccess?, FeatureAccess>>()
-        info.onFeatureChange = { _, oldAccess, newAccess -> transitions += oldAccess to newAccess }
+        info.onFeatureChange = { _, oldAccess, newAccess, _ ->
+            transitions += oldAccess to newAccess
+        }
         val firstCommit = info.stageUpdate("credits", first, null)
         val secondCommit = info.stageUpdate("credits", second, null)
 
@@ -60,16 +62,20 @@ class FeatureInfoListenerTest {
         val info = FeatureInfo()
         val listenerStarted = CompletableDeferred<Unit>()
         val releaseListener = CompletableDeferred<Unit>()
-        info.onFeatureChange = { _, _, _ ->
-            listenerStarted.complete(Unit)
-            releaseListener.await()
+        info.onFeatureChange = { _, _, newAccess, _ ->
+            if (newAccess.allowed) {
+                listenerStarted.complete(Unit)
+                releaseListener.await()
+            }
         }
         val update = async {
             info.update(mapOf("credits" to access(allowed = true, balance = 2.0)), emptyMap())
         }
         listenerStarted.await()
 
-        info.resetImmediately()
+        info.publish(
+            info.stageIdentityChange(emptyMap(), emptyMap(), FeatureInfo.State.Unknown),
+        )
 
         assertFalse(info.isAllowed("credits"))
         releaseListener.complete(Unit)
@@ -82,7 +88,9 @@ class FeatureInfoListenerTest {
         val info = FeatureInfo()
         val transitions = mutableListOf<Pair<FeatureAccess?, FeatureAccess>>()
         val flowBalances = mutableListOf<Double>()
-        info.onFeatureChange = { _, oldAccess, newAccess -> transitions += oldAccess to newAccess }
+        info.onFeatureChange = { _, oldAccess, newAccess, _ ->
+            transitions += oldAccess to newAccess
+        }
         val collector = launch(start = CoroutineStart.UNDISPATCHED) {
             info.all.collect { access -> access["credits"]?.balance?.let(flowBalances::add) }
         }
@@ -102,7 +110,9 @@ class FeatureInfoListenerTest {
         val info = FeatureInfo()
         val transitions = mutableListOf<Pair<FeatureAccess?, FeatureAccess>>()
         val flowBalances = mutableListOf<Double>()
-        info.onFeatureChange = { _, oldAccess, newAccess -> transitions += oldAccess to newAccess }
+        info.onFeatureChange = { _, oldAccess, newAccess, _ ->
+            transitions += oldAccess to newAccess
+        }
         val collector = launch(start = CoroutineStart.UNDISPATCHED) {
             info.all.collect { access -> access["credits"]?.balance?.let(flowBalances::add) }
         }
@@ -115,6 +125,85 @@ class FeatureInfoListenerTest {
 
         assertEquals(2, transitions.size)
         assertEquals(2, flowBalances.size)
+    }
+
+    @Test
+    fun bulkRemovalEmitsANotFoundEquivalentTransition() = runBlocking {
+        val info = FeatureInfo()
+        val granted = access(allowed = true, balance = 2.0)
+        val transitions = mutableListOf<Pair<FeatureAccess?, FeatureAccess>>()
+        info.update(mapOf("credits" to granted), emptyMap())
+        info.onFeatureChange = { _, oldAccess, newAccess, _ ->
+            transitions += oldAccess to newAccess
+        }
+
+        info.update(emptyMap(), emptyMap())
+
+        assertEquals(
+            listOf(
+                granted to FeatureAccess(
+                    allowed = false,
+                    unlimited = false,
+                    balance = null,
+                    type = FeatureType.BOOLEAN,
+                ),
+            ),
+            transitions,
+        )
+        assertEquals(emptyMap<String, FeatureAccess>(), info.all.value)
+    }
+
+    @Test
+    fun readinessPublishesBeforeTheValuesItDescribes() = runBlocking {
+        val info = FeatureInfo()
+        val observedState = CompletableDeferred<FeatureInfo.State>()
+        val collector = launch(start = CoroutineStart.UNDISPATCHED) {
+            info.all.collect { features ->
+                if (features.containsKey("credits")) {
+                    observedState.complete(info.state.value)
+                }
+            }
+        }
+
+        info.update(
+            mapOf("credits" to access(allowed = true, balance = 2.0)),
+            emptyMap(),
+            FeatureInfo.State.Reconciling,
+        )
+
+        assertEquals(FeatureInfo.State.Reconciling, observedState.await())
+        collector.cancelAndJoin()
+    }
+
+    @Test
+    fun callbackIdentityChangeStopsTheSupersededCallbackBatch() = runBlocking {
+        val info = FeatureInfo()
+        val granted = access(allowed = true, balance = 2.0)
+        val grantedCallbacks = mutableListOf<String>()
+        info.onFeatureChange = { featureId, _, newAccess, _ ->
+            if (newAccess.allowed) {
+                grantedCallbacks += featureId
+                if (featureId == "alpha") {
+                    info.publish(
+                        info.stageIdentityChange(
+                            emptyMap(),
+                            emptyMap(),
+                            FeatureInfo.State.Unknown,
+                        ),
+                    )
+                }
+            }
+        }
+
+        info.update(
+            linkedMapOf("alpha" to granted, "beta" to granted),
+            emptyMap(),
+            FeatureInfo.State.Reconciling,
+        )
+
+        assertEquals(listOf("alpha"), grantedCallbacks)
+        assertEquals(emptyMap<String, FeatureAccess>(), info.all.value)
+        assertEquals(FeatureInfo.State.Unknown, info.state.value)
     }
 
     private fun access(allowed: Boolean, balance: Double) = FeatureAccess(

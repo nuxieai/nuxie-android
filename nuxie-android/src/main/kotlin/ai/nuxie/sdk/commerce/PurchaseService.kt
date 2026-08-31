@@ -440,25 +440,26 @@ internal class PurchaseService(
         settings.delegate?.let {
             return it.restorePurchases().also { outcome -> emitRestoreOutcome(outcome, initiatingOwner) }
         }
-        val found = mutableListOf<PlayPurchase>()
-        for (type in listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP)) {
-            when (val result = billing.queryActive(type)) {
-                is ActivePurchasesResult.Success -> found += result.purchases
-                is ActivePurchasesResult.Failed -> return RestoreResult.Failed(
-                    BillingUnavailableException(result.responseCode, result.debugMessage),
-                ).also { outcome -> emitRestoreOutcome(outcome, initiatingOwner) }
+        val outcome: RestoreResult = processing.withLock {
+            val found = mutableListOf<PlayPurchase>()
+            for (type in listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP)) {
+                when (val result = billing.queryActive(type)) {
+                    is ActivePurchasesResult.Success -> found += result.purchases
+                    is ActivePurchasesResult.Failed -> return@withLock RestoreResult.Failed(
+                        BillingUnavailableException(result.responseCode, result.debugMessage),
+                    )
+                }
             }
+            if (!revokeMissingOptimistic(found.mapTo(mutableSetOf()) { it.purchaseToken })) {
+                return@withLock RestoreResult.Failed(
+                    IllegalStateException("Could not durably revoke missing purchase evidence."),
+                )
+            }
+            if (found.isEmpty()) return@withLock RestoreResult.NoPurchases
+            found.forEach { processPurchase(it) }
+            RestoreResult.Restored
         }
-        if (!revokeMissingOptimistic(found.mapTo(mutableSetOf()) { it.purchaseToken })) {
-            return RestoreResult.Failed(
-                IllegalStateException("Could not durably revoke missing purchase evidence."),
-            ).also { emitRestoreOutcome(it, initiatingOwner) }
-        }
-        if (found.isEmpty()) {
-            return RestoreResult.NoPurchases.also { emitRestoreOutcome(it, initiatingOwner) }
-        }
-        processPurchases(found)
-        return RestoreResult.Restored.also { emitRestoreOutcome(it, initiatingOwner) }
+        return outcome.also { emitRestoreOutcome(it, initiatingOwner) }
     }
 
     suspend fun onPurchasesUpdated(update: PurchaseUpdate) {
@@ -939,6 +940,7 @@ internal class PurchaseService(
                     .filter {
                         !it.synced && it.ownerDistinctId == currentDistinctId &&
                             it.purchaseState == StoredPurchaseState.PURCHASED &&
+                            (it.nuxieManaged || !it.consumable) &&
                             it.purchaseToken !in activeTokens
                     }
                 locallyRevokedTokens += missing.map { it.purchaseToken }
@@ -1166,6 +1168,11 @@ internal class PurchaseService(
             deriveOptimisticProjection(currentDistinctId),
         )
     }
+
+    /** Pure local snapshot for a synchronous identity-scope recomposition. */
+    internal fun optimisticProjectionSnapshot(
+        distinctId: String,
+    ): Map<String, OptimisticFeatureOverlay>? = deriveOptimisticProjection(distinctId)
 
     private fun deriveOptimisticProjection(currentDistinctId: String = distinctId()) =
         optimisticFeatureProjection(
