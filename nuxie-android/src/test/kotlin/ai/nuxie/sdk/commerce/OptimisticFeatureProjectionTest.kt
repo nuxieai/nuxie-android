@@ -2,11 +2,10 @@ package ai.nuxie.sdk.commerce
 
 import ai.nuxie.sdk.features.FeatureAllowance
 import ai.nuxie.sdk.features.FeatureType
+import ai.nuxie.sdk.commerce.ProjectionFixtureAdapters.unlessNull
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import java.io.File
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -26,18 +25,45 @@ class OptimisticFeatureProjectionTest {
 
         fixture.getValue("cases").jsonArray.forEach { element ->
             val case = element.jsonObject
-            val actual = optimisticFeatureProjection(
-                distinctId = case.getValue("distinctId").jsonPrimitive.content,
-                authorityScope = AUTHORITY_SCOPE,
-                evidence = fixtureEvidence(case["evidence"]),
-                descriptors = fixtureDescriptors(case["descriptors"]),
+            // The declarations input is deliberately consumed and never fed
+            // into derivation: external billing produces no overlay.
+            check(
+                case["externalPurchaseDeclarations"].unlessNull()?.jsonArray
+                    ?.all { it.jsonObject.containsKey("productId") } != false,
             )
+            var currentEvidence = ProjectionFixtureAdapters.evidence(case["evidence"])
+            var currentDescriptors = ProjectionFixtureAdapters.descriptors(case["descriptors"])
 
             assertEquals(
                 case.getValue("name").jsonPrimitive.content,
-                fixtureExpectedProjection(case["expected"]),
-                actual,
+                ProjectionFixtureAdapters.expectedProjection(case["expectedOverlay"]),
+                optimisticFeatureProjection(
+                    distinctId = case.getValue("distinctId").jsonPrimitive.content,
+                    authorityScope = AUTHORITY_SCOPE,
+                    evidence = currentEvidence,
+                    descriptors = currentDescriptors,
+                ),
             )
+
+            case["transitions"].unlessNull()?.jsonArray.orEmpty().forEach { transitionElement ->
+                val transition = transitionElement.jsonObject
+                transition["evidence"].unlessNull()?.let {
+                    currentEvidence = ProjectionFixtureAdapters.evidence(it)
+                }
+                transition["descriptors"].unlessNull()?.let {
+                    currentDescriptors = ProjectionFixtureAdapters.descriptors(it)
+                }
+                assertEquals(
+                    transition.getValue("name").jsonPrimitive.content,
+                    ProjectionFixtureAdapters.expectedProjection(transition["expectedOverlay"]),
+                    optimisticFeatureProjection(
+                        distinctId = transition.getValue("distinctId").jsonPrimitive.content,
+                        authorityScope = AUTHORITY_SCOPE,
+                        evidence = currentEvidence,
+                        descriptors = currentDescriptors,
+                    ),
+                )
+            }
         }
     }
 
@@ -143,6 +169,85 @@ class OptimisticFeatureProjectionTest {
         )
 
         assertEquals(4.0, projection?.get("exports")?.balanceIncrease!!, 0.0)
+    }
+
+    @Test
+    fun meteredAndCreditSystemJoinAsCreditSystemRegardlessOfAllowanceOrder() {
+        val metered = FeatureAllowance("balance", FeatureType.METERED, allowance = 2.0)
+        val creditSystem = FeatureAllowance("balance", FeatureType.CREDIT_SYSTEM, allowance = 3.0)
+        val expected = OptimisticFeatureOverlay(
+            type = FeatureType.CREDIT_SYSTEM,
+            unlimited = false,
+            balanceIncrease = 5.0,
+        )
+
+        listOf(
+            arrayOf(metered, creditSystem),
+            arrayOf(creditSystem, metered),
+        ).forEach { allowances ->
+            val projection = optimisticFeatureProjection(
+                distinctId = "customer-a",
+                authorityScope = AUTHORITY_SCOPE,
+                evidence = listOf(evidence(owner = "customer-a")),
+                descriptors = listOf(descriptor(*allowances)),
+            )
+
+            assertEquals(expected, projection?.get("balance"))
+        }
+    }
+
+    @Test
+    fun unlimitedJoinUsesHighestRankedTypeRegardlessOfAllowanceOrder() {
+        val unlimitedMetered = FeatureAllowance(
+            "balance",
+            FeatureType.METERED,
+            unlimited = true,
+        )
+        val creditSystem = FeatureAllowance("balance", FeatureType.CREDIT_SYSTEM, allowance = 3.0)
+        val expected = OptimisticFeatureOverlay(
+            type = FeatureType.CREDIT_SYSTEM,
+            unlimited = true,
+            balanceIncrease = null,
+        )
+
+        listOf(
+            arrayOf(unlimitedMetered, creditSystem),
+            arrayOf(creditSystem, unlimitedMetered),
+        ).forEach { allowances ->
+            val projection = optimisticFeatureProjection(
+                distinctId = "customer-a",
+                authorityScope = AUTHORITY_SCOPE,
+                evidence = listOf(evidence(owner = "customer-a")),
+                descriptors = listOf(descriptor(*allowances)),
+            )
+
+            assertEquals(expected, projection?.get("balance"))
+        }
+    }
+
+    @Test
+    fun booleanAndMeteredJoinRetainsMeteredAllowanceRegardlessOfAllowanceOrder() {
+        val boolean = FeatureAllowance("balance", FeatureType.BOOLEAN)
+        val metered = FeatureAllowance("balance", FeatureType.METERED, allowance = 4.0)
+        val expected = OptimisticFeatureOverlay(
+            type = FeatureType.METERED,
+            unlimited = false,
+            balanceIncrease = 4.0,
+        )
+
+        listOf(
+            arrayOf(boolean, metered),
+            arrayOf(metered, boolean),
+        ).forEach { allowances ->
+            val projection = optimisticFeatureProjection(
+                distinctId = "customer-a",
+                authorityScope = AUTHORITY_SCOPE,
+                evidence = listOf(evidence(owner = "customer-a")),
+                descriptors = listOf(descriptor(*allowances)),
+            )
+
+            assertEquals(expected, projection?.get("balance"))
+        }
     }
 
     @Test
@@ -263,73 +368,8 @@ class OptimisticFeatureProjectionTest {
         },
     )
 
-    private fun fixtureEvidence(element: JsonElement?): List<PurchaseEvidence> =
-        element.unlessNull()?.jsonArray.orEmpty().map { evidenceElement ->
-            val evidence = evidenceElement.jsonObject
-            val backendSynced = evidence.getValue("backendSynced").jsonPrimitive.content.toBoolean()
-            val transactionId = evidence.getValue("transactionId").jsonPrimitive.content
-            val owner = evidence.getValue("distinctId").jsonPrimitive.content
-            PurchaseEvidence(
-                purchaseToken = transactionId,
-                packageName = "com.example.fixture",
-                storeProductIds = listOf(transactionId),
-                nuxieProductId = transactionId,
-                purchaseState = StoredPurchaseState.PURCHASED,
-                syncAttributionDistinctId = owner,
-                ownerDistinctId = owner,
-                acknowledged = false,
-                firstSeenMillis = 1L,
-                catalogResolved = true,
-                signatureVerificationRequired = true,
-                signatureVerified = true,
-                authorityScope = AUTHORITY_SCOPE,
-                revoked = evidence.getValue("revoked").jsonPrimitive.content.toBoolean(),
-                backendSyncedAtMillis = 1L.takeIf { backendSynced },
-            )
-        }
-
-    private fun fixtureDescriptors(element: JsonElement?): List<StoredProductMapping> =
-        element.unlessNull()?.jsonObject.orEmpty().map { (transactionId, allowancesElement) ->
-            StoredProductMapping(
-                storeProductId = transactionId,
-                nuxieProductId = transactionId,
-                productType = "inapp",
-                consumable = false,
-                featureAllowances = allowancesElement.jsonArray.map { allowanceElement ->
-                    val allowance = allowanceElement.jsonObject
-                    StoredFeatureAllowance(
-                        featureId = allowance.getValue("featureId").jsonPrimitive.content,
-                        type = fixtureFeatureType(allowance.getValue("kind").jsonPrimitive.content).name,
-                        unlimited = allowance["unlimited"]?.jsonPrimitive?.content?.toBoolean() ?: false,
-                        allowance = allowance["allowance"]?.jsonPrimitive?.content?.toDouble(),
-                    )
-                },
-            )
-        }
-
-    private fun fixtureExpectedProjection(
-        element: JsonElement?,
-    ): Map<String, OptimisticFeatureOverlay>? = element.unlessNull()?.jsonObject?.mapValues { (_, value) ->
-        val expected = value.jsonObject
-        val type = fixtureFeatureType(expected.getValue("kind").jsonPrimitive.content)
-        OptimisticFeatureOverlay(
-            type = type,
-            unlimited = expected["unlimited"]?.jsonPrimitive?.content?.toBoolean() ?: false,
-            balanceIncrease = expected["allowance"]?.jsonPrimitive?.content?.toDouble()
-                ?.takeUnless { type == FeatureType.BOOLEAN },
-        )
-    }
-
-    private fun fixtureFeatureType(kind: String): FeatureType = when (kind) {
-        "boolean" -> FeatureType.BOOLEAN
-        "metered" -> FeatureType.METERED
-        "credit_system", "creditSystem" -> FeatureType.CREDIT_SYSTEM
-        else -> error("Unsupported fixture Feature kind: $kind")
-    }
-
-    private fun JsonElement?.unlessNull(): JsonElement? = this?.takeUnless { it is JsonNull }
 
     private companion object {
-        const val AUTHORITY_SCOPE = "scope-a"
+        const val AUTHORITY_SCOPE = ProjectionFixtureAdapters.AUTHORITY_SCOPE
     }
 }

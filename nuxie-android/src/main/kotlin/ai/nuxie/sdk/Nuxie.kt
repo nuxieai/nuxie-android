@@ -6,6 +6,7 @@ import ai.nuxie.sdk.features.FeatureAccess
 import ai.nuxie.sdk.features.FeatureCheckPolicy
 import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureUsageResult
+import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.commerce.NuxiePurchaseDelegate
 import ai.nuxie.sdk.commerce.PurchaseHandlingMode
@@ -38,6 +39,7 @@ object Nuxie {
     private var setupState: SetupState? = null
 
     private val featureInfoInstance = FeatureInfo()
+    private val identityDecisionLock = Any()
 
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
@@ -73,7 +75,9 @@ object Nuxie {
 
         require(configuration.apiKey.isNotBlank()) { "apiKey must not be blank." }
 
-        featureInfoInstance.onFeatureChange = ::deliverFeatureAccessChange
+        featureInfoInstance.onFeatureChange = { featureId, oldAccess, newAccess, isCurrent ->
+            deliverFeatureAccessChange(featureId, oldAccess, newAccess, isCurrent)
+        }
         val core = NuxieCore(
             context = context,
             apiKey = configuration.apiKey,
@@ -221,7 +225,6 @@ object Nuxie {
      * is a full no-op; a different id migrates anonymous history (first
      * identify only), starts a new session, and captures `$identify`.
      */
-    @Synchronized
     fun identify(
         distinctId: String,
         userProperties: Map<String, Any?>? = null,
@@ -230,70 +233,107 @@ object Nuxie {
         val core = core ?: return
         require(distinctId.isNotBlank()) { "distinctId must not be blank." }
 
-        val identity = core.identity
-        val oldDistinctId = identity.distinctId()
-        val wasIdentified = identity.isIdentified
-        val hasDifferentDistinctId = distinctId != oldDistinctId
+        val decision = synchronized(identityDecisionLock) {
+            val identity = core.identity
+            val oldDistinctId = identity.distinctId()
+            val wasIdentified = identity.isIdentified
+            val hasDifferentDistinctId = distinctId != oldDistinctId
 
-        identity.setDistinctId(distinctId)
-        val currentDistinctId = identity.distinctId()
-
-        // Serialized, uncancellable transition across per-user state
-        // (anonymous-event migration included). A rapid second identify() or
-        // reset() queues behind this one instead of cancelling it mid-fan-out.
-        if (hasDifferentDistinctId) {
-            // The public identity and visible Feature projection switch as one
-            // synchronous facade operation. Durable purchase evidence remains
-            // retained and the queued recovery derives the new customer's view.
-            core.features.handleUserChange(oldDistinctId, currentDistinctId)
-            core.userTransitions.enqueue(
-                UserTransitionCoordinator.Transition(
-                    kind = UserTransitionCoordinator.Kind.IDENTIFY,
-                    from = oldDistinctId,
-                    to = currentDistinctId,
-                    migrateEvents = !wasIdentified,
-                ),
+            identity.setDistinctId(distinctId)
+            val currentDistinctId = identity.distinctId()
+            IdentifyDecision(
+                scope = identity.captureScope(),
+                oldDistinctId = oldDistinctId,
+                currentDistinctId = currentDistinctId,
+                wasIdentified = wasIdentified,
+                hasDifferentDistinctId = hasDifferentDistinctId,
+                userProperties = userProperties?.toMap(),
+                userPropertiesSetOnce = userPropertiesSetOnce?.toMap(),
+                publication = if (hasDifferentDistinctId) {
+                    core.stageFeatureUserChange(oldDistinctId, currentDistinctId)
+                } else {
+                    null
+                },
             )
-            // Rotating the session on every same-id identify would fragment
-            // session analytics; rotate only when the user actually changed.
-            core.sessions.startSession()
         }
 
-        val hasUserProperties = userProperties != null || userPropertiesSetOnce != null
-        if (hasDifferentDistinctId || hasUserProperties) {
-            userProperties?.let { identity.setUserProperties(it) }
-            userPropertiesSetOnce?.let { identity.setOnceUserProperties(it) }
+        // The identity and Feature-state decisions are complete. Emission is
+        // deliberately outside both the facade decision lock and FeatureService
+        // lock so inline collectors may safely supersede this call.
+        decision.publication?.let { publication ->
+            kotlinx.coroutines.runBlocking { core.featureInfo.publish(publication) }
+        }
 
-            val properties = linkedMapOf<String, Any?>("distinct_id" to currentDistinctId)
-            if (!wasIdentified && hasDifferentDistinctId) {
-                properties["\$anon_distinct_id"] = oldDistinctId
+        val hasUserProperties =
+            decision.userProperties != null || decision.userPropertiesSetOnce != null
+        if (!decision.hasDifferentDistinctId && !hasUserProperties) return
+
+        // A collector/listener may have changed identity during publication.
+        // Commit every remaining side effect only if this exact decision still
+        // owns the identity; otherwise the superseding call owns the transition.
+        val committed = core.identity.withCurrentScope(decision.scope) {
+            if (decision.hasDifferentDistinctId) {
+                core.userTransitions.enqueue(
+                    UserTransitionCoordinator.Transition(
+                        kind = UserTransitionCoordinator.Kind.IDENTIFY,
+                        from = decision.oldDistinctId,
+                        to = decision.currentDistinctId,
+                        migrateEvents = !decision.wasIdentified,
+                    ),
+                )
+                // Rotating on every same-id identify would fragment sessions.
+                core.sessions.startSession()
             }
-            userProperties?.let { properties["\$set"] = it }
-            userPropertiesSetOnce?.let { properties["\$set_once"] = it }
-            core.eventLog.capture(SystemEventNames.IDENTIFY, properties)
+            decision.userProperties?.let { core.identity.setUserProperties(it) }
+            decision.userPropertiesSetOnce?.let { core.identity.setOnceUserProperties(it) }
+            true
+        } == true
+        if (!committed) return
+
+        val properties = linkedMapOf<String, Any?>(
+            "distinct_id" to decision.currentDistinctId,
+        )
+        if (!decision.wasIdentified && decision.hasDifferentDistinctId) {
+            properties["\$anon_distinct_id"] = decision.oldDistinctId
         }
+        decision.userProperties?.let { properties["\$set"] = it }
+        decision.userPropertiesSetOnce?.let { properties["\$set_once"] = it }
+        core.eventLog.capture(
+            SystemEventNames.IDENTIFY,
+            properties,
+            distinctIdOverride = decision.currentDistinctId,
+        )
     }
 
     /** End the identified session and return to a (new or kept) anonymous id. */
-    @Synchronized
     fun reset(keepAnonymousId: Boolean = false) {
         val core = core ?: return
-        val identity = core.identity
-        val previousDistinctId = identity.distinctId()
+        val decision = synchronized(identityDecisionLock) {
+            val identity = core.identity
+            val previousDistinctId = identity.distinctId()
+            identity.reset(keepAnonymousId)
+            val newDistinctId = identity.distinctId()
+            ResetDecision(
+                scope = identity.captureScope(),
+                previousDistinctId = previousDistinctId,
+                newDistinctId = newDistinctId,
+                publication = core.stageFeatureUserChange(previousDistinctId, newDistinctId),
+            )
+        }
 
-        identity.reset(keepAnonymousId)
+        kotlinx.coroutines.runBlocking { core.featureInfo.publish(decision.publication) }
 
-        val newDistinctId = identity.distinctId()
-        core.features.handleUserChange(previousDistinctId, newDistinctId)
-        core.userTransitions.enqueue(
-            UserTransitionCoordinator.Transition(
-                kind = UserTransitionCoordinator.Kind.RESET,
-                from = previousDistinctId,
-                to = newDistinctId,
-                migrateEvents = false,
-            ),
-        )
-        core.sessions.resetSession()
+        core.identity.withCurrentScope(decision.scope) {
+            core.userTransitions.enqueue(
+                UserTransitionCoordinator.Transition(
+                    kind = UserTransitionCoordinator.Kind.RESET,
+                    from = decision.previousDistinctId,
+                    to = decision.newDistinctId,
+                    migrateEvents = false,
+                ),
+            )
+            core.sessions.resetSession()
+        }
     }
 
     val distinctId: String
@@ -332,21 +372,32 @@ object Nuxie {
         featureId: String,
         oldAccess: FeatureAccess?,
         newAccess: FeatureAccess,
+        isCurrent: () -> Boolean,
     ) {
-        deliverOnMain("Feature access change") {
+        deliverOnMain("Feature access change", isCurrent) {
             it.featureAccessDidChange(featureId, oldAccess, newAccess)
         }
     }
 
-    private suspend fun deliverOnMain(label: String, callback: (NuxieListener) -> Unit) {
-        if (listener == null) return
+    private suspend fun deliverOnMain(
+        label: String,
+        isCurrent: () -> Boolean = { true },
+        callback: (NuxieListener) -> Unit,
+    ) {
+        if (!isCurrent() || listener == null) return
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            listener?.let(callback)
+            listener?.let { resolved ->
+                if (isCurrent()) callback(resolved)
+            }
             return
         }
         suspendCancellableCoroutine { continuation ->
             val posted = mainHandler.post {
-                runCatching { listener?.let(callback) }
+                runCatching {
+                    listener?.let { resolved ->
+                        if (isCurrent()) callback(resolved)
+                    }
+                }
                     .onSuccess { continuation.resume(Unit) }
                     .onFailure(continuation::resumeWithException)
             }
@@ -397,5 +448,23 @@ object Nuxie {
     private class SetupState(
         val logLevel: LogLevel,
         val core: NuxieCore,
+    )
+
+    private data class IdentifyDecision(
+        val scope: IdentityScope,
+        val oldDistinctId: String,
+        val currentDistinctId: String,
+        val wasIdentified: Boolean,
+        val hasDifferentDistinctId: Boolean,
+        val userProperties: Map<String, Any?>?,
+        val userPropertiesSetOnce: Map<String, Any?>?,
+        val publication: FeatureInfo.Mutation?,
+    )
+
+    private data class ResetDecision(
+        val scope: IdentityScope,
+        val previousDistinctId: String,
+        val newDistinctId: String,
+        val publication: FeatureInfo.Mutation,
     )
 }

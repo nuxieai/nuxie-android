@@ -22,8 +22,11 @@ internal fun optimisticFeatureProjection(
 ): Map<String, OptimisticFeatureOverlay>? {
     val projected = linkedMapOf<String, OptimisticFeatureOverlay>()
     for (purchase in evidence.filter { it.isEligibleProjectionEvidence(distinctId, authorityScope) }) {
+        // A purchase whose descriptor is missing or grants nothing (an empty
+        // entitlement list is schema-valid) contributes no overlay, but must
+        // not suppress another purchase's derivable overlay. When nothing
+        // derives at all the projection stays absent below.
         val allowances = featureAllowancesForEvidence(purchase, descriptors, bindings)
-        if (allowances.isEmpty()) return null
         for (allowance in allowances) {
             if (allowance.featureId.isBlank()) continue
             val type = runCatching { FeatureType.valueOf(allowance.type) }.getOrNull() ?: continue
@@ -68,9 +71,26 @@ private fun PurchaseEvidence.isEligibleProjectionEvidence(
         signatureVerified
 
 private fun OptimisticFeatureOverlay.widen(other: OptimisticFeatureOverlay): OptimisticFeatureOverlay {
-    if (unlimited || other.unlimited) return copy(unlimited = true, balanceIncrease = null)
-    if (type == FeatureType.BOOLEAN || other.type == FeatureType.BOOLEAN) {
+    val joinedType = deterministicFeatureType(type, other.type)
+    if (unlimited || other.unlimited) {
+        return OptimisticFeatureOverlay(joinedType, unlimited = true, balanceIncrease = null)
+    }
+    if (joinedType == FeatureType.BOOLEAN) {
         return OptimisticFeatureOverlay(FeatureType.BOOLEAN, unlimited = false, balanceIncrease = null)
     }
-    return copy(balanceIncrease = (balanceIncrease ?: 0.0) + (other.balanceIncrease ?: 0.0))
+    return OptimisticFeatureOverlay(
+        type = joinedType,
+        unlimited = false,
+        balanceIncrease = (balanceIncrease ?: 0.0) + (other.balanceIncrease ?: 0.0),
+    )
 }
+
+private fun deterministicFeatureType(left: FeatureType, right: FeatureType): FeatureType =
+    if (left.projectionRank >= right.projectionRank) left else right
+
+private val FeatureType.projectionRank: Int
+    get() = when (this) {
+        FeatureType.BOOLEAN -> 0
+        FeatureType.METERED -> 1
+        FeatureType.CREDIT_SYSTEM -> 2
+    }

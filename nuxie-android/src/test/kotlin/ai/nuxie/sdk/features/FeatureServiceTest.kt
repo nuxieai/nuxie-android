@@ -159,7 +159,7 @@ class FeatureServiceTest {
         )
         assertEquals(10.0, core.featureInfo.balance("credits")!!, 0.0)
         val observed = mutableListOf<Double?>()
-        core.featureInfo.onFeatureChange = { featureId, _, access ->
+        core.featureInfo.onFeatureChange = { featureId, _, access, _ ->
             if (featureId == "credits") observed += access.balance
         }
         val scope = core.features.captureAuthoritativeUseScope(customer)
@@ -265,9 +265,9 @@ class FeatureServiceTest {
         val staleScope = core.identity.captureScope()
 
         core.identity.setDistinctId("customer-b")
-        core.features.handleUserChange(originalId, "customer-b")
+        core.featureInfo.publish(core.features.handleUserChange(originalId, "customer-b"))
         core.identity.setDistinctId(originalId)
-        core.features.handleUserChange("customer-b", originalId)
+        core.featureInfo.publish(core.features.handleUserChange("customer-b", originalId))
 
         val result = runCatching {
             core.features.applyAuthoritativeUsageBalance(
@@ -296,10 +296,10 @@ class FeatureServiceTest {
             ).jsonObject,
         )
         val expectedScope = core.identity.captureScope()
-        core.featureInfo.onFeatureChange = { featureId, _, access ->
+        core.featureInfo.onFeatureChange = { featureId, _, access, _ ->
             if (featureId == "credits" && access.balance == 4.0) {
                 core.identity.setDistinctId("customer-b")
-                core.features.handleUserChange(originalId, "customer-b")
+                core.featureInfo.publish(core.features.handleUserChange(originalId, "customer-b"))
             }
         }
 
@@ -367,9 +367,9 @@ class FeatureServiceTest {
         val staleScope = core.features.captureAuthoritativeUseScope(customer)
 
         core.identity.setDistinctId("customer-b")
-        core.features.handleUserChange(customer, "customer-b")
+        core.featureInfo.publish(core.features.handleUserChange(customer, "customer-b"))
         core.identity.setDistinctId(customer)
-        core.features.handleUserChange("customer-b", customer)
+        core.featureInfo.publish(core.features.handleUserChange("customer-b", customer))
 
         val result = runCatching {
             core.features.applyAuthoritativeUse(
@@ -1009,6 +1009,61 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun overlayRecompositionRetainsTheLatestEntityScopedAuthority() = runBlocking {
+        val checks = AtomicInteger()
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "credits",
+                            requiredBalance = 1.0,
+                            balance = if (checks.incrementAndGet() == 1) "2" else "3",
+                            type = "creditSystem",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+        val customer = core.identity.distinctId()
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement(
+                profile(
+                    """[{"id":"credits","type":"creditSystem","balance":5,"unlimited":false}]""",
+                ),
+            ).jsonObject,
+        )
+
+        core.features.check("credits", entityId = "workspace-1")
+        assertEquals(2.0, core.featureInfo.balance("credits")!!, 0.0)
+        core.features.check("credits", entityId = "workspace-2")
+        assertEquals(3.0, core.featureInfo.balance("credits")!!, 0.0)
+
+        core.features.applyOptimisticPurchaseProjection(
+            customer,
+            mapOf(
+                "credits" to OptimisticFeatureOverlay(
+                    FeatureType.CREDIT_SYSTEM,
+                    unlimited = false,
+                    balanceIncrease = 10.0,
+                ),
+            ),
+        )
+        assertEquals(13.0, core.featureInfo.balance("credits")!!, 0.0)
+
+        core.features.applyOptimisticPurchaseProjection(customer, null)
+        assertEquals(3.0, core.featureInfo.balance("credits")!!, 0.0)
+        core.stop()
+    }
+
+    @Test
     fun entityScopedDenialCannotNarrowAnActiveOptimisticOverlay() = runBlocking {
         lateinit var core: NuxieCore
         val transport = FakeTransport().apply {
@@ -1200,9 +1255,39 @@ class FeatureServiceTest {
         assertTrue(core.featureInfo.isAllowed("pro"))
 
         core.identity.setDistinctId("customer-2")
-        core.features.handleUserChange(oldId, "customer-2")
+        core.featureInfo.publish(core.features.handleUserChange(oldId, "customer-2"))
 
         assertFalse(core.featureInfo.isAllowed("pro"))
+        core.stop()
+    }
+
+    @Test
+    fun userChangePublishesTheDestinationCustomersRetainedProjection() = runBlocking {
+        val core = core(FakeTransport())
+        val owner = core.identity.distinctId()
+        val retainedProjection = mapOf(
+            "pro" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null),
+        )
+        core.features.applyOptimisticPurchaseProjection(owner, retainedProjection)
+        assertTrue(core.featureInfo.isAllowed("pro"))
+
+        core.identity.setDistinctId("customer-2")
+        core.featureInfo.publish(
+            core.features.handleUserChange(owner, "customer-2", destinationProjection = null),
+        )
+        assertFalse(core.featureInfo.isAllowed("pro"))
+
+        core.identity.setDistinctId(owner)
+        core.featureInfo.publish(
+            core.features.handleUserChange(
+                "customer-2",
+                owner,
+                destinationProjection = retainedProjection,
+            ),
+        )
+
+        assertTrue(core.featureInfo.isAllowed("pro"))
+        assertEquals(FeatureInfo.State.Unknown, core.featureInfo.state.value)
         core.stop()
     }
 
@@ -1216,7 +1301,7 @@ class FeatureServiceTest {
         )
 
         core.identity.setDistinctId("customer-2")
-        core.features.handleUserChange(oldId, "customer-2")
+        core.featureInfo.publish(core.features.handleUserChange(oldId, "customer-2"))
         assertEquals(FeatureInfo.State.Unknown, core.featureInfo.state.value)
         assertFalse(core.featureInfo.isAllowed("pro"))
 

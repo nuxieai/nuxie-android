@@ -195,6 +195,18 @@ internal class NuxieCore(
         capturePurchaseSynced = eventLog::captureIdempotently,
     ).also { purchaseService = it }
 
+    /**
+     * Decide the complete destination Feature projection synchronously. The
+     * facade publishes the returned mutation only after releasing its identity
+     * monitor, so inline collectors cannot observe a half-switched customer.
+     */
+    fun stageFeatureUserChange(from: String, to: String): FeatureInfo.Mutation =
+        features.handleUserChange(
+            from,
+            to,
+            purchases.optimisticProjectionSnapshot(to),
+        )
+
     val featureUsage = FeatureUsageService(
         api = api,
         purchases = purchases,
@@ -337,6 +349,9 @@ internal class NuxieCore(
             presentations.shutdownOwnedBy(from)
         })
         userTransitions.addObserver(UserTransitionCoordinator.Observer { _, _, _ ->
+            // The retained-evidence projection already switched synchronously
+            // through stageFeatureUserChange. This queued lane reconciles Play
+            // and backend state without becoming the source of local readiness.
             purchases.recover()
         })
         userTransitions.addObserver(profile.transitionObserver)

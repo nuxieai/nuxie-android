@@ -9,7 +9,11 @@ import ai.nuxie.sdk.commerce.StoredFeatureAllowance
 import ai.nuxie.sdk.commerce.StoredProductMapping
 import ai.nuxie.sdk.commerce.StoredPurchaseState
 import ai.nuxie.sdk.commerce.purchaseAuthorityScope
+import ai.nuxie.sdk.commerce.ProjectionFixtureAdapters
+import ai.nuxie.sdk.commerce.ProjectionFixtureAdapters.unlessNull
+import ai.nuxie.sdk.commerce.optimisticFeatureProjection
 import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.identity.IdentityService
 import ai.nuxie.sdk.testsupport.FakeTransport
 import kotlinx.coroutines.async
@@ -18,6 +22,14 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -127,14 +139,80 @@ class OptimisticFeatureOverlayTest {
         core.features.applyOptimisticPurchaseProjection(owner, projection)
 
         core.identity.setDistinctId("customer-b")
-        core.features.handleUserChange(owner, "customer-b")
+        core.featureInfo.publish(core.features.handleUserChange(owner, "customer-b"))
         core.features.applyOptimisticPurchaseProjection(owner, projection)
         assertFalse(core.featureInfo.isAllowed("pro"))
 
         core.identity.setDistinctId(owner)
-        core.features.handleUserChange("customer-b", owner)
-        core.features.applyOptimisticPurchaseProjection(owner, projection)
+        core.featureInfo.publish(
+            core.features.handleUserChange(
+                "customer-b",
+                owner,
+                destinationProjection = projection,
+            ),
+        )
         assertTrue(core.featureInfo.isAllowed("pro"))
+        core.stop()
+    }
+
+    @Test
+    fun returningIdentitySynchronouslyRederivesProjectionFromRetainedEvidence() = runBlocking {
+        val apiKey = "pk_test_identity_projection_${System.nanoTime()}"
+        val owner = "customer-a"
+        val application = RuntimeEnvironment.getApplication()
+        val identity = IdentityService(application).also { it.setDistinctId(owner) }
+        val store = InMemoryPurchaseEvidenceStore().also {
+            it.upsert(
+                PurchaseEvidence(
+                    purchaseToken = "identity-return-token",
+                    packageName = "com.example.app",
+                    storeProductIds = listOf("play-pro"),
+                    nuxieProductId = "pro",
+                    purchaseState = StoredPurchaseState.PURCHASED,
+                    syncAttributionDistinctId = owner,
+                    ownerDistinctId = owner,
+                    acknowledged = false,
+                    firstSeenMillis = 1L,
+                    catalogResolved = true,
+                    signatureVerified = true,
+                    authorityScope = purchaseAuthorityScope(apiKey, NuxieEnvironment.DEVELOPMENT),
+                ),
+            )
+            it.upsertProductMapping(
+                StoredProductMapping(
+                    storeProductId = "play-pro",
+                    nuxieProductId = "pro",
+                    productType = "inapp",
+                    consumable = false,
+                    featureAllowances = listOf(
+                        StoredFeatureAllowance("pro", FeatureType.BOOLEAN.name, false),
+                    ),
+                ),
+            )
+        }
+        val core = NuxieCore(
+            context = application,
+            apiKey = apiKey,
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(
+                transport = FakeTransport(),
+                identity = identity,
+                purchaseEvidenceStore = store,
+                registerLifecycle = false,
+            ),
+        )
+
+        identity.setDistinctId("customer-b")
+        core.featureInfo.publish(core.stageFeatureUserChange(owner, "customer-b"))
+        assertFalse(core.featureInfo.isAllowed("pro"))
+
+        identity.setDistinctId(owner)
+        core.featureInfo.publish(core.stageFeatureUserChange("customer-b", owner))
+
+        assertTrue(core.featureInfo.isAllowed("pro"))
+        assertEquals(FeatureInfo.State.Unknown, core.featureInfo.state.value)
         core.stop()
     }
 
@@ -192,6 +270,145 @@ class OptimisticFeatureOverlayTest {
         }
         core.stop()
     }
+
+    @Test
+    fun visibleJoinAndReadinessMatchTheCrossSdkProjectionFixture() = runBlocking {
+        val fixture = Json.parseToJsonElement(
+            java.io.File(
+                FixtureRunner.fixturesRoot(),
+                "features/optimistic-entitlement-projection.json",
+            ).readText(),
+        ).jsonObject
+
+        fixture.getValue("cases").jsonArray.forEach { element ->
+            val case = element.jsonObject
+            val core = core()
+            try {
+                var currentEvidence = ProjectionFixtureAdapters.evidence(case["evidence"])
+                var currentDescriptors = ProjectionFixtureAdapters.descriptors(case["descriptors"])
+                var currentDistinctId = case.getValue("distinctId").jsonPrimitive.content
+                core.identity.setDistinctId(currentDistinctId)
+
+                fun deriveOverlay() = optimisticFeatureProjection(
+                    distinctId = currentDistinctId,
+                    authorityScope = ProjectionFixtureAdapters.AUTHORITY_SCOPE,
+                    evidence = currentEvidence,
+                    descriptors = currentDescriptors,
+                )
+
+                suspend fun applyStage(stage: JsonObject) {
+                    if (stage.boolean("profileAdmitted")) {
+                        core.features.hydrateProfile(
+                            currentDistinctId,
+                            fixtureProfile(stage["authoritative"]),
+                        )
+                    }
+                    core.features.applyOptimisticPurchaseProjection(
+                        currentDistinctId,
+                        deriveOverlay(),
+                    )
+                    assertFixtureVisible(core, stage)
+                }
+
+                applyStage(case)
+
+                case["transitions"].unlessNull()?.jsonArray.orEmpty().forEach { transitionElement ->
+                    val transition = transitionElement.jsonObject
+                    transition["evidence"].unlessNull()?.let {
+                        currentEvidence = ProjectionFixtureAdapters.evidence(it)
+                    }
+                    transition["descriptors"].unlessNull()?.let {
+                        currentDescriptors = ProjectionFixtureAdapters.descriptors(it)
+                    }
+                    val nextDistinctId = transition.getValue("distinctId").jsonPrimitive.content
+                    if (nextDistinctId != currentDistinctId) {
+                        val previous = currentDistinctId
+                        currentDistinctId = nextDistinctId
+                        core.identity.setDistinctId(nextDistinctId)
+                        core.featureInfo.publish(
+                            core.features.handleUserChange(
+                                previous,
+                                nextDistinctId,
+                                destinationProjection = deriveOverlay(),
+                            ),
+                        )
+                    }
+                    applyStage(transition)
+                }
+            } finally {
+                core.stop()
+            }
+        }
+    }
+
+    /**
+     * A profile expresses denial by omission, so only expressible rows are
+     * hydrated; [assertFixtureVisible] asserts semantic outcomes rather than
+     * row shapes for the same reason.
+     */
+    private fun fixtureProfile(authoritative: JsonElement?): JsonObject {
+        val features = authoritative.unlessNull()?.jsonObject.orEmpty().mapNotNull { (id, value) ->
+            val access = value.jsonObject
+            val allowed = access.boolean("allowed")
+            val balance = access["balance"].unlessNull()?.jsonPrimitive?.content?.toDouble()
+            val unlimited = access.boolean("unlimited")
+            if (!allowed && balance == null && !unlimited) return@mapNotNull null
+            buildJsonObject {
+                put("id", JsonPrimitive(id))
+                put("type", JsonPrimitive(access.getValue("type").jsonPrimitive.content))
+                put("balance", balance?.let(::JsonPrimitive) ?: JsonNull)
+                put("unlimited", JsonPrimitive(unlimited))
+            }
+        }
+        return buildJsonObject {
+            put("segments", JsonArray(emptyList()))
+            put("features", JsonArray(features))
+        }
+    }
+
+    private fun assertFixtureVisible(core: NuxieCore, stage: JsonObject) {
+        val label = stage.getValue("name").jsonPrimitive.content
+        val expectedVisible = stage.getValue("expectedVisible").jsonObject
+        if (expectedVisible.isEmpty()) {
+            assertTrue(label, core.featureInfo.all.value.isEmpty())
+        }
+        expectedVisible.forEach { (featureId, value) ->
+            val expected = value.jsonObject
+            val allowed = expected.boolean("allowed")
+            val balance = expected["balance"].unlessNull()?.jsonPrimitive?.content?.toDouble()
+            val unlimited = expected.boolean("unlimited")
+            val actual = core.featureInfo.all.value[featureId]
+            if (actual == null) {
+                // Denial-by-omission is this platform's representation of a
+                // fully denied row.
+                assertFalse(label, allowed)
+                assertEquals(label, null, balance)
+                assertFalse(label, unlimited)
+                assertFalse(label, core.featureInfo.isAllowed(featureId))
+                return@forEach
+            }
+            assertEquals("$label / $featureId allowed", allowed, actual.allowed)
+            assertEquals("$label / $featureId unlimited", unlimited, actual.unlimited)
+            assertEquals("$label / $featureId balance", balance, actual.balance)
+            assertEquals(
+                "$label / $featureId type",
+                ProjectionFixtureAdapters.featureType(
+                    expected.getValue("type").jsonPrimitive.content,
+                ),
+                actual.type,
+            )
+        }
+        val expectedState = when (stage.getValue("expectedState").jsonPrimitive.content) {
+            "unknown" -> FeatureInfo.State.Unknown
+            "reconciling" -> FeatureInfo.State.Reconciling
+            "ready" -> FeatureInfo.State.Ready
+            else -> error("Unsupported fixture state")
+        }
+        assertEquals(label, expectedState, core.featureInfo.state.value)
+    }
+
+    private fun JsonObject.boolean(key: String): Boolean =
+        (this[key] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() ?: false
 
     private fun core() = NuxieCore(
         context = RuntimeEnvironment.getApplication(),

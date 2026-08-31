@@ -1,9 +1,22 @@
 package ai.nuxie.sdk
 
 import ai.nuxie.sdk.commerce.OptimisticFeatureOverlay
+import ai.nuxie.sdk.commerce.InMemoryPurchaseEvidenceStore
+import ai.nuxie.sdk.commerce.PurchaseEvidence
+import ai.nuxie.sdk.commerce.StoredFeatureAllowance
+import ai.nuxie.sdk.commerce.StoredProductMapping
+import ai.nuxie.sdk.commerce.StoredPurchaseState
+import ai.nuxie.sdk.commerce.purchaseAuthorityScope
 import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureType
+import ai.nuxie.sdk.identity.IdentityService
 import ai.nuxie.sdk.testsupport.FakeTransport
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.After
@@ -156,7 +169,7 @@ class NuxieIdentityFacadeTest {
     fun identifyFromAFeatureListenerInvalidatesThePublishingMutationWithoutDeadlock() = runBlocking {
         val core = requireNotNull(Nuxie.core)
         val anonymous = Nuxie.distinctId
-        core.featureInfo.onFeatureChange = { featureId, _, _ ->
+        core.featureInfo.onFeatureChange = { featureId, _, _, _ ->
             if (featureId == "pro") Nuxie.identify("listener-user")
         }
 
@@ -167,6 +180,118 @@ class NuxieIdentityFacadeTest {
 
         assertEquals("listener-user", Nuxie.distinctId)
         assertFalse(Nuxie.features.isAllowed("pro"))
+    }
+
+    @Test
+    fun inlineFeatureCollectorCanSupersedeIdentifyWithoutCommittingTheOuterTransition() = runBlocking {
+        val core = requireNotNull(Nuxie.core)
+        val initialDistinctId = Nuxie.distinctId
+        val outerDistinctId = "outer-${System.nanoTime()}"
+        val nestedDistinctId = "nested-${System.nanoTime()}"
+        val outerProperty = "outer-property-${System.nanoTime()}"
+        val transitions = mutableListOf<Pair<String, String>>()
+        core.userTransitions.addObserver { _, from, to -> transitions += from to to }
+        core.features.applyOptimisticPurchaseProjection(
+            initialDistinctId,
+            mapOf("pro" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null)),
+        )
+        assertTrue(Nuxie.features.isAllowed("pro"))
+
+        var maySupersede = true
+        val collector = launch(Dispatchers.Unconfined, start = CoroutineStart.UNDISPATCHED) {
+            Nuxie.features.all.collect { features ->
+                if (maySupersede && features.isEmpty()) {
+                    maySupersede = false
+                    Nuxie.identify(nestedDistinctId)
+                }
+            }
+        }
+
+        Nuxie.identify(
+            outerDistinctId,
+            userProperties = mapOf(outerProperty to "must-not-leak"),
+        )
+        collector.cancelAndJoin()
+        core.userTransitions.drain()
+        core.eventLog.awaitBarrier()
+
+        assertEquals(nestedDistinctId, Nuxie.distinctId)
+        assertNull(core.identity.userProperty(outerProperty))
+        assertEquals(listOf(outerDistinctId to nestedDistinctId), transitions)
+        val identifyCustomers = core.store.pendingBatch(limit = 50)
+            .filter { it.name == "\$identify" }
+            .map { it.distinctId }
+        assertFalse(outerDistinctId in identifyCustomers)
+        assertTrue(nestedDistinctId in identifyCustomers)
+    }
+
+    @Test
+    fun returningToEvidenceOwnerPublishesItsOverlayBeforeIdentifyReturns() = runBlocking {
+        Nuxie.resetForTesting()
+        val application = RuntimeEnvironment.getApplication()
+        val apiKey = "pk_test_identity_projection_${System.nanoTime()}"
+        val owner = "owner-${System.nanoTime()}"
+        val identity = IdentityService(application).also { it.setDistinctId(owner) }
+        val evidenceStore = InMemoryPurchaseEvidenceStore().also { store ->
+            store.upsertProductMapping(
+                StoredProductMapping(
+                    storeProductId = "play-pro",
+                    nuxieProductId = "pro-product",
+                    productType = "inapp",
+                    consumable = false,
+                    featureAllowances = listOf(
+                        StoredFeatureAllowance(
+                            featureId = "pro",
+                            type = FeatureType.BOOLEAN.name,
+                            unlimited = false,
+                        ),
+                    ),
+                ),
+            )
+            store.upsert(
+                PurchaseEvidence(
+                    purchaseToken = "token-owner",
+                    packageName = "com.example.app",
+                    storeProductIds = listOf("play-pro"),
+                    nuxieProductId = "pro-product",
+                    purchaseState = StoredPurchaseState.PURCHASED,
+                    syncAttributionDistinctId = owner,
+                    ownerDistinctId = owner,
+                    acknowledged = false,
+                    firstSeenMillis = 1L,
+                    catalogResolved = true,
+                    signatureVerified = true,
+                    authorityScope = purchaseAuthorityScope(
+                        apiKey,
+                        NuxieEnvironment.PRODUCTION,
+                    ),
+                ),
+            )
+        }
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            identity = identity,
+            transport = FakeTransport(),
+            purchaseEvidenceStore = evidenceStore,
+            registerLifecycle = false,
+        )
+        Nuxie.setup(
+            application,
+            NuxieConfiguration(apiKey).apply { logLevel = LogLevel.NONE },
+        )
+        val core = requireNotNull(Nuxie.core)
+        core.features.applyOptimisticPurchaseProjection(
+            owner,
+            core.purchases.optimisticProjectionSnapshot(owner),
+        )
+        assertTrue(Nuxie.features.isAllowed("pro"))
+
+        Nuxie.identify("other-${System.nanoTime()}")
+        assertFalse(Nuxie.features.isAllowed("pro"))
+
+        Nuxie.identify(owner)
+
+        assertTrue(Nuxie.features.isAllowed("pro"))
+        assertEquals(FeatureInfo.State.Unknown, Nuxie.features.state.value)
     }
 
     @Test

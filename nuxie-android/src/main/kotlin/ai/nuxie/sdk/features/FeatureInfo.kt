@@ -11,8 +11,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -35,20 +33,86 @@ class FeatureInfo {
 
     private val mutableState = MutableStateFlow<State>(State.Unknown)
     private val mutableAll = MutableFeatureAccessFlow()
-    private val mutationLock = Mutex()
     private val stagingLock = Any()
-    private val publicationLock = Any()
-    private var mutationTail = CompletableDeferred<Unit>().also { it.complete(Unit) }
+    private val emissionLock = Any()
     @Volatile
-    private var publicationGeneration = 0L
+    private var currentGeneration = Generation()
     @Volatile
     private var entityAccess: Map<String, Map<String, FeatureAccess>> = emptyMap()
 
+    @Volatile
     internal var onFeatureChange: suspend (
         featureId: String,
         oldAccess: FeatureAccess?,
         newAccess: FeatureAccess,
-    ) -> Unit = { _, _, _ -> }
+        isCurrent: () -> Boolean,
+    ) -> Unit = { _, _, _, _ -> }
+
+    /** One FIFO lane per customer-visible publication generation. */
+    private class Generation {
+        var tail = CompletableDeferred<Unit>().also { it.complete(Unit) }
+    }
+
+    /** Fence shared by readiness, values, and every last-mile callback. */
+    private inner class PublicationFence(
+        private val generation: Generation,
+        private val additionalCheck: () -> Boolean,
+    ) {
+        fun isCurrent(): Boolean =
+            currentGeneration === generation && additionalCheck()
+
+        suspend fun publishSnapshot(
+            features: Map<String, FeatureAccess>,
+            entities: Map<String, Map<String, FeatureAccess>>,
+            state: State?,
+        ) {
+            if (!isCurrent()) return
+            val oldFeatures = synchronized(emissionLock) {
+                if (!isCurrent()) return
+                mutableAll.value
+            }
+            val observer = onFeatureChange
+            val callbacks = (oldFeatures.keys + features.keys).toSortedSet().mapNotNull { featureId ->
+                val oldAccess = oldFeatures[featureId]
+                val newAccess = features[featureId] ?: FEATURE_NOT_FOUND
+                if (oldAccess.hasSameFieldsAs(newAccess)) {
+                    null
+                } else {
+                    FeatureChange(featureId, oldAccess, newAccess)
+                }
+            }
+
+            // Readiness describes the values, so an inline values collector
+            // must never observe the prior readiness for the new snapshot.
+            if (state != null && !emitIfCurrent(this) { mutableState.value = state }) return
+            if (!emitIfCurrent(this) {
+                    entityAccess = entities
+                    mutableAll.publish(features)
+                }
+            ) {
+                return
+            }
+
+            callbacks.forEach { callback ->
+                if (!isCurrent()) return
+                runCatching {
+                    observer(
+                        callback.featureId,
+                        callback.oldAccess,
+                        callback.newAccess,
+                        ::isCurrent,
+                    )
+                }
+                if (!isCurrent()) return
+            }
+        }
+    }
+
+    private data class FeatureChange(
+        val featureId: String,
+        val oldAccess: FeatureAccess?,
+        val newAccess: FeatureAccess,
+    )
 
     /** A FIFO position reserved at the engine mutation commit point. */
     internal class Mutation internal constructor(
@@ -82,20 +146,24 @@ class FeatureInfo {
         entities: Map<String, Map<String, FeatureAccess>>,
         state: State? = null,
         isCurrent: () -> Boolean = { true },
-    ): Mutation = stage { generation ->
-        if (!isPublicationCurrent(generation) || !isCurrent()) return@stage
-        val oldFeatures = mutableAll.value
-        features.forEach { (featureId, newAccess) ->
-            val oldAccess = oldFeatures[featureId]
-            if (!oldAccess.hasSameFieldsAs(newAccess)) {
-                runCatching { onFeatureChange(featureId, oldAccess, newAccess) }
-            }
-        }
-        if (!isCurrent()) return@stage
-        publishIfCurrent(generation) {
-            entityAccess = entities
-            mutableAll.publish(features)
-            state?.let { mutableState.value = it }
+    ): Mutation = stage(isCurrent) { fence ->
+        fence.publishSnapshot(features, entities, state)
+    }
+
+    /**
+     * Invalidate every older customer publication and stage the complete new
+     * customer view. Staging emits nothing; callers publish only after all
+     * identity-decision locks have been released.
+     */
+    internal fun stageIdentityChange(
+        features: Map<String, FeatureAccess>,
+        entities: Map<String, Map<String, FeatureAccess>>,
+        state: State,
+    ): Mutation = synchronized(stagingLock) {
+        val generation = Generation()
+        currentGeneration = generation
+        stageLocked(generation, isCurrent = { true }) { fence ->
+            fence.publishSnapshot(features, entities, state)
         }
     }
 
@@ -106,49 +174,31 @@ class FeatureInfo {
         featureId: String,
         access: FeatureAccess,
         entityId: String?,
-    ): Mutation = stage { generation ->
-        if (!isPublicationCurrent(generation)) return@stage
-        val oldAccess = mutableAll.value[featureId]
-        if (!oldAccess.hasSameFieldsAs(access)) {
-            runCatching { onFeatureChange(featureId, oldAccess, access) }
+    ): Mutation = stage { fence ->
+        val entities = if (entityId == null) {
+            entityAccess
+        } else {
+            entityAccess + (
+                featureId to (entityAccess[featureId].orEmpty() + (entityId to access))
+            )
         }
-        publishIfCurrent(generation) {
-            // iOS has one reactive Feature map: an entity check publishes its
-            // result there even though its reusable cache entry stays scoped.
-            mutableAll.publish(mutableAll.value + (featureId to access))
-            if (entityId != null) {
-                entityAccess = entityAccess + (
-                    featureId to (entityAccess[featureId].orEmpty() + (entityId to access))
-                )
-            }
-        }
+        // iOS has one reactive Feature map: an entity check publishes its
+        // result there even though its reusable cache entry stays scoped.
+        fence.publishSnapshot(mutableAll.value + (featureId to access), entities, state = null)
     }
 
     internal suspend fun clear() = publish(stageClear())
 
-    internal fun stageClear(): Mutation = stage { generation ->
-        publishIfCurrent(generation) {
-            entityAccess = emptyMap()
-            mutableAll.publish(emptyMap())
-        }
+    internal fun stageClear(): Mutation = stage { fence ->
+        fence.publishSnapshot(emptyMap(), emptyMap(), state = null)
     }
 
-    internal suspend fun reset() = publish(stageReset())
+    internal suspend fun reset() = publish(
+        stageIdentityChange(emptyMap(), emptyMap(), State.Unknown),
+    )
 
-    internal fun stageReset(): Mutation = stage { generation ->
-        publishIfCurrent(generation) {
-            entityAccess = emptyMap()
-            mutableAll.publish(emptyMap())
-            mutableState.value = State.Unknown
-        }
-    }
-
-    /** Invalidate older queued mutations and clear the visible customer synchronously. */
-    internal fun resetImmediately() = synchronized(publicationLock) {
-        publicationGeneration += 1
-        entityAccess = emptyMap()
-        mutableAll.publish(emptyMap())
-        mutableState.value = State.Unknown
+    internal fun stageReset(): Mutation = stage { fence ->
+        fence.publishSnapshot(emptyMap(), emptyMap(), State.Unknown)
     }
 
     internal suspend fun publish(mutation: Mutation) {
@@ -157,26 +207,51 @@ class FeatureInfo {
         withContext(NonCancellable) {
             mutation.previous.await()
             try {
-                mutationLock.withLock { mutation.apply() }
+                mutation.apply()
             } finally {
                 mutation.completed.complete(Unit)
             }
         }
     }
 
-    private fun stage(apply: suspend (Long) -> Unit): Mutation = synchronized(stagingLock) {
-        val completed = CompletableDeferred<Unit>()
-        val generation = publicationGeneration
-        Mutation(mutationTail, completed) { apply(generation) }.also { mutationTail = completed }
+    private fun stage(
+        isCurrent: () -> Boolean = { true },
+        apply: suspend (PublicationFence) -> Unit,
+    ): Mutation = synchronized(stagingLock) {
+        stageLocked(currentGeneration, isCurrent, apply)
     }
 
-    private fun isPublicationCurrent(generation: Long): Boolean =
-        publicationGeneration == generation
+    private fun stageLocked(
+        generation: Generation,
+        isCurrent: () -> Boolean,
+        apply: suspend (PublicationFence) -> Unit,
+    ): Mutation {
+        val completed = CompletableDeferred<Unit>()
+        val previous = generation.tail
+        generation.tail = completed
+        val fence = PublicationFence(generation, isCurrent)
+        return Mutation(previous, completed) { apply(fence) }
+    }
 
-    private inline fun publishIfCurrent(generation: Long, publish: () -> Unit) {
-        synchronized(publicationLock) {
-            if (publicationGeneration == generation) publish()
+    private inline fun emitIfCurrent(
+        fence: PublicationFence,
+        emit: () -> Unit,
+    ): Boolean = synchronized(emissionLock) {
+        if (!fence.isCurrent()) {
+            false
+        } else {
+            emit()
+            fence.isCurrent()
         }
+    }
+
+    private companion object {
+        val FEATURE_NOT_FOUND = FeatureAccess(
+            allowed = false,
+            unlimited = false,
+            balance = null,
+            type = FeatureType.BOOLEAN,
+        )
     }
 }
 
