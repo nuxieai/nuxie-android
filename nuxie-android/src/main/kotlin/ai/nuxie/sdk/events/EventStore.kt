@@ -52,9 +52,30 @@ internal interface EventStore {
 
     suspend fun deleteOldestDeliveredEvents(keeping: Int): Int
 
+    /** Null means this source cannot promise any complete history window. */
+    suspend fun historyCoverageStartingAt(): Long? = null
+
+    /** Monotonically fence history after a known persistence gap. */
+    suspend fun advanceHistoryCoverage(startingAtMillis: Long): Long? = null
+
+    /** Reads coverage and rows in one snapshot. Null means incomplete or truncated,
+     * including unbounded lifetime queries against retention-bounded history. */
+    suspend fun queryHistory(
+        name: String,
+        distinctId: String,
+        sinceMillis: Long?,
+        untilMillis: Long?,
+    ): List<StoredEvent>? = null
+
     suspend fun recordStableDrop(eventId: String, recordedAtMillis: Long = System.currentTimeMillis()): Boolean
 
     suspend fun pendingBatch(limit: Int): List<StoredEvent>
 
     suspend fun close()
 }
+
+internal data class EventHistoryPruneResult(
+    val countDeleted: Int,
+    val ageDeleted: Int,
+    val coverageStartingAtMillis: Long,
+)

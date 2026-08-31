@@ -140,7 +140,7 @@ class SQLiteEventStoreTest {
     }
 
     @Test
-    fun migratesAnEmptyDatabaseToVersionTwoWithTheExactSchema() = runBlocking {
+    fun migratesAnEmptyDatabaseToVersionThreeWithTheExactSchema() = runBlocking {
         val eventStore = SQLiteEventStore(context).also { store = it }
 
         assertEquals(emptyList<StoredEvent>(), eventStore.pendingBatch(limit = 1))
@@ -149,12 +149,12 @@ class SQLiteEventStoreTest {
 
         val connection = AndroidSQLiteDriver().open(File(databaseDirectory, "events.db").absolutePath)
         connection.use {
-            assertEquals(2L, it.queryLong("PRAGMA user_version;"))
+            assertEquals(3L, it.queryLong("PRAGMA user_version;"))
             assertEquals(
-                setOf("events", "stable_event_drops"),
+                setOf("events", "stable_event_drops", "event_history_metadata"),
                 it.queryStrings(
                     "SELECT name FROM sqlite_master " +
-                        "WHERE type = 'table' AND name IN ('events', 'stable_event_drops');",
+                        "WHERE type = 'table' AND name IN ('events', 'stable_event_drops', 'event_history_metadata');",
                 ),
             )
             assertEquals(

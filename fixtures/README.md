@@ -2,9 +2,27 @@
 
 These language-neutral vectors pin the cross-plane experience-execution contract:
 
+- `journeys/planes/occurrence-evaluation.json`: horizon-fenced occurrence counts,
+  predicates, numeric aggregates, relative windows, and unknown propagation.
+- `journeys/planes/history-coverage.json`: durable count/age retention fences,
+  tied timestamps, protected pending captures and server facts, late delivery,
+  persistence gaps, restart, and known-empty versus incomplete query windows.
+  Both native SQLite stores execute these vectors.
+- `journeys/planes/release.json`: canonical TypeScript publisher-signed report-only
+  and rendered leg envelopes, using the public development test key. The parent
+  repository's device-leg release suite verifies the same envelopes against the
+  canonical schemas and Ed25519 verifier; the iOS and macOS admission suites consume
+  these bytes without reconstructing a whole journey.
+- `journeys/planes/entry-evaluation.json`: flat-fact device-leg entry evaluation,
+  including the foreground latch, event edges, opaque positive/negative membership
+  gates, current property snapshots, and fail-closed unknown facts under negation.
+  These vectors belong to the Experience Plane Partitioning runtime; the legacy
+  handoff and claim suites below remain until the coordinated state discard.
+
 - `journeys/transitions`: a timeline maps to ordered `$journey_transition` facts with exact properties.
 - `journeys/effects`: deterministic request ids, server completion facts, result binding, timeout, late-arrival, and offline-delivery semantics.
-- `segments/seed-mirror`: profile generations reconcile an authoritative server membership mirror.
+- `segments/seed-mirror`: admitted profile snapshots replace the read-only membership value;
+  missing membership rejects the response and explicit empty membership clears it.
 - `events/down-facts`: repeated server facts commit once, never upload, and route once to subscribers.
 - `events/experience-events`: canonical `$experience_*` names and the
   experience identity/version properties carried by presentation facts and
@@ -16,6 +34,9 @@ These language-neutral vectors pin the cross-plane experience-execution contract
 - `events/delivery-disposition`: retry/auth/split/poison classification,
   all-or-nothing partial-ack validation, and poison-event isolation without
   disturbing valid neighbors.
+- `events/generated-control-routing`: reserved generated native interaction
+  identity resolves only to an exact signed control, never from an ordinary
+  analytics event's payload.
 - `golden-journey`: the minimal synchronous-enrollment journey vocabulary.
 - `journeys/handoff`: server→device mailbox claim plus device→server
   `$journey_handoff` property shape, direction, epoch 0/1 encoding,
@@ -38,10 +59,18 @@ These language-neutral vectors pin the cross-plane experience-execution contract
 - `journeys/time-window`: identical Swift/server calendar decisions.
 - `journeys/experiment-resolution`: identical Swift/server assignment,
   fallback, freezing, and invalid-assignment decisions.
+- `journeys/screen-emission-runtime`: one typed control input becomes one
+  atomic emission batch, then preserves response state and Customer Event
+  identity through durable admission and replay.
 - `experience-release-profile-v1/profile.json`: delivery origins plus the
   active and pinned locator/envelope membership wire shape shared by SDKs.
 - `experience-release-descriptor/segment-trigger.json`: compiled segment
   predicate semantics, including disjunction and negative membership, kept
   distinct from the segment dependency inventory.
+- `features/optimistic-entitlement-projection.json`: retained-evidence ×
+  descriptor-allowance projection composed with an admitted authoritative
+  snapshot. Vectors pin overlay absence, widening joins, post-ack server
+  authority, tri-state readiness, revocation, identity scoping, and
+  external-billing absence.
 
 The Swift contract tests exercise the same behaviors. Consumers in other SDKs can reuse these JSON vectors.
