@@ -233,7 +233,7 @@ internal object ExperienceReleaseVerifier {
         )
     }
 
-    private fun validateRequirements(requirements: JsonObject, supported: SupportedRuntime) {
+    internal fun validateRequirements(requirements: JsonObject, supported: SupportedRuntime) {
         val minimumSdk = SemanticVersion.parse(requirements.string("minimumSdkVersion") ?: fail("minimumSdkVersion"))
             ?: fail("minimumSdkVersion")
         val currentSdk = SemanticVersion.parse(supported.currentSdkVersion) ?: fail("current sdk version")
