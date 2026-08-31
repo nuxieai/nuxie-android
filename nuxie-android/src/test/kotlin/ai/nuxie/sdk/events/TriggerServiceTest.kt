@@ -418,7 +418,12 @@ class TriggerServiceTest {
             continueReporting.complete(Unit)
 
             withTimeout(2_000L) {
-                while (store.load(ownerDistinctId, journeyId)?.state != JourneyRunState.TERMINAL) {
+                // Terminal state is saved before the producer enqueues its
+                // exit event. Await its durable completion record, not an
+                // event-log barrier that can race ahead of that producer.
+                while (store.load(ownerDistinctId, journeyId)?.state != JourneyRunState.TERMINAL ||
+                    !store.hasCompleted(ownerDistinctId, ref.experienceId)
+                ) {
                     yield()
                 }
             }

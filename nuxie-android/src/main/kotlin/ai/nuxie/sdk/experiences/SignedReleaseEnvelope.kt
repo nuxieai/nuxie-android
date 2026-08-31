@@ -5,7 +5,7 @@ import java.security.MessageDigest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.doubleOrNull
 
 /** Exact-byte authentication shared by release grammars. A verified envelope
  * is not an admitted program: the caller must still validate its descriptor,
@@ -70,7 +70,9 @@ internal class SignedReleaseEnvelope private constructor(
         private fun JsonObject.string(key: String): String =
             (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: fail(key)
         private fun JsonObject.integer(key: String): Long =
-            (this[key] as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull ?: fail(key)
+            (this[key] as? JsonPrimitive)?.takeUnless { it.isString }?.doubleOrNull
+                ?.takeIf { it.isFinite() && it == kotlin.math.floor(it) && it in 0.0..9_007_199_254_740_991.0 }
+                ?.toLong() ?: fail(key)
         private fun fail(message: String): Nothing = throw ReleaseAuthenticationException(message)
     }
 }

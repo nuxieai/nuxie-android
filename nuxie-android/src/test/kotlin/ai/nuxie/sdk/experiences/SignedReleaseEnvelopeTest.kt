@@ -41,6 +41,16 @@ class SignedReleaseEnvelopeTest {
         }
     }
 
+    @Test fun `integral JSON numbers do not require a particular lexical spelling`() {
+        val original = envelope()
+        val signature = JsonObject(original.getValue("signature").jsonObject + ("version" to JsonPrimitive(1.0)))
+        val changed = JsonObject(original + mapOf("signature" to signature,
+            "descriptorSizeBytes" to JsonPrimitive(original.getValue("descriptorSizeBytes").jsonPrimitive.content.toDouble())))
+        val verified = SignedReleaseEnvelope.authenticate(changed.toString().encodeToByteArray(), keys,
+            SignedReleaseEnvelope.Format.DEVICE_LEG)
+        assertEquals(original.getValue("descriptorSha256").jsonPrimitive.content, verified.sha256)
+    }
+
     @Test fun `duplicate envelope keys are rejected after JSON escape decoding`() {
         for (duplicate in listOf("mediaType", "media\\u0054ype")) {
             val text = envelope().toString().replaceFirst("{", "{\"$duplicate\":\"application/vnd.nuxie.device-leg+json\",")

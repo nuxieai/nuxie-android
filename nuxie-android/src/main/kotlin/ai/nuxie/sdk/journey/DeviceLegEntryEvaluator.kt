@@ -102,7 +102,7 @@ internal object DeviceLegEntryEvaluator {
             if (depth > 64) return false
             val node = value as? JsonObject ?: return false
             return when (node["type"].string()) {
-                "Pred" -> available(node, hasEvent = true, depth = depth + 1)
+                "Pred" -> node["op"].string() != "has" && available(node, hasEvent = true, depth = depth + 1)
                 "PredAnd", "PredOr" -> (node["args"] as? JsonArray)?.all { predicateAvailable(it, depth + 1) } == true
                 else -> false
             }
@@ -195,7 +195,7 @@ internal object DeviceLegEntryEvaluator {
                     text != null && runCatching { Regex(pattern).containsMatchIn(text) }.getOrDefault(false)
                 }
                 "is_date_exact", "is_date_after", "is_date_before" -> {
-                    val timestamp = actual.coerceNumber() ?: actual.string()?.let { IsoDates.parseMillis(it)?.div(1000.0) }
+                    val timestamp = actual.coerceNumber() ?: actual.string()?.let(::timestampSeconds)
                     val target = expected.number()
                     if (timestamp == null || target == null || !isTimestamp(expression["value"])) false
                     else when (op) {
@@ -229,8 +229,8 @@ internal object DeviceLegEntryEvaluator {
                     since = maxOf(since ?: Double.NEGATIVE_INFINITY, nowMillis / 1000.0 - duration)
                 }
             }
-            val lower = since?.let { milliseconds(it) ?: return null }
-            val upper = until?.let { milliseconds(it) ?: return null }
+            val lower = since?.let { queryMilliseconds(it, lower = true) ?: return null }
+            val upper = until?.let { queryMilliseconds(it, lower = false) ?: return null }
             // Bind predicate inputs once, before inspecting rows. An empty
             // result must not conceal an unknown nested occurrence query.
             val predicate = expression["where"]?.let { compilePredicate(it) ?: return null }
@@ -352,10 +352,27 @@ internal object DeviceLegEntryEvaluator {
     private fun milliseconds(seconds: Double): Long? = (seconds * 1000).takeIf {
         it.isFinite() && it >= Long.MIN_VALUE && it < Long.MAX_VALUE
     }?.toLong()
+    private fun queryMilliseconds(seconds: Double, lower: Boolean): Long? {
+        val raw = seconds * 1000
+        val nearest = kotlin.math.round(raw)
+        val tolerance = Math.ulp(seconds) * 1000 + Math.ulp(raw)
+        val normalized = if (kotlin.math.abs(raw - nearest) <= tolerance) nearest else raw
+        val boundary = if (lower) kotlin.math.ceil(normalized) else kotlin.math.floor(normalized)
+        return boundary.takeIf { it.isFinite() && it >= Long.MIN_VALUE && it < Long.MAX_VALUE }?.toLong()
+    }
     private fun day(seconds: Double): List<Int> {
         val calendar = Calendar.getInstance().apply { timeInMillis = milliseconds(seconds) ?: return emptyList() }
         return listOf(calendar.get(Calendar.ERA), calendar.get(Calendar.YEAR), calendar.get(Calendar.DAY_OF_YEAR))
     }
+    private fun timestampSeconds(value: String): Double? {
+        val parts = isoTimestamp.matchEntire(value) ?: return null
+        val whole = IsoDates.parseMillis(parts.groupValues[1] + parts.groupValues[3]) ?: return null
+        val fraction = parts.groupValues[2].takeIf { it.isNotEmpty() }?.let { "0.$it".toDoubleOrNull() } ?: 0.0
+        return whole / 1000.0 + fraction
+    }
+    // SimpleDateFormat's SSS means an integer millisecond field: `.5` would
+    // mean 5 ms. Parse the fraction as decimal seconds, as ISO 8601 requires.
+    private val isoTimestamp = Regex("""^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$""")
     private val propertyOps = setOf("has", "eq", "neq", "icontains", "regex", "gt", "gte", "lt", "lte",
         "is_set", "is_not_set", "is_date_exact", "is_date_after", "is_date_before", "in", "not_in")
     private val compareOps = setOf("==", "!=", "<", "<=", ">", ">=", "in", "not_in")
