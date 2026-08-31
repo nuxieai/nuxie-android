@@ -28,6 +28,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -44,7 +45,7 @@ import org.robolectric.RuntimeEnvironment
 @OptIn(ExperimentalCoroutinesApi::class)
 class PurchaseServiceTest {
     @Test
-    fun purchasedWithoutLicensingKeyProjectsWhileBackendSyncIsPending() = runTest {
+    fun billingClientDeliveryIsTheTrustBoundaryWhenNoLicensingKeyIsConfigured() = runTest {
         val fixture = fixture(this)
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
         val checkout = async {
@@ -68,6 +69,39 @@ class PurchaseServiceTest {
         assertFalse(retained.signatureVerificationRequired)
         assertFalse(retained.signatureVerified)
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun configuredLicensingKeyRejectsBeforeAVerifiedOutcomeCanCommit() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(
+            this,
+            actions = actions,
+            verifyPurchaseSignature = { _, _, _ -> false },
+        )
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+
+        fixture.service.onPurchasesUpdated(
+            okUpdate(playPurchase("invalid-signature").forCheckout(fixture)),
+        )
+
+        assertTrue(checkout.await() is PurchaseResult.Failed)
+        val evidence = fixture.store.load().getValue("invalid-signature")
+        assertTrue(evidence.signatureVerificationRequired)
+        assertFalse(evidence.signatureVerified)
+        assertTrue(evidence.permanentlyRejected)
+        assertTrue(evidence.revoked)
+        assertTrue(fixture.purchaseEventCaptureAttempts.isEmpty())
+        assertFalse("sync" in actions)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
     }
 
@@ -629,7 +663,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun duplicateCallbacksCannotReturnCheckoutBeforeItsStagedProjectionDrains() = runTest {
+    fun duplicateCallbacksReturnWhileCheckoutWaitsForItsStagedProjection() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(this, actions = actions)
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
@@ -679,7 +713,7 @@ class PurchaseServiceTest {
 
         assertFalse(checkout.isCompleted)
         assertFalse(update.isCompleted)
-        assertFalse(duplicateUpdate.isCompleted)
+        assertTrue(duplicateUpdate.isCompleted)
         assertTrue(cancellationUpdate.isCompleted)
         assertEquals(
             0,
@@ -799,6 +833,39 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun featurePublicationCanReenterTheSameTokenWithoutJoiningItsOwnCommit() = runTest {
+        val fixture = fixture(this)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        lateinit var purchase: PlayPurchase
+        var reentered = false
+        fixture.core.featureInfo.onFeatureChange = { featureId, _, _, _ ->
+            if (featureId == "pro" && !reentered) {
+                reentered = true
+                fixture.service.onPurchasesUpdated(okUpdate(purchase))
+            }
+        }
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+        purchase = playPurchase("reentrant-publication").forCheckout(fixture)
+
+        withTimeout(1_000) {
+            fixture.service.onPurchasesUpdated(okUpdate(purchase))
+        }
+
+        assertTrue(reentered)
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertEquals(1, fixture.purchaseEventCaptureAttempts.size)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
     fun unsolicitedUpdateRunsPipelineAndAppManagedNeverCompletesPlayPurchase() = runTest {
         val actions = mutableListOf<String>()
         val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
@@ -898,11 +965,18 @@ class PurchaseServiceTest {
 
         fixture.service.onPurchasesUpdated(okUpdate(purchase))
         assertEquals(PurchaseResult.Purchased, checkout.await())
+        val persistedAfterCommit = actions.count { it == "persist" }
+        val purchaseRevisionAfterCommit = fixture.core.features.capturePurchaseRevision()
         fixture.service.onPurchasesUpdated(okUpdate(purchase))
         fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(purchase)
         fixture.service.recover()
 
         assertEquals(setOf("all-producers"), fixture.store.load().keys)
+        assertEquals(persistedAfterCommit, actions.count { it == "persist" })
+        assertEquals(
+            purchaseRevisionAfterCommit,
+            fixture.core.features.capturePurchaseRevision(),
+        )
         assertEquals(1, fixture.purchaseEventCaptureAttempts.size)
         assertEquals(
             1,
@@ -967,7 +1041,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun duplicateVerifiedObservationWaitsForTheOwningCommitDrain() = runTest {
+    fun duplicateVerifiedObservationReturnsWithoutJoiningTheOwningCapture() = runTest {
         val actions = mutableListOf<String>()
         val captureStarted = CompletableDeferred<Unit>()
         val releaseCapture = CompletableDeferred<Unit>()
@@ -994,12 +1068,11 @@ class PurchaseServiceTest {
         runCurrent()
 
         assertFalse(firstObservation.isCompleted)
-        assertFalse(duplicateObservation.isCompleted)
+        assertTrue(duplicateObservation.isCompleted)
         assertFalse("sync" in actions)
 
         releaseCapture.complete(Unit)
         firstObservation.await()
-        duplicateObservation.await()
 
         assertEquals(PurchaseResult.Purchased, checkout.await())
         assertEquals(1, fixture.purchaseEventCaptureAttempts.size)
@@ -1008,6 +1081,82 @@ class PurchaseServiceTest {
             1,
             actions.count { it == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED },
         )
+        fixture.close()
+    }
+
+    @Test
+    fun purchaseCaptureCanReenterTheSameTokenWithoutDeadlocking() = runTest {
+        lateinit var fixture: Fixture
+        lateinit var purchase: PlayPurchase
+        var reentered = false
+        fixture = fixture(
+            this,
+            capturePurchaseEventOverride = { _, _, _, _ ->
+                if (!reentered) {
+                    reentered = true
+                    fixture.service.onPurchasesUpdated(okUpdate(purchase))
+                }
+                true
+            },
+        )
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+        purchase = playPurchase("reentrant-capture").forCheckout(fixture)
+
+        withTimeout(1_000) {
+            fixture.service.onPurchasesUpdated(okUpdate(purchase))
+        }
+
+        assertTrue(reentered)
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertEquals(1, fixture.purchaseEventCaptureAttempts.size)
+        assertEquals(1, fixture.purchaseCompletionEventIds.size)
+        fixture.close()
+    }
+
+    @Test
+    fun purchaseCaptureCanReenterANewTokenWithoutAGlobalDrainCycle() = runTest {
+        lateinit var fixture: Fixture
+        lateinit var nestedPurchase: PlayPurchase
+        var reentered = false
+        fixture = fixture(
+            this,
+            capturePurchaseEventOverride = { _, _, _, _ ->
+                if (!reentered) {
+                    reentered = true
+                    fixture.service.onPurchasesUpdated(okUpdate(nestedPurchase))
+                }
+                true
+            },
+        )
+        val owner = fixture.core.identity.distinctId()
+        val nestedProduct = product(
+            productId = "nuxie-addon",
+            storeProductId = "play-addon",
+        )
+        fixture.service.rememberProduct(nestedProduct)
+        fixture.store.upsertBinding(nestedProduct.bindingFor(owner))
+        nestedPurchase = playPurchase(
+            "nested-reentrant-capture",
+            products = listOf("play-addon"),
+            obfuscatedAccountId = accountHash(owner),
+        )
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+        val checkoutPurchase = playPurchase("outer-reentrant-capture").forCheckout(fixture)
+
+        withTimeout(1_000) {
+            fixture.service.onPurchasesUpdated(okUpdate(checkoutPurchase))
+        }
+
+        assertTrue(reentered)
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertEquals(
+            setOf("outer-reentrant-capture", "nested-reentrant-capture"),
+            fixture.store.load().keys,
+        )
+        assertEquals(2, fixture.purchaseEventCaptureAttempts.size)
+        assertEquals(2, fixture.purchaseEventCaptureAttempts.distinct().size)
         fixture.close()
     }
 
@@ -1644,6 +1793,54 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun recoveryCapturesRetainedCompletionAfterSyncAndPlayCompletionAreTerminal() = runTest {
+        val actions = mutableListOf<String>()
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, actions = actions, emissions = emissions)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(
+            PurchaseEvidence(
+                purchaseToken = "retained-unemitted-completion",
+                packageName = "com.example.app",
+                storeProductIds = listOf("play-pro"),
+                nuxieProductId = "nuxie-pro",
+                purchaseState = StoredPurchaseState.PURCHASED,
+                obfuscatedAccountId = accountHash(owner),
+                syncAttributionDistinctId = owner,
+                ownerDistinctId = owner,
+                acknowledged = true,
+                synced = true,
+                firstSeenMillis = 1L,
+                catalogResolved = true,
+                syncedEventEmitted = true,
+                signatureVerificationRequired = true,
+                signatureVerified = true,
+                authorityScope = "test-fixture",
+            ),
+        )
+
+        fixture.service.recover()
+
+        assertEquals(1, fixture.purchaseEventCaptureAttempts.size)
+        assertEquals(1, fixture.purchaseCompletionEventIds.size)
+        assertEquals(listOf(owner), fixture.purchaseEventDistinctIds)
+        assertEquals(
+            "startup_recovery",
+            emissions.single {
+                it.first == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED
+            }.second["source"],
+        )
+        assertTrue(
+            fixture.store.load().getValue("retained-unemitted-completion").completionEmitted,
+        )
+
+        fixture.service.recover()
+
+        assertEquals(1, fixture.purchaseEventCaptureAttempts.size)
+        fixture.close()
+    }
+
+    @Test
     fun explicitVerificationFailureIsPermanentButAmbiguousFailureIsTransient() {
         val permanent = Json.parseToJsonElement(
             """{"success":false,"error":"verification failed"}""",
@@ -1710,6 +1907,77 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun delegateSuccessRetriesTheSameOperationAfterACaptureMiss() = runTest {
+        var mintedOperations = 0
+        val captureResults = mutableListOf(false, true)
+        val fixture = fixture(
+            this,
+            initialRetryDelayMillis = 10,
+            maxRetryDelayMillis = 1_000,
+            purchaseEventCaptureResults = captureResults,
+            externalOperationId = { "external-retry-${++mintedOperations}" },
+        )
+        fixture.settings.delegate = object : NuxiePurchaseDelegate {
+            override suspend fun purchase(product: StoreProduct): PurchaseResult = PurchaseResult.Purchased
+            override suspend fun restorePurchases(): RestoreResult = RestoreResult.NoPurchases
+        }
+
+        assertEquals(PurchaseResult.Purchased, fixture.service.purchase(activity(), product(), null))
+        assertEquals(1, mintedOperations)
+        assertEquals(1, fixture.purchaseEventCaptureAttempts.size)
+        assertTrue(fixture.purchaseCompletionEventIds.isEmpty())
+
+        advanceTimeBy(19)
+        runCurrent()
+        assertEquals(1, fixture.purchaseEventCaptureAttempts.size)
+        advanceTimeBy(1)
+        runCurrent()
+
+        assertEquals(2, fixture.purchaseEventCaptureAttempts.size)
+        assertEquals(1, fixture.purchaseEventCaptureAttempts.distinct().size)
+        assertEquals(1, fixture.purchaseCompletionEventIds.size)
+        fixture.close()
+    }
+
+    @Test
+    fun delegateSuccessDropsItsOperationAfterBoundedCaptureRetries() = runTest {
+        var mintedOperations = 0
+        val warnings = mutableListOf<String>()
+        val fixture = fixture(
+            this,
+            initialRetryDelayMillis = 1,
+            maxRetryDelayMillis = 1_000,
+            purchaseEventCaptureResults = mutableListOf(false, false, false, false, true),
+            externalOperationId = { "external-drop-${++mintedOperations}" },
+            logWarning = { message, _ -> warnings += message },
+        )
+        fixture.settings.delegate = object : NuxiePurchaseDelegate {
+            override suspend fun purchase(product: StoreProduct): PurchaseResult = PurchaseResult.Purchased
+            override suspend fun restorePurchases(): RestoreResult = RestoreResult.NoPurchases
+        }
+
+        assertEquals(PurchaseResult.Purchased, fixture.service.purchase(activity(), product(), null))
+        advanceTimeBy(2)
+        runCurrent()
+        advanceTimeBy(4)
+        runCurrent()
+        advanceTimeBy(8)
+        runCurrent()
+
+        assertEquals(1, mintedOperations)
+        assertEquals(4, fixture.purchaseEventCaptureAttempts.size)
+        assertEquals(1, fixture.purchaseEventCaptureAttempts.distinct().size)
+        assertTrue(fixture.purchaseCompletionEventIds.isEmpty())
+        assertEquals(1, warnings.size)
+        assertTrue(warnings.single().contains("external-drop-1"))
+
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertEquals(4, fixture.purchaseEventCaptureAttempts.size)
+        fixture.close()
+    }
+
+    @Test
     fun eachPurchasedDelegateCallbackGetsItsOwnExternalCommit() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(this, actions = actions)
@@ -1755,18 +2023,25 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun externalPurchaseCallbackDoesNotCommitAcrossAnIdentityChange() = runTest {
+    fun externalPurchaseCallbackCapturesCarrierForInitiatingIdentityAcrossIdentityChange() = runTest {
         var mintedOperations = 0
         val fixture = fixture(
             this,
             externalOperationId = { "external-race-${++mintedOperations}" },
         )
+        val initiatingOwner = fixture.core.identity.distinctId()
         val callback = CompletableDeferred<PurchaseResult>()
         fixture.settings.delegate = object : NuxiePurchaseDelegate {
             override suspend fun purchase(product: StoreProduct): PurchaseResult = callback.await()
             override suspend fun restorePurchases(): RestoreResult = RestoreResult.NoPurchases
         }
-        val purchase = async { fixture.service.purchase(activity(), product(), null) }
+        val purchase = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
         runCurrent()
 
         assertEquals(0, mintedOperations)
@@ -1775,9 +2050,11 @@ class PurchaseServiceTest {
 
         assertEquals(PurchaseResult.Purchased, purchase.await())
         assertEquals(1, mintedOperations)
-        assertTrue(fixture.purchaseEventCaptureAttempts.isEmpty())
-        assertTrue(fixture.purchaseEventDistinctIds.isEmpty())
+        assertEquals(1, fixture.purchaseEventCaptureAttempts.size)
+        assertEquals(1, fixture.purchaseCompletionEventIds.size)
+        assertEquals(listOf(initiatingOwner), fixture.purchaseEventDistinctIds)
         assertTrue(fixture.store.load().isEmpty())
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
     }
 
@@ -2065,6 +2342,8 @@ class PurchaseServiceTest {
             String,
         ) -> Boolean)? = null,
         externalOperationId: (() -> String)? = null,
+        verifyPurchaseSignature: (String, String, String) -> Boolean = { _, _, _ -> true },
+        logWarning: (String, Throwable) -> Unit = { _, _ -> },
     ): Fixture {
         val core = NuxieCore(
             context = RuntimeEnvironment.getApplication(),
@@ -2120,7 +2399,8 @@ class PurchaseServiceTest {
             },
             newExternalOperationId = externalOperationId
                 ?: { "external-operation-${++externalOperationSequence}" },
-            verifyPurchaseSignature = { _, _, _ -> true },
+            verifyPurchaseSignature = verifyPurchaseSignature,
+            logWarning = logWarning,
         )
         fixture = Fixture(
             core,
