@@ -27,6 +27,9 @@ import ai.nuxie.sdk.commerce.PurchaseService
 import ai.nuxie.sdk.commerce.PurchaseSettings
 import ai.nuxie.sdk.commerce.purchaseEvidenceDirectory
 import ai.nuxie.sdk.commerce.purchaseAuthorityScope
+import ai.nuxie.sdk.commerce.registerAuthenticatedReleaseProductMappings
+import ai.nuxie.sdk.experiences.AuthenticatedRelease
+import ai.nuxie.sdk.experiences.ExperienceReleaseProfile
 import ai.nuxie.sdk.experiences.ExperienceTrustRoots
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
 import ai.nuxie.sdk.identity.IdentityService
@@ -97,6 +100,10 @@ internal class NuxieCore(
         val presenter: TriggerService.ExperiencePresenter? = null,
         val presentationFactory: PresentationFactory? = null,
         val purchaseEvidenceStore: PurchaseEvidenceStore? = null,
+        val journeySupportedRuntime: (() -> SupportedRuntime?)? = null,
+        val authenticateRelease: (
+            (ExperienceReleaseProfile.Entry, SupportedRuntime) -> AuthenticatedRelease?
+        )? = null,
     )
 
     private val appContext = context.applicationContext ?: context
@@ -139,10 +146,19 @@ internal class NuxieCore(
         sessionIdProvider = { sessions.getSessionId() },
     )
 
+    private val purchaseEvidenceStore = overrides.purchaseEvidenceStore
+        ?: FilePurchaseEvidenceStore(
+            purchaseEvidenceDirectory(appContext.filesDir, apiKey, environment),
+        )
+
     private val journeyCatalog = JourneyReleaseCatalog(
         trustedKeys = ExperienceTrustRoots.keys(environment),
         highWater = ReleaseHighWaterStore(appContext),
-        supportedRuntime = ::journeySupportedRuntime,
+        supportedRuntime = overrides.journeySupportedRuntime ?: ::journeySupportedRuntime,
+        authenticate = overrides.authenticateRelease,
+        onReleaseAdmitted = { release ->
+            purchaseEvidenceStore.registerAuthenticatedReleaseProductMappings(release)
+        },
     )
 
     private val triggerBroker = TriggerBroker()
@@ -155,11 +171,6 @@ internal class NuxieCore(
         initialDistinctId = identity.distinctId(),
         triggerBroker = triggerBroker,
     )
-
-    private val purchaseEvidenceStore = overrides.purchaseEvidenceStore
-        ?: FilePurchaseEvidenceStore(
-            purchaseEvidenceDirectory(appContext.filesDir, apiKey, environment),
-        )
 
     val features = FeatureService(
         api = api,

@@ -108,6 +108,7 @@ internal class AuthenticatedRelease(
 internal data class AuthenticatedGooglePlayProductAllowances(
     val productId: String,
     val storeProductId: String,
+    val productType: String,
     val featureAllowances: List<FeatureAllowance>,
 )
 
@@ -131,15 +132,16 @@ internal fun authenticatedGooglePlayProductAllowances(
         if (store.string("platform") != "google_play") return@mapNotNull null
         val productId = product.string("id") ?: return@mapNotNull null
         val storeProductId = store.string("productId") ?: return@mapNotNull null
+        val productType = product.string("type")?.takeIf {
+            it == "subscription" || it == "consumable" || it == "nonConsumable"
+        } ?: return@mapNotNull null
         val allowances = (product["entitlements"] as? JsonArray).orEmpty()
             .mapNotNull { allowanceElement ->
                 val allowanceDocument = allowanceElement as? JsonObject
                     ?: return@mapNotNull null
                 val featureExternalId = allowanceDocument.string("featureExternalId")
-                // The allowance document's own id is not a Feature id. A
-                // source with neither Feature reference contributes nothing.
                 val featureId = allowanceDocument.string("featureId")
-                    ?: featureExternalId
+                    ?: allowanceDocument.string("id")
                     ?: return@mapNotNull null
                 FeatureAllowance.fromDescriptor(
                     featureId = featureId,
@@ -148,7 +150,12 @@ internal fun authenticatedGooglePlayProductAllowances(
                     allowance = allowanceDocument.number("allowance"),
                 )
             }
-        AuthenticatedGooglePlayProductAllowances(productId, storeProductId, allowances)
+        AuthenticatedGooglePlayProductAllowances(
+            productId,
+            storeProductId,
+            productType,
+            allowances,
+        )
     }
 }
 

@@ -284,6 +284,35 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun authoritativeUsageBalanceRejectsScopeAcrossASameIdIdentityModeChange() = runBlocking {
+        val core = core(FakeTransport())
+        val anonymousId = core.identity.distinctId()
+        core.features.hydrateProfile(
+            anonymousId,
+            Json.parseToJsonElement(
+                profile(
+                    """[{"id":"credits","type":"creditSystem","balance":5,"unlimited":false}]""",
+                ),
+            ).jsonObject,
+        )
+        val anonymousScope = core.identity.captureScope()
+
+        core.identity.setDistinctId(anonymousId)
+        val result = runCatching {
+            core.features.applyAuthoritativeUsageBalance(
+                featureId = "credits",
+                balance = 4.0,
+                entityId = null,
+                expectedScope = anonymousScope,
+            )
+        }
+
+        assertTrue(result.exceptionOrNull() is CancellationException)
+        assertEquals(5.0, core.featureInfo.balance("credits")!!, 0.0)
+        core.stop()
+    }
+
+    @Test
     fun authoritativeUsagePublicationRunsOutsideTheIdentityFenceAndDropsWhenStale() = runBlocking {
         val core = core(FakeTransport())
         val originalId = core.identity.distinctId()
@@ -907,6 +936,71 @@ class FeatureServiceTest {
 
         assertTrue(runCatching { check.await() }.exceptionOrNull() is CancellationException)
         assertTrue(core.features.getCached("pro", null)!!.allowed)
+        core.stop()
+    }
+
+    @Test
+    fun profileCommitMarkerFencesAnOlderCheckWhenANewerCheckOnlyMintsAToken() = runBlocking {
+        val checks = AtomicInteger()
+        val firstStarted = CountDownLatch(1)
+        val secondStarted = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        val releaseSecond = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    when (checks.incrementAndGet()) {
+                        1 -> {
+                            firstStarted.countDown()
+                            assertTrue(releaseFirst.await(5, TimeUnit.SECONDS))
+                        }
+                        2 -> {
+                            secondStarted.countDown()
+                            assertTrue(releaseSecond.await(5, TimeUnit.SECONDS))
+                        }
+                    }
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            allowed = false,
+                            balance = "null",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+        val customer = core.identity.distinctId()
+
+        val first = async(Dispatchers.Default) { runCatching { core.features.check("pro") } }
+        assertTrue(firstStarted.await(5, TimeUnit.SECONDS))
+        val profileRevision = core.features.reserveAuthoritativeRevision()
+        val second = async(Dispatchers.Default) { core.features.check("pro") }
+        assertTrue(secondStarted.await(5, TimeUnit.SECONDS))
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement(
+                profile("""[{"id":"pro","type":"boolean","unlimited":false}]"""),
+            ).jsonObject,
+            snapshotPurchaseRevision = core.features.capturePurchaseRevision(),
+            snapshotAuthoritativeRevision = profileRevision,
+        )
+
+        releaseFirst.countDown()
+
+        assertTrue(first.await().exceptionOrNull() is CancellationException)
+        assertTrue(core.features.getCached("pro", null)!!.allowed)
+        assertTrue(core.featureInfo.isAllowed("pro"))
+
+        releaseSecond.countDown()
+        assertFalse(second.await().allowed)
         core.stop()
     }
 

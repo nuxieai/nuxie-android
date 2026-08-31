@@ -2,14 +2,20 @@ package ai.nuxie.sdk.features
 
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FeatureInfoListenerTest {
@@ -80,6 +86,56 @@ class FeatureInfoListenerTest {
         assertFalse(info.isAllowed("credits"))
         releaseListener.complete(Unit)
         update.await()
+        assertFalse(info.isAllowed("credits"))
+    }
+
+    @Test
+    fun identityInvalidationWaitsForAnInProgressEmissionCommit() = runBlocking {
+        val info = FeatureInfo()
+        val emissionCheckCount = AtomicInteger()
+        val oldEmissionHasLock = CountDownLatch(1)
+        val releaseOldEmission = CountDownLatch(1)
+        val identityThreadStarted = CountDownLatch(1)
+        val stagedIdentity = AtomicReference<FeatureInfo.Mutation>()
+        val oldMutation = info.stageUpdate(
+            features = mapOf("credits" to access(allowed = true, balance = 2.0)),
+            entities = emptyMap(),
+            isCurrent = {
+                if (emissionCheckCount.incrementAndGet() == 3) {
+                    oldEmissionHasLock.countDown()
+                    check(releaseOldEmission.await(5, TimeUnit.SECONDS))
+                }
+                true
+            },
+        )
+        val oldPublisher = async(Dispatchers.Default) { info.publish(oldMutation) }
+        assertTrue(oldEmissionHasLock.await(5, TimeUnit.SECONDS))
+        val identityThread = Thread {
+            identityThreadStarted.countDown()
+            stagedIdentity.set(
+                info.stageIdentityChange(emptyMap(), emptyMap(), FeatureInfo.State.Unknown),
+            )
+        }
+
+        try {
+            identityThread.start()
+            assertTrue(identityThreadStarted.await(5, TimeUnit.SECONDS))
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (identityThread.isAlive &&
+                identityThread.state != Thread.State.BLOCKED &&
+                System.nanoTime() < deadline
+            ) {
+                Thread.yield()
+            }
+
+            assertEquals(Thread.State.BLOCKED, identityThread.state)
+        } finally {
+            releaseOldEmission.countDown()
+            identityThread.join(5_000)
+        }
+
+        oldPublisher.await()
+        info.publish(checkNotNull(stagedIdentity.get()))
         assertFalse(info.isAllowed("credits"))
     }
 

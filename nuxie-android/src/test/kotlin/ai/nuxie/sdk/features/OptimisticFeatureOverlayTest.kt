@@ -295,7 +295,7 @@ class OptimisticFeatureOverlayTest {
     }
 
     @Test
-    fun failedFirstArrivalPinDoesNotPublishAnEphemeralProjection() = runBlocking {
+    fun failedFirstArrivalPinRetriesTheSameAllowancesAfterDescriptorReplacement() = runBlocking {
         val apiKey = "pk_test_descriptor_pin_failure_${System.nanoTime()}"
         val owner = "customer-a"
         val application = RuntimeEnvironment.getApplication()
@@ -358,6 +358,37 @@ class OptimisticFeatureOverlayTest {
             assertNull(projection)
             assertNull(store.load().getValue("token-1").pinnedFeatureAllowances)
             assertFalse(core.featureInfo.isAllowed("credits"))
+
+            assertTrue(
+                store.upsertProductMapping(
+                    StoredProductMapping(
+                        storeProductId = "play-credit-pack",
+                        nuxieProductId = "credit-pack",
+                        productType = "inapp",
+                        consumable = false,
+                        featureAllowances = listOf(
+                            StoredFeatureAllowance(
+                                "credits",
+                                FeatureType.METERED.name,
+                                false,
+                                99.0,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            assertNull(core.purchases.withOptimisticProjectionSnapshot(owner) { it })
+
+            store.failPinnedEvidenceUpserts = false
+            val retried = core.purchases.withOptimisticProjectionSnapshot(owner) { it }
+
+            assertEquals(10.0, retried?.get("credits")?.balanceIncrease!!, 0.0)
+            assertEquals(
+                10.0,
+                store.load().getValue("token-1").pinnedFeatureAllowances
+                    ?.single()?.allowance!!,
+                0.0,
+            )
         } finally {
             core.stop()
         }

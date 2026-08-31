@@ -141,7 +141,58 @@ class OptimisticFeatureProjectionTest {
     }
 
     @Test
-    fun purchasedButUnverifiedPlayEvidenceIsNotEligible() {
+    fun aSingleCatalogMappingResolvesEvidenceBeforeItsNuxieProductIdentityArrives() {
+        val unresolvedEvidence = evidence(owner = "customer-a").copy(nuxieProductId = null)
+
+        val resolved = resolvedFeatureAllowancesForEvidence(
+            evidence = unresolvedEvidence,
+            descriptors = listOf(
+                descriptor(FeatureAllowance("pro", FeatureType.BOOLEAN)),
+            ),
+        )
+
+        assertEquals("pro", resolved?.single()?.featureId)
+    }
+
+    @Test
+    fun ambiguousCatalogMappingsDoNotResolveEvidenceWithoutANuxieProductIdentity() {
+        val unresolvedEvidence = evidence(owner = "customer-a").copy(nuxieProductId = null)
+
+        val resolved = resolvedFeatureAllowancesForEvidence(
+            evidence = unresolvedEvidence,
+            descriptors = listOf(
+                descriptor(FeatureAllowance("pro", FeatureType.BOOLEAN)),
+                descriptor(FeatureAllowance("other", FeatureType.BOOLEAN)).copy(
+                    nuxieProductId = "other-product",
+                ),
+            ),
+        )
+
+        assertNull(resolved)
+    }
+
+    @Test
+    fun purchasedWithoutRequiredSignatureIsEligibleWhenUnverified() {
+        val projection = optimisticFeatureProjection(
+            distinctId = "customer-a",
+            authorityScope = AUTHORITY_SCOPE,
+            evidence = listOf(
+                evidence(owner = "customer-a").copy(
+                    signatureVerificationRequired = false,
+                    signatureVerified = false,
+                ),
+            ),
+            descriptors = listOf(descriptor(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+        )
+
+        assertEquals(
+            OptimisticFeatureOverlay(FeatureType.BOOLEAN, unlimited = false, balanceIncrease = null),
+            projection?.get("pro"),
+        )
+    }
+
+    @Test
+    fun purchasedWithRequiredButUnverifiedSignatureIsNotEligible() {
         assertNull(
             optimisticFeatureProjection(
                 distinctId = "customer-a",

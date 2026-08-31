@@ -62,13 +62,26 @@ internal fun resolvedFeatureAllowancesForEvidence(
     // explicitly pins an empty list. Legacy evidence falls back to its checkout
     // binding, then to a catalog descriptor that may arrive during recovery.
     evidence.pinnedFeatureAllowances?.let { return it }
-    bindings.firstOrNull { binding ->
-        binding.obfuscatedAccountId == evidence.obfuscatedAccountId &&
-            evidence.matchesProductIdentity(binding.productIdentity)
-    }?.let { return it.featureAllowances }
-    return descriptors.firstOrNull { descriptor ->
-        evidence.matchesProductIdentity(descriptor.productIdentity)
-    }?.featureAllowances
+    evidence.selectAllowanceSource(
+        bindings.filter { it.obfuscatedAccountId == evidence.obfuscatedAccountId },
+        { it.productIdentity },
+    )?.let { return it.featureAllowances }
+    return evidence.selectAllowanceSource(
+        descriptors,
+        { it.productIdentity },
+    )?.featureAllowances
+}
+
+private fun <T> PurchaseEvidence.selectAllowanceSource(
+    candidates: Collection<T>,
+    identity: (T) -> StoredProductIdentity,
+): T? {
+    val storeMatches = candidates.filter { identity(it).storeProductId in storeProductIds }
+    return if (nuxieProductId == null) {
+        storeMatches.singleOrNull()
+    } else {
+        storeMatches.firstOrNull { matchesProductIdentity(identity(it)) }
+    }
 }
 
 private fun PurchaseEvidence.isEligibleProjectionEvidence(
@@ -82,7 +95,10 @@ private fun PurchaseEvidence.isEligibleProjectionEvidence(
         !permanentlyRejected &&
         !synced &&
         backendSyncedAtMillis == null &&
-        signatureVerified
+        hasEligiblePurchaseSignature
+
+internal val PurchaseEvidence.hasEligiblePurchaseSignature: Boolean
+    get() = !signatureVerificationRequired || signatureVerified
 
 private fun OptimisticFeatureOverlay.widen(other: OptimisticFeatureOverlay): OptimisticFeatureOverlay {
     val joinedType = deterministicFeatureType(type, other.type)

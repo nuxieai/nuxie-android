@@ -331,13 +331,15 @@ internal class FeatureService(
                 revision <= snapshotAuthoritativeRevision
             }
             affectedFeatureIds.forEach { featureId ->
-                if ((featureMutationRevisions[featureId] ?: Long.MIN_VALUE) <=
-                    snapshotAuthoritativeRevision
-                ) {
-                    featureMutationRevisions[featureId] = snapshotAuthoritativeRevision
-                    committedMutationRevisions[CacheKey(featureId, null)] =
-                        snapshotAuthoritativeRevision
-                }
+                featureMutationRevisions[featureId] = maxOf(
+                    featureMutationRevisions[featureId] ?: Long.MIN_VALUE,
+                    snapshotAuthoritativeRevision,
+                )
+                val globalKey = CacheKey(featureId, null)
+                committedMutationRevisions[globalKey] = maxOf(
+                    committedMutationRevisions[globalKey] ?: Long.MIN_VALUE,
+                    snapshotAuthoritativeRevision,
+                )
             }
             purchaseUpdates.entries.removeAll {
                 it.value.committedRevision <= snapshotPurchaseRevision

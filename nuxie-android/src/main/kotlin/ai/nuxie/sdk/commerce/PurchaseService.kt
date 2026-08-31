@@ -158,6 +158,20 @@ internal class PurchaseService(
         val result: PurchaseResult,
     )
 
+    private data class AllowanceResolutionIdentity(
+        val purchaseToken: String,
+        val obfuscatedAccountId: String?,
+        val storeProductIds: Set<String>,
+        val nuxieProductId: String?,
+        val basePlanId: String?,
+        val offerId: String?,
+    )
+
+    private data class PendingAllowancePin(
+        val identity: AllowanceResolutionIdentity,
+        val allowances: List<StoredFeatureAllowance>,
+    )
+
     private class ProcessingEffects {
         val publications = mutableListOf<FeatureInfo.Mutation>()
         val purchaseCompletions = mutableListOf<PendingPurchaseCompletion>()
@@ -252,6 +266,8 @@ internal class PurchaseService(
     private val purchaseUsageClaims = mutableSetOf<String>()
     private val purchaseUsageWaiters = mutableMapOf<String, MutableList<CompletableDeferred<Unit>>>()
     private val managedCompletionClaims = mutableSetOf<String>()
+    /** Guarded by [projectionRefresh]; failed pins retry their first resolved snapshot. */
+    private val pendingAllowancePins = mutableMapOf<String, PendingAllowancePin>()
 
     init {
         // Projection is a local derivation and must not wait for Play Billing
@@ -417,7 +433,7 @@ internal class PurchaseService(
                 evidence.purchaseToken.isNotBlank() &&
                 evidence.packageName.isNotBlank() &&
                 evidence.storeProductIds.firstOrNull()?.isNotBlank() == true &&
-                evidence.signatureVerified &&
+                evidence.hasEligiblePurchaseSignature &&
                 featureAllowancesForEvidence(evidence, descriptors, bindings).any { it.featureId == featureId }
         }
     }
@@ -1071,7 +1087,7 @@ internal class PurchaseService(
 
     private fun PurchaseEvidence.canProjectTo(currentDistinctId: String): Boolean =
         ownerDistinctId == currentDistinctId &&
-            signatureVerified
+            hasEligiblePurchaseSignature
 
     private fun hasConfiguredLicensingKey(
         evidence: PurchaseEvidence,
@@ -1432,14 +1448,33 @@ internal class PurchaseService(
         Map<String, OptimisticFeatureOverlay>? {
         val descriptors = evidenceStore.loadProductMappings()
         val bindings = evidenceStore.loadBindings()
-        val evidence = evidenceStore.load().values.mapNotNull { retained ->
-            if (retained.pinnedFeatureAllowances != null) return@mapNotNull retained
-            val resolved = resolvedFeatureAllowancesForEvidence(retained, descriptors, bindings)
+        val retainedEvidence = evidenceStore.load().values
+        val identitiesByToken = retainedEvidence.associate { retained ->
+            retained.purchaseToken to retained.allowanceResolutionIdentity()
+        }
+        pendingAllowancePins.entries.removeAll { (token, pending) ->
+            identitiesByToken[token] != pending.identity
+        }
+        val evidence = retainedEvidence.mapNotNull { retained ->
+            if (retained.pinnedFeatureAllowances != null) {
+                pendingAllowancePins.remove(retained.purchaseToken)
+                return@mapNotNull retained
+            }
+            val identity = identitiesByToken.getValue(retained.purchaseToken)
+            val pending = pendingAllowancePins[retained.purchaseToken]
+                ?.takeIf { it.identity == identity }
+            val resolved = pending?.allowances
+                ?: resolvedFeatureAllowancesForEvidence(retained, descriptors, bindings)
                 ?: return@mapNotNull retained
+            if (pending == null) {
+                pendingAllowancePins[retained.purchaseToken] = PendingAllowancePin(identity, resolved)
+            }
             // A resolved allowance projection is safe only after its token-scoped
             // allowance snapshot is durable. Otherwise a later replacement or
             // relaunch could silently swap the retained purchase's allowances.
-            upsertEvidenceLocked(retained.copy(pinnedFeatureAllowances = resolved))
+            upsertEvidenceLocked(retained.copy(pinnedFeatureAllowances = resolved))?.also {
+                pendingAllowancePins.remove(retained.purchaseToken)
+            }
         }
         return optimisticFeatureProjection(
             distinctId = currentDistinctId,
@@ -1451,6 +1486,15 @@ internal class PurchaseService(
             bindings = bindings,
         )
     }
+
+    private fun PurchaseEvidence.allowanceResolutionIdentity() = AllowanceResolutionIdentity(
+        purchaseToken = purchaseToken,
+        obfuscatedAccountId = obfuscatedAccountId,
+        storeProductIds = storeProductIds.toSet(),
+        nuxieProductId = nuxieProductId,
+        basePlanId = basePlanId,
+        offerId = offerId,
+    )
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.encodeToByteArray())
