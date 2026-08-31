@@ -201,11 +201,11 @@ internal class NuxieCore(
      * monitor, so inline collectors cannot observe a half-switched customer.
      */
     fun stageFeatureUserChange(from: String, to: String): FeatureInfo.Mutation =
-        features.handleUserChange(
-            from,
-            to,
-            purchases.optimisticProjectionSnapshot(to),
-        )
+        kotlinx.coroutines.runBlocking {
+            purchases.withOptimisticProjectionSnapshot(to) { destinationProjection ->
+                features.handleUserChange(from, to, destinationProjection)
+            }
+        }
 
     val featureUsage = FeatureUsageService(
         api = api,

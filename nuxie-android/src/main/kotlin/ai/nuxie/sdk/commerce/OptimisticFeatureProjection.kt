@@ -2,7 +2,7 @@ package ai.nuxie.sdk.commerce
 
 import ai.nuxie.sdk.features.FeatureType
 
-/** A widening-only delta derived from retained Play evidence and a signed descriptor. */
+/** A widening-only delta derived from retained verified Play evidence and resolved Feature allowances. */
 internal data class OptimisticFeatureOverlay(
     val type: FeatureType,
     val unlimited: Boolean,
@@ -10,8 +10,8 @@ internal data class OptimisticFeatureOverlay(
 )
 
 /**
- * Pure optimistic projection. A missing evidence/descriptor pair is absence,
- * never an authoritative empty Feature snapshot.
+ * Pure optimistic projection. Missing eligible evidence or an allowance source
+ * is absence, never an authoritative empty Feature snapshot.
  */
 internal fun optimisticFeatureProjection(
     distinctId: String,
@@ -23,7 +23,7 @@ internal fun optimisticFeatureProjection(
     val projected = linkedMapOf<String, OptimisticFeatureOverlay>()
     for (purchase in evidence.filter { it.isEligibleProjectionEvidence(distinctId, authorityScope) }) {
         // A purchase whose descriptor is missing or grants nothing (an empty
-        // entitlement list is schema-valid) contributes no overlay, but must
+        // Feature allowance list is schema-valid) contributes no overlay, but must
         // not suppress another purchase's derivable overlay. When nothing
         // derives at all the projection stays absent below.
         val allowances = featureAllowancesForEvidence(purchase, descriptors, bindings)
@@ -46,15 +46,29 @@ internal fun featureAllowancesForEvidence(
     evidence: PurchaseEvidence,
     descriptors: Collection<StoredProductMapping>,
     bindings: Collection<StoredPurchaseBinding> = emptyList(),
-): List<StoredFeatureAllowance> {
-    descriptors.firstOrNull { descriptor ->
-        evidence.matchesProductIdentity(descriptor.productIdentity)
-    }
-        ?.let { return it.featureAllowances }
-    return bindings.firstOrNull { binding ->
+): List<StoredFeatureAllowance> = resolvedFeatureAllowancesForEvidence(
+    evidence,
+    descriptors,
+    bindings,
+).orEmpty()
+
+/** Returns null only when no pinned, checkout-binding, or catalog allowance source exists. */
+internal fun resolvedFeatureAllowancesForEvidence(
+    evidence: PurchaseEvidence,
+    descriptors: Collection<StoredProductMapping>,
+    bindings: Collection<StoredPurchaseBinding> = emptyList(),
+): List<StoredFeatureAllowance>? {
+    // A token snapshot is immutable purchase-time evidence, including when it
+    // explicitly pins an empty list. Legacy evidence falls back to its checkout
+    // binding, then to a catalog descriptor that may arrive during recovery.
+    evidence.pinnedFeatureAllowances?.let { return it }
+    bindings.firstOrNull { binding ->
         binding.obfuscatedAccountId == evidence.obfuscatedAccountId &&
             evidence.matchesProductIdentity(binding.productIdentity)
-    }?.featureAllowances.orEmpty()
+    }?.let { return it.featureAllowances }
+    return descriptors.firstOrNull { descriptor ->
+        evidence.matchesProductIdentity(descriptor.productIdentity)
+    }?.featureAllowances
 }
 
 private fun PurchaseEvidence.isEligibleProjectionEvidence(

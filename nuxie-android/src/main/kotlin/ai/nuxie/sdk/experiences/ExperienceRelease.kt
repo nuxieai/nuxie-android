@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.experiences
 
+import ai.nuxie.sdk.features.FeatureAllowance
 import android.util.Base64
 import java.security.MessageDigest
 import kotlinx.serialization.json.Json
@@ -99,7 +100,57 @@ internal class AuthenticatedRelease(
     val descriptor: JsonObject,
     /** publishedAtSeq to promote into the high-water store (Active only). */
     val publishedAtSeqToPromote: Long?,
+    /** Raw signed Google Play allowances classified once at release admission. */
+    val googlePlayProductAllowances: List<AuthenticatedGooglePlayProductAllowances> =
+        authenticatedGooglePlayProductAllowances(descriptor),
 )
+
+internal data class AuthenticatedGooglePlayProductAllowances(
+    val productId: String,
+    val storeProductId: String,
+    val featureAllowances: List<FeatureAllowance>,
+)
+
+/**
+ * Production signed-descriptor adapter. Product resolution already accepts
+ * classified [FeatureAllowance] values; this is the single raw-field boundary
+ * that catalog registration can feed into it.
+ */
+internal fun authenticatedGooglePlayProductAllowances(
+    descriptor: JsonObject,
+): List<AuthenticatedGooglePlayProductAllowances> {
+    fun JsonObject.string(key: String): String? =
+        (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+    fun JsonObject.number(key: String): Double? =
+        (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.doubleOrNull
+
+    return (descriptor["products"] as? JsonArray).orEmpty().mapNotNull { productElement ->
+        val product = productElement as? JsonObject ?: return@mapNotNull null
+        val store = product["store"] as? JsonObject ?: return@mapNotNull null
+        if (store.string("platform") != "google_play") return@mapNotNull null
+        val productId = product.string("id") ?: return@mapNotNull null
+        val storeProductId = store.string("productId") ?: return@mapNotNull null
+        val allowances = (product["entitlements"] as? JsonArray).orEmpty()
+            .mapNotNull { allowanceElement ->
+                val allowanceDocument = allowanceElement as? JsonObject
+                    ?: return@mapNotNull null
+                val featureExternalId = allowanceDocument.string("featureExternalId")
+                // The allowance document's own id is not a Feature id. A
+                // source with neither Feature reference contributes nothing.
+                val featureId = allowanceDocument.string("featureId")
+                    ?: featureExternalId
+                    ?: return@mapNotNull null
+                FeatureAllowance.fromDescriptor(
+                    featureId = featureId,
+                    featureExternalId = featureExternalId,
+                    allowanceType = allowanceDocument.string("allowanceType"),
+                    allowance = allowanceDocument.number("allowance"),
+                )
+            }
+        AuthenticatedGooglePlayProductAllowances(productId, storeProductId, allowances)
+    }
+}
 
 internal class ReleaseAuthenticationException(message: String) : Exception(message)
 

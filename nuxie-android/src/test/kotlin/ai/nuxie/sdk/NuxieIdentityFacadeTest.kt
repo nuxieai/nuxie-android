@@ -183,14 +183,17 @@ class NuxieIdentityFacadeTest {
     }
 
     @Test
-    fun inlineFeatureCollectorCanSupersedeIdentifyWithoutCommittingTheOuterTransition() = runBlocking {
+    fun inlineFeatureCollectorCanSupersedeIdentifyWithoutDroppingEitherTransition() = runBlocking {
         val core = requireNotNull(Nuxie.core)
         val initialDistinctId = Nuxie.distinctId
         val outerDistinctId = "outer-${System.nanoTime()}"
         val nestedDistinctId = "nested-${System.nanoTime()}"
         val outerProperty = "outer-property-${System.nanoTime()}"
+        val migrationEventName = "identity-migration-${System.nanoTime()}"
         val transitions = mutableListOf<Pair<String, String>>()
         core.userTransitions.addObserver { _, from, to -> transitions += from to to }
+        core.eventLog.capture(migrationEventName)
+        core.eventLog.awaitBarrier()
         core.features.applyOptimisticPurchaseProjection(
             initialDistinctId,
             mapOf("pro" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null)),
@@ -217,12 +220,21 @@ class NuxieIdentityFacadeTest {
 
         assertEquals(nestedDistinctId, Nuxie.distinctId)
         assertNull(core.identity.userProperty(outerProperty))
-        assertEquals(listOf(outerDistinctId to nestedDistinctId), transitions)
+        assertEquals(
+            listOf(
+                initialDistinctId to outerDistinctId,
+                outerDistinctId to nestedDistinctId,
+            ),
+            transitions,
+        )
         val identifyCustomers = core.store.pendingBatch(limit = 50)
             .filter { it.name == "\$identify" }
             .map { it.distinctId }
-        assertFalse(outerDistinctId in identifyCustomers)
-        assertTrue(nestedDistinctId in identifyCustomers)
+        assertEquals(listOf(outerDistinctId, nestedDistinctId), identifyCustomers)
+        assertEquals(
+            outerDistinctId,
+            core.store.pendingBatch(limit = 50).single { it.name == migrationEventName }.distinctId,
+        )
     }
 
     @Test
@@ -279,10 +291,7 @@ class NuxieIdentityFacadeTest {
             NuxieConfiguration(apiKey).apply { logLevel = LogLevel.NONE },
         )
         val core = requireNotNull(Nuxie.core)
-        core.features.applyOptimisticPurchaseProjection(
-            owner,
-            core.purchases.optimisticProjectionSnapshot(owner),
-        )
+        core.featureInfo.publish(core.stageFeatureUserChange(owner, owner))
         assertTrue(Nuxie.features.isAllowed("pro"))
 
         Nuxie.identify("other-${System.nanoTime()}")

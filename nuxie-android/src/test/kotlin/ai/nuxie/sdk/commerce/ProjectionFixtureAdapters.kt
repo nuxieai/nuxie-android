@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.commerce
 
+import ai.nuxie.sdk.features.FeatureAllowance
 import ai.nuxie.sdk.features.FeatureType
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -10,9 +11,9 @@ import kotlinx.serialization.json.jsonPrimitive
 /**
  * Adapters from the cross-SDK optimistic-entitlement-projection fixture's
  * portable shapes to this SDK's projection inputs. The fixture carries RAW
- * signed-descriptor fields; classification is owned here so both SDKs must
- * agree on the derivation (nil allowanceType is boolean; "fixed" and
- * "unlimited" are balance-bearing).
+ * signed-descriptor fields and routes them through the production classifier
+ * so both SDKs must agree on the derivation (nil allowanceType is boolean;
+ * "fixed" and "unlimited" are balance-bearing).
  */
 internal object ProjectionFixtureAdapters {
     const val AUTHORITY_SCOPE = "scope-a"
@@ -51,19 +52,20 @@ internal object ProjectionFixtureAdapters {
                 consumable = false,
                 featureAllowances = allowancesElement.jsonArray.map { allowanceElement ->
                     val allowance = allowanceElement.jsonObject
-                    val allowanceType = allowance["allowanceType"].unlessNull()
-                        ?.jsonPrimitive?.content?.lowercase()
-                    StoredFeatureAllowance(
-                        featureId = allowance["featureExternalId"].unlessNull()
-                            ?.jsonPrimitive?.content
-                            ?: allowance.getValue("featureId").jsonPrimitive.content,
-                        type = when (allowanceType) {
-                            null -> FeatureType.BOOLEAN
-                            else -> FeatureType.METERED
-                        }.name,
-                        unlimited = allowanceType == "unlimited",
+                    val classified = FeatureAllowance.fromDescriptor(
+                        featureId = allowance.getValue("featureId").jsonPrimitive.content,
+                        featureExternalId = allowance["featureExternalId"].unlessNull()
+                            ?.jsonPrimitive?.content,
+                        allowanceType = allowance["allowanceType"].unlessNull()
+                            ?.jsonPrimitive?.content,
                         allowance = allowance["allowance"].unlessNull()
                             ?.jsonPrimitive?.content?.toDouble(),
+                    )
+                    StoredFeatureAllowance(
+                        featureId = classified.featureId,
+                        type = classified.type.name,
+                        unlimited = classified.unlimited,
+                        allowance = classified.allowance,
                     )
                 },
             )

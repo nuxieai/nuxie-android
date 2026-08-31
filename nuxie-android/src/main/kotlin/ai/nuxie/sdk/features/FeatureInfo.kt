@@ -201,6 +201,9 @@ class FeatureInfo {
         fence.publishSnapshot(emptyMap(), emptyMap(), State.Unknown)
     }
 
+    /** Reserve a FIFO position without changing the visible Feature snapshot. */
+    internal fun stageBarrier(): Mutation = stage { _ -> }
+
     internal suspend fun publish(mutation: Mutation) {
         // Once engine state commits, cancellation cannot abandon its matching
         // listener/StateFlow publication or strand later FIFO reservations.
