@@ -34,9 +34,11 @@ internal class DeviceLegControlExecutor(
         nowMillis: Long,
         checkpoint: Checkpoint? = null,
         signal: Signal = Signal(),
-    ): Result = runCatching {
+    ): Result = try {
         evaluateChecked(step, context, assignments, nowMillis, checkpoint, signal)
-    }.getOrDefault(Result.Invalid)
+    } catch (_: Exception) {
+        Result.Invalid
+    }
 
     private fun evaluateChecked(
         step: JsonObject,
