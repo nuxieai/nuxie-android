@@ -19,13 +19,16 @@ import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
@@ -126,6 +129,28 @@ class PurchaseServiceTest {
             properties,
             "1200",
             "¥1,200",
+        )
+        fixture.close()
+    }
+
+    @Test
+    fun cancelledPlayCallbackCompletesCheckoutAndEmitsItsOutcomeExactlyOnce() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+
+        fixture.service.onPurchasesUpdated(
+            PurchaseUpdate(
+                result(BillingClient.BillingResponseCode.USER_CANCELED),
+                purchases = null,
+            ),
+        )
+
+        assertEquals(PurchaseResult.Cancelled, checkout.await())
+        assertEquals(
+            1,
+            actions.count { it == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_CANCELLED },
         )
         fixture.close()
     }
@@ -353,14 +378,19 @@ class PurchaseServiceTest {
                 releaseStaleRefresh.await()
             }
         }
-        fixture.service.rememberProduct(
-            product(
-                allowances = listOf(
-                    FeatureAllowance("pro", FeatureType.BOOLEAN),
-                    FeatureAllowance("refresh-blocker", FeatureType.BOOLEAN),
+        // Purchase-time pinning means a late descriptor cannot introduce a new
+        // Feature on retained evidence, so the stale refresh is modeled as an
+        // older projection application parked mid-publication; the revocation
+        // staged behind it must still win once the chain drains.
+        val staleRefresh = launch {
+            fixture.core.features.applyOptimisticPurchaseProjection(
+                fixture.core.identity.distinctId(),
+                mapOf(
+                    "pro" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null),
+                    "refresh-blocker" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null),
                 ),
-            ),
-        )
+            )
+        }
         runCurrent()
         staleRefreshStartedPublishing.await()
 
@@ -368,6 +398,7 @@ class PurchaseServiceTest {
         runCurrent()
         restore.cancel()
         releaseStaleRefresh.complete(Unit)
+        staleRefresh.join()
         runCurrent()
 
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
@@ -376,7 +407,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun restoreSnapshotWaitsForConcurrentPurchaseProcessingAndCannotRevokeIt() = runTest {
+    fun restoreQueriesAndDecisionDoNotWaitForConcurrentBackendSync() = runTest {
         val fixture = fixture(this)
         val syncStarted = CompletableDeferred<Unit>()
         val finishSync = CompletableDeferred<Unit>()
@@ -406,14 +437,281 @@ class PurchaseServiceTest {
         val restore = async { fixture.service.restorePurchases() }
         runCurrent()
 
-        assertEquals(queryCountBeforeRestore, fixture.billing.queries.size)
+        assertEquals(queryCountBeforeRestore + 2, fixture.billing.queries.size)
+        assertEquals(RestoreResult.NoPurchases, restore.await())
+        assertFalse(fixture.store.load().getValue("revoked-during-sync").revoked)
         finishSync.complete(Unit)
         purchaseUpdate.await()
-        assertEquals(RestoreResult.NoPurchases, restore.await())
 
         assertFalse(fixture.store.load().getValue("revoked-during-sync").revoked)
         assertTrue(fixture.store.load().getValue("revoked-during-sync").synced)
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun slowRestoreQueryDoesNotStarveAnInteractivePurchaseCallback() = runTest {
+        val fixture = fixture(this)
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+        val queryStarted = CompletableDeferred<Unit>()
+        val releaseQueries = CompletableDeferred<Unit>()
+        fixture.billing.queryStarted = queryStarted
+        fixture.billing.releaseQueries = releaseQueries
+
+        val restore = async { fixture.service.restorePurchases() }
+        queryStarted.await()
+        val purchaseUpdate = async {
+            fixture.service.onPurchasesUpdated(
+                okUpdate(playPurchase("purchase-during-restore-query").forCheckout(fixture)),
+            )
+        }
+        runCurrent()
+
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertTrue(purchaseUpdate.isCompleted)
+        assertTrue(fixture.store.load().getValue("purchase-during-restore-query").synced)
+
+        releaseQueries.complete(Unit)
+        purchaseUpdate.await()
+        assertEquals(RestoreResult.NoPurchases, restore.await())
+        assertFalse(fixture.store.load().getValue("purchase-during-restore-query").revoked)
+        fixture.close()
+    }
+
+    @Test
+    fun destinationProjectionInstallationOwnsTheRefreshMutexUntilInstallReturns() = runTest {
+        val fixture = fixture(this)
+        val installStarted = CountDownLatch(1)
+        val releaseInstall = CountDownLatch(1)
+        val installing = async(Dispatchers.Default) {
+            fixture.service.withOptimisticProjectionSnapshot(fixture.core.identity.distinctId()) {
+                installStarted.countDown()
+                check(releaseInstall.await(5, TimeUnit.SECONDS)) {
+                    "Timed out waiting to release destination projection installation"
+                }
+            }
+        }
+        assertTrue(installStarted.await(5, TimeUnit.SECONDS))
+        val queryCountBeforeRestore = fixture.billing.queries.size
+
+        val restore = async(start = CoroutineStart.UNDISPATCHED) {
+            fixture.service.restorePurchases()
+        }
+
+        assertEquals(queryCountBeforeRestore, fixture.billing.queries.size)
+        releaseInstall.countDown()
+        installing.await()
+        assertEquals(RestoreResult.NoPurchases, restore.await())
+        assertEquals(queryCountBeforeRestore + 2, fixture.billing.queries.size)
+        fixture.close()
+    }
+
+    @Test
+    fun inlineDestinationSnapshotDuringProjectionPublicationDoesNotDeadlock() = runTest {
+        val fixture = fixture(this)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        val callbackCompleted = CompletableDeferred<Unit>()
+        fixture.core.featureInfo.onFeatureChange = { featureId, _, _, _ ->
+            if (featureId == "pro") {
+                fixture.service.withOptimisticProjectionSnapshot(
+                    fixture.core.identity.distinctId(),
+                ) {}
+                callbackCompleted.complete(Unit)
+            }
+        }
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+
+        fixture.service.onPurchasesUpdated(
+            okUpdate(playPurchase("inline-identity-snapshot").forCheckout(fixture)),
+        )
+
+        callbackCompleted.await()
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun duplicateCallbacksCannotReturnCheckoutBeforeItsStagedProjectionDrains() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        val blockerStarted = CompletableDeferred<Unit>()
+        val releaseBlocker = CompletableDeferred<Unit>()
+        fixture.core.featureInfo.onFeatureChange = { featureId, _, _, _ ->
+            if (featureId == "publication-blocker") {
+                blockerStarted.complete(Unit)
+                releaseBlocker.await()
+            }
+        }
+        val olderPublication = async {
+            fixture.core.features.applyOptimisticPurchaseProjection(
+                fixture.core.identity.distinctId(),
+                mapOf(
+                    "publication-blocker" to OptimisticFeatureOverlay(
+                        FeatureType.BOOLEAN,
+                        unlimited = false,
+                        balanceIncrease = null,
+                    ),
+                ),
+            )
+        }
+        blockerStarted.await()
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+        val playUpdate = okUpdate(playPurchase("projection-before-return").forCheckout(fixture))
+        val update = async { fixture.service.onPurchasesUpdated(playUpdate) }
+        runCurrent()
+        val duplicateUpdate = async { fixture.service.onPurchasesUpdated(playUpdate) }
+        runCurrent()
+        val cancellationUpdate = async {
+            fixture.service.onPurchasesUpdated(
+                PurchaseUpdate(
+                    result(BillingClient.BillingResponseCode.USER_CANCELED),
+                    purchases = null,
+                ),
+            )
+        }
+        runCurrent()
+
+        assertFalse(checkout.isCompleted)
+        assertFalse(update.isCompleted)
+        assertTrue(duplicateUpdate.isCompleted)
+        assertTrue(cancellationUpdate.isCompleted)
+        assertEquals(
+            0,
+            actions.count { it == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_CANCELLED },
+        )
+
+        releaseBlocker.complete(Unit)
+        olderPublication.await()
+        duplicateUpdate.await()
+        cancellationUpdate.await()
+        update.await()
+
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun equivalentProjectionStagedByAnotherRefreshStillBlocksCheckoutCompletion() = runTest {
+        val fixture = fixture(this)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        val owner = fixture.core.identity.distinctId()
+        val blockerStarted = CompletableDeferred<Unit>()
+        val releaseBlocker = CompletableDeferred<Unit>()
+        fixture.core.featureInfo.onFeatureChange = { featureId, _, _, _ ->
+            if (featureId == "publication-blocker") {
+                blockerStarted.complete(Unit)
+                releaseBlocker.await()
+            }
+        }
+        val olderPublication = async {
+            fixture.core.features.applyOptimisticPurchaseProjection(
+                owner,
+                mapOf(
+                    "publication-blocker" to OptimisticFeatureOverlay(
+                        FeatureType.BOOLEAN,
+                        unlimited = false,
+                        balanceIncrease = null,
+                    ),
+                ),
+            )
+        }
+        blockerStarted.await()
+        val equivalentRefresh = async {
+            fixture.core.features.applyOptimisticPurchaseProjection(
+                owner,
+                mapOf(
+                    "pro" to OptimisticFeatureOverlay(
+                        FeatureType.BOOLEAN,
+                        unlimited = false,
+                        balanceIncrease = null,
+                    ),
+                ),
+            )
+        }
+        runCurrent()
+        assertFalse(equivalentRefresh.isCompleted)
+
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+        val update = async {
+            fixture.service.onPurchasesUpdated(
+                okUpdate(playPurchase("equivalent-staged-projection").forCheckout(fixture)),
+            )
+        }
+        runCurrent()
+
+        assertFalse(checkout.isCompleted)
+        assertFalse(update.isCompleted)
+
+        releaseBlocker.complete(Unit)
+        olderPublication.await()
+        equivalentRefresh.await()
+        update.await()
+
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun featurePublicationRunsAfterThePurchaseDecisionMutexIsReleased() = runTest {
+        val fixture = fixture(this)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        val processingWasAvailable = CompletableDeferred<Boolean>()
+        fixture.core.featureInfo.onFeatureChange = { featureId, _, _, _ ->
+            if (featureId == "pro" && !processingWasAvailable.isCompleted) {
+                val reentrantCallback = backgroundScope.async(start = CoroutineStart.UNDISPATCHED) {
+                    fixture.service.onPurchasesUpdated(okUpdate())
+                }
+                yield()
+                processingWasAvailable.complete(reentrantCallback.isCompleted)
+            }
+        }
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+
+        fixture.service.onPurchasesUpdated(
+            okUpdate(playPurchase("publication-outside-processing").forCheckout(fixture)),
+        )
+
+        assertTrue(processingWasAvailable.await())
+        assertEquals(PurchaseResult.Purchased, checkout.await())
         fixture.close()
     }
 
@@ -480,6 +778,56 @@ class PurchaseServiceTest {
         assertTrue(matching.core.featureInfo.isAllowed("pro"))
         unmatched.close()
         matching.close()
+    }
+
+    @Test
+    fun purchaseDecisionPinsItsCatalogSnapshotBeforeAReplacementCanSwapAllowances() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        val purchaseTimeMapping = StoredProductMapping(
+            storeProductId = "play-pro",
+            nuxieProductId = "nuxie-pro",
+            productType = BillingClient.ProductType.INAPP,
+            consumable = false,
+            featureAllowances = listOf(
+                StoredFeatureAllowance("credits", FeatureType.METERED.name, false, 1.0),
+            ),
+            licensingPublicKey = "test-public-key",
+        )
+        fixture.store.upsertProductMapping(purchaseTimeMapping)
+        var replacementInstalled = false
+        fixture.store.afterNextMappingsLoad = { snapshot ->
+            assertEquals(1.0, snapshot.single().featureAllowances.single().allowance!!, 0.0)
+            fixture.store.upsertProductMapping(
+                purchaseTimeMapping.copy(
+                    featureAllowances = listOf(
+                        StoredFeatureAllowance(
+                            "credits",
+                            FeatureType.METERED.name,
+                            false,
+                            99.0,
+                        ),
+                    ),
+                ),
+            )
+            replacementInstalled = true
+        }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+
+        fixture.service.onPurchasesUpdated(
+            okUpdate(
+                playPurchase(
+                    "catalog-snapshot-pin",
+                    obfuscatedAccountId = accountHash(owner),
+                ),
+            ),
+        )
+
+        assertTrue(replacementInstalled)
+        val retained = fixture.store.load().getValue("catalog-snapshot-pin")
+        assertEquals(1.0, retained.pinnedFeatureAllowances?.single()?.allowance!!, 0.0)
+        assertEquals(1.0, fixture.core.featureInfo.balance("credits")!!, 0.0)
+        fixture.close()
     }
 
     @Test
@@ -574,6 +922,102 @@ class PurchaseServiceTest {
         assertTrue(evidence.synced)
         assertEquals(42L, evidence.backendSyncedAtMillis)
         assertFalse(syncCalled)
+        fixture.close()
+    }
+
+    @Test
+    fun stalePendingCallbackCannotDowngradeOrPendAnAlreadyPurchasedCheckoutToken() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(
+            PurchaseEvidence(
+                purchaseToken = "stale-pending-checkout",
+                packageName = "com.example.app",
+                storeProductIds = listOf("play-pro"),
+                nuxieProductId = "nuxie-pro",
+                purchaseState = StoredPurchaseState.PURCHASED,
+                obfuscatedAccountId = accountHash(owner),
+                syncAttributionDistinctId = owner,
+                ownerDistinctId = owner,
+                pinnedFeatureAllowances = listOf(
+                    StoredFeatureAllowance("pro", FeatureType.BOOLEAN.name, false, null),
+                ),
+                acknowledged = false,
+                firstSeenMillis = 1L,
+                catalogResolved = true,
+                signatureVerified = true,
+            ),
+        )
+        var syncCalled = false
+        fixture.synchronizer = {
+            syncCalled = true
+            accepted(owner)
+        }
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+
+        fixture.service.onPurchasesUpdated(
+            okUpdate(
+                playPurchase(
+                    "stale-pending-checkout",
+                    state = StoredPurchaseState.PENDING,
+                ).forCheckout(fixture),
+            ),
+        )
+
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertEquals(
+            StoredPurchaseState.PURCHASED,
+            fixture.store.load().getValue("stale-pending-checkout").purchaseState,
+        )
+        assertTrue(syncCalled)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun permanentlyRejectedEvidenceFailsItsCorrelatedCheckoutInsteadOfAbandoningIt() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(
+            PurchaseEvidence(
+                purchaseToken = "rejected-checkout",
+                packageName = "com.example.app",
+                storeProductIds = listOf("play-pro"),
+                nuxieProductId = "nuxie-pro",
+                purchaseState = StoredPurchaseState.PURCHASED,
+                obfuscatedAccountId = accountHash(owner),
+                syncAttributionDistinctId = owner,
+                ownerDistinctId = owner,
+                acknowledged = false,
+                permanentlyRejected = true,
+                firstSeenMillis = 1L,
+                catalogResolved = true,
+                signatureVerified = true,
+            ),
+        )
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+
+        fixture.service.onPurchasesUpdated(
+            okUpdate(playPurchase("rejected-checkout").forCheckout(fixture)),
+        )
+        runCurrent()
+
+        assertTrue(checkout.isCompleted)
+        val outcome = checkout.await()
+        assertTrue(outcome is PurchaseResult.Failed)
+        assertEquals(
+            1,
+            actions.count { it == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_FAILED },
+        )
         fixture.close()
     }
 
@@ -1228,6 +1672,7 @@ class PurchaseServiceTest {
         var actions: MutableList<String> = mutableListOf()
         var failEvidenceUpserts = false
         var afterNextLoad: ((Map<String, PurchaseEvidence>) -> Unit)? = null
+        var afterNextMappingsLoad: ((List<StoredProductMapping>) -> Unit)? = null
         override fun load(): Map<String, PurchaseEvidence> {
             val snapshot = entries.toMap()
             val callback = afterNextLoad
@@ -1249,7 +1694,13 @@ class PurchaseServiceTest {
             bindings[binding.obfuscatedAccountId to binding.productIdentity] = binding
             return true
         }
-        override fun loadProductMappings(): List<StoredProductMapping> = mappings.values.toList()
+        override fun loadProductMappings(): List<StoredProductMapping> {
+            val snapshot = mappings.values.toList()
+            val callback = afterNextMappingsLoad
+            afterNextMappingsLoad = null
+            callback?.invoke(snapshot)
+            return snapshot
+        }
         override fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
             mappings[mapping.productIdentity] = mapping
             return true
@@ -1263,6 +1714,8 @@ class PurchaseServiceTest {
         var launchCode = BillingClient.BillingResponseCode.OK
         val acknowledgeCodes = mutableListOf<Int>()
         var failQueries = false
+        var queryStarted: CompletableDeferred<Unit>? = null
+        var releaseQueries: CompletableDeferred<Unit>? = null
 
         override suspend fun launch(activity: Activity, request: CheckoutRequest): BillingResult {
             launched = request
@@ -1271,6 +1724,8 @@ class PurchaseServiceTest {
 
         override suspend fun queryActive(productType: String): ActivePurchasesResult {
             queries += productType
+            queryStarted?.complete(Unit)
+            releaseQueries?.await()
             if (failQueries) {
                 return ActivePurchasesResult.Failed(
                     BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE,

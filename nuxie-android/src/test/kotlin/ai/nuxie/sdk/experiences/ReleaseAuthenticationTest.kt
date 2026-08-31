@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.experiences
 
 import ai.nuxie.sdk.fixtures.FixtureRunner
+import ai.nuxie.sdk.features.FeatureType
 import android.util.Base64
 import java.io.File
 import kotlinx.serialization.json.Json
@@ -60,6 +61,73 @@ class ReleaseAuthenticationTest {
         assertEquals(42L, release.publishedAtSeqToPromote)
         assertEquals("experience_golden", release.identity.experienceId)
         assertTrue(release.descriptor.containsKey("render"))
+    }
+
+    @Test
+    fun authenticatedReleaseUsesTheProductionDescriptorClassifier() {
+        val descriptor = Json.parseToJsonElement(
+            """{
+                "products": [{
+                    "id": "credit-pack",
+                    "store": {
+                        "platform": "google_play",
+                        "productId": "play-credit-pack"
+                    },
+                    "entitlements": [
+                        {
+                            "id": "fallback-boolean",
+                            "featureId": null,
+                            "featureExternalId": "pro",
+                            "allowanceType": null,
+                            "allowance": null
+                        },
+                        {
+                            "id": "fixed",
+                            "featureId": "feature-internal",
+                            "featureExternalId": "credits",
+                            "allowanceType": "fixed",
+                            "allowance": 0.5
+                        },
+                        {
+                            "id": "unlimited",
+                            "featureId": "exports",
+                            "featureExternalId": null,
+                            "allowanceType": "unlimited",
+                            "allowance": null
+                        },
+                        {
+                            "id": "not-a-feature-id",
+                            "featureId": null,
+                            "featureExternalId": null,
+                            "allowanceType": null,
+                            "allowance": null
+                        }
+                    ]
+                }]
+            }""",
+        ).jsonObject
+
+        val release = AuthenticatedRelease(
+            keyId = "test-key",
+            descriptorSha256 = "test-sha",
+            identity = expectedIdentity(),
+            descriptorBytes = ByteArray(0),
+            descriptor = descriptor,
+            publishedAtSeqToPromote = null,
+        )
+        val product = release.googlePlayProductAllowances.single()
+
+        assertEquals("credit-pack", product.productId)
+        assertEquals("play-credit-pack", product.storeProductId)
+        assertEquals(
+            listOf(
+                Triple("pro", FeatureType.BOOLEAN, false),
+                Triple("credits", FeatureType.METERED, false),
+                Triple("exports", FeatureType.METERED, true),
+            ),
+            product.featureAllowances.map { Triple(it.featureId, it.type, it.unlimited) },
+        )
+        assertEquals(0.5, product.featureAllowances[1].allowance!!, 0.0)
     }
 
     @Test

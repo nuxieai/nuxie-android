@@ -122,6 +122,25 @@ class OptimisticFeatureProjectionTest {
     }
 
     @Test
+    fun allowanceResolutionDistinguishesNoSourceFromAnExplicitlyEmptySource() {
+        val evidence = evidence(owner = "customer-a")
+
+        assertNull(
+            resolvedFeatureAllowancesForEvidence(
+                evidence = evidence,
+                descriptors = emptyList(),
+            ),
+        )
+        assertEquals(
+            emptyList<StoredFeatureAllowance>(),
+            resolvedFeatureAllowancesForEvidence(
+                evidence = evidence,
+                descriptors = listOf(descriptor()),
+            ),
+        )
+    }
+
+    @Test
     fun purchasedButUnverifiedPlayEvidenceIsNotEligible() {
         assertNull(
             optimisticFeatureProjection(
@@ -340,6 +359,131 @@ class OptimisticFeatureProjectionTest {
         )
 
         assertEquals(setOf("right-feature"), projection?.keys)
+    }
+
+    @Test
+    fun purchaseTimeBindingAllowanceWinsOverALaterDescriptorUpdate() {
+        val purchaseEvidence = evidence(owner = "customer-a").copy(
+            obfuscatedAccountId = "account-a",
+        )
+        val purchaseTimeBinding = StoredPurchaseBinding(
+            obfuscatedAccountId = "account-a",
+            distinctId = "customer-a",
+            storeProductId = "play-product",
+            nuxieProductId = "nuxie-product",
+            productType = "inapp",
+            consumable = false,
+            featureAllowances = listOf(
+                StoredFeatureAllowance("credits", FeatureType.METERED.name, false, 2.0),
+            ),
+            nuxieManaged = true,
+        )
+        val updatedDescriptor = descriptor(
+            FeatureAllowance("credits", FeatureType.METERED, allowance = 99.0),
+        )
+
+        val projection = optimisticFeatureProjection(
+            distinctId = "customer-a",
+            authorityScope = AUTHORITY_SCOPE,
+            evidence = listOf(purchaseEvidence),
+            descriptors = listOf(updatedDescriptor),
+            bindings = listOf(purchaseTimeBinding),
+        )
+
+        assertEquals(2.0, projection?.get("credits")?.balanceIncrease!!, 0.0)
+    }
+
+    @Test
+    fun tokenPinnedAllowanceWinsOverLaterBindingAndDescriptorValues() {
+        val purchaseEvidence = evidence(owner = "customer-a").copy(
+            obfuscatedAccountId = "account-a",
+            pinnedFeatureAllowances = listOf(
+                StoredFeatureAllowance("credits", FeatureType.METERED.name, false, 1.0),
+            ),
+        )
+        val laterBinding = StoredPurchaseBinding(
+            obfuscatedAccountId = "account-a",
+            distinctId = "customer-a",
+            storeProductId = "play-product",
+            nuxieProductId = "nuxie-product",
+            productType = "inapp",
+            consumable = false,
+            featureAllowances = listOf(
+                StoredFeatureAllowance("credits", FeatureType.METERED.name, false, 2.0),
+            ),
+            nuxieManaged = true,
+        )
+
+        val projection = optimisticFeatureProjection(
+            distinctId = "customer-a",
+            authorityScope = AUTHORITY_SCOPE,
+            evidence = listOf(purchaseEvidence),
+            descriptors = listOf(
+                descriptor(FeatureAllowance("credits", FeatureType.METERED, allowance = 99.0)),
+            ),
+            bindings = listOf(laterBinding),
+        )
+
+        assertEquals(1.0, projection?.get("credits")?.balanceIncrease!!, 0.0)
+    }
+
+    @Test
+    fun emptyTokenPinDoesNotGainLaterBindingOrDescriptorAllowances() {
+        val purchaseEvidence = evidence(owner = "customer-a").copy(
+            obfuscatedAccountId = "account-a",
+            pinnedFeatureAllowances = emptyList(),
+        )
+        val laterBinding = StoredPurchaseBinding(
+            obfuscatedAccountId = "account-a",
+            distinctId = "customer-a",
+            storeProductId = "play-product",
+            nuxieProductId = "nuxie-product",
+            productType = "inapp",
+            consumable = false,
+            featureAllowances = listOf(
+                StoredFeatureAllowance("pro", FeatureType.BOOLEAN.name, false),
+            ),
+            nuxieManaged = true,
+        )
+
+        val projection = optimisticFeatureProjection(
+            distinctId = "customer-a",
+            authorityScope = AUTHORITY_SCOPE,
+            evidence = listOf(purchaseEvidence),
+            descriptors = listOf(descriptor(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+            bindings = listOf(laterBinding),
+        )
+
+        assertNull(projection)
+    }
+
+    @Test
+    fun emptyPurchaseTimeBindingDoesNotGainALaterDescriptorAllowance() {
+        val purchaseEvidence = evidence(owner = "customer-a").copy(
+            obfuscatedAccountId = "account-a",
+        )
+        val purchaseTimeBinding = StoredPurchaseBinding(
+            obfuscatedAccountId = "account-a",
+            distinctId = "customer-a",
+            storeProductId = "play-product",
+            nuxieProductId = "nuxie-product",
+            productType = "inapp",
+            consumable = false,
+            featureAllowances = emptyList(),
+            nuxieManaged = true,
+        )
+
+        val projection = optimisticFeatureProjection(
+            distinctId = "customer-a",
+            authorityScope = AUTHORITY_SCOPE,
+            evidence = listOf(purchaseEvidence),
+            descriptors = listOf(
+                descriptor(FeatureAllowance("pro", FeatureType.BOOLEAN)),
+            ),
+            bindings = listOf(purchaseTimeBinding),
+        )
+
+        assertNull(projection)
     }
 
     private fun evidence(owner: String) = PurchaseEvidence(

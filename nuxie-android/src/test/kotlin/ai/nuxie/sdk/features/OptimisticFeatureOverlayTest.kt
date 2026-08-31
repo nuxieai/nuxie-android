@@ -5,6 +5,7 @@ import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.commerce.InMemoryPurchaseEvidenceStore
 import ai.nuxie.sdk.commerce.OptimisticFeatureOverlay
 import ai.nuxie.sdk.commerce.PurchaseEvidence
+import ai.nuxie.sdk.commerce.PurchaseEvidenceStore
 import ai.nuxie.sdk.commerce.StoredFeatureAllowance
 import ai.nuxie.sdk.commerce.StoredProductMapping
 import ai.nuxie.sdk.commerce.StoredPurchaseState
@@ -33,6 +34,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -217,7 +219,7 @@ class OptimisticFeatureOverlayTest {
     }
 
     @Test
-    fun cachedDescriptorChangeRecomputesProjectionWithoutAnotherBillingUpdate() = runBlocking {
+    fun cachedDescriptorArrivalDerivesProjectionWithoutAnotherBillingUpdate() = runBlocking {
         val apiKey = "pk_test_descriptor_refresh_${System.nanoTime()}"
         val application = RuntimeEnvironment.getApplication()
         val identity = IdentityService(application).also { it.setDistinctId("customer-a") }
@@ -268,7 +270,164 @@ class OptimisticFeatureOverlayTest {
         withTimeout(5_000) {
             core.featureInfo.all.first { it["credits"]?.balance == 10.0 }
         }
+        assertEquals(
+            10.0,
+            store.load().getValue("token-1").pinnedFeatureAllowances
+                ?.single()?.allowance!!,
+            0.0,
+        )
+
+        store.upsertProductMapping(
+            StoredProductMapping(
+                storeProductId = "play-credit-pack",
+                nuxieProductId = "credit-pack",
+                productType = "inapp",
+                consumable = false,
+                featureAllowances = listOf(
+                    StoredFeatureAllowance("credits", FeatureType.METERED.name, false, 99.0),
+                ),
+            ),
+        )
+        core.featureInfo.publish(core.stageFeatureUserChange("customer-a", "customer-a"))
+
+        assertEquals(10.0, core.featureInfo.balance("credits")!!, 0.0)
         core.stop()
+    }
+
+    @Test
+    fun failedFirstArrivalPinDoesNotPublishAnEphemeralProjection() = runBlocking {
+        val apiKey = "pk_test_descriptor_pin_failure_${System.nanoTime()}"
+        val owner = "customer-a"
+        val application = RuntimeEnvironment.getApplication()
+        val identity = IdentityService(application).also { it.setDistinctId(owner) }
+        val store = FailingPinEvidenceStore()
+        assertTrue(
+            store.upsert(
+                PurchaseEvidence(
+                    purchaseToken = "token-1",
+                    packageName = "com.example.app",
+                    storeProductIds = listOf("play-credit-pack"),
+                    nuxieProductId = "credit-pack",
+                    purchaseState = StoredPurchaseState.PURCHASED,
+                    syncAttributionDistinctId = owner,
+                    ownerDistinctId = owner,
+                    acknowledged = false,
+                    firstSeenMillis = 1L,
+                    catalogResolved = true,
+                    signatureVerified = true,
+                    authorityScope = purchaseAuthorityScope(apiKey, NuxieEnvironment.DEVELOPMENT),
+                ),
+            ),
+        )
+        val core = NuxieCore(
+            context = application,
+            apiKey = apiKey,
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(
+                transport = FakeTransport(),
+                identity = identity,
+                purchaseEvidenceStore = store,
+                registerLifecycle = false,
+            ),
+        )
+        try {
+            store.failPinnedEvidenceUpserts = true
+            assertTrue(
+                store.upsertProductMapping(
+                    StoredProductMapping(
+                        storeProductId = "play-credit-pack",
+                        nuxieProductId = "credit-pack",
+                        productType = "inapp",
+                        consumable = false,
+                        featureAllowances = listOf(
+                            StoredFeatureAllowance(
+                                "credits",
+                                FeatureType.METERED.name,
+                                false,
+                                10.0,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+
+            val projection = core.purchases.withOptimisticProjectionSnapshot(owner) { it }
+
+            assertNull(projection)
+            assertNull(store.load().getValue("token-1").pinnedFeatureAllowances)
+            assertFalse(core.featureInfo.isAllowed("credits"))
+        } finally {
+            core.stop()
+        }
+    }
+
+    @Test
+    fun descriptorArrivalAfterStopDoesNotStrandFeatureInfoPublication() = runBlocking {
+        val apiKey = "pk_test_descriptor_after_stop_${System.nanoTime()}"
+        val owner = "customer-a"
+        val application = RuntimeEnvironment.getApplication()
+        val identity = IdentityService(application).also { it.setDistinctId(owner) }
+        val store = InMemoryPurchaseEvidenceStore()
+        assertTrue(
+            store.upsert(
+                PurchaseEvidence(
+                    purchaseToken = "token-after-stop",
+                    packageName = "com.example.app",
+                    storeProductIds = listOf("play-pro"),
+                    nuxieProductId = "pro",
+                    purchaseState = StoredPurchaseState.PURCHASED,
+                    syncAttributionDistinctId = owner,
+                    ownerDistinctId = owner,
+                    acknowledged = false,
+                    firstSeenMillis = 1L,
+                    catalogResolved = true,
+                    signatureVerified = true,
+                    authorityScope = purchaseAuthorityScope(apiKey, NuxieEnvironment.DEVELOPMENT),
+                ),
+            ),
+        )
+        val core = NuxieCore(
+            context = application,
+            apiKey = apiKey,
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(
+                transport = FakeTransport(),
+                identity = identity,
+                purchaseEvidenceStore = store,
+                registerLifecycle = false,
+            ),
+        )
+        core.stop()
+
+        store.upsertProductMapping(
+            StoredProductMapping(
+                storeProductId = "play-pro",
+                nuxieProductId = "pro",
+                productType = "inapp",
+                consumable = false,
+                featureAllowances = listOf(
+                    StoredFeatureAllowance("pro", FeatureType.BOOLEAN.name, false),
+                ),
+            ),
+        )
+
+        withTimeout(2_000) {
+            core.features.applyOptimisticPurchaseProjection(
+                owner,
+                mapOf(
+                    "publication-probe" to OptimisticFeatureOverlay(
+                        FeatureType.BOOLEAN,
+                        unlimited = false,
+                        balanceIncrease = null,
+                    ),
+                ),
+            )
+        }
+        assertTrue(core.featureInfo.isAllowed("publication-probe"))
     }
 
     @Test
@@ -426,4 +585,38 @@ class OptimisticFeatureOverlayTest {
             """{"segments":[],"features":[{"id":"exports","type":"metered","balance":$exportsBalance,"unlimited":false}]}"""
         },
     ).jsonObject
+
+    private class FailingPinEvidenceStore : PurchaseEvidenceStore {
+        private val delegate = InMemoryPurchaseEvidenceStore()
+        private val mappingInstallationLock = Any()
+
+        @Volatile
+        var failPinnedEvidenceUpserts = false
+
+        @Volatile
+        private var productMappingsChangedListener: (() -> Unit)? = null
+
+        override fun load(): Map<String, PurchaseEvidence> = delegate.load()
+
+        override fun upsert(evidence: PurchaseEvidence): Boolean =
+            if (failPinnedEvidenceUpserts && evidence.pinnedFeatureAllowances != null) {
+                false
+            } else {
+                delegate.upsert(evidence)
+            }
+
+        override fun loadProductMappings(): List<StoredProductMapping> =
+            delegate.loadProductMappings()
+
+        override fun upsertProductMapping(mapping: StoredProductMapping): Boolean =
+            synchronized(mappingInstallationLock) {
+                delegate.upsertProductMapping(mapping).also { persisted ->
+                    if (persisted) productMappingsChangedListener?.invoke()
+                }
+            }
+
+        override fun setProductMappingsChangedListener(listener: (() -> Unit)?) {
+            productMappingsChangedListener = listener
+        }
+    }
 }

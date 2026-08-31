@@ -43,4 +43,22 @@ internal data class FeatureAllowance(
     val type: FeatureType,
     val unlimited: Boolean = false,
     val allowance: Double? = null,
-)
+) {
+    companion object {
+        /** Classify the raw allowance fields carried by a signed product descriptor. */
+        fun fromDescriptor(
+            featureId: String,
+            featureExternalId: String?,
+            allowanceType: String?,
+            allowance: Double?,
+        ): FeatureAllowance {
+            val normalizedType = allowanceType?.lowercase()
+            return FeatureAllowance(
+                featureId = featureExternalId ?: featureId,
+                type = if (normalizedType == null) FeatureType.BOOLEAN else FeatureType.METERED,
+                unlimited = normalizedType == "unlimited",
+                allowance = allowance,
+            )
+        }
+    }
+}

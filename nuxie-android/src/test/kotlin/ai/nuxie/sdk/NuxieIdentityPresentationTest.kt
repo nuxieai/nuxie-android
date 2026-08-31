@@ -1,10 +1,13 @@
 package ai.nuxie.sdk
 
+import ai.nuxie.sdk.commerce.OptimisticFeatureOverlay
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.experiences.AcquiredRelease
 import ai.nuxie.sdk.experiences.AuthenticatedRelease
 import ai.nuxie.sdk.experiences.Delivery
 import ai.nuxie.sdk.experiences.ExperienceReleaseIdentity
+import ai.nuxie.sdk.features.FeatureType
+import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.presentation.ExperiencePresentationService
 import ai.nuxie.sdk.presentation.PresentationRegistry
 import ai.nuxie.sdk.presentation.PresentationRelease
@@ -61,8 +64,64 @@ class NuxieIdentityPresentationTest {
         }
     }
 
+    @Test
+    fun resetCleanupAndTransitionSurviveReentrantIdentifyDuringProjectionPublication() = runBlocking {
+        val nestedDistinctId = "nested-${System.nanoTime()}"
+        var ownerDistinctId: String? = null
+        var resetDistinctId: String? = null
+        val transitions = mutableListOf<Triple<UserTransitionCoordinator.Kind, String, String>>()
+
+        assertIdentityTransitionShutsDownPresentation(
+            initiallyIdentified = true,
+            prepareTransition = { core, owner ->
+                ownerDistinctId = owner
+                core.userTransitions.addObserver { kind, from, to ->
+                    transitions += Triple(kind, from, to)
+                }
+                core.features.applyOptimisticPurchaseProjection(
+                    owner,
+                    mapOf(
+                        "pro" to OptimisticFeatureOverlay(
+                            FeatureType.BOOLEAN,
+                            unlimited = false,
+                            balanceIncrease = null,
+                        ),
+                    ),
+                )
+                var shouldReenter = true
+                core.featureInfo.onFeatureChange = { featureId, _, _, _ ->
+                    if (shouldReenter && featureId == "pro") {
+                        shouldReenter = false
+                        resetDistinctId = Nuxie.distinctId
+                        Nuxie.identify(nestedDistinctId)
+                    }
+                }
+            },
+        ) {
+            Nuxie.reset()
+        }
+
+        assertEquals(nestedDistinctId, Nuxie.distinctId)
+        assertEquals(
+            listOf(
+                Triple(
+                    UserTransitionCoordinator.Kind.RESET,
+                    requireNotNull(ownerDistinctId),
+                    requireNotNull(resetDistinctId),
+                ),
+                Triple(
+                    UserTransitionCoordinator.Kind.IDENTIFY,
+                    requireNotNull(resetDistinctId),
+                    nestedDistinctId,
+                ),
+            ),
+            transitions,
+        )
+    }
+
     private suspend fun assertIdentityTransitionShutsDownPresentation(
         initiallyIdentified: Boolean = false,
+        prepareTransition: suspend (NuxieCore, String) -> Unit = { _, _ -> },
         transition: () -> Unit,
     ) {
         val launched = mutableListOf<String>()
@@ -102,6 +161,7 @@ class NuxieIdentityPresentationTest {
         PresentationRegistry.reportFirstFrame(launched.single())
         shown.await()
 
+        prepareTransition(core, ownerDistinctId)
         transition()
         withTimeout(2_000) { core.userTransitions.drain() }
         Nuxie.dismiss()

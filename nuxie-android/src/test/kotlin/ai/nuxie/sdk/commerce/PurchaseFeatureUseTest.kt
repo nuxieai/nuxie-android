@@ -76,6 +76,23 @@ class PurchaseFeatureUseTest {
     }
 
     @Test
+    fun missingTokenRestoreDoesNotRevokeAClaimedAtomicSpend() = runBlocking {
+        val fixture = concurrentFixture(firstStatus = 200)
+        val use = async(Dispatchers.Default) { fixture.use() }
+        assertTrue(fixture.transport.firstRequestStarted.await(5, TimeUnit.SECONDS))
+
+        assertEquals(RestoreResult.NoPurchases, fixture.service.restorePurchases())
+        assertFalse(fixture.store.load().getValue("token-1").revoked)
+
+        fixture.transport.releaseFirst.countDown()
+        assertNotNull(use.await())
+        val accepted = fixture.store.load().getValue("token-1")
+        assertTrue(accepted.synced)
+        assertFalse(accepted.revoked)
+        fixture.core.stop()
+    }
+
+    @Test
     fun concurrentSpendWaitsThenReevaluatesAfterTheFirstSucceeds() = runBlocking {
         val fixture = concurrentFixture(firstStatus = 200)
         val first = async(Dispatchers.Default) { fixture.use() }

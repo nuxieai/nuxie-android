@@ -113,6 +113,8 @@ internal data class PurchaseEvidence(
     val syncAttributionDistinctId: String,
     val ownerDistinctId: String? = null,
     val context: StoredPurchaseContext? = null,
+    /** Purchase-token-scoped allowance snapshot; null is unresolved and empty carries no Feature allowances. */
+    val pinnedFeatureAllowances: List<StoredFeatureAllowance>? = null,
     val acknowledged: Boolean,
     val consumed: Boolean = false,
     val synced: Boolean = false,
@@ -140,6 +142,7 @@ internal interface PurchaseEvidenceStore {
     fun loadBindings(): List<StoredPurchaseBinding> = emptyList()
     fun upsertBinding(binding: StoredPurchaseBinding): Boolean = true
     fun loadProductMappings(): List<StoredProductMapping> = emptyList()
+    /** Successful installation invokes the listener before a later mapping installation may begin. */
     fun upsertProductMapping(mapping: StoredProductMapping): Boolean = true
     fun setProductMappingsChangedListener(listener: (() -> Unit)?) = Unit
 }
@@ -152,6 +155,7 @@ internal class FilePurchaseEvidenceStore(
     private val bindingsFile = File(directory, "purchase-bindings.json")
     private val catalogFile = File(directory, "purchase-catalog.json")
     private val lock = Any()
+    private val productMappingInstallationLock = Any()
     private val json = Json { ignoreUnknownKeys = true }
     @Volatile private var productMappingsChangedListener: (() -> Unit)? = null
 
@@ -196,15 +200,16 @@ internal class FilePurchaseEvidenceStore(
         loadMappingsUnlocked()
     }
 
-    override fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
-        val persisted = synchronized(lock) {
-            val entries = loadMappingsUnlocked().associateByTo(linkedMapOf()) { it.productIdentity }
-            entries[mapping.productIdentity] = mapping
-            saveArray(catalogFile, entries.values.map(::encodeMapping), "catalog mapping")
+    override fun upsertProductMapping(mapping: StoredProductMapping): Boolean =
+        synchronized(productMappingInstallationLock) {
+            val persisted = synchronized(lock) {
+                val entries = loadMappingsUnlocked().associateByTo(linkedMapOf()) { it.productIdentity }
+                entries[mapping.productIdentity] = mapping
+                saveArray(catalogFile, entries.values.map(::encodeMapping), "catalog mapping")
+            }
+            if (persisted) productMappingsChangedListener?.invoke()
+            persisted
         }
-        if (persisted) productMappingsChangedListener?.invoke()
-        return persisted
-    }
 
     override fun setProductMappingsChangedListener(listener: (() -> Unit)?) {
         productMappingsChangedListener = listener
@@ -262,6 +267,9 @@ internal class FilePurchaseEvidenceStore(
             put("syncAttributionDistinctId", JsonPrimitive(evidence.syncAttributionDistinctId))
             evidence.ownerDistinctId?.let { put("ownerDistinctId", JsonPrimitive(it)) }
             evidence.context?.let { put("context", encodeContext(it)) }
+            evidence.pinnedFeatureAllowances?.let { allowances ->
+                put("pinnedFeatureAllowances", JsonArray(allowances.map(::encodeAllowance)))
+            }
             put("acknowledged", JsonPrimitive(evidence.acknowledged))
             put("consumed", JsonPrimitive(evidence.consumed))
             put("synced", JsonPrimitive(evidence.synced))
@@ -298,6 +306,8 @@ internal class FilePurchaseEvidenceStore(
             syncAttributionDistinctId = raw.string("syncAttributionDistinctId") ?: return null,
             ownerDistinctId = raw.string("ownerDistinctId"),
             context = (raw["context"] as? JsonObject)?.let(::decodeContext),
+            pinnedFeatureAllowances = (raw["pinnedFeatureAllowances"] as? JsonArray)
+                ?.mapNotNull(::decodeAllowance),
             acknowledged = raw.boolean("acknowledged"),
             consumed = raw.boolean("consumed"),
             synced = raw.boolean("synced"),
@@ -431,6 +441,7 @@ internal class InMemoryPurchaseEvidenceStore : PurchaseEvidenceStore {
     private val entries = linkedMapOf<String, PurchaseEvidence>()
     private val bindings = linkedMapOf<StoredPurchaseBindingKey, StoredPurchaseBinding>()
     private val mappings = linkedMapOf<StoredProductIdentity, StoredProductMapping>()
+    private val productMappingInstallationLock = Any()
     @Volatile private var productMappingsChangedListener: (() -> Unit)? = null
     override fun load(): Map<String, PurchaseEvidence> = synchronized(entries) { entries.toMap() }
     override fun upsert(evidence: PurchaseEvidence): Boolean = synchronized(entries) {
@@ -447,11 +458,12 @@ internal class InMemoryPurchaseEvidenceStore : PurchaseEvidenceStore {
     override fun loadProductMappings(): List<StoredProductMapping> = synchronized(mappings) {
         mappings.values.toList()
     }
-    override fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
-        synchronized(mappings) { mappings[mapping.productIdentity] = mapping }
-        productMappingsChangedListener?.invoke()
-        return true
-    }
+    override fun upsertProductMapping(mapping: StoredProductMapping): Boolean =
+        synchronized(productMappingInstallationLock) {
+            synchronized(mappings) { mappings[mapping.productIdentity] = mapping }
+            productMappingsChangedListener?.invoke()
+            true
+        }
     override fun setProductMappingsChangedListener(listener: (() -> Unit)?) {
         productMappingsChangedListener = listener
     }

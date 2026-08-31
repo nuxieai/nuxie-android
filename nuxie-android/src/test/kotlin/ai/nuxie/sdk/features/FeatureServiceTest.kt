@@ -405,6 +405,24 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun fractionalProfileBalanceIsVisibleAccessButNotDefaultGateAuthority() = runBlocking {
+        val core = core(FakeTransport())
+        core.features.hydrateProfile(
+            core.identity.distinctId(),
+            Json.parseToJsonElement(
+                profile(
+                    """[{"id":"credits","type":"metered","balance":0.5,"unlimited":false}]""",
+                ),
+            ).jsonObject,
+        )
+
+        assertTrue(core.featureInfo.isAllowed("credits"))
+        assertEquals(0.5, core.featureInfo.balance("credits")!!, 0.0)
+        assertFalse(core.features.getCached("credits", null)!!.allowed)
+        core.stop()
+    }
+
+    @Test
     fun optimisticPurchaseWidensDescriptorAllowancesAndClearsBackToProfile() = runBlocking {
         val core = core(FakeTransport())
         val customer = core.identity.distinctId()
@@ -443,7 +461,76 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun cachedAccessKeepsTheOverlayAboveRealTimeAndProfileAccess() = runBlocking {
+    fun optimisticOverlayIsDisplayOnlyForCacheFirstChecksAndJourneyGates() = runBlocking {
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                when (request.url.path) {
+                    "/entitled" -> HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            allowed = false,
+                            balance = "null",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                    "/event" -> HttpTransport.Response(
+                        200,
+                        """{"status":"ok","payload":{"gate":{"decision":"require_feature","featureId":"pro","policy":"cache_only"}}}"""
+                            .encodeToByteArray(),
+                    )
+                    else -> HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                }
+            }
+        }
+        core = core(transport)
+        val customer = core.identity.distinctId()
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement(profile("[]")).jsonObject,
+        )
+        core.features.applyOptimisticPurchaseProjection(
+            customer,
+            mapOf("pro" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null)),
+        )
+
+        assertTrue(core.featureInfo.isAllowed("pro"))
+        assertTrue(core.features.getAllCached().isEmpty())
+        assertFalse(core.features.checkWithCache("pro").allowed)
+        assertTrue(core.featureInfo.isAllowed("pro"))
+
+        val updates = mutableListOf<ai.nuxie.sdk.TriggerUpdate>()
+        core.triggers.trigger("moment", null) { updates += it }
+
+        assertEquals(
+            ai.nuxie.sdk.FeatureAccessUpdate.Denied,
+            (updates.single() as ai.nuxie.sdk.TriggerUpdate.FeatureAccess).update,
+        )
+        assertTrue(core.featureInfo.isAllowed("pro"))
+        core.stop()
+    }
+
+    @Test
+    fun stagedOptimisticProjectionPublishesOnlyAfterItsCoordinationLockIsReleased() = runBlocking {
+        val core = core(FakeTransport())
+        val customer = core.identity.distinctId()
+
+        val publication = core.features.stageOptimisticPurchaseProjection(
+            customer,
+            mapOf("pro" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null)),
+        )
+
+        assertFalse(core.featureInfo.isAllowed("pro"))
+        core.features.publishStaged(publication)
+        assertTrue(core.featureInfo.isAllowed("pro"))
+        core.stop()
+    }
+
+    @Test
+    fun cachedAccessStaysAuthoritativeWhileFeatureInfoKeepsTheOverlayVisible() = runBlocking {
         val transport = FakeTransport().apply {
             respond = { request ->
                 if (request.url.path == "/entitled") {
@@ -476,17 +563,20 @@ class FeatureServiceTest {
 
         val allowance = listOf(FeatureAllowance("exports", FeatureType.METERED, unlimited = true))
         applyTestPurchase(core, allowance, "local-token")
-        assertTrue(core.features.getCached("exports", null)!!.allowed)
-        assertTrue(core.features.checkWithCache("exports").allowed)
+        assertFalse(core.features.getCached("exports", null)!!.allowed)
+        assertFalse(core.features.checkWithCache("exports").allowed)
+        assertTrue(core.featureInfo.isAllowed("exports"))
 
         assertFalse(core.features.check("exports").allowed)
-        assertTrue(core.features.getCached("exports", null)!!.allowed)
+        assertFalse(core.features.getCached("exports", null)!!.allowed)
+        assertTrue(core.featureInfo.isAllowed("exports"))
 
         applyTestPurchase(core, allowance, "other-token")
-        assertTrue(core.features.getCached("exports", null)!!.allowed)
+        assertFalse(core.features.getCached("exports", null)!!.allowed)
         removeTestPurchase(core, "other-token")
         applyTestPurchase(core, allowance, "new-token")
-        assertTrue(core.features.getCached("exports", null)!!.allowed)
+        assertFalse(core.features.getCached("exports", null)!!.allowed)
+        assertTrue(core.featureInfo.isAllowed("exports"))
         core.stop()
     }
 
@@ -521,7 +611,8 @@ class FeatureServiceTest {
         releaseFetch.countDown()
 
         assertTrue(refresh.await())
-        assertTrue(core.features.getCached("exports", null)!!.allowed)
+        assertFalse(core.features.getCached("exports", null)!!.allowed)
+        assertTrue(core.featureInfo.isAllowed("exports"))
         core.stop()
     }
 
@@ -908,7 +999,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun globalPurchaseWidensEntityScopedChecksWithoutSupersedingTheirAuthority() = runBlocking {
+    fun globalPurchaseWidensFeatureInfoWithoutSupersedingEntityScopedAuthority() = runBlocking {
         val checksStarted = CountDownLatch(2)
         val releaseChecks = CountDownLatch(1)
         lateinit var core: NuxieCore
@@ -965,7 +1056,8 @@ class FeatureServiceTest {
             core.features.getCached("exports", "cache-first-project")!!,
         )
         assertEquals(2, cachedEntityChecks.count { it.allowed })
-        assertTrue(cachedEntityChecks.all { it.unlimited })
+        assertTrue(cachedEntityChecks.none { it.unlimited })
+        assertTrue(core.featureInfo.all.value.getValue("exports").unlimited)
         core.stop()
     }
 
@@ -1395,7 +1487,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun cacheFirstCheckReturnsTheProfileAndOverlayThatSupersededIt() = runBlocking {
+    fun cacheFirstCheckNeverReturnsTheVisibleOverlayWhenAuthoritySupersedesIt() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
         lateinit var core: NuxieCore
@@ -1439,14 +1531,15 @@ class FeatureServiceTest {
                 profile("""[{"id":"exports","type":"metered","balance":0,"unlimited":false}]"""),
             ).jsonObject,
         )
-        assertTrue(core.features.getCached("exports", null)!!.allowed)
+        assertFalse(core.features.getCached("exports", null)!!.allowed)
+        assertTrue(core.featureInfo.isAllowed("exports"))
         releaseCheck.countDown()
 
         val access = check.await()
         assertTrue(access.allowed)
         assertFalse(access.unlimited)
-        assertEquals(0.0, access.balance)
-        assertEquals(FeatureType.METERED, access.type)
+        assertEquals(5.0, access.balance)
+        assertEquals(FeatureType.CREDIT_SYSTEM, access.type)
         assertTrue(core.featureInfo.isAllowed("exports"))
         core.stop()
     }

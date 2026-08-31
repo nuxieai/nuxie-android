@@ -19,6 +19,7 @@ internal data class CatalogProductRequest(
     val placementId: String? = null,
     val isOfferPersonalized: Boolean = false,
     val consumable: Boolean = false,
+    /** Already classified by the signed-release adapter via [FeatureAllowance.fromDescriptor]. */
     val featureAllowances: List<FeatureAllowance> = emptyList(),
     val licensingPublicKey: String? = null,
     val experienceId: String? = null,

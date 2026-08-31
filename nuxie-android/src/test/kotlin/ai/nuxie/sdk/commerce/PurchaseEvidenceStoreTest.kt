@@ -6,6 +6,11 @@ import java.math.BigDecimal
 import java.nio.file.Files
 import java.security.KeyPairGenerator
 import java.security.Signature
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
@@ -54,6 +59,50 @@ class PurchaseEvidenceStoreTest {
             assertEquals(
                 evidence.copy(acknowledged = true),
                 FilePurchaseEvidenceStore(directory).load().getValue("token-1"),
+            )
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun fileStoreDistinguishesAbsentEmptyAndPopulatedPinnedAllowances() {
+        val directory = Files.createTempDirectory("nuxie-pinned-purchase-allowances").toFile()
+        try {
+            val base = PurchaseEvidence(
+                purchaseToken = "absent",
+                packageName = "com.example.app",
+                storeProductIds = listOf("play-product"),
+                nuxieProductId = "nuxie-product",
+                purchaseState = StoredPurchaseState.PURCHASED,
+                syncAttributionDistinctId = "customer-1",
+                ownerDistinctId = "customer-1",
+                acknowledged = false,
+                firstSeenMillis = 123L,
+            )
+            val empty = base.copy(
+                purchaseToken = "empty",
+                pinnedFeatureAllowances = emptyList(),
+            )
+            val populated = base.copy(
+                purchaseToken = "populated",
+                pinnedFeatureAllowances = listOf(
+                    StoredFeatureAllowance("credits", "METERED", false, allowance = 2.5),
+                ),
+            )
+            val store = FilePurchaseEvidenceStore(directory)
+
+            assertTrue(store.upsert(base))
+            assertTrue(store.upsert(empty))
+            assertTrue(store.upsert(populated))
+
+            assertEquals(
+                mapOf(
+                    base.purchaseToken to base,
+                    empty.purchaseToken to empty,
+                    populated.purchaseToken to populated,
+                ),
+                FilePurchaseEvidenceStore(directory).load(),
             )
         } finally {
             directory.deleteRecursively()
@@ -160,6 +209,70 @@ class PurchaseEvidenceStoreTest {
         } finally {
             directory.deleteRecursively()
         }
+    }
+
+    @Test
+    fun productMappingReplacementWaitsForTheFirstArrivalListener() {
+        val directory = Files.createTempDirectory("nuxie-product-mapping-linearization").toFile()
+        val releaseFirstListener = CountDownLatch(1)
+        val firstListenerStarted = CountDownLatch(1)
+        val secondWorkerStarted = CountDownLatch(1)
+        val secondWorkerFinished = CountDownLatch(1)
+        val listenerInvocations = AtomicInteger()
+        val workerFailure = AtomicReference<Throwable>()
+        var firstWorker: Thread? = null
+        var secondWorker: Thread? = null
+        try {
+            val store = FilePurchaseEvidenceStore(directory)
+            val first = StoredProductMapping(
+                storeProductId = "play-credits",
+                nuxieProductId = "credits",
+                productType = "inapp",
+                consumable = false,
+                featureAllowances = listOf(
+                    StoredFeatureAllowance("credits", "METERED", false, allowance = 1.0),
+                ),
+            )
+            val replacement = first.copy(
+                featureAllowances = listOf(
+                    StoredFeatureAllowance("credits", "METERED", false, allowance = 99.0),
+                ),
+            )
+            store.setProductMappingsChangedListener {
+                if (listenerInvocations.getAndIncrement() == 0) {
+                    firstListenerStarted.countDown()
+                    check(releaseFirstListener.await(5, TimeUnit.SECONDS)) {
+                        "Timed out waiting to release the first mapping listener"
+                    }
+                }
+            }
+
+            firstWorker = thread(name = "first-product-mapping") {
+                runCatching { check(store.upsertProductMapping(first)) }
+                    .onFailure { workerFailure.compareAndSet(null, it) }
+            }
+            assertTrue(firstListenerStarted.await(5, TimeUnit.SECONDS))
+
+            secondWorker = thread(name = "replacement-product-mapping") {
+                secondWorkerStarted.countDown()
+                runCatching { check(store.upsertProductMapping(replacement)) }
+                    .onFailure { workerFailure.compareAndSet(null, it) }
+                secondWorkerFinished.countDown()
+            }
+            assertTrue(secondWorkerStarted.await(5, TimeUnit.SECONDS))
+
+            assertFalse(
+                "a replacement became visible before first-arrival pinning completed",
+                secondWorkerFinished.await(250, TimeUnit.MILLISECONDS),
+            )
+            assertEquals(first, store.loadProductMappings().single())
+        } finally {
+            releaseFirstListener.countDown()
+            firstWorker?.join(5_000)
+            secondWorker?.join(5_000)
+            directory.deleteRecursively()
+        }
+        workerFailure.get()?.let { throw AssertionError("mapping worker failed", it) }
     }
 
     @Test
