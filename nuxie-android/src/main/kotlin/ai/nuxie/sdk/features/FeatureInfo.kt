@@ -95,10 +95,11 @@ class FeatureInfo {
             // Readiness and values are one staged publication. A scope change
             // may supersede the whole snapshot, but cannot commit only one
             // half and leave Ready paired with stale or empty Feature values.
+            var lastStored: PublishedFeatures? = null
             if (!emitIfCurrent(this) {
                     if (state != null) mutableState.value = state
                     entityAccess = entities
-                    mutableAll.publish(features)
+                    lastStored = mutableAll.publish(features)
                 }
             ) {
                 // An unconfined collector may have reentered mid-emission and
@@ -107,14 +108,31 @@ class FeatureInfo {
                 repairClobberedReplacement()
                 return
             }
-            synchronized(emissionLock) {
-                if (isCurrent()) {
-                    generation.latestSnapshot = PublishedSnapshot(
-                        features,
-                        entities,
-                        state ?: mutableState.value,
-                    )
+            val recorded = PublishedSnapshot(
+                features,
+                entities,
+                state ?: mutableState.value,
+            )
+            var stored = lastStored
+            while (true) {
+                synchronized(emissionLock) {
+                    if (!isCurrent()) {
+                        repairClobberedReplacement()
+                        return
+                    }
+                    generation.latestSnapshot = recorded
                 }
+                // A stale repairer may have overwritten the flows between the
+                // emission and the record; re-set until the flow holds this
+                // publication's exact container (identity, not field
+                // equality: NaN balances never field-compare equal, and a
+                // deduped publish returns the surviving equal container).
+                val settled = mutableAll.currentPublished === stored &&
+                    mutableState.value == recorded.state
+                if (settled) break
+                mutableState.value = recorded.state
+                entityAccess = recorded.entities
+                stored = mutableAll.publish(recorded.features)
             }
 
             callbacks.forEach { callback ->
@@ -263,19 +281,26 @@ class FeatureInfo {
     }
 
     private fun repairClobberedReplacement() {
-        // Loop: another reentrant swap can land during the repair itself.
+        // Loop: another swap, or a newer same-generation publication, can
+        // land during the repair itself. Exit only when the snapshot the
+        // repair restored is still the generation's recorded latest.
         while (true) {
             val (generation, snapshot) = synchronized(emissionLock) {
                 currentGeneration to currentGeneration.latestSnapshot
             }
-            // No completed publication for the replacement yet: its own
-            // queued publication will land through the FIFO lane.
+            // No completed publication for the replacement yet: its recorder
+            // verifies the flows after recording and re-sets if this repair
+            // (or any stale writer) clobbered its emission.
             if (snapshot == null) return
             mutableState.value = snapshot.state
             entityAccess = snapshot.entities
             mutableAll.publish(snapshot.features)
             synchronized(emissionLock) {
-                if (currentGeneration === generation) return
+                if (currentGeneration === generation &&
+                    generation.latestSnapshot === snapshot
+                ) {
+                    return
+                }
             }
         }
     }
@@ -345,9 +370,16 @@ private class MutableFeatureAccessFlow : StateFlow<Map<String, FeatureAccess>> {
     override suspend fun collect(collector: FlowCollector<Map<String, FeatureAccess>>): Nothing =
         published.collect { collector.emit(it.features) }
 
-    fun publish(features: Map<String, FeatureAccess>) {
+    @Suppress("MemberVisibilityCanBePrivate")
+    fun publish(features: Map<String, FeatureAccess>): PublishedFeatures {
         val current = published.value
-        if (current.features.hasSameFieldsAs(features)) return
-        published.value = PublishedFeatures(current.revision + 1, features)
+        if (current.features.hasSameFieldsAs(features)) return current
+        val next = PublishedFeatures(current.revision + 1, features)
+        published.value = next
+        return next
     }
+
+    /** The exact published container, for identity-based clobber detection. */
+    val currentPublished: PublishedFeatures
+        get() = published.value
 }
