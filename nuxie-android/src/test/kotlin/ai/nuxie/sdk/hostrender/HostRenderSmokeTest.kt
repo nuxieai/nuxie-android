@@ -38,6 +38,10 @@ class HostRenderSmokeTest {
             }
             try {
                 val artboard = checkNotNull(file.newArtboard())
+                // The same upstream data-binding fixture used by Android's
+                // instrumentation smoke declares the Test root view model.
+                // Exercise the real snapshot-root schema lookup before binding.
+                artboard.bindDefaultViewModel("Test")
                 artboard.close()
             } finally {
                 file.close()
@@ -139,7 +143,11 @@ class HostRenderSmokeTest {
             System.getProperty("nuxie.repo.root"),
             "example-app/src/debug/assets/asset-smoke",
         )
-        val rivBytes = File(fixtureDirectory, "external-image.riv").readBytes()
+        val rivBytes = namedArtboardFixture(
+            File(fixtureDirectory, "external-image.riv").readBytes(),
+            artboardOffset = 0x11,
+            name = "Image smoke",
+        )
         val imageBytes = File(fixtureDirectory, "external-image.png").readBytes()
         val imageAsset = checkNotNull(runtime.inspectFileAssets(rivBytes))
             .single { it.kind == FileAssetKind.IMAGE }
@@ -173,9 +181,16 @@ class HostRenderSmokeTest {
                 })
                 put("screens", buildJsonArray {
                     add(buildJsonObject {
+                        put("id", "image-smoke")
+                        put("artboardName", "Image smoke")
                         put("width", 64)
                         put("height", 64)
                     })
+                })
+            })
+            put("journey", buildJsonObject {
+                put("screens", buildJsonArray {
+                    add(buildJsonObject { put("id", "image-smoke") })
                 })
             })
         }
@@ -186,7 +201,11 @@ class HostRenderSmokeTest {
     }
 
     private fun prepareScriptedInterpolatorInput(): File {
-        val rivBytes = fixtureBytes("scripted-interpolator.riv.base64")
+        val rivBytes = namedArtboardFixture(
+            fixtureBytes("scripted-interpolator.riv.base64"),
+            artboardOffset = 0x251,
+            name = "Script smoke",
+        )
         val input = Files.createTempDirectory("host-render-script-input-").toFile()
         File(input, "scene.riv").writeBytes(rivBytes)
         val descriptor = buildJsonObject {
@@ -199,9 +218,16 @@ class HostRenderSmokeTest {
                 put("assets", buildJsonArray {})
                 put("screens", buildJsonArray {
                     add(buildJsonObject {
+                        put("id", "script-smoke")
+                        put("artboardName", "Script smoke")
                         put("width", 100)
                         put("height", 100)
                     })
+                })
+            })
+            put("journey", buildJsonObject {
+                put("screens", buildJsonArray {
+                    add(buildJsonObject { put("id", "script-smoke") })
                 })
             })
         }
@@ -209,6 +235,21 @@ class HostRenderSmokeTest {
             JSON.encodeToString(JsonElement.serializer(), descriptor),
         )
         return input
+    }
+
+    private fun namedArtboardFixture(bytes: ByteArray, artboardOffset: Int, name: String): ByteArray {
+        // These raw fixtures intentionally have unnamed Artboards. A published
+        // Experience must declare a name, so author only ComponentBase's exact
+        // upstream name property (key 4), leaving every asset/animation byte and
+        // the original on-disk fixture unchanged. Verify the known Artboard(1)
+        // followed by width(7) seam before inserting its length-prefixed string.
+        require(bytes[artboardOffset] == 1.toByte() && bytes[artboardOffset + 1] == 7.toByte())
+        val encodedName = name.encodeToByteArray()
+        require(encodedName.size in 1..127)
+        val insertion = artboardOffset + 1
+        return bytes.copyOfRange(0, insertion) +
+            byteArrayOf(4, encodedName.size.toByte()) + encodedName +
+            bytes.copyOfRange(insertion, bytes.size)
     }
 
     private fun fixtureBytes(name: String): ByteArray {

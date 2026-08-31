@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
+import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
 import ai.nuxie.sdk.runtime.NuxieAndroidVulkanRenderer
 import ai.nuxie.sdk.runtime.NuxieRuntime
 import ai.nuxie.sdk.runtime.NuxieRuntimeArtboard
@@ -148,12 +149,36 @@ internal class ExperienceSurfaceHost(
                 onLoaded?.invoke(false)
                 return@enqueue
             }
+            try {
+                descriptor?.let {
+                    ExperienceViewModelBinding.defaultSchemaName(it, artboardName)
+                }?.let(loadedArtboard::bindDefaultViewModel)
+            } catch (error: Exception) {
+                // Do not retain a partially bound graph after a signed state
+                // contract failure. The renderer remains available for retry.
+                artboard = null
+                file = null
+                runCatching { loadedArtboard.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                reportFailure(
+                    ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                    "Experience default view-model binding failed",
+                    error,
+                )
+                onLoaded?.invoke(false)
+                return@enqueue
+            }
             player = loadedArtboard.newPlayer()
             if (player == null) {
-                Log.w(LOG_TAG, "Player creation failed")
+                val error = IllegalStateException("Experience player creation failed")
+                artboard = null
+                file = null
+                runCatching { loadedArtboard.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 reportFailure(
                     ExperiencePresentationException.Reason.HOST_FAILED,
                     "Experience player creation failed",
+                    error,
                 )
                 onLoaded?.invoke(false)
                 return@enqueue
@@ -279,16 +304,27 @@ internal class ExperienceSurfaceHost(
         Choreographer.getInstance().removeFrameCallback(this)
         lane.enqueue {
             attached = false
-            window?.close()
+            val closeHandles = listOfNotNull(
+                window?.let { it::close },
+                player?.let { it::close },
+                artboard?.let { it::close },
+                file?.let { it::close },
+                renderer?.let { it::close },
+            )
             window = null
-            player?.close()
             player = null
-            artboard?.close()
             artboard = null
-            file?.close()
             file = null
-            renderer?.close()
             renderer = null
+            var firstFailure: Throwable? = null
+            closeHandles.forEach { close ->
+                try {
+                    close()
+                } catch (error: Throwable) {
+                    if (firstFailure == null) firstFailure = error else firstFailure?.addSuppressed(error)
+                }
+            }
+            firstFailure?.let { throw it }
         }
     }
 

@@ -182,6 +182,8 @@ internal object NuxieRuntimeBridge {
 
     external fun nativeViewModelInstanceNewDefault(artboard: Long, statusOut: IntArray): Long
 
+    external fun nativeViewModelRootSchemaIndex(viewModel: Long, statusOut: IntArray): Long
+
     external fun nativeArtboardInstanceBindViewModel(artboard: Long, viewModel: Long): Int
 
     external fun nativeViewModelMutate(
