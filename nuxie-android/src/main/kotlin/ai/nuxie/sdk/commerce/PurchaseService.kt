@@ -671,6 +671,7 @@ internal class PurchaseService(
         val recoveryFollowUps = withProcessingDecision { effects ->
             val bindings = evidenceStore.loadBindings()
             val mappings = evidenceStore.loadProductMappings()
+            var normalizedAnyEvidence = false
             val evidenceRecords = evidenceStore.load().values.mapNotNull { storedEvidence ->
                 val normalized = if (!storedEvidence.signatureVerificationRequired &&
                     hasConfiguredLicensingKey(storedEvidence, bindings, mappings)
@@ -679,7 +680,19 @@ internal class PurchaseService(
                 } else {
                     storedEvidence
                 }
-                if (normalized != storedEvidence) upsertEvidence(normalized) else normalized
+                if (normalized != storedEvidence) {
+                    normalizedAnyEvidence = true
+                    upsertEvidence(normalized)
+                } else {
+                    normalized
+                }
+            }
+            if (normalizedAnyEvidence) {
+                // The projection published before normalization could demand
+                // signature verification for legacy evidence; republish so an
+                // unverified purchase cannot stay projected.
+                projectionRefresh.withLock { stageOptimisticProjectionLocked() }
+                    ?.let(effects.publications::add)
             }
             evidenceRecords
                 .filter {

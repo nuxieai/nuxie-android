@@ -1213,6 +1213,54 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun recoveryRepublishesTheProjectionAfterNormalizingLegacyEvidence() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(
+            PurchaseEvidence(
+                purchaseToken = "legacy-projected",
+                packageName = "com.example.app",
+                storeProductIds = listOf("play-pro"),
+                nuxieProductId = "nuxie-pro",
+                authorityScope = "test-fixture",
+                purchaseState = StoredPurchaseState.PURCHASED,
+                syncAttributionDistinctId = owner,
+                ownerDistinctId = owner,
+                acknowledged = false,
+                firstSeenMillis = 1L,
+                catalogResolved = true,
+            ),
+        )
+        fixture.service.rememberProduct(
+            product(
+                licensingPublicKey = "configured-key",
+                allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
+            ),
+        )
+        runCurrent()
+        assertTrue(
+            "legacy evidence must project before normalization demands verification",
+            fixture.core.featureInfo.isAllowed("pro"),
+        )
+        // Play is unreachable, so recovery can neither verify the signature
+        // nor revoke the token as missing; only the normalization republish
+        // can retract the projected legacy grant.
+        fixture.billing.failQueries = true
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+
+        fixture.service.recover()
+
+        assertTrue(
+            fixture.store.load().getValue("legacy-projected").signatureVerificationRequired,
+        )
+        assertFalse(
+            "normalized-unverified evidence must not stay projected",
+            fixture.core.featureInfo.isAllowed("pro"),
+        )
+        fixture.close()
+    }
+
+    @Test
     fun appManagedModeCannotBeUpgradedByAnOldManagedBindingForANewToken() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(this, mode = PurchaseHandlingMode.APP_MANAGED, actions = actions)
