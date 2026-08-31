@@ -26,6 +26,9 @@ internal class StoredEvent private constructor(
         Json.parseToJsonElement(this.encodedProperties.decodeToString()).jsonObject
     }
 
+    val origin: String
+        get() = if (properties["\$nuxie_event_origin"] == JsonPrimitive("server")) "server" else "device"
+
     constructor(
         id: String,
         name: String,

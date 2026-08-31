@@ -18,7 +18,11 @@ import kotlinx.coroutines.withContext
 internal class SQLiteEventStore(
     context: Context,
     private val writerDispatcher: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1),
+    nowMillis: () -> Long = System::currentTimeMillis,
 ) : EventStore {
+    // A legacy store has no proof about its older rows. Capture the conservative
+    // origin before any writes, and retain it durably on subsequent opens.
+    private val initialCoverageMillis = nowMillis()
     private val databaseFile = File(context.filesDir, "nuxie/events.db")
     private var connection: SQLiteConnection? = null
     private var closed = false
@@ -26,8 +30,8 @@ internal class SQLiteEventStore(
     override suspend fun insertPending(event: StoredEvent): Unit = onWriter { database ->
         database.prepare(
             """
-            INSERT INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state)
-            VALUES (?, ?, ?, ?, ?, ?, ?);
+            INSERT INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
             """.trimIndent(),
         ).use { statement ->
             statement.bindText(1, event.id)
@@ -37,6 +41,7 @@ internal class SQLiteEventStore(
             statement.bindText(5, event.distinctId)
             event.sessionId?.let { statement.bindText(6, it) } ?: statement.bindNull(6)
             statement.bindLong(7, DELIVERY_PENDING)
+            statement.bindText(8, event.origin)
             statement.step()
         }
         Unit
@@ -46,8 +51,8 @@ internal class SQLiteEventStore(
         database.immediateTransaction {
             database.prepare(
                 """
-                INSERT OR IGNORE INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state)
-                SELECT ?, ?, ?, ?, ?, ?, ?
+                INSERT OR IGNORE INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?
                 WHERE NOT EXISTS (
                     SELECT 1 FROM stable_event_drops WHERE event_id = ?
                 );
@@ -60,7 +65,8 @@ internal class SQLiteEventStore(
                 statement.bindText(5, event.distinctId)
                 event.sessionId?.let { statement.bindText(6, it) } ?: statement.bindNull(6)
                 statement.bindLong(7, DELIVERY_PENDING)
-                statement.bindText(8, event.id)
+                statement.bindText(8, event.origin)
+                statement.bindText(9, event.id)
                 statement.step()
             }
             database.queryLong("SELECT changes();") == 1L
@@ -88,8 +94,8 @@ internal class SQLiteEventStore(
         database.immediateTransaction {
             database.prepare(
                 """
-                INSERT OR IGNORE INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state)
-                VALUES (?, ?, ?, ?, ?, ?, ?);
+                INSERT OR IGNORE INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
                 """.trimIndent(),
             ).use { statement ->
                 statement.bindText(1, event.id)
@@ -99,6 +105,7 @@ internal class SQLiteEventStore(
                 statement.bindText(5, event.distinctId)
                 event.sessionId?.let { statement.bindText(6, it) } ?: statement.bindNull(6)
                 statement.bindLong(7, DELIVERY_DELIVERED)
+                statement.bindText(8, event.origin)
                 statement.step()
             }
             database.queryLong("SELECT changes();") == 1L
@@ -129,23 +136,79 @@ internal class SQLiteEventStore(
         }
     }
 
-    override suspend fun deleteOldestDeliveredEvents(keeping: Int): Int = onWriter { database ->
+    override suspend fun deleteOldestDeliveredEvents(keeping: Int): Int =
+        pruneHistory(keeping, Long.MIN_VALUE).countDeleted
+
+    override suspend fun historyCoverageStartingAt(): Long = onWriter { it.readCoverage() }
+
+    override suspend fun advanceHistoryCoverage(startingAtMillis: Long): Long = onWriter { database ->
         database.immediateTransaction {
+            database.advanceCoverage(startingAtMillis)
+            database.readCoverage()
+        }
+    }
+
+    suspend fun pruneHistory(keeping: Int, olderThanMillis: Long): EventHistoryPruneResult = onWriter { database ->
+        require(keeping >= 0) { "Negative event retention cap." }
+        database.immediateTransaction {
+            database.readCoverage() // Refuse deletion without an established origin.
             database.prepare(
-                """
-                DELETE FROM events
-                WHERE delivery_state = $DELIVERY_DELIVERED
-                  AND id IN (
-                    SELECT id FROM events
-                    ORDER BY timestamp ASC
-                    LIMIT max(0, (SELECT COUNT(*) FROM events) - ?)
-                  );
-                """.trimIndent(),
+                "DELETE FROM events WHERE delivery_state = $DELIVERY_DELIVERED AND origin != 'server' AND timestamp < ?;",
             ).use { statement ->
-                statement.bindLong(1, keeping.toLong())
+                statement.bindLong(1, olderThanMillis)
                 statement.step()
             }
-            database.queryLong("SELECT changes();").toInt()
+            val ageDeleted = database.queryLong("SELECT changes();").toInt()
+            val countLimit = (database.queryLong("SELECT COUNT(*) FROM events;") - keeping).coerceAtLeast(0)
+            // Select only evictable rows. Pending captures and server facts must
+            // not consume the deletion limit or advance the coverage boundary.
+            val candidates = database.prepare(
+                """
+                SELECT id, timestamp FROM events
+                WHERE delivery_state = $DELIVERY_DELIVERED AND origin != 'server'
+                ORDER BY timestamp ASC, id ASC LIMIT ?;
+                """.trimIndent(),
+            ).use { statement ->
+                statement.bindLong(1, countLimit)
+                buildList {
+                    while (statement.step()) add(statement.getText(0) to statement.getLong(1))
+                }
+            }
+            for ((id, _) in candidates) database.prepare("DELETE FROM events WHERE id = ?;").use {
+                it.bindText(1, id)
+                it.step()
+            }
+            if (ageDeleted > 0) database.advanceCoverage(olderThanMillis)
+            candidates.lastOrNull()?.second?.let { lastDeleted ->
+                // No representable instant follows MAX_VALUE. Abort rather than
+                // claiming completeness at a timestamp from which we lost a row.
+                check(lastDeleted < Long.MAX_VALUE) { "Event retention boundary overflow." }
+                database.advanceCoverage(lastDeleted + 1)
+            }
+            EventHistoryPruneResult(candidates.size, ageDeleted, database.readCoverage())
+        }
+    }
+
+    override suspend fun queryHistory(
+        name: String,
+        distinctId: String,
+        sinceMillis: Long?,
+        untilMillis: Long?,
+    ): List<StoredEvent>? = onWriter { database ->
+        database.immediateTransaction {
+            if (sinceMillis == null || sinceMillis < database.readCoverage()) return@immediateTransaction null
+            val upperBound = if (untilMillis == null) "" else " AND timestamp <= ?"
+            database.prepare(
+                """
+                SELECT id, name, properties, timestamp, user_id, session_id FROM events
+                WHERE user_id = ? AND name = ? AND timestamp >= ?$upperBound
+                ORDER BY timestamp ASC, id ASC LIMIT ${HISTORY_QUERY_LIMIT + 1};
+                """.trimIndent(),
+            ).use { statement ->
+                statement.bindEventQuery(distinctId, name, sinceMillis, untilMillis)
+                val rows = buildList { while (statement.step()) add(statement.readStoredEvent()) }
+                rows.takeIf { it.size <= HISTORY_QUERY_LIMIT }
+            }
         }
     }
 
@@ -277,6 +340,10 @@ internal class SQLiteEventStore(
             opened.execute("PRAGMA foreign_keys=ON;")
             opened.execute(CREATE_EVENTS_TABLE)
             migrate(opened)
+            opened.prepare("INSERT OR IGNORE INTO event_history_metadata (id, coverage_start_ms) VALUES (1, ?);").use {
+                it.bindLong(1, initialCoverageMillis)
+                it.step()
+            }
             CREATE_INDEXES.forEach { sql -> runCatching { opened.execute(sql) } }
         } catch (failure: Throwable) {
             opened.close()
@@ -299,6 +366,40 @@ internal class SQLiteEventStore(
             database.execute(CREATE_STABLE_DROPS_TABLE)
             database.execute("PRAGMA user_version = 2;")
         }
+        if (version < 3L) database.immediateTransaction {
+            database.execute("ALTER TABLE events ADD COLUMN origin TEXT NOT NULL DEFAULT 'device';")
+            // Old server facts already carry the origin marker in their canonical
+            // bytes. API 23 SQLite has no JSON extension, so backfill via the codec.
+            val origins = database.prepare("SELECT id, name, properties, timestamp, user_id, session_id FROM events;").use {
+                buildList {
+                    while (it.step()) {
+                        val row = it.readStoredEvent()
+                        if (runCatching { row.origin }.getOrNull() == "server") add(row.id)
+                    }
+                }
+            }
+            for (id in origins) database.prepare("UPDATE events SET origin = 'server' WHERE id = ?;").use {
+                it.bindText(1, id)
+                it.step()
+            }
+            database.execute("""
+                CREATE TABLE event_history_metadata (
+                    id INTEGER PRIMARY KEY CHECK (id = 1), coverage_start_ms INTEGER NOT NULL
+                );
+            """.trimIndent())
+            database.execute("PRAGMA user_version = 3;")
+        }
+    }
+
+    private fun SQLiteConnection.readCoverage(): Long =
+        queryLong("SELECT coverage_start_ms FROM event_history_metadata WHERE id = 1;")
+
+    private fun SQLiteConnection.advanceCoverage(startingAtMillis: Long) {
+        prepare("UPDATE event_history_metadata SET coverage_start_ms = max(coverage_start_ms, ?) WHERE id = 1;").use {
+            it.bindLong(1, startingAtMillis)
+            it.step()
+        }
+        check(readCoverage() >= startingAtMillis) { "Missing event history coverage." }
     }
 
     private fun SQLiteConnection.execute(sql: String) {
@@ -365,6 +466,7 @@ internal class SQLiteEventStore(
     private companion object {
         const val DELIVERY_PENDING = 0L
         const val DELIVERY_DELIVERED = 2L
+        const val HISTORY_QUERY_LIMIT = 10_000
 
         val CREATE_EVENTS_TABLE =
             """

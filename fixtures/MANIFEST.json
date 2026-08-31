@@ -1,23 +1,21 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "cebde43a786e0bbe010b87b0c80a71e5799b6ced",
-  "sourceCommitOverrides": {
-    "features/optimistic-entitlement-projection.json": "a1efb57b860b2b8bc28c31785eb1deb22cb94348",
-    "profile/locale-admission.json": "649cdfea2ee55e56e2c9726f50a88b164ef4b382"
-  },
+  "sourceCommit": "32478a0cdcb62163e961dcff137bedbe4912834d",
   "files": {
-    "README.md": "8b7682a62d357d417f5fb7a4a187c6ba562dd1f295e686aade19cd8c03c93410",
+    "README.md": "e5254caf9373e8493b5f19ff06f3db1660660743cb2659c1003e014d55d07ba0",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
     "encodings/feature-usage.json": "2606a5062e041237fb7245dd919e921c383d94735d537e509aab429855b17c69",
     "encodings/forwarded-activity.json": "16b02be158da485629812236129380156d5425ba43a10fb36717ce5cb1709a36",
-    "encodings/trigger-result.json": "6162c008be5c8ae5884e549b7e5590edb2c1f368725ff73d52f8dc8cd3a2ea3f",
+    "encodings/trigger-result.json": "dc4d52dbbb24cd7c08997671aa36449e9d73c20bde0621f23d030181d09fcc45",
     "events/atomic-purchase-sync.json": "00ad8a8acfcc8b5531de8312a6ad9e13cae2ec6fc386a4b3263fde3d574f0764",
     "events/batch-item-encoding.json": "2eff88659c755cc7029030ff6162dc4af95c4a37ff1ac46897aa73deb91ae37c",
-    "events/catalog.json": "67455e15178af34664b250a74cf1be0f9a15edaa8a519692ff124db4051f253c",
+    "events/catalog.json": "05554b4dce75567465c654446bade6a5469cd5960e619f14eec4e867dd56b5ed",
     "events/delivery-disposition.json": "bf2e48165a90e6bf568f00ba804cfa8c2f1efcdc9a5867533a24bbf99a31575d",
     "events/down-facts/converted.json": "f9c5ae6514cab17f4c8622998f7e9d4646306cb2f05ff76fef4684f38d3d3466",
     "events/experience-events.json": "c27bf587fb43fe2e19733aa40453160407e89352ffcdc03b8aa59a1f928babef",
-    "experience-release-descriptor/envelope.json": "404c050a06adb54599bfc52168b5e7995d4671e921bdc4d49d21634af3eac8a9",
+    "events/generated-control-routing.json": "f461826c8a2e79d2f08178a1b3a27b03cbcda52ed208f572b995fa7165fef77a",
+    "events/response-bearing-event-encoding.json": "9084a3bb5df1035f58bb2789cea13e68279c6971637596f9552f051a75d083ad",
+    "experience-release-descriptor/envelope.json": "164b3169a09acd69a615ffbfc3b85ee7ea08771535be74614d40dce48c558bd8",
     "experience-release-descriptor/expected-identity.json": "8c26bd6a014907a91ab7a25094551efb87bd1c28b5a245bc397def2bf970d32f",
     "experience-release-descriptor/segment-trigger.json": "7774fbbb36e5c43671a201afa9dc30be0864c7de036671cfc21d767625b072fb",
     "experience-release-descriptor/supported-capabilities.json": "51dc97cf78a132d69e8ef2423210b8b311b094d98cd2e5c94e70b541c9be4a65",
@@ -33,13 +31,22 @@
     "journeys/experiment-resolution/cross-plane.json": "91ef97d88f04b2d975a633671be411e352187fb3197a97dd2028c3a8303570de",
     "journeys/ghost/superseded.json": "2fc3a944a4f32a8bbc5a0800410e8d36569a22ab57bcd1dd75a1346ba8625893",
     "journeys/handler-host-dispatch/lifecycle.json": "5ebf00eb123b41f7c995ebbc9ff43adf2ba55390d5c83d61e99d1e691ebf9bc2",
-    "journeys/handoff/claim.json": "51fe5bd912be358911d339d86dd5b4faa216c424d9e64da159e319b59eb9dc7f",
-    "journeys/parking/emission.json": "3918462923572de58b79a724a25ec97f0706be148e6fc44383010ef2d94ce579",
-    "journeys/seizure-race/device-handoff-wins.json": "57bdb18f6122a0d4a3de7b1ebd130807383d1ae680bd09a003ccb3413cf94fa8",
-    "journeys/takeover/claimable.json": "8da78cf90be6b9a527f24a7f4fb1e9ed8292eca9edd6ee8a2c40eba71da0f89d",
+    "journeys/handoff/claim.json": "ed69bc408c32ea5d142595c99c74e575b18e3e7fa66a69728c955145c9337ce1",
+    "journeys/parking/emission.json": "fb51b042ba3b8be9df94f55e824ba2205eda612c9a0d83e28c9c1c1920b73782",
+    "journeys/planes/entry-evaluation.json": "86b177667a593689650924cb1b82635ed08687f2e2c5977b096741f4976ffcd5",
+    "journeys/planes/history-coverage.json": "c0310ff558b10c646bfb437fb6b1e02d49c9a9f42e294c03ef014cb97e5a4f09",
+    "journeys/planes/occurrence-evaluation.json": "e6da8a0f6eacf6a9d41d61f5202ad2061ed957a42e21df00724f55ad21722e73",
+    "journeys/planes/release.json": "c8d745ef5468ba6983ba8f8c21f9143794f6c509fb33c9b19bad9105d386657e",
+    "journeys/screen-emission-runtime/input-effect-persistence-replay.json": "260d63bab0740a286f6c61d223a1d3d3889b5dcacd55129c0cdfa29056316935",
+    "journeys/seizure-race/device-handoff-wins.json": "4ec4902a324667138faa58e99cb69d7c7b61297ba82df142ec41d479c2481af9",
+    "journeys/takeover/claimable.json": "332aedb7e66566c433af4b8b2dc48dd5e9cac652075c3a4fdb2b68e2ba6cf837",
     "journeys/time-window/cross-plane.json": "5896275d61a52cc150fb34eb131331566f810dff621464e9b7b4c53ab94f80e4",
     "journeys/transitions/basic.json": "4460073a4055be574650c503a58dc05ddfa210844a49e0ce2dc4b2c5e9e1b06e",
-    "segments/seed-mirror/server-mode.json": "67cb883affd73d4bcd179c89a654318b976e34eaf26a632da6a234ef7364b389",
+    "segments/seed-mirror/server-mode.json": "fd71fc809795d39f96c5ce186559336ffcb38f881a5ceab835184751c0564c0a",
     "profile/locale-admission.json": "a3df581ff611f480b4e75d194a54a33cb99e8f199f4c1d8df128ea0056a93176"
+  },
+  "sourceCommitOverrides": {
+    "features/optimistic-entitlement-projection.json": "a1efb57b860b2b8bc28c31785eb1deb22cb94348",
+    "profile/locale-admission.json": "649cdfea2ee55e56e2c9726f50a88b164ef4b382"
   }
 }

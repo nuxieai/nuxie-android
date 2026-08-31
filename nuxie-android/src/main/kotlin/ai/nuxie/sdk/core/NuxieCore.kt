@@ -125,7 +125,7 @@ internal class NuxieCore(
 
     val sessions = SessionService(nowMillis)
 
-    val store: EventStore = overrides.store ?: SQLiteEventStore(appContext)
+    val store: EventStore = overrides.store ?: SQLiteEventStore(appContext, nowMillis = nowMillis)
 
     val userTransitions: UserTransitionCoordinator by lazy {
         UserTransitionCoordinator(store, scope)
