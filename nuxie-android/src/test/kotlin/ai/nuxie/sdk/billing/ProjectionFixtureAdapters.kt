@@ -1,4 +1,4 @@
-package ai.nuxie.sdk.commerce
+package ai.nuxie.sdk.billing
 
 import ai.nuxie.sdk.features.FeatureAllowance
 import ai.nuxie.sdk.features.FeatureType

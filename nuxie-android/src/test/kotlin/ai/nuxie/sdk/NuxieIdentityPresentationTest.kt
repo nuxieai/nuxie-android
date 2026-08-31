@@ -1,6 +1,6 @@
 package ai.nuxie.sdk
 
-import ai.nuxie.sdk.commerce.OptimisticFeatureOverlay
+import ai.nuxie.sdk.billing.OptimisticFeatureOverlay
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.experiences.AcquiredRelease
 import ai.nuxie.sdk.experiences.AuthenticatedRelease

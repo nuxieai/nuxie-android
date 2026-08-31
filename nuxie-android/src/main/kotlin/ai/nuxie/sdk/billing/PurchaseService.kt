@@ -1,6 +1,7 @@
-package ai.nuxie.sdk.commerce
+package ai.nuxie.sdk.billing
 
 import ai.nuxie.sdk.events.SystemEventNames
+import ai.nuxie.sdk.events.TimeBasedEpochGenerator
 import ai.nuxie.sdk.features.FeatureAccess
 import ai.nuxie.sdk.features.FeatureAllowance
 import ai.nuxie.sdk.features.FeatureInfo
@@ -113,6 +114,16 @@ internal class PurchaseService(
         eventId: String,
         distinctId: String,
     ) -> Boolean = { _, _, _, _ -> false },
+    private val capturePurchaseEvent: suspend (
+        name: String,
+        properties: Map<String, Any?>,
+        eventId: String,
+        distinctId: String,
+    ) -> Boolean = { name, properties, _, _ ->
+        emit(name, properties)
+        true
+    },
+    private val newExternalOperationId: () -> String = TimeBasedEpochGenerator.shared::next,
     private val verifyPurchaseSignature: (String, String, String) -> Boolean =
         PlayPurchaseSignatureVerifier::verify,
 ) {
@@ -148,14 +159,44 @@ internal class PurchaseService(
     )
 
     private data class PendingPurchaseCompletion(
-        val purchase: PlayPurchase,
-        val result: PurchaseResult,
+        val outcome: PurchaseOutcome,
         val checkout: InFlightPurchase,
     )
 
     private data class PendingDirectCheckoutCompletion(
         val checkout: InFlightPurchase,
-        val result: PurchaseResult,
+        val outcome: PurchaseOutcome,
+    )
+
+    private data class PendingOutcomeEmission(
+        val product: StoreProduct,
+        val ownerDistinctId: String,
+        val outcome: PurchaseOutcome,
+    )
+
+    private sealed interface PurchaseCommitIdentity {
+        data class Evidence(val purchaseToken: String) : PurchaseCommitIdentity
+        data class External(val operationId: String) : PurchaseCommitIdentity
+    }
+
+    private data class PendingPurchaseCommit(
+        val identity: PurchaseCommitIdentity,
+        val eventName: String,
+        val eventId: String,
+        val ownerDistinctId: String,
+        val properties: Map<String, Any?>,
+        val afterCapture: suspend () -> Unit = {},
+        val onFailure: () -> Unit = {},
+    )
+
+    private sealed interface PurchaseCommitDrainResult {
+        data object Succeeded : PurchaseCommitDrainResult
+        data class Failed(val reason: Throwable) : PurchaseCommitDrainResult
+    }
+
+    private data class OwnedPurchaseCommit(
+        val identity: PurchaseCommitIdentity,
+        val completion: CompletableDeferred<PurchaseCommitDrainResult>,
     )
 
     private data class AllowanceResolutionIdentity(
@@ -173,16 +214,21 @@ internal class PurchaseService(
     )
 
     private class ProcessingEffects {
+        val purchaseCommits = mutableListOf<PendingPurchaseCommit>()
+        val ownedPurchaseCommits = mutableListOf<OwnedPurchaseCommit>()
+        val purchaseCommitWaits = mutableListOf<CompletableDeferred<PurchaseCommitDrainResult>>()
         val publications = mutableListOf<FeatureInfo.Mutation>()
         val purchaseCompletions = mutableListOf<PendingPurchaseCompletion>()
         val directCheckoutCompletions = mutableListOf<PendingDirectCheckoutCompletion>()
+        val outcomeEmissions = mutableListOf<PendingOutcomeEmission>()
     }
 
     /**
-     * Keep [processing] around local snapshot/decision work only. Any FeatureInfo
-     * mutations reserved by that work are published after the mutex is released,
-     * including when the decision itself fails. Checkout continuations resume
-     * only after every reserved publication has drained.
+     * [processing] serializes local outcome decisions. Durable event capture and
+     * FeatureInfo publication drain after the mutex is released; a successful
+     * capture briefly re-enters the decision lane to stage its projection and
+     * checkout continuation. Duplicate evidence observations wait for the whole
+     * commit drain without blocking reentrant event or Feature callbacks.
      */
     private suspend fun <T> withProcessingDecision(
         decide: suspend (ProcessingEffects) -> T,
@@ -193,6 +239,25 @@ internal class PurchaseService(
         } catch (failure: Throwable) {
             Result.failure(failure)
         }
+        var purchaseCommitFailure: Throwable? = null
+        if (effects.purchaseCommits.isNotEmpty()) {
+            purchaseCommitDrain.withLock {
+                effects.purchaseCommits.forEach { commit ->
+                    runCatching {
+                        capturePurchaseCommit(commit)
+                        processing.withLock { commit.afterCapture() }
+                    }.onFailure { failure ->
+                        commit.onFailure()
+                        val aggregate = purchaseCommitFailure
+                        if (aggregate == null) {
+                            purchaseCommitFailure = failure
+                        } else if (aggregate !== failure) {
+                            aggregate.addSuppressed(failure)
+                        }
+                    }
+                }
+            }
+        }
         var publicationFailure: Throwable? = null
         effects.publications.forEach { publication ->
             runCatching { features.publishStaged(publication) }
@@ -201,11 +266,34 @@ internal class PurchaseService(
                         ?: run { publicationFailure = failure }
                 }
         }
+        val commitDrainFailure = outcome.exceptionOrNull()
+            ?: purchaseCommitFailure
+            ?: publicationFailure
+        effects.ownedPurchaseCommits.forEach { commit ->
+            commit.completion.complete(
+                commitDrainFailure?.let { PurchaseCommitDrainResult.Failed(it) }
+                    ?: PurchaseCommitDrainResult.Succeeded,
+            )
+            purchaseCommitOperations.remove(commit.identity, commit.completion)
+        }
+        effects.purchaseCommitWaits.forEach { completion ->
+            when (val result = completion.await()) {
+                PurchaseCommitDrainResult.Succeeded -> Unit
+                is PurchaseCommitDrainResult.Failed -> {
+                    val aggregate = purchaseCommitFailure
+                    if (aggregate == null) {
+                        purchaseCommitFailure = result.reason
+                    } else if (aggregate !== result.reason) {
+                        aggregate.addSuppressed(result.reason)
+                    }
+                }
+            }
+        }
         var completionFailure: Throwable? = null
         effects.purchaseCompletions.forEach { completion ->
             runCatching {
                 try {
-                    complete(completion.purchase, completion.result)
+                    complete(completion.checkout, completion.outcome)
                 } finally {
                     claimedCheckoutCompletions.remove(completion.checkout)
                 }
@@ -219,22 +307,43 @@ internal class PurchaseService(
             runCatching {
                 emitPurchaseOutcome(
                     completion.checkout.product,
-                    completion.result,
+                    completion.outcome,
                     completion.checkout.owner,
                 )
-                completion.checkout.result.complete(completion.result)
+                completion.checkout.result.complete(completion.outcome.toPurchaseResult())
+            }.onFailure { failure ->
+                completionFailure?.addSuppressed(failure)
+                    ?: run { completionFailure = failure }
+            }
+        }
+        effects.outcomeEmissions.forEach { emission ->
+            runCatching {
+                emitPurchaseOutcome(
+                    emission.product,
+                    emission.outcome,
+                    emission.ownerDistinctId,
+                )
             }.onFailure { failure ->
                 completionFailure?.addSuppressed(failure)
                     ?: run { completionFailure = failure }
             }
         }
         outcome.exceptionOrNull()?.let { decisionFailure ->
-            publicationFailure?.let(decisionFailure::addSuppressed)
-            completionFailure?.let(decisionFailure::addSuppressed)
+            purchaseCommitFailure?.takeIf { it !== decisionFailure }
+                ?.let(decisionFailure::addSuppressed)
+            publicationFailure?.takeIf { it !== decisionFailure }
+                ?.let(decisionFailure::addSuppressed)
+            completionFailure?.takeIf { it !== decisionFailure }
+                ?.let(decisionFailure::addSuppressed)
             throw decisionFailure
         }
+        purchaseCommitFailure?.let { failure ->
+            publicationFailure?.takeIf { it !== failure }?.let(failure::addSuppressed)
+            completionFailure?.takeIf { it !== failure }?.let(failure::addSuppressed)
+            throw failure
+        }
         publicationFailure?.let { failure ->
-            completionFailure?.let(failure::addSuppressed)
+            completionFailure?.takeIf { it !== failure }?.let(failure::addSuppressed)
             throw failure
         }
         completionFailure?.let { throw it }
@@ -243,21 +352,56 @@ internal class PurchaseService(
 
     private fun ProcessingEffects.completeCheckoutAfterPublications(
         purchase: PlayPurchase,
-        result: PurchaseResult,
+        outcome: PurchaseOutcome,
         checkout: InFlightPurchase?,
     ) {
         if (checkout == null || !claimedCheckoutCompletions.add(checkout)) return
-        publications += features.stagePublicationBarrier()
-        purchaseCompletions += PendingPurchaseCompletion(purchase, result, checkout)
+        stageReservedCheckoutCompletion(outcome, checkout)
     }
+
+    private fun ProcessingEffects.stageReservedCheckoutCompletion(
+        outcome: PurchaseOutcome,
+        checkout: InFlightPurchase,
+    ) {
+        publications += features.stagePublicationBarrier()
+        purchaseCompletions += PendingPurchaseCompletion(outcome, checkout)
+    }
+
+    private suspend fun capturePurchaseCommit(commit: PendingPurchaseCommit) {
+        check(
+            capturePurchaseEvent(
+                commit.eventName,
+                commit.properties,
+                commit.eventId,
+                commit.ownerDistinctId,
+            ),
+        ) { "Could not durably capture the purchase outcome event." }
+        when (val identity = commit.identity) {
+            is PurchaseCommitIdentity.Evidence -> check(markCompletionCaptured(identity.purchaseToken)) {
+                "Could not persist the purchase completion commit."
+            }
+            is PurchaseCommitIdentity.External -> committedExternalOperations.add(identity.operationId)
+        }
+    }
+
+    private suspend fun markCompletionCaptured(purchaseToken: String): Boolean =
+        projectionRefresh.withLock {
+            val current = evidenceStore.load()[purchaseToken] ?: return@withLock false
+            current.completionEmitted || evidenceStore.upsert(current.copy(completionEmitted = true))
+        }
 
     private val products = ConcurrentHashMap<StoredProductIdentity, StoreProduct>()
     private val inFlight = ConcurrentHashMap<String, InFlightPurchase>()
     private val processing = Mutex()
+    private val purchaseCommitDrain = Mutex()
     private val projectionRefresh = Mutex()
     private val syncRetryJobs = ConcurrentHashMap<String, Job>()
     private val completionRetryJobs = ConcurrentHashMap<String, Job>()
     private val claimedCheckoutCompletions: MutableSet<InFlightPurchase> =
+        Collections.newSetFromMap(ConcurrentHashMap())
+    private val purchaseCommitOperations =
+        ConcurrentHashMap<PurchaseCommitIdentity, CompletableDeferred<PurchaseCommitDrainResult>>()
+    private val committedExternalOperations: MutableSet<String> =
         Collections.newSetFromMap(ConcurrentHashMap())
     private val locallyRevokedTokens: MutableSet<String> =
         Collections.newSetFromMap(ConcurrentHashMap())
@@ -509,13 +653,19 @@ internal class PurchaseService(
     ): PurchaseResult {
         val initiatingOwner = distinctId()
         settings.delegate?.let { delegate ->
-            val outcome = delegate.purchase(product)
-            if (outcome == PurchaseResult.Purchased) {
-                emitPurchaseCompleted(product, transactionId = null, initiatingOwner)
+            val result = delegate.purchase(product)
+            val outcome = if (result == PurchaseResult.Purchased) {
+                PurchaseOutcome.External(
+                    ExternalPurchaseDeclaration.Purchase(
+                        operationId = newExternalOperationId(),
+                        ownerDistinctId = initiatingOwner,
+                        product = product,
+                    ),
+                )
             } else {
-                emitPurchaseOutcome(product, outcome, initiatingOwner)
+                result.toPurchaseOutcome(PurchaseOutcomeSource.EXTERNAL_DELEGATE)
             }
-            return outcome
+            return commitStandaloneOutcome(product, initiatingOwner, outcome)
         }
         products[product.productIdentity()] = product
         val owner = initiatingOwner
@@ -523,18 +673,29 @@ internal class PurchaseService(
         if (!evidenceStore.upsertProductMapping(product.toMapping()) ||
             !evidenceStore.upsertBinding(product.toBinding(accountId, owner))
         ) {
-            return failed(product, IllegalStateException("Could not persist purchase catalog mapping."), owner)
+            return failed(
+                product,
+                IllegalStateException("Could not persist purchase catalog mapping."),
+                owner,
+                PurchaseOutcomeSource.CHECKOUT,
+            )
         }
         val active = when (val queried = billing.queryActive(product.productType)) {
             is ActivePurchasesResult.Failed -> return failed(
                 product,
                 BillingUnavailableException(queried.responseCode, queried.debugMessage),
                 owner,
+                PurchaseOutcomeSource.CHECKOUT,
             )
             is ActivePurchasesResult.Success -> queried.purchases
         }
         if (product.productType == BillingClient.ProductType.SUBS && replacement == null && active.isNotEmpty()) {
-            return failed(product, SubscriptionReplacementRequiredException(), owner)
+            return failed(
+                product,
+                SubscriptionReplacementRequiredException(),
+                owner,
+                PurchaseOutcomeSource.CHECKOUT,
+            )
         }
         val priorTokens = active.mapTo(mutableSetOf()) { it.purchaseToken }
 
@@ -554,7 +715,12 @@ internal class PurchaseService(
             }
         }
         if (!registered) {
-            return failed(product, IllegalStateException("Another Play purchase is already in flight."), owner)
+            return failed(
+                product,
+                IllegalStateException("Another Play purchase is already in flight."),
+                owner,
+                PurchaseOutcomeSource.CHECKOUT,
+            )
         }
         val launch = runCatching {
             billing.launch(
@@ -563,14 +729,23 @@ internal class PurchaseService(
             )
         }.getOrElse {
             inFlight.remove(product.storeProductId, pending)
-            return failed(product, it, owner)
+            return failed(product, it, owner, PurchaseOutcomeSource.CHECKOUT)
         }
         if (launch.responseCode != BillingClient.BillingResponseCode.OK) {
             inFlight.remove(product.storeProductId, pending)
             return if (launch.responseCode == BillingClient.BillingResponseCode.USER_CANCELED) {
-                PurchaseResult.Cancelled.also { emitPurchaseOutcome(product, it, owner) }
+                commitStandaloneOutcome(
+                    product,
+                    owner,
+                    PurchaseOutcome.Cancelled(PurchaseOutcomeSource.CHECKOUT),
+                )
             } else {
-                failed(product, BillingUnavailableException(launch.responseCode, launch.debugMessage), owner)
+                failed(
+                    product,
+                    BillingUnavailableException(launch.responseCode, launch.debugMessage),
+                    owner,
+                    PurchaseOutcomeSource.CHECKOUT,
+                )
             }
         }
         return result.await()
@@ -578,8 +753,23 @@ internal class PurchaseService(
 
     suspend fun restorePurchases(): RestoreResult {
         val initiatingOwner = distinctId()
-        settings.delegate?.let {
-            return it.restorePurchases().also { outcome -> emitRestoreOutcome(outcome, initiatingOwner) }
+        settings.delegate?.let { delegate ->
+            val result = delegate.restorePurchases()
+            if (result == RestoreResult.Restored) {
+                withProcessingDecision { effects ->
+                    commitPurchaseOutcome(
+                        PurchaseOutcome.External(
+                            ExternalPurchaseDeclaration.Restore(
+                                newExternalOperationId(),
+                                initiatingOwner,
+                            ),
+                        ),
+                        effects,
+                    )
+                }
+                return result
+            }
+            return result.also { emitRestoreOutcome(it, initiatingOwner) }
         }
         val revocationSnapshot = withProcessingDecision { missingRevocationSnapshot() }
         val found = mutableListOf<PlayPurchase>()
@@ -609,7 +799,12 @@ internal class PurchaseService(
             } else {
                 RestoreDecision(
                     RestoreResult.Restored,
-                    found.mapNotNull { preparePurchase(it, effects) },
+                    found.mapNotNull {
+                        commitPurchaseOutcome(
+                            classifyPurchaseOutcome(it, PurchaseOutcomeSource.STARTUP_RECOVERY),
+                            effects,
+                        )
+                    },
                 )
             }
         }
@@ -620,24 +815,32 @@ internal class PurchaseService(
     suspend fun onPurchasesUpdated(update: PurchaseUpdate) {
         if (update.billingResult.responseCode == BillingClient.BillingResponseCode.USER_CANCELED) {
             withProcessingDecision { effects ->
-                effects.completeAllAfterPublications(PurchaseResult.Cancelled)
+                commitPurchaseOutcome(
+                    PurchaseOutcome.Cancelled(callbackOutcomeSource()),
+                    effects,
+                )
             }
             return
         }
         if (update.billingResult.responseCode != BillingClient.BillingResponseCode.OK) {
             withProcessingDecision { effects ->
-                effects.completeAllAfterPublications(
-                    PurchaseResult.Failed(
+                commitPurchaseOutcome(
+                    PurchaseOutcome.Failed(
                         BillingUnavailableException(
                             update.billingResult.responseCode,
                             update.billingResult.debugMessage,
                         ),
+                        callbackOutcomeSource(),
                     ),
+                    effects,
                 )
             }
             return
         }
-        processPurchases(update.purchases.orEmpty())
+        processPurchases(
+            update.purchases.orEmpty(),
+            PurchaseOutcomeSource.PURCHASES_UPDATED_STREAM,
+        )
     }
 
     /** Billing connect and app foreground share one recovery lane. */
@@ -655,7 +858,12 @@ internal class PurchaseService(
             }
         }
         val purchaseFollowUps = withProcessingDecision { effects ->
-            val prepared = active.mapNotNull { preparePurchase(it, effects) }
+            val prepared = active.mapNotNull {
+                commitPurchaseOutcome(
+                    classifyPurchaseOutcome(it, PurchaseOutcomeSource.STARTUP_RECOVERY),
+                    effects,
+                )
+            }
             val activeTokens = active.mapTo(mutableSetOf()) { it.purchaseToken }
             if (allQueriesSucceeded) {
                 val revocation = stageMissingOptimisticRevocation(activeTokens, revocationSnapshot)
@@ -727,16 +935,169 @@ internal class PurchaseService(
         }
     }
 
-    private suspend fun processPurchases(purchases: List<PlayPurchase>) {
+    private suspend fun processPurchases(
+        purchases: List<PlayPurchase>,
+        observedSource: PurchaseOutcomeSource,
+    ) {
         val followUps = withProcessingDecision { effects ->
-            purchases.mapNotNull { preparePurchase(it, effects) }
+            purchases.mapNotNull { purchase ->
+                commitPurchaseOutcome(
+                    classifyPurchaseOutcome(purchase, observedSource),
+                    effects,
+                )
+            }
         }
         followUps.forEach { finishPurchase(it) }
     }
 
-    /** Persist and stage local facts while [processing] is held; return any I/O follow-up. */
-    private suspend fun preparePurchase(
+    private fun callbackOutcomeSource(): PurchaseOutcomeSource =
+        if (inFlight.isEmpty()) PurchaseOutcomeSource.PURCHASES_UPDATED_STREAM
+        else PurchaseOutcomeSource.CHECKOUT
+
+    /** Classify provenance while the serialized purchase decision is held. */
+    private fun classifyPurchaseOutcome(
         purchase: PlayPurchase,
+        observedSource: PurchaseOutcomeSource,
+    ): PurchaseOutcome {
+        val existing = evidenceStore.load()[purchase.purchaseToken]
+        val matchingCheckout = purchase.products.firstNotNullOfOrNull(inFlight::get)
+            ?.matches(purchase) == true
+        val source = when {
+            observedSource == PurchaseOutcomeSource.PURCHASES_UPDATED_STREAM &&
+                existing?.purchaseState == StoredPurchaseState.PENDING &&
+                purchase.state == StoredPurchaseState.PURCHASED ->
+                PurchaseOutcomeSource.DEFERRED_UPDATE
+            observedSource == PurchaseOutcomeSource.PURCHASES_UPDATED_STREAM && matchingCheckout ->
+                PurchaseOutcomeSource.CHECKOUT
+            else -> observedSource
+        }
+        return if (purchase.state == StoredPurchaseState.PENDING) {
+            PurchaseOutcome.Pending(source, purchase)
+        } else {
+            PurchaseOutcome.Verified(purchase, source)
+        }
+    }
+
+    /** The sole interpreter for conclusions from every purchase source. */
+    private suspend fun commitPurchaseOutcome(
+        outcome: PurchaseOutcome,
+        effects: ProcessingEffects,
+        directProduct: StoreProduct? = null,
+        directOwner: String? = null,
+    ): PurchaseEvidence? = when (outcome) {
+        is PurchaseOutcome.Verified -> {
+            val identity = PurchaseCommitIdentity.Evidence(outcome.evidence.purchaseToken)
+            if (!effects.beginPurchaseCommit(identity)) {
+                evidenceStore.load()[outcome.evidence.purchaseToken]
+            } else {
+                commitStoreOutcome(outcome.evidence, outcome.source, effects)
+            }
+        }
+        is PurchaseOutcome.Pending -> {
+            val storeEvidence = outcome.evidence
+            if (storeEvidence == null) {
+                checkNotNull(directProduct)
+                effects.outcomeEmissions += PendingOutcomeEmission(
+                    directProduct,
+                    checkNotNull(directOwner),
+                    outcome,
+                )
+                null
+            } else {
+                val ongoing = purchaseCommitOperations[
+                    PurchaseCommitIdentity.Evidence(storeEvidence.purchaseToken)
+                ]
+                if (ongoing == null) {
+                    commitStoreOutcome(storeEvidence, outcome.source, effects)
+                } else {
+                    effects.purchaseCommitWaits += ongoing
+                    null
+                }
+            }
+        }
+        is PurchaseOutcome.External -> {
+            val identity = PurchaseCommitIdentity.External(outcome.declaration.operationId)
+            if (outcome.declaration.ownerDistinctId == distinctId() &&
+                outcome.declaration.operationId !in committedExternalOperations &&
+                effects.beginPurchaseCommit(identity)
+            ) {
+                commitExternalDeclaration(outcome.declaration, identity, effects)
+            }
+            null
+        }
+        is PurchaseOutcome.Cancelled,
+        is PurchaseOutcome.Failed,
+        -> {
+            if (directProduct != null) {
+                effects.outcomeEmissions += PendingOutcomeEmission(
+                    directProduct,
+                    checkNotNull(directOwner),
+                    outcome,
+                )
+            } else {
+                effects.completeAllAfterPublications(outcome)
+            }
+            null
+        }
+    }
+
+    private fun commitExternalDeclaration(
+        declaration: ExternalPurchaseDeclaration,
+        identity: PurchaseCommitIdentity.External,
+        effects: ProcessingEffects,
+    ) {
+        val commit = when (declaration) {
+            is ExternalPurchaseDeclaration.Purchase -> purchaseCompletionCommit(
+                identity = identity,
+                ownerDistinctId = declaration.ownerDistinctId,
+                properties = purchaseCompletionProperties(
+                    declaration.product,
+                    source = PurchaseOutcomeSource.EXTERNAL_DELEGATE,
+                ),
+            )
+            is ExternalPurchaseDeclaration.Restore -> PendingPurchaseCommit(
+                identity = identity,
+                eventName = SystemEventNames.RESTORE_COMPLETED,
+                eventId = purchaseCommitEventId(identity),
+                ownerDistinctId = declaration.ownerDistinctId,
+                properties = mapOf(
+                    "source" to PurchaseOutcomeSource.EXTERNAL_DELEGATE.wireValue,
+                    "test_store" to false,
+                ),
+            )
+        }
+        effects.purchaseCommits += commit
+    }
+
+    private fun ProcessingEffects.beginPurchaseCommit(
+        identity: PurchaseCommitIdentity,
+    ): Boolean {
+        if (ownedPurchaseCommits.any { it.identity == identity }) return false
+        val completion = CompletableDeferred<PurchaseCommitDrainResult>()
+        val existing = purchaseCommitOperations.putIfAbsent(identity, completion)
+        if (existing != null) {
+            purchaseCommitWaits += existing
+            return false
+        }
+        ownedPurchaseCommits += OwnedPurchaseCommit(identity, completion)
+        return true
+    }
+
+    private suspend fun commitStandaloneOutcome(
+        product: StoreProduct,
+        ownerDistinctId: String,
+        outcome: PurchaseOutcome,
+    ): PurchaseResult {
+        withProcessingDecision { effects ->
+            commitPurchaseOutcome(outcome, effects, product, ownerDistinctId)
+        }
+        return outcome.toPurchaseResult()
+    }
+
+    /** Persist and stage local facts while [processing] is held; return any I/O follow-up. */
+    private suspend fun commitStoreOutcome(
+        purchase: PlayPurchase,
+        source: PurchaseOutcomeSource,
         effects: ProcessingEffects,
     ): PurchaseEvidence? {
         val existing = evidenceStore.load()[purchase.purchaseToken]
@@ -846,98 +1207,134 @@ internal class PurchaseService(
         if (evidence == null) {
             effects.completeCheckoutAfterPublications(
                 purchase,
-                PurchaseResult.Failed(IllegalStateException("Could not persist purchase evidence.")),
+                PurchaseOutcome.Failed(
+                    IllegalStateException("Could not persist purchase evidence."),
+                    source,
+                ),
                 checkoutFlight,
             )
             return null
         }
-        if (ownerDistinctId != null &&
-            existing?.ownerDistinctId != ownerDistinctId &&
-            (existing?.ownerDistinctId ?: existing?.syncAttributionDistinctId) == currentOwner
-        ) {
-            val publication = projectionRefresh.withLock {
-                features.stageReassignPurchaseAuthority(
-                    currentOwner,
-                    evidence.purchaseToken,
-                    deriveOptimisticProjection(currentOwner),
-                )
+        suspend fun stageAuthorityReassignment() {
+            if (ownerDistinctId != null &&
+                existing?.ownerDistinctId != ownerDistinctId &&
+                (existing?.ownerDistinctId ?: existing?.syncAttributionDistinctId) == currentOwner
+            ) {
+                val publication = projectionRefresh.withLock {
+                    features.stageReassignPurchaseAuthority(
+                        currentOwner,
+                        evidence.purchaseToken,
+                        deriveOptimisticProjection(currentOwner),
+                    )
+                }
+                publication?.let(effects.publications::add)
             }
-            publication?.let(effects.publications::add)
         }
         if (evidence.purchaseState == StoredPurchaseState.PENDING) {
+            stageAuthorityReassignment()
             effects.completeCheckoutAfterPublications(
                 purchase,
-                PurchaseResult.Pending,
+                PurchaseOutcome.Pending(source, purchase),
                 checkoutFlight,
             )
             return null
         }
         if (evidence.permanentlyRejected) {
+            stageAuthorityReassignment()
             stageEvidenceRevocation(evidence).publication?.let(effects.publications::add)
             effects.completeCheckoutAfterPublications(
                 purchase,
-                PurchaseResult.Failed(
+                PurchaseOutcome.Failed(
                     IllegalStateException("Purchase evidence was permanently rejected."),
+                    source,
                 ),
                 checkoutFlight,
             )
             return null
         }
         if (evidence.signatureVerificationRequired && !evidence.signatureVerified) {
+            stageAuthorityReassignment()
             stageEvidenceRevocation(evidence.copy(permanentlyRejected = true)).publication
                 ?.let(effects.publications::add)
             effects.completeCheckoutAfterPublications(
                 purchase,
-                PurchaseResult.Failed(SecurityException("Play purchase signature is invalid.")),
+                PurchaseOutcome.Failed(
+                    SecurityException("Play purchase signature is invalid."),
+                    source,
+                ),
                 checkoutFlight,
             )
             return null
         }
         if (evidence.revoked) {
+            stageAuthorityReassignment()
             projectionRefresh.withLock { stageOptimisticProjectionLocked() }
                 ?.let(effects.publications::add)
             effects.completeCheckoutAfterPublications(
                 purchase,
-                PurchaseResult.Purchased,
+                PurchaseOutcome.Verified(purchase, source),
                 checkoutFlight,
             )
             return null
         }
 
-        val projectionPublication = projectionRefresh.withLock {
-            val acceptedBody = evidence.acceptedResponseBody
-            if (evidence.canProjectTo(distinctId()) && acceptedBody != null) {
-                features.stageReconcilePurchase(
-                    evidence.ownerDistinctId!!,
-                    acceptedBody,
-                    purchase.purchaseToken,
-                    deriveOptimisticProjection(),
-                )
+        val needsCompletionCapture = evidence.ownerDistinctId == distinctId() &&
+            !evidence.completionEmitted
+        val reservedCheckout = checkoutFlight?.takeIf {
+            needsCompletionCapture && claimedCheckoutCompletions.add(it)
+        }
+        suspend fun finalizeVerifiedOutcome() {
+            stageAuthorityReassignment()
+            val projectionPublication = projectionRefresh.withLock {
+                val acceptedBody = evidence.acceptedResponseBody
+                if (evidence.canProjectTo(distinctId()) && acceptedBody != null) {
+                    features.stageReconcilePurchase(
+                        evidence.ownerDistinctId!!,
+                        acceptedBody,
+                        purchase.purchaseToken,
+                        deriveOptimisticProjection(),
+                    )
+                } else {
+                    stageOptimisticProjectionLocked()
+                }
+            }
+            projectionPublication?.let(effects.publications::add)
+            val verifiedOutcome = PurchaseOutcome.Verified(purchase, source)
+            if (reservedCheckout != null) {
+                effects.stageReservedCheckoutCompletion(verifiedOutcome, reservedCheckout)
             } else {
-                stageOptimisticProjectionLocked()
+                effects.completeCheckoutAfterPublications(
+                    purchase,
+                    verifiedOutcome,
+                    checkoutFlight,
+                )
             }
         }
-        projectionPublication?.let(effects.publications::add)
-        var currentEvidence = evidence
-        if (evidence.canProjectTo(distinctId())) {
-            if (isCheckoutOutcome && !evidence.completionEmitted && emitPurchaseCompleted(evidence)) {
-                currentEvidence = upsertEvidence(evidence.copy(completionEmitted = true)) ?: evidence
-            }
+        if (needsCompletionCapture) {
+            effects.purchaseCommits += purchaseCompletionCommit(
+                identity = PurchaseCommitIdentity.Evidence(evidence.purchaseToken),
+                ownerDistinctId = evidence.ownerDistinctId!!,
+                properties = purchaseCompletionProperties(evidence, source),
+                afterCapture = ::finalizeVerifiedOutcome,
+                onFailure = {
+                    reservedCheckout?.let(claimedCheckoutCompletions::remove)
+                },
+            )
+        } else {
+            finalizeVerifiedOutcome()
         }
-        effects.completeCheckoutAfterPublications(
-            purchase,
-            PurchaseResult.Purchased,
-            checkoutFlight,
-        )
-        return currentEvidence.takeUnless { it.permanentlyRejected }
+        return evidence.takeUnless { it.permanentlyRejected }
     }
 
     /** Backend synchronization and Play completion deliberately run outside [processing]. */
     private suspend fun finishPurchase(evidence: PurchaseEvidence) {
-        if (evidence.synced) completeManaged(evidence) else syncEvidence(evidence)
+        val current = evidenceStore.load()[evidence.purchaseToken] ?: evidence
+        if (current.synced) completeManaged(current) else syncEvidence(current)
     }
 
     private suspend fun syncEvidence(original: PurchaseEvidence): Boolean {
+        val current = evidenceStore.load()[original.purchaseToken] ?: original
+        if (current.synced) return true
         val operation: CompletableDeferred<Boolean>
         val ownsOperation: Boolean
         synchronized(usageCoordinationLock) {
@@ -954,7 +1351,7 @@ internal class PurchaseService(
         }
         if (!ownsOperation) return operation.await()
         val synced = try {
-            performSyncEvidence(original)
+            performSyncEvidence(current)
         } catch (_: Exception) {
             false
         }
@@ -1267,52 +1664,76 @@ internal class PurchaseService(
         (initialRetryDelayMillis * (1L shl attempt.coerceAtMost(16)))
             .coerceAtMost(maxRetryDelayMillis)
 
-    private fun emitPurchaseCompleted(evidence: PurchaseEvidence): Boolean {
-        if (evidence.ownerDistinctId != distinctId()) return false
-        val properties = linkedMapOf<String, Any?>(
+    private fun purchaseCompletionProperties(
+        evidence: PurchaseEvidence,
+        source: PurchaseOutcomeSource,
+    ): Map<String, Any?> =
+        linkedMapOf<String, Any?>(
             "product_id" to (evidence.nuxieProductId ?: evidence.storeProductIds.firstOrNull().orEmpty()),
             "placement_id" to evidence.context?.placementId,
             "store_product_id" to evidence.storeProductIds.firstOrNull().orEmpty(),
             "experience_id" to evidence.context?.experienceId,
-            "source" to "purchase",
+            "source" to source.wireValue,
             "test_store" to false,
             "transaction_id" to evidence.purchaseToken,
             "price" to evidence.context?.price?.toDouble(),
             "display_price" to evidence.context?.displayPrice,
         ).filterValues { it != null }
-        emit(SystemEventNames.PURCHASE_COMPLETED, properties)
-        return true
-    }
 
-    private fun emitPurchaseCompleted(
+    private fun purchaseCompletionProperties(
         product: StoreProduct,
-        transactionId: String?,
-        initiatingOwner: String,
-    ) {
-        if (distinctId() != initiatingOwner) return
+        source: PurchaseOutcomeSource,
+    ): Map<String, Any?> {
         val price = product.storePrice()
-        val properties = linkedMapOf<String, Any?>(
+        return linkedMapOf<String, Any?>(
             "product_id" to product.productId,
             "placement_id" to product.placementId,
             "store_product_id" to product.storeProductId,
             "experience_id" to product.purchaseContext?.experienceId,
-            "source" to "purchase",
+            "source" to source.wireValue,
             "test_store" to false,
-            "transaction_id" to transactionId,
             "price" to price?.amount?.toDouble(),
             "display_price" to price?.display,
         ).filterValues { it != null }
-        emit(SystemEventNames.PURCHASE_COMPLETED, properties)
     }
 
-    private fun complete(purchase: PlayPurchase, result: PurchaseResult) {
-        purchase.products.forEach { productId ->
-            val pending = inFlight[productId] ?: return@forEach
-            if (pending.matches(purchase) && inFlight.remove(productId, pending)) {
-                emitPurchaseOutcome(pending.product, result, pending.owner)
-                pending.result.complete(result)
-            }
-        }
+    /** The only construction site for a `$purchase_completed` capture. */
+    private fun purchaseCompletionCommit(
+        identity: PurchaseCommitIdentity,
+        ownerDistinctId: String,
+        properties: Map<String, Any?>,
+        afterCapture: suspend () -> Unit = {},
+        onFailure: () -> Unit = {},
+    ): PendingPurchaseCommit = PendingPurchaseCommit(
+        identity = identity,
+        eventName = SystemEventNames.PURCHASE_COMPLETED,
+        eventId = purchaseCommitEventId(identity),
+        ownerDistinctId = ownerDistinctId,
+        properties = properties,
+        afterCapture = afterCapture,
+        onFailure = onFailure,
+    )
+
+    private fun purchaseCommitEventId(identity: PurchaseCommitIdentity): String = stableEventId(
+        "purchase-completed:",
+        when (identity) {
+            is PurchaseCommitIdentity.Evidence -> listOf(
+                purchaseStorageScope,
+                "verified",
+                identity.purchaseToken,
+            )
+            is PurchaseCommitIdentity.External -> listOf(
+                purchaseStorageScope,
+                "external",
+                identity.operationId,
+            )
+        },
+    )
+
+    private fun complete(checkout: InFlightPurchase, outcome: PurchaseOutcome) {
+        if (!inFlight.remove(checkout.product.storeProductId, checkout)) return
+        emitPurchaseOutcome(checkout.product, outcome, checkout.owner)
+        checkout.result.complete(outcome.toPurchaseResult())
     }
 
     private fun InFlightPurchase.matches(purchase: PlayPurchase): Boolean =
@@ -1320,29 +1741,32 @@ internal class PurchaseService(
             purchase.purchaseToken !in priorTokens &&
             product.storeProductId in purchase.products
 
-    private fun ProcessingEffects.completeAllAfterPublications(result: PurchaseResult) {
+    private fun ProcessingEffects.completeAllAfterPublications(outcome: PurchaseOutcome) {
         val keys = inFlight.keys()
         while (keys.hasMoreElements()) {
             val key = keys.nextElement()
             val pending = inFlight[key] ?: continue
-            // A successful callback that already owns this checkout must first
-            // drain its reserved FeatureInfo publication.
+            // A successful callback already reserved this checkout's ordered drain.
             if (pending in claimedCheckoutCompletions) continue
             if (!inFlight.remove(key, pending)) continue
-            directCheckoutCompletions += PendingDirectCheckoutCompletion(pending, result)
+            directCheckoutCompletions += PendingDirectCheckoutCompletion(pending, outcome)
         }
     }
 
-    private fun failed(
+    private suspend fun failed(
         product: StoreProduct,
         cause: Throwable,
         initiatingOwner: String,
-    ): PurchaseResult.Failed =
-        PurchaseResult.Failed(cause).also { emitPurchaseOutcome(product, it, initiatingOwner) }
+        source: PurchaseOutcomeSource,
+    ): PurchaseResult.Failed = commitStandaloneOutcome(
+        product,
+        initiatingOwner,
+        PurchaseOutcome.Failed(cause, source),
+    ) as PurchaseResult.Failed
 
     private fun emitPurchaseOutcome(
         product: StoreProduct,
-        result: PurchaseResult,
+        outcome: PurchaseOutcome,
         initiatingOwner: String,
     ) {
         if (distinctId() != initiatingOwner) return
@@ -1356,15 +1780,33 @@ internal class PurchaseService(
             "price" to price?.amount?.toDouble(),
             "display_price" to price?.display,
         ).filterValues { it != null }.toMutableMap()
-        when (result) {
-            PurchaseResult.Purchased -> return
-            PurchaseResult.Cancelled -> emit(SystemEventNames.PURCHASE_CANCELLED, properties)
-            PurchaseResult.Pending -> emit(SystemEventNames.PURCHASE_PENDING, properties)
-            is PurchaseResult.Failed -> {
-                properties["error"] = result.cause.message ?: result.cause.javaClass.simpleName
+        when (outcome) {
+            is PurchaseOutcome.Verified,
+            is PurchaseOutcome.External,
+            -> return
+            is PurchaseOutcome.Cancelled -> emit(SystemEventNames.PURCHASE_CANCELLED, properties)
+            is PurchaseOutcome.Pending -> emit(SystemEventNames.PURCHASE_PENDING, properties)
+            is PurchaseOutcome.Failed -> {
+                properties["error"] = outcome.reason.message ?: outcome.reason.javaClass.simpleName
                 emit(SystemEventNames.PURCHASE_FAILED, properties)
             }
         }
+    }
+
+    private fun PurchaseOutcome.toPurchaseResult(): PurchaseResult = when (this) {
+        is PurchaseOutcome.Verified,
+        is PurchaseOutcome.External,
+        -> PurchaseResult.Purchased
+        is PurchaseOutcome.Cancelled -> PurchaseResult.Cancelled
+        is PurchaseOutcome.Pending -> PurchaseResult.Pending
+        is PurchaseOutcome.Failed -> PurchaseResult.Failed(reason)
+    }
+
+    private fun PurchaseResult.toPurchaseOutcome(source: PurchaseOutcomeSource): PurchaseOutcome = when (this) {
+        PurchaseResult.Purchased -> error("A purchased delegate result requires an external declaration.")
+        PurchaseResult.Cancelled -> PurchaseOutcome.Cancelled(source)
+        PurchaseResult.Pending -> PurchaseOutcome.Pending(source)
+        is PurchaseResult.Failed -> PurchaseOutcome.Failed(cause, source)
     }
 
     private fun emitRestoreOutcome(result: RestoreResult, initiatingOwner: String) {

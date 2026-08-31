@@ -1,4 +1,4 @@
-package ai.nuxie.sdk.commerce
+package ai.nuxie.sdk.billing
 
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.ProductDetails

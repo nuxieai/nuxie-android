@@ -1,7 +1,7 @@
 package ai.nuxie.sdk.features
 
 import ai.nuxie.sdk.NuxieEvent
-import ai.nuxie.sdk.commerce.PurchaseService
+import ai.nuxie.sdk.billing.PurchaseService
 import ai.nuxie.sdk.events.BatchItemWireEncoder
 import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.events.StoredEvent
@@ -25,7 +25,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonObject
 
-/** Immediate-confirmation metered Feature use with the commerce first-spend gate hidden inside. */
+/** Immediate-confirmation metered Feature use with the purchase first-spend gate hidden inside. */
 internal class FeatureUsageService(
     private val api: NuxieApi,
     private val purchases: PurchaseService,

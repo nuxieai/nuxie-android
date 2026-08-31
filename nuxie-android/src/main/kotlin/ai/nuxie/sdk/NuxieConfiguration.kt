@@ -1,7 +1,7 @@
 package ai.nuxie.sdk
 
-import ai.nuxie.sdk.commerce.NuxiePurchaseDelegate
-import ai.nuxie.sdk.commerce.PurchaseHandlingMode
+import ai.nuxie.sdk.billing.NuxiePurchaseDelegate
+import ai.nuxie.sdk.billing.PurchaseHandlingMode
 
 /** Configuration captured when [Nuxie.setup] initializes the SDK. */
 class NuxieConfiguration(val apiKey: String) {

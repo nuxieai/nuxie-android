@@ -1,4 +1,4 @@
-package ai.nuxie.sdk.commerce
+package ai.nuxie.sdk.billing
 
 import android.app.Activity
 import com.android.billingclient.api.AcknowledgePurchaseParams

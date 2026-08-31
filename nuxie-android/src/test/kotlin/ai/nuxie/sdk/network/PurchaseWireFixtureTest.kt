@@ -2,20 +2,20 @@ package ai.nuxie.sdk.network
 
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
-import ai.nuxie.sdk.commerce.ActivePurchasesResult
-import ai.nuxie.sdk.commerce.CheckoutRequest
-import ai.nuxie.sdk.commerce.InMemoryPurchaseEvidenceStore
-import ai.nuxie.sdk.commerce.NuxieApiPurchaseSynchronizer
-import ai.nuxie.sdk.commerce.PlayBillingGateway
-import ai.nuxie.sdk.commerce.PurchaseEvidence
-import ai.nuxie.sdk.commerce.PurchaseHandlingMode
-import ai.nuxie.sdk.commerce.PurchaseService
-import ai.nuxie.sdk.commerce.PurchaseSettings
-import ai.nuxie.sdk.commerce.PurchaseSynchronizer
-import ai.nuxie.sdk.commerce.PurchaseSyncOutcome
-import ai.nuxie.sdk.commerce.StoredFeatureAllowance
-import ai.nuxie.sdk.commerce.StoredProductMapping
-import ai.nuxie.sdk.commerce.StoredPurchaseState
+import ai.nuxie.sdk.billing.ActivePurchasesResult
+import ai.nuxie.sdk.billing.CheckoutRequest
+import ai.nuxie.sdk.billing.InMemoryPurchaseEvidenceStore
+import ai.nuxie.sdk.billing.NuxieApiPurchaseSynchronizer
+import ai.nuxie.sdk.billing.PlayBillingGateway
+import ai.nuxie.sdk.billing.PurchaseEvidence
+import ai.nuxie.sdk.billing.PurchaseHandlingMode
+import ai.nuxie.sdk.billing.PurchaseService
+import ai.nuxie.sdk.billing.PurchaseSettings
+import ai.nuxie.sdk.billing.PurchaseSynchronizer
+import ai.nuxie.sdk.billing.PurchaseSyncOutcome
+import ai.nuxie.sdk.billing.StoredFeatureAllowance
+import ai.nuxie.sdk.billing.StoredProductMapping
+import ai.nuxie.sdk.billing.StoredPurchaseState
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.fixtures.FixtureRunner
@@ -56,11 +56,11 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
-class CommerceWireFixtureTest {
+class PurchaseWireFixtureTest {
     @Test
     fun committedRequestFixtureSetIsComplete() {
-        val expected = CommerceWireFixtures.requests()
-        val requestDirectory = CommerceWireFixtures.requestDirectory()
+        val expected = PurchaseWireFixtures.requests()
+        val requestDirectory = PurchaseWireFixtures.requestDirectory()
         val committedFiles = Files.list(requestDirectory).use { paths ->
             paths
                 .filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".json") }
@@ -76,7 +76,7 @@ class CommerceWireFixtureTest {
 
     @Test
     fun committedAndroidEncoderRequestsMatchTheSdkWireByteForByte() {
-        CommerceWireFixtures.requests()
+        PurchaseWireFixtures.requests()
             .filterNot { it.name == APP_STORE_SERVER_CONTRACT_CASE }
             .forEach(::assertCommittedRequest)
     }
@@ -87,7 +87,7 @@ class CommerceWireFixtureTest {
      */
     @Test
     fun entitledAppStoreUntouchedPinsIosCodingKeysForParentWorkerReplayNotAndroidEncoding() {
-        val fixture = CommerceWireFixtures.requests()
+        val fixture = PurchaseWireFixtures.requests()
             .single { it.name == APP_STORE_SERVER_CONTRACT_CASE }
 
         assertEquals("/entitled", fixture.endpoint)
@@ -100,32 +100,32 @@ class CommerceWireFixtureTest {
     }
 
     @Test
-    fun generateCommerceWireFixtures() {
+    fun generatePurchaseWireFixtures() {
         assumeTrue(
-            "Set NUXIE_GENERATE_COMMERCE_WIRE_FIXTURES=1 to regenerate committed request fixtures.",
-            System.getenv("NUXIE_GENERATE_COMMERCE_WIRE_FIXTURES") == "1",
+            "Set NUXIE_GENERATE_PURCHASE_WIRE_FIXTURES=1 to regenerate committed request fixtures.",
+            System.getenv("NUXIE_GENERATE_PURCHASE_WIRE_FIXTURES") == "1",
         )
-        CommerceWireFixtures.writeRequests()
+        PurchaseWireFixtures.writeRequests()
     }
 
     @Test
     fun everyCommittedWorkerResponseParsesThroughTheSdkResponsePath() {
         assumeFalse(
-            "Parent-worker commerce response fixtures are pending while responses/PENDING exists.",
-            CommerceWireResponses.isPending(),
+            "Parent-worker purchase response fixtures are pending while responses/PENDING exists.",
+            PurchaseWireResponses.isPending(),
         )
-        val responseFiles = CommerceWireResponses.files()
+        val responseFiles = PurchaseWireResponses.files()
         assertEquals(
-            "Every commerce request needs TypeScript and Rust worker response fixtures.",
-            CommerceWireResponses.requiredFileNames(),
+            "Every purchase request needs TypeScript and Rust worker response fixtures.",
+            PurchaseWireResponses.requiredFileNames(),
             responseFiles.mapTo(sortedSetOf()) { it.fileName.toString() },
         )
-        responseFiles.forEach(CommerceWireResponses::assertParses)
+        responseFiles.forEach(PurchaseWireResponses::assertParses)
     }
 
     @Test
     fun responseScaffoldingCoversSuccessAndEndpointErrorMapping() {
-        CommerceWireResponses.assertParses(
+        PurchaseWireResponses.assertParses(
             response(
                 name = "scaffold-purchase-success",
                 request = "purchase-one-time",
@@ -135,7 +135,7 @@ class CommerceWireFixtureTest {
                     """{"success":true,"customer_id":"fixture-response-customer","features":[]}""",
             ),
         )
-        CommerceWireResponses.assertParses(
+        PurchaseWireResponses.assertParses(
             response(
                 name = "scaffold-entitled-success",
                 request = "entitled-atomic-use-full",
@@ -145,7 +145,7 @@ class CommerceWireFixtureTest {
                     """{"customerId":"fixture-response-customer","featureId":"fixture-response-feature","code":"allowed","allowed":true,"unlimited":false,"balance":6.5,"type":"creditSystem"}""",
             ),
         )
-        CommerceWireResponses.assertParses(
+        PurchaseWireResponses.assertParses(
             response(
                 name = "scaffold-purchase-error",
                 request = "purchase-subscription-full",
@@ -154,7 +154,7 @@ class CommerceWireFixtureTest {
                 bodyText = """{"error":"invalid purchase"}""",
             ),
         )
-        CommerceWireResponses.assertParses(
+        PurchaseWireResponses.assertParses(
             response(
                 name = "scaffold-entitled-error",
                 request = "entitled-atomic-use-minimal",
@@ -163,7 +163,7 @@ class CommerceWireFixtureTest {
                 bodyText = """{"error":"temporarily unavailable"}""",
             ),
         )
-        CommerceWireResponses.assertParses(
+        PurchaseWireResponses.assertParses(
             response(
                 name = "scaffold-purchase-empty-retryable-error",
                 request = "purchase-token-first",
@@ -198,7 +198,7 @@ class CommerceWireFixtureTest {
 
     @Test
     fun jsonErrorResponseRequiresMatchingParsedBody() {
-        val fixture = CommerceWireResponses.ResponseFixture(
+        val fixture = PurchaseWireResponses.ResponseFixture(
             name = "purchase-one-time.ts",
             lane = "ts",
             request = "purchase-one-time",
@@ -209,15 +209,15 @@ class CommerceWireFixtureTest {
         )
 
         val failure = assertThrows(AssertionError::class.java) {
-            CommerceWireResponses.assertParses(fixture)
+            PurchaseWireResponses.assertParses(fixture)
         }
         assertTrue(failure.message.orEmpty().contains("must contain body equal to its parsed bodyText"))
     }
 
     @Test
     fun semanticJsonBodyEqualityAcceptsEquivalentNumberFormattingRecursively() {
-        CommerceWireResponses.assertParses(
-            CommerceWireResponses.ResponseFixture(
+        PurchaseWireResponses.assertParses(
+            PurchaseWireResponses.ResponseFixture(
                 name = "purchase-one-time.rs",
                 lane = "rs",
                 request = "purchase-one-time",
@@ -234,7 +234,7 @@ class CommerceWireFixtureTest {
 
     @Test
     fun semanticJsonBodyEqualityRejectsSwappedResponseBody() {
-        val fixture = CommerceWireResponses.ResponseFixture(
+        val fixture = PurchaseWireResponses.ResponseFixture(
             name = "purchase-one-time.ts",
             lane = "ts",
             request = "purchase-one-time",
@@ -245,14 +245,14 @@ class CommerceWireFixtureTest {
         )
 
         val failure = assertThrows(AssertionError::class.java) {
-            CommerceWireResponses.assertParses(fixture)
+            PurchaseWireResponses.assertParses(fixture)
         }
         assertTrue(failure.message.orEmpty().contains("must contain body equal to its parsed bodyText"))
     }
 
     @Test
     fun nonJsonErrorResponseRejectsParsedBody() {
-        val fixture = CommerceWireResponses.ResponseFixture(
+        val fixture = PurchaseWireResponses.ResponseFixture(
             name = "purchase-one-time.ts",
             lane = "ts",
             request = "purchase-one-time",
@@ -263,7 +263,7 @@ class CommerceWireFixtureTest {
         )
 
         val failure = assertThrows(AssertionError::class.java) {
-            CommerceWireResponses.assertParses(fixture)
+            PurchaseWireResponses.assertParses(fixture)
         }
         assertTrue(failure.message.orEmpty().contains("must omit body when bodyText is not JSON"))
     }
@@ -274,7 +274,7 @@ class CommerceWireFixtureTest {
         lane: String,
         expectedMessage: String,
     ) {
-        val directory = Files.createTempDirectory("commerce-wire-response")
+        val directory = Files.createTempDirectory("purchase-wire-response")
         val path = directory.resolve("purchase-one-time.ts.json")
         val bodyText = """{"error":"invalid purchase"}"""
         val fixtureText = buildJsonObject {
@@ -290,7 +290,7 @@ class CommerceWireFixtureTest {
 
         try {
             val failure = assertThrows(AssertionError::class.java) {
-                CommerceWireResponses.assertParses(path)
+                PurchaseWireResponses.assertParses(path)
             }
             assertTrue(failure.message.orEmpty().contains(expectedMessage))
         } finally {
@@ -305,7 +305,7 @@ class CommerceWireFixtureTest {
         endpoint: String,
         statusCode: Int,
         bodyText: String,
-    ): CommerceWireResponses.ResponseFixture = CommerceWireResponses.ResponseFixture(
+    ): PurchaseWireResponses.ResponseFixture = PurchaseWireResponses.ResponseFixture(
         name = name,
         lane = "scaffold",
         request = request,
@@ -315,15 +315,15 @@ class CommerceWireFixtureTest {
         bodyText = bodyText,
     )
 
-    private fun assertCommittedRequest(fixture: CommerceWireFixtures.RequestFixture) {
+    private fun assertCommittedRequest(fixture: PurchaseWireFixtures.RequestFixture) {
         val committed = String(
             Files.readAllBytes(
-                CommerceWireFixtures.requestDirectory().resolve("${fixture.name}.json"),
+                PurchaseWireFixtures.requestDirectory().resolve("${fixture.name}.json"),
             ),
             StandardCharsets.UTF_8,
         )
         assertEquals(
-            "Regenerate commerce wire fixtures after an intentional wire change.",
+            "Regenerate purchase wire fixtures after an intentional wire change.",
             fixture.fileText(),
             committed,
         )
@@ -340,7 +340,7 @@ class CommerceWireFixtureTest {
     }
 }
 
-private object CommerceWireFixtures {
+private object PurchaseWireFixtures {
     private const val API_KEY = "pk_fixture"
 
     data class RequestFixture(
@@ -357,7 +357,7 @@ private object CommerceWireFixtures {
     }
 
     fun requestDirectory(): Path =
-        FixtureRunner.fixturesRoot().toPath().resolve("commerce-wire/requests")
+        FixtureRunner.fixturesRoot().toPath().resolve("purchase-wire/requests")
 
     fun requests(): List<RequestFixture> = capturedRequests
 
@@ -680,7 +680,7 @@ private object CommerceWireFixtures {
         .joinToString("") { byte -> "%02x".format(byte) }
 }
 
-private object CommerceWireResponses {
+private object PurchaseWireResponses {
     data class ResponseFixture(
         val name: String,
         val lane: String,
@@ -692,11 +692,11 @@ private object CommerceWireResponses {
     )
 
     private fun responseDirectory(): Path =
-        FixtureRunner.fixturesRoot().toPath().resolve("commerce-wire/responses")
+        FixtureRunner.fixturesRoot().toPath().resolve("purchase-wire/responses")
 
     fun isPending(): Boolean = Files.exists(responseDirectory().resolve("PENDING"))
 
-    fun requiredFileNames(): Set<String> = CommerceWireFixtures.requests()
+    fun requiredFileNames(): Set<String> = PurchaseWireFixtures.requests()
         .flatMap { fixture -> listOf("${fixture.name}.ts.json", "${fixture.name}.rs.json") }
         .toSortedSet()
 
@@ -736,7 +736,7 @@ private object CommerceWireResponses {
             assertParses(fixture)
         } catch (failure: AssertionError) {
             throw AssertionError(
-                "Commerce response fixture '${path.fileName}' failed: ${failure.message}",
+                "Purchase response fixture '${path.fileName}' failed: ${failure.message}",
                 failure,
             )
         }
@@ -745,7 +745,7 @@ private object CommerceWireResponses {
     fun assertParses(fixture: ResponseFixture) {
         assertTrue(
             "${fixture.name} must reference a committed request fixture.",
-            CommerceWireFixtures.requests().any {
+            PurchaseWireFixtures.requests().any {
                 it.name == fixture.request && it.endpoint == fixture.endpoint
             },
         )
@@ -771,7 +771,7 @@ private object CommerceWireResponses {
             when (fixture.endpoint) {
                 "/purchase" -> assertPurchaseResponse(fixture, api)
                 "/entitled" -> assertFeatureCheckResponse(fixture, api)
-                else -> throw AssertionError("Unsupported commerce response endpoint ${fixture.endpoint}")
+                else -> throw AssertionError("Unsupported purchase response endpoint ${fixture.endpoint}")
             }
         } else {
             assertErrorMapping(fixture, api)
@@ -826,7 +826,7 @@ private object CommerceWireResponses {
                 assertEquals(fixture.statusCode, error.statusCode)
             }
 
-            else -> throw AssertionError("Unsupported commerce response endpoint ${fixture.endpoint}")
+            else -> throw AssertionError("Unsupported purchase response endpoint ${fixture.endpoint}")
         }
     }
 
