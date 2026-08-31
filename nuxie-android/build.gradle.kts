@@ -166,9 +166,9 @@ tasks.register<JavaExec>("hostRenderHarness") {
   if (hostDyldLibraryPath.isPresent) {
     environment("DYLD_LIBRARY_PATH", hostDyldLibraryPath.get())
   }
-  doFirst {
-    classpath = tasks.named<Test>("testDebugUnitTest").get().classpath
-  }
+  // Resolve the runtime classpath before Gradle builds the dependency graph,
+  // so its runtime JAR producer runs even without a preceding unit-test task.
+  classpath = tasks.named<Test>("testDebugUnitTest").get().classpath
 }
 
 tasks.withType<Test>().matching {
