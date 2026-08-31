@@ -158,9 +158,11 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         Unit
     }
 
-    private fun <T> read(operation: (Snapshot) -> T): T = lock.withTargetLock(file.path) { operation(load()) }
+    // The lock root is already canonical. A relative customer key also makes
+    // aliases such as directory/. contend for the same snapshot transaction.
+    private fun <T> read(operation: (Snapshot) -> T): T = lock.withTargetLock(file.name) { operation(load()) }
 
-    private fun <T> update(operation: (Snapshot) -> T): T = lock.withTargetLock(file.path) {
+    private fun <T> update(operation: (Snapshot) -> T): T = lock.withTargetLock(file.name) {
         val state = load()
         val result = operation(state)
         val bytes = buildJsonObject {

@@ -7,6 +7,7 @@ import ai.nuxie.sdk.events.ActivityCuration
 import ai.nuxie.sdk.events.ActivityForwarder
 import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.SQLiteEventStore
+import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.experiences.JourneyPlaneProfile
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.identity.IdentityProvider
@@ -16,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.Json
@@ -137,6 +139,36 @@ class DeviceLegRunJournalTest {
         assertEquals(1, listOfNotNull(a.await(), b.await()).size)
         assertNotNull(DeviceLegRunJournal(directory, "customer").admit(arm(), JourneyReentry.OneTime, "step", 100_000))
         assertEquals(1, DeviceLegRunJournal(directory, "../customer").runs().size)
+    }
+
+    @Test fun `equivalent directory paths share one admission lock`() = runBlocking {
+        for (index in 0 until 20) {
+            val first = DeviceLegRunJournal(directory, "customer-$index")
+            val alias = DeviceLegRunJournal(File(directory, "."), "customer-$index")
+            val begin = CompletableDeferred<Unit>()
+            val a = async(Dispatchers.Default) { begin.await(); first.admit(arm(), JourneyReentry.OneTime, "step", 100_000) }
+            val b = async(Dispatchers.Default) { begin.await(); alias.admit(arm(), JourneyReentry.OneTime, "step", 100_000) }
+            begin.complete(Unit)
+            assertEquals(1, listOfNotNull(a.await(), b.await()).size)
+        }
+    }
+
+    @Test fun `forwarding handles offset and invalid occurrence timestamps on API 23`() = runBlocking {
+        for ((timestamp, expected) in listOf(
+            "1970-01-01T01:03:20.5001+01:00" to 200_500L,
+            "not-a-date" to 900_000L,
+            "1970-01-01T00:03:20.000Ztrailing" to 900_000L,
+        )) {
+            val delivered = mutableListOf<ai.nuxie.sdk.NuxieActivityInfo>()
+            val forwarder = ActivityForwarder({ _, _ -> null }) { delivered.add(it) }
+            forwarder.onCommitted(StoredEvent("event", JourneyEventNames.LEG_COMPLETED,
+                JsonObject(mapOf("experience_id" to JsonPrimitive("experience"), "experience_version_id" to JsonPrimitive("version"),
+                    "journey_id" to JsonPrimitive("journey"), "leg_id" to JsonPrimitive("a".repeat(64)),
+                    "leg_generation" to JsonPrimitive(1), "outcome" to JsonPrimitive("done"), "completed_at" to JsonPrimitive(timestamp))),
+                timestampMillis = 900_000, distinctId = "customer", forwardingReceivedAtMillis = 950_000))
+            assertEquals(timestamp, expected, delivered.single().timestampMillis)
+            assertEquals(950_000L, delivered.single().receivedAtMillis)
+        }
     }
 
     @Test fun `invalid buffered JSON cannot replace the last readable snapshot`() {
