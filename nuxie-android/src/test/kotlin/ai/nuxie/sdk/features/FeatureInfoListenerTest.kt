@@ -232,6 +232,26 @@ class FeatureInfoListenerTest {
     }
 
     @Test
+    fun scopeChangeCannotSplitReadinessFromItsStagedValues() = runBlocking {
+        val info = FeatureInfo()
+        val emissionChecks = AtomicInteger()
+        val granted = access(allowed = true, balance = 2.0)
+        val mutation = info.stageUpdate(
+            features = mapOf("credits" to granted),
+            entities = emptyMap(),
+            state = FeatureInfo.State.Ready,
+            // The fourth check is the post-emission fence. A scope change
+            // there must not leave readiness committed without its values.
+            isCurrent = { emissionChecks.incrementAndGet() < 4 },
+        )
+
+        info.publish(mutation)
+
+        assertEquals(FeatureInfo.State.Ready, info.state.value)
+        assertEquals(granted, info.all.value["credits"])
+    }
+
+    @Test
     fun callbackIdentityChangeStopsTheSupersededCallbackBatch() = runBlocking {
         val info = FeatureInfo()
         val granted = access(allowed = true, balance = 2.0)

@@ -87,7 +87,6 @@ internal class EventLog(
         data class CommitServerFact(
             val event: StoredEvent,
             val receivedAtMillis: Long,
-            val isCurrent: () -> Boolean,
             val done: CompletableDeferred<Boolean>,
         ) : Command
         data class Barrier(val done: CompletableDeferred<Unit>) : Command
@@ -145,11 +144,7 @@ internal class EventLog(
                     command.done.complete(captured)
                 }
                 is Command.CommitServerFact -> command.done.complete(
-                    if (command.isCurrent()) {
-                        commitServerFactNow(command.event, command.receivedAtMillis)
-                    } else {
-                        false
-                    },
+                    commitServerFactNow(command.event, command.receivedAtMillis),
                 )
                 is Command.Barrier -> command.done.complete(Unit)
             }
@@ -332,14 +327,16 @@ internal class EventLog(
         runCatching { store.markDelivered(listOf(eventId)) }
     }
 
-    /** Commits a server fact once, delivers it locally, and never uploads it. */
+    /**
+     * Commits a server fact once, delivers it locally, and never uploads it.
+     * Facts are customer-scoped by [StoredEvent.distinctId], not localized.
+     */
     suspend fun commitServerFact(
         event: StoredEvent,
         receivedAtMillis: Long = nowMillis(),
-        isCurrent: () -> Boolean = { true },
     ): Boolean {
         val done = CompletableDeferred<Boolean>()
-        val command = Command.CommitServerFact(event, receivedAtMillis, isCurrent, done)
+        val command = Command.CommitServerFact(event, receivedAtMillis, done)
         if (commands.trySend(command).isFailure) return false
         return done.await()
     }

@@ -27,12 +27,13 @@ import kotlinx.serialization.json.jsonObject
  *   served (evict-don't-serve-stale).
  * - Conditional refetch via the scoped ETag validator (locale-keyed).
  * - Atomic admission by identity decision, effective locale, and monotonic
- *   profile generation before any cache or fanout side effect.
+ *   profile generation before every locale-scoped mutation.
  * - 30-minute periodic refresh; on user change a fresh-enough cache
  *   (< 5 min) is served without an immediate network hit.
- * - Fanout on every applied profile: user properties, segment memberships,
- *   release authority, Features, and server down-facts all retain the same
- *   admission fence. Android has no profile-mailbox consumer in this slice.
+ * - Locale-scoped profile cache, segment membership, release authority, and
+ *   visible Features share one admission. User properties and server facts
+ *   are customer-scoped instead; Android has no profile-mailbox consumer in
+ *   this slice.
  *
  * The profile body is retained as raw JSON (duplicate-key validated at the
  * network layer); typed models arrive with their consumers.
@@ -47,8 +48,7 @@ internal class ProfileService(
     private val applyJourneyFacts: suspend (
         distinctId: String,
         body: JsonObject,
-        isCurrent: () -> Boolean,
-    ) -> Unit = { _, _, _ -> },
+    ) -> Unit = { _, _ -> },
     private val stageFeatureProfile: (
         distinctId: String,
         body: JsonObject,
@@ -72,11 +72,15 @@ internal class ProfileService(
         val body: JsonObject,
     )
 
+    // Lock order for nested admission work: identity -> locale -> profile.
     private val lock = Any()
     private val baseDir = File((context.applicationContext ?: context).cacheDir, "nuxie/profiles")
     private var resident: CachedProfile? = null
     @Volatile
     private var nextProfileGeneration = 0L
+
+    @Volatile
+    private var nextCustomerGeneration = 0L
 
     @Volatile
     private var latestAppliedGeneration = 0L
@@ -85,6 +89,7 @@ internal class ProfileService(
         val identityScope: IdentityScope,
         val localeScope: ProfileLocaleScope,
         val generation: Long,
+        val customerGeneration: Long,
         val featurePurchaseRevision: Long,
         val featureAuthoritativeRevision: Long,
     )
@@ -143,15 +148,27 @@ internal class ProfileService(
         return done.await()
     }
 
+    /** Change the effective locale and invalidate all older locale-scoped work. */
+    fun setLocaleIdentifier(localeIdentifier: String?) {
+        // Preserve the global lock order: locale -> profile (identity is not
+        // needed because locale invalidation is customer-agnostic).
+        localeSettings.setLocaleIdentifier(localeIdentifier)
+        synchronized(lock) {
+            nextProfileGeneration += 1
+        }
+    }
+
     /** User-transition observer: reset/refresh per the iOS coordinator rules. */
     val transitionObserver = UserTransitionCoordinator.Observer { kind, from, to ->
+        if (kind == UserTransitionCoordinator.Kind.RESET) {
+            // Ordered cleanup belongs to the old identity's keys. A newer
+            // admission must never cancel it.
+            clearCache(from)
+        }
         val admission = beginAdmission(expectedDistinctId = to)
         if (admission == null) {
             Log.w(LOG_TAG, "Discarding superseded profile transition")
             return@Observer
-        }
-        if (kind == UserTransitionCoordinator.Kind.RESET) {
-            clearCache(from, admission)
         }
         handleUserChange(to, admission)
     }
@@ -207,8 +224,8 @@ internal class ProfileService(
             return false
         }
 
-        if (!isScopeCurrent(admission)) {
-            Log.w(LOG_TAG, "Discarding stale profile fetch - customer scope changed mid-flight")
+        if (!identity.isCurrentScope(admission.identityScope)) {
+            Log.w(LOG_TAG, "Discarding stale profile fetch - customer changed mid-flight")
             return false
         }
 
@@ -247,6 +264,8 @@ internal class ProfileService(
         cached: CachedProfile,
         admission: Admission,
     ): Boolean {
+        applyCustomerProperties(cached, admission)
+
         var featurePublication: FeatureInfo.Mutation? = null
         val admitted = withCurrentScope(admission.identityScope, admission.localeScope) {
             synchronized(lock) {
@@ -259,9 +278,6 @@ internal class ProfileService(
 
                 resident = cached
                 persist(cached)
-                (cached.body["userProperties"] as? JsonObject)?.let { properties ->
-                    applyUserProperties(properties.mapValues { (_, value) -> value })
-                }
                 segments.applySnapshot(
                     cached.distinctId,
                     cached.body["segmentMemberships"] as? JsonObject,
@@ -279,45 +295,63 @@ internal class ProfileService(
         } == true
         if (!admitted) {
             Log.w(LOG_TAG, "Discarding stale profile admission")
-            return false
+        } else {
+            publishFeatureProfile(featurePublication)
         }
 
-        publishFeatureProfile(featurePublication)
-        applyJourneyFacts(cached.distinctId, cached.body) { isAdmissionCurrent(admission) }
-        return true
+        // Server facts are keyed to the captured customer and deliberately
+        // locale-independent; their durable idempotency owns supersession.
+        if (isCustomerAdmissionCurrent(admission)) {
+            applyJourneyFacts(cached.distinctId, cached.body)
+        }
+        return admitted
+    }
+
+    private fun applyCustomerProperties(cached: CachedProfile, admission: Admission) {
+        identity.withCurrentScope(admission.identityScope) current@ {
+            synchronized(lock) {
+                if (admission.customerGeneration != nextCustomerGeneration) return@current
+                (cached.body["userProperties"] as? JsonObject)?.let { properties ->
+                    applyUserProperties(properties.mapValues { (_, value) -> value })
+                }
+            }
+        }
     }
 
     private fun beginAdmission(expectedDistinctId: String? = null): Admission? {
         val identityScope = identity.captureScope()
         if (expectedDistinctId != null && identityScope.distinctId != expectedDistinctId) return null
         val localeScope = localeSettings.captureScope()
-        return synchronized(lock) {
-            if (!identity.isCurrentScope(identityScope) ||
-                !localeSettings.isCurrentScope(localeScope) ||
-                (expectedDistinctId != null && identityScope.distinctId != expectedDistinctId)
-            ) {
-                return@synchronized null
+        return withCurrentScope(identityScope, localeScope) {
+            synchronized(lock) {
+                if (expectedDistinctId != null &&
+                    identityScope.distinctId != expectedDistinctId
+                ) {
+                    return@synchronized null
+                }
+                nextProfileGeneration += 1
+                nextCustomerGeneration += 1
+                Admission(
+                    identityScope = identityScope,
+                    localeScope = localeScope,
+                    generation = nextProfileGeneration,
+                    customerGeneration = nextCustomerGeneration,
+                    featurePurchaseRevision = captureFeaturePurchaseRevision(),
+                    featureAuthoritativeRevision = reserveFeatureAuthoritativeRevision(),
+                )
             }
-            nextProfileGeneration += 1
-            Admission(
-                identityScope = identityScope,
-                localeScope = localeScope,
-                generation = nextProfileGeneration,
-                featurePurchaseRevision = captureFeaturePurchaseRevision(),
-                featureAuthoritativeRevision = reserveFeatureAuthoritativeRevision(),
-            )
         }
     }
-
-    private fun isScopeCurrent(admission: Admission): Boolean =
-        identity.isCurrentScope(admission.identityScope) &&
-            localeSettings.isCurrentScope(admission.localeScope)
 
     private fun isAdmissionCurrent(admission: Admission): Boolean =
         identity.isCurrentScope(admission.identityScope) &&
             localeSettings.isCurrentScope(admission.localeScope) &&
             nextProfileGeneration == admission.generation &&
             latestAppliedGeneration == admission.generation
+
+    private fun isCustomerAdmissionCurrent(admission: Admission): Boolean =
+        identity.isCurrentScope(admission.identityScope) &&
+            nextCustomerGeneration == admission.customerGeneration
 
     private fun <T> withCurrentScope(
         identityScope: IdentityScope,
@@ -327,21 +361,12 @@ internal class ProfileService(
         localeSettings.withCurrentScope(localeScope, block)
     }
 
-    private fun clearCache(distinctId: String, admission: Admission) {
-        withCurrentScope(admission.identityScope, admission.localeScope) {
-            synchronized(lock) {
-                if (admission.generation != nextProfileGeneration ||
-                    admission.generation < latestAppliedGeneration
-                ) {
-                    return@synchronized false
-                }
-                latestAppliedGeneration = admission.generation
-                if (resident?.distinctId == distinctId) resident = null
-                fileFor(distinctId).delete()
-                segments.clearSegments(distinctId)
-                true
-            }
+    private fun clearCache(distinctId: String) {
+        synchronized(lock) {
+            if (resident?.distinctId == distinctId) resident = null
+            fileFor(distinctId).delete()
         }
+        segments.clearSegments(distinctId)
     }
 
     private fun evictCache(distinctId: String, admission: Admission) {

@@ -331,6 +331,13 @@ object Nuxie {
 
     // MARK: Profile
 
+    /** Change the profile locale and await a refresh for the new locale. */
+    suspend fun setLocaleIdentifier(localeIdentifier: String?) {
+        val core = core ?: return
+        core.profile.setLocaleIdentifier(localeIdentifier)
+        core.profile.refreshAndWait()
+    }
+
     // MARK: Presentation
 
     /** Dismiss the active engine-owned Experience and await local semantic completion. */

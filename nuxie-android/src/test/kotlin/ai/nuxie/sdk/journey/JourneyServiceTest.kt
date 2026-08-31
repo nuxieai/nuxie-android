@@ -20,7 +20,12 @@ import ai.nuxie.sdk.experiences.ExperienceReleaseIdentity
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
 import ai.nuxie.sdk.experiences.SupportedRuntime
 import ai.nuxie.sdk.identity.IdentityProvider
+import ai.nuxie.sdk.network.HttpTransport
+import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.presentation.CloseReason
+import ai.nuxie.sdk.profile.ProfileLocaleSettings
+import ai.nuxie.sdk.profile.ProfileService
+import ai.nuxie.sdk.segments.SegmentService
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -1308,6 +1313,73 @@ class JourneyServiceTest {
             assertEquals("server", h.store.events.getValue("fact-1").properties.stringValue("\$nuxie_event_origin"))
             assertNull(h.store.events.values.firstOrNull { it.name == JourneyEventNames.EXITED && it.properties["journey_id"]?.toString()?.contains(journeyId) == true })
         } finally { h.root.deleteRecursively() }
+    }
+
+    @Test
+    fun factFetchedBeforeLocaleFlipStillCommitsAndRoutesForItsCustomer() = runBlocking {
+        val identity = Identity().apply { currentDistinctId = "locale-fact-customer" }
+        val h = harness(identity = identity)
+        val context = RuntimeEnvironment.getApplication()
+        var profile: ProfileService? = null
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent(
+                    "trigger-locale-fact",
+                    "opened",
+                    timestampMillis = now,
+                    distinctId = identity.currentDistinctId,
+                ),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = checkNotNull(started.ref.journeyId)
+            val fact = buildJsonObject {
+                put("id", JsonPrimitive("locale-independent-fact"))
+                put("event", JsonPrimitive(JourneyEventNames.SUPERSEDED))
+                put("timestamp", JsonPrimitive(now))
+                put("properties", buildJsonObject {
+                    put("journey_id", JsonPrimitive(journeyId))
+                })
+            }
+            val requestStarted = CompletableDeferred<Unit>()
+            val releaseResponse = CompletableDeferred<Unit>()
+            val transport = HttpTransport { request ->
+                check(request.url.path == "/profile")
+                requestStarted.complete(Unit)
+                runBlocking { releaseResponse.await() }
+                HttpTransport.Response(
+                    statusCode = 200,
+                    body = buildJsonObject {
+                        put("facts", JsonArray(listOf(fact)))
+                    }.toString().encodeToByteArray(),
+                )
+            }
+            val profileService = ProfileService(
+                context = context,
+                api = NuxieApi("pk_test_locale_fact", NuxieEnvironment.DEVELOPMENT, transport),
+                identity = identity,
+                segments = SegmentService(context),
+                applyUserProperties = {},
+                applyJourneyFacts = { distinctId, body ->
+                    h.service.applyDownFacts(body, distinctId)
+                },
+                scope = scope,
+                localeSettings = ProfileLocaleSettings("en_US") { "device_TEST" },
+                nowMillis = { now },
+            )
+            profile = profileService
+
+            val refresh = async(Dispatchers.Default) { profileService.refreshAndWait() }
+            requestStarted.await()
+            profileService.setLocaleIdentifier("fr_FR")
+            releaseResponse.complete(Unit)
+
+            assertFalse(refresh.await())
+            h.log.awaitBarrier()
+            assertTrue("locale-independent-fact" in h.store.events)
+            assertTrue(JourneyStore(h.root).load(identity.currentDistinctId, journeyId)!!.isGhost)
+        } finally {
+            profile?.close()
+            h.root.deleteRecursively()
+        }
     }
 
     @Test

@@ -3,6 +3,8 @@ package ai.nuxie.sdk.profile
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.identity.IdentityProvider
+import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.identity.IdentityService
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.network.HttpTransport
@@ -12,8 +14,11 @@ import ai.nuxie.sdk.testsupport.FakeTransport
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.ReentrantLock
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,6 +26,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -94,6 +100,87 @@ class ProfileServiceTest {
         }
 
         fun request(index: Int): HttpTransport.Request = recordedRequests[index]
+
+        fun started(index: Int): CompletableDeferred<Unit> = gates[index].started
+    }
+
+    private class LockOrderIdentity(
+        private val id: String,
+    ) : IdentityProvider {
+        class ScopeGate {
+            val started = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val acquired = CompletableDeferred<Unit>()
+        }
+
+        private val decisionLock = ReentrantLock()
+        private val gateLock = Any()
+        private var nextWithCurrentGate: ScopeGate? = null
+        private var nextIsCurrentGate: ScopeGate? = null
+        val identityLockTimedOut = AtomicBoolean(false)
+
+        fun armNextWithCurrent(): ScopeGate = ScopeGate().also { gate ->
+            synchronized(gateLock) { nextWithCurrentGate = gate }
+        }
+
+        fun armNextIsCurrent(): ScopeGate = ScopeGate().also { gate ->
+            synchronized(gateLock) { nextIsCurrentGate = gate }
+        }
+
+        fun disarmIsCurrent(gate: ScopeGate) {
+            synchronized(gateLock) {
+                if (nextIsCurrentGate === gate) nextIsCurrentGate = null
+            }
+        }
+
+        override fun distinctId(): String = id
+
+        override fun anonymousId(): String = id
+
+        override fun rawDistinctId(): String? = id
+
+        override val isIdentified: Boolean = true
+
+        override fun captureScope(): IdentityScope {
+            decisionLock.lock()
+            return try {
+                IdentityScope(id, 0L)
+            } finally {
+                decisionLock.unlock()
+            }
+        }
+
+        override fun isCurrentScope(scope: IdentityScope): Boolean {
+            val gate = synchronized(gateLock) {
+                nextIsCurrentGate.also { nextIsCurrentGate = null }
+            }
+            gate?.started?.complete(Unit)
+            if (gate != null) runBlocking { gate.release.await() }
+            if (!decisionLock.tryLock(1, TimeUnit.SECONDS)) {
+                identityLockTimedOut.set(true)
+                return false
+            }
+            return try {
+                scope.distinctId == id && scope.revision == 0L
+            } finally {
+                decisionLock.unlock()
+            }
+        }
+
+        override fun <T> withCurrentScope(scope: IdentityScope, block: () -> T): T? {
+            val gate = synchronized(gateLock) {
+                nextWithCurrentGate.also { nextWithCurrentGate = null }
+            }
+            gate?.started?.complete(Unit)
+            if (gate != null) runBlocking { gate.release.await() }
+            decisionLock.lock()
+            return try {
+                gate?.acquired?.complete(Unit)
+                if (scope.distinctId == id && scope.revision == 0L) block() else null
+            } finally {
+                decisionLock.unlock()
+            }
+        }
     }
 
     private class FanoutRecorder {
@@ -136,8 +223,8 @@ class ProfileServiceTest {
                 fanout.properties += (properties["snapshot"] as JsonPrimitive).content
             },
             applyJourneyProfile = { _, body -> fanout.releases += body.snapshotLabel() },
-            applyJourneyFacts = { _, body, isCurrent ->
-                if (isCurrent()) fanout.facts += body.snapshotLabel()
+            applyJourneyFacts = { _, body ->
+                fanout.facts += body.snapshotLabel()
             },
             stageFeatureProfile = { _, body, _, _, isCurrent ->
                 if (isCurrent()) fanout.features += body.snapshotLabel()
@@ -149,6 +236,8 @@ class ProfileServiceTest {
             localeSettings = locales,
             nowMillis = { now },
         )
+
+        fun hasDiskProfile(): Boolean = profileFile.exists()
 
         suspend fun close(deleteDisk: Boolean = true) {
             service.close()
@@ -345,6 +434,98 @@ class ProfileServiceTest {
     }
 
     @Test
+    fun workerRefreshAndTransitionHydrationUseIdentityLocaleProfileLockOrder() = runBlocking {
+        val distinctId = "profile_lock_order"
+        val transport = GatedProfileTransport(
+            listOf(profileResponse("seed"), profileResponse("worker")),
+        )
+        val identity = LockOrderIdentity(distinctId)
+        val context = RuntimeEnvironment.getApplication()
+        val segments = SegmentService(context)
+        val featureRevision = AtomicLong()
+        val armTransitionApply = AtomicBoolean(false)
+        val transitionGateReady = CompletableDeferred<LockOrderIdentity.ScopeGate>()
+        File(context.cacheDir, "nuxie/profiles/$distinctId.json").delete()
+        segments.clearSegments(distinctId)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val service = ProfileService(
+            context = context,
+            api = NuxieApi("pk_test_profile_lock_order", NuxieEnvironment.DEVELOPMENT, transport),
+            identity = identity,
+            segments = segments,
+            applyUserProperties = {},
+            captureFeaturePurchaseRevision = { 0L },
+            reserveFeatureAuthoritativeRevision = {
+                if (armTransitionApply.compareAndSet(true, false)) {
+                    transitionGateReady.complete(identity.armNextWithCurrent())
+                }
+                featureRevision.incrementAndGet()
+            },
+            scope = scope,
+            localeSettings = ProfileLocaleSettings("en_US") { "device_TEST" },
+            nowMillis = { now },
+        )
+        var transitionGate: LockOrderIdentity.ScopeGate? = null
+        var validationGate: LockOrderIdentity.ScopeGate? = null
+
+        try {
+            val seed = async(Dispatchers.Default) { service.refreshAndWait() }
+            transport.awaitStarted(0)
+            transport.release(0)
+            assertTrue(withTimeout(5_000L) { seed.await() })
+
+            armTransitionApply.set(true)
+            val transition = async(Dispatchers.Default) {
+                service.transitionObserver.handleUserChange(
+                    UserTransitionCoordinator.Kind.IDENTIFY,
+                    distinctId,
+                    distinctId,
+                )
+            }
+            val armedTransitionGate = withTimeout(5_000L) { transitionGateReady.await() }
+            transitionGate = armedTransitionGate
+            withTimeout(5_000L) { armedTransitionGate.started.await() }
+
+            val armedValidationGate = identity.armNextIsCurrent()
+            validationGate = armedValidationGate
+            val workerRefresh = async(Dispatchers.Default) { service.refreshAndWait() }
+            val workerHeldProfileBeforeIdentity = withTimeout(5_000L) {
+                select {
+                    armedValidationGate.started.onAwait { true }
+                    transport.started(1).onAwait { false }
+                }
+            }
+            if (!workerHeldProfileBeforeIdentity) {
+                identity.disarmIsCurrent(armedValidationGate)
+            }
+
+            armedTransitionGate.release.complete(Unit)
+            withTimeout(5_000L) { armedTransitionGate.acquired.await() }
+            if (workerHeldProfileBeforeIdentity) {
+                armedValidationGate.release.complete(Unit)
+            } else {
+                withTimeout(5_000L) { transition.await() }
+                transport.release(1)
+            }
+
+            withTimeout(5_000L) { transition.await() }
+            withTimeout(5_000L) { workerRefresh.await() }
+            assertFalse(
+                "profile lock must never be held while waiting for the identity lock",
+                identity.identityLockTimedOut.get(),
+            )
+        } finally {
+            transitionGate?.release?.complete(Unit)
+            validationGate?.release?.complete(Unit)
+            transport.releaseAll()
+            service.close()
+            scope.cancel()
+            File(context.cacheDir, "nuxie/profiles/$distinctId.json").delete()
+            segments.clearSegments(distinctId)
+        }
+    }
+
+    @Test
     fun identityRoundTripRejectsAnInFlightProfileAcrossEveryFanout() = runBlocking {
         val transport = GatedProfileTransport(listOf(profileResponse("stale")))
         val fixture = ProfileFixture(
@@ -372,6 +553,35 @@ class ProfileServiceTest {
     }
 
     @Test
+    fun supersededResetStillRemovesTheOldIdentityProfileAndSegments() = runBlocking {
+        val oldDistinctId = "profile_reset_old"
+        val fixture = ProfileFixture(
+            transport = profileTransport(body = profileBody("old"), etag = null),
+            distinctId = oldDistinctId,
+            localeIdentifier = "en_US",
+        )
+
+        try {
+            assertTrue(fixture.service.refreshAndWait())
+            assertTrue(fixture.hasDiskProfile())
+            assertTrue(fixture.segments.isMember(oldDistinctId, "segment-old"))
+
+            fixture.identity.setDistinctId("profile_reset_destination")
+            fixture.identity.setDistinctId("profile_reset_newer")
+            fixture.service.transitionObserver.handleUserChange(
+                UserTransitionCoordinator.Kind.RESET,
+                oldDistinctId,
+                "profile_reset_destination",
+            )
+
+            assertFalse(fixture.hasDiskProfile())
+            assertFalse(fixture.segments.isMember(oldDistinctId, "segment-old"))
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun localeChangeRejectsTheOldResponseAndScopesTheReplacementRequest() = runBlocking {
         val transport = GatedProfileTransport(
             listOf(profileResponse("old-locale", etag = "\"en\""), profileResponse("new-locale")),
@@ -385,12 +595,15 @@ class ProfileServiceTest {
         try {
             val oldFetch = async(Dispatchers.Default) { fixture.service.refreshAndWait() }
             transport.awaitStarted(0)
-            fixture.locales.setLocaleIdentifier("fr_FR")
+            fixture.service.setLocaleIdentifier("fr_FR")
             transport.release(0)
 
             assertFalse(withTimeout(5_000L) { oldFetch.await() })
             assertNull(fixture.service.currentProfile())
-            fixture.fanout.all().forEach { assertTrue(it.isEmpty()) }
+            assertEquals(listOf("old-locale"), fixture.fanout.properties)
+            assertTrue(fixture.fanout.releases.isEmpty())
+            assertTrue(fixture.fanout.features.isEmpty())
+            assertEquals(listOf("old-locale"), fixture.fanout.facts)
 
             val replacement = async(Dispatchers.Default) { fixture.service.refreshAndWait() }
             transport.awaitStarted(1)
@@ -401,7 +614,10 @@ class ProfileServiceTest {
 
             assertTrue(withTimeout(5_000L) { replacement.await() })
             assertEquals("new-locale", fixture.service.currentProfile()!!.body.snapshotLabel())
-            fixture.fanout.all().forEach { assertEquals(listOf("new-locale"), it) }
+            assertEquals(listOf("old-locale", "new-locale"), fixture.fanout.properties)
+            assertEquals(listOf("new-locale"), fixture.fanout.releases)
+            assertEquals(listOf("new-locale"), fixture.fanout.features)
+            assertEquals(listOf("old-locale", "new-locale"), fixture.fanout.facts)
         } finally {
             transport.releaseAll()
             fixture.close()
@@ -432,12 +648,15 @@ class ProfileServiceTest {
             val revalidation = async(Dispatchers.Default) { fixture.service.refreshAndWait() }
             transport.awaitStarted(1)
             assertEquals("\"en\"", transport.request(1).headers["If-None-Match"])
-            fixture.locales.setLocaleIdentifier("fr_FR")
+            fixture.service.setLocaleIdentifier("fr_FR")
             transport.release(1)
 
             assertFalse(withTimeout(5_000L) { revalidation.await() })
             assertNull(fixture.service.currentProfile())
-            fixture.fanout.all().forEach { assertEquals(listOf("english"), it) }
+            assertEquals(listOf("english", "english"), fixture.fanout.properties)
+            assertEquals(listOf("english"), fixture.fanout.releases)
+            assertEquals(listOf("english"), fixture.fanout.features)
+            assertEquals(listOf("english", "english"), fixture.fanout.facts)
 
             val replacement = async(Dispatchers.Default) { fixture.service.refreshAndWait() }
             transport.awaitStarted(2)
@@ -446,7 +665,10 @@ class ProfileServiceTest {
             assertTrue(withTimeout(5_000L) { replacement.await() })
 
             assertEquals("french", fixture.service.currentProfile()!!.body.snapshotLabel())
-            fixture.fanout.all().forEach { assertEquals(listOf("english", "french"), it) }
+            assertEquals(listOf("english", "english", "french"), fixture.fanout.properties)
+            assertEquals(listOf("english", "french"), fixture.fanout.releases)
+            assertEquals(listOf("english", "french"), fixture.fanout.features)
+            assertEquals(listOf("english", "english", "french"), fixture.fanout.facts)
         } finally {
             transport.releaseAll()
             fixture.close()

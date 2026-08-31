@@ -82,10 +82,11 @@ class FeatureInfo {
                 }
             }
 
-            // Readiness describes the values, so an inline values collector
-            // must never observe the prior readiness for the new snapshot.
-            if (state != null && !emitIfCurrent(this) { mutableState.value = state }) return
+            // Readiness and values are one staged publication. A scope change
+            // may supersede the whole snapshot, but cannot commit only one
+            // half and leave Ready paired with stale or empty Feature values.
             if (!emitIfCurrent(this) {
+                    if (state != null) mutableState.value = state
                     entityAccess = entities
                     mutableAll.publish(features)
                 }
