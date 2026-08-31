@@ -37,12 +37,14 @@ class FeatureInfo {
             entities = emptyMap(),
             state = State.Unknown,
             featuresRevision = 0L,
+            generationSeq = 0L,
         )
     )
     private val stagingLock = Any()
     private val emissionLock = Any()
+    private var generationSeqCounter = 0L
     @Volatile
-    private var currentGeneration = Generation()
+    private var currentGeneration = Generation(seq = 0L)
     private val entityAccess: Map<String, Map<String, FeatureAccess>>
         get() = published.value.entities
 
@@ -55,7 +57,10 @@ class FeatureInfo {
     ) -> Unit = { _, _, _, _ -> }
 
     /** One FIFO lane per customer-visible publication generation. */
-    private class Generation {
+    private class Generation(
+        /** Monotonic swap order; newer generations carry larger values. */
+        val seq: Long,
+    ) {
         var tail = CompletableDeferred<Unit>().also { it.complete(Unit) }
     }
 
@@ -69,6 +74,14 @@ class FeatureInfo {
         val entities: Map<String, Map<String, FeatureAccess>>,
         val state: State,
         val featuresRevision: Long,
+        /** Seq of the generation that stored this container. The commit
+         *  loop refuses to replace a container from a NEWER generation
+         *  (the fence check and the CAS are not one atomic step), and a
+         *  dedupe may only short-circuit within one generation: a
+         *  cross-generation publication always stores a fresh container so
+         *  a stale writer's CAS against the pre-swap object can never
+         *  succeed over a field-identical replacement (the ABA case). */
+        val generationSeq: Long,
     )
 
     /** Fence shared by readiness, values, and every last-mile callback. */
@@ -129,20 +142,32 @@ class FeatureInfo {
         ): PublishedSnapshot? {
             while (true) {
                 if (!isCurrent()) return null
+                // The fence check above and the CAS below are separate
+                // steps: an identity swap can commit between them. The
+                // stored container carries its writer's generation seq, so
+                // a stale writer that reads the post-swap container sees a
+                // newer seq and stands down instead of clobbering it.
                 val current = published.value
+                if (current.generationSeq > generation.seq) return null
                 val resolvedState = state ?: current.state
                 val featuresChanged = !current.features.hasSameFieldsAs(features)
                 val stateChanged = current.state != resolvedState
                 val entitiesChanged = current.entities != entities
-                if (!featuresChanged && !stateChanged && !entitiesChanged) {
+                val sameGeneration = current.generationSeq == generation.seq
+                if (sameGeneration && !featuresChanged && !stateChanged && !entitiesChanged) {
                     return current
                 }
                 val next = PublishedSnapshot(
-                    features = features,
+                    // Field-equal features reuse the visible map so value,
+                    // replayCache, and suppressed collectors stay coherent
+                    // (signed zero and NaN field-compare differently than
+                    // reference reuse would suggest).
+                    features = if (featuresChanged) features else current.features,
                     entities = entities,
                     state = resolvedState,
                     featuresRevision = current.featuresRevision +
                         (if (featuresChanged) 1L else 0L),
+                    generationSeq = generation.seq,
                 )
                 if (published.compareAndSet(current, next)) return next
             }
@@ -210,7 +235,7 @@ class FeatureInfo {
         state: State,
     ): Mutation = synchronized(emissionLock) {
         synchronized(stagingLock) {
-            val generation = Generation()
+            val generation = Generation(seq = ++generationSeqCounter)
             currentGeneration = generation
             stageLocked(generation, isCurrent = { true }) { fence ->
                 fence.publishSnapshot(features, entities, state)

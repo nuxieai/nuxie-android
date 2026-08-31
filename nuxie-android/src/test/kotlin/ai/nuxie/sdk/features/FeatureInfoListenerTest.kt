@@ -125,6 +125,79 @@ class FeatureInfoListenerTest {
     }
 
     @Test
+    fun staleWriterStandsDownAfterAFieldIdenticalIdentityPublicationCompletes() = runBlocking {
+        val info = FeatureInfo()
+        val original = access(allowed = true, balance = 2.0)
+        info.update(mapOf("credits" to original), emptyMap(), FeatureInfo.State.Ready)
+
+        val emissionEntered = CountDownLatch(1)
+        val releaseEmission = CountDownLatch(1)
+        val checks = AtomicInteger()
+        val staleMutation = info.stageUpdate(
+            features = mapOf("credits" to access(allowed = false, balance = 0.0)),
+            entities = emptyMap(),
+            // Check 2 is the commit-loop fence. Pausing INSIDE the check
+            // (after the generation conjunct already read as current) models
+            // the fence-then-CAS gap: the writer resumes believing it is
+            // current after a replacement generation has fully published.
+            isCurrent = {
+                if (checks.incrementAndGet() == 2) {
+                    emissionEntered.countDown()
+                    check(releaseEmission.await(5, TimeUnit.SECONDS))
+                }
+                true
+            },
+        )
+        val stalePublisher = async(Dispatchers.Default) { info.publish(staleMutation) }
+        assertTrue(emissionEntered.await(5, TimeUnit.SECONDS))
+
+        // The identity publication is field-identical to the standing
+        // snapshot: it must still commit a fresh, newer-generation container
+        // (never dedupe across generations) so the resumed stale writer
+        // cannot CAS its old-customer values over the completed swap.
+        info.publish(
+            info.stageIdentityChange(
+                mapOf("credits" to original),
+                emptyMap(),
+                FeatureInfo.State.Ready,
+            ),
+        )
+        releaseEmission.countDown()
+        stalePublisher.await()
+
+        assertEquals(original, info.all.value.getValue("credits"))
+        assertEquals(FeatureInfo.State.Ready, info.state.value)
+    }
+
+    @Test
+    fun fieldEqualFeaturesKeepTheVisibleMapWhenReadinessChanges() = runBlocking {
+        val info = FeatureInfo()
+        val flowMaps = mutableListOf<Map<String, FeatureAccess>>()
+        val collector = launch(start = CoroutineStart.UNDISPATCHED) {
+            info.all.collect(flowMaps::add)
+        }
+
+        info.update(mapOf("credits" to access(allowed = false, balance = -0.0)), emptyMap())
+        yield()
+        // +0.0 is field-equal to -0.0, so collectors stay silent — and the
+        // snapshot must keep the PRIOR map so value/replayCache/new
+        // subscribers agree with what collectors last saw, even though the
+        // readiness change commits a new container.
+        info.update(
+            mapOf("credits" to access(allowed = false, balance = 0.0)),
+            emptyMap(),
+            FeatureInfo.State.Ready,
+        )
+        yield()
+        collector.cancelAndJoin()
+
+        assertEquals(2, flowMaps.size)
+        assertEquals(FeatureInfo.State.Ready, info.state.value)
+        val visible = info.all.value.getValue("credits").balance
+        assertEquals((-0.0).toRawBits(), visible?.toRawBits())
+    }
+
+    @Test
     fun signedZeroBalanceDoesNotEmitOnEitherSurface() = runBlocking {
         val info = FeatureInfo()
         val transitions = mutableListOf<Pair<FeatureAccess?, FeatureAccess>>()
