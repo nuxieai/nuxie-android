@@ -690,9 +690,11 @@ internal class PurchaseService(
             if (normalizedAnyEvidence) {
                 // The projection published before normalization could demand
                 // signature verification for legacy evidence; republish so an
-                // unverified purchase cannot stay projected.
-                projectionRefresh.withLock { stageOptimisticProjectionLocked() }
-                    ?.let(effects.publications::add)
+                // unverified purchase cannot stay projected. A concurrent
+                // refresh may already have reserved the equivalent mutation;
+                // a barrier still orders recovery's return after it drains.
+                val restaged = projectionRefresh.withLock { stageOptimisticProjectionLocked() }
+                effects.publications.add(restaged ?: features.stagePublicationBarrier())
             }
             evidenceRecords
                 .filter {
