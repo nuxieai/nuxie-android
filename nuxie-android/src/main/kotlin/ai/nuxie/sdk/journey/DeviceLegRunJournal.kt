@@ -32,7 +32,7 @@ internal data class DeviceLegRun(
     val outputs: JsonObject = emptyOutputs(),
     val completion: Completion? = null,
 ) {
-    data class Park(val wakeAtMillis: Long?)
+    data class Park(val wakeAtMillis: Long?, val anchorAtMillis: Long? = null)
     data class Completion(val outcome: String, val atMillis: Long)
     val id get() = "$journeyId:$generation"
     val experienceId get() = reference.text("experienceId")
@@ -105,6 +105,16 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
             context = JsonObject(run.context + ("responses" to JsonObject(run.context.getValue("responses").jsonObject + values))),
             outputs = JsonObject(run.outputs + ("responses" to JsonObject(run.outputs.getValue("responses").jsonObject + values))),
         )
+    }
+
+    /** Persist one executor transition before another step or effect runs. */
+    fun transition(id: String, stepId: String, context: JsonObject,
+        checkpoint: DeviceLegControlExecutor.Checkpoint? = null,
+    ) = update { state ->
+        val run = checkNotNull(state.runs[id])
+        check(run.startedQueued && run.completion == null)
+        state.runs[id] = run.copy(stepId = stepId, context = context,
+            park = checkpoint?.let { DeviceLegRun.Park(it.wakeAtMillis, it.anchorAtMillis) })
     }
 
     fun park(id: String, stepId: String, untilMillis: Long?) = update { state ->
@@ -216,6 +226,7 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         put("stepId", JsonPrimitive(run.stepId)); put("context", run.context); put("outputs", run.outputs)
         run.park?.let { park -> put("park", buildJsonObject {
             park.wakeAtMillis?.let { put("wakeAtMillis", JsonPrimitive(it)) }
+            park.anchorAtMillis?.let { put("anchorAtMillis", JsonPrimitive(it)) }
         }) }
         run.completion?.let { completion -> put("completion", buildJsonObject {
             put("outcome", JsonPrimitive(completion.outcome)); put("atMillis", JsonPrimitive(completion.atMillis))
@@ -228,7 +239,8 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         startedEventId = value.text("startedEventId"), completedEventId = value.text("completedEventId"),
         startedQueued = value.getValue("startedQueued").jsonPrimitive.boolean, stepId = value.text("stepId"),
         context = value.getValue("context").jsonObject, outputs = value.getValue("outputs").jsonObject,
-        park = value["park"]?.jsonObject?.let { DeviceLegRun.Park(it["wakeAtMillis"]?.jsonPrimitive?.long) },
+        park = value["park"]?.jsonObject?.let { DeviceLegRun.Park(it["wakeAtMillis"]?.jsonPrimitive?.long,
+            it["anchorAtMillis"]?.jsonPrimitive?.long) },
         completion = value["completion"]?.jsonObject?.let { DeviceLegRun.Completion(it.text("outcome"), it.number("atMillis")) },
     )
 
