@@ -1065,3 +1065,4 @@ public final class ai/nuxie/sdk/features/FeatureUsageResult$UsageInfo {
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
 }
+

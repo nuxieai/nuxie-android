@@ -99,6 +99,8 @@ internal fun isPermanentPurchaseRejection(body: JsonObject): Boolean {
         .any { it in explicitReasons }
 }
 
+internal class RestoreReconciliationException(message: String) : IllegalStateException(message)
+
 /** Owns checkout correlation, durable evidence, reconciliation, and managed completion. */
 internal class PurchaseService(
     private val billing: PlayBillingGateway,
@@ -900,7 +902,53 @@ internal class PurchaseService(
             }
         }
         decision.followUps.forEach { finishPurchase(it) }
-        return decision.outcome.also { emitRestoreOutcome(it, initiatingOwner) }
+        val outcome = if (expectedOwnerDistinctId != null && decision.outcome == RestoreResult.Restored) {
+            strictRestoreOutcome(found, initiatingOwner)
+        } else {
+            decision.outcome
+        }
+        return outcome.also { emitRestoreOutcome(it, initiatingOwner) }
+    }
+
+    /**
+     * Signed Experience restore routes may advance only after every owned Play
+     * token is durable, server-verified, exactly catalog-resolved, and locally
+     * completed. The public host restore API retains its legacy asynchronous
+     * result; authenticated routes opt into this stricter decision by passing
+     * their presentation owner.
+     */
+    private fun strictRestoreOutcome(
+        found: List<PlayPurchase>,
+        initiatingOwner: String,
+    ): RestoreResult {
+        val evidenceByToken = evidenceStore.load()
+        if (found.any { it.purchaseToken !in evidenceByToken }) {
+            return RestoreResult.Failed(
+                RestoreReconciliationException(
+                    "A restored purchase could not be retained for reconciliation.",
+                ),
+            )
+        }
+        val selected = found.mapNotNull { evidenceByToken[it.purchaseToken] }
+            .filter { it.ownerDistinctId == initiatingOwner }
+        return when {
+            selected.isEmpty() -> RestoreResult.NoPurchases
+            selected.any { !it.catalogResolved } -> RestoreResult.Failed(
+                RestoreReconciliationException(
+                    "A restored purchase did not match one exact signed Product.",
+                ),
+            )
+            selected.any { it.permanentlyRejected || it.revoked } -> RestoreResult.Failed(
+                RestoreReconciliationException("A restored purchase could not be verified."),
+            )
+            selected.any { !it.synced } -> RestoreResult.Failed(
+                RestoreReconciliationException("Restore is waiting for purchase verification."),
+            )
+            selected.any { it.needsManagedCompletion() } -> RestoreResult.Failed(
+                RestoreReconciliationException("Restore is waiting for Google Play completion."),
+            )
+            else -> RestoreResult.Restored
+        }
     }
 
     suspend fun onPurchasesUpdated(update: PurchaseUpdate) {
@@ -1558,12 +1606,29 @@ internal class PurchaseService(
                 return false
             }
             is PurchaseSyncOutcome.Accepted -> {
+                val catalog = outcome.response.catalogProduct
+                if (catalog == null && !attempted.catalogResolved) return false
+                if (catalog != null && catalog.storeProductId !in attempted.storeProductIds) return false
+                val serverProductType = when (catalog?.storeProductType) {
+                    null -> attempted.productType
+                    "subscription" -> BillingClient.ProductType.SUBS
+                    "consumable", "nonConsumable" -> BillingClient.ProductType.INAPP
+                    else -> return false
+                }
                 val stagedAcceptance = projectionRefresh.withLock {
                     val current = evidenceStore.load()[attempted.purchaseToken]
                         ?: return@withLock null
                     if (current.revoked || current.permanentlyRejected) return@withLock null
                     val provenOwner = currentProvenOwner(current)
                     val accepted = current.copy(
+                        nuxieProductId = catalog?.productId ?: current.nuxieProductId,
+                        basePlanId = catalog?.basePlanId ?: current.basePlanId,
+                        purchaseOptionId = catalog?.purchaseOptionId ?: current.purchaseOptionId,
+                        offerId = catalog?.offerId ?: current.offerId,
+                        productType = serverProductType,
+                        consumable = catalog?.storeProductType == "consumable" ||
+                            (catalog == null && current.consumable),
+                        catalogResolved = current.catalogResolved || catalog != null,
                         ownerDistinctId = provenOwner ?: current.ownerDistinctId,
                         synced = true,
                         syncedCustomerId = outcome.response.customerId,
@@ -1650,7 +1715,14 @@ internal class PurchaseService(
             } else {
                 billing.acknowledge(evidence.purchaseToken)
             }
-            if (completion.responseCode == BillingClient.BillingResponseCode.OK) {
+            val completed = when {
+                completion.responseCode == BillingClient.BillingResponseCode.OK -> true
+                attempted.consumable &&
+                    completion.responseCode == BillingClient.BillingResponseCode.ITEM_NOT_OWNED &&
+                    attempted.completionAttempts > 1 -> reconcilePriorConsume(attempted.purchaseToken)
+                else -> false
+            }
+            if (completed) {
                 projectionRefresh.withLock {
                     val current = evidenceStore.load()[attempted.purchaseToken] ?: return@withLock
                     upsertEvidenceLocked(
@@ -1668,6 +1740,19 @@ internal class PurchaseService(
             }
         }
     }
+
+    /**
+     * A consume may commit in Play before the terminal local write commits.
+     * Only a durable prior attempt plus a successful active-purchase query
+     * proving the token absent can turn ITEM_NOT_OWNED into success.
+     */
+    private suspend fun reconcilePriorConsume(purchaseToken: String): Boolean =
+        when (val active = billing.queryActive(BillingClient.ProductType.INAPP)) {
+            is ActivePurchasesResult.Success -> active.purchases.none {
+                it.purchaseToken == purchaseToken
+            }
+            is ActivePurchasesResult.Failed -> false
+        }
 
     private fun PurchaseEvidence.needsManagedCompletion(): Boolean =
         nuxieManaged && catalogResolved && if (consumable) !consumed else !acknowledged
