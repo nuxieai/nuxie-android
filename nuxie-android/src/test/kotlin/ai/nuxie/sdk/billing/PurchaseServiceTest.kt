@@ -123,7 +123,7 @@ class PurchaseServiceTest {
             assertTrue(fixture.core.featureInfo.isAllowed("unlimited"))
             assertFalse(fixture.core.featureInfo.isAllowed("exports"))
             assertFalse(fixture.core.featureInfo.isAllowed("credits"))
-            accepted(evidence.syncAttributionDistinctId)
+            accepted(evidence.syncAttributionDistinctId, evidence)
         }
         val purchase = async { fixture.service.purchase(activity(), product, null) }
         runCurrent()
@@ -296,7 +296,7 @@ class PurchaseServiceTest {
         val fixture = fixture(this, actions = actions, emissions = emissions)
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId)
+            accepted(it.syncAttributionDistinctId, it)
         }
         val checkout = async {
             fixture.service.purchase(
@@ -565,7 +565,7 @@ class PurchaseServiceTest {
         fixture.synchronizer = { evidence ->
             syncStarted.complete(Unit)
             finishSync.await()
-            accepted(evidence.syncAttributionDistinctId)
+            accepted(evidence.syncAttributionDistinctId, evidence)
         }
         val checkout = async {
             fixture.service.purchase(
@@ -944,7 +944,7 @@ class PurchaseServiceTest {
         val fixture = fixture(this, actions = actions, emissions = emissions)
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId)
+            accepted(it.syncAttributionDistinctId, it)
         }
         val owner = fixture.core.identity.distinctId()
         val mappedProduct = product()
@@ -985,7 +985,7 @@ class PurchaseServiceTest {
         val fixture = fixture(this, actions = actions, emissions = emissions)
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId)
+            accepted(it.syncAttributionDistinctId, it)
         }
         val checkout = async {
             fixture.service.purchase(
@@ -1040,7 +1040,7 @@ class PurchaseServiceTest {
         )
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId)
+            accepted(it.syncAttributionDistinctId, it)
         }
         val checkout = async {
             fixture.service.purchase(
@@ -1090,7 +1090,7 @@ class PurchaseServiceTest {
         )
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId)
+            accepted(it.syncAttributionDistinctId, it)
         }
         val checkout = async { fixture.service.purchase(activity(), product(), null) }
         runCurrent()
@@ -1202,7 +1202,7 @@ class PurchaseServiceTest {
         )
         unmatched.synchronizer = {
             assertFalse(unmatched.core.featureInfo.isAllowed("pro"))
-            accepted(it.syncAttributionDistinctId)
+            accepted(it.syncAttributionDistinctId, it)
         }
         unmatched.service.onPurchasesUpdated(
             okUpdate(playPurchase("unmatched", obfuscatedAccountId = accountHash("someone-else"))),
@@ -1219,7 +1219,7 @@ class PurchaseServiceTest {
         )
         matching.synchronizer = {
             assertTrue(matching.core.featureInfo.isAllowed("pro"))
-            accepted(it.syncAttributionDistinctId)
+            accepted(it.syncAttributionDistinctId, it)
         }
         matching.service.onPurchasesUpdated(
             okUpdate(
@@ -1360,7 +1360,7 @@ class PurchaseServiceTest {
         var syncCalled = false
         fixture.synchronizer = {
             syncCalled = true
-            accepted(owner)
+            accepted(owner, it)
         }
 
         fixture.service.onPurchasesUpdated(
@@ -1407,7 +1407,7 @@ class PurchaseServiceTest {
         var syncCalled = false
         fixture.synchronizer = {
             syncCalled = true
-            accepted(owner)
+            accepted(owner, it)
         }
         val checkout = async {
             fixture.service.purchase(
@@ -1530,7 +1530,7 @@ class PurchaseServiceTest {
         fixture.synchronizer = {
             syncStarted.countDown()
             assertTrue(releaseAcceptance.await(5, TimeUnit.SECONDS))
-            accepted(provenOwner)
+            accepted(provenOwner, it)
         }
 
         val update = async(Dispatchers.Default) {
@@ -1570,7 +1570,7 @@ class PurchaseServiceTest {
         fixture.synchronizer = {
             assertEquals(fixture.core.identity.distinctId(), it.syncAttributionDistinctId)
             assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-            accepted(it.syncAttributionDistinctId)
+            accepted(it.syncAttributionDistinctId, it)
         }
 
         fixture.service.recover()
@@ -1631,7 +1631,7 @@ class PurchaseServiceTest {
         fixture.billing.failQueries = true
         fixture.synchronizer = {
             assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-            accepted(it.syncAttributionDistinctId)
+            accepted(it.syncAttributionDistinctId, it)
         }
 
         fixture.service.recover()
@@ -1894,7 +1894,7 @@ class PurchaseServiceTest {
         val fixture = fixture(this, actions = actions, emissions = emissions)
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId)
+            accepted(it.syncAttributionDistinctId, it)
         }
         fixture.settings.delegate = object : NuxiePurchaseDelegate {
             override suspend fun purchase(product: StoreProduct): PurchaseResult = PurchaseResult.Purchased
@@ -2099,7 +2099,7 @@ class PurchaseServiceTest {
         val fixture = fixture(this, actions = actions, emissions = emissions)
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId)
+            accepted(it.syncAttributionDistinctId, it)
         }
         fixture.settings.delegate = object : NuxiePurchaseDelegate {
             override suspend fun purchase(product: StoreProduct): PurchaseResult = PurchaseResult.Cancelled
@@ -2134,7 +2134,7 @@ class PurchaseServiceTest {
         val fixture = fixture(this, actions = actions)
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId)
+            accepted(it.syncAttributionDistinctId, it)
         }
         val purchase = async { fixture.service.purchase(activity(), product(consumable = true), null) }
         runCurrent()
@@ -2200,7 +2200,7 @@ class PurchaseServiceTest {
         assertFalse(afterRestore.synced)
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
 
-        fixture.synchronizer = { accepted(it.syncAttributionDistinctId) }
+        fixture.synchronizer = { accepted(it.syncAttributionDistinctId, it) }
         fixture.service.recover()
 
         val afterRecovery = fixture.store.load().getValue("app-managed-consumable")
@@ -2237,7 +2237,7 @@ class PurchaseServiceTest {
         )
         second.synchronizer = {
             assertTrue(second.core.featureInfo.isAllowed("pro"))
-            accepted(it.syncAttributionDistinctId)
+            accepted(it.syncAttributionDistinctId, it)
         }
         second.service.recover()
 
@@ -2316,6 +2316,73 @@ class PurchaseServiceTest {
             listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP).let { it + it },
             fixture.billing.queries,
         )
+        fixture.close()
+    }
+
+    @Test
+    fun authenticatedRestoreWaitsForBackendVerification() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.service.rememberProduct(product())
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("deferred-authenticated-restore", obfuscatedAccountId = accountHash(owner)),
+        )
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+
+        val result = fixture.service.restorePurchases(expectedOwnerDistinctId = owner)
+
+        assertTrue(result is RestoreResult.Failed)
+        assertTrue(
+            (result as RestoreResult.Failed).cause.message.orEmpty()
+                .contains("waiting for purchase verification"),
+        )
+        assertFalse(fixture.store.load().getValue("deferred-authenticated-restore").synced)
+        fixture.close()
+    }
+
+    @Test
+    fun authenticatedFreshInstallRestoreRetainsServerVerifiedCatalogIdentity() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase(
+                "retired-product-token",
+                products = listOf("play-retired"),
+                obfuscatedAccountId = accountHash(owner),
+            ),
+        )
+        fixture.synchronizer = { evidence ->
+            assertFalse(evidence.catalogResolved)
+            PurchaseSyncOutcome.Accepted(
+                NuxieApi.PurchaseResponse(
+                    body = Json.parseToJsonElement(
+                        """{"success":true,"customer_id":"server-customer","features":[],"catalog_product":{"id":"nuxie-retired","store_product_id":"play-retired","base_plan_id":"annual","purchase_option_id":null,"offer_id":"launch","store_product_type":"subscription"}}""",
+                    ).jsonObject,
+                    success = true,
+                    customerId = "server-customer",
+                    catalogProduct = NuxieApi.VerifiedCatalogProduct(
+                        productId = "nuxie-retired",
+                        storeProductId = "play-retired",
+                        basePlanId = "annual",
+                        purchaseOptionId = null,
+                        offerId = "launch",
+                        storeProductType = "subscription",
+                    ),
+                ),
+            )
+        }
+
+        assertEquals(
+            RestoreResult.Restored,
+            fixture.service.restorePurchases(expectedOwnerDistinctId = owner),
+        )
+        val retained = fixture.store.load().getValue("retired-product-token")
+        assertEquals("nuxie-retired", retained.nuxieProductId)
+        assertEquals("annual", retained.basePlanId)
+        assertEquals("launch", retained.offerId)
+        assertEquals(BillingClient.ProductType.SUBS, retained.productType)
+        assertTrue(retained.catalogResolved)
+        assertTrue(retained.acknowledged)
         fixture.close()
     }
 
@@ -2445,7 +2512,7 @@ class PurchaseServiceTest {
             purchaseCompletionEventIds,
             purchaseEventCaptureAttempts,
             purchaseEventDistinctIds,
-        ) { accepted(core.identity.distinctId()) }
+        ) { evidence -> accepted(core.identity.distinctId(), evidence) }
         return fixture
     }
 
@@ -2636,14 +2703,28 @@ class PurchaseServiceTest {
         purchases.toList(),
     )
 
-    private fun accepted(customerId: String) = PurchaseSyncOutcome.Accepted(
+    private fun accepted(
+        customerId: String,
+        evidence: PurchaseEvidence,
+    ) = PurchaseSyncOutcome.Accepted(
         NuxieApi.PurchaseResponse(
             Json.parseToJsonElement(
                 """{"success":true,"customer_id":"$customerId","features":[{"id":"pro","type":"boolean","allowed":true,"unlimited":false},{"id":"unlimited","type":"metered","allowed":true,"unlimited":true}]}""",
             ).jsonObject,
             true,
             customerId,
-            null,
+            NuxieApi.VerifiedCatalogProduct(
+                productId = evidence.nuxieProductId ?: "server-product",
+                storeProductId = evidence.storeProductIds.single(),
+                basePlanId = evidence.basePlanId,
+                purchaseOptionId = evidence.purchaseOptionId,
+                offerId = evidence.offerId,
+                storeProductType = when {
+                    evidence.productType == BillingClient.ProductType.SUBS -> "subscription"
+                    evidence.consumable -> "consumable"
+                    else -> "nonConsumable"
+                },
+            ),
         ),
     )
 

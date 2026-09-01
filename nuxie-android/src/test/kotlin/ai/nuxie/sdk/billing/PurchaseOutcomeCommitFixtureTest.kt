@@ -88,6 +88,9 @@ class PurchaseOutcomeCommitFixtureTest {
         val harness = Harness(
             scope = this,
             vectorIndex = vectorIndex,
+            catalogProductsByStore = contract.products.values.associate {
+                it.storeProductId to it.productId
+            },
             trackedFeatureIds = contract.products.values
                 .flatMap(FixtureProduct::featureIds)
                 .toSet(),
@@ -819,10 +822,11 @@ class PurchaseOutcomeCommitFixtureTest {
     private class Harness(
         scope: TestScope,
         val vectorIndex: Int,
+        catalogProductsByStore: Map<String, String>,
         val trackedFeatureIds: Set<String>,
     ) {
         val ownerDistinctId = "purchase_outcome_owner_$vectorIndex"
-        val transport = RecordingPurchaseTransport(ownerDistinctId)
+        val transport = RecordingPurchaseTransport(ownerDistinctId, catalogProductsByStore)
         val core = NuxieCore(
             context = RuntimeEnvironment.getApplication(),
             apiKey = "pk_test_purchase_outcome_$vectorIndex",
@@ -943,6 +947,7 @@ class PurchaseOutcomeCommitFixtureTest {
 
     private class RecordingPurchaseTransport(
         private val customerId: String,
+        private val catalogProductsByStore: Map<String, String>,
     ) : HttpTransport {
         val requests = mutableListOf<HttpTransport.Request>()
         val purchaseRequests: List<HttpTransport.Request>
@@ -951,8 +956,10 @@ class PurchaseOutcomeCommitFixtureTest {
         override fun execute(request: HttpTransport.Request): HttpTransport.Response {
             requests += request
             val body = when (request.url.path) {
-                "/purchase" -> JsonObject(
-                    mapOf(
+                "/purchase" -> {
+                    val report = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                    val storeProductId = report.getValue("product_id").jsonPrimitive.content
+                    JsonObject(mapOf(
                         "success" to JsonPrimitive(true),
                         "customer_id" to JsonPrimitive(customerId),
                         "features" to JsonArray(
@@ -969,16 +976,24 @@ class PurchaseOutcomeCommitFixtureTest {
                         ),
                         "catalog_product" to JsonObject(
                             mapOf(
-                                "id" to JsonPrimitive("fixture-product"),
-                                "store_product_id" to JsonPrimitive("fixture-product"),
-                                "base_plan_id" to JsonNull,
-                                "purchase_option_id" to JsonNull,
-                                "offer_id" to JsonNull,
-                                "store_product_type" to JsonPrimitive("nonConsumable"),
+                                "id" to JsonPrimitive(
+                                    checkNotNull(catalogProductsByStore[storeProductId]),
+                                ),
+                                "store_product_id" to report.getValue("product_id"),
+                                "base_plan_id" to (report["base_plan_id"] ?: JsonNull),
+                                "purchase_option_id" to (report["purchase_option_id"] ?: JsonNull),
+                                "offer_id" to (report["offer_id"] ?: JsonNull),
+                                "store_product_type" to JsonPrimitive(
+                                    if (report["product_type"]?.jsonPrimitive?.content == "subscription") {
+                                        "subscription"
+                                    } else {
+                                        "nonConsumable"
+                                    },
+                                ),
                             ),
                         ),
-                    ),
-                ).toString()
+                    )).toString()
+                }
                 "/profile" -> """{"segments":[]}"""
                 else -> "{}"
             }
