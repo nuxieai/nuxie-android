@@ -6,6 +6,7 @@ import android.util.Base64
 import java.io.File
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
@@ -36,6 +37,28 @@ class ReleaseAuthenticationTest {
             ),
         )
 
+    @Test
+    fun legacyReleaseIdentityKeysAreRejectedEvenAlongsideCurrentKeys() {
+        val current = Json.parseToJsonElement(
+            File(fixtureDir, "expected-identity.json").readText(),
+        ).jsonObject
+        val mixed = JsonObject(
+            current + mapOf(
+                "publishedAt" to JsonPrimitive("2026-08-12T12:00:00.000Z"),
+                "publishedAtSeq" to JsonPrimitive(42),
+            ),
+        )
+        val legacyOnly = JsonObject(
+            (current - setOf("releaseCreatedAt", "releaseSequence")) + mapOf(
+                "publishedAt" to JsonPrimitive("2026-08-12T12:00:00.000Z"),
+                "publishedAtSeq" to JsonPrimitive(42),
+            ),
+        )
+
+        assertEquals(null, ExperienceReleaseIdentity.fromJson(mixed))
+        assertEquals(null, ExperienceReleaseIdentity.fromJson(legacyOnly))
+    }
+
     /** The golden descriptor's requirements, satisfied. */
     private fun supportedRuntime(): SupportedRuntime = SupportedRuntime(
         currentSdkVersion = "1.2.0",
@@ -55,10 +78,10 @@ class ReleaseAuthenticationTest {
             trustedKeys = trustedKeys(),
             expectedIdentity = expectedIdentity(),
             supportedRuntime = supportedRuntime(),
-            replayPolicy = ReplayPolicy.Active(minimumPublishedAtSeq = 0),
+            replayPolicy = ReplayPolicy.Active(minimumReleaseSequence = 0),
         )
         assertEquals("TEST_ONLY_DEV_KEYPAIR", release.keyId)
-        assertEquals(42L, release.publishedAtSeqToPromote)
+        assertEquals(42L, release.releaseSequenceToPromote)
         assertEquals("experience_golden", release.identity.experienceId)
         assertTrue(release.descriptor.containsKey("render"))
     }
@@ -114,7 +137,7 @@ class ReleaseAuthenticationTest {
             identity = expectedIdentity(),
             descriptorBytes = ByteArray(0),
             descriptor = descriptor,
-            publishedAtSeqToPromote = null,
+            releaseSequenceToPromote = null,
         )
         val product = release.googlePlayProductAllowances.single()
 
@@ -192,7 +215,7 @@ class ReleaseAuthenticationTest {
         val failure = assertThrows(ReleaseAuthenticationException::class.java) {
             ExperienceReleaseVerifier.authenticate(
                 envelopeBytes(), trustedKeys(), expectedIdentity(), supportedRuntime(),
-                ReplayPolicy.Active(minimumPublishedAtSeq = 43),
+                ReplayPolicy.Active(minimumReleaseSequence = 43),
             )
         }
         assertTrue(failure.message!!.contains("replay rejected"))
@@ -209,7 +232,7 @@ class ReleaseAuthenticationTest {
                 expectedDescriptorSha256 = envelope.getValue("descriptorSha256").jsonPrimitive.content,
             ),
         )
-        assertEquals(null, release.publishedAtSeqToPromote)
+        assertEquals(null, release.releaseSequenceToPromote)
     }
 
     @Test

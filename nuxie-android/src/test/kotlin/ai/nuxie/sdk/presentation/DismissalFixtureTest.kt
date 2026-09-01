@@ -439,8 +439,8 @@ class DismissalFixtureTest {
             experienceVersionId = "flow-version-1",
             buildId = "build",
             versionNumber = 1,
-            publishedAt = "2026-08-23T00:00:00Z",
-            publishedAtSeq = 1,
+            releaseCreatedAt = "2026-08-23T00:00:00Z",
+            releaseSequence = 1,
         )
         val descriptor = buildJsonObject {
             put("render", buildJsonObject { put("assets", buildJsonArray {}) })

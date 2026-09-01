@@ -37,14 +37,28 @@ internal data class ExperienceReleaseIdentity(
     val experienceVersionId: String,
     val buildId: String,
     val versionNumber: Long,
-    val publishedAt: String,
-    val publishedAtSeq: Long,
+    val releaseCreatedAt: String,
+    val releaseSequence: Long,
 ) {
     /** The admission stream this identity's replay protection is keyed on. */
     val streamKey: String get() = "$appId|$environment|$experienceId"
 
     companion object {
-        fun fromJson(json: JsonObject): ExperienceReleaseIdentity? {
+        private val wireKeys = setOf(
+            "appId",
+            "environment",
+            "experienceId",
+            "experienceVersionId",
+            "buildId",
+            "versionNumber",
+            "releaseCreatedAt",
+            "releaseSequence",
+        )
+        fun fromJson(
+            json: JsonObject,
+            additionalKeys: Set<String> = emptySet(),
+        ): ExperienceReleaseIdentity? {
+            if (json.keys != wireKeys + additionalKeys) return null
             fun string(key: String): String? =
                 (json[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
             fun number(key: String): Long? = (json[key] as? JsonPrimitive)
@@ -57,8 +71,8 @@ internal data class ExperienceReleaseIdentity(
                 experienceVersionId = string("experienceVersionId") ?: return null,
                 buildId = string("buildId") ?: return null,
                 versionNumber = number("versionNumber") ?: return null,
-                publishedAt = string("publishedAt") ?: return null,
-                publishedAtSeq = number("publishedAtSeq") ?: return null,
+                releaseCreatedAt = string("releaseCreatedAt") ?: return null,
+                releaseSequence = number("releaseSequence") ?: return null,
             )
         }
     }
@@ -79,7 +93,7 @@ internal data class SupportedRuntime(
 
 internal sealed class ReplayPolicy {
     /** Ordinary active-stream admission with monotonic replay protection. */
-    class Active(val minimumPublishedAtSeq: Long) : ReplayPolicy()
+    class Active(val minimumReleaseSequence: Long) : ReplayPolicy()
 
     /** Pinned preview admission: exact version, build, and digest. */
     class Pinned(
@@ -97,8 +111,8 @@ internal class AuthenticatedRelease(
     val descriptorBytes: ByteArray,
     /** The authenticated, exact-key-validated descriptor document. */
     val descriptor: JsonObject,
-    /** publishedAtSeq to promote into the high-water store (Active only). */
-    val publishedAtSeqToPromote: Long?,
+    /** releaseSequence to promote into the high-water store (Active only). */
+    val releaseSequenceToPromote: Long?,
     /** Raw signed Google Play allowances classified once at release admission. */
     val googlePlayProductAllowances: List<AuthenticatedGooglePlayProductAllowances> =
         authenticatedGooglePlayProductAllowances(descriptor),
@@ -205,12 +219,12 @@ internal object ExperienceReleaseVerifier {
 
         val promote = when (replayPolicy) {
             is ReplayPolicy.Active -> {
-                if (replayPolicy.minimumPublishedAtSeq < 0 ||
-                    identity.publishedAtSeq < replayPolicy.minimumPublishedAtSeq
+                if (replayPolicy.minimumReleaseSequence < 0 ||
+                    identity.releaseSequence < replayPolicy.minimumReleaseSequence
                 ) {
                     fail("replay rejected")
                 }
-                identity.publishedAtSeq
+                identity.releaseSequence
             }
             is ReplayPolicy.Pinned -> {
                 if (identity.experienceVersionId != replayPolicy.experienceVersionId ||
@@ -229,7 +243,7 @@ internal object ExperienceReleaseVerifier {
             identity = identity,
             descriptorBytes = descriptorBytes,
             descriptor = descriptor,
-            publishedAtSeqToPromote = promote,
+            releaseSequenceToPromote = promote,
         )
     }
 

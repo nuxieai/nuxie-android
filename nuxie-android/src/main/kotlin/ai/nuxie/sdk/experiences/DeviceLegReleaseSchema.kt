@@ -25,11 +25,11 @@ internal object DeviceLegReleaseSchema {
 
     fun validate(root: JsonObject) {
         val identity = exact(root["identity"], setOf("appId", "environment", "experienceId", "experienceVersionId",
-            "versionNumber", "buildId", "publishedAt", "publishedAtSeq"))
+            "versionNumber", "buildId", "releaseCreatedAt", "releaseSequence"))
         for (key in listOf("appId", "experienceId", "experienceVersionId", "buildId")) releaseId(identity[key])
         oneOf(identity["environment"], "test", "live")
-        integer(identity["versionNumber"], 1); integer(identity["publishedAtSeq"])
-        ReleaseJson.timestamp(identity["publishedAt"])
+        integer(identity["versionNumber"], 1); integer(identity["releaseSequence"])
+        ReleaseJson.timestamp(identity["releaseCreatedAt"])
         val metadata = exact(root["metadata"], setOf("name", "appDefaultTimezone"), setOf("experienceType", "description"))
         id(metadata["name"]); releaseId(metadata["appDefaultTimezone"])
         metadata["experienceType"]?.let { id(it, 64) }

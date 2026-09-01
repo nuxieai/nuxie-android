@@ -59,7 +59,7 @@ internal class JourneyPlaneProfile private constructor(
             }
             val releases = array(root["releases"]).also { if (it.size > 1024) fail("release count") }.map { value ->
                 val release = exact(value, setOf("locator", "envelope"))
-                val locator = exact(release["locator"], setOf("appId", "environment", "experienceId", "experienceVersionId", "versionNumber", "buildId", "publishedAt", "publishedAtSeq", "legId"))
+                val locator = exact(release["locator"], setOf("appId", "environment", "experienceId", "experienceVersionId", "versionNumber", "buildId", "releaseCreatedAt", "releaseSequence", "legId"))
                 val legId = hash(locator["legId"])
                 for (key in listOf("appId", "experienceId", "experienceVersionId", "buildId")) {
                     val identifier = id(locator[key])
@@ -67,9 +67,9 @@ internal class JourneyPlaneProfile private constructor(
                 }
                 if (text(locator["environment"]) !in setOf("test", "live")) fail("environment")
                 integer(locator["versionNumber"], minimum = 1)
-                integer(locator["publishedAtSeq"])
-                ReleaseJson.timestamp(locator["publishedAt"])
-                val identity = ExperienceReleaseIdentity.fromJson(locator) ?: fail("identity")
+                integer(locator["releaseSequence"])
+                ReleaseJson.timestamp(locator["releaseCreatedAt"])
+                val identity = ExperienceReleaseIdentity.fromJson(locator, setOf("legId")) ?: fail("identity")
                 val envelope = record(release["envelope"])
                 SignedReleaseEnvelope.validateShape(envelope.toString().encodeToByteArray(), SignedReleaseEnvelope.Format.DEVICE_LEG)
                 Release(identity, legId, envelope)

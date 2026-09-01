@@ -1646,8 +1646,8 @@ class ExperiencePresentationServiceTest {
             experienceVersionId = version,
             buildId = "build-$version",
             versionNumber = 1,
-            publishedAt = "2026-08-24T00:00:00Z",
-            publishedAtSeq = 1,
+            releaseCreatedAt = "2026-08-24T00:00:00Z",
+            releaseSequence = 1,
         )
         val descriptor = buildJsonObject {
             put("render", buildJsonObject {

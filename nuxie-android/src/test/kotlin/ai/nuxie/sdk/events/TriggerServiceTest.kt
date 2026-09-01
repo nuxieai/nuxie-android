@@ -640,7 +640,7 @@ class TriggerServiceTest {
                 put("render", buildJsonObject {})
                 put("presentation", buildJsonObject {})
             },
-            publishedAtSeqToPromote = 1,
+            releaseSequenceToPromote = 1,
         ),
         delivery = Delivery("https://render.example/", "https://assets.example/"),
     )
@@ -652,7 +652,7 @@ class TriggerServiceTest {
         experienceVersionId = requireNotNull(ref.experienceVersion),
         buildId = "build",
         versionNumber = 1,
-        publishedAt = "2026-08-24T00:00:00Z",
-        publishedAtSeq = 1,
+        releaseCreatedAt = "2026-08-24T00:00:00Z",
+        releaseSequence = 1,
     )
 }

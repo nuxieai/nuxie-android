@@ -53,7 +53,7 @@ class DeviceLegProfileCatalogTest {
         assertEquals(entry.getValue("locator").jsonObject.getValue("legId").jsonPrimitive.content, release.leg.getValue("id").jsonPrimitive.content)
         assertEquals(snapshot.profile.armedLegs.single().reference.getValue("descriptorSha256"), JsonPrimitive(release.descriptorSha256))
         assertNull(catalog.snapshot("other"))
-        assertEquals(release.identity.publishedAtSeq, highWater.floor(release.identity.streamKey))
+        assertEquals(release.identity.releaseSequence, highWater.floor(release.identity.streamKey))
     }
 
     @Test fun `a rejected replacement cannot mutate current authority or replay floors`() {
@@ -82,21 +82,27 @@ class DeviceLegProfileCatalogTest {
         val highWater = ReleaseHighWaterStore(context)
         val catalog = DeviceLegProfileCatalog(keys, highWater) { runtime() }
         val prepared = catalog.prepare(profile())
-        val identity = ExperienceReleaseIdentity.fromJson(entry.getValue("locator").jsonObject)!!
-        highWater.promote(identity.streamKey, identity.publishedAtSeq + 1)
+        val identity = ExperienceReleaseIdentity.fromJson(
+            entry.getValue("locator").jsonObject,
+            setOf("legId"),
+        )!!
+        highWater.promote(identity.streamKey, identity.releaseSequence + 1)
 
         assertThrows(ReleaseAuthenticationException::class.java) {
             catalog.commit("customer", prepared)
         }
         assertNull(catalog.snapshot("customer"))
-        assertEquals(identity.publishedAtSeq + 1, highWater.floor(identity.streamKey))
+        assertEquals(identity.releaseSequence + 1, highWater.floor(identity.streamKey))
     }
 
     @Test fun `a continuation-only release remains pinned behind a newer active floor`() {
         val highWater = ReleaseHighWaterStore(context)
         val catalog = DeviceLegProfileCatalog(keys, highWater) { runtime() }
-        val identity = ExperienceReleaseIdentity.fromJson(entry.getValue("locator").jsonObject)!!
-        highWater.promote(identity.streamKey, identity.publishedAtSeq + 1)
+        val identity = ExperienceReleaseIdentity.fromJson(
+            entry.getValue("locator").jsonObject,
+            setOf("legId"),
+        )!!
+        highWater.promote(identity.streamKey, identity.releaseSequence + 1)
         val continuation = buildJsonObject {
             put("type", "continue")
             put("journeyId", "00000000-0000-7000-8000-000000000001")
@@ -107,7 +113,7 @@ class DeviceLegProfileCatalogTest {
 
         assertEquals("continue", requireNotNull(catalog.snapshot("customer"))
             .profile.armedLegs.single().binding.getValue("type").jsonPrimitive.content)
-        assertEquals(identity.publishedAtSeq + 1, highWater.floor(identity.streamKey))
+        assertEquals(identity.releaseSequence + 1, highWater.floor(identity.streamKey))
     }
 
     private fun profile(

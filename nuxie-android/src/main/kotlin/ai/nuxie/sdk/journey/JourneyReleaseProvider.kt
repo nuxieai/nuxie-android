@@ -64,7 +64,7 @@ internal class JourneyReleaseCatalog(
         }
         val authenticated = profile.active.mapNotNull { entry ->
             val authenticated = authenticateEntry(entry, runtime) ?: return@mapNotNull null
-            authenticated.publishedAtSeqToPromote?.let {
+            authenticated.releaseSequenceToPromote?.let {
                 highWater.promote(authenticated.identity.streamKey, it)
             }
             authenticated

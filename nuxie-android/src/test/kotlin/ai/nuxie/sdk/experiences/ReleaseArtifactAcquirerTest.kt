@@ -1511,7 +1511,7 @@ class ReleaseArtifactAcquirerTest {
                 put("assets", buildJsonArray { assets.forEach(::add) })
             })
         },
-        publishedAtSeqToPromote = null,
+        releaseSequenceToPromote = null,
     )
 
     private fun artifact(
@@ -1634,8 +1634,8 @@ class ReleaseArtifactAcquirerTest {
             experienceVersionId = "version",
             buildId = "build",
             versionNumber = 1,
-            publishedAt = "2026-08-24T00:00:00Z",
-            publishedAtSeq = 1,
+            releaseCreatedAt = "2026-08-24T00:00:00Z",
+            releaseSequence = 1,
         )
     }
 }
