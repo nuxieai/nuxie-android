@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.billing
 
+import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieEnvironment
@@ -2537,6 +2538,8 @@ class PurchaseServiceTest {
                         emptyList()
                     }
                 },
+                requestInitialProfileRefresh = false,
+                billingClientFactory = InertBillingClientAdapter.factory,
             ),
         )
         kotlinx.coroutines.runBlocking { core.purchases.awaitInitialProjection() }

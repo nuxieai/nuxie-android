@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.billing
 
+import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.core.NuxieCore
@@ -859,6 +860,8 @@ class PurchaseOutcomeCommitFixtureTest {
                 nowMillis = { FIXED_NOW_MILLIS + vectorIndex },
                 registerLifecycle = false,
                 journeys = journeyRouter,
+                requestInitialProfileRefresh = false,
+                billingClientFactory = InertBillingClientAdapter.factory,
             ),
         ).also { it.identity.setDistinctId(ownerDistinctId) }
         val store = RecordingEvidenceStore()

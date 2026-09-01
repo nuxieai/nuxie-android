@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.features
 
+import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.billing.InMemoryPurchaseEvidenceStore
@@ -212,6 +213,8 @@ class OptimisticFeatureOverlayTest {
                 identity = identity,
                 purchaseEvidenceStore = store,
                 registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
             ),
         ).also(cores::add)
 
@@ -261,6 +264,8 @@ class OptimisticFeatureOverlayTest {
                 identity = identity,
                 purchaseEvidenceStore = store,
                 registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
             ),
         ).also(cores::add)
 
@@ -339,6 +344,8 @@ class OptimisticFeatureOverlayTest {
                 identity = identity,
                 purchaseEvidenceStore = store,
                 registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
             ),
         ).also(cores::add)
         try {
@@ -439,6 +446,8 @@ class OptimisticFeatureOverlayTest {
                 identity = identity,
                 purchaseEvidenceStore = store,
                 registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
             ),
         ).also(cores::add)
         core.stop()

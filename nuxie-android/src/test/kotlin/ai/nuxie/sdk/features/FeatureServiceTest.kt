@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.features
 
+import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.billing.InMemoryPurchaseEvidenceStore
@@ -59,6 +60,8 @@ class FeatureServiceTest {
                 nowMillis = { now },
                 transport = transport,
                 registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+                billingClientFactory = InertBillingClientAdapter.factory,
                 purchaseEvidenceStore = InMemoryPurchaseEvidenceStore(),
                 eventDatabaseFile = File(storageDirectory, "events.db"),
                 profileCacheDirectory = File(storageDirectory, "profiles"),
