@@ -276,7 +276,7 @@ class NuxieApiTest {
         assertEquals(2.5, response.requiredBalance, 0.0)
         assertEquals(3.5, response.balance!!, 0.0)
         assertEquals(
-            """{"apiKey":"pk_test_key","customerId":"customer-1","featureId":"credits","requiredBalance":2.5,"eventData":{"value":2.5,"properties":{"source":"export"}},"entityId":"workspace-1","purchase":{"type":"playstore","purchase_token":"token-1","package_name":"com.example.app","product_id":"credit-pack","purchase_option_id":"standard","product_type":"one_time","obfuscated_account_id":"account-hash","event_id":"purchase-use:stable"}}""",
+            """{"apiKey":"pk_test_key","customerId":"customer-1","featureId":"credits","requiredBalance":2.5,"eventData":{"value":2.5,"properties":{"source":"export"}},"idempotencyKey":"purchase-use:stable","entityId":"workspace-1","purchase":{"type":"playstore","purchase_token":"token-1","package_name":"com.example.app","product_id":"credit-pack","purchase_option_id":"standard","product_type":"one_time","obfuscated_account_id":"account-hash","event_id":"purchase-use:stable"}}""",
             transport.request.body.decodeToString(),
         )
     }
