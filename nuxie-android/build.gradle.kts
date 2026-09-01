@@ -5,8 +5,8 @@ plugins {
 
 android {
   namespace = "ai.nuxie.sdk"
-  compileSdk = 35
-  buildToolsVersion = "34.0.0"
+  compileSdk = 36
+  buildToolsVersion = "36.0.0"
 
   defaultConfig {
     minSdk = 23
@@ -24,7 +24,7 @@ android {
   }
 
   testOptions {
-    targetSdk = 35
+    targetSdk = 36
     unitTests.isReturnDefaultValues = true
     unitTests.isIncludeAndroidResources = true
   }

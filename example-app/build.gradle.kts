@@ -5,13 +5,13 @@ plugins {
 
 android {
   namespace = "ai.nuxie.example"
-  compileSdk = 35
-  buildToolsVersion = "34.0.0"
+  compileSdk = 36
+  buildToolsVersion = "36.0.0"
 
   defaultConfig {
     applicationId = "ai.nuxie.example"
     minSdk = 23
-    targetSdk = 35
+    targetSdk = 36
     versionCode = 1
     versionName = "0.1.0"
   }
