@@ -101,8 +101,8 @@ class ReleaseProductMappingProjectionTest {
             experienceVersionId = "version-1",
             buildId = "build-1",
             versionNumber = 1,
-            publishedAt = "2026-01-01T00:00:00.000Z",
-            publishedAtSeq = 1,
+            releaseCreatedAt = "2026-01-01T00:00:00.000Z",
+            releaseSequence = 1,
         )
         val descriptor = buildJsonObject {
             put("products", JsonArray(listOf(buildJsonObject {
@@ -136,7 +136,7 @@ class ReleaseProductMappingProjectionTest {
             identity = identity,
             descriptorBytes = ByteArray(0),
             descriptor = descriptor,
-            publishedAtSeqToPromote = null,
+            releaseSequenceToPromote = null,
         )
     }
 
@@ -161,8 +161,8 @@ class ReleaseProductMappingProjectionTest {
                     put("experienceVersionId", JsonPrimitive(identity.experienceVersionId))
                     put("buildId", JsonPrimitive(identity.buildId))
                     put("versionNumber", JsonPrimitive(identity.versionNumber))
-                    put("publishedAt", JsonPrimitive(identity.publishedAt))
-                    put("publishedAtSeq", JsonPrimitive(identity.publishedAtSeq))
+                    put("releaseCreatedAt", JsonPrimitive(identity.releaseCreatedAt))
+                    put("releaseSequence", JsonPrimitive(identity.releaseSequence))
                 })
                 put("descriptorSha256", JsonPrimitive("sha"))
                 put("envelopeBytesBase64", JsonPrimitive("eA=="))

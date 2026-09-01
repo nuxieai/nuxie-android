@@ -49,7 +49,7 @@ class ReleaseAcquisitionTest {
         )
         // The fixture's expectations.
         assertEquals("version_active", profile.active.single().locator.experienceVersionId)
-        assertEquals(42L, profile.active.single().locator.publishedAtSeq)
+        assertEquals(42L, profile.active.single().locator.releaseSequence)
         assertEquals("version_pinned", profile.pinned.single().locator.experienceVersionId)
         assertEquals("build_pinned", profile.pinned.single().locator.buildId)
         assertTrue(profile.renderBaseUrl.startsWith("https://cdn.nuxie.test/"))

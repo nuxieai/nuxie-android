@@ -109,7 +109,7 @@ class JourneyPlaneProfileTest {
             assertThrows(ReleaseAuthenticationException::class.java) { JourneyPlaneProfile.decode(invalid.encodeToByteArray()) }
         }
         val precise = original.replace("2026-08-12T12:00:00.000Z", "2026-08-12T12:00:00.123456Z")
-        assertEquals("2026-08-12T12:00:00.123456Z", JourneyPlaneProfile.decode(precise.encodeToByteArray()).releases.single().locator.publishedAt)
+        assertEquals("2026-08-12T12:00:00.123456Z", JourneyPlaneProfile.decode(precise.encodeToByteArray()).releases.single().locator.releaseCreatedAt)
     }
 
     @Test fun `canonical numbers cannot duplicate arm authority or smuggle non JSON facts`() {

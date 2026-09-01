@@ -54,17 +54,22 @@ class DeviceLegReleaseTest {
             val envelope = entry.getValue("envelope").jsonObject
             val bytes = Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP)
             val source = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
-            val identity = requireNotNull(ExperienceReleaseIdentity.fromJson(entry.getValue("locator").jsonObject))
+            val identity = requireNotNull(
+                ExperienceReleaseIdentity.fromJson(
+                    entry.getValue("locator").jsonObject,
+                    setOf("legId"),
+                ),
+            )
             val release = DeviceLegReleaseVerifier.authenticate(envelope.toString().encodeToByteArray(), keys,
                 identity, "a".repeat(64), runtime(source), ReplayPolicy.Active(0))
             assertArrayEquals(bytes, release.descriptorBytes)
-            assertEquals(identity.publishedAtSeq, release.publishedAtSeqToPromote)
+            assertEquals(identity.releaseSequence, release.releaseSequenceToPromote)
             assertEquals("a".repeat(64), release.leg.getValue("id").jsonPrimitive.content)
             if (key == "entry") assertEquals(JsonNull, release.descriptor["render"])
             val pinned = DeviceLegReleaseVerifier.authenticate(envelope.toString().encodeToByteArray(), keys,
                 identity, "a".repeat(64), runtime(source), ReplayPolicy.Pinned(identity.experienceVersionId,
                     identity.buildId, release.descriptorSha256))
-            assertNull(pinned.publishedAtSeqToPromote)
+            assertNull(pinned.releaseSequenceToPromote)
         }
     }
 
@@ -96,7 +101,7 @@ class DeviceLegReleaseTest {
             DeviceLegReleaseVerifier.authenticate(bytes, keys, identity, "b".repeat(64), runtime(source), ReplayPolicy.Active(0))
         }
         assertThrows(ReleaseAuthenticationException::class.java) {
-            DeviceLegReleaseVerifier.authenticate(bytes, keys, identity, "a".repeat(64), runtime(source), ReplayPolicy.Active(identity.publishedAtSeq + 1))
+            DeviceLegReleaseVerifier.authenticate(bytes, keys, identity, "a".repeat(64), runtime(source), ReplayPolicy.Active(identity.releaseSequence + 1))
         }
         assertThrows(ReleaseAuthenticationException::class.java) {
             DeviceLegReleaseVerifier.authenticate(bytes, keys, identity, "a".repeat(64), runtime(source), ReplayPolicy.Pinned(identity.experienceVersionId, identity.buildId, "b".repeat(64)))

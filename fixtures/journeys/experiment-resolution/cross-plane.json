@@ -8,6 +8,32 @@
       "assignment": {
         "experimentKey": "checkout",
         "variantKey": "treatment",
+        "status": "concluded",
+        "isHoldout": false
+      },
+      "frozenVariantKey": null,
+      "hasEmittedExposure": false,
+      "variantId": "treatment",
+      "shouldFreezeVariant": true,
+      "exposure": "fallback:status_concluded"
+    },
+    {
+      "assignment": {
+        "experimentKey": "checkout",
+        "variantKey": "control",
+        "status": "concluded",
+        "isHoldout": false
+      },
+      "frozenVariantKey": "treatment",
+      "hasEmittedExposure": false,
+      "variantId": "treatment",
+      "shouldFreezeVariant": false,
+      "exposure": "fallback:status_concluded"
+    },
+    {
+      "assignment": {
+        "experimentKey": "checkout",
+        "variantKey": "treatment",
         "status": "running",
         "isHoldout": false
       },

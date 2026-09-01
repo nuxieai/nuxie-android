@@ -57,7 +57,7 @@ internal class DeviceLegProfileCatalog(
             if (authenticated.put(release.descriptorSha256, release) != null) {
                 throw ReleaseAuthenticationException("duplicate authenticated device leg")
             }
-            if (isActive) release.publishedAtSeqToPromote?.let { sequence ->
+            if (isActive) release.releaseSequenceToPromote?.let { sequence ->
                 val previous = promotions.put(entry.locator.streamKey, sequence)
                 if (previous != null && previous != sequence) {
                     throw ReleaseAuthenticationException("conflicting release sequence")

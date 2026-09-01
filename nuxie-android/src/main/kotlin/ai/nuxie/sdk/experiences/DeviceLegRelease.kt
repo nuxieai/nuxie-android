@@ -8,7 +8,7 @@ internal class AuthenticatedDeviceLegRelease(
     private val envelope: SignedReleaseEnvelope,
     val identity: ExperienceReleaseIdentity,
     val descriptor: JsonObject,
-    val publishedAtSeqToPromote: Long?,
+    val releaseSequenceToPromote: Long?,
 ) {
     val keyId: String get() = envelope.keyId
     val descriptorSha256: String get() = envelope.sha256
@@ -38,10 +38,10 @@ internal object DeviceLegReleaseVerifier {
         }
         val promote = when (replayPolicy) {
             is ReplayPolicy.Active -> {
-                if (replayPolicy.minimumPublishedAtSeq < 0 || identity.publishedAtSeq < replayPolicy.minimumPublishedAtSeq) {
+                if (replayPolicy.minimumReleaseSequence < 0 || identity.releaseSequence < replayPolicy.minimumReleaseSequence) {
                     ReleaseJson.fail("replay rejected")
                 }
-                identity.publishedAtSeq
+                identity.releaseSequence
             }
             is ReplayPolicy.Pinned -> {
                 if (identity.experienceVersionId != replayPolicy.experienceVersionId || identity.buildId != replayPolicy.buildId ||

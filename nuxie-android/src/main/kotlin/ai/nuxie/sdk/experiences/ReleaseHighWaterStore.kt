@@ -5,7 +5,7 @@ import android.content.Context
 /**
  * Monotonic replay protection for release admission, ported from the iOS
  * `PersistentExperienceReleaseHighWaterStore`: per admission stream
- * (appId|environment|experienceId), the highest admitted publishedAtSeq is
+ * (appId|environment|experienceId), the highest admitted releaseSequence is
  * the floor for future Active admissions.
  */
 internal class ReleaseHighWaterStore(context: Context) {
@@ -17,8 +17,8 @@ internal class ReleaseHighWaterStore(context: Context) {
     }
 
     /** Promote after successful admission; never lowers the floor. */
-    fun promote(streamKey: String, publishedAtSeq: Long) {
-        promoteBatch(mapOf(streamKey to publishedAtSeq))
+    fun promote(streamKey: String, releaseSequence: Long) {
+        promoteBatch(mapOf(streamKey to releaseSequence))
     }
 
     /** Publish one verified profile's replay floors in a single preferences transaction. */

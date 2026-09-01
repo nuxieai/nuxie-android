@@ -1665,7 +1665,7 @@ class JourneyServiceTest {
         val identity = ExperienceReleaseIdentity(
             appId = "app", environment = "development", experienceId = "experience-1",
             experienceVersionId = "version-1", buildId = "build-1", versionNumber = 1,
-            publishedAt = "2026-01-01T00:00:00.000Z", publishedAtSeq = 1,
+            releaseCreatedAt = "2026-01-01T00:00:00.000Z", releaseSequence = 1,
         )
         val release = AuthenticatedRelease(
             keyId = "test", descriptorSha256 = "sha", identity = identity,
@@ -1682,7 +1682,7 @@ class JourneyServiceTest {
                     put("exitPolicy", JsonPrimitive("manual"))
                 })
             },
-            publishedAtSeqToPromote = null,
+            releaseSequenceToPromote = null,
         )
         val catalog = JourneyReleaseCatalog(
             trustedKeys = emptyMap(),
@@ -1704,8 +1704,8 @@ class JourneyServiceTest {
                         put("experienceVersionId", JsonPrimitive(identity.experienceVersionId))
                         put("buildId", JsonPrimitive(identity.buildId))
                         put("versionNumber", JsonPrimitive(identity.versionNumber))
-                        put("publishedAt", JsonPrimitive(identity.publishedAt))
-                        put("publishedAtSeq", JsonPrimitive(identity.publishedAtSeq))
+                        put("releaseCreatedAt", JsonPrimitive(identity.releaseCreatedAt))
+                        put("releaseSequence", JsonPrimitive(identity.releaseSequence))
                     })
                     put("descriptorSha256", JsonPrimitive("sha"))
                     put("envelopeBytesBase64", JsonPrimitive("eA=="))
