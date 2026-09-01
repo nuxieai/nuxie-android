@@ -14,8 +14,9 @@ import ai.nuxie.sdk.identity.IdentityProvider
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
@@ -54,7 +55,7 @@ class DeviceLegRunJournalTest {
 
     @After fun tearDown() = runBlocking {
         log?.close()
-        scope.cancel()
+        scope.coroutineContext[Job]?.cancelAndJoin()
         directory.deleteRecursively()
         Unit
     }

@@ -233,12 +233,17 @@ internal class EventLog(
     }
 
     suspend fun close() {
+        closeWorkers()
+        store.close()
+    }
+
+    /** Stop the pipelines without closing the store owned by the composition root. */
+    suspend fun closeWorkers() {
         awaitBarrier()
         commands.close()
         worker.join()
         forwardingCommands.close()
         forwardingWorker.join()
-        store.close()
     }
 
     /**

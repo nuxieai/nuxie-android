@@ -9,10 +9,12 @@ import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.identity.IdentityProvider
 import java.io.File
+import kotlin.io.path.createTempDirectory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -55,6 +57,7 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 class JourneyConformanceTest {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val roots = mutableListOf<File>()
     private val now = 1_784_462_400_000L
     private val distinctId = "customer-1"
 
@@ -98,7 +101,7 @@ class JourneyConformanceTest {
     )
 
     private fun harness(): Harness {
-        val root = createTempDir(prefix = "nuxie-journey-conformance-")
+        val root = createTempDirectory("nuxie-journey-conformance-").toFile().also(roots::add)
         val captured = CapturingStore()
         val identity = Identity()
         val log = EventLog(
@@ -124,7 +127,11 @@ class JourneyConformanceTest {
         )
     }
 
-    @After fun tearDown() = scope.cancel()
+    @After fun tearDown() = runBlocking {
+        scope.coroutineContext[Job]?.cancelAndJoin()
+        roots.asReversed().forEach(File::deleteRecursively)
+        roots.clear()
+    }
 
     private fun activeRun(id: String) = JourneyRun(
         id = id,

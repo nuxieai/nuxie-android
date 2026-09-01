@@ -6,8 +6,9 @@ import ai.nuxie.sdk.network.NuxieApi
 import java.io.IOException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -26,6 +27,7 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 class EventDeliveryWorkerTest {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val stores = mutableListOf<SQLiteEventStore>()
     private var now = 1_784_462_400_000L
 
     private class ScriptedTransport(vararg outcomes: Any) : HttpTransport {
@@ -47,7 +49,8 @@ class EventDeliveryWorkerTest {
         }
     }
 
-    private fun store(): SQLiteEventStore = SQLiteEventStore(RuntimeEnvironment.getApplication())
+    private fun store(): SQLiteEventStore =
+        SQLiteEventStore(RuntimeEnvironment.getApplication()).also(stores::add)
 
     private fun worker(store: EventStore, transport: HttpTransport): EventDeliveryWorker =
         EventDeliveryWorker(
@@ -71,8 +74,10 @@ class EventDeliveryWorkerTest {
     }
 
     @After
-    fun tearDown() {
-        scope.cancel()
+    fun tearDown() = runBlocking {
+        scope.coroutineContext[Job]?.cancelAndJoin()
+        stores.asReversed().forEach { it.close() }
+        stores.clear()
     }
 
     @Test

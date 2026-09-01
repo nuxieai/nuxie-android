@@ -14,6 +14,7 @@ import android.app.Activity
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.BillingResult
 import com.android.billingclient.api.ProductDetails
+import java.io.File
 import java.math.BigDecimal
 import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
@@ -32,10 +33,13 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
@@ -44,6 +48,17 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 @OptIn(ExperimentalCoroutinesApi::class)
 class PurchaseServiceTest {
+    @get:Rule
+    val temporaryFolder = TemporaryFolder()
+
+    private val fixtures = mutableListOf<Fixture>()
+
+    @After
+    fun closeFixtures() {
+        fixtures.asReversed().forEach(Fixture::close)
+        fixtures.clear()
+    }
+
     @Test
     fun billingClientDeliveryIsTheTrustBoundaryWhenNoLicensingKeyIsConfigured() = runTest {
         val fixture = fixture(this)
@@ -2446,14 +2461,21 @@ class PurchaseServiceTest {
         verifyPurchaseSignature: (String, String, String) -> Boolean = { _, _, _ -> true },
         logWarning: (String, Throwable) -> Unit = { _, _ -> },
     ): Fixture {
+        val storageDirectory = temporaryFolder.newFolder("fixture-${fixtures.size}")
         val core = NuxieCore(
             context = RuntimeEnvironment.getApplication(),
             apiKey = "pk_test_purchase_${System.identityHashCode(store)}",
             environment = NuxieEnvironment.DEVELOPMENT,
             logLevel = LogLevel.NONE,
             beforeSend = null,
-            overrides = NuxieCore.Overrides(transport = FakeTransport(), registerLifecycle = false),
+            overrides = NuxieCore.Overrides(
+                transport = FakeTransport(),
+                registerLifecycle = false,
+                eventDatabaseFile = File(storageDirectory, "events.db"),
+                profileCacheDirectory = File(storageDirectory, "profiles"),
+            ),
         )
+        kotlinx.coroutines.runBlocking { core.purchases.awaitInitialProjection() }
         store.actions = actions
         val billing = FakeBilling(actions)
         val settings = PurchaseSettings(null, mode)
@@ -2513,6 +2535,7 @@ class PurchaseServiceTest {
             purchaseEventCaptureAttempts,
             purchaseEventDistinctIds,
         ) { evidence -> accepted(core.identity.distinctId(), evidence) }
+        fixtures += fixture
         return fixture
     }
 

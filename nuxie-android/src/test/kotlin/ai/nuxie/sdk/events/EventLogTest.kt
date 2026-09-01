@@ -9,8 +9,9 @@ import ai.nuxie.sdk.journey.JourneyEventNames
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -106,7 +107,7 @@ class EventLogTest {
 
     @After
     fun tearDown() {
-        scope.cancel()
+        runBlocking { scope.coroutineContext[Job]?.cancelAndJoin() }
     }
 
     @Test

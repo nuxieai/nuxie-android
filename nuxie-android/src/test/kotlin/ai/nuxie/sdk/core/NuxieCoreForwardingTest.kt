@@ -7,11 +7,18 @@ import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.testsupport.FakeTransport
+import android.app.Application
+import android.content.Context
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -19,8 +26,29 @@ import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 class NuxieCoreForwardingTest {
+    private class RecordingApplication : Application() {
+        val registrations = AtomicInteger()
+        val unregistrations = AtomicInteger()
+
+        fun attach(base: Context) {
+            attachBaseContext(base)
+        }
+
+        override fun getApplicationContext(): Context = this
+
+        override fun registerActivityLifecycleCallbacks(callback: ActivityLifecycleCallbacks) {
+            registrations.incrementAndGet()
+        }
+
+        override fun unregisterActivityLifecycleCallbacks(callback: ActivityLifecycleCallbacks) {
+            unregistrations.incrementAndGet()
+        }
+    }
+
     private class RecordingStore : EventStore {
         val pending = CopyOnWriteArrayList<StoredEvent>()
+        val accessedAfterClose = AtomicBoolean(false)
+        private val closed = AtomicBoolean(false)
         var onPendingInserted: (StoredEvent) -> Unit = {}
 
         override suspend fun insertPending(event: StoredEvent) {
@@ -53,8 +81,13 @@ class NuxieCoreForwardingTest {
         override suspend fun reassignEvents(from: String, to: String) = 0
         override suspend fun deleteOldestDeliveredEvents(keeping: Int) = 0
         override suspend fun recordStableDrop(eventId: String, recordedAtMillis: Long) = true
-        override suspend fun pendingBatch(limit: Int) = pending.take(limit)
-        override suspend fun close() = Unit
+        override suspend fun pendingBatch(limit: Int): List<StoredEvent> {
+            if (closed.get()) accessedAfterClose.set(true)
+            return pending.take(limit)
+        }
+        override suspend fun close() {
+            closed.set(true)
+        }
     }
 
     @Test
@@ -117,6 +150,69 @@ class NuxieCoreForwardingTest {
             releaseFirstForwarding.complete(Unit)
             core.stop()
             lifecyclePreferences.edit().clear().commit()
+        }
+    }
+
+    @Test
+    fun stopJoinsResidualScopeWorkBeforeClosingTheOwnedStore() = runBlocking {
+        val store = RecordingStore()
+        val core = NuxieCore(
+            context = RuntimeEnvironment.getApplication(),
+            apiKey = "pk_test_ordered_stop",
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(
+                store = store,
+                transport = FakeTransport(),
+                registerLifecycle = false,
+            ),
+        )
+        val started = CompletableDeferred<Unit>()
+        val residualWork = core.scope.launch {
+            started.complete(Unit)
+            try {
+                awaitCancellation()
+            } finally {
+                store.pendingBatch(limit = 1)
+            }
+        }
+
+        try {
+            started.await()
+            core.stop()
+            residualWork.join()
+
+            assertFalse("core scope accessed its store after close", store.accessedAfterClose.get())
+        } finally {
+            core.stop()
+        }
+    }
+
+    @Test
+    fun stopUnregistersLifecycleCallbacksExactlyOnce() {
+        val application = RecordingApplication().apply {
+            attach(RuntimeEnvironment.getApplication())
+        }
+        val core = NuxieCore(
+            context = application,
+            apiKey = "pk_test_lifecycle_stop",
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(transport = FakeTransport()),
+        )
+
+        try {
+            core.start()
+            assertEquals(1, application.registrations.get())
+
+            core.stop()
+            core.stop()
+
+            assertEquals(1, application.unregistrations.get())
+        } finally {
+            core.stop()
         }
     }
 }

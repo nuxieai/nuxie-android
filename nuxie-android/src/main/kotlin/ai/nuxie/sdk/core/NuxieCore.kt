@@ -60,7 +60,9 @@ import ai.nuxie.sdk.presentation.CloseReason
 import ai.nuxie.sdk.presentation.PresentationOutcome
 import android.app.Application
 import android.content.Context
+import java.io.File
 import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -91,6 +93,7 @@ internal class NuxieCore(
     private val forwardActivity: suspend (NuxieActivityInfo) -> Unit = {},
 ) {
     private val registerLifecycle = overrides.registerLifecycle
+    private val stopped = AtomicBoolean(false)
 
     internal fun interface PresentationFactory {
         fun create(
@@ -111,6 +114,8 @@ internal class NuxieCore(
         val presenter: TriggerService.ExperiencePresenter? = null,
         val presentationFactory: PresentationFactory? = null,
         val purchaseEvidenceStore: PurchaseEvidenceStore? = null,
+        val eventDatabaseFile: File? = null,
+        val profileCacheDirectory: File? = null,
         val journeySupportedRuntime: (() -> SupportedRuntime?)? = null,
         val authenticateRelease: (
             (ExperienceReleaseProfile.Entry, SupportedRuntime) -> AuthenticatedRelease?
@@ -133,7 +138,11 @@ internal class NuxieCore(
 
     val sessions = SessionService(nowMillis)
 
-    val store: EventStore = overrides.store ?: SQLiteEventStore(appContext, nowMillis = nowMillis)
+    val store: EventStore = overrides.store ?: SQLiteEventStore(
+        appContext,
+        nowMillis = nowMillis,
+        databaseFile = overrides.eventDatabaseFile ?: File(appContext.filesDir, "nuxie/events.db"),
+    )
 
     val userTransitions: UserTransitionCoordinator by lazy {
         UserTransitionCoordinator(store, scope)
@@ -368,6 +377,7 @@ internal class NuxieCore(
         scope = scope,
         localeSettings = profileLocale,
         nowMillis = nowMillis,
+        cacheDirectory = overrides.profileCacheDirectory,
     )
 
     val lifecycleTracker = AppLifecycleTracker(
@@ -422,16 +432,22 @@ internal class NuxieCore(
         }
     }
 
-    /** Cancel workers and release the store. Testing teardown only for now. */
+    /** Stop every owned coroutine before releasing the shared event store. */
     fun stop() {
+        if (!stopped.compareAndSet(false, true)) return
+        if (registerLifecycle) {
+            (appContext as? Application)?.unregisterActivityLifecycleCallbacks(lifecycleCoordinator)
+        }
         billing.close()
         presentations.close()
         kotlinx.coroutines.runBlocking {
             runCatching { profile.close() }
             runCatching { delivery.close() }
-            runCatching { eventLog.close() }
+            runCatching { eventLog.closeWorkers() }
+            scope.cancel()
+            scope.coroutineContext[kotlinx.coroutines.Job]?.join()
+            runCatching { store.close() }
         }
-        scope.cancel()
     }
 
     private fun defaultAppVersion(): String = runCatching {
