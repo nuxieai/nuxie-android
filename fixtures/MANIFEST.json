@@ -1,6 +1,9 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
   "sourceCommit": "4120325fed0793f7a72016bae6f160648a8ae1fd",
+  "sourceCommitOverrides": {
+    "purchases/outcome-commit.json": "d03fe63aef9f6d66d9196cdaa66e1570681f048e"
+  },
   "files": {
     "README.md": "e20401b0e5e83a1a738d80d00ce63430da42579fb65398bcc6893ce24f6c3751",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
@@ -48,6 +51,7 @@
     "journeys/time-window/cross-plane.json": "5896275d61a52cc150fb34eb131331566f810dff621464e9b7b4c53ab94f80e4",
     "journeys/transitions/basic.json": "4460073a4055be574650c503a58dc05ddfa210844a49e0ce2dc4b2c5e9e1b06e",
     "profile/locale-admission.json": "a3df581ff611f480b4e75d194a54a33cb99e8f199f4c1d8df128ea0056a93176",
+    "purchases/outcome-commit.json": "d70a3cd48e4daa39fb4343aac281580845e0bcb3056e9ef49d3ef601c26e68cf",
     "segments/seed-mirror/server-mode.json": "fd71fc809795d39f96c5ce186559336ffcb38f881a5ceab835184751c0564c0a"
   }
 }
