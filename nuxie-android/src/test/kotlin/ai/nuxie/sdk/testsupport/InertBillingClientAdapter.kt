@@ -18,17 +18,18 @@ import com.android.billingclient.api.QueryProductDetailsResult
 import com.android.billingclient.api.QueryPurchasesParams
 
 /**
- * A billing adapter that reports SERVICE_UNAVAILABLE immediately to every
- * call, mirroring a Play-less device. Connection-driven recovery can never
- * fire or hang, so it cannot race a test's explicit feature or projection
- * state. Unit suites that exercise billing behavior use their own
+ * A billing adapter that reports BILLING_UNAVAILABLE immediately to every
+ * call, mirroring a Play-less device. The code is a PERMANENT setup failure
+ * (PlayBillingConnection does not retry it), so connection-driven recovery
+ * can never fire, and anything awaiting the client fails fast instead of
+ * hanging. Unit suites that exercise billing behavior use their own
  * purpose-built fakes instead.
  */
 internal object InertBillingClientAdapter : BillingClientAdapter {
     val factory = BillingClientAdapterFactory { InertBillingClientAdapter }
 
     private val unavailable: BillingResult = BillingResult.newBuilder()
-        .setResponseCode(BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE)
+        .setResponseCode(BillingClient.BillingResponseCode.BILLING_UNAVAILABLE)
         .build()
 
     override val isReady: Boolean = false
