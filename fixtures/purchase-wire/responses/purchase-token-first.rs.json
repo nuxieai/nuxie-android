@@ -5,6 +5,14 @@
   "endpoint": "/purchase",
   "statusCode": 200,
   "body": {
+    "catalog_product": {
+      "base_plan_id": null,
+      "id": "product-commerce-token-first",
+      "offer_id": "default",
+      "purchase_option_id": "buy",
+      "store_product_id": "fixture-credit-pack-token-first",
+      "store_product_type": "nonConsumable"
+    },
     "customer_id": "21b7ebc6-64af-5041-aa04-7062caefacf3",
     "features": [
       {
@@ -18,5 +26,5 @@
     ],
     "success": true
   },
-  "bodyText": "{\"customer_id\":\"21b7ebc6-64af-5041-aa04-7062caefacf3\",\"features\":[{\"allowed\":true,\"balance\":1,\"ext_id\":\"fixture-credits-token-first\",\"id\":\"feature-commerce-token-first\",\"type\":\"metered\",\"unlimited\":false}],\"success\":true}"
+  "bodyText": "{\"catalog_product\":{\"base_plan_id\":null,\"id\":\"product-commerce-token-first\",\"offer_id\":\"default\",\"purchase_option_id\":\"buy\",\"store_product_id\":\"fixture-credit-pack-token-first\",\"store_product_type\":\"nonConsumable\"},\"customer_id\":\"21b7ebc6-64af-5041-aa04-7062caefacf3\",\"features\":[{\"allowed\":true,\"balance\":1,\"ext_id\":\"fixture-credits-token-first\",\"id\":\"feature-commerce-token-first\",\"type\":\"metered\",\"unlimited\":false}],\"success\":true}"
 }

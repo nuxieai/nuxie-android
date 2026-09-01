@@ -4,6 +4,7 @@ import ai.nuxie.sdk.ExperienceRef
 import ai.nuxie.sdk.FeatureAccessUpdate
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
+import ai.nuxie.sdk.NuxieEvent
 import ai.nuxie.sdk.TriggerDecision
 import ai.nuxie.sdk.TriggerErrorCode
 import ai.nuxie.sdk.TriggerUpdate
@@ -26,6 +27,7 @@ import ai.nuxie.sdk.presentation.PresentationReleaseProvider
 import ai.nuxie.sdk.testsupport.FakeTransport
 import java.io.Closeable
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -70,12 +72,13 @@ class TriggerServiceTest {
         features: TriggerService.FeatureGate? = null,
         presenter: TriggerService.ExperiencePresenter? = null,
         presentationFactory: NuxieCore.PresentationFactory? = null,
+        beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
     ): NuxieCore = NuxieCore(
         context = RuntimeEnvironment.getApplication(),
         apiKey = "pk_test_trigger",
         environment = NuxieEnvironment.DEVELOPMENT,
         logLevel = LogLevel.NONE,
-        beforeSend = null,
+        beforeSend = beforeSend,
         overrides = NuxieCore.Overrides(
             transport = transport,
             registerLifecycle = false,
@@ -358,6 +361,8 @@ class TriggerServiceTest {
         val launched = mutableListOf<String>()
         val outcomeSelected = CompletableDeferred<Unit>()
         val continueReporting = CompletableDeferred<Unit>()
+        val outcomeReported = CompletableDeferred<Unit>()
+        val capturedExit = AtomicReference<NuxieEvent?>()
         val rivFile = temporaryFolder.newFile("identity-race.riv").apply {
             writeBytes(byteArrayOf(1))
         }
@@ -380,13 +385,21 @@ class TriggerServiceTest {
                 reportOutcome = { outcome ->
                     outcomeSelected.complete(Unit)
                     continueReporting.await()
-                    reportOutcome(outcome)
+                    try {
+                        reportOutcome(outcome)
+                    } finally {
+                        outcomeReported.complete(Unit)
+                    }
                 },
             )
         }
         val core = core(
             transportWithGate(null),
             presentationFactory = factory,
+            beforeSend = { event ->
+                if (event.name == JourneyEventNames.EXITED) capturedExit.set(event)
+                event
+            },
         )
         val ownerDistinctId = core.identity.distinctId()
         val replacementDistinctId = "replacement-${UUID.randomUUID()}"
@@ -416,6 +429,7 @@ class TriggerServiceTest {
             outcomeSelected.await()
             core.identity.setDistinctId(replacementDistinctId)
             continueReporting.complete(Unit)
+            outcomeReported.await()
 
             withTimeout(2_000L) {
                 // Terminal state is saved before the producer enqueues its
@@ -430,13 +444,11 @@ class TriggerServiceTest {
             core.eventLog.awaitBarrier()
 
             val ended = requireNotNull(store.load(ownerDistinctId, journeyId))
-            val exit = core.store.pendingBatch(100).single {
-                it.name == JourneyEventNames.EXITED &&
-                    it.properties["journey_id"] == JsonPrimitive(journeyId)
-            }
+            val exit = requireNotNull(capturedExit.get())
             assertEquals("goal_met", ended.terminalReason)
             assertTrue(store.hasCompleted(ownerDistinctId, ref.experienceId))
             assertEquals(ownerDistinctId, exit.distinctId)
+            assertEquals(journeyId, exit.properties["journey_id"])
             assertEquals(null, store.load(replacementDistinctId, journeyId))
         } finally {
             continueReporting.complete(Unit)

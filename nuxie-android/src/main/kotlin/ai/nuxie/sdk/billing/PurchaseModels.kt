@@ -10,6 +10,7 @@ class StoreProduct internal constructor(
     val productId: String,
     val storeProductId: String,
     val basePlanId: String?,
+    val purchaseOptionId: String? = null,
     val offerId: String?,
     val placementId: String?,
     val rawProduct: ProductDetails?,
@@ -33,7 +34,10 @@ internal fun StoreProduct.storePrice(): StorePrice? {
     val displayPrice: String
     when (productType) {
         BillingClient.ProductType.INAPP -> {
-            val offer = details.oneTimePurchaseOfferDetails ?: return null
+            val offer = details.oneTimePurchaseOfferDetailsList
+                ?.firstOrNull { it.offerToken == offerToken }
+                ?: details.oneTimePurchaseOfferDetails
+                ?: return null
             amountMicros = offer.priceAmountMicros
             displayPrice = offer.formattedPrice
         }

@@ -56,6 +56,7 @@ internal data class StoredPurchaseBinding(
     val storeProductId: String,
     val nuxieProductId: String,
     val basePlanId: String? = null,
+    val purchaseOptionId: String? = null,
     val offerId: String? = null,
     val productType: String,
     val consumable: Boolean,
@@ -69,6 +70,7 @@ internal data class StoredProductMapping(
     val storeProductId: String,
     val nuxieProductId: String,
     val basePlanId: String? = null,
+    val purchaseOptionId: String? = null,
     val offerId: String? = null,
     val productType: String,
     val consumable: Boolean,
@@ -81,20 +83,50 @@ internal data class StoredProductIdentity(
     val storeProductId: String,
     val nuxieProductId: String,
     val basePlanId: String?,
+    val purchaseOptionId: String?,
     val offerId: String?,
+    val productType: String?,
 )
 
 internal val StoredPurchaseBinding.productIdentity: StoredProductIdentity
-    get() = StoredProductIdentity(storeProductId, nuxieProductId, basePlanId, offerId)
+    get() = StoredProductIdentity(
+        storeProductId,
+        nuxieProductId,
+        basePlanId,
+        purchaseOptionId,
+        offerId,
+        productType,
+    )
 
 internal val StoredProductMapping.productIdentity: StoredProductIdentity
-    get() = StoredProductIdentity(storeProductId, nuxieProductId, basePlanId, offerId)
+    get() = StoredProductIdentity(
+        storeProductId,
+        nuxieProductId,
+        basePlanId,
+        purchaseOptionId,
+        offerId,
+        productType,
+    )
 
 internal fun PurchaseEvidence.matchesProductIdentity(identity: StoredProductIdentity): Boolean =
     identity.storeProductId in storeProductIds &&
         identity.nuxieProductId == nuxieProductId &&
         identity.basePlanId == basePlanId &&
-        identity.offerId == offerId
+        identity.offerId == offerId &&
+        (purchaseOptionId == null || identity.purchaseOptionId == purchaseOptionId) &&
+        (productType == null || identity.productType == productType)
+
+/**
+ * Match retained legacy evidence without guessing between newly distinct Play
+ * purchase options. Callers must still require a single matching candidate.
+ */
+internal fun StoredProductIdentity.matchesKnownIdentity(known: StoredProductIdentity): Boolean =
+    storeProductId == known.storeProductId &&
+        nuxieProductId == known.nuxieProductId &&
+        basePlanId == known.basePlanId &&
+        offerId == known.offerId &&
+        (known.purchaseOptionId == null || purchaseOptionId == known.purchaseOptionId) &&
+        (known.productType == null || productType == known.productType)
 
 private data class StoredPurchaseBindingKey(
     val obfuscatedAccountId: String,
@@ -108,7 +140,9 @@ internal data class PurchaseEvidence(
     val storeProductIds: List<String>,
     val nuxieProductId: String? = null,
     val basePlanId: String? = null,
+    val purchaseOptionId: String? = null,
     val offerId: String? = null,
+    val productType: String? = null,
     val purchaseState: StoredPurchaseState,
     val obfuscatedAccountId: String? = null,
     val syncAttributionDistinctId: String,
@@ -262,7 +296,9 @@ internal class FilePurchaseEvidenceStore(
             put("storeProductIds", JsonArray(evidence.storeProductIds.map(::JsonPrimitive)))
             evidence.nuxieProductId?.let { put("nuxieProductId", JsonPrimitive(it)) }
             evidence.basePlanId?.let { put("basePlanId", JsonPrimitive(it)) }
+            evidence.purchaseOptionId?.let { put("purchaseOptionId", JsonPrimitive(it)) }
             evidence.offerId?.let { put("offerId", JsonPrimitive(it)) }
+            evidence.productType?.let { put("productType", JsonPrimitive(it)) }
             put("purchaseState", JsonPrimitive(evidence.purchaseState.name))
             evidence.obfuscatedAccountId?.let { put("obfuscatedAccountId", JsonPrimitive(it)) }
             put("syncAttributionDistinctId", JsonPrimitive(evidence.syncAttributionDistinctId))
@@ -301,7 +337,9 @@ internal class FilePurchaseEvidenceStore(
                 .mapNotNull { (it as? JsonPrimitive)?.contentOrNull },
             nuxieProductId = raw.string("nuxieProductId"),
             basePlanId = raw.string("basePlanId"),
+            purchaseOptionId = raw.string("purchaseOptionId"),
             offerId = raw.string("offerId"),
+            productType = raw.string("productType"),
             purchaseState = StoredPurchaseState.valueOf(raw.string("purchaseState") ?: return null),
             obfuscatedAccountId = raw.string("obfuscatedAccountId"),
             syncAttributionDistinctId = raw.string("syncAttributionDistinctId") ?: return null,
@@ -338,6 +376,7 @@ internal class FilePurchaseEvidenceStore(
             put("storeProductId", JsonPrimitive(binding.storeProductId))
             put("nuxieProductId", JsonPrimitive(binding.nuxieProductId))
             binding.basePlanId?.let { put("basePlanId", JsonPrimitive(it)) }
+            binding.purchaseOptionId?.let { put("purchaseOptionId", JsonPrimitive(it)) }
             binding.offerId?.let { put("offerId", JsonPrimitive(it)) }
             put("productType", JsonPrimitive(binding.productType))
             put("consumable", JsonPrimitive(binding.consumable))
@@ -355,6 +394,7 @@ internal class FilePurchaseEvidenceStore(
             storeProductId = raw.string("storeProductId") ?: return null,
             nuxieProductId = raw.string("nuxieProductId") ?: return null,
             basePlanId = raw.string("basePlanId"),
+            purchaseOptionId = raw.string("purchaseOptionId"),
             offerId = raw.string("offerId"),
             productType = raw.string("productType") ?: return null,
             consumable = raw.boolean("consumable"),
@@ -373,6 +413,7 @@ internal class FilePurchaseEvidenceStore(
             storeProductId = mapping.storeProductId,
             nuxieProductId = mapping.nuxieProductId,
             basePlanId = mapping.basePlanId,
+            purchaseOptionId = mapping.purchaseOptionId,
             offerId = mapping.offerId,
             productType = mapping.productType,
             consumable = mapping.consumable,
@@ -388,6 +429,7 @@ internal class FilePurchaseEvidenceStore(
             storeProductId = raw.string("storeProductId") ?: return null,
             nuxieProductId = raw.string("nuxieProductId") ?: return null,
             basePlanId = raw.string("basePlanId"),
+            purchaseOptionId = raw.string("purchaseOptionId"),
             offerId = raw.string("offerId"),
             productType = raw.string("productType") ?: return null,
             consumable = raw.boolean("consumable"),

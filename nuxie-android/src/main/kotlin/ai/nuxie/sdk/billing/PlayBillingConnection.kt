@@ -327,6 +327,13 @@ internal class PlayBillingConnection(
         productType = details.productType,
         rawProduct = details,
         oneTimePurchaseOfferToken = details.oneTimePurchaseOfferDetails?.offerToken,
+        oneTimePurchaseOffers = details.oneTimePurchaseOfferDetailsList.orEmpty().map { offer ->
+            PlayOneTimePurchaseOffer(
+                purchaseOptionId = offer.purchaseOptionId,
+                offerId = offer.offerId,
+                offerToken = offer.offerToken,
+            )
+        },
         subscriptionOffers = details.subscriptionOfferDetails.orEmpty().map { offer ->
             PlaySubscriptionOffer(
                 basePlanId = offer.basePlanId,

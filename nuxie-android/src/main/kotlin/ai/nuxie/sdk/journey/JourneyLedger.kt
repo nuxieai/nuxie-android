@@ -46,7 +46,7 @@ internal class JourneyLedger(private val eventLog: EventLog) {
             "experience_id" to run.experienceId,
             "experience_version" to run.experienceVersion,
             "reason" to reason,
-            "at" to atMillis,
+            "at" to IsoDates.formatMillis(atMillis),
         ),
         run.distinctId,
     )

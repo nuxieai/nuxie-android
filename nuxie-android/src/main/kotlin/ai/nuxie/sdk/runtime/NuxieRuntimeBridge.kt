@@ -194,6 +194,8 @@ internal object NuxieRuntimeBridge {
         numberValue: Float,
         integerValue: Long,
         boolValue: Boolean,
+        relatedViewModel: Long,
+        index: Long,
     ): Int
 
     external fun nativeViewModelInstanceFree(viewModel: Long): Int
@@ -215,6 +217,11 @@ internal object NuxieRuntimeBridge {
         inputNames: Array<ByteArray>,
         inputBoolValues: BooleanArray,
         inputNumberValues: FloatArray,
+        pointerKinds: IntArray,
+        pointerXs: FloatArray,
+        pointerYs: FloatArray,
+        pointerIds: IntArray,
+        pointerTimestamps: FloatArray,
         elapsedSeconds: Float,
         correlationId: Long,
         statusOut: IntArray,

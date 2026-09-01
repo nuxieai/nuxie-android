@@ -1534,6 +1534,133 @@ class JourneyServiceTest {
     }
 
     @Test
+    fun authenticatedExitPreservesItsSignedJourneyReasonAndCompletionPolicy() = runBlocking {
+        val h = harness()
+        try {
+            val updates = mutableListOf<TriggerUpdate>()
+            suspend fun start(triggerId: String): String =
+                (h.service.handleEventForTrigger(
+                    StoredEvent(
+                        triggerId,
+                        "opened",
+                        timestampMillis = now,
+                        distinctId = "customer-1",
+                    ),
+                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started)
+                    .ref.journeyId!!
+
+            h.broker.register("authenticated-expired", updates::add)
+            val expired = start("authenticated-expired")
+            assertTrue(
+                h.service.transitionPresentationOutcome(
+                    "customer-1",
+                    expired,
+                    CloseReason.AuthenticatedExit(JourneyExitReason.EXPIRED),
+                ),
+            )
+            assertTrue(h.service.completePresentationOutcome("customer-1", expired))
+            h.log.awaitBarrier()
+
+            val expiredRun = h.journeyStore.load("customer-1", expired)!!
+            assertEquals("time_limit", expiredRun.terminalReason)
+            assertEquals(JourneyExitReason.EXPIRED, expiredRun.terminalTriggerExitReason)
+            val expiredEvent = h.store.events.values.single {
+                it.name == JourneyEventNames.EXITED &&
+                    it.properties.stringValue("journey_id") == expired
+            }
+            assertEquals(
+                "time_limit",
+                expiredEvent.properties.stringValue("reason"),
+            )
+            assertEquals("2026-07-19T12:00:00.000Z", expiredEvent.properties.stringValue("at"))
+            assertEquals(1, h.journeyStore.completionCount("customer-1", "experience-1"))
+            assertEquals(
+                JourneyExitReason.EXPIRED,
+                (updates.single() as TriggerUpdate.Journey).update.exitReason,
+            )
+
+            updates.clear()
+            h.broker.register("authenticated-cancelled", updates::add)
+            val cancelled = start("authenticated-cancelled")
+            assertTrue(
+                h.service.transitionPresentationOutcome(
+                    "customer-1",
+                    cancelled,
+                    CloseReason.AuthenticatedExit(JourneyExitReason.CANCELLED),
+                ),
+            )
+            assertTrue(h.service.completePresentationOutcome("customer-1", cancelled))
+            h.log.awaitBarrier()
+
+            assertEquals(
+                "cancelled",
+                h.journeyStore.load("customer-1", cancelled)!!.terminalReason,
+            )
+            assertEquals(1, h.journeyStore.completionCount("customer-1", "experience-1"))
+            assertEquals(
+                JourneyExitReason.CANCELLED,
+                (updates.single() as TriggerUpdate.Journey).update.exitReason,
+            )
+        } finally { h.root.deleteRecursively() }
+    }
+
+    @Test
+    fun authenticatedExitReasonsUseTheServerExecutionVocabulary() {
+        val expected = mapOf(
+            JourneyExitReason.COMPLETED to "completed",
+            JourneyExitReason.DISMISSED to "cancelled",
+            JourneyExitReason.GOAL_MET to "converted_exit",
+            JourneyExitReason.TRIGGER_UNMATCHED to "stopped_matching",
+            JourneyExitReason.EXPIRED to "time_limit",
+            JourneyExitReason.CANCELLED to "cancelled",
+            JourneyExitReason.ERROR to "error",
+            JourneyExitReason.SUPERSEDED to "superseded",
+        )
+
+        expected.forEach { (reason, wire) -> assertEquals(wire, reason.executionReason()) }
+    }
+
+    @Test
+    fun authenticatedExitCompletesItsTriggerWaiterBeforeCompletionPersistenceFails() = runBlocking {
+        val h = harness()
+        try {
+            val triggerId = "authenticated-persistence-failure"
+            val journeyId = (h.service.handleEventForTrigger(
+                StoredEvent(triggerId, "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started)
+                .ref.journeyId!!
+            val terminalUpdate = CompletableDeferred<TriggerUpdate>()
+            h.broker.register(triggerId) { update ->
+                terminalUpdate.complete(update)
+                h.broker.complete(triggerId)
+            }
+            File(h.root, "nuxie/journeys/completions").apply {
+                parentFile?.mkdirs()
+                writeText("blocks the completion directory")
+            }
+
+            assertTrue(
+                h.service.transitionPresentationOutcome(
+                    "customer-1",
+                    journeyId,
+                    CloseReason.AuthenticatedExit(JourneyExitReason.EXPIRED),
+                ),
+            )
+            val failure = runCatching {
+                h.service.completePresentationOutcome("customer-1", journeyId)
+            }.exceptionOrNull()
+
+            assertTrue("the failed completion receipt must remain observable", failure != null)
+            assertTrue("the trigger waiter must complete before the disk failure", terminalUpdate.isCompleted)
+            assertEquals(
+                JourneyExitReason.EXPIRED,
+                (terminalUpdate.await() as TriggerUpdate.Journey).update.exitReason,
+            )
+            assertEquals(0, h.journeyStore.completionCount("customer-1", "experience-1"))
+        } finally { h.root.deleteRecursively() }
+    }
+
+    @Test
     fun catalogReleasesAreScopedToTheProfileDistinctId() {
         val identity = ExperienceReleaseIdentity(
             appId = "app", environment = "development", experienceId = "experience-1",

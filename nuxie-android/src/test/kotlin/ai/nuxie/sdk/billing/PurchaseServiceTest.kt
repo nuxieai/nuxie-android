@@ -2643,6 +2643,7 @@ class PurchaseServiceTest {
             ).jsonObject,
             true,
             customerId,
+            null,
         ),
     )
 

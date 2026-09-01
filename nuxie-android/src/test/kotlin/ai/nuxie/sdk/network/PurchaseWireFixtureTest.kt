@@ -132,7 +132,7 @@ class PurchaseWireFixtureTest {
                 endpoint = "/purchase",
                 statusCode = 200,
                 bodyText =
-                    """{"success":true,"customer_id":"fixture-response-customer","features":[]}""",
+                    """{"success":true,"customer_id":"fixture-response-customer","features":[],"catalog_product":{"id":"product-commerce-one-time","store_product_id":"fixture-credit-pack","base_plan_id":null,"purchase_option_id":"buy","offer_id":"default","store_product_type":"nonConsumable"}}""",
             ),
         )
         PurchaseWireResponses.assertParses(
@@ -367,11 +367,11 @@ private object PurchaseWireFixtures {
             capturePurchase(
                 name = "purchase-subscription-full",
                 report = NuxieApi.PlayPurchaseReport(
-                    packageName = "ai.nuxie.fixture",
                     productId = "fixture-subscription",
                     purchaseToken = "fixture-subscription-token",
                     basePlanId = "annual",
                     offerId = "introductory",
+                    productType = "subscription",
                     obfuscatedAccountId = sha256(SUBSCRIPTION_CUSTOMER_ID),
                     distinctId = SUBSCRIPTION_CUSTOMER_ID,
                 ),
@@ -380,11 +380,12 @@ private object PurchaseWireFixtures {
             capturePurchase(
                 name = "purchase-one-time",
                 report = NuxieApi.PlayPurchaseReport(
-                    packageName = "ai.nuxie.fixture",
                     productId = "fixture-credit-pack",
                     purchaseToken = "fixture-one-time-token",
                     basePlanId = null,
+                    purchaseOptionId = "standard",
                     offerId = null,
+                    productType = "one_time",
                     obfuscatedAccountId = sha256(ONE_TIME_CUSTOMER_ID),
                     distinctId = ONE_TIME_CUSTOMER_ID,
                 ),
@@ -392,7 +393,6 @@ private object PurchaseWireFixtures {
             capturePurchase(
                 name = "purchase-invalid-token",
                 report = NuxieApi.PlayPurchaseReport(
-                    packageName = "ai.nuxie.fixture",
                     productId = "fixture-invalid-product",
                     purchaseToken = "fixture-invalid-token",
                     basePlanId = null,
@@ -659,7 +659,7 @@ private object PurchaseWireFixtures {
     }
 
     private const val PURCHASE_RESPONSE =
-        """{"success":true,"customer_id":"fixture-customer","features":[]}"""
+        """{"success":true,"customer_id":"fixture-customer","features":[],"catalog_product":{"id":"fixture-product","store_product_id":"fixture-store-product","base_plan_id":null,"purchase_option_id":null,"offer_id":null,"store_product_type":"nonConsumable"}}"""
     private const val ENTITLED_RESPONSE =
         """{"customerId":"fixture-customer","featureId":"fixture-feature","code":"allowed","allowed":true,"unlimited":false,"balance":8.0,"type":"metered"}"""
     private const val SUBSCRIPTION_CUSTOMER_ID = "fixture-customer-subscription"
@@ -841,7 +841,6 @@ private object PurchaseWireResponses {
     }
 
     private fun responsePathPurchaseReport() = NuxieApi.PlayPurchaseReport(
-        packageName = "ai.nuxie.fixture",
         productId = "fixture-response-product",
         purchaseToken = "fixture-response-token",
         basePlanId = null,
