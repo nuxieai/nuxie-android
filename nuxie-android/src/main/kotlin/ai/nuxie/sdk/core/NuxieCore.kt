@@ -10,6 +10,7 @@ import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.EventDeliveryWorker
+import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.events.TriggerBroker
 import ai.nuxie.sdk.events.TriggerService
 import ai.nuxie.sdk.features.FeatureInfo
@@ -60,6 +61,7 @@ import ai.nuxie.sdk.presentation.CloseReason
 import ai.nuxie.sdk.presentation.PresentationOutcome
 import android.app.Application
 import android.content.Context
+import android.util.Log
 import java.io.File
 import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
@@ -240,8 +242,41 @@ internal class NuxieCore(
         api = api,
         purchaseStorageScope = purchaseAuthorityScope(apiKey, environment),
         capturePurchaseSynced = eventLog::captureIdempotently,
-        capturePurchaseEvent = eventLog::captureIdempotently,
+        capturePurchaseEvent = ::capturePurchaseEvent,
     ).also { purchaseService = it }
+
+    /** Durable purchase capture followed by best-effort routing for the current identity. */
+    internal suspend fun capturePurchaseEvent(
+        name: String,
+        properties: Map<String, Any?>,
+        eventId: String,
+        distinctId: String,
+    ): Boolean {
+        val result = eventLog.captureIdempotentlyWithResult(
+            name,
+            properties,
+            eventId,
+            distinctId,
+        )
+        val stored = result.storedEvent
+        if (result.newlyCaptured && stored != null) {
+            runCatching {
+                // Both completion carriers route (iOS parity: restore
+                // declarations advance journeys too); local routing stays
+                // suppressed for initiating-identity carriers committed
+                // after an identity change.
+                if ((stored.name == SystemEventNames.PURCHASE_COMPLETED ||
+                        stored.name == SystemEventNames.RESTORE_COMPLETED) &&
+                    stored.distinctId == identity.distinctId()
+                ) {
+                    triggers.routeCommittedSystemEvent(stored)
+                }
+            }.onFailure { failure ->
+                Log.w(LOG_TAG, "Purchase Journey routing failed", failure)
+            }
+        }
+        return result.succeeded
+    }
 
     /**
      * Decide the complete destination Feature projection synchronously. The
@@ -482,6 +517,7 @@ internal class NuxieCore(
     }
 
     private companion object {
+        const val LOG_TAG = "Nuxie"
         const val LIFECYCLE_PREFERENCES = "nuxie_lifecycle"
     }
 }

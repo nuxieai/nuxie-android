@@ -41,6 +41,12 @@ internal class EventLog(
     /** Stamps \$session_id and touches the session; null until sessions exist. */
     private val sessionIdProvider: (() -> String?)? = null,
 ) {
+    internal data class IdempotentCaptureResult(
+        val succeeded: Boolean,
+        val storedEvent: StoredEvent?,
+        val newlyCaptured: Boolean,
+    )
+
     internal fun interface CommittedSubscription {
         suspend fun onCommitted(event: StoredEvent)
     }
@@ -76,7 +82,7 @@ internal class EventLog(
             val eventId: String,
             val distinctId: String,
             val applyBeforeSend: Boolean,
-            val done: CompletableDeferred<Boolean>,
+            val done: CompletableDeferred<IdempotentCaptureResult>,
         ) : Command
         data class CaptureDeliveredIdempotently(
             val name: String,
@@ -120,7 +126,7 @@ internal class EventLog(
                     command.done.complete(stored)
                 }
                 is Command.CaptureIdempotently -> {
-                    val captured = runCatching {
+                    val result = runCatching {
                         processIdempotently(
                             command.name,
                             command.properties,
@@ -129,8 +135,8 @@ internal class EventLog(
                             command.applyBeforeSend,
                         )
                     }.onFailure { Log.w(LOG_TAG, "Idempotent event capture failed", it) }
-                        .getOrDefault(false)
-                    command.done.complete(captured)
+                        .getOrElse { IdempotentCaptureResult(false, null, false) }
+                    command.done.complete(result)
                 }
                 is Command.CaptureDeliveredIdempotently -> {
                     val captured = runCatching {
@@ -267,7 +273,24 @@ internal class EventLog(
         properties: Map<String, Any?>,
         eventId: String,
         distinctId: String,
-    ): Boolean = captureIdempotently(
+    ): Boolean = captureIdempotentlyWithResult(
+        name,
+        properties,
+        eventId,
+        distinctId,
+        applyBeforeSend = true,
+    ).succeeded
+
+    /**
+     * Durably capture a stable-id event and report whether this call inserted
+     * the stored event. Existing stable outcomes remain successful duplicates.
+     */
+    suspend fun captureIdempotentlyWithResult(
+        name: String,
+        properties: Map<String, Any?>,
+        eventId: String,
+        distinctId: String,
+    ): IdempotentCaptureResult = captureIdempotentlyWithResult(
         name,
         properties,
         eventId,
@@ -281,23 +304,25 @@ internal class EventLog(
         properties: Map<String, Any?>,
         eventId: String,
         distinctId: String,
-    ): Boolean = captureIdempotently(
+    ): Boolean = captureIdempotentlyWithResult(
         name,
         properties,
         eventId,
         distinctId,
         applyBeforeSend = false,
-    )
+    ).succeeded
 
-    private suspend fun captureIdempotently(
+    private suspend fun captureIdempotentlyWithResult(
         name: String,
         properties: Map<String, Any?>,
         eventId: String,
         distinctId: String,
         applyBeforeSend: Boolean,
-    ): Boolean {
-        if (name.isEmpty() || eventId.isEmpty() || distinctId.isEmpty()) return false
-        val done = CompletableDeferred<Boolean>()
+    ): IdempotentCaptureResult {
+        if (name.isEmpty() || eventId.isEmpty() || distinctId.isEmpty()) {
+            return IdempotentCaptureResult(false, null, false)
+        }
+        val done = CompletableDeferred<IdempotentCaptureResult>()
         val command = Command.CaptureIdempotently(
             name,
             properties,
@@ -306,7 +331,9 @@ internal class EventLog(
             applyBeforeSend,
             done,
         )
-        if (commands.trySend(command).isFailure) return false
+        if (commands.trySend(command).isFailure) {
+            return IdempotentCaptureResult(false, null, false)
+        }
         return done.await()
     }
 
@@ -392,8 +419,10 @@ internal class EventLog(
         eventId: String,
         distinctId: String,
         applyBeforeSend: Boolean,
-    ): Boolean {
-        if (store.hasStableOutcome(eventId)) return true
+    ): IdempotentCaptureResult {
+        if (store.hasStableOutcome(eventId)) {
+            return IdempotentCaptureResult(true, null, false)
+        }
         var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties)
         // Leg outputs are validated JSON. Keep their exact values through
         // analytics sanitization; beforeSend still governs the full event.
@@ -420,7 +449,7 @@ internal class EventLog(
         if (transformed == null) {
             store.recordStableDrop(original.id, original.timestampMillis)
             Log.d(LOG_TAG, "Event '$name' terminally dropped by beforeSend hook")
-            return true
+            return IdempotentCaptureResult(true, null, false)
         }
         val stored = projectPostTransform(original, transformed)
         val inserted = store.insertPendingIfAbsent(stored)
@@ -433,7 +462,11 @@ internal class EventLog(
                 }
             }
         }
-        return true
+        return IdempotentCaptureResult(
+            succeeded = true,
+            storedEvent = stored.takeIf { inserted },
+            newlyCaptured = inserted,
+        )
     }
 
     private suspend fun commitServerFactNow(event: StoredEvent, receivedAtMillis: Long): Boolean {

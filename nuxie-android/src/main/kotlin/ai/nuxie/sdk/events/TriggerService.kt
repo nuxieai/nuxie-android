@@ -206,6 +206,30 @@ internal class TriggerService(
         }
     }
 
+    /** Route an already-durable SDK system event through the local Journey lane only. */
+    internal suspend fun routeCommittedSystemEvent(stored: StoredEvent) {
+        runCatching {
+            journeys.handleEventForTrigger(stored).forEach { result ->
+                when (result) {
+                    is JourneyTriggerResult.Started -> result.ref.experienceVersion?.let { version ->
+                        presentExperience(
+                            experienceVersionId = version,
+                            eventId = stored.id,
+                            journeyId = result.ref.journeyId,
+                        )
+                    }
+                    is JourneyTriggerResult.Failed -> Log.w(
+                        LOG_TAG,
+                        "System-event Journey admission failed: ${result.error.message}",
+                    )
+                    is JourneyTriggerResult.Suppressed -> Unit
+                }
+            }
+        }.onFailure { failure ->
+            Log.w(LOG_TAG, "System-event Journey routing failed", failure)
+        }
+    }
+
     private suspend fun handleShowExperience(plan: GatePlan, eventId: String) {
         val experienceVersionId = plan.experienceVersionId
         if (experienceVersionId == null) {
