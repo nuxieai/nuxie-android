@@ -2,21 +2,26 @@ package ai.nuxie.sdk.features
 
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
+import ai.nuxie.sdk.billing.InMemoryPurchaseEvidenceStore
 import ai.nuxie.sdk.billing.OptimisticFeatureOverlay
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.testsupport.FakeTransport
+import java.io.File
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
@@ -26,18 +31,43 @@ import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
 class FeatureServiceTest {
+    @get:Rule
+    val temporaryFolder = TemporaryFolder()
+
     private var now = 1_784_462_400_000L
     private val testPurchaseAllowances = mutableMapOf<Pair<NuxieCore, String>, List<FeatureAllowance>>()
+    private var coreSequence = 0
+    private val cores = mutableListOf<NuxieCore>()
 
-    private fun core(transport: FakeTransport, ttlMillis: Long = 5 * 60 * 1000L): NuxieCore = NuxieCore(
-        context = RuntimeEnvironment.getApplication(),
-        apiKey = "pk_test_features_${now}",
-        environment = NuxieEnvironment.DEVELOPMENT,
-        logLevel = LogLevel.NONE,
-        beforeSend = null,
-        featureCacheTtlMillis = ttlMillis,
-        overrides = NuxieCore.Overrides(nowMillis = { now }, transport = transport, registerLifecycle = false),
-    )
+    @After
+    fun closeCores() {
+        cores.asReversed().forEach(NuxieCore::stop)
+        cores.clear()
+        testPurchaseAllowances.clear()
+    }
+
+    private fun core(transport: FakeTransport, ttlMillis: Long = 5 * 60 * 1000L): NuxieCore {
+        val storageDirectory = temporaryFolder.newFolder("core-${++coreSequence}")
+        val core = NuxieCore(
+            context = RuntimeEnvironment.getApplication(),
+            apiKey = "pk_test_features_${now}",
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            featureCacheTtlMillis = ttlMillis,
+            overrides = NuxieCore.Overrides(
+                nowMillis = { now },
+                transport = transport,
+                registerLifecycle = false,
+                purchaseEvidenceStore = InMemoryPurchaseEvidenceStore(),
+                eventDatabaseFile = File(storageDirectory, "events.db"),
+                profileCacheDirectory = File(storageDirectory, "profiles"),
+            ),
+        )
+        runBlocking { core.purchases.awaitInitialProjection() }
+        cores += core
+        return core
+    }
 
     private fun profile(features: String): String = """{"segments":[],"features":$features}"""
 

@@ -32,9 +32,10 @@ import kotlin.io.path.createTempDirectory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -172,7 +173,7 @@ class DismissalFixtureTest {
                 assertEquals(ownerDistinctId, dismissed.distinctId)
             }
         } finally {
-            scope.cancel()
+            runBlocking { scope.coroutineContext[Job]?.cancelAndJoin() }
             PresentationRegistry.clearForTesting()
         }
     }
@@ -296,7 +297,7 @@ class DismissalFixtureTest {
             ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed
             assertEquals(SuppressReason.REENTRY_LIMITED, admission.reason)
         } finally {
-            scope.cancel()
+            scope.coroutineContext[Job]?.cancelAndJoin()
             PresentationRegistry.clearForTesting()
             root.deleteRecursively()
         }
@@ -425,7 +426,7 @@ class DismissalFixtureTest {
             )
             assertEquals(expectedProperties, exit.properties)
         } finally {
-            scope.cancel()
+            scope.coroutineContext[Job]?.cancelAndJoin()
             PresentationRegistry.clearForTesting()
             root.deleteRecursively()
         }

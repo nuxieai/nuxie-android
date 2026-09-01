@@ -31,14 +31,15 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.io.path.createTempDirectory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
@@ -61,6 +62,7 @@ import org.robolectric.shadows.ShadowLog
 @RunWith(RobolectricTestRunner::class)
 class JourneyServiceTest {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val roots = mutableListOf<File>()
     private var now = 1_784_462_400_000L
 
     private class Identity : IdentityProvider {
@@ -126,7 +128,7 @@ class JourneyServiceTest {
         onJourneyReleaseRead: () -> Unit = {},
         hostDismissRetrySleep: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
     ): Harness {
-        val root = createTempDir(prefix = "nuxie-journey-")
+        val root = createTempDirectory("nuxie-journey-").toFile().also(roots::add)
         val eventStore = Store()
         val eventLog = EventLog(
             store = eventStore,
@@ -177,7 +179,11 @@ class JourneyServiceTest {
         )
     }
 
-    @After fun tearDown() = scope.cancel()
+    @After fun tearDown() = runBlocking {
+        scope.coroutineContext[Job]?.cancelAndJoin()
+        roots.asReversed().forEach(File::deleteRecursively)
+        roots.clear()
+    }
 
     @Test
     fun enrollmentAndFiveFactsUseTheDocumentedWireProperties() = runBlocking {

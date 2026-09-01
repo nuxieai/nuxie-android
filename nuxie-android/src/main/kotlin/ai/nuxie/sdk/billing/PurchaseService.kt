@@ -494,6 +494,7 @@ internal class PurchaseService(
     private val managedCompletionClaims = mutableSetOf<String>()
     /** Guarded by [projectionRefresh]; failed pins retry their first resolved snapshot. */
     private val pendingAllowancePins = mutableMapOf<String, PendingAllowancePin>()
+    private val initialProjectionRefresh: Job
 
     init {
         // Projection is a local derivation and must not wait for Play Billing
@@ -507,7 +508,12 @@ internal class PurchaseService(
             }
             scope.launch { refreshOptimisticProjection() }
         }
-        scope.launch { refreshOptimisticProjection() }
+        initialProjectionRefresh = scope.launch { refreshOptimisticProjection() }
+    }
+
+    /** Wait until cold-start evidence has established the initial optimistic projection. */
+    internal suspend fun awaitInitialProjection() {
+        initialProjectionRefresh.join()
     }
 
     suspend fun useFeatureWithPendingPurchase(

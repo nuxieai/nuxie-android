@@ -33,9 +33,10 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.selects.select
@@ -269,7 +270,7 @@ class ProfileServiceTest {
 
         suspend fun close(deleteDisk: Boolean = true) {
             service.close()
-            scope.cancel()
+            scope.coroutineContext[Job]?.cancelAndJoin()
             if (deleteDisk) {
                 profileFile.delete()
                 segments.clearSegments(distinctId)
@@ -938,7 +939,7 @@ class ProfileServiceTest {
             validationGate?.release?.complete(Unit)
             transport.releaseAll()
             service.close()
-            scope.cancel()
+            scope.coroutineContext[Job]?.cancelAndJoin()
             File(context.cacheDir, "nuxie/profiles/$distinctId.json").delete()
             segments.clearSegments(distinctId)
         }

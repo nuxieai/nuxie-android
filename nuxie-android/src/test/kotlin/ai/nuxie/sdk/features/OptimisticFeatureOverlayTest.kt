@@ -32,6 +32,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.jsonObject
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -43,6 +44,14 @@ import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 class OptimisticFeatureOverlayTest {
+    private val cores = mutableListOf<NuxieCore>()
+
+    @After
+    fun closeCores() {
+        cores.asReversed().forEach(NuxieCore::stop)
+        cores.clear()
+    }
+
     @Test
     fun overlayWidensProfileUntilEvidenceReconcilesWithoutSnapshotFlicker() = runBlocking {
         val core = core()
@@ -204,7 +213,7 @@ class OptimisticFeatureOverlayTest {
                 purchaseEvidenceStore = store,
                 registerLifecycle = false,
             ),
-        )
+        ).also(cores::add)
 
         identity.setDistinctId("customer-b")
         core.featureInfo.publish(core.stageFeatureUserChange(owner, "customer-b"))
@@ -253,7 +262,7 @@ class OptimisticFeatureOverlayTest {
                 purchaseEvidenceStore = store,
                 registerLifecycle = false,
             ),
-        )
+        ).also(cores::add)
 
         store.upsertProductMapping(
             StoredProductMapping(
@@ -331,7 +340,7 @@ class OptimisticFeatureOverlayTest {
                 purchaseEvidenceStore = store,
                 registerLifecycle = false,
             ),
-        )
+        ).also(cores::add)
         try {
             store.failPinnedEvidenceUpserts = true
             assertTrue(
@@ -431,7 +440,7 @@ class OptimisticFeatureOverlayTest {
                 purchaseEvidenceStore = store,
                 registerLifecycle = false,
             ),
-        )
+        ).also(cores::add)
         core.stop()
 
         store.upsertProductMapping(
@@ -600,14 +609,18 @@ class OptimisticFeatureOverlayTest {
     private fun JsonObject.boolean(key: String): Boolean =
         (this[key] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() ?: false
 
-    private fun core() = NuxieCore(
-        context = RuntimeEnvironment.getApplication(),
-        apiKey = "pk_test_optimistic_projection_${System.nanoTime()}",
-        environment = NuxieEnvironment.DEVELOPMENT,
-        logLevel = LogLevel.NONE,
-        beforeSend = null,
-        overrides = NuxieCore.Overrides(transport = FakeTransport(), registerLifecycle = false),
-    )
+    private fun core(): NuxieCore {
+        val core = NuxieCore(
+            context = RuntimeEnvironment.getApplication(),
+            apiKey = "pk_test_optimistic_projection_${System.nanoTime()}",
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(transport = FakeTransport(), registerLifecycle = false),
+        ).also(cores::add)
+        runBlocking { core.purchases.awaitInitialProjection() }
+        return core
+    }
 
     private fun profile(exportsBalance: Double?) = Json.parseToJsonElement(
         if (exportsBalance == null) {

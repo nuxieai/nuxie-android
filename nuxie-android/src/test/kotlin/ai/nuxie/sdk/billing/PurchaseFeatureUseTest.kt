@@ -28,11 +28,14 @@ import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.double
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
@@ -40,6 +43,18 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 @OptIn(ExperimentalCoroutinesApi::class)
 class PurchaseFeatureUseTest {
+    @get:Rule
+    val temporaryFolder = TemporaryFolder()
+
+    private val cores = mutableListOf<NuxieCore>()
+    private var coreSequence = 0
+
+    @After
+    fun closeCores() {
+        cores.asReversed().forEach(NuxieCore::stop)
+        cores.clear()
+    }
+
     @Test
     fun identityChangeMidFlightCommitsForTheOwnerThenCancelsTheCaller() = runBlocking {
         val fixture = concurrentFixture(firstStatus = 200)
@@ -399,14 +414,27 @@ class PurchaseFeatureUseTest {
         core.stop()
     }
 
-    private fun core(transport: HttpTransport) = NuxieCore(
-        context = RuntimeEnvironment.getApplication(),
-        apiKey = "pk_test_purchase_feature_use",
-        environment = NuxieEnvironment.DEVELOPMENT,
-        logLevel = LogLevel.NONE,
-        beforeSend = null,
-        overrides = NuxieCore.Overrides(transport = transport, registerLifecycle = false),
-    ).also { it.identity.setDistinctId("customer-a") }
+    private fun core(transport: HttpTransport): NuxieCore {
+        val storageDirectory = temporaryFolder.newFolder("core-${++coreSequence}")
+        return NuxieCore(
+            context = RuntimeEnvironment.getApplication(),
+            apiKey = "pk_test_purchase_feature_use",
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(
+                transport = transport,
+                registerLifecycle = false,
+                purchaseEvidenceStore = InMemoryPurchaseEvidenceStore(),
+                eventDatabaseFile = File(storageDirectory, "events.db"),
+                profileCacheDirectory = File(storageDirectory, "profiles"),
+            ),
+        ).also {
+            it.identity.setDistinctId("customer-a")
+            runBlocking { it.purchases.awaitInitialProjection() }
+            cores += it
+        }
+    }
 
     private fun service(
         core: NuxieCore,

@@ -66,6 +66,7 @@ internal class ProfileService(
     private val localeSettings: ProfileLocaleSettings,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val refreshIntervalMillis: Long = REFRESH_INTERVAL_MILLIS,
+    cacheDirectory: File? = null,
 ) {
     class CachedProfile(
         val distinctId: String,
@@ -77,7 +78,8 @@ internal class ProfileService(
 
     // Lock order for nested admission work: identity -> locale -> profile.
     private val lock = Any()
-    private val baseDir = File((context.applicationContext ?: context).cacheDir, "nuxie/profiles")
+    private val baseDir = cacheDirectory
+        ?: File((context.applicationContext ?: context).cacheDir, "nuxie/profiles")
     private var resident: CachedProfile? = null
     @Volatile
     private var nextProfileGeneration = 0L

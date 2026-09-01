@@ -19,11 +19,11 @@ internal class SQLiteEventStore(
     context: Context,
     private val writerDispatcher: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1),
     nowMillis: () -> Long = System::currentTimeMillis,
+    private val databaseFile: File = File(context.filesDir, "nuxie/events.db"),
 ) : EventStore {
     // A legacy store has no proof about its older rows. Capture the conservative
     // origin before any writes, and retain it durably on subsequent opens.
     private val initialCoverageMillis = nowMillis()
-    private val databaseFile = File(context.filesDir, "nuxie/events.db")
     private var connection: SQLiteConnection? = null
     private var closed = false
 
