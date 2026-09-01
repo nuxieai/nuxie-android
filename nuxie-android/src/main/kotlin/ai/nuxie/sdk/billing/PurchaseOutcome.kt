@@ -9,6 +9,22 @@ internal enum class PurchaseOutcomeSource(val wireValue: String) {
     EXTERNAL_DELEGATE("external_delegate"),
 }
 
+/** Stable identity used by the serialized purchase committer. */
+internal sealed interface PurchaseCommitIdentity {
+    data class Evidence(val purchaseToken: String) : PurchaseCommitIdentity
+    data class External(val operationId: String) : PurchaseCommitIdentity
+}
+
+/** Internal, passive test observation of the purchase committer boundary. */
+internal sealed interface PurchaseCommitObservation {
+    data class Committed(val identity: PurchaseCommitIdentity) : PurchaseCommitObservation
+
+    data class Terminal(
+        val outcome: PurchaseOutcome,
+        val terminal: Boolean,
+    ) : PurchaseCommitObservation
+}
+
 /**
  * The single conclusion shape consumed by [PurchaseService]. Store evidence and
  * host declarations deliberately remain different variants: only the former

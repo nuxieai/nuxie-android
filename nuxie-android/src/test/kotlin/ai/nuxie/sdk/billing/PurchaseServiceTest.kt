@@ -429,6 +429,40 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun mixedPendingAndVerifiedUpdatePublishesInReservationOrder() = runTest {
+        val fixture = fixture(this)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+        // One update mixes a PENDING purchase that completes the checkout at
+        // decision time (reserving a publication barrier, the earlier FIFO
+        // position) with a verified purchase whose completion capture stages
+        // a post-capture projection (a later reservation). The drain must
+        // publish in reservation order, or the later mutation waits forever
+        // on the earlier, still-unpublished barrier.
+        withTimeout(10_000) {
+            fixture.service.onPurchasesUpdated(
+                okUpdate(
+                    playPurchase(
+                        "mixed-pending",
+                        state = StoredPurchaseState.PENDING,
+                    ).forCheckout(fixture),
+                    playPurchase("mixed-verified").forCheckout(fixture),
+                ),
+            )
+            assertEquals(PurchaseResult.Pending, checkout.await())
+        }
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
     fun failedDurableRevocationStillNarrowsTheProjectionAndReportsFailure() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()

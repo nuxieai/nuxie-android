@@ -51,7 +51,7 @@
     "journeys/time-window/cross-plane.json": "5896275d61a52cc150fb34eb131331566f810dff621464e9b7b4c53ab94f80e4",
     "journeys/transitions/basic.json": "4460073a4055be574650c503a58dc05ddfa210844a49e0ce2dc4b2c5e9e1b06e",
     "profile/locale-admission.json": "a3df581ff611f480b4e75d194a54a33cb99e8f199f4c1d8df128ea0056a93176",
-    "purchases/outcome-commit.json": "d70a3cd48e4daa39fb4343aac281580845e0bcb3056e9ef49d3ef601c26e68cf",
+    "purchases/outcome-commit.json": "9ba6554f5660d3b5689865d1922818bd4f31483162a02be0054282ccfd521171",
     "segments/seed-mirror/server-mode.json": "fd71fc809795d39f96c5ce186559336ffcb38f881a5ceab835184751c0564c0a"
   }
 }
