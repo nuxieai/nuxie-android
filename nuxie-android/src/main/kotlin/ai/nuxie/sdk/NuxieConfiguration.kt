@@ -2,6 +2,7 @@ package ai.nuxie.sdk
 
 import ai.nuxie.sdk.billing.NuxiePurchaseDelegate
 import ai.nuxie.sdk.billing.PurchaseHandlingMode
+import java.net.URL
 
 /** Configuration captured when [Nuxie.setup] initializes the SDK. */
 class NuxieConfiguration(val apiKey: String) {
@@ -28,6 +29,14 @@ class NuxieConfiguration(val apiKey: String) {
     var purchaseHandlingMode: PurchaseHandlingMode = PurchaseHandlingMode.NUXIE_MANAGED
 
     var purchaseDelegate: NuxiePurchaseDelegate? = null
+
+    /** Explicit test-host overrides. Production integrations should leave these unset. */
+    val testingOverrides: NuxieTestingOverrides = NuxieTestingOverrides()
+}
+
+class NuxieTestingOverrides {
+    /** Overrides the environment's ingest origin for an attended local test host. */
+    var apiEndpoint: URL? = null
 }
 
 enum class NuxieEnvironment {

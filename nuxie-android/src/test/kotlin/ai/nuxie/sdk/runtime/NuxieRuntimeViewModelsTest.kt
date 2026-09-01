@@ -109,11 +109,13 @@ class NuxieRuntimeViewModelsTest {
         override fun stepPlayer(
             playerHandle: Long,
             inputs: List<NativePlayerInput>,
+            pointers: List<NativePlayerPointer>,
             elapsedSeconds: Float,
             correlationId: Long,
         ): NativeCallResult<NativePlayerStepOutcome> {
             record("step")
             assertEquals(listOf(NativePlayerInput(2, "submit", false, 0f)), inputs)
+            assertEquals(emptyList<NativePlayerPointer>(), pointers)
             assertEquals(55L, correlationId)
             return NativeCallResult(0, NativePlayerStepOutcome(true, emptyArray(), emptyArray()))
         }

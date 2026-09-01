@@ -44,6 +44,116 @@ internal class NuxieRuntime(
             .takeUnless { it == 0L }
             ?.let { NuxieRuntimeWindow(it, native) }
 
+    /**
+     * Replace one authored list with freshly projected children and bind the
+     * resulting root before player creation. This is synchronous by design:
+     * presentation invokes it from the already-confined runtime lane.
+     */
+    fun bindViewModelList(
+        file: NuxieRuntimeFile,
+        artboard: NuxieRuntimeArtboard,
+        projection: NuxieViewModelListProjection,
+    ): NuxieRuntimeViewModelState {
+        require(projection.items.map { it.listIndex } == projection.items.indices.toList()) {
+            "Projected view-model list indices must be contiguous and ordered"
+        }
+        require(projection.items.count { it.selected } <= 1) {
+            "Projected view-model list may select at most one item"
+        }
+        val catalog = requireNativeValue(
+            native.viewModelCatalog(file.requireHandle()),
+            "read view-model catalog",
+        ).toViewModelCatalog()
+        val rootSchema = catalog.schemas.singleOrNull {
+            it.name == projection.rootSchemaName
+        } ?: error("Unknown or ambiguous root view-model '${projection.rootSchemaName}'")
+        val itemSchema = catalog.schemas.singleOrNull {
+            it.name == projection.itemSchemaName
+        } ?: error("Unknown or ambiguous item view-model '${projection.itemSchemaName}'")
+        val listProperty = catalog.propertyAtPath(rootSchema.index, projection.listPath)
+        require(listProperty.kind == NuxieViewModelPropertyKind.LIST) {
+            "View-model property '${projection.listPath}' is not a list"
+        }
+        require(listProperty.referencedSchemaIndex == itemSchema.index) {
+            "View-model list '${projection.listPath}' does not contain '${projection.itemSchemaName}'"
+        }
+        projection.selectedItemPath?.let { path ->
+            val selectedProperty = catalog.propertyAtPath(rootSchema.index, path)
+            require(selectedProperty.kind == NuxieViewModelPropertyKind.VIEW_MODEL) {
+                "View-model property '$path' is not a view model"
+            }
+            require(selectedProperty.referencedSchemaIndex == itemSchema.index) {
+                "View-model property '$path' does not reference '${projection.itemSchemaName}'"
+            }
+        }
+
+        val root = requireNativeValue(
+            native.newDefaultViewModel(artboard.requireHandle()),
+            "create default view model",
+        )
+        val children = mutableListOf<Long>()
+        val usedAuthoredInstances = mutableSetOf<Int>()
+        try {
+            projection.items.forEach { item ->
+                val authored = catalog.authoredInstances.firstOrNull {
+                    it.schemaIndex == itemSchema.index &&
+                        it.name == item.authoredInstanceName &&
+                        it.index !in usedAuthoredInstances
+                } ?: error(
+                    "Unknown authored '${projection.itemSchemaName}' instance " +
+                        "'${item.authoredInstanceName}'",
+                )
+                usedAuthoredInstances += authored.index
+                val child = requireNativeValue(
+                    native.newViewModel(file.requireHandle(), itemSchema.index, authored.index),
+                    "create projected item view model",
+                )
+                children += child
+                item.values.forEach { (path, value) ->
+                    val property = catalog.propertyAtPath(itemSchema.index, path)
+                    val write = value.toNativeWrite(path, property.kind)
+                    requireNativeSuccess(
+                        native.mutateViewModel(child, write),
+                        "project live ProductDetails into '$path'",
+                    )
+                }
+                requireNativeSuccess(
+                    native.mutateViewModel(
+                        root,
+                        NativeViewModelWrite(
+                            kind = NuxieViewModelMutationKind.LIST_SET,
+                            path = projection.listPath,
+                            relatedViewModel = child,
+                            index = item.listIndex.toLong(),
+                        ),
+                    ),
+                    "replace projected view-model list item",
+                )
+                if (item.selected && projection.selectedItemPath != null) {
+                    requireNativeSuccess(
+                        native.mutateViewModel(
+                            root,
+                            NativeViewModelWrite(
+                                kind = NuxieViewModelMutationKind.SET_VIEW_MODEL,
+                                path = projection.selectedItemPath,
+                                relatedViewModel = child,
+                            ),
+                        ),
+                        "replace selected projected view model",
+                    )
+                }
+            }
+            requireNativeSuccess(
+                native.bindViewModel(artboard.requireHandle(), root),
+                "bind projected default view model",
+            )
+            return NuxieRuntimeViewModelState(root, children, native)
+        } catch (error: Throwable) {
+            freeViewModelHandles(root, children, native)
+            throw error
+        }
+    }
+
     companion object {
         val shared = NuxieRuntime()
     }
@@ -83,6 +193,8 @@ internal class NuxieRuntimeFile(
     }
 
     fun close() = owned.close()
+
+    internal fun requireHandle(): Long = owned.require()
 }
 
 /**
@@ -171,6 +283,72 @@ internal class NuxieRuntimeArtboard internal constructor(
         }
         owned.close()
     }
+
+    internal fun requireHandle(): Long = owned.require()
+}
+
+internal class NuxieRuntimeViewModelState(
+    private var root: Long?,
+    children: List<Long>,
+    private val native: NuxieTypedRuntimeNative,
+) {
+    private val children = children.toMutableList()
+
+    fun close() {
+        val rootHandle = root ?: return
+        root = null
+        freeViewModelHandles(rootHandle, children, native)
+        children.clear()
+    }
+}
+
+private fun NuxieViewModelScalarValue.toNativeWrite(
+    path: String,
+    propertyKind: NuxieViewModelPropertyKind,
+): NativeViewModelWrite = when (this) {
+    is NuxieViewModelScalarValue.StringValue -> {
+        require(propertyKind == NuxieViewModelPropertyKind.STRING) {
+            "View-model property '$path' is $propertyKind, not STRING"
+        }
+        NativeViewModelWrite(
+            kind = NuxieViewModelMutationKind.SET_STRING,
+            path = path,
+            bytesValue = value.encodeToByteArray(),
+        )
+    }
+    is NuxieViewModelScalarValue.NumberValue -> {
+        require(propertyKind == NuxieViewModelPropertyKind.NUMBER) {
+            "View-model property '$path' is $propertyKind, not NUMBER"
+        }
+        require(value.isFinite()) { "View-model number must be finite" }
+        val nativeValue = value.toFloat()
+        require(nativeValue.isFinite()) { "View-model number is outside the native Float range" }
+        NativeViewModelWrite(
+            kind = NuxieViewModelMutationKind.SET_NUMBER,
+            path = path,
+            numberValue = nativeValue,
+        )
+    }
+    is NuxieViewModelScalarValue.BooleanValue -> {
+        require(propertyKind == NuxieViewModelPropertyKind.BOOLEAN) {
+            "View-model property '$path' is $propertyKind, not BOOLEAN"
+        }
+        NativeViewModelWrite(
+            kind = NuxieViewModelMutationKind.SET_BOOLEAN,
+            path = path,
+            boolValue = value,
+        )
+    }
+}
+
+private fun freeViewModelHandles(
+    root: Long,
+    children: List<Long>,
+    native: NuxieTypedRuntimeNative,
+) {
+    // Drop the graph owner before the handles it references.
+    native.freeViewModel(root)
+    children.asReversed().forEach(native::freeViewModel)
 }
 
 /**
@@ -185,6 +363,33 @@ internal class NuxieRuntimePlayer internal constructor(
 
     fun step(elapsedSeconds: Double): Int =
         native.stepPlayerFrame(owned.require(), elapsedSeconds)
+
+    /**
+     * Advance one configured ProductHost frame and copy every emitted event
+     * before the native result is released. Presentation uses this path so a
+     * signed screen action can reach the SDK's host-owned commerce executor.
+     */
+    fun stepWithEvents(
+        elapsedSeconds: Double,
+        pointers: List<NuxiePlayerPointerEvent> = emptyList(),
+    ): NuxiePlayerStepOutcome {
+        require(elapsedSeconds.isFinite() && elapsedSeconds >= 0.0) {
+            "Player elapsed seconds must be finite and nonnegative"
+        }
+        val nativeElapsed = elapsedSeconds.toFloat()
+        require(nativeElapsed.isFinite()) { "Player elapsed seconds exceed the native Float range" }
+        val encodedPointers = encodePlayerPointers(pointers)
+        return requireNativeValue(
+            native.stepPlayer(
+                playerHandle = owned.require(),
+                inputs = emptyList(),
+                pointers = encodedPointers,
+                elapsedSeconds = nativeElapsed,
+                correlationId = 0L,
+            ),
+            "step configured player",
+        ).toPlayerStepOutcome()
+    }
 
     fun close() = owned.close()
 

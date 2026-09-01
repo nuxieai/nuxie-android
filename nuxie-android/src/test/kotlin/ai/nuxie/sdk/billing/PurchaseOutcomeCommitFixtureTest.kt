@@ -22,6 +22,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
@@ -964,6 +965,16 @@ class PurchaseOutcomeCommitFixtureTest {
                                         "unlimited" to JsonPrimitive(false),
                                     ),
                                 ),
+                            ),
+                        ),
+                        "catalog_product" to JsonObject(
+                            mapOf(
+                                "id" to JsonPrimitive("fixture-product"),
+                                "store_product_id" to JsonPrimitive("fixture-product"),
+                                "base_plan_id" to JsonNull,
+                                "purchase_option_id" to JsonNull,
+                                "offer_id" to JsonNull,
+                                "store_product_type" to JsonPrimitive("nonConsumable"),
                             ),
                         ),
                     ),

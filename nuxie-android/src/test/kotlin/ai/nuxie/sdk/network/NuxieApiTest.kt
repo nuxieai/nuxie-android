@@ -6,6 +6,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.URL
 
 class NuxieApiTest {
     private class RecordingTransport(private val statusCode: Int = 200) : HttpTransport {
@@ -47,6 +48,34 @@ class NuxieApiTest {
         val transport = RecordingTransport()
         NuxieApi("pk_live", NuxieEnvironment.PRODUCTION, transport).postBatch(listOf("{}"))
         assertEquals("https://i.nuxie.ai/batch", transport.requests.single().url.toString())
+    }
+
+    @Test
+    fun explicitTestEndpointOverridesTheEnvironmentHost() {
+        val transport = RecordingTransport()
+        NuxieApi(
+            "pk_test",
+            NuxieEnvironment.PRODUCTION,
+            transport,
+            URL("http://127.0.0.1:11394/local/"),
+        ).postBatch(listOf("{}"))
+
+        assertEquals(
+            "http://127.0.0.1:11394/local/batch",
+            transport.requests.single().url.toString(),
+        )
+    }
+
+    @Test
+    fun explicitTestEndpointRejectsNonHttpSchemes() {
+        assertThrows(IllegalArgumentException::class.java) {
+            NuxieApi(
+                "pk_test",
+                NuxieEnvironment.DEVELOPMENT,
+                RecordingTransport(),
+                URL("file:///tmp/nuxie"),
+            )
+        }
     }
 
     @Test
@@ -112,18 +141,18 @@ class NuxieApiTest {
                 this.request = request
                 return HttpTransport.Response(
                     200,
-                    """{"success":true,"customer_id":"customer-1","features":[]}""".encodeToByteArray(),
+                    """{"success":true,"customer_id":"customer-1","features":[],"catalog_product":{"id":"product-pro","store_product_id":"pro","base_plan_id":"annual","purchase_option_id":null,"offer_id":"launch","store_product_type":"subscription"}}""".encodeToByteArray(),
                 )
             }
         }
 
         val response = NuxieApi("pk_test_key", NuxieEnvironment.DEVELOPMENT, transport).postPurchase(
             NuxieApi.PlayPurchaseReport(
-                packageName = "com.example.app",
                 productId = "pro",
                 purchaseToken = "token-1",
                 basePlanId = "annual",
                 offerId = "launch",
+                productType = "subscription",
                 obfuscatedAccountId = "account-hash",
                 distinctId = "customer-1",
             ),
@@ -132,8 +161,10 @@ class NuxieApiTest {
         assertEquals("https://dev-i.nuxie.ai/purchase", transport.request.url.toString())
         assertTrue(response.success)
         assertEquals("customer-1", response.customerId)
+        assertEquals("product-pro", response.catalogProduct?.productId)
+        assertEquals("annual", response.catalogProduct?.basePlanId)
         assertEquals(
-            """{"apiKey":"pk_test_key","type":"playstore","purchase_token":"token-1","product_id":"pro","package_name":"com.example.app","base_plan_id":"annual","offer_id":"launch","obfuscated_account_id":"account-hash","distinct_id":"customer-1"}""",
+            """{"apiKey":"pk_test_key","type":"playstore","purchase_token":"token-1","product_id":"pro","base_plan_id":"annual","offer_id":"launch","product_type":"subscription","obfuscated_account_id":"account-hash","distinct_id":"customer-1"}""",
             transport.request.body.decodeToString(),
         )
     }
@@ -153,7 +184,6 @@ class NuxieApiTest {
 
         val response = NuxieApi("pk_test_key", NuxieEnvironment.DEVELOPMENT, transport).postPurchase(
             NuxieApi.PlayPurchaseReport(
-                packageName = "com.example.app",
                 productId = "pro",
                 purchaseToken = "token-1",
                 basePlanId = null,
@@ -165,24 +195,26 @@ class NuxieApiTest {
 
         assertFalse(response.success)
         assertEquals(
-            """{"apiKey":"pk_test_key","type":"playstore","purchase_token":"token-1","product_id":"pro","package_name":"com.example.app","distinct_id":"customer-1"}""",
+            """{"apiKey":"pk_test_key","type":"playstore","purchase_token":"token-1","product_id":"pro","distinct_id":"customer-1"}""",
             transport.request.body.decodeToString(),
         )
     }
 
     @Test
-    fun playPurchaseOmitsBlankProductAndPackageIdentifiersTokenFirst() {
+    fun playPurchaseOmitsBlankProductIdentifierTokenFirst() {
         val transport = object : HttpTransport {
             lateinit var request: HttpTransport.Request
             override fun execute(request: HttpTransport.Request): HttpTransport.Response {
                 this.request = request
-                return HttpTransport.Response(200, """{"success":true}""".encodeToByteArray())
+                return HttpTransport.Response(
+                    200,
+                    """{"success":true,"catalog_product":{"id":"product-pro","store_product_id":"pro","base_plan_id":null,"purchase_option_id":null,"offer_id":null,"store_product_type":"nonConsumable"}}""".encodeToByteArray(),
+                )
             }
         }
 
         val response = NuxieApi("pk_test_key", NuxieEnvironment.DEVELOPMENT, transport).postPurchase(
             NuxieApi.PlayPurchaseReport(
-                packageName = null,
                 productId = null,
                 purchaseToken = "token-1",
                 basePlanId = null,
@@ -228,8 +260,10 @@ class NuxieApiTest {
                     packageName = "com.example.app",
                     productId = "credit-pack",
                     purchaseToken = "token-1",
-                    basePlanId = "annual",
-                    offerId = "launch",
+                    basePlanId = null,
+                    purchaseOptionId = "standard",
+                    offerId = null,
+                    productType = "one_time",
                     obfuscatedAccountId = "account-hash",
                     eventId = "purchase-use:stable",
                 ),
@@ -242,7 +276,7 @@ class NuxieApiTest {
         assertEquals(2.5, response.requiredBalance, 0.0)
         assertEquals(3.5, response.balance!!, 0.0)
         assertEquals(
-            """{"apiKey":"pk_test_key","customerId":"customer-1","featureId":"credits","requiredBalance":2.5,"eventData":{"value":2.5,"properties":{"source":"export"}},"entityId":"workspace-1","purchase":{"type":"playstore","purchase_token":"token-1","package_name":"com.example.app","product_id":"credit-pack","base_plan_id":"annual","offer_id":"launch","obfuscated_account_id":"account-hash","event_id":"purchase-use:stable"}}""",
+            """{"apiKey":"pk_test_key","customerId":"customer-1","featureId":"credits","requiredBalance":2.5,"eventData":{"value":2.5,"properties":{"source":"export"}},"entityId":"workspace-1","purchase":{"type":"playstore","purchase_token":"token-1","package_name":"com.example.app","product_id":"credit-pack","purchase_option_id":"standard","product_type":"one_time","obfuscated_account_id":"account-hash","event_id":"purchase-use:stable"}}""",
             transport.request.body.decodeToString(),
         )
     }

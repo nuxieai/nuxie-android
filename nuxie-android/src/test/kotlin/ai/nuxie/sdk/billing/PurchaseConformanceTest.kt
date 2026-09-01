@@ -64,7 +64,7 @@ class PurchaseConformanceTest {
                         1 -> HttpTransport.Response(200, "not-json".encodeToByteArray())
                         else -> HttpTransport.Response(
                             200,
-                            """{"success":true,"customer_id":"server-customer","features":[]}"""
+                            """{"success":true,"customer_id":"server-customer","features":[],"catalog_product":{"id":"fixture-product","store_product_id":"fixture-play-product","base_plan_id":null,"purchase_option_id":null,"offer_id":null,"store_product_type":"nonConsumable"}}"""
                                 .encodeToByteArray(),
                         )
                     }

@@ -11,12 +11,38 @@ internal sealed interface NuxiePlayerInput {
     data class Trigger(override val name: String) : NuxiePlayerInput
 }
 
+/** Exact pointer phases accepted by one atomic ProductHost player step. */
+internal enum class NuxiePlayerPointerKind(val nativeValue: Int) {
+    DOWN(0),
+    MOVE(1),
+    UP(2),
+    EXIT(3),
+}
+
+/** One pointer sample already projected into authored artboard coordinates. */
+internal data class NuxiePlayerPointerEvent(
+    val kind: NuxiePlayerPointerKind,
+    val x: Float,
+    val y: Float,
+    val pointerId: Int,
+    val timestampSeconds: Float,
+)
+
 /** Fixed construction shape for `NuxPlayerInputChange`. */
 internal data class NativePlayerInput(
     val kind: Int,
     val name: String,
     val boolValue: Boolean,
     val numberValue: Float,
+)
+
+/** Fixed construction shape for `NuxPlayerPointerEvent`. */
+internal data class NativePlayerPointer(
+    val kind: Int,
+    val x: Float,
+    val y: Float,
+    val pointerId: Int,
+    val timestampSeconds: Float,
 )
 
 internal fun encodePlayerInputs(inputs: List<NuxiePlayerInput>): List<NativePlayerInput> =
@@ -52,6 +78,24 @@ internal fun encodePlayerInputs(inputs: List<NuxiePlayerInput>): List<NativePlay
             )
         }
     }
+
+internal fun encodePlayerPointers(
+    pointers: List<NuxiePlayerPointerEvent>,
+): List<NativePlayerPointer> = pointers.map { pointer ->
+    require(pointer.x.isFinite() && pointer.y.isFinite()) {
+        "Player pointer coordinates must be finite"
+    }
+    require(pointer.timestampSeconds.isFinite() && pointer.timestampSeconds >= 0f) {
+        "Player pointer timestamp must be finite and nonnegative"
+    }
+    NativePlayerPointer(
+        kind = pointer.kind.nativeValue,
+        x = pointer.x,
+        y = pointer.y,
+        pointerId = pointer.pointerId,
+        timestampSeconds = pointer.timestampSeconds,
+    )
+}
 
 internal sealed interface NuxieRuntimeEventPropertyValue {
     data class Number(val value: Float) : NuxieRuntimeEventPropertyValue

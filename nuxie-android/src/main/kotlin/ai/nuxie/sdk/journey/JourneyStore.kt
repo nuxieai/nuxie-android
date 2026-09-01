@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.journey
 
+import ai.nuxie.sdk.JourneyExitReason
 import java.io.File
 import java.security.MessageDigest
 import kotlinx.serialization.json.Json
@@ -130,6 +131,8 @@ internal class JourneyStore(
             isGhost = value["is_ghost"]?.let { (it as? JsonPrimitive)?.content == "true" } ?: false,
             convertedAtMillis = value.long("converted_at"),
             terminalReason = value.string("terminal_reason"),
+            terminalTriggerExitReason = value.string("terminal_trigger_exit_reason")
+                ?.let { reason -> runCatching { JourneyExitReason.valueOf(reason) }.getOrNull() },
             terminalPresentationOutcome = value.string("terminal_presentation_outcome")
                 ?.let(JourneyRunPresentationOutcome::valueOf),
             terminalInitiatingDistinctId = value.string("terminal_initiating_distinct_id"),
@@ -201,6 +204,10 @@ internal class JourneyStore(
         put("is_ghost", JsonPrimitive(run.isGhost))
         put("converted_at", run.convertedAtMillis?.let(::JsonPrimitive) ?: JsonNull)
         put("terminal_reason", run.terminalReason?.let(::JsonPrimitive) ?: JsonNull)
+        put(
+            "terminal_trigger_exit_reason",
+            run.terminalTriggerExitReason?.name?.let(::JsonPrimitive) ?: JsonNull,
+        )
         put(
             "terminal_presentation_outcome",
             run.terminalPresentationOutcome?.name?.let(::JsonPrimitive) ?: JsonNull,

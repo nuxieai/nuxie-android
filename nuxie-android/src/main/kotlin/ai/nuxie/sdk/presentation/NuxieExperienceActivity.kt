@@ -1,6 +1,9 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.JourneyExitReason
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
+import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
+import ai.nuxie.sdk.billing.ExperiencePurchaseProgramHost
 import android.app.Activity
 import android.os.Bundle
 import android.util.Log
@@ -44,7 +47,10 @@ internal class ScreenCloseState(
  * Process-death policy (decision 10): a cold-recreated instance (no live
  * SDK state behind it) finishes immediately and never re-presents.
  */
-internal class NuxieExperienceActivity : Activity(), PresentationActivityHandle {
+internal class NuxieExperienceActivity :
+    Activity(),
+    PresentationActivityHandle,
+    ExperiencePurchaseProgramHost {
     private var host: ExperienceSurfaceHost? = null
     private var lane: NuxieRuntimeLane? = null
     private var presentationId: String? = null
@@ -94,6 +100,7 @@ internal class NuxieExperienceActivity : Activity(), PresentationActivityHandle 
             context = this,
             lane = lane,
             clearColor = prepared.clearColor,
+            artboardSize = prepared.artboardSize,
             listener = object : ExperienceSurfaceHost.Listener {
                 override fun onFirstFrame() {
                     PresentationRegistry.reportFirstFrame(presentationId)
@@ -101,6 +108,10 @@ internal class NuxieExperienceActivity : Activity(), PresentationActivityHandle 
 
                 override fun onFailure(error: ExperiencePresentationException) {
                     fail(error)
+                }
+
+                override fun onRuntimeEvent(event: NuxieRuntimeEvent) {
+                    prepared.handleRuntimeEvent(this@NuxieExperienceActivity, event)
                 }
             },
         )
@@ -138,6 +149,14 @@ internal class NuxieExperienceActivity : Activity(), PresentationActivityHandle 
 
     override fun screenCloseReason(): CloseReason? = screenClose.reason
 
+    override fun dismissFromAuthenticatedProgram() {
+        finishTerminal(CloseReason.UserDismissed)
+    }
+
+    override fun exitFromAuthenticatedProgram(reason: JourneyExitReason) {
+        finishTerminal(CloseReason.AuthenticatedExit(reason))
+    }
+
     override fun finishAfterServiceClose() {
         runOnUiThread { finish() }
     }
@@ -173,6 +192,7 @@ internal class NuxieExperienceActivity : Activity(), PresentationActivityHandle 
             artboardName = prepared.artboardName,
             descriptor = prepared.descriptor,
             artifactsByKey = prepared.artifactsByKey,
+            viewModelProjection = prepared.viewModelProjection,
         )
     }
 

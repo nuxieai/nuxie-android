@@ -1,11 +1,17 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.ExperienceRef
+import ai.nuxie.sdk.JourneyExitReason
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.experiences.AcquiredRelease
 import ai.nuxie.sdk.experiences.AuthenticatedRelease
 import ai.nuxie.sdk.experiences.Delivery
 import ai.nuxie.sdk.experiences.ReleaseArtifactAcquirer
+import ai.nuxie.sdk.billing.ExperiencePurchasePreparer
+import ai.nuxie.sdk.billing.ExperiencePurchaseSession
+import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
+import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import java.io.File
@@ -47,6 +53,7 @@ internal sealed interface CloseReason {
     data object GoalMet : CloseReason
     data object PurchaseCompleted : CloseReason
     data object Timeout : CloseReason
+    data class AuthenticatedExit(val exitReason: JourneyExitReason) : CloseReason
     data class Error(val cause: Throwable) : CloseReason
 }
 
@@ -79,9 +86,18 @@ internal data class PreparedPresentation(
     val artboardName: String?,
     val clearColor: Int,
     val shell: PresentationShell,
+    val screenId: String? = null,
     val descriptor: JsonObject? = null,
     val artifactsByKey: Map<String, File> = emptyMap(),
-)
+    val artboardSize: ExperienceArtboardSize? = null,
+    val commerce: ExperiencePurchaseSession? = null,
+    val viewModelProjection: NuxieViewModelListProjection? = null,
+) {
+    /** Deliver only runtime events emitted by this authenticated presentation. */
+    fun handleRuntimeEvent(activity: Activity, event: NuxieRuntimeEvent) {
+        screenId?.let { commerce?.handle(activity, it, event) }
+    }
+}
 
 internal sealed interface PresentationShell {
     val dismissible: Boolean
@@ -263,6 +279,7 @@ internal class ExperiencePresentationService(
     private val scope: CoroutineScope,
     private val runtimeAvailable: () -> Boolean,
     private val launch: (String) -> Unit,
+    private val commerce: ExperiencePurchasePreparer = ExperiencePurchasePreparer.NONE,
     private val transitionOutcome: suspend (PresentationOutcome) -> Boolean = { true },
     private val reportOutcome: suspend (PresentationOutcome) -> Unit = {},
     private val firstFrameTimeoutMillis: Long = FIRST_FRAME_TIMEOUT_MILLIS,
@@ -275,6 +292,7 @@ internal class ExperiencePresentationService(
         emit: (String, Map<String, Any?>, String?) -> Unit,
         scope: CoroutineScope,
         runtimeAvailable: () -> Boolean,
+        commerce: ExperiencePurchasePreparer = ExperiencePurchasePreparer.NONE,
         transitionOutcome: suspend (PresentationOutcome) -> Boolean = { true },
         reportOutcome: suspend (PresentationOutcome) -> Unit = {},
     ) : this(
@@ -284,6 +302,7 @@ internal class ExperiencePresentationService(
         scope = scope,
         runtimeAvailable = runtimeAvailable,
         launch = AndroidPresentationLauncher(context.applicationContext ?: context),
+        commerce = commerce,
         transitionOutcome = transitionOutcome,
         reportOutcome = reportOutcome,
         firstFrameTimeoutMillis = FIRST_FRAME_TIMEOUT_MILLIS,
@@ -293,6 +312,7 @@ internal class ExperiencePresentationService(
         val id: String,
         val ref: ExperienceRef,
         val acquired: AcquiredRelease,
+        val commerce: ExperiencePurchaseSession?,
         val ownerDistinctId: String?,
         val firstFrame: CompletableDeferred<ExperienceRef>,
         val closed: AtomicBoolean = AtomicBoolean(false),
@@ -373,6 +393,47 @@ internal class ExperiencePresentationService(
                     )
                 }
                 val identity = admitted.release.identity
+                var purchasePrepared = false
+                val purchaseSession = try {
+                    try {
+                        commerce.prepare(
+                            admitted.release,
+                            journeyId,
+                            request.ownerDistinctId,
+                        ).also { purchasePrepared = true }
+                    } catch (error: Throwable) {
+                        if (error is CancellationException) throw error
+                        throw ExperiencePresentationException(
+                            ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                            "Experience commerce preparation failed: " +
+                                (error.message ?: "unknown error"),
+                            error,
+                        )
+                    }
+                } finally {
+                    // Commerce preparation is suspendable. Cancellation must
+                    // not strand the release lease acquired immediately
+                    // before it.
+                    if (!purchasePrepared) acquired.close()
+                }
+                val screenId = admitted.release.defaultScreenId()
+                val viewModelProjection = try {
+                    GooglePlayProductViewModelProjection.prepare(
+                        descriptor = admitted.release.descriptor,
+                        products = purchaseSession?.resolvedProducts().orEmpty(),
+                        screenId = screenId,
+                    )
+                } catch (error: Throwable) {
+                    purchaseSession?.retire()
+                    acquired.close()
+                    if (error is CancellationException) throw error
+                    throw ExperiencePresentationException(
+                        ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                        "Experience commerce display preparation failed: " +
+                            (error.message ?: "unknown error"),
+                        error,
+                    )
+                }
                 val ref = ExperienceRef(
                     identity.experienceId,
                     identity.experienceVersionId,
@@ -383,6 +444,7 @@ internal class ExperiencePresentationService(
                     id,
                     ref,
                     acquired,
+                    purchaseSession,
                     request.ownerDistinctId,
                     CompletableDeferred(),
                 )
@@ -399,10 +461,18 @@ internal class ExperiencePresentationService(
                             content = PreparedPresentation(
                                 rivFile = acquired.rivFile,
                                 artboardName = admitted.release.defaultArtboardName(),
+                                screenId = if (purchaseSession == null) {
+                                    null
+                                } else {
+                                    screenId
+                                },
                                 clearColor = admitted.release.presentationClearColor(),
                                 shell = admitted.release.presentationShell(),
                                 descriptor = admitted.release.descriptor,
                                 artifactsByKey = acquired.artifactsByKey,
+                                artboardSize = admitted.release.defaultArtboardSize(),
+                                commerce = purchaseSession,
+                                viewModelProjection = viewModelProjection,
                             ),
                             onFirstFrame = { firstFrame(pending) },
                             onFailure = { error -> failed(pending, error) },
@@ -427,6 +497,7 @@ internal class ExperiencePresentationService(
                     }
                 }
                 if (!launched) {
+                    purchaseSession?.retire()
                     acquired.close()
                     throw supersededByIdentityTransition()
                 }
@@ -538,6 +609,7 @@ internal class ExperiencePresentationService(
     private fun failed(active: ActivePresentation, error: Throwable) {
         if (!active.closed.compareAndSet(false, true)) return
         clearCurrent(active)
+        active.commerce?.retire()
         active.acquired.close()
         active.finished.complete(Unit)
         val typed = if (error is ExperiencePresentationException) error else {
@@ -554,6 +626,7 @@ internal class ExperiencePresentationService(
     private fun ended(active: ActivePresentation, reason: CloseReason) {
         if (!active.closed.compareAndSet(false, true)) return
         clearCurrent(active)
+        active.commerce?.retire()
         active.acquired.close()
         if (!active.firstFrame.isCompleted) {
             active.firstFrame.completeExceptionally(
@@ -618,6 +691,7 @@ internal class ExperiencePresentationService(
             CloseReason.HostDismissed -> properties["reason"] = "host"
             CloseReason.IdentityChanged -> return
             CloseReason.GoalMet -> properties["reason"] = "goal_met"
+            is CloseReason.AuthenticatedExit -> return
             else -> Unit
         }
         val name = when (reason) {
@@ -629,6 +703,7 @@ internal class ExperiencePresentationService(
                 SystemEventNames.EXPERIENCE_PURCHASED
             }
             CloseReason.Timeout -> SystemEventNames.EXPERIENCE_TIMED_OUT
+            is CloseReason.AuthenticatedExit -> return
             is CloseReason.Error -> {
                 properties["error_message"] = reason.cause.message
                 SystemEventNames.EXPERIENCE_ERRORED
@@ -654,6 +729,24 @@ private fun AuthenticatedRelease.defaultArtboardName(): String? {
     val firstScreen = (render["screens"] as? JsonArray)?.firstOrNull() as? JsonObject
     return (firstScreen?.get("artboardName") as? JsonPrimitive)
         ?.takeIf { it.isString }?.content
+}
+
+private fun AuthenticatedRelease.defaultScreenId(): String? {
+    val render = descriptor["render"] as? JsonObject ?: return null
+    val firstScreen = (render["screens"] as? JsonArray)?.firstOrNull() as? JsonObject ?: return null
+    return (firstScreen["id"] as? JsonPrimitive)
+        ?.takeIf { it.isString }
+        ?.content
+        ?.takeIf(String::isNotBlank)
+}
+
+private fun AuthenticatedRelease.defaultArtboardSize(): ExperienceArtboardSize? {
+    val render = descriptor["render"] as? JsonObject ?: return null
+    val firstScreen = (render["screens"] as? JsonArray)?.firstOrNull() as? JsonObject
+        ?: return null
+    val width = firstScreen.float("width") ?: return null
+    val height = firstScreen.float("height") ?: return null
+    return runCatching { ExperienceArtboardSize(width, height) }.getOrNull()
 }
 
 private fun AuthenticatedRelease.presentationClearColor(): Int {

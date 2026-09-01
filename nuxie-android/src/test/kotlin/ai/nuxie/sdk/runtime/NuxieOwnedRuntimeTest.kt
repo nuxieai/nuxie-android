@@ -111,6 +111,47 @@ class NuxieOwnedRuntimeTest {
     }
 
     @Test
+    fun `configured player step copies emitted runtime events`() {
+        val native = RecordingNative()
+        val runtime = NuxieRuntime(native)
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(1, 1))
+        val file = checkNotNull(runtime.importFile(renderer, byteArrayOf(1)))
+        val artboard = checkNotNull(file.newArtboard())
+        val player = checkNotNull(artboard.newPlayer())
+
+        val outcome = player.stepWithEvents(
+            elapsedSeconds = 0.016,
+            pointers = listOf(
+                NuxiePlayerPointerEvent(
+                    kind = NuxiePlayerPointerKind.DOWN,
+                    x = 12f,
+                    y = 34f,
+                    pointerId = 7,
+                    timestampSeconds = 1.25f,
+                ),
+                NuxiePlayerPointerEvent(
+                    kind = NuxiePlayerPointerKind.UP,
+                    x = 12f,
+                    y = 34f,
+                    pointerId = 7,
+                    timestampSeconds = 1.5f,
+                ),
+            ),
+        )
+
+        assertTrue(outcome.keepGoing)
+        assertEquals(listOf("checkout"), outcome.events.map { it.name })
+        assertEquals(listOf(0.016f), native.typedFrameSteps)
+        assertEquals(
+            listOf(
+                NativePlayerPointer(0, 12f, 34f, 7, 1.25f),
+                NativePlayerPointer(2, 12f, 34f, 7, 1.5f),
+            ),
+            native.typedPointers,
+        )
+    }
+
+    @Test
     fun `renderer and window free once and reject rendering after close`() {
         val native = RecordingNative()
         val runtime = NuxieRuntime(native)
@@ -175,6 +216,8 @@ class NuxieOwnedRuntimeTest {
         val freedArtboards = mutableListOf<Long>()
         val freedPlayers = mutableListOf<Long>()
         val frameSteps = mutableListOf<Double>()
+        val typedFrameSteps = mutableListOf<Float>()
+        var typedPointers = emptyList<NativePlayerPointer>()
         val freedRenderers = mutableListOf<Long>()
         val releasedWindows = mutableListOf<Long>()
         var defaultArtboardCreations = 0
@@ -226,6 +269,35 @@ class NuxieOwnedRuntimeTest {
         override fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int {
             frameSteps += elapsedSeconds
             return 7
+        }
+
+        override fun stepPlayer(
+            playerHandle: Long,
+            inputs: List<NativePlayerInput>,
+            pointers: List<NativePlayerPointer>,
+            elapsedSeconds: Float,
+            correlationId: Long,
+        ): NativeCallResult<NativePlayerStepOutcome> {
+            typedFrameSteps += elapsedSeconds
+            typedPointers = pointers
+            return NativeCallResult(
+                status = 0,
+                value = NativePlayerStepOutcome(
+                    keepGoing = true,
+                    events = arrayOf(
+                        NativeRuntimeEvent(
+                            localIndex = 0,
+                            coreType = 0,
+                            name = "checkout",
+                            url = "",
+                            target = "",
+                            delay = 0f,
+                            properties = emptyArray(),
+                        ),
+                    ),
+                    viewModelChanges = emptyArray(),
+                ),
+            )
         }
 
         override fun freePlayer(handle: Long) {

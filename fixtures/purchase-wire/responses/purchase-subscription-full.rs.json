@@ -5,6 +5,14 @@
   "endpoint": "/purchase",
   "statusCode": 200,
   "body": {
+    "catalog_product": {
+      "base_plan_id": "annual",
+      "id": "product-commerce-subscription",
+      "offer_id": "introductory",
+      "purchase_option_id": null,
+      "store_product_id": "fixture-subscription",
+      "store_product_type": "subscription"
+    },
     "customer_id": "273eac55-5075-5ef4-963c-de2a9c53d586",
     "features": [
       {
@@ -18,5 +26,5 @@
     ],
     "success": true
   },
-  "bodyText": "{\"customer_id\":\"273eac55-5075-5ef4-963c-de2a9c53d586\",\"features\":[{\"allowed\":true,\"balance\":null,\"ext_id\":\"fixture-subscription-access\",\"id\":\"feature-commerce-subscription\",\"type\":\"boolean\",\"unlimited\":false}],\"success\":true}"
+  "bodyText": "{\"catalog_product\":{\"base_plan_id\":\"annual\",\"id\":\"product-commerce-subscription\",\"offer_id\":\"introductory\",\"purchase_option_id\":null,\"store_product_id\":\"fixture-subscription\",\"store_product_type\":\"subscription\"},\"customer_id\":\"273eac55-5075-5ef4-963c-de2a9c53d586\",\"features\":[{\"allowed\":true,\"balance\":null,\"ext_id\":\"fixture-subscription-access\",\"id\":\"feature-commerce-subscription\",\"type\":\"boolean\",\"unlimited\":false}],\"success\":true}"
 }

@@ -8,16 +8,21 @@ import ai.nuxie.sdk.runtime.NuxieRuntimeArtboard
 import ai.nuxie.sdk.runtime.NuxieRuntimeFile
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import ai.nuxie.sdk.runtime.NuxieRuntimePlayer
+import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
 import ai.nuxie.sdk.runtime.NuxieRuntimeWindow
+import ai.nuxie.sdk.runtime.NuxieRuntimeViewModelState
+import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
 import android.content.Context
 import android.graphics.PixelFormat
 import android.util.Log
 import android.view.Choreographer
+import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.serialization.json.JsonObject
 
 /**
@@ -36,11 +41,13 @@ internal class ExperienceSurfaceHost(
     private val lane: NuxieRuntimeLane,
     private val clearColor: Int = CLEAR_COLOR_OPAQUE_BLACK,
     private val listener: Listener? = null,
+    artboardSize: ExperienceArtboardSize? = null,
     private val runtime: NuxieRuntime = NuxieRuntime.shared,
 ) : SurfaceView(context), SurfaceHolder.Callback, Choreographer.FrameCallback {
     interface Listener {
         fun onFirstFrame()
         fun onFailure(error: ExperiencePresentationException)
+        fun onRuntimeEvent(event: NuxieRuntimeEvent) {}
     }
 
     /** Owned runtime wrappers; created, touched, and closed only on the runtime lane. */
@@ -49,6 +56,7 @@ internal class ExperienceSurfaceHost(
     private var player: NuxieRuntimePlayer? = null
     private var file: NuxieRuntimeFile? = null
     private var artboard: NuxieRuntimeArtboard? = null
+    private var viewModelState: NuxieRuntimeViewModelState? = null
 
     /**
      * Lane-confined surface attachment. Jobs already queued when the
@@ -60,7 +68,9 @@ internal class ExperienceSurfaceHost(
 
     @Volatile
     private var running = false
+    private val released = AtomicBoolean(false)
     private var lastFrameNanos = 0L
+    private val pointerInput = ExperienceRuntimePointerInput(artboardSize)
 
     init {
         holder.setFormat(PixelFormat.TRANSLUCENT)
@@ -77,6 +87,7 @@ internal class ExperienceSurfaceHost(
         artboardName: String?,
         descriptor: JsonObject? = null,
         artifactsByKey: Map<String, File> = emptyMap(),
+        viewModelProjection: NuxieViewModelListProjection? = null,
         onLoaded: ((Boolean) -> Unit)? = null,
     ) {
         lane.enqueue {
@@ -150,9 +161,17 @@ internal class ExperienceSurfaceHost(
                 return@enqueue
             }
             try {
-                descriptor?.let {
-                    ExperienceViewModelBinding.defaultSchemaName(it, artboardName)
-                }?.let(loadedArtboard::bindDefaultViewModel)
+                if (viewModelProjection != null) {
+                    viewModelState = runtime.bindViewModelList(
+                        file = loadedFile,
+                        artboard = loadedArtboard,
+                        projection = viewModelProjection,
+                    )
+                } else {
+                    descriptor?.let {
+                        ExperienceViewModelBinding.defaultSchemaName(it, artboardName)
+                    }?.let(loadedArtboard::bindDefaultViewModel)
+                }
             } catch (error: Exception) {
                 // Do not retain a partially bound graph after a signed state
                 // contract failure. The renderer remains available for retry.
@@ -162,7 +181,7 @@ internal class ExperienceSurfaceHost(
                 runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 reportFailure(
                     ExperiencePresentationException.Reason.PREPARATION_FAILED,
-                    "Experience default view-model binding failed",
+                    "Experience view-model binding failed",
                     error,
                 )
                 onLoaded?.invoke(false)
@@ -189,8 +208,8 @@ internal class ExperienceSurfaceHost(
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         val frame = holder.surfaceFrame
-        val width = frame.width().coerceAtLeast(1)
-        val height = frame.height().coerceAtLeast(1)
+        val width = (frame?.width() ?: width).coerceAtLeast(1)
+        val height = (frame?.height() ?: height).coerceAtLeast(1)
         val surface = holder.surface
         lane.enqueue {
             // Attach only once both the headless renderer and this surface's
@@ -240,6 +259,7 @@ internal class ExperienceSurfaceHost(
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         running = false
+        pointerInput.reset()
         Choreographer.getInstance().removeFrameCallback(this)
         // Session state (player/artboard) survives; only presentation stops.
         // The Surface contract requires rendering to have stopped before
@@ -283,7 +303,19 @@ internal class ExperienceSurfaceHost(
             // window, so attached implies a live window; this null-check is
             // a type-level guard, never a reachable behavior change.
             val window = window ?: return@enqueue
-            player.step(elapsedSeconds)
+            val outcome = try {
+                player.stepWithEvents(
+                    elapsedSeconds = elapsedSeconds,
+                    pointers = pointerInput.takeBatch(),
+                )
+            } catch (error: Throwable) {
+                reportFailure(
+                    ExperiencePresentationException.Reason.HOST_FAILED,
+                    "Experience runtime step failed",
+                    error,
+                )
+                return@enqueue
+            }
             val disposition = renderer.renderAndPresent(player, window, clearColor, true)
             if (disposition < 0) {
                 Log.w(LOG_TAG, "render_player failed with status ${-disposition}")
@@ -294,12 +326,26 @@ internal class ExperienceSurfaceHost(
             } else if (disposition > 0) {
                 listener?.onFirstFrame()
             }
+            if (outcome.events.isNotEmpty()) {
+                post {
+                    if (!released.get()) {
+                        outcome.events.forEach { listener?.onRuntimeEvent(it) }
+                    }
+                }
+            }
         }
         Choreographer.getInstance().postFrameCallback(this)
     }
 
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (!running || released.get()) return false
+        return pointerInput.enqueue(event, width, height)
+    }
+
     /** Release every native handle. The host is not reusable afterwards. */
     fun release() {
+        released.set(true)
+        pointerInput.release()
         running = false
         Choreographer.getInstance().removeFrameCallback(this)
         lane.enqueue {
@@ -307,12 +353,14 @@ internal class ExperienceSurfaceHost(
             val closeHandles = listOfNotNull(
                 window?.let { it::close },
                 player?.let { it::close },
+                viewModelState?.let { it::close },
                 artboard?.let { it::close },
                 file?.let { it::close },
                 renderer?.let { it::close },
             )
             window = null
             player = null
+            viewModelState = null
             artboard = null
             file = null
             renderer = null

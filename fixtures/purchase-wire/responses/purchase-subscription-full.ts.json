@@ -16,7 +16,15 @@
         "balance": null,
         "unlimited": false
       }
-    ]
+    ],
+    "catalog_product": {
+      "id": "product-commerce-subscription",
+      "store_product_id": "fixture-subscription",
+      "base_plan_id": "annual",
+      "purchase_option_id": null,
+      "offer_id": "introductory",
+      "store_product_type": "subscription"
+    }
   },
-  "bodyText": "{\"success\":true,\"customer_id\":\"273eac55-5075-5ef4-963c-de2a9c53d586\",\"features\":[{\"id\":\"feature-commerce-subscription\",\"ext_id\":\"fixture-subscription-access\",\"type\":\"boolean\",\"allowed\":true,\"balance\":null,\"unlimited\":false}]}"
+  "bodyText": "{\"success\":true,\"customer_id\":\"273eac55-5075-5ef4-963c-de2a9c53d586\",\"features\":[{\"id\":\"feature-commerce-subscription\",\"ext_id\":\"fixture-subscription-access\",\"type\":\"boolean\",\"allowed\":true,\"balance\":null,\"unlimited\":false}],\"catalog_product\":{\"id\":\"product-commerce-subscription\",\"store_product_id\":\"fixture-subscription\",\"base_plan_id\":\"annual\",\"purchase_option_id\":null,\"offer_id\":\"introductory\",\"store_product_type\":\"subscription\"}}"
 }

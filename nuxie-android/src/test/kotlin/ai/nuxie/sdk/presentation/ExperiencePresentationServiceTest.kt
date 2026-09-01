@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.ExperienceRef
+import ai.nuxie.sdk.billing.ExperiencePurchasePreparer
 import ai.nuxie.sdk.experiences.AcquiredRelease
 import ai.nuxie.sdk.experiences.AuthenticatedRelease
 import ai.nuxie.sdk.experiences.Delivery
@@ -23,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
@@ -91,6 +93,47 @@ class ExperiencePresentationServiceTest {
 
         service.dismiss()
         assertTrue(lease.closed.get())
+    }
+
+    @Test
+    fun authenticatedCommerceIsPreparedBeforeTheExperienceLaunches() = runTest {
+        val preparedVersions = mutableListOf<String>()
+        val launched = mutableListOf<String>()
+        val service = service(
+            commerce = ExperiencePurchasePreparer { release, _, _ ->
+                preparedVersions += release.identity.experienceVersionId
+                null
+            },
+            launch = launched::add,
+        )
+
+        val result = async { service.present("v1") }
+        runCurrent()
+
+        assertEquals(listOf("v1"), preparedVersions)
+        assertEquals(1, launched.size)
+        PresentationRegistry.reportFirstFrame(launched.single())
+        result.await()
+    }
+
+    @Test
+    fun cancellingSuspendableCommercePreparationClosesTheAcquiredRelease() = runTest {
+        val lease = Lease()
+        val preparationStarted = CompletableDeferred<Unit>()
+        val service = service(
+            acquire = { acquired("exp-1", "v1", lease) },
+            commerce = ExperiencePurchasePreparer { _, _, _ ->
+                preparationStarted.complete(Unit)
+                awaitCancellation()
+            },
+        )
+
+        val presentation = async { service.present("v1") }
+        preparationStarted.await()
+
+        presentation.cancelAndJoin()
+
+        assertTrue("cancelled commerce preparation leaked its release", lease.closed.get())
     }
 
     @Test
@@ -1562,6 +1605,7 @@ class ExperiencePresentationServiceTest {
         },
         emit: (String, Map<String, Any?>, String?) -> Unit = { _, _, _ -> },
         launch: (String) -> Unit = {},
+        commerce: ExperiencePurchasePreparer = ExperiencePurchasePreparer.NONE,
         transitionOutcome: suspend (PresentationOutcome) -> Boolean = { true },
         reportOutcome: suspend (PresentationOutcome) -> Unit = {},
         firstFrameTimeoutMillis: Long = 30_000,
@@ -1573,6 +1617,7 @@ class ExperiencePresentationServiceTest {
         scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined),
         runtimeAvailable = { runtimeAvailable },
         launch = launch,
+        commerce = commerce,
         transitionOutcome = transitionOutcome,
         reportOutcome = reportOutcome,
         firstFrameTimeoutMillis = firstFrameTimeoutMillis,

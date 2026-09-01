@@ -621,6 +621,7 @@ public final class ai/nuxie/sdk/NuxieConfiguration {
 	public final fun getLogLevel ()Lai/nuxie/sdk/LogLevel;
 	public final fun getPurchaseDelegate ()Lai/nuxie/sdk/billing/NuxiePurchaseDelegate;
 	public final fun getPurchaseHandlingMode ()Lai/nuxie/sdk/billing/PurchaseHandlingMode;
+	public final fun getTestingOverrides ()Lai/nuxie/sdk/NuxieTestingOverrides;
 	public final fun setBeforeSend (Lkotlin/jvm/functions/Function1;)V
 	public final fun setEnvironment (Lai/nuxie/sdk/NuxieEnvironment;)V
 	public final fun setFeatureCacheTTL (J)V
@@ -652,6 +653,12 @@ public abstract interface class ai/nuxie/sdk/NuxieListener {
 	public fun featureAccessDidChange (Ljava/lang/String;Lai/nuxie/sdk/features/FeatureAccess;Lai/nuxie/sdk/features/FeatureAccess;)V
 	public fun onActivityEmitted (Lai/nuxie/sdk/Nuxie;Lai/nuxie/sdk/NuxieActivityInfo;)V
 	public abstract fun onAppActionRequested (Lai/nuxie/sdk/Nuxie;Lai/nuxie/sdk/AppAction;)V
+}
+
+public final class ai/nuxie/sdk/NuxieTestingOverrides {
+	public fun <init> ()V
+	public final fun getApiEndpoint ()Ljava/net/URL;
+	public final fun setApiEndpoint (Ljava/net/URL;)V
 }
 
 public final class ai/nuxie/sdk/PermissionKind : java/lang/Enum {
@@ -943,6 +950,7 @@ public final class ai/nuxie/sdk/billing/StoreProduct {
 	public final fun getOfferId ()Ljava/lang/String;
 	public final fun getPlacementId ()Ljava/lang/String;
 	public final fun getProductId ()Ljava/lang/String;
+	public final fun getPurchaseOptionId ()Ljava/lang/String;
 	public final fun getRawProduct ()Lcom/android/billingclient/api/ProductDetails;
 	public final fun getStoreProductId ()Ljava/lang/String;
 }
@@ -1057,4 +1065,3 @@ public final class ai/nuxie/sdk/features/FeatureUsageResult$UsageInfo {
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
 }
-

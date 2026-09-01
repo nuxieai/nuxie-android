@@ -60,11 +60,12 @@ internal class NuxieApiPurchaseSynchronizer(
     override suspend fun sync(evidence: PurchaseEvidence): PurchaseSyncOutcome = try {
         val response = api.postPurchase(
             NuxieApi.PlayPurchaseReport(
-                packageName = evidence.packageName.takeIf(String::isNotBlank),
                 productId = evidence.storeProductIds.firstOrNull()?.takeIf(String::isNotBlank),
                 purchaseToken = evidence.purchaseToken,
                 basePlanId = evidence.basePlanId,
+                purchaseOptionId = evidence.purchaseOptionId,
                 offerId = evidence.offerId,
+                productType = evidence.productType.toApiProductType(),
                 obfuscatedAccountId = evidence.obfuscatedAccountId,
                 distinctId = evidence.syncAttributionDistinctId,
             ),
@@ -219,7 +220,9 @@ internal class PurchaseService(
         val storeProductIds: Set<String>,
         val nuxieProductId: String?,
         val basePlanId: String?,
+        val purchaseOptionId: String?,
         val offerId: String?,
+        val productType: String?,
     )
 
     private data class PendingAllowancePin(
@@ -727,8 +730,14 @@ internal class PurchaseService(
         activity: Activity,
         product: StoreProduct,
         replacement: SubscriptionReplacement?,
+        expectedOwnerDistinctId: String? = null,
     ): PurchaseResult {
         val initiatingOwner = distinctId()
+        if (expectedOwnerDistinctId != null && initiatingOwner != expectedOwnerDistinctId) {
+            return PurchaseResult.Failed(
+                IllegalStateException("The customer changed before checkout could start."),
+            )
+        }
         settings.delegate?.let { delegate ->
             val result = delegate.purchase(product)
             val outcome = if (result == PurchaseResult.Purchased) {
@@ -828,8 +837,13 @@ internal class PurchaseService(
         return result.await()
     }
 
-    suspend fun restorePurchases(): RestoreResult {
+    suspend fun restorePurchases(expectedOwnerDistinctId: String? = null): RestoreResult {
         val initiatingOwner = distinctId()
+        if (expectedOwnerDistinctId != null && initiatingOwner != expectedOwnerDistinctId) {
+            return RestoreResult.Failed(
+                IllegalStateException("The customer changed before restore could start."),
+            )
+        }
         settings.delegate?.let { delegate ->
             val result = delegate.restorePurchases()
             if (result == RestoreResult.Restored) {
@@ -1245,12 +1259,18 @@ internal class PurchaseService(
                     storeProductId,
                     nuxieProductId,
                     existing.basePlanId,
+                    existing.purchaseOptionId,
                     existing.offerId,
+                    existing.productType,
                 )
             }
         }
         val product = matchingFlight?.product?.takeIf { isCheckoutOutcome }
-            ?: existingProductIdentity?.let(products::get)
+            ?: existingProductIdentity?.let { knownIdentity ->
+                products.entries.filter { (identity) ->
+                    identity.matchesKnownIdentity(knownIdentity)
+                }.singleOrNull()?.value
+            }
         val knownProductIdentity = existingProductIdentity ?: product?.productIdentity()
         val accountBindings = bindings.filter { binding ->
             binding.obfuscatedAccountId == purchase.obfuscatedAccountId &&
@@ -1301,8 +1321,12 @@ internal class PurchaseService(
                 ?: catalogBinding?.nuxieProductId ?: catalogMapping?.nuxieProductId,
             basePlanId = existing?.basePlanId ?: product?.basePlanId
                 ?: catalogBinding?.basePlanId ?: catalogMapping?.basePlanId,
+            purchaseOptionId = existing?.purchaseOptionId ?: product?.purchaseOptionId
+                ?: catalogBinding?.purchaseOptionId ?: catalogMapping?.purchaseOptionId,
             offerId = existing?.offerId ?: product?.offerId
                 ?: catalogBinding?.offerId ?: catalogMapping?.offerId,
+            productType = existing?.productType ?: product?.productType
+                ?: catalogBinding?.productType ?: catalogMapping?.productType,
             purchaseState = purchase.state,
             obfuscatedAccountId = purchase.obfuscatedAccountId ?: existing?.obfuscatedAccountId
                 ?: sha256(ownerDistinctId ?: syncAttributionDistinctId),
@@ -1646,7 +1670,7 @@ internal class PurchaseService(
     }
 
     private fun PurchaseEvidence.needsManagedCompletion(): Boolean =
-        nuxieManaged && catalogResolved && !acknowledged && !consumed
+        nuxieManaged && catalogResolved && if (consumable) !consumed else !acknowledged
 
     private fun PurchaseEvidence.canProjectTo(currentDistinctId: String): Boolean =
         ownerDistinctId == currentDistinctId &&
@@ -1669,7 +1693,7 @@ internal class PurchaseService(
     ): T? = if (knownIdentity == null) {
         candidates.singleOrNull()
     } else {
-        candidates.firstOrNull { identity(it) == knownIdentity }
+        candidates.filter { identity(it).matchesKnownIdentity(knownIdentity) }.singleOrNull()
     }
 
     private suspend fun upsertEvidence(
@@ -1982,6 +2006,7 @@ internal class PurchaseService(
         storeProductId = storeProductId,
         nuxieProductId = productId,
         basePlanId = basePlanId,
+        purchaseOptionId = purchaseOptionId,
         offerId = offerId,
         productType = productType,
         consumable = consumable,
@@ -2000,6 +2025,7 @@ internal class PurchaseService(
         storeProductId = storeProductId,
         nuxieProductId = productId,
         basePlanId = basePlanId,
+        purchaseOptionId = purchaseOptionId,
         offerId = offerId,
         productType = productType,
         consumable = consumable,
@@ -2027,7 +2053,9 @@ internal class PurchaseService(
         storeProductId,
         productId,
         basePlanId,
+        purchaseOptionId,
         offerId,
+        productType,
     )
 
     private suspend fun refreshOptimisticProjection() {
@@ -2112,10 +2140,18 @@ internal class PurchaseService(
         storeProductIds = storeProductIds.toSet(),
         nuxieProductId = nuxieProductId,
         basePlanId = basePlanId,
+        purchaseOptionId = purchaseOptionId,
         offerId = offerId,
+        productType = productType,
     )
 
-    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.encodeToByteArray())
         .joinToString("") { "%02x".format(it) }
+}
+
+private fun String?.toApiProductType(): String? = when (this) {
+    BillingClient.ProductType.SUBS -> "subscription"
+    BillingClient.ProductType.INAPP -> "one_time"
+    else -> null
 }

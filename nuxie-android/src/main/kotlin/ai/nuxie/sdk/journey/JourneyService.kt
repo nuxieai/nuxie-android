@@ -152,15 +152,22 @@ internal class JourneyService(
             JourneyRunPresentationOutcome.GOAL_MET,
             JourneyRunPresentationOutcome.PURCHASE_COMPLETED,
             JourneyRunPresentationOutcome.TIMEOUT,
+            JourneyRunPresentationOutcome.AUTHENTICATED_EXIT,
             -> nowMillis()
             JourneyRunPresentationOutcome.IDENTITY_CHANGED,
             JourneyRunPresentationOutcome.ERROR,
             -> null
         }
+        val terminalReason = if (reason is CloseReason.AuthenticatedExit) {
+            reason.exitReason.executionReason()
+        } else {
+            outcome.terminalReason
+        }
         rememberRun(
             run.copy(
                 state = JourneyRunState.TERMINAL,
-                terminalReason = outcome.terminalReason,
+                terminalReason = terminalReason,
+                terminalTriggerExitReason = (reason as? CloseReason.AuthenticatedExit)?.exitReason,
                 terminalPresentationOutcome = outcome,
                 terminalInitiatingDistinctId = initiatingDistinctId,
                 completedAtMillis = completedAtMillis,
@@ -185,27 +192,49 @@ internal class JourneyService(
             val terminal = inMemoryRun(distinctId, journeyId)
                 ?.takeIf { it.state == JourneyRunState.TERMINAL }
                 ?: return@withLock
-            withContext(Dispatchers.IO) { store.save(terminal) }
-            if (selected == JourneyRunPresentationOutcome.IDENTITY_CHANGED || terminal.isGhost) {
-                return@withLock
+            val shouldNotifyTrigger =
+                selected != JourneyRunPresentationOutcome.IDENTITY_CHANGED && !terminal.isGhost
+            try {
+                withContext(Dispatchers.IO) { store.save(terminal) }
+                if (!shouldNotifyTrigger) return@withLock
+                val completedAtMillis = terminal.completedAtMillis
+                if (selected == JourneyRunPresentationOutcome.USER_DISMISSED) {
+                    if (completedAtMillis == null) return@withLock
+                    ledger.userExited(terminal, completedAtMillis)
+                } else {
+                    ledger.exited(
+                        terminal,
+                        requireNotNull(terminal.terminalReason),
+                        completedAtMillis ?: nowMillis(),
+                    )
+                }
+            } finally {
+                // The terminal result unblocks triggerAndWait independently of
+                // local ledger/reentry persistence. TriggerService removes its
+                // handler after this terminal update, so a bookkeeping retry
+                // cannot complete the waiter twice.
+                if (shouldNotifyTrigger) {
+                    when (selected) {
+                        JourneyRunPresentationOutcome.USER_DISMISSED -> emitDismissedTrigger(terminal)
+                        JourneyRunPresentationOutcome.AUTHENTICATED_EXIT -> emitTerminalTrigger(
+                            terminal,
+                            terminal.terminalTriggerExitReason ?: JourneyExitReason.COMPLETED,
+                        )
+                        else -> Unit
+                    }
+                }
             }
             val completedAtMillis = terminal.completedAtMillis
-            if (selected == JourneyRunPresentationOutcome.USER_DISMISSED) {
-                if (completedAtMillis == null) return@withLock
-                ledger.userExited(terminal, completedAtMillis)
-            } else {
-                ledger.exited(terminal, requireNotNull(terminal.terminalReason), nowMillis())
-            }
-            completedAtMillis?.let {
+            completedAtMillis?.takeIf {
+                selected != JourneyRunPresentationOutcome.AUTHENTICATED_EXIT ||
+                    terminal.terminalReason !in setOf("cancelled", "error")
+            }?.let {
                 withContext(Dispatchers.IO) {
                     store.recordCompletion(
                         distinctId,
                         JourneyCompletion(terminal.experienceId, terminal.id, it),
                     )
                 }
-            }
-            if (selected == JourneyRunPresentationOutcome.USER_DISMISSED) {
-                emitDismissedTrigger(terminal)
             }
         }
         return true
@@ -334,13 +363,17 @@ internal class JourneyService(
     }
 
     private suspend fun emitDismissedTrigger(run: JourneyRun) {
+        emitTerminalTrigger(run, JourneyExitReason.DISMISSED)
+    }
+
+    private suspend fun emitTerminalTrigger(run: JourneyRun, exitReason: JourneyExitReason) {
         run.triggerRef?.let { triggerRef ->
             triggerBroker.emit(
                 triggerRef,
                 TriggerUpdate.Journey(
                     JourneyUpdate(
                         ref = ExperienceRef(run.experienceId, run.experienceVersion, run.id),
-                        exitReason = JourneyExitReason.DISMISSED,
+                        exitReason = exitReason,
                         goalMet = run.convertedAtMillis != null,
                     ),
                 ),
@@ -573,6 +606,7 @@ internal class JourneyService(
         CloseReason.GoalMet -> JourneyRunPresentationOutcome.GOAL_MET
         CloseReason.PurchaseCompleted -> JourneyRunPresentationOutcome.PURCHASE_COMPLETED
         CloseReason.Timeout -> JourneyRunPresentationOutcome.TIMEOUT
+        is CloseReason.AuthenticatedExit -> JourneyRunPresentationOutcome.AUTHENTICATED_EXIT
         is CloseReason.Error -> JourneyRunPresentationOutcome.ERROR
     }
 
@@ -586,6 +620,7 @@ internal class JourneyService(
             JourneyRunPresentationOutcome.PURCHASE_COMPLETED,
             JourneyRunPresentationOutcome.TIMEOUT,
             -> "completed"
+            JourneyRunPresentationOutcome.AUTHENTICATED_EXIT -> "completed"
             JourneyRunPresentationOutcome.ERROR -> "error"
         }
 

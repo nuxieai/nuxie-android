@@ -455,6 +455,7 @@ class PurchaseFeatureUseTest {
         packageName = packageName,
         storeProductIds = storeProductIds,
         nuxieProductId = "credit-pack",
+        productType = BillingClient.ProductType.INAPP,
         purchaseState = purchaseState,
         obfuscatedAccountId = "account-hash",
         syncAttributionDistinctId = "customer-a",
@@ -668,6 +669,14 @@ class PurchaseFeatureUseTest {
         ).jsonObject,
         success = true,
         customerId = customerId,
+        catalogProduct = NuxieApi.VerifiedCatalogProduct(
+            productId = "credit-pack",
+            storeProductId = "play-credit-pack",
+            basePlanId = null,
+            purchaseOptionId = null,
+            offerId = null,
+            storeProductType = "nonConsumable",
+        ),
     )
 
     private data class CapturedEvent(

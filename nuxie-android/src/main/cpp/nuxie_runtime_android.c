@@ -1376,15 +1376,23 @@ JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
     JNIEnv *env, jobject self, jlong view_model, jint kind, jbyteArray path,
     jbyteArray bytes_value, jfloat number_value, jlong integer_value,
-    jboolean bool_value) {
+    jboolean bool_value, jlong related_view_model, jlong index) {
   (void)self;
   if (view_model == 0 || path == NULL || bytes_value == NULL) {
     return (jint)NUX_STATUS_NULL_ARGUMENT;
   }
-  if (kind < NUX_VIEW_MODEL_MUTATION_KIND_SET_STRING ||
-      kind > NUX_VIEW_MODEL_MUTATION_KIND_FIRE_TRIGGER) {
+  if (!((kind >= NUX_VIEW_MODEL_MUTATION_KIND_SET_STRING &&
+         kind <= NUX_VIEW_MODEL_MUTATION_KIND_FIRE_TRIGGER) ||
+        kind == NUX_VIEW_MODEL_MUTATION_KIND_SET_VIEW_MODEL ||
+        kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_SET)) {
     return (jint)NUX_STATUS_INVALID_ARGUMENT;
   }
+  if ((kind == NUX_VIEW_MODEL_MUTATION_KIND_SET_VIEW_MODEL ||
+       kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_SET) &&
+      related_view_model == 0) {
+    return (jint)NUX_STATUS_NULL_ARGUMENT;
+  }
+  if (index < 0) return (jint)NUX_STATUS_INVALID_ARGUMENT;
   jsize path_len = (*env)->GetArrayLength(env, path);
   if (clear_jni_exception(env)) return (jint)NUX_STATUS_RUNTIME_ERROR;
   jsize bytes_len = (*env)->GetArrayLength(env, bytes_value);
@@ -1416,6 +1424,9 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
   mutation.number_value = number_value;
   mutation.integer_value = (uint64_t)integer_value;
   mutation.bool_value = bool_value == JNI_TRUE ? 1u : 0u;
+  mutation.related_instance =
+      (struct NuxViewModelInstance *)from_handle(related_view_model);
+  mutation.index = (size_t)index;
   struct NuxViewModelMutationBatch batch;
   memset(&batch, 0, sizeof(batch));
   batch.struct_size = (uint32_t)sizeof(batch);
@@ -1516,13 +1527,18 @@ JNIEXPORT jobject JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     JNIEnv *env, jobject self, jlong player, jintArray input_kind_array,
     jobjectArray input_name_array, jbooleanArray input_bool_array,
-    jfloatArray input_number_array, jfloat elapsed_seconds,
-    jlong correlation_id, jintArray status_out) {
+    jfloatArray input_number_array, jintArray pointer_kind_array,
+    jfloatArray pointer_x_array, jfloatArray pointer_y_array,
+    jintArray pointer_id_array, jfloatArray pointer_timestamp_array,
+    jfloat elapsed_seconds, jlong correlation_id, jintArray status_out) {
   (void)self;
   NuxStatus reported_status = NUX_STATUS_RUNTIME_ERROR;
   if (status_out == NULL) return NULL;
   if (player == 0 || input_kind_array == NULL || input_name_array == NULL ||
-      input_bool_array == NULL || input_number_array == NULL) {
+      input_bool_array == NULL || input_number_array == NULL ||
+      pointer_kind_array == NULL || pointer_x_array == NULL ||
+      pointer_y_array == NULL || pointer_id_array == NULL ||
+      pointer_timestamp_array == NULL) {
     set_status_out(env, status_out, NUX_STATUS_NULL_ARGUMENT);
     return NULL;
   }
@@ -1530,8 +1546,14 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
   jint *kinds = NULL;
   jboolean *bool_values = NULL;
   jfloat *number_values = NULL;
+  jint *pointer_kinds = NULL;
+  jfloat *pointer_xs = NULL;
+  jfloat *pointer_ys = NULL;
+  jint *pointer_ids = NULL;
+  jfloat *pointer_timestamps = NULL;
   char **names = NULL;
   struct NuxPlayerInputChange *inputs = NULL;
+  struct NuxPlayerPointerEvent *pointers = NULL;
   struct NuxPlayerStepResult *step_result = NULL;
   jclass property_class = NULL;
   jclass event_class = NULL;
@@ -1566,6 +1588,26 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     set_status_out(env, status_out, NUX_STATUS_INVALID_ARGUMENT);
     return NULL;
   }
+  jsize pointer_count = (*env)->GetArrayLength(env, pointer_kind_array);
+  if (clear_jni_exception(env)) {
+    set_status_out(env, status_out, NUX_STATUS_RUNTIME_ERROR);
+    return NULL;
+  }
+  jsize pointer_x_count = (*env)->GetArrayLength(env, pointer_x_array);
+  jsize pointer_y_count = (*env)->GetArrayLength(env, pointer_y_array);
+  jsize pointer_id_count = (*env)->GetArrayLength(env, pointer_id_array);
+  jsize pointer_timestamp_count =
+      (*env)->GetArrayLength(env, pointer_timestamp_array);
+  if (clear_jni_exception(env)) {
+    set_status_out(env, status_out, NUX_STATUS_RUNTIME_ERROR);
+    return NULL;
+  }
+  if (pointer_x_count != pointer_count || pointer_y_count != pointer_count ||
+      pointer_id_count != pointer_count ||
+      pointer_timestamp_count != pointer_count) {
+    set_status_out(env, status_out, NUX_STATUS_INVALID_ARGUMENT);
+    return NULL;
+  }
 
   size_t allocation_count = count == 0 ? 1u : (size_t)count;
   kinds = calloc(allocation_count, sizeof(*kinds));
@@ -1573,8 +1615,19 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
   number_values = calloc(allocation_count, sizeof(*number_values));
   names = calloc(allocation_count, sizeof(*names));
   inputs = calloc(allocation_count, sizeof(*inputs));
+  size_t pointer_allocation_count =
+      pointer_count == 0 ? 1u : (size_t)pointer_count;
+  pointer_kinds = calloc(pointer_allocation_count, sizeof(*pointer_kinds));
+  pointer_xs = calloc(pointer_allocation_count, sizeof(*pointer_xs));
+  pointer_ys = calloc(pointer_allocation_count, sizeof(*pointer_ys));
+  pointer_ids = calloc(pointer_allocation_count, sizeof(*pointer_ids));
+  pointer_timestamps =
+      calloc(pointer_allocation_count, sizeof(*pointer_timestamps));
+  pointers = calloc(pointer_allocation_count, sizeof(*pointers));
   if (kinds == NULL || bool_values == NULL || number_values == NULL ||
-      names == NULL || inputs == NULL) {
+      names == NULL || inputs == NULL || pointer_kinds == NULL ||
+      pointer_xs == NULL || pointer_ys == NULL || pointer_ids == NULL ||
+      pointer_timestamps == NULL || pointers == NULL) {
     failed = 1;
     goto typed_step_cleanup;
   }
@@ -1594,6 +1647,35 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
       failed = 1;
       goto typed_step_cleanup;
     }
+  }
+  if (pointer_count != 0) {
+    (*env)->GetIntArrayRegion(env, pointer_kind_array, 0, pointer_count,
+                              pointer_kinds);
+    (*env)->GetFloatArrayRegion(env, pointer_x_array, 0, pointer_count,
+                                pointer_xs);
+    (*env)->GetFloatArrayRegion(env, pointer_y_array, 0, pointer_count,
+                                pointer_ys);
+    (*env)->GetIntArrayRegion(env, pointer_id_array, 0, pointer_count,
+                              pointer_ids);
+    (*env)->GetFloatArrayRegion(env, pointer_timestamp_array, 0,
+                                pointer_count, pointer_timestamps);
+    if (clear_jni_exception(env)) {
+      failed = 1;
+      goto typed_step_cleanup;
+    }
+  }
+  for (jsize index = 0; index < pointer_count; index++) {
+    if (pointer_kinds[index] < NUX_PLAYER_POINTER_KIND_DOWN ||
+        pointer_kinds[index] > NUX_PLAYER_POINTER_KIND_EXIT) {
+      reported_status = NUX_STATUS_INVALID_ARGUMENT;
+      failed = 1;
+      goto typed_step_cleanup;
+    }
+    pointers[index].kind = (uint32_t)pointer_kinds[index];
+    pointers[index].x = pointer_xs[index];
+    pointers[index].y = pointer_ys[index];
+    pointers[index].pointer_id = pointer_ids[index];
+    pointers[index].timestamp_seconds = pointer_timestamps[index];
   }
   for (jsize index = 0; index < count; index++) {
     if (kinds[index] < NUX_PLAYER_INPUT_KIND_BOOL ||
@@ -1642,6 +1724,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
   step.struct_size = (uint32_t)sizeof(step);
   step.inputs = count == 0 ? NULL : inputs;
   step.input_count = (size_t)count;
+  step.pointers = pointer_count == 0 ? NULL : pointers;
+  step.pointer_count = (size_t)pointer_count;
   step.elapsed_seconds = elapsed_seconds;
   step.correlation_id = (uint64_t)correlation_id;
   NuxStatus call_status = nux_player_step(
@@ -1981,6 +2065,12 @@ typed_step_cleanup:
     for (jsize index = 0; index < count; index++) free(names[index]);
   }
   free(inputs);
+  free(pointers);
+  free(pointer_timestamps);
+  free(pointer_ids);
+  free(pointer_ys);
+  free(pointer_xs);
+  free(pointer_kinds);
   free(names);
   free(number_values);
   free(bool_values);

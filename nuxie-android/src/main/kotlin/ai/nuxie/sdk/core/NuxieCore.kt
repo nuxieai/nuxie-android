@@ -16,14 +16,18 @@ import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureService
 import ai.nuxie.sdk.features.FeatureUsageService
 import ai.nuxie.sdk.features.FeatureType
+import ai.nuxie.sdk.billing.AuthenticatedExperiencePurchasePreparer
+import ai.nuxie.sdk.billing.AuthenticatedExperienceOutcomeProgramExecutor
 import ai.nuxie.sdk.billing.FilePurchaseEvidenceStore
 import ai.nuxie.sdk.billing.GooglePlayBillingClientAdapter
 import ai.nuxie.sdk.billing.NuxiePurchaseDelegate
 import ai.nuxie.sdk.billing.NuxieApiPurchaseSynchronizer
 import ai.nuxie.sdk.billing.PlayBillingConnection
+import ai.nuxie.sdk.billing.ProductResolver
 import ai.nuxie.sdk.billing.PurchaseEvidenceStore
 import ai.nuxie.sdk.billing.PurchaseHandlingMode
 import ai.nuxie.sdk.billing.PurchaseService
+import ai.nuxie.sdk.billing.PurchaseServiceExperiencePurchaseExecutor
 import ai.nuxie.sdk.billing.PurchaseSettings
 import ai.nuxie.sdk.billing.purchaseEvidenceDirectory
 import ai.nuxie.sdk.billing.purchaseAuthorityScope
@@ -56,6 +60,7 @@ import ai.nuxie.sdk.presentation.CloseReason
 import ai.nuxie.sdk.presentation.PresentationOutcome
 import android.app.Application
 import android.content.Context
+import java.net.URL
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -80,6 +85,7 @@ internal class NuxieCore(
     localeIdentifier: String? = null,
     purchaseDelegate: NuxiePurchaseDelegate? = null,
     purchaseHandlingMode: PurchaseHandlingMode = PurchaseHandlingMode.NUXIE_MANAGED,
+    apiEndpointOverride: URL? = null,
     overrides: Overrides = Overrides(),
     private val forwardingEnabled: () -> Boolean = { false },
     private val forwardActivity: suspend (NuxieActivityInfo) -> Unit = {},
@@ -139,6 +145,7 @@ internal class NuxieCore(
         apiKey = apiKey,
         environment = environment,
         transport = transport,
+        baseUrlOverride = apiEndpointOverride,
     )
 
     val delivery = EventDeliveryWorker(store, api, scope, nowMillis = nowMillis)
@@ -239,6 +246,19 @@ internal class NuxieCore(
             }
         }
 
+    private val experiencePurchases = AuthenticatedExperiencePurchasePreparer(
+        resolver = ProductResolver(billing, purchaseEvidenceStore),
+        executor = PurchaseServiceExperiencePurchaseExecutor(purchases),
+        programExecutor = AuthenticatedExperienceOutcomeProgramExecutor(
+            journeys = journeys,
+            emit = { name, properties, ownerDistinctId ->
+                eventLog.capture(name, properties, ownerDistinctId)
+            },
+        ),
+        scope = scope,
+        distinctId = identity::distinctId,
+    )
+
     val featureUsage = FeatureUsageService(
         api = api,
         purchases = purchases,
@@ -283,6 +303,7 @@ internal class NuxieCore(
             emit = eventLog::capture,
             scope = scope,
             runtimeAvailable = AndroidRenderCapability::isAvailable,
+            commerce = experiencePurchases,
             transitionOutcome = transitionPresentationOutcome,
             reportOutcome = reportPresentationOutcome,
         )

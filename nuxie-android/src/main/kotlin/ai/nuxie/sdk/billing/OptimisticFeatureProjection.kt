@@ -80,7 +80,7 @@ private fun <T> PurchaseEvidence.selectAllowanceSource(
     return if (nuxieProductId == null) {
         storeMatches.singleOrNull()
     } else {
-        storeMatches.firstOrNull { matchesProductIdentity(identity(it)) }
+        storeMatches.filter { matchesProductIdentity(identity(it)) }.singleOrNull()
     }
 }
 

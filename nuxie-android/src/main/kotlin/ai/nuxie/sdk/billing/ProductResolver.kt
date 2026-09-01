@@ -15,6 +15,7 @@ internal data class CatalogProductRequest(
     val storeProductId: String,
     @BillingClient.ProductType val productType: String,
     val basePlanId: String? = null,
+    val purchaseOptionId: String? = null,
     val offerSelection: OfferSelection = OfferSelection.None,
     val placementId: String? = null,
     val isOfferPersonalized: Boolean = false,
@@ -56,6 +57,13 @@ internal data class PlayProductDetails(
     val rawProduct: ProductDetails?,
     val subscriptionOffers: List<PlaySubscriptionOffer>,
     val oneTimePurchaseOfferToken: String? = null,
+    val oneTimePurchaseOffers: List<PlayOneTimePurchaseOffer> = emptyList(),
+)
+
+internal data class PlayOneTimePurchaseOffer(
+    val purchaseOptionId: String?,
+    val offerId: String?,
+    val offerToken: String?,
 )
 
 internal data class PlaySubscriptionOffer(
@@ -131,6 +139,45 @@ internal class ProductResolver(
                     )
                 }
 
+                request.productType == BillingClient.ProductType.SUBS &&
+                    request.offerSelection is OfferSelection.Exact &&
+                    product.subscriptionOffers.none {
+                        it.basePlanId == request.basePlanId &&
+                            it.offerId == request.offerSelection.offerId &&
+                            it.hasTimeOrderedPricingPhases
+                    } -> {
+                    failures += request.failureDescription(
+                        "configured offer '${request.offerSelection.offerId}' is absent or has invalid pricing phases " +
+                            "inside base plan '${request.basePlanId}'",
+                    )
+                }
+
+                request.productType == BillingClient.ProductType.INAPP &&
+                    request.offerSelection is OfferSelection.Exact &&
+                    (request.purchaseOptionId == null ||
+                        product.oneTimePurchaseOffers.none {
+                            it.purchaseOptionId == request.purchaseOptionId &&
+                                it.offerId == request.offerSelection.offerId &&
+                                it.offerToken != null
+                        }) -> {
+                    failures += request.failureDescription(
+                        "configured offer '${request.offerSelection.offerId}' is absent from " +
+                            "purchase option '${request.purchaseOptionId}'",
+                    )
+                }
+
+                request.productType == BillingClient.ProductType.INAPP &&
+                    request.purchaseOptionId != null &&
+                    request.offerSelection == OfferSelection.None &&
+                    product.oneTimePurchaseOffers.none {
+                        it.purchaseOptionId == request.purchaseOptionId &&
+                            it.offerId == null && it.offerToken != null
+                    } -> {
+                    failures += request.failureDescription(
+                        "configured purchase option '${request.purchaseOptionId}' is absent from ProductDetails",
+                    )
+                }
+
                 else -> resolvedProducts += resolve(request, product)
             }
         }
@@ -152,14 +199,29 @@ internal class ProductResolver(
         product: PlayProductDetails,
     ): StoreProduct {
         if (request.productType != BillingClient.ProductType.SUBS) {
+            val selectedOffer = when (val selection = request.offerSelection) {
+                OfferSelection.None -> request.purchaseOptionId?.let { purchaseOptionId ->
+                    product.oneTimePurchaseOffers.first {
+                        it.purchaseOptionId == purchaseOptionId &&
+                            it.offerId == null && it.offerToken != null
+                    }
+                }
+                is OfferSelection.Exact -> product.oneTimePurchaseOffers.first {
+                    it.purchaseOptionId == request.purchaseOptionId &&
+                        it.offerId == selection.offerId && it.offerToken != null
+                }
+                OfferSelection.Automatic -> null
+            }
+            val selectedOfferToken = selectedOffer?.offerToken ?: product.oneTimePurchaseOfferToken
             return StoreProduct(
                 productId = request.productId,
                 storeProductId = request.storeProductId,
                 basePlanId = null,
-                offerId = null,
+                purchaseOptionId = request.purchaseOptionId,
+                offerId = selectedOffer?.offerId,
                 placementId = request.placementId,
                 rawProduct = product.rawProduct,
-                offerToken = product.oneTimePurchaseOfferToken,
+                offerToken = selectedOfferToken,
                 isOfferPersonalized = request.isOfferPersonalized,
                 productType = request.productType,
                 consumable = request.consumable,
@@ -181,13 +243,14 @@ internal class ProductResolver(
             is OfferSelection.Exact -> product.subscriptionOffers.firstOrNull {
                 it.basePlanId == basePlanId &&
                     it.offerId == request.offerSelection.offerId &&
-                    it.introductoryPhases.size <= 1
-            } ?: basePlan
+                    it.hasTimeOrderedPricingPhases
+            } ?: error("Exact offer availability is validated before resolution.")
         }
         return StoreProduct(
             productId = request.productId,
             storeProductId = request.storeProductId,
             basePlanId = selected.basePlanId,
+            purchaseOptionId = null,
             offerId = selected.offerId,
             placementId = request.placementId,
             rawProduct = product.rawProduct,
@@ -208,6 +271,7 @@ internal class ProductResolver(
         storeProductId = storeProductId,
         nuxieProductId = productId,
         basePlanId = basePlanId,
+        purchaseOptionId = purchaseOptionId,
         offerId = offerId,
         productType = productType,
         consumable = consumable,
@@ -222,25 +286,52 @@ internal class ProductResolver(
         licensingPublicKey = licensingPublicKey,
     )
 
+    /** Play returns pricing phases in the order the subscriber pays them. */
     private val PlaySubscriptionOffer.introductoryPhases: List<PlayPricingPhase>
-        get() = pricingPhases.filter { it.recurrenceMode != PlayRecurrenceMode.INFINITE }
+        get() = pricingPhases.dropLast(1)
+
+    private val PlaySubscriptionOffer.hasTimeOrderedPricingPhases: Boolean
+        get() = pricingPhases.isNotEmpty() &&
+            pricingPhases.last().recurrenceMode == PlayRecurrenceMode.INFINITE &&
+            pricingPhases.dropLast(1).none {
+                it.recurrenceMode == PlayRecurrenceMode.INFINITE
+            }
 
     private fun selectAutomatic(offers: List<PlaySubscriptionOffer>): PlaySubscriptionOffer? {
         val eligible = offers.filter {
             it.offerId != null &&
                 IGNORE_OFFER_TAG !in it.offerTags &&
-                it.introductoryPhases.size == 1
+                it.hasTimeOrderedPricingPhases &&
+                it.introductoryPhases.isNotEmpty()
         }
-        val freeTrials = eligible.filter { it.introductoryPhases.single().priceAmountMicros == 0L }
+        val freeTrials = eligible.mapNotNull { offer ->
+            offer.introductoryPhases
+                .firstOrNull { it.priceAmountMicros == 0L }
+                ?.let { offer to it }
+        }
         if (freeTrials.isNotEmpty()) {
-            return freeTrials.maxByOrNull {
-                val phase = it.introductoryPhases.single()
-                billingPeriodDays(phase.billingPeriod) * phase.billingCycleCount.coerceAtLeast(1)
-            }
+            return freeTrials.sortedWith(
+                compareByDescending<Pair<PlaySubscriptionOffer, PlayPricingPhase>> {
+                    val phase = it.second
+                    billingPeriodDays(phase.billingPeriod) *
+                        phase.billingCycleCount.coerceAtLeast(1)
+                }.thenBy { it.first.offerId }
+                    .thenBy { it.first.offerToken },
+            ).first().first
         }
         return eligible
-            .filter { it.introductoryPhases.single().priceAmountMicros > 0L }
-            .minByOrNull { it.introductoryPhases.single().priceAmountMicros }
+            .mapNotNull { offer ->
+                offer.introductoryPhases.firstOrNull()?.let { offer to it }
+            }
+            .filter { it.second.priceAmountMicros > 0L }
+            .sortedWith(
+                compareBy<Pair<PlaySubscriptionOffer, PlayPricingPhase>> {
+                    it.second.priceAmountMicros
+                }.thenBy { it.first.offerId }
+                    .thenBy { it.first.offerToken },
+            )
+            .firstOrNull()
+            ?.first
     }
 
     private fun billingPeriodDays(period: String): Long {

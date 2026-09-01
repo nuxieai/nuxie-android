@@ -8,6 +8,8 @@ import ai.nuxie.sdk.features.FeatureType
 import java.io.IOException
 import java.net.URL
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 
@@ -20,8 +22,9 @@ internal class NuxieApi(
     private val apiKey: String,
     environment: NuxieEnvironment,
     private val transport: HttpTransport = HttpUrlConnectionTransport(),
+    baseUrlOverride: URL? = null,
 ) {
-    private val baseUrl: String = when (environment) {
+    private val baseUrl: String = baseUrlOverride?.let(::normalizedBaseUrl) ?: when (environment) {
         NuxieEnvironment.PRODUCTION -> "https://i.nuxie.ai"
         NuxieEnvironment.DEVELOPMENT -> "https://dev-i.nuxie.ai"
     }
@@ -38,14 +41,24 @@ internal class NuxieApi(
     ) : IOException("/purchase rejected with status $statusCode")
 
     data class PlayPurchaseReport(
-        val packageName: String?,
         val productId: String?,
         val purchaseToken: String,
         val basePlanId: String?,
+        val purchaseOptionId: String? = null,
         val offerId: String?,
+        val productType: String? = null,
         val obfuscatedAccountId: String?,
         val distinctId: String,
     )
+
+    private companion object {
+        fun normalizedBaseUrl(value: URL): String {
+            require(value.protocol == "http" || value.protocol == "https") {
+                "apiEndpoint must use http or https."
+            }
+            return value.toExternalForm().trimEnd('/')
+        }
+    }
 
     data class FeatureUseEventData(
         val value: Double,
@@ -57,7 +70,9 @@ internal class NuxieApi(
         val productId: String,
         val purchaseToken: String,
         val basePlanId: String?,
+        val purchaseOptionId: String? = null,
         val offerId: String?,
+        val productType: String? = null,
         val obfuscatedAccountId: String?,
         val eventId: String,
     )
@@ -71,10 +86,20 @@ internal class NuxieApi(
         val purchase: PlayPurchaseUseReport,
     )
 
+    data class VerifiedCatalogProduct(
+        val productId: String,
+        val storeProductId: String,
+        val basePlanId: String?,
+        val purchaseOptionId: String?,
+        val offerId: String?,
+        val storeProductType: String,
+    )
+
     data class PurchaseResponse(
-        val body: kotlinx.serialization.json.JsonObject,
+        val body: JsonObject,
         val success: Boolean,
         val customerId: String?,
+        val catalogProduct: VerifiedCatalogProduct?,
     )
 
     /** Opaque conditional-fetch validator (the response ETag, scoped to /profile). */
@@ -295,7 +320,11 @@ internal class NuxieApi(
             append(",\"package_name\":").append(jsonString(report.purchase.packageName))
             append(",\"product_id\":").append(jsonString(report.purchase.productId))
             report.purchase.basePlanId?.let { append(",\"base_plan_id\":").append(jsonString(it)) }
+            report.purchase.purchaseOptionId?.let {
+                append(",\"purchase_option_id\":").append(jsonString(it))
+            }
             report.purchase.offerId?.let { append(",\"offer_id\":").append(jsonString(it)) }
+            report.purchase.productType?.let { append(",\"product_type\":").append(jsonString(it)) }
             report.purchase.obfuscatedAccountId?.let {
                 append(",\"obfuscated_account_id\":").append(jsonString(it))
             }
@@ -351,9 +380,12 @@ internal class NuxieApi(
             append(",\"type\":\"playstore\"")
             append(",\"purchase_token\":").append(jsonString(report.purchaseToken))
             report.productId?.let { append(",\"product_id\":").append(jsonString(it)) }
-            report.packageName?.let { append(",\"package_name\":").append(jsonString(it)) }
             report.basePlanId?.let { append(",\"base_plan_id\":").append(jsonString(it)) }
+            report.purchaseOptionId?.let {
+                append(",\"purchase_option_id\":").append(jsonString(it))
+            }
             report.offerId?.let { append(",\"offer_id\":").append(jsonString(it)) }
+            report.productType?.let { append(",\"product_type\":").append(jsonString(it)) }
             report.obfuscatedAccountId?.let {
                 append(",\"obfuscated_account_id\":").append(jsonString(it))
             }
@@ -383,8 +415,47 @@ internal class NuxieApi(
         val customerId = ((parsed["customer_id"] ?: parsed["customerId"]) as? JsonPrimitive)
             ?.takeIf { it.isString }
             ?.content
-        return PurchaseResponse(parsed, success, customerId)
+        val catalog = parsed["catalog_product"] as? JsonObject
+        if (success && catalog == null) {
+            throw IOException("/purchase response is missing catalog_product")
+        }
+        val storeProductType = catalog?.requiredString(
+            "store_product_type",
+            "/purchase catalog_product",
+        )?.takeIf { it in setOf("subscription", "consumable", "nonConsumable") }
+        if (catalog != null && storeProductType == null) {
+            throw IOException("/purchase catalog_product has an invalid store_product_type")
+        }
+        return PurchaseResponse(
+            body = parsed,
+            success = success,
+            customerId = customerId,
+            catalogProduct = catalog?.let {
+                VerifiedCatalogProduct(
+                    productId = it.requiredString("id", "/purchase catalog_product"),
+                    storeProductId = it.requiredString(
+                        "store_product_id",
+                        "/purchase catalog_product",
+                    ),
+                    basePlanId = it.nullableString("base_plan_id", "/purchase catalog_product"),
+                    purchaseOptionId = it.nullableString(
+                        "purchase_option_id",
+                        "/purchase catalog_product",
+                    ),
+                    offerId = it.nullableString("offer_id", "/purchase catalog_product"),
+                    storeProductType = checkNotNull(storeProductType),
+                )
+            },
+        )
     }
+
+    private fun JsonObject.nullableString(key: String, context: String): String? =
+        when (val value = this[key]) {
+            null, JsonNull -> null
+            is JsonPrimitive -> value.takeIf { it.isString }?.content
+                ?: throw IOException("$context has an invalid $key")
+            else -> throw IOException("$context has an invalid $key")
+        }
 
     private fun kotlinx.serialization.json.JsonObject.requiredString(key: String, context: String): String =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content

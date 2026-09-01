@@ -96,6 +96,8 @@ internal enum class NuxieViewModelMutationKind(val nativeValue: Int) {
     SET_COLOR(3),
     SET_ENUM(4),
     FIRE_TRIGGER(5),
+    SET_VIEW_MODEL(8),
+    LIST_SET(13),
 }
 
 /** Fixed Kotlin-side encoding of one ABI-v4 `NuxViewModelMutation`. */
@@ -106,7 +108,35 @@ internal data class NativeViewModelWrite(
     val numberValue: Float = 0f,
     val integerValue: Long = 0,
     val boolValue: Boolean = false,
+    val relatedViewModel: Long = 0,
+    val index: Long = 0,
 )
+
+internal sealed interface NuxieViewModelScalarValue {
+    data class StringValue(val value: String) : NuxieViewModelScalarValue
+    data class NumberValue(val value: Double) : NuxieViewModelScalarValue
+    data class BooleanValue(val value: Boolean) : NuxieViewModelScalarValue
+}
+
+/**
+ * A presentation-time replacement for one authored list of child view models.
+ * The signed descriptor decides the graph shape and declared scalar paths;
+ * callers may replace only the values inside that shape.
+ */
+internal data class NuxieViewModelListProjection(
+    val rootSchemaName: String,
+    val listPath: String,
+    val selectedItemPath: String?,
+    val itemSchemaName: String,
+    val items: List<Item>,
+) {
+    data class Item(
+        val authoredInstanceName: String,
+        val listIndex: Int,
+        val selected: Boolean,
+        val values: Map<String, NuxieViewModelScalarValue>,
+    )
+}
 
 internal data class NativeCallResult<out T>(val status: Int, val value: T?)
 
@@ -200,6 +230,7 @@ internal interface NuxieTypedRuntimeNative {
     fun stepPlayer(
         playerHandle: Long,
         inputs: List<NativePlayerInput>,
+        pointers: List<NativePlayerPointer>,
         elapsedSeconds: Float,
         correlationId: Long,
     ): NativeCallResult<NativePlayerStepOutcome> = error("stepPlayer is not implemented")
@@ -346,11 +377,14 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
             numberValue = write.numberValue,
             integerValue = write.integerValue,
             boolValue = write.boolValue,
+            relatedViewModel = write.relatedViewModel,
+            index = write.index,
         )
 
     override fun stepPlayer(
         playerHandle: Long,
         inputs: List<NativePlayerInput>,
+        pointers: List<NativePlayerPointer>,
         elapsedSeconds: Float,
         correlationId: Long,
     ): NativeCallResult<NativePlayerStepOutcome> {
@@ -361,6 +395,13 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
             inputNames = inputs.map { it.name.encodeToByteArray() }.toTypedArray(),
             inputBoolValues = inputs.map(NativePlayerInput::boolValue).toBooleanArray(),
             inputNumberValues = inputs.map(NativePlayerInput::numberValue).toFloatArray(),
+            pointerKinds = pointers.map(NativePlayerPointer::kind).toIntArray(),
+            pointerXs = pointers.map(NativePlayerPointer::x).toFloatArray(),
+            pointerYs = pointers.map(NativePlayerPointer::y).toFloatArray(),
+            pointerIds = pointers.map(NativePlayerPointer::pointerId).toIntArray(),
+            pointerTimestamps = pointers
+                .map(NativePlayerPointer::timestampSeconds)
+                .toFloatArray(),
             elapsedSeconds = elapsedSeconds,
             correlationId = correlationId,
             statusOut = status,
@@ -445,6 +486,7 @@ internal class NuxieRuntimeViewModels(
 
     suspend fun step(
         inputs: List<NuxiePlayerInput> = emptyList(),
+        pointers: List<NuxiePlayerPointerEvent> = emptyList(),
         elapsedSeconds: Double,
         correlationId: ULong = 0uL,
     ): NuxiePlayerStepOutcome {
@@ -454,11 +496,13 @@ internal class NuxieRuntimeViewModels(
         val nativeElapsed = elapsedSeconds.toFloat()
         require(nativeElapsed.isFinite()) { "Player elapsed seconds exceed the native Float range" }
         val encodedInputs = encodePlayerInputs(inputs)
+        val encodedPointers = encodePlayerPointers(pointers)
         return lane.call {
             requireNativeValue(
                 native.stepPlayer(
                     playerHandle,
                     encodedInputs,
+                    encodedPointers,
                     nativeElapsed,
                     correlationId.toLong(),
                 ),
@@ -603,11 +647,11 @@ internal class NuxieRuntimeCallException(
     val status: Int,
 ) : IllegalStateException("Native runtime $operation failed with status $status")
 
-private fun requireNativeSuccess(status: Int, operation: String) {
+internal fun requireNativeSuccess(status: Int, operation: String) {
     if (status != NUX_STATUS_OK) throw NuxieRuntimeCallException(operation, status)
 }
 
-private fun <T> requireNativeValue(result: NativeCallResult<T>, operation: String): T {
+internal fun <T> requireNativeValue(result: NativeCallResult<T>, operation: String): T {
     requireNativeSuccess(result.status, operation)
     return checkNotNull(result.value) { "Native runtime $operation returned no value" }
 }
