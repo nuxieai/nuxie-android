@@ -314,6 +314,7 @@ internal class NuxieApi(
                 append(CanonicalJson.encode(JsonValueConverter.fromMap(properties)))
             }
             append('}')
+            append(",\"idempotencyKey\":").append(jsonString(report.purchase.eventId))
             report.entityId?.let { append(",\"entityId\":").append(jsonString(it)) }
             append(",\"purchase\":{\"type\":\"playstore\"")
             append(",\"purchase_token\":").append(jsonString(report.purchase.purchaseToken))

@@ -499,6 +499,7 @@ private object PurchaseWireFixtures {
                     put("source", "commerce-wire-fixture")
                 })
             })
+            put("idempotencyKey", "fixture-entitled-appstore-event")
             put("entityId", "fixture-workspace")
             put("purchase", buildJsonObject {
                 put("transaction_jwt", "fixture.header.payload.signature")
