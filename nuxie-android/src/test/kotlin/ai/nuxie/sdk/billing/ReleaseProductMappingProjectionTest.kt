@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.billing
 
+import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.core.NuxieCore
@@ -73,6 +74,8 @@ class ReleaseProductMappingProjectionTest {
                 journeySupportedRuntime = { supportedRuntime() },
                 authenticateRelease = { _, _ -> release },
                 registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
             ),
         )
         try {

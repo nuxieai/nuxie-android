@@ -19,6 +19,7 @@ import ai.nuxie.sdk.features.FeatureUsageService
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.billing.AuthenticatedExperiencePurchasePreparer
 import ai.nuxie.sdk.billing.AuthenticatedExperienceOutcomeProgramExecutor
+import ai.nuxie.sdk.billing.BillingClientAdapterFactory
 import ai.nuxie.sdk.billing.FilePurchaseEvidenceStore
 import ai.nuxie.sdk.billing.GooglePlayBillingClientAdapter
 import ai.nuxie.sdk.billing.NuxiePurchaseDelegate
@@ -96,6 +97,7 @@ internal class NuxieCore(
 ) {
     private val registerLifecycle = overrides.registerLifecycle
     private val stopped = AtomicBoolean(false)
+    private val requestInitialProfileRefresh = overrides.requestInitialProfileRefresh
 
     internal fun interface PresentationFactory {
         fun create(
@@ -123,6 +125,15 @@ internal class NuxieCore(
             (ExperienceReleaseProfile.Entry, SupportedRuntime) -> AuthenticatedRelease?
         )? = null,
         val deviceLocaleIdentifier: (() -> String)? = null,
+        /** Unit suites that hydrate profiles explicitly opt out so the
+         *  startup refresh cannot race their hydrations through the
+         *  authoritative revision fences. */
+        val requestInitialProfileRefresh: Boolean = true,
+        /** Unit suites inject an inert factory so a Robolectric billing
+         *  connection can never fire connection-driven recovery, whose
+         *  evidence-derived projection would clear a test's display overlay
+         *  mid-assertion. */
+        val billingClientFactory: BillingClientAdapterFactory? = null,
     )
 
     private val appContext = context.applicationContext ?: context
@@ -223,7 +234,8 @@ internal class NuxieCore(
     private lateinit var purchaseService: PurchaseService
 
     private val billing = PlayBillingConnection(
-        factory = GooglePlayBillingClientAdapter.factory(appContext),
+        factory = overrides.billingClientFactory
+            ?: GooglePlayBillingClientAdapter.factory(appContext),
         scope = scope,
         onPurchasesUpdated = { update -> scope.launch { purchaseService.onPurchasesUpdated(update) } },
         onConnected = { purchaseService.recover() },
@@ -458,7 +470,9 @@ internal class NuxieCore(
             purchases.recover()
         })
         userTransitions.addObserver(profile.transitionObserver)
-        profile.requestRefresh()
+        if (requestInitialProfileRefresh) {
+            profile.requestRefresh()
+        }
         scope.launch { journeys.recoverPendingHostDismissals() }
         lifecycleTracker.trackAppLaunchEvents()
         billing.connect()

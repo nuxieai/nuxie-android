@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.events
 
+import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
 import ai.nuxie.sdk.ExperienceRef
 import ai.nuxie.sdk.FeatureAccessUpdate
 import ai.nuxie.sdk.LogLevel
@@ -82,6 +83,8 @@ class TriggerServiceTest {
         overrides = NuxieCore.Overrides(
             transport = transport,
             registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
             journeys = journeys,
             features = features,
             presenter = presenter ?: journeys?.takeIf { presentationFactory == null }?.let {

@@ -35,7 +35,10 @@ import org.robolectric.RuntimeEnvironment
 class NuxieIdentityFacadeTest {
     @Before
     fun setUp() {
-        Nuxie.overridesForTesting = NuxieCore.Overrides(transport = FakeTransport())
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = FakeTransport(),
+            requestInitialProfileRefresh = false,
+        )
         Nuxie.setup(
             RuntimeEnvironment.getApplication(),
             NuxieConfiguration("pk_test_identity"),
@@ -285,6 +288,7 @@ class NuxieIdentityFacadeTest {
             transport = FakeTransport(),
             purchaseEvidenceStore = evidenceStore,
             registerLifecycle = false,
+            requestInitialProfileRefresh = false,
         )
         Nuxie.setup(
             application,

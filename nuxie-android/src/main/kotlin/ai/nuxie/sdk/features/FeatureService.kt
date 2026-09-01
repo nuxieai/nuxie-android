@@ -327,7 +327,10 @@ internal class FeatureService(
         isCurrent: () -> Boolean = { true },
     ): FeatureInfo.Mutation? {
         val hydrationGeneration = synchronized(lock) { scopeGeneration }
-        if (identity.distinctId() != distinctId || !isCurrent()) return null
+        if (identity.distinctId() != distinctId || !isCurrent()) {
+            println("NUXTRACE stageProfile DISCARD-identity want=$distinctId have=${identity.distinctId()} thread=${Thread.currentThread().name}")
+            return null
+        }
         val parsed = parseProfileFeatures(body)
         return synchronized(lock) {
             if (identity.distinctId() != distinctId ||
@@ -335,6 +338,12 @@ internal class FeatureService(
                 !isCurrent() ||
                 snapshotAuthoritativeRevision <= lastProfileAuthoritativeRevision
             ) {
+                println(
+                    "NUXTRACE stageProfile DISCARD id=${identity.distinctId()}/$distinctId " +
+                        "gen=$scopeGeneration/$hydrationGeneration " +
+                        "rev=$snapshotAuthoritativeRevision/$lastProfileAuthoritativeRevision " +
+                        "thread=${Thread.currentThread().name}",
+                )
                 return@synchronized null
             }
             lastProfileAuthoritativeRevision = snapshotAuthoritativeRevision
@@ -729,6 +738,11 @@ internal class FeatureService(
         featureMutationRevisions.clear()
         committedMutationRevisions.clear()
         scopeGeneration += 1
+        println(
+            "NUXTRACE scopeSync gen=$scopeGeneration id=$distinctId " +
+                "thread=${Thread.currentThread().name} " +
+                "from=${Throwable().stackTrace.take(7).joinToString(" <- ") { it.methodName }}",
+        )
         return true
     }
 

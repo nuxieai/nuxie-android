@@ -1,5 +1,6 @@
 package ai.nuxie.sdk
 
+import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
 import ai.nuxie.sdk.billing.InMemoryPurchaseEvidenceStore
 import ai.nuxie.sdk.billing.PurchaseEvidence
 import ai.nuxie.sdk.billing.StoredFeatureAllowance
@@ -96,6 +97,8 @@ class NuxieMeteredUseTest {
         Nuxie.overridesForTesting = NuxieCore.Overrides(
             transport = transport,
             registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
         )
         Nuxie.setup(
             RuntimeEnvironment.getApplication(),
@@ -135,6 +138,8 @@ class NuxieMeteredUseTest {
             store = store,
             transport = usageTransport(),
             registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
         )
         Nuxie.setup(
             RuntimeEnvironment.getApplication(),
@@ -185,6 +190,8 @@ class NuxieMeteredUseTest {
             overrides = NuxieCore.Overrides(
                 transport = transport,
                 registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
             ),
         )
         core.features.hydrateProfile(
@@ -215,6 +222,8 @@ class NuxieMeteredUseTest {
         Nuxie.overridesForTesting = NuxieCore.Overrides(
             transport = usageTransport(),
             registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
         )
         Nuxie.setup(
             RuntimeEnvironment.getApplication(),
@@ -241,6 +250,8 @@ class NuxieMeteredUseTest {
         Nuxie.overridesForTesting = NuxieCore.Overrides(
             transport = transport,
             registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
         )
         Nuxie.setup(
             RuntimeEnvironment.getApplication(),
@@ -331,6 +342,8 @@ class NuxieMeteredUseTest {
                 transport = transport,
                 purchaseEvidenceStore = store,
                 registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
             ),
         )
 
