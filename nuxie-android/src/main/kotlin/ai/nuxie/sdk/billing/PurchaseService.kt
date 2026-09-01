@@ -2082,6 +2082,9 @@ internal class PurchaseService(
     private fun emitRestoreOutcome(result: RestoreResult, initiatingOwner: String) {
         if (distinctId() != initiatingOwner) return
         when (result) {
+            // Native restores emit fire-and-forget like iOS (its TransactionService
+            // uses eventSink.emit); only EXTERNAL restore declarations route to
+            // journeys through the committer's stable capture (UNIV-2901 parity).
             RestoreResult.Restored -> emit(SystemEventNames.RESTORE_COMPLETED, emptyMap())
             RestoreResult.NoPurchases -> emit(SystemEventNames.RESTORE_NO_PURCHASES, emptyMap())
             is RestoreResult.Failed -> emit(

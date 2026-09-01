@@ -369,6 +369,7 @@ internal class NuxieCore(
         eventLog = eventLog,
         api = api,
         broker = triggerBroker,
+        identityDistinctId = identity::distinctId,
         journeys = overrides.journeys ?: journeys,
         features = overrides.features ?: object : TriggerService.FeatureGate {
             override suspend fun cachedAccess(

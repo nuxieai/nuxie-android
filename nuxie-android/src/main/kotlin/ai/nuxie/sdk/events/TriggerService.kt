@@ -32,6 +32,7 @@ internal class TriggerService(
     private val journeys: JourneyRouter,
     private val features: FeatureGate,
     private val presenter: ExperiencePresenter,
+    private val identityDistinctId: () -> String = { "" },
     private val sleepMillis: suspend (Long) -> Unit = { delay(it) },
     private val nowMillis: () -> Long = System::currentTimeMillis,
 ) {
@@ -212,11 +213,17 @@ internal class TriggerService(
             journeys.handleEventForTrigger(stored).forEach { result ->
                 when (result) {
                     is JourneyTriggerResult.Started -> result.ref.experienceVersion?.let { version ->
-                        presentExperience(
-                            experienceVersionId = version,
-                            eventId = stored.id,
-                            journeyId = result.ref.journeyId,
-                        )
+                        // Enrollment is bookkeeping for the EVENT's customer
+                        // and stands even if identity changed mid-admission,
+                        // but an Experience must never present to a customer
+                        // the run does not belong to.
+                        if (identityDistinctId() == stored.distinctId) {
+                            presentExperience(
+                                experienceVersionId = version,
+                                eventId = stored.id,
+                                journeyId = result.ref.journeyId,
+                            )
+                        }
                     }
                     is JourneyTriggerResult.Failed -> Log.w(
                         LOG_TAG,
