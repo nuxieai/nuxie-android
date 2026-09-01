@@ -134,6 +134,8 @@ internal class PurchaseService(
     private val logWarning: (String, Throwable) -> Unit = { message, failure ->
         Log.w("NuxieBilling", message, failure)
     },
+    /** Internal test observation only; null in production and never controls behavior. */
+    private val purchaseCommitObserver: ((PurchaseCommitObservation) -> Unit)? = null,
 ) {
     private data class InFlightPurchase(
         val result: CompletableDeferred<PurchaseResult>,
@@ -192,11 +194,6 @@ internal class PurchaseService(
         val purchase: PlayPurchase,
         val source: PurchaseOutcomeSource,
     )
-
-    private sealed interface PurchaseCommitIdentity {
-        data class Evidence(val purchaseToken: String) : PurchaseCommitIdentity
-        data class External(val operationId: String) : PurchaseCommitIdentity
-    }
 
     private data class PendingPurchaseCommit(
         val identity: PurchaseCommitIdentity,
@@ -265,14 +262,20 @@ internal class PurchaseService(
         effects.ownedPurchaseCommits.forEach { it.completion.complete(Unit) }
         effects.purchaseCommitWaits.forEach { it.await() }
 
+        // Publication order must equal FIFO reservation order: decision-time
+        // publications and barriers reserved their lane slots before any
+        // commit's afterCapture can reserve one, so the outer effects drain
+        // FIRST. Draining a commit's post-capture publication ahead of an
+        // earlier outer reservation deadlocks the lane (the later mutation
+        // awaits the earlier one, which cannot publish until this drain
+        // returns).
+        val callbackFailure = drainCallbackEffects(effects)
         var purchaseCommitFailure: Throwable? = null
         effects.purchaseCommits.forEach { commit ->
             drainPurchaseCommit(commit)?.let { failure ->
                 purchaseCommitFailure = aggregateFailure(purchaseCommitFailure, failure)
             }
         }
-
-        val callbackFailure = drainCallbackEffects(effects)
         val stagedOperations = effects.purchaseCommits.mapTo(mutableSetOf()) { it.operation }
         processing.withLock {
             // A decision can reserve an identity and then terminate before it
@@ -410,7 +413,7 @@ internal class PurchaseService(
         if (failure == null) {
             processing.withLock {
                 if (purchaseCommitOperations[commit.identity] === commit.operation) {
-                    completedPurchaseCommits[commit.identity] = Unit
+                    recordCompletedPurchaseCommit(commit.identity)
                     purchaseCommitOperations.remove(commit.identity, commit.operation)
                 }
             }
@@ -1101,6 +1104,7 @@ internal class PurchaseService(
             val storeEvidence = outcome.evidence
             if (storeEvidence == null) {
                 checkNotNull(directProduct)
+                recordTerminalPurchaseOutcome(outcome)
                 effects.outcomeEmissions += PendingOutcomeEmission(
                     directProduct,
                     checkNotNull(directOwner),
@@ -1130,6 +1134,7 @@ internal class PurchaseService(
         is PurchaseOutcome.Cancelled,
         is PurchaseOutcome.Failed,
         -> {
+            recordTerminalPurchaseOutcome(outcome)
             if (directProduct != null) {
                 effects.outcomeEmissions += PendingOutcomeEmission(
                     directProduct,
@@ -1189,6 +1194,26 @@ internal class PurchaseService(
         }
         ownedPurchaseCommits += OwnedPurchaseCommit(identity, completion)
         return completion
+    }
+
+    /** Called only while [processing] is held. */
+    private fun recordCompletedPurchaseCommit(identity: PurchaseCommitIdentity) {
+        if (completedPurchaseCommits.put(identity, Unit) != null) return
+        val observer = purchaseCommitObserver ?: return
+        runCatching { observer(PurchaseCommitObservation.Committed(identity)) }
+    }
+
+    /** Called at the serialized interpreter boundary. */
+    private fun recordTerminalPurchaseOutcome(outcome: PurchaseOutcome) {
+        val observer = purchaseCommitObserver ?: return
+        runCatching {
+            observer(
+                PurchaseCommitObservation.Terminal(
+                    outcome = outcome,
+                    terminal = true,
+                ),
+            )
+        }
     }
 
     private suspend fun commitStandaloneOutcome(
@@ -1313,12 +1338,14 @@ internal class PurchaseService(
         // D2: evidence is durable before projection, facts, sync, acknowledge, or consume.
         val evidence = upsertEvidence(evidenceCandidate)
         if (evidence == null) {
+            val failedOutcome = PurchaseOutcome.Failed(
+                IllegalStateException("Could not persist purchase evidence."),
+                source,
+            )
+            recordTerminalPurchaseOutcome(failedOutcome)
             effects.completeCheckoutAfterPublications(
                 purchase,
-                PurchaseOutcome.Failed(
-                    IllegalStateException("Could not persist purchase evidence."),
-                    source,
-                ),
+                failedOutcome,
                 checkoutFlight,
             )
             return null
@@ -1339,28 +1366,37 @@ internal class PurchaseService(
             }
         }
         if (evidence.purchaseState == StoredPurchaseState.PENDING) {
+            val pendingOutcome = PurchaseOutcome.Pending(source, purchase)
+            recordTerminalPurchaseOutcome(pendingOutcome)
             stageAuthorityReassignment(effects)
             effects.completeCheckoutAfterPublications(
                 purchase,
-                PurchaseOutcome.Pending(source, purchase),
+                pendingOutcome,
                 checkoutFlight,
             )
             return null
         }
         if (evidence.permanentlyRejected) {
+            val failedOutcome = PurchaseOutcome.Failed(
+                IllegalStateException("Purchase evidence was permanently rejected."),
+                source,
+            )
+            recordTerminalPurchaseOutcome(failedOutcome)
             stageAuthorityReassignment(effects)
             stageEvidenceRevocation(evidence).publication?.let(effects.publications::add)
             effects.completeCheckoutAfterPublications(
                 purchase,
-                PurchaseOutcome.Failed(
-                    IllegalStateException("Purchase evidence was permanently rejected."),
-                    source,
-                ),
+                failedOutcome,
                 checkoutFlight,
             )
             return null
         }
         if (evidence.signatureVerificationRequired && !evidence.signatureVerified) {
+            val failedOutcome = PurchaseOutcome.Failed(
+                SecurityException("Play purchase signature is invalid."),
+                source,
+            )
+            recordTerminalPurchaseOutcome(failedOutcome)
             stageAuthorityReassignment(effects)
             stageEvidenceRevocation(evidence.copy(permanentlyRejected = true)).publication
                 ?.let(effects.publications::add)
@@ -1435,7 +1471,7 @@ internal class PurchaseService(
         } else {
             finalizeVerifiedOutcome(effects)
             if (evidence.completionEmitted) {
-                completedPurchaseCommits[identity] = Unit
+                recordCompletedPurchaseCommit(identity)
             }
         }
         return evidence.takeUnless { it.permanentlyRejected }
@@ -2024,6 +2060,13 @@ internal class PurchaseService(
         Map<String, OptimisticFeatureOverlay>? {
         val descriptors = evidenceStore.loadProductMappings()
         val bindings = evidenceStore.loadBindings()
+        // Cross-commit visibility is deliberate: an evidence row is DURABLE
+        // at persist time and the accepted optimistic-projection spec derives
+        // the overlay from the durable evidence window with no dependency on
+        // the purchase-completed carrier. The committer's evidence -> signal
+        // -> projection order is per-commit discipline; another commit's
+        // refresh surfacing this row before this commit's carrier lands is
+        // spec-conformant, not a leak (adjudicated UNIV-2676 review r2).
         val retainedEvidence = evidenceStore.load().values
         val identitiesByToken = retainedEvidence.associate { retained ->
             retained.purchaseToken to retained.allowanceResolutionIdentity()

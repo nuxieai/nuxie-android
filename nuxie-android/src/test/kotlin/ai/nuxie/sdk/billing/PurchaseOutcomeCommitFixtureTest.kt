@@ -148,25 +148,59 @@ class PurchaseOutcomeCommitFixtureTest {
             "external_delegate" -> executeExternalDeclaration(harness, contract, action)
             "retry_retained_outcomes" -> {
                 assertEquals("retry", action.requiredString("outcome"))
-                val minimumAttempts = expected.optionalInt("minimumCarrierCaptureAttempts") ?: 2
-                while (harness.captureAttempts.size < minimumAttempts - 1) {
-                    advanceTimeBy(harness.nextExternalRetryDelayMillis)
-                    runCurrent()
-                    harness.nextExternalRetryDelayMillis *= 2
+                val retainedOperationId = checkNotNull(harness.externalOperationIds.lastOrNull()) {
+                    "A retained external retry requires an earlier external operation."
                 }
-                harness.captureShouldSucceed = action.optionalBoolean("carrierCaptureSucceeds")
-                    ?: true
+                val retainedEventId = checkNotNull(harness.captureAttempts.lastOrNull()?.eventId) {
+                    "A retained external retry requires an earlier carrier attempt."
+                }
+                val operationCountBefore = harness.externalOperationIds.size
+                val attemptsBefore = harness.captureAttempts.size
+                val captureSucceeds = action.optionalBoolean("carrierCaptureSucceeds") ?: true
+                harness.captureShouldSucceed = captureSucceeds
                 advanceTimeBy(harness.nextExternalRetryDelayMillis)
                 runCurrent()
                 harness.nextExternalRetryDelayMillis *= 2
-                val attemptsAfterSuccess = harness.captureAttempts.size
-                advanceTimeBy(1_000)
-                runCurrent()
+                val delta = harness.captureAttempts.size - attemptsBefore
+                action.optionalInt("expectedCarrierCaptureAttemptDelta")?.let { expectedDelta ->
+                    assertEquals(
+                        "A retained operation past its retry cap must stop attempting",
+                        expectedDelta,
+                        delta,
+                    )
+                }
+                if (delta > 0) {
+                    assertEquals(
+                        "Every retry must retain the declaration's carrier identity",
+                        listOf(retainedEventId),
+                        harness.captureAttempts.drop(attemptsBefore)
+                            .map(CaptureAttempt::eventId).distinct(),
+                    )
+                }
                 assertEquals(
-                    "A successful retained operation must cancel further carrier retries",
-                    attemptsAfterSuccess,
-                    harness.captureAttempts.size,
+                    "A retained retry must not mint another external operation",
+                    operationCountBefore,
+                    harness.externalOperationIds.size,
                 )
+                if (captureSucceeds && delta > 0) {
+                    assertTrue(
+                        "The successful retained capture must commit the original external operation",
+                        harness.hasCommittedExternalOperation(retainedOperationId),
+                    )
+                    val attemptCountAfterSuccess = harness.captureAttempts.size
+                    advanceTimeBy(1_000)
+                    runCurrent()
+                    assertEquals(
+                        "A successful retained operation must cancel further carrier retries",
+                        attemptCountAfterSuccess,
+                        harness.captureAttempts.size,
+                    )
+                } else if (!captureSucceeds) {
+                    assertTrue(
+                        "The retained operation must not commit while its carrier keeps failing",
+                        !harness.hasCommittedExternalOperation(retainedOperationId),
+                    )
+                }
             }
             else -> error("Unsupported purchase outcome fixture entry '$entry'.")
         }
@@ -239,7 +273,6 @@ class PurchaseOutcomeCommitFixtureTest {
             "pending" -> assertEquals(PurchaseResult.Pending, result)
             "failed" -> assertTrue(result is PurchaseResult.Failed)
         }
-        result.toTerminalOutcomeOrNull()?.let(harness.terminalOutcomes::add)
     }
 
     private suspend fun TestScope.executeExternalDeclaration(
@@ -304,10 +337,19 @@ class PurchaseOutcomeCommitFixtureTest {
         val failures = harness.emittedEvents.filter {
             it.name == SystemEventNames.PURCHASE_FAILED
         }
+        val committedIdentities = harness.purchaseCommitObservations
+            .filterIsInstance<PurchaseCommitObservation.Committed>()
+            .map(PurchaseCommitObservation.Committed::identity)
+        val terminalOutcomes = harness.purchaseCommitObservations
+            .filterIsInstance<PurchaseCommitObservation.Terminal>()
+            .map { it.toFixtureTerminalOutcome() }
 
-        // The committer's completed set is intentionally private. A successful stable-id
-        // capture is its mandatory durable predecessor and is the existing observable probe.
-        assertEquals(name, expected.requiredInt("successfulCommits"), successfulCaptures.size)
+        assertEquals(name, expected.requiredInt("successfulCommits"), committedIdentities.size)
+        assertEquals(
+            "$name: a completed committer identity must be observed once",
+            committedIdentities.size,
+            committedIdentities.distinct().size,
+        )
 
         // Play persists pending ownership in PurchaseEvidenceStore. The shared fixture gives
         // pending ownership its own bucket, so this portable evidence count tracks identities
@@ -376,9 +418,9 @@ class PurchaseOutcomeCommitFixtureTest {
                     terminal = terminal.requiredBoolean("terminal"),
                 )
             },
-            harness.terminalOutcomes,
+            terminalOutcomes,
         )
-        assertTerminalEvents(name, harness)
+        assertTerminalEvents(name, harness, terminalOutcomes)
 
         assertEquals(
             name,
@@ -410,13 +452,27 @@ class PurchaseOutcomeCommitFixtureTest {
         }
         expected.optionalInt("minimumCarrierCaptureAttempts")?.let { minimum ->
             assertTrue(name, harness.captureAttempts.size >= minimum)
-            assertTrue(name, harness.captureAttempts.size <= MAX_EXTERNAL_CAPTURE_ATTEMPTS)
+            val maximum = expected.optionalInt("maximumCarrierCaptureAttempts")
+                ?: MAX_EXTERNAL_CAPTURE_ATTEMPTS
+            assertTrue(name, minimum <= maximum)
+            assertTrue(name, harness.captureAttempts.size <= maximum)
+        }
+        expected.optionalInt("maximumCarrierCaptureAttempts")?.let { maximum ->
+            assertTrue(name, harness.captureAttempts.size <= maximum)
         }
         expected.optionalInt("successfulCarrierCaptures")?.let { count ->
             assertEquals(name, count, harness.successfulCaptureCallbacks.size)
         }
         expected.optionalInt("carrierCaptureOperationIdentityCount")?.let { count ->
             assertEquals(name, count, harness.captureAttempts.map(CaptureAttempt::eventId).distinct().size)
+        }
+        expected.optionalInt("retainedCarrierRetryRoundLimit")?.let { limit ->
+            // Production makes one immediate attempt plus at most `limit`
+            // retained retry rounds for one external operation.
+            assertTrue(name, harness.captureAttempts.size <= 1 + limit)
+            if (expected.optionalBoolean("carrierCaptureAttemptsStopAtRetryLimit") == true) {
+                assertEquals(name, 1 + limit, harness.captureAttempts.size)
+            }
         }
 
         val expectedFinalizations = expected.optionalInt("storeFinalizationCalls")
@@ -583,8 +639,12 @@ class PurchaseOutcomeCommitFixtureTest {
         }
     }
 
-    private fun assertTerminalEvents(name: String, harness: Harness) {
-        val expectedNames = harness.terminalOutcomes.map { terminal ->
+    private fun assertTerminalEvents(
+        name: String,
+        harness: Harness,
+        terminalOutcomes: List<TerminalOutcome>,
+    ) {
+        val expectedNames = terminalOutcomes.map { terminal ->
             when (terminal.kind) {
                 "cancelled" -> SystemEventNames.PURCHASE_CANCELLED
                 "pending" -> SystemEventNames.PURCHASE_PENDING
@@ -788,7 +848,7 @@ class PurchaseOutcomeCommitFixtureTest {
         val purchasesByEvidence = mutableMapOf<String, PlayPurchase>()
         val checkoutResults = mutableListOf<PurchaseResult>()
         val restoreResults = mutableListOf<RestoreResult>()
-        val terminalOutcomes = mutableListOf<TerminalOutcome>()
+        val purchaseCommitObservations = mutableListOf<PurchaseCommitObservation>()
         var captureShouldSucceed = true
         var overlayEverPresent = false
         var logicalEntitlementScans = 0
@@ -850,6 +910,7 @@ class PurchaseOutcomeCommitFixtureTest {
                 true
             },
             logWarning = { _, _ -> },
+            purchaseCommitObserver = purchaseCommitObservations::add,
         )
 
         init {
@@ -869,6 +930,12 @@ class PurchaseOutcomeCommitFixtureTest {
                 is PurchaseResult.Failed -> "failed"
             }
         }
+
+        fun hasCommittedExternalOperation(operationId: String): Boolean =
+            purchaseCommitObservations.any { observation ->
+                observation is PurchaseCommitObservation.Committed &&
+                    observation.identity == PurchaseCommitIdentity.External(operationId)
+            }
 
         fun close() = core.stop()
     }
@@ -1027,30 +1094,31 @@ class PurchaseOutcomeCommitFixtureTest {
         vectorIndex: Int,
     ): PlayPurchase = product.toStandalonePendingPurchase(vectorIndex)
 
-    // Terminal lifecycle events do not expose provenance on Android. Every caller of this
-    // adapter has just driven the in-flight Play callback, which is the production checkout
-    // classification path; the public result and emitted lifecycle event supply the rest.
-    private fun PurchaseResult.toTerminalOutcomeOrNull(): TerminalOutcome? = when (this) {
-        PurchaseResult.Purchased -> null
-        PurchaseResult.Cancelled -> TerminalOutcome(
-            kind = "cancelled",
-            source = PurchaseOutcomeSource.CHECKOUT.wireValue,
-            reason = null,
-            terminal = true,
-        )
-        PurchaseResult.Pending -> TerminalOutcome(
-            kind = "pending",
-            source = PurchaseOutcomeSource.CHECKOUT.wireValue,
-            reason = null,
-            terminal = true,
-        )
-        is PurchaseResult.Failed -> TerminalOutcome(
-            kind = "failed",
-            source = PurchaseOutcomeSource.CHECKOUT.wireValue,
-            reason = (cause as? BillingUnavailableException)?.debugMessage ?: cause.message,
-            terminal = true,
-        )
-    }
+    private fun PurchaseCommitObservation.Terminal.toFixtureTerminalOutcome(): TerminalOutcome =
+        when (val committedOutcome = outcome) {
+            is PurchaseOutcome.Cancelled -> TerminalOutcome(
+                kind = "cancelled",
+                source = committedOutcome.source.wireValue,
+                reason = null,
+                terminal = terminal,
+            )
+            is PurchaseOutcome.Pending -> TerminalOutcome(
+                kind = "pending",
+                source = committedOutcome.source.wireValue,
+                reason = null,
+                terminal = terminal,
+            )
+            is PurchaseOutcome.Failed -> TerminalOutcome(
+                kind = "failed",
+                source = committedOutcome.source.wireValue,
+                reason = (committedOutcome.reason as? BillingUnavailableException)?.debugMessage
+                    ?: committedOutcome.reason.message,
+                terminal = terminal,
+            )
+            is PurchaseOutcome.External,
+            is PurchaseOutcome.Verified,
+            -> error("A successful purchase outcome cannot be a terminal fixture observation.")
+        }
 
     private fun okUpdate(vararg purchases: PlayPurchase): PurchaseUpdate = PurchaseUpdate(
         billingResult(BillingClient.BillingResponseCode.OK, "updated"),
