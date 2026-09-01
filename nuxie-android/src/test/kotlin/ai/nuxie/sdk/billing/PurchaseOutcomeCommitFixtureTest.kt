@@ -3,7 +3,9 @@ package ai.nuxie.sdk.billing
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.SystemEventNames
+import ai.nuxie.sdk.events.TriggerService
 import ai.nuxie.sdk.features.FeatureAllowance
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.network.HttpTransport
@@ -13,6 +15,9 @@ import com.android.billingclient.api.BillingResult
 import com.android.billingclient.api.ProductDetails
 import java.io.File
 import java.math.BigDecimal
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -71,6 +76,18 @@ class PurchaseOutcomeCommitFixtureTest {
                 runTest { runVector(contract, vector, vectorIndex) }
             } catch (failure: Throwable) {
                 throw AssertionError("Fixture vector 'purchases/outcome-commit/$name' failed", failure)
+            }
+        }
+    }
+
+    private suspend fun awaitRealWork(timeoutMillis: Long = 5_000, predicate: () -> Boolean) {
+        withContext(Dispatchers.Default) {
+            val deadline = System.currentTimeMillis() + timeoutMillis
+            while (!predicate()) {
+                check(System.currentTimeMillis() < deadline) {
+                    "Timed out waiting for real-dispatcher work to settle."
+                }
+                delay(5)
             }
         }
     }
@@ -187,6 +204,10 @@ class PurchaseOutcomeCommitFixtureTest {
                     harness.externalOperationIds.size,
                 )
                 if (captureSucceeds && delta > 0) {
+                    // The retry's durable capture and commit bookkeeping run
+                    // on the real EventLog dispatcher; virtual time cannot
+                    // drain them.
+                    awaitRealWork { harness.hasCommittedExternalOperation(retainedOperationId) }
                     assertTrue(
                         "The successful retained capture must commit the original external operation",
                         harness.hasCommittedExternalOperation(retainedOperationId),
@@ -291,26 +312,15 @@ class PurchaseOutcomeCommitFixtureTest {
             "purchase" -> {
                 harness.delegate.purchaseResult = PurchaseResult.Purchased
                 val product = contract.products.getValue(action.requiredString("product"))
-                val gate = harness.delegate.gateNextPurchase()
-                val initiatingIdentity = harness.core.identity.distinctId()
-                val purchase = async {
-                    harness.service.purchase(
-                        activity(),
-                        product.toStoreProduct(),
-                        replacement = null,
-                    )
-                }
-                runCurrent()
-                gate.started.await()
-                harness.core.identity.setDistinctId(
-                    "post_delegate_${harness.vectorIndex}_${harness.delegate.purchasedProducts.size}",
+                // Vectors run under a stable current identity; the
+                // initiating-identity suppression across an identity change
+                // is pinned by its dedicated PurchaseServiceTest behavior
+                // test, not by every external vector.
+                val result = harness.service.purchase(
+                    activity(),
+                    product.toStoreProduct(),
+                    replacement = null,
                 )
-                gate.release.complete(Unit)
-                val result = try {
-                    purchase.await()
-                } finally {
-                    harness.core.identity.setDistinctId(initiatingIdentity)
-                }
                 harness.checkoutResults += result
                 assertEquals(PurchaseResult.Purchased, result)
             }
@@ -375,10 +385,16 @@ class PurchaseOutcomeCommitFixtureTest {
             expected.requiredInt("uniqueEvidenceRows") + expected.requiredInt("pendingRecords"),
             harness.store.load().size,
         )
+        // This is the Journey router's actual completion-carrier input
+        // count (purchase AND restore both route, matching iOS), independent
+        // from carrier capture or restore completion counts.
         assertEquals(
             name,
             expected.requiredInt("journeyAdvancements"),
-            completions.size + restores.size,
+            harness.journeyEvents.count {
+                it.name == SystemEventNames.PURCHASE_COMPLETED ||
+                    it.name == SystemEventNames.RESTORE_COMPLETED
+            },
         )
         assertEquals(name, expected.requiredInt("purchaseCompletedEvents"), completions.size)
         assertEquals(name, expected.requiredInt("restoreCompletedEvents"), restores.size)
@@ -827,6 +843,11 @@ class PurchaseOutcomeCommitFixtureTest {
     ) {
         val ownerDistinctId = "purchase_outcome_owner_$vectorIndex"
         val transport = RecordingPurchaseTransport(ownerDistinctId, catalogProductsByStore)
+        val journeyEvents = mutableListOf<StoredEvent>()
+        private val journeyRouter = TriggerService.JourneyRouter { event ->
+            journeyEvents += event
+            emptyList()
+        }
         val core = NuxieCore(
             context = RuntimeEnvironment.getApplication(),
             apiKey = "pk_test_purchase_outcome_$vectorIndex",
@@ -837,6 +858,7 @@ class PurchaseOutcomeCommitFixtureTest {
                 transport = transport,
                 nowMillis = { FIXED_NOW_MILLIS + vectorIndex },
                 registerLifecycle = false,
+                journeys = journeyRouter,
             ),
         ).also { it.identity.setDistinctId(ownerDistinctId) }
         val store = RecordingEvidenceStore()
@@ -889,7 +911,13 @@ class PurchaseOutcomeCommitFixtureTest {
             capturePurchaseEvent = { name, properties, eventId, distinctId ->
                 val attempt = CaptureAttempt(name, eventId, distinctId)
                 captureAttempts += attempt
-                if (captureShouldSucceed) {
+                val captured = captureShouldSucceed && core.capturePurchaseEvent(
+                    name,
+                    properties,
+                    eventId,
+                    distinctId,
+                )
+                if (captured) {
                     successfulCaptureCallbacks += attempt
                     if (eventId !in successfulCaptures) {
                         successfulCaptures[eventId] = CapturedEvent(
@@ -899,10 +927,8 @@ class PurchaseOutcomeCommitFixtureTest {
                             distinctId = distinctId,
                         )
                     }
-                    true
-                } else {
-                    false
                 }
+                captured
             },
             newExternalOperationId = {
                 externalOperationSequence += 1

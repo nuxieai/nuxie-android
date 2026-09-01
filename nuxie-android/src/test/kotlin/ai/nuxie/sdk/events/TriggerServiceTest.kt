@@ -286,6 +286,75 @@ class TriggerServiceTest {
     }
 
     @Test
+    fun committedSystemEventRoutesLocallyAndPresentsStartedJourney() = runBlocking {
+        val routed = mutableListOf<StoredEvent>()
+        val presented = mutableListOf<Pair<String, String?>>()
+        val transport = transportWithGate(null)
+        val core = core(
+            transport = transport,
+            journeys = TriggerService.JourneyRouter { event ->
+                routed += event
+                listOf(
+                    TriggerService.JourneyTriggerResult.Started(
+                        ExperienceRef("exp-1", "v1", "j-1"),
+                    ),
+                    TriggerService.JourneyTriggerResult.Started(
+                        ExperienceRef("exp-2", null, "j-2"),
+                    ),
+                    TriggerService.JourneyTriggerResult.Failed(
+                        ai.nuxie.sdk.TriggerError(
+                            TriggerErrorCode.TRIGGER_FAILED,
+                            "admission failed",
+                        ),
+                    ),
+                    TriggerService.JourneyTriggerResult.Suppressed(
+                        ai.nuxie.sdk.SuppressReason.ALREADY_ACTIVE,
+                    ),
+                )
+            },
+            presenter = TriggerService.ExperiencePresenter { version, journeyId ->
+                presented += version to journeyId
+                ExperienceRef("exp-1", version, journeyId)
+            },
+        )
+        val stored = checkNotNull(
+            core.eventLog.captureIdempotentlyWithResult(
+                SystemEventNames.PURCHASE_COMPLETED,
+                emptyMap(),
+                "purchase-event-${UUID.randomUUID()}",
+                core.identity.distinctId(),
+            ).storedEvent,
+        )
+
+        core.triggers.routeCommittedSystemEvent(stored)
+
+        assertEquals(listOf(stored), routed)
+        assertEquals(listOf("v1" to "j-1"), presented)
+        assertTrue(transport.requests.none { it.url.path == "/event" })
+        core.stop()
+    }
+
+    @Test
+    fun committedSystemEventRouterFailureDoesNotEscape() = runBlocking {
+        val core = core(
+            transportWithGate(null),
+            journeys = TriggerService.JourneyRouter { error("router failed") },
+        )
+        val eventId = "purchase-event-${UUID.randomUUID()}"
+
+        assertTrue(
+            core.capturePurchaseEvent(
+                SystemEventNames.PURCHASE_COMPLETED,
+                emptyMap(),
+                eventId,
+                core.identity.distinctId(),
+            ),
+        )
+        assertTrue(core.store.pendingBatch(10).any { it.id == eventId })
+        core.stop()
+    }
+
+    @Test
     fun journeyCloseReasonReachesJourneyServiceThroughProductionComposition() = runBlocking {
         val journeyId = "composition-${UUID.randomUUID()}"
         val started = ExperienceRef("exp-composed", "v-composed", journeyId)

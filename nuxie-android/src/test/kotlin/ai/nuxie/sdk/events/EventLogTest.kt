@@ -16,6 +16,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -186,6 +187,32 @@ class EventLogTest {
         assertEquals(listOf("stable-id"), store.pending.map { it.id })
         assertEquals("owner-1", store.pending.single().distinctId)
         assertEquals(1, announcements)
+    }
+
+    @Test
+    fun stableIdCaptureReportsOnlyTheFirstDurableInsertAsNew() = runBlocking {
+        val store = RecordingStore()
+        val eventLog = log(store)
+
+        val first = eventLog.captureIdempotentlyWithResult(
+            "\$purchase_completed",
+            emptyMap(),
+            "stable-id",
+            "owner-1",
+        )
+        val duplicate = eventLog.captureIdempotentlyWithResult(
+            "\$purchase_completed",
+            emptyMap(),
+            "stable-id",
+            "owner-1",
+        )
+
+        assertTrue(first.succeeded)
+        assertTrue(first.newlyCaptured)
+        assertEquals("stable-id", first.storedEvent?.id)
+        assertTrue(duplicate.succeeded)
+        assertFalse(duplicate.newlyCaptured)
+        assertNull(duplicate.storedEvent)
     }
 
     @Test

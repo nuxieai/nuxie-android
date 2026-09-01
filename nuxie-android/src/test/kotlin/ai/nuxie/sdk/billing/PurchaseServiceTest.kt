@@ -6,6 +6,9 @@ import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.events.ActivityCuration
 import ai.nuxie.sdk.events.JsonValueConverter
+import ai.nuxie.sdk.events.StoredEvent
+import ai.nuxie.sdk.events.SystemEventNames
+import ai.nuxie.sdk.events.TriggerService
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.features.FeatureAllowance
 import ai.nuxie.sdk.network.NuxieApi
@@ -22,6 +25,8 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
@@ -1090,6 +1095,23 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun completedCheckoutRoutesOnePurchaseEventAcrossRedelivery() = runTest {
+        val journeyEvents = mutableListOf<StoredEvent>()
+        val fixture = fixture(this, journeyEvents = journeyEvents)
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+        val purchase = playPurchase("journey-routing-checkout").forCheckout(fixture)
+
+        fixture.service.onPurchasesUpdated(okUpdate(purchase))
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        fixture.service.onPurchasesUpdated(okUpdate(purchase))
+
+        assertEquals(1, journeyEvents.size)
+        assertEquals(SystemEventNames.PURCHASE_COMPLETED, journeyEvents.single().name)
+        fixture.close()
+    }
+
+    @Test
     fun duplicateVerifiedObservationReturnsWithoutJoiningTheOwningCapture() = runTest {
         val actions = mutableListOf<String>()
         val captureStarted = CompletableDeferred<Unit>()
@@ -1906,7 +1928,13 @@ class PurchaseServiceTest {
     fun purchasedDelegateOutcomeCapturesCheckoutCompletionWithoutNativeEvidence() = runTest {
         val actions = mutableListOf<String>()
         val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
-        val fixture = fixture(this, actions = actions, emissions = emissions)
+        val journeyEvents = mutableListOf<StoredEvent>()
+        val fixture = fixture(
+            this,
+            actions = actions,
+            emissions = emissions,
+            journeyEvents = journeyEvents,
+        )
         fixture.synchronizer = {
             actions += "sync"
             accepted(it.syncAttributionDistinctId, it)
@@ -1952,19 +1980,37 @@ class PurchaseServiceTest {
         assertFalse("sync" in actions)
         assertTrue(fixture.store.load().isEmpty())
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        assertEquals(
+            listOf(SystemEventNames.PURCHASE_COMPLETED),
+            journeyEvents.map(StoredEvent::name),
+        )
         fixture.close()
+    }
+
+    private suspend fun awaitRealWork(timeoutMillis: Long = 5_000, predicate: () -> Boolean) {
+        withContext(Dispatchers.Default) {
+            val deadline = System.currentTimeMillis() + timeoutMillis
+            while (!predicate()) {
+                check(System.currentTimeMillis() < deadline) {
+                    "Timed out waiting for real-dispatcher work to settle."
+                }
+                delay(5)
+            }
+        }
     }
 
     @Test
     fun delegateSuccessRetriesTheSameOperationAfterACaptureMiss() = runTest {
         var mintedOperations = 0
         val captureResults = mutableListOf(false, true)
+        val journeyEvents = mutableListOf<StoredEvent>()
         val fixture = fixture(
             this,
             initialRetryDelayMillis = 10,
             maxRetryDelayMillis = 1_000,
             purchaseEventCaptureResults = captureResults,
             externalOperationId = { "external-retry-${++mintedOperations}" },
+            journeyEvents = journeyEvents,
         )
         fixture.settings.delegate = object : NuxiePurchaseDelegate {
             override suspend fun purchase(product: StoreProduct): PurchaseResult = PurchaseResult.Purchased
@@ -1975,16 +2021,24 @@ class PurchaseServiceTest {
         assertEquals(1, mintedOperations)
         assertEquals(1, fixture.purchaseEventCaptureAttempts.size)
         assertTrue(fixture.purchaseCompletionEventIds.isEmpty())
+        assertTrue(journeyEvents.isEmpty())
 
         advanceTimeBy(19)
         runCurrent()
         assertEquals(1, fixture.purchaseEventCaptureAttempts.size)
         advanceTimeBy(1)
         runCurrent()
+        // The retry's durable capture runs on the real EventLog dispatcher;
+        // virtual time cannot drain it.
+        awaitRealWork { fixture.purchaseCompletionEventIds.size == 1 }
 
         assertEquals(2, fixture.purchaseEventCaptureAttempts.size)
         assertEquals(1, fixture.purchaseEventCaptureAttempts.distinct().size)
         assertEquals(1, fixture.purchaseCompletionEventIds.size)
+        assertEquals(
+            listOf(SystemEventNames.PURCHASE_COMPLETED),
+            journeyEvents.map(StoredEvent::name),
+        )
         fixture.close()
     }
 
@@ -2074,9 +2128,11 @@ class PurchaseServiceTest {
     @Test
     fun externalPurchaseCallbackCapturesCarrierForInitiatingIdentityAcrossIdentityChange() = runTest {
         var mintedOperations = 0
+        val journeyEvents = mutableListOf<StoredEvent>()
         val fixture = fixture(
             this,
             externalOperationId = { "external-race-${++mintedOperations}" },
+            journeyEvents = journeyEvents,
         )
         val initiatingOwner = fixture.core.identity.distinctId()
         val callback = CompletableDeferred<PurchaseResult>()
@@ -2104,6 +2160,7 @@ class PurchaseServiceTest {
         assertEquals(listOf(initiatingOwner), fixture.purchaseEventDistinctIds)
         assertTrue(fixture.store.load().isEmpty())
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        assertTrue(journeyEvents.isEmpty())
         fixture.close()
     }
 
@@ -2460,6 +2517,7 @@ class PurchaseServiceTest {
         externalOperationId: (() -> String)? = null,
         verifyPurchaseSignature: (String, String, String) -> Boolean = { _, _, _ -> true },
         logWarning: (String, Throwable) -> Unit = { _, _ -> },
+        journeyEvents: MutableList<StoredEvent>? = null,
     ): Fixture {
         val storageDirectory = temporaryFolder.newFolder("fixture-${fixtures.size}")
         val core = NuxieCore(
@@ -2473,6 +2531,12 @@ class PurchaseServiceTest {
                 registerLifecycle = false,
                 eventDatabaseFile = File(storageDirectory, "events.db"),
                 profileCacheDirectory = File(storageDirectory, "profiles"),
+                journeys = journeyEvents?.let { events ->
+                    TriggerService.JourneyRouter { event ->
+                        events += event
+                        emptyList()
+                    }
+                },
             ),
         )
         kotlinx.coroutines.runBlocking { core.purchases.awaitInitialProjection() }
@@ -2512,13 +2576,18 @@ class PurchaseServiceTest {
                 } else {
                     purchaseEventCaptureResults.removeAt(0)
                 }
-                if (captured && eventId !in purchaseCompletionEventIds) {
+                val durablyCaptured = if (captured && journeyEvents != null) {
+                    core.capturePurchaseEvent(name, properties, eventId, capturedDistinctId)
+                } else {
+                    captured
+                }
+                if (durablyCaptured && eventId !in purchaseCompletionEventIds) {
                     purchaseCompletionEventIds += eventId
                     purchaseEventDistinctIds += capturedDistinctId
                     actions += name
                     emissions += name to properties
                 }
-                captured
+                durablyCaptured
             },
             newExternalOperationId = externalOperationId
                 ?: { "external-operation-${++externalOperationSequence}" },
