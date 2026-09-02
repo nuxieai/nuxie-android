@@ -1,12 +1,24 @@
 package ai.nuxie.sdk.core
 
+import ai.nuxie.sdk.experiences.SemanticVersion
 import ai.nuxie.sdk.runtime.NuxieEmbeddedRuntimeCompatibility
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class EmbeddedRuntimeCompatibilityTest {
+    @Test
+    fun `shipped sdk version satisfies the first stable release minimum`() {
+        val current = requireNotNull(
+            SemanticVersion.parse(requireNotNull(supportedRuntimeForEmbeddedRuntime("native")).currentSdkVersion),
+        )
+        val minimum = requireNotNull(SemanticVersion.parse("0.1.0"))
+
+        assertTrue(current >= minimum)
+    }
+
     @Test
     fun `release admission uses the cross-platform compatibility revision not native provenance`() {
         val nativeSourceRevision = "native-runtime-build-revision"
