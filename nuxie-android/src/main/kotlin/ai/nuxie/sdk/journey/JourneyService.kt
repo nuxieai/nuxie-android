@@ -54,6 +54,7 @@ internal class JourneyService(
         // transitions; action restoration belongs to the execution slice.
         initialDistinctId?.let { distinctId ->
             store.loadActive(distinctId).forEach(::rememberRun)
+            store.loadPendingEnrollments(distinctId).forEach(::rememberRun)
         }
     }
 
@@ -78,21 +79,23 @@ internal class JourneyService(
         toNode: String,
         region: String = "device-main",
     ) {
-        runLock.withLock {
+        val run = runLock.withLock {
             val run = loadRun(distinctId, journeyId) ?: return
             if (run.state == JourneyRunState.ACTIVE && !run.isGhost) {
-                ledger.transition(run, fromNode, toNode, region)
-            }
-        }
+                run
+            } else null
+        } ?: return
+        ledger.transition(run, fromNode, toNode, region)
     }
 
     suspend fun milestone(distinctId: String, journeyId: String, milestoneId: String) {
-        runLock.withLock {
+        val run = runLock.withLock {
             val run = loadRun(distinctId, journeyId) ?: return
             if (run.state == JourneyRunState.ACTIVE && !run.isGhost) {
-                ledger.milestone(run, milestoneId)
-            }
-        }
+                run
+            } else null
+        } ?: return
+        ledger.milestone(run, milestoneId)
     }
 
     suspend fun requestEffect(
@@ -103,33 +106,38 @@ internal class JourneyService(
         effect: String,
         payload: JsonObject,
     ): String? {
-        return runLock.withLock {
+        val run = runLock.withLock {
             val run = loadRun(distinctId, journeyId) ?: return null
             if (run.state == JourneyRunState.ACTIVE && !run.isGhost) {
-                ledger.effectRequested(run, nodeId, attempt, effect, payload)
+                run
             } else {
                 null
             }
-        }
+        } ?: return null
+        val requested = ledger.effectRequested(run, nodeId, attempt, effect, payload)
+        return requested.invocationId
     }
 
     suspend fun exit(distinctId: String, journeyId: String, reason: String) {
-        runLock.withLock {
+        val exited = runLock.withLock {
             val run = loadRun(distinctId, journeyId) ?: return
             if (run.state != JourneyRunState.ACTIVE) return
             val terminal = run.copy(state = JourneyRunState.TERMINAL, terminalReason = reason)
             store.save(terminal)
             rememberRun(terminal)
             if (!run.isGhost) {
-                ledger.exited(run, reason, nowMillis())
                 if (reason != "cancelled" && reason != "error") {
                     store.recordCompletion(
                         distinctId,
                         JourneyCompletion(run.experienceId, run.id, nowMillis()),
                     )
                 }
+                run
+            } else {
+                null
             }
-        }
+        } ?: return
+        ledger.exited(exited, reason, nowMillis())
     }
 
     /**
@@ -188,6 +196,10 @@ internal class JourneyService(
             hostDismissWithRetry(distinctId, journeyId)
             return true
         }
+        var shouldCaptureExit = false
+        var exitAtMillis: Long? = null
+        var exitReason: String? = null
+        var terminalRun: JourneyRun? = null
         runLock.withLock {
             val terminal = inMemoryRun(distinctId, journeyId)
                 ?.takeIf { it.state == JourneyRunState.TERMINAL }
@@ -200,13 +212,14 @@ internal class JourneyService(
                 val completedAtMillis = terminal.completedAtMillis
                 if (selected == JourneyRunPresentationOutcome.USER_DISMISSED) {
                     if (completedAtMillis == null) return@withLock
-                    ledger.userExited(terminal, completedAtMillis)
+                    shouldCaptureExit = true
+                    exitAtMillis = completedAtMillis
+                    terminalRun = terminal
                 } else {
-                    ledger.exited(
-                        terminal,
-                        requireNotNull(terminal.terminalReason),
-                        completedAtMillis ?: nowMillis(),
-                    )
+                    shouldCaptureExit = true
+                    exitAtMillis = completedAtMillis ?: nowMillis()
+                    exitReason = requireNotNull(terminal.terminalReason)
+                    terminalRun = terminal
                 }
             } finally {
                 // The terminal result unblocks triggerAndWait independently of
@@ -235,6 +248,14 @@ internal class JourneyService(
                         JourneyCompletion(terminal.experienceId, terminal.id, it),
                     )
                 }
+            }
+        }
+        if (shouldCaptureExit) {
+            val terminal = requireNotNull(terminalRun)
+            if (exitReason == null) {
+                ledger.userExited(terminal, requireNotNull(exitAtMillis))
+            } else {
+                ledger.exited(terminal, requireNotNull(exitReason), requireNotNull(exitAtMillis))
             }
         }
         return true
@@ -273,8 +294,8 @@ internal class JourneyService(
         if (terminal.pendingHostExitCapture) {
             val captured = runCatching {
                 ledger.hostExited(terminal, completedAtMillis)
-            }.getOrDefault(false)
-            if (captured) {
+            }.getOrNull()
+            if (captured != null) {
                 val advanced = terminal.copy(pendingHostExitCapture = false)
                 if (persistAdvancedHostDismissal(terminal, advanced)) {
                     terminal = advanced
@@ -409,13 +430,50 @@ internal class JourneyService(
             val event = StoredEvent(id, name, serverProperties, timestamp, distinctId)
             if (name == JourneyEventNames.SUPERSEDED || name == JourneyEventNames.CONVERTED) {
                 runLock.withLock {
-                    if (ledger.serverFact(event, receivedAtMillis)) {
-                        routeDownFact(distinctId, name, serverProperties)
-                    }
+                    ledger.serverFact(event, receivedAtMillis)
+                    routeDownFact(distinctId, name, serverProperties)
                 }
-            } else if (ledger.serverFact(event, receivedAtMillis)) {
+            } else {
+                ledger.serverFact(event, receivedAtMillis)
                 routeDownFact(distinctId, name, serverProperties)
             }
+        }
+    }
+
+    /** Finish an accepted decision before its durable source event is acknowledged. */
+    internal suspend fun applyDecisionResponse(event: StoredEvent, body: JsonObject) {
+        if (event.name == JourneyEventNames.ENROLLED) {
+            acceptEnrollment(event)
+        }
+        applyDownFacts(body, event.distinctId)
+    }
+
+    /** Roll back a terminally rejected decision before its source event is resolved. */
+    internal suspend fun rejectDecisionEvent(event: StoredEvent) {
+        if (event.name != JourneyEventNames.ENROLLED) return
+        val journeyId = event.properties.string("journey_id") ?: return
+        runLock.withLock {
+            val run = loadRun(event.distinctId, journeyId) ?: return@withLock
+            if (
+                run.state == JourneyRunState.ENROLLING &&
+                run.pendingEnrollmentEventId == event.id
+            ) {
+                store.delete(run)
+                check(store.load(run.distinctId, run.id) == null) {
+                    "Rejected enrollment could not be removed"
+                }
+                forgetRun(run)
+            }
+        }
+    }
+
+    /** Recreate or replay every unresolved enrollment with its original `/event` UUID. */
+    internal suspend fun recoverPendingEnrollments() {
+        store.loadPendingEnrollments().forEach { run ->
+            rememberRunIfAbsent(run)
+            val eventId = run.pendingEnrollmentEventId ?: return@forEach
+            val triggerRef = run.triggerRef ?: return@forEach
+            ledger.enrolled(run, triggerRef, eventId)
         }
     }
 
@@ -432,7 +490,7 @@ internal class JourneyService(
                 return TriggerService.JourneyTriggerResult.Suppressed(SuppressReason.REENTRY_LIMITED)
             }
             if (runSnapshot.any {
-                    it.state == JourneyRunState.ACTIVE &&
+                    (it.state == JourneyRunState.ENROLLING || it.state == JourneyRunState.ACTIVE) &&
                         it.experienceId == release.experienceId
                 }
             ) {
@@ -447,28 +505,102 @@ internal class JourneyService(
                 epoch = 0,
                 plane = JourneyPlane.DEVICE,
                 settingsSnapshot = release.settingsTemplate.withAnchor(now),
-                state = JourneyRunState.ACTIVE,
+                state = JourneyRunState.ENROLLING,
+                pendingEnrollmentEventId = ids.next(),
                 triggerRef = event.id,
             )
-            // The enrollment fact is a synchronous durability boundary. Do
-            // not admit or persist a run if committing it failed.
-            if (ledger.enrolled(run, event.id) == null) {
+            // Persist recoverable intent before `/event`. The decision lane
+            // activates or removes this exact run before acknowledging its
+            // stable source event, closing every crash window.
+            val persisted = runCatching {
+                runLock.withLock {
+                    store.save(run)
+                    rememberRun(run)
+                }
+            }.isSuccess
+            if (!persisted) {
+                return TriggerService.JourneyTriggerResult.Failed(
+                    TriggerError(TriggerErrorCode.TRIGGER_FAILED, "Journey enrollment persistence failed"),
+                )
+            }
+            val enrollment = ledger.enrolled(
+                run,
+                event.id,
+                requireNotNull(run.pendingEnrollmentEventId),
+            )
+            if (enrollment?.event == null) {
                 return TriggerService.JourneyTriggerResult.Failed(
                     TriggerError(TriggerErrorCode.TRIGGER_FAILED, "Journey enrollment capture failed"),
                 )
             }
-            // Persist after the synchronous enrollment fact so a crash cannot
-            // leave server admission without its local run snapshot.
-            runLock.withLock {
-                store.save(run)
-                rememberRun(run)
+            if (enrollment.response == null) {
+                return TriggerService.JourneyTriggerResult.Failed(
+                    TriggerError(TriggerErrorCode.TRIGGER_FAILED, "Journey enrollment request failed"),
+                )
             }
+            val active = loadRun(event.distinctId, run.id)
+                ?.takeIf { it.state == JourneyRunState.ACTIVE }
+                ?: return TriggerService.JourneyTriggerResult.Failed(
+                    TriggerError(TriggerErrorCode.TRIGGER_FAILED, "Journey enrollment was not activated"),
+                )
             return TriggerService.JourneyTriggerResult.Started(
-                ExperienceRef(run.experienceId, run.experienceVersion, run.id),
+                ExperienceRef(active.experienceId, active.experienceVersion, active.id),
             )
         } finally {
             synchronized(admissions) { admissions.remove(key) }
         }
+    }
+
+    private suspend fun acceptEnrollment(event: StoredEvent) {
+        val accepted = event.toEnrollmentRun() ?: error("Accepted enrollment event is malformed")
+        runLock.withLock {
+            val current = loadRun(event.distinctId, accepted.id)
+            when (current?.state) {
+                null -> {
+                    store.save(accepted)
+                    rememberRun(accepted)
+                }
+                JourneyRunState.ENROLLING -> {
+                    check(current.pendingEnrollmentEventId == event.id) {
+                        "Enrollment event identity does not match its pending run"
+                    }
+                    val active = current.copy(
+                        state = JourneyRunState.ACTIVE,
+                        pendingEnrollmentEventId = null,
+                    )
+                    store.save(active)
+                    rememberRun(active)
+                }
+                JourneyRunState.ACTIVE -> Unit
+                JourneyRunState.TRANSFERRED, JourneyRunState.TERMINAL -> Unit
+            }
+        }
+    }
+
+    private fun StoredEvent.toEnrollmentRun(): JourneyRun? {
+        if (name != JourneyEventNames.ENROLLED) return null
+        val journeyId = properties.string("journey_id") ?: return null
+        val experienceId = properties.string("experience_id") ?: return null
+        val experienceVersion = properties.string("experience_version") ?: return null
+        val epoch = properties.long("epoch") ?: return null
+        val plane = when (properties.string("plane")) {
+            "device" -> JourneyPlane.DEVICE
+            "server" -> JourneyPlane.SERVER
+            else -> return null
+        }
+        val settings = properties["settings_snapshot"] as? JsonObject ?: return null
+        val triggerRef = properties.string("trigger_ref") ?: return null
+        return JourneyRun(
+            id = journeyId,
+            distinctId = distinctId,
+            experienceId = experienceId,
+            experienceVersion = experienceVersion,
+            epoch = epoch,
+            plane = plane,
+            settingsSnapshot = settings,
+            state = JourneyRunState.ACTIVE,
+            triggerRef = triggerRef,
+        )
     }
 
     private fun isReentryLimited(
@@ -516,6 +648,7 @@ internal class JourneyService(
     /** Called under [runLock]; both admission gates consume the returned state snapshot. */
     private fun runsForAdmissionSnapshot(distinctId: String): List<JourneyRun> {
         store.loadActive(distinctId).forEach(::rememberRunIfAbsent)
+        store.loadPendingEnrollments(distinctId).forEach(::rememberRunIfAbsent)
         store.loadPendingHostDismissals(distinctId).forEach(::rememberPendingRecoveryRun)
         return inMemoryRuns(distinctId)
     }
@@ -554,10 +687,22 @@ internal class JourneyService(
     }
 
     private fun JsonObject.withAnchor(now: Long): JsonObject = buildJsonObject {
-        this@withAnchor.forEach { (key, value) -> if (key != "goal_window_ms") put(key, value) }
-        put("conversion_anchor_at", JsonPrimitive(now))
+        this@withAnchor.forEach { (key, value) ->
+            if (key != "goal_window_ms" && key != "time_limit_ms") put(key, value)
+        }
+        put("conversion_anchor_at", JsonPrimitive(IsoDates.formatMillis(now)))
         val window = (this@withAnchor["goal_window_ms"] as? JsonPrimitive)?.content?.toLongOrNull()
-        put("goal_window_ends_at", window?.let { JsonPrimitive(now + it) } ?: kotlinx.serialization.json.JsonNull)
+        put(
+            "goal_window_ends_at",
+            window?.let { JsonPrimitive(IsoDates.formatMillis(now + it)) }
+                ?: kotlinx.serialization.json.JsonNull,
+        )
+        val timeLimit = (this@withAnchor["time_limit_ms"] as? JsonPrimitive)?.content?.toLongOrNull()
+        put(
+            "time_limit_at",
+            timeLimit?.let { JsonPrimitive(IsoDates.formatMillis(now + it)) }
+                ?: kotlinx.serialization.json.JsonNull,
+        )
     }
 
     private fun loadRun(distinctId: String, journeyId: String): JourneyRun? {

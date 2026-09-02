@@ -1,6 +1,8 @@
 package ai.nuxie.sdk.events
 
 import ai.nuxie.sdk.NuxieEnvironment
+import ai.nuxie.sdk.LogLevel
+import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.NuxieApi
 import java.io.IOException
@@ -29,7 +31,15 @@ import org.robolectric.RuntimeEnvironment
 class EventDeliveryWorkerTest {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val stores = mutableListOf<SQLiteEventStore>()
+    private val logs = mutableListOf<EventLog>()
     private var now = 1_784_462_400_000L
+
+    private class FakeIdentity : IdentityProvider {
+        override fun distinctId(): String = "user-1"
+        override fun anonymousId(): String = "anonymous-user"
+        override fun rawDistinctId(): String? = "user-1"
+        override val isIdentified: Boolean = true
+    }
 
     private class ScriptedTransport(vararg outcomes: Any) : HttpTransport {
         private val script = outcomes.toMutableList()
@@ -57,9 +67,24 @@ class EventDeliveryWorkerTest {
     private fun store(): SQLiteEventStore =
         SQLiteEventStore(RuntimeEnvironment.getApplication()).also(stores::add)
 
+    private fun eventLog(store: EventStore): EventLog = EventLog(
+        store = store,
+        contextBuilder = NuxieContextBuilder(
+            RuntimeEnvironment.getApplication(),
+            NuxieEnvironment.DEVELOPMENT,
+            LogLevel.NONE,
+            FakeIdentity(),
+        ),
+        identity = FakeIdentity(),
+        beforeSend = null,
+        scope = scope,
+        nowMillis = { now },
+    ).also(logs::add)
+
     private fun worker(store: EventStore, transport: HttpTransport): EventDeliveryWorker =
         EventDeliveryWorker(
             store = store,
+            eventLog = eventLog(store),
             api = NuxieApi("pk_test", NuxieEnvironment.DEVELOPMENT, transport),
             scope = scope,
             nowMillis = { now },
@@ -80,6 +105,7 @@ class EventDeliveryWorkerTest {
 
     @After
     fun tearDown() = runBlocking {
+        logs.asReversed().forEach { runCatching { it.close() } }
         scope.coroutineContext[Job]?.cancelAndJoin()
         stores.asReversed().forEach { it.close() }
         stores.clear()
@@ -137,6 +163,7 @@ class EventDeliveryWorkerTest {
         val store = store()
         val delivery = EventDeliveryWorker(
             store = store,
+            eventLog = eventLog(store),
             api = NuxieApi("pk_test", NuxieEnvironment.DEVELOPMENT, ScriptedTransport()),
             scope = scope,
             maxEventsStored = 10,

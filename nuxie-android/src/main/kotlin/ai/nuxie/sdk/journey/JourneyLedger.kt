@@ -1,14 +1,30 @@
 package ai.nuxie.sdk.journey
 
+import ai.nuxie.sdk.events.DecisionEventCapture
+import ai.nuxie.sdk.events.DecisionEventCapturing
 import ai.nuxie.sdk.events.EventLog
+import ai.nuxie.sdk.events.EventLog.ServerFactCommitResult
 import ai.nuxie.sdk.events.StoredEvent
+import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.util.IsoDates
 import java.security.MessageDigest
 import kotlinx.serialization.json.JsonObject
 
 /** Emits the five device-authored Journey facts through the durable EventLog. */
-internal class JourneyLedger(private val eventLog: EventLog) {
-    suspend fun enrolled(run: JourneyRun, triggerRef: String): StoredEvent? = eventLog.captureForTrigger(
+internal data class JourneyEffectRequest(
+    val invocationId: String,
+    val capture: DecisionEventCapture?,
+)
+
+internal class JourneyLedger(
+    private val eventLog: EventLog,
+    private val decisionEvents: DecisionEventCapturing,
+) {
+    suspend fun enrolled(
+        run: JourneyRun,
+        triggerRef: String,
+        eventId: String,
+    ): DecisionEventCapture? = decisionEvents.capture(
         JourneyEventNames.ENROLLED,
         mapOf(
             "journey_id" to run.id,
@@ -17,11 +33,19 @@ internal class JourneyLedger(private val eventLog: EventLog) {
             "experience_version" to run.experienceVersion,
             "trigger_ref" to triggerRef,
             "plane" to run.plane.wireName(),
-            "settings_snapshot" to run.settingsSnapshot,
+            "settings_snapshot" to JsonValueConverter.toNativeMap(run.settingsSnapshot),
         ),
+        run.distinctId,
+        eventId = eventId,
+        applyBeforeSend = false,
     )
 
-    fun transition(run: JourneyRun, fromNode: String?, toNode: String, region: String) {
+    suspend fun transition(
+        run: JourneyRun,
+        fromNode: String?,
+        toNode: String,
+        region: String,
+    ): DecisionEventCapture? {
         val properties = linkedMapOf<String, Any?>(
             "journey_id" to run.id,
             "epoch" to run.epoch,
@@ -30,15 +54,20 @@ internal class JourneyLedger(private val eventLog: EventLog) {
             "plane" to run.plane.wireName(),
         )
         fromNode?.takeIf(String::isNotEmpty)?.let { properties["from_node"] = it }
-        capture(JourneyEventNames.TRANSITION, properties)
+        return decisionEvents.capture(JourneyEventNames.TRANSITION, properties, run.distinctId)
     }
 
-    fun milestone(run: JourneyRun, milestoneId: String) = capture(
+    suspend fun milestone(run: JourneyRun, milestoneId: String): DecisionEventCapture? = decisionEvents.capture(
         JourneyEventNames.MILESTONE,
         mapOf("journey_id" to run.id, "epoch" to run.epoch, "milestone_id" to milestoneId),
+        run.distinctId,
     )
 
-    fun exited(run: JourneyRun, reason: String, atMillis: Long) = eventLog.capture(
+    suspend fun exited(
+        run: JourneyRun,
+        reason: String,
+        atMillis: Long,
+    ): DecisionEventCapture? = decisionEvents.capture(
         JourneyEventNames.EXITED,
         mapOf(
             "journey_id" to run.id,
@@ -51,8 +80,8 @@ internal class JourneyLedger(private val eventLog: EventLog) {
         run.distinctId,
     )
 
-    suspend fun hostExited(run: JourneyRun, atMillis: Long): Boolean =
-        eventLog.captureIdempotently(
+    suspend fun hostExited(run: JourneyRun, atMillis: Long): DecisionEventCapture? =
+        decisionEvents.capture(
             name = JourneyEventNames.EXITED,
             properties = mapOf(
                 "journey_id" to run.id,
@@ -67,8 +96,8 @@ internal class JourneyLedger(private val eventLog: EventLog) {
             distinctId = run.distinctId,
         )
 
-    suspend fun userExited(run: JourneyRun, atMillis: Long): Boolean =
-        eventLog.captureSystemEvent(
+    suspend fun userExited(run: JourneyRun, atMillis: Long): DecisionEventCapture? =
+        decisionEvents.capture(
             name = JourneyEventNames.EXITED,
             properties = mapOf(
                 "journey_id" to run.id,
@@ -81,36 +110,37 @@ internal class JourneyLedger(private val eventLog: EventLog) {
             ),
             eventId = "journey-exited:${run.id}:${run.epoch}",
             distinctId = run.distinctId,
+            applyBeforeSend = false,
         )
 
-    fun effectRequested(
+    suspend fun effectRequested(
         run: JourneyRun,
         nodeId: String,
         attempt: Long,
         effect: String,
         payload: JsonObject,
-    ): String {
+    ): JourneyEffectRequest {
         val invocationId = invocationId(run.id, nodeId, attempt)
-        capture(
-            JourneyEventNames.EFFECT_REQUESTED,
-            mapOf(
+        val capture = decisionEvents.capture(
+            name = JourneyEventNames.EFFECT_REQUESTED,
+            properties = mapOf(
                 "journey_id" to run.id,
                 "epoch" to run.epoch,
                 "node_id" to nodeId,
                 "invocation_id" to invocationId,
                 "effect" to effect,
-                "payload" to payload,
+                "payload" to JsonValueConverter.toNativeMap(payload),
             ),
+            distinctId = run.distinctId,
         )
-        return invocationId
+        return JourneyEffectRequest(invocationId, capture)
     }
 
-    suspend fun serverFact(event: StoredEvent, receivedAtMillis: Long): Boolean =
+    suspend fun serverFact(
+        event: StoredEvent,
+        receivedAtMillis: Long,
+    ): ServerFactCommitResult =
         eventLog.commitServerFact(event, receivedAtMillis)
-
-    private fun capture(name: String, properties: Map<String, Any?>) {
-        eventLog.capture(name, properties)
-    }
 
     private fun JourneyPlane.wireName(): String = when (this) {
         JourneyPlane.DEVICE -> "device"

@@ -189,8 +189,6 @@ internal class NuxieCore(
         baseUrlOverride = apiEndpointOverride,
     )
 
-    val delivery = EventDeliveryWorker(store, api, scope, nowMillis = nowMillis)
-
     val segments = SegmentService(appContext)
 
     val contextBuilder = NuxieContextBuilder(appContext, environment, logLevel, identity)
@@ -231,14 +229,30 @@ internal class NuxieCore(
 
     private val triggerBroker = TriggerBroker()
 
+    private lateinit var journeyResponseRouter: JourneyService
+
+    val delivery = EventDeliveryWorker(
+        store = store,
+        eventLog = eventLog,
+        api = api,
+        scope = scope,
+        onDecisionResponse = { event, response ->
+            journeyResponseRouter.applyDecisionResponse(event, response)
+        },
+        onDecisionRejected = { event, _ ->
+            journeyResponseRouter.rejectDecisionEvent(event)
+        },
+        nowMillis = nowMillis,
+    )
+
     val journeys = JourneyService(
         store = JourneyStore(appContext.filesDir),
-        ledger = JourneyLedger(eventLog),
+        ledger = JourneyLedger(eventLog, delivery),
         releases = journeyCatalog,
         nowMillis = nowMillis,
         initialDistinctId = identity.distinctId(),
         triggerBroker = triggerBroker,
-    )
+    ).also { journeyResponseRouter = it }
 
     val features = FeatureService(
         api = api,
@@ -385,8 +399,7 @@ internal class NuxieCore(
 
     val triggers by lazy {
         TriggerService(
-        eventLog = eventLog,
-        api = api,
+        decisionEvents = delivery,
         broker = triggerBroker,
         identityDistinctId = identity::distinctId,
         journeys = overrides.journeys ?: journeys,
@@ -464,6 +477,8 @@ internal class NuxieCore(
             // revocation lane; purchase recovery handles still-active Play evidence.
             profile.requestRefresh()
             purchases.recover()
+            journeys.recoverPendingEnrollments()
+            delivery.flushAll()
             journeys.recoverPendingHostDismissals()
         },
     )
@@ -493,7 +508,11 @@ internal class NuxieCore(
         if (requestInitialProfileRefresh) {
             profile.requestRefresh()
         }
-        scope.launch { journeys.recoverPendingHostDismissals() }
+        scope.launch {
+            journeys.recoverPendingEnrollments()
+            delivery.flushAll()
+            journeys.recoverPendingHostDismissals()
+        }
         lifecycleTracker.trackAppLaunchEvents()
         billing.connect()
         if (registerLifecycle) {

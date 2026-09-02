@@ -32,6 +32,33 @@ class JourneyStoreTest {
     }
 
     @Test
+    fun persistsPendingEnrollmentIdentityAcrossStoreRestart() {
+        val root = createTempDir(prefix = "nuxie-journey-enrollment-")
+        try {
+            val run = JourneyRun(
+                id = "018fc8e0-7b00-7000-8000-000000000002",
+                distinctId = "customer-1",
+                experienceId = "experience-1",
+                experienceVersion = "version-1",
+                epoch = 0,
+                plane = JourneyPlane.DEVICE,
+                settingsSnapshot = kotlinx.serialization.json.JsonObject(emptyMap()),
+                state = JourneyRunState.ENROLLING,
+                pendingEnrollmentEventId = "018fc8e0-7b00-7000-8000-000000000003",
+                triggerRef = "trigger-1",
+            )
+
+            JourneyStore(root).save(run)
+
+            assertEquals(listOf(run), JourneyStore(root).loadPendingEnrollments("customer-1"))
+            assertEquals(listOf(run), JourneyStore(root).loadPendingEnrollments())
+            assertEquals(emptyList<JourneyRun>(), JourneyStore(root).loadActive("customer-1"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun completionAccountingIsIdempotentByJourneyId() {
         val root = createTempDir(prefix = "nuxie-journey-completion-")
         try {

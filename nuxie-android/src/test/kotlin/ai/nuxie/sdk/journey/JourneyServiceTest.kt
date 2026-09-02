@@ -45,6 +45,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -78,6 +79,7 @@ class JourneyServiceTest {
         val events = linkedMapOf<String, StoredEvent>()
         val delivered = mutableSetOf<String>()
         var failNextPendingInsert = false
+        var failNextServerFactInsert = false
         var beforePendingInsert: ((StoredEvent) -> Unit)? = null
         var serverFactInsertStarted: CompletableDeferred<Unit>? = null
         var serverFactInsertGate: CompletableDeferred<Unit>? = null
@@ -92,6 +94,10 @@ class JourneyServiceTest {
         override suspend fun insertDeliveredIfAbsent(event: StoredEvent): Boolean {
             serverFactInsertStarted?.complete(Unit)
             serverFactInsertGate?.await()
+            if (failNextServerFactInsert) {
+                failNextServerFactInsert = false
+                error("server fact insert failed")
+            }
             if (events.putIfAbsent(event.id, event) != null) return false
             delivered += event.id
             return true
@@ -127,6 +133,13 @@ class JourneyServiceTest {
         onJourneyClockRead: () -> Unit = {},
         onJourneyReleaseRead: () -> Unit = {},
         hostDismissRetrySleep: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
+        decisionResponse: (StoredEvent) -> JsonObject? = {
+            buildJsonObject {
+                put("status", JsonPrimitive("ok"))
+                put("facts", JsonArray(emptyList()))
+            }
+        },
+        onDecisionCaptured: (JourneyStore, StoredEvent) -> Unit = { _, _ -> },
     ): Harness {
         val root = createTempDirectory("nuxie-journey-").toFile().also(roots::add)
         val eventStore = Store()
@@ -146,7 +159,10 @@ class JourneyServiceTest {
             triggerEventName = "opened",
             reentry = reentry,
             settingsTemplate = buildJsonObject {
-                put("goal", JsonPrimitive("goal"))
+                put("goal", buildJsonObject {
+                    put("kind", JsonPrimitive("milestone"))
+                    put("milestoneId", JsonPrimitive("reached-a"))
+                })
                 put("conversion_anchor", JsonPrimitive("journey_start"))
                 put("goal_window_ms", JsonPrimitive(1_000L))
                 put("end_on_goal", JsonPrimitive(true))
@@ -158,25 +174,208 @@ class JourneyServiceTest {
             if (name == "opened") listOf(release) else emptyList()
         }
         val journeyStore = JourneyStore(root)
+        lateinit var service: JourneyService
+        val decisionEvents = CapturingDecisionEvents(
+            eventLog = eventLog,
+            responseFor = { event ->
+                onDecisionCaptured(journeyStore, event)
+                decisionResponse(event)
+            },
+            applyResponse = { event, response -> service.applyDecisionResponse(event, response) },
+        )
+        service = JourneyService(
+            journeyStore,
+            JourneyLedger(eventLog, decisionEvents),
+            releases,
+            {
+                onJourneyClockRead()
+                now
+            },
+            triggerBroker = broker,
+            hostDismissRetrySleep = hostDismissRetrySleep,
+        )
         return Harness(
             root,
             eventStore,
             eventLog,
-            JourneyService(
-                journeyStore,
-                JourneyLedger(eventLog),
-                releases,
-                {
-                    onJourneyClockRead()
-                    now
-                },
-                triggerBroker = broker,
-                hostDismissRetrySleep = hostDismissRetrySleep,
-            ),
+            service,
             broker,
             releases,
             journeyStore,
         )
+    }
+
+
+    @Test
+    fun enrollmentWithoutAnAcceptedDecisionDoesNotStartOrPersistAnActiveRun() = runBlocking {
+        val h = harness(decisionResponse = { null })
+        try {
+            val result = h.service.handleEventForTrigger(
+                StoredEvent(
+                    "trigger-no-response",
+                    "opened",
+                    timestampMillis = now,
+                    distinctId = "customer-1",
+                ),
+            )
+
+            assertTrue(result.single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Failed)
+            assertTrue(h.journeyStore.loadActive("customer-1").isEmpty())
+            assertEquals(
+                1,
+                h.journeyStore.loadPendingEnrollments("customer-1").size,
+            )
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun enrollmentPersistsRecoverableRunBeforeSendingItsDecisionEvent() = runBlocking {
+        var persistedBeforeSend: JourneyRun? = null
+        val h = harness(
+            onDecisionCaptured = { store, event ->
+                if (event.name == JourneyEventNames.ENROLLED) {
+                    val journeyId = (event.properties.getValue("journey_id") as JsonPrimitive).content
+                    persistedBeforeSend = store.load(event.distinctId, journeyId)
+                }
+            },
+        )
+        try {
+            val result = h.service.handleEventForTrigger(
+                StoredEvent(
+                    "trigger-crash-boundary",
+                    "opened",
+                    timestampMillis = now,
+                    distinctId = "customer-1",
+                ),
+            )
+
+            assertTrue(result.single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started)
+            assertEquals(JourneyRunState.ENROLLING, persistedBeforeSend?.state)
+            assertTrue(persistedBeforeSend?.pendingEnrollmentEventId != null)
+            assertEquals(JourneyRunState.ACTIVE, h.journeyStore.loadActive("customer-1").single().state)
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun enrollmentDecisionCannotBeDroppedByBeforeSend() = runBlocking {
+        val h = harness(beforeSend = { null })
+        try {
+            val result = h.service.handleEventForTrigger(
+                StoredEvent(
+                    "trigger-before-send",
+                    "opened",
+                    timestampMillis = now,
+                    distinctId = "customer-1",
+                ),
+            )
+
+            assertTrue(result.single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started)
+            assertEquals(JourneyRunState.ACTIVE, h.journeyStore.loadActive("customer-1").single().state)
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun pendingEnrollmentRecoversWithItsOriginalEventIdentity() = runBlocking {
+        val h = harness()
+        try {
+            val pending = JourneyRun(
+                id = "018fc8e0-7b00-7000-8000-000000000011",
+                distinctId = "customer-1",
+                experienceId = "experience-1",
+                experienceVersion = "version-1",
+                epoch = 0,
+                plane = JourneyPlane.DEVICE,
+                settingsSnapshot = buildJsonObject {},
+                state = JourneyRunState.ENROLLING,
+                pendingEnrollmentEventId = "018fc8e0-7b00-7000-8000-000000000012",
+                triggerRef = "trigger-recovery",
+            )
+            h.journeyStore.save(pending)
+            val originalEventId = requireNotNull(pending.pendingEnrollmentEventId)
+
+            lateinit var recoveredService: JourneyService
+            val recoveringEvents = CapturingDecisionEvents(
+                eventLog = h.log,
+                responseFor = {
+                    buildJsonObject {
+                        put("status", JsonPrimitive("ok"))
+                        put("facts", JsonArray(emptyList()))
+                    }
+                },
+                applyResponse = { event, response ->
+                    recoveredService.applyDecisionResponse(event, response)
+                },
+            )
+            recoveredService = JourneyService(
+                h.journeyStore,
+                JourneyLedger(h.log, recoveringEvents),
+                JourneyReleaseProvider { _, _ -> emptyList() },
+                nowMillis = { now },
+                initialDistinctId = "customer-1",
+            )
+
+            recoveredService.recoverPendingEnrollments()
+
+            assertEquals(originalEventId, h.store.events.getValue(originalEventId).id)
+            assertTrue(h.journeyStore.loadPendingEnrollments("customer-1").isEmpty())
+            val active = h.journeyStore.loadActive("customer-1").single()
+            assertEquals(pending.id, active.id)
+            assertEquals(null, active.pendingEnrollmentEventId)
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun terminalEnrollmentRejectionRemovesOnlyItsMatchingPendingRun() = runBlocking {
+        val h = harness(decisionResponse = { null })
+        try {
+            h.service.handleEventForTrigger(
+                StoredEvent(
+                    "trigger-rejected",
+                    "opened",
+                    timestampMillis = now,
+                    distinctId = "customer-1",
+                ),
+            )
+            val pending = h.journeyStore.loadPendingEnrollments("customer-1").single()
+            val event = h.store.events.getValue(requireNotNull(pending.pendingEnrollmentEventId))
+
+            h.service.rejectDecisionEvent(event)
+
+            assertEquals(null, h.journeyStore.load("customer-1", pending.id))
+            assertTrue(h.journeyStore.loadPendingEnrollments("customer-1").isEmpty())
+        } finally {
+            h.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun unresolvedEnrollmentSuppressesASecondAdmission() = runBlocking {
+        val h = harness(decisionResponse = { null })
+        try {
+            val first = h.service.handleEventForTrigger(
+                StoredEvent("trigger-pending-1", "opened", distinctId = "customer-1"),
+            )
+            val second = h.service.handleEventForTrigger(
+                StoredEvent("trigger-pending-2", "opened", distinctId = "customer-1"),
+            )
+
+            assertTrue(first.single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Failed)
+            assertEquals(
+                SuppressReason.ALREADY_ACTIVE,
+                (second.single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed).reason,
+            )
+            assertEquals(1, h.journeyStore.loadPendingEnrollments("customer-1").size)
+        } finally {
+            h.root.deleteRecursively()
+        }
     }
 
     @After fun tearDown() = runBlocking {
@@ -199,10 +398,24 @@ class JourneyServiceTest {
             h.log.awaitBarrier()
 
             assertEquals(first, retry)
+            val enrollment = h.store.events.values.first { it.name == JourneyEventNames.ENROLLED }
             assertEquals(
                 setOf("journey_id", "epoch", "experience_id", "experience_version", "trigger_ref", "plane", "settings_snapshot"),
-                h.store.events.values.first { it.name == JourneyEventNames.ENROLLED }.properties.keys.filterNot { it.startsWith("$") }.toSet(),
+                enrollment.properties.keys.filterNot { it.startsWith("$") }.toSet(),
             )
+            val settings = enrollment.properties.getValue("settings_snapshot") as JsonObject
+            assertEquals(
+                buildJsonObject {
+                    put("kind", JsonPrimitive("milestone"))
+                    put("milestoneId", JsonPrimitive("reached-a"))
+                },
+                settings.getValue("goal"),
+            )
+            assertEquals("journey_start", (settings.getValue("conversion_anchor") as JsonPrimitive).content)
+            assertEquals("2026-07-19T12:00:00.000Z", (settings.getValue("conversion_anchor_at") as JsonPrimitive).content)
+            assertEquals("2026-07-19T12:00:01.000Z", (settings.getValue("goal_window_ends_at") as JsonPrimitive).content)
+            assertEquals(true, (settings.getValue("end_on_goal") as JsonPrimitive).content.toBooleanStrict())
+            assertEquals(JsonNull, settings.getValue("time_limit_at"))
             assertEquals(
                 setOf("journey_id", "epoch", "to_node", "region", "plane"),
                 h.store.events.values.first { it.name == JourneyEventNames.TRANSITION }.properties.keys.filterNot { it.startsWith("$") }.toSet(),
@@ -219,6 +432,45 @@ class JourneyServiceTest {
                 setOf("journey_id", "epoch", "experience_id", "experience_version", "reason", "at"),
                 h.store.events.values.first { it.name == JourneyEventNames.EXITED }.properties.keys.filterNot { it.startsWith("$") }.toSet(),
             )
+        } finally { h.root.deleteRecursively() }
+    }
+
+    @Test
+    fun milestoneAppliesConversionFromItsDecisionResponse() = runBlocking {
+        val convertedAt = now + 750L
+        val h = harness(decisionResponse = { event ->
+            if (event.name != JourneyEventNames.MILESTONE) {
+                buildJsonObject {
+                    put("status", JsonPrimitive("ok"))
+                    put("facts", JsonArray(emptyList()))
+                }
+            } else {
+                val journeyId = (event.properties.getValue("journey_id") as JsonPrimitive).content
+                buildJsonObject {
+                    put("status", JsonPrimitive("ok"))
+                    put("facts", JsonArray(listOf(buildJsonObject {
+                        put("id", JsonPrimitive("server:converted:$journeyId"))
+                        put("event", JsonPrimitive(JourneyEventNames.CONVERTED))
+                        put("timestamp", JsonPrimitive("2026-07-19T12:00:00.750Z"))
+                        put("properties", buildJsonObject {
+                            put("journey_id", JsonPrimitive(journeyId))
+                            put("at", JsonPrimitive("2026-07-19T12:00:00.750Z"))
+                        })
+                    })))
+                }
+            }
+        })
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = requireNotNull(started.ref.journeyId)
+
+            h.service.milestone("customer-1", journeyId, "reached-a")
+
+            val run = requireNotNull(JourneyStore(h.root).load("customer-1", journeyId))
+            assertEquals(convertedAt, run.convertedAtMillis)
+            assertTrue("server:converted:$journeyId" in h.store.delivered)
         } finally { h.root.deleteRecursively() }
     }
 
@@ -834,7 +1086,7 @@ class JourneyServiceTest {
             failTriggerCompletion = false
             val restartedService = JourneyService(
                 JourneyStore(h.root),
-                JourneyLedger(h.log),
+                JourneyLedger(h.log, CapturingDecisionEvents(h.log)),
                 h.releases,
                 { now },
                 initialDistinctId = "customer-1",
@@ -879,7 +1131,7 @@ class JourneyServiceTest {
 
             val restartedService = JourneyService(
                 JourneyStore(h.root),
-                JourneyLedger(h.log),
+                JourneyLedger(h.log, CapturingDecisionEvents(h.log)),
                 h.releases,
                 { now },
                 triggerBroker = h.broker,
@@ -954,7 +1206,7 @@ class JourneyServiceTest {
             ShadowLog.clear()
             val recoveringService = JourneyService(
                 JourneyStore(h.root),
-                JourneyLedger(h.log),
+                JourneyLedger(h.log, CapturingDecisionEvents(h.log)),
                 h.releases,
                 { now },
                 triggerBroker = h.broker,
@@ -1009,7 +1261,7 @@ class JourneyServiceTest {
 
             val restartedService = JourneyService(
                 JourneyStore(h.root),
-                JourneyLedger(h.log),
+                JourneyLedger(h.log, CapturingDecisionEvents(h.log)),
                 h.releases,
                 { now },
                 triggerBroker = h.broker,
@@ -1278,7 +1530,7 @@ class JourneyServiceTest {
     }
 
     @Test
-    fun failedEnrollmentFactDoesNotPersistOrAdmitAndCanRetry() = runBlocking {
+    fun failedEnrollmentCaptureRetainsRecoverableIntentAndCanRetry() = runBlocking {
         val h = harness()
         try {
             h.store.failNextPendingInsert = true
@@ -1287,7 +1539,12 @@ class JourneyServiceTest {
             val failed = h.service.handleEventForTrigger(event).single()
             assertTrue(failed is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Failed)
             assertTrue(JourneyStore(h.root).loadActive("customer-1").isEmpty())
-            assertTrue(h.service.handleEventForTrigger(event).single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started)
+            assertEquals(1, h.journeyStore.loadPendingEnrollments("customer-1").size)
+
+            h.service.recoverPendingEnrollments()
+
+            assertEquals(JourneyRunState.ACTIVE, h.journeyStore.loadActive("customer-1").single().state)
+            assertTrue(h.journeyStore.loadPendingEnrollments("customer-1").isEmpty())
         } finally { h.root.deleteRecursively() }
     }
 
@@ -1318,6 +1575,37 @@ class JourneyServiceTest {
             assertEquals("fact-1", h.store.events.getValue("fact-1").properties.stringValue("\$server_fact_id"))
             assertEquals("server", h.store.events.getValue("fact-1").properties.stringValue("\$nuxie_event_origin"))
             assertNull(h.store.events.values.firstOrNull { it.name == JourneyEventNames.EXITED && it.properties["journey_id"]?.toString()?.contains(journeyId) == true })
+        } finally { h.root.deleteRecursively() }
+    }
+
+    @Test
+    fun downFactStorageFailurePropagatesWithoutApplyingTheFact() = runBlocking {
+        val h = harness()
+        try {
+            val started = h.service.handleEventForTrigger(
+                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
+            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
+            val journeyId = requireNotNull(started.ref.journeyId)
+            val fact = buildJsonObject {
+                put("id", JsonPrimitive("fact-storage-failure"))
+                put("event", JsonPrimitive(JourneyEventNames.SUPERSEDED))
+                put("timestamp", JsonPrimitive(now))
+                put("properties", buildJsonObject {
+                    put("journey_id", JsonPrimitive(journeyId))
+                })
+            }
+            h.store.failNextServerFactInsert = true
+
+            val failure = runCatching {
+                h.service.applyDownFacts(
+                    buildJsonObject { put("facts", JsonArray(listOf(fact))) },
+                    "customer-1",
+                )
+            }.exceptionOrNull()
+
+            assertEquals("server fact insert failed", failure?.message)
+            assertFalse(JourneyStore(h.root).load("customer-1", journeyId)!!.isGhost)
+            assertFalse("fact-storage-failure" in h.store.events)
         } finally { h.root.deleteRecursively() }
     }
 
@@ -1727,6 +2015,101 @@ class JourneyServiceTest {
         catalog.applyProfile("user-b", profile)
         assertTrue(catalog.releasesFor("user-a", "opened").isEmpty())
         assertEquals(1, catalog.releasesFor("user-b", "opened").size)
+    }
+
+    @Test
+    fun catalogConvertsReleaseLifecycleIntoTheJourneySettingsWireShape() {
+        val identity = ExperienceReleaseIdentity(
+            appId = "app", environment = "development", experienceId = "experience-1",
+            experienceVersionId = "version-1", buildId = "build-1", versionNumber = 1,
+            releaseCreatedAt = "2026-01-01T00:00:00.000Z", releaseSequence = 1,
+        )
+        val condition = buildJsonObject {
+            put("ir_version", JsonPrimitive(1))
+            put("expr", buildJsonObject {
+                put("type", JsonPrimitive("Pred"))
+                put("key", JsonPrimitive("milestone_id"))
+                put("op", JsonPrimitive("eq"))
+                put("value", buildJsonObject {
+                    put("type", JsonPrimitive("String"))
+                    put("value", JsonPrimitive("paywall_converted"))
+                })
+            })
+        }
+        val release = AuthenticatedRelease(
+            keyId = "test",
+            descriptorSha256 = "sha",
+            identity = identity,
+            descriptorBytes = ByteArray(0),
+            descriptor = buildJsonObject {
+                put("enrollment", buildJsonObject {
+                    put("trigger", buildJsonObject {
+                        put("type", JsonPrimitive("event"))
+                        put("eventName", JsonPrimitive("opened"))
+                    })
+                })
+                put("lifecycle", buildJsonObject {
+                    put("reentry", buildJsonObject { put("type", JsonPrimitive("every_time")) })
+                    put("exitPolicy", JsonPrimitive("on_goal"))
+                    put("conversionAnchor", JsonPrimitive("last_experience_shown"))
+                    put("goal", buildJsonObject {
+                        put("type", JsonPrimitive("event"))
+                        put("eventName", JsonPrimitive(JourneyEventNames.MILESTONE))
+                        put("condition", condition)
+                        put("windowSeconds", JsonPrimitive(86_400L))
+                    })
+                    put("timeLimitSeconds", JsonPrimitive(604_800L))
+                })
+            },
+            releaseSequenceToPromote = null,
+        )
+        val catalog = JourneyReleaseCatalog(
+            trustedKeys = emptyMap(),
+            highWater = ReleaseHighWaterStore(RuntimeEnvironment.getApplication()),
+            supportedRuntime = { supportedRuntime() },
+            authenticate = { _, _ -> release },
+        )
+
+        catalog.applyProfile("user-a", profileFor(identity))
+
+        val settings = catalog.releasesFor("user-a", "opened").single().settingsTemplate
+        assertEquals(
+            buildJsonObject {
+                put("kind", JsonPrimitive("event"))
+                put("eventName", JsonPrimitive(JourneyEventNames.MILESTONE))
+                put("eventFilter", condition)
+                put("window", JsonPrimitive(86_400L))
+            },
+            settings.getValue("goal"),
+        )
+        assertEquals("last_experience_shown", (settings.getValue("conversion_anchor") as JsonPrimitive).content)
+        assertEquals(86_400_000L, (settings.getValue("goal_window_ms") as JsonPrimitive).content.toLong())
+        assertEquals(604_800_000L, (settings.getValue("time_limit_ms") as JsonPrimitive).content.toLong())
+        assertEquals(true, (settings.getValue("end_on_goal") as JsonPrimitive).content.toBooleanStrict())
+    }
+
+    private fun profileFor(identity: ExperienceReleaseIdentity) = buildJsonObject {
+        put("releases", buildJsonObject {
+            put("delivery", buildJsonObject {
+                put("renderBaseUrl", JsonPrimitive("https://example.test/renders/"))
+                put("assetBaseUrl", JsonPrimitive("https://example.test/assets/"))
+            })
+            put("active", JsonArray(listOf(buildJsonObject {
+                put("locator", buildJsonObject {
+                    put("appId", JsonPrimitive(identity.appId))
+                    put("environment", JsonPrimitive(identity.environment))
+                    put("experienceId", JsonPrimitive(identity.experienceId))
+                    put("experienceVersionId", JsonPrimitive(identity.experienceVersionId))
+                    put("buildId", JsonPrimitive(identity.buildId))
+                    put("versionNumber", JsonPrimitive(identity.versionNumber))
+                    put("releaseCreatedAt", JsonPrimitive(identity.releaseCreatedAt))
+                    put("releaseSequence", JsonPrimitive(identity.releaseSequence))
+                })
+                put("descriptorSha256", JsonPrimitive("sha"))
+                put("envelopeBytesBase64", JsonPrimitive("eA=="))
+            })))
+            put("pinned", JsonArray(emptyList()))
+        })
     }
 
     private fun supportedRuntime() = SupportedRuntime(
