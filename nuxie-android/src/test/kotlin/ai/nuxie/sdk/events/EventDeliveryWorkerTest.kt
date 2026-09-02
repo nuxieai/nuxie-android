@@ -4,6 +4,7 @@ import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.NuxieApi
 import java.io.IOException
+import java.util.zip.GZIPInputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -35,7 +36,11 @@ class EventDeliveryWorkerTest {
         val batches = mutableListOf<List<String>>()
 
         override fun execute(request: HttpTransport.Request): HttpTransport.Response {
-            val body = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+            assertEquals("gzip", request.headers["Content-Encoding"])
+            val decodedBody = GZIPInputStream(request.body.inputStream())
+                .bufferedReader()
+                .use { it.readText() }
+            val body = Json.parseToJsonElement(decodedBody).jsonObject
             batches.add(
                 body.getValue("batch").jsonArray.map { item ->
                     (item as JsonObject).getValue("idempotency_key").jsonPrimitive.content

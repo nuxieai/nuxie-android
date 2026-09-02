@@ -5,8 +5,10 @@ import ai.nuxie.sdk.SdkVersion
 import ai.nuxie.sdk.events.CanonicalJson
 import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.features.FeatureType
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.URL
+import java.util.zip.GZIPOutputStream
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -195,15 +197,13 @@ internal class NuxieApi(
         val response = transport.execute(
             HttpTransport.Request(
                 url = URL("$baseUrl/batch"),
-                // iOS parity: request bodies are NOT gzip-compressed in
-                // production (NuxieCore passes useGzipCompression: false);
-                // responses accept gzip.
                 headers = mapOf(
                     "Content-Type" to "application/json",
+                    "Content-Encoding" to "gzip",
                     "Accept-Encoding" to "gzip",
                     "User-Agent" to "Nuxie-Android-SDK/${SdkVersion.VALUE}",
                 ),
-                body = body,
+                body = gzip(body),
             ),
         )
         if (response.statusCode !in 200..299) {
@@ -492,3 +492,9 @@ internal class NuxieApi(
         append('"')
     }
 }
+
+private fun gzip(body: ByteArray): ByteArray =
+    ByteArrayOutputStream().use { output ->
+        GZIPOutputStream(output).use { it.write(body) }
+        output.toByteArray()
+    }
