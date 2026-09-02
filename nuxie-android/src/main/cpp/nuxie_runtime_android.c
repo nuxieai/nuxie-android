@@ -1361,6 +1361,187 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelRootSchemaIndex(
   return status == NUX_STATUS_OK ? schema_index : 0;
 }
 
+JNIEXPORT jobject JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelInstanceSnapshot(
+    JNIEnv *env, jobject self, jlong view_model, jintArray status_out) {
+  (void)self;
+  if (status_out == NULL) return NULL;
+  if (view_model == 0) {
+    set_status_out(env, status_out, NUX_STATUS_NULL_ARGUMENT);
+    return NULL;
+  }
+
+  struct NuxViewModelSnapshot *snapshot = NULL;
+  jclass instance_class = NULL;
+  jclass value_class = NULL;
+  jclass snapshot_class = NULL;
+  jobjectArray instances = NULL;
+  jobjectArray values = NULL;
+  jobject result = NULL;
+  NuxStatus status = nux_view_model_instance_snapshot(
+      (const struct NuxViewModelInstance *)from_handle(view_model), &snapshot);
+  if (status == NUX_STATUS_OK && snapshot == NULL) status = NUX_STATUS_RUNTIME_ERROR;
+  if (status != NUX_STATUS_OK) goto view_model_snapshot_cleanup;
+
+  struct NuxViewModelSnapshotInfo info;
+  memset(&info, 0, sizeof(info));
+  info.struct_size = (uint32_t)sizeof(info);
+  status = nux_view_model_snapshot_info(snapshot, &info);
+  if (status != NUX_STATUS_OK || info.instance_count > INT32_MAX ||
+      info.value_count > INT32_MAX || info.list_item_count > INT32_MAX) {
+    if (status == NUX_STATUS_OK) status = NUX_STATUS_RUNTIME_ERROR;
+    goto view_model_snapshot_cleanup;
+  }
+
+  instance_class = (*env)->FindClass(
+      env, "ai/nuxie/sdk/runtime/NativeViewModelSnapshotInstance");
+  if (clear_jni_exception(env) || instance_class == NULL) {
+    status = NUX_STATUS_RUNTIME_ERROR;
+    goto view_model_snapshot_cleanup;
+  }
+  value_class = (*env)->FindClass(
+      env, "ai/nuxie/sdk/runtime/NativeViewModelSnapshotValue");
+  if (clear_jni_exception(env) || value_class == NULL) {
+    status = NUX_STATUS_RUNTIME_ERROR;
+    goto view_model_snapshot_cleanup;
+  }
+  snapshot_class = (*env)->FindClass(
+      env, "ai/nuxie/sdk/runtime/NativeViewModelSnapshot");
+  if (clear_jni_exception(env) || snapshot_class == NULL) {
+    status = NUX_STATUS_RUNTIME_ERROR;
+    goto view_model_snapshot_cleanup;
+  }
+
+  jmethodID instance_constructor = (*env)->GetMethodID(
+      env, instance_class, "<init>", "(JJ)V");
+  if (clear_jni_exception(env) || instance_constructor == NULL) {
+    status = NUX_STATUS_RUNTIME_ERROR;
+    goto view_model_snapshot_cleanup;
+  }
+  jmethodID value_constructor = (*env)->GetMethodID(
+      env, value_class, "<init>", "(JJLjava/lang/String;I[BJ)V");
+  if (clear_jni_exception(env) || value_constructor == NULL) {
+    status = NUX_STATUS_RUNTIME_ERROR;
+    goto view_model_snapshot_cleanup;
+  }
+  jmethodID snapshot_constructor = (*env)->GetMethodID(
+      env, snapshot_class, "<init>",
+      "(J[Lai/nuxie/sdk/runtime/NativeViewModelSnapshotInstance;"
+      "[Lai/nuxie/sdk/runtime/NativeViewModelSnapshotValue;)V");
+  if (clear_jni_exception(env) || snapshot_constructor == NULL) {
+    status = NUX_STATUS_RUNTIME_ERROR;
+    goto view_model_snapshot_cleanup;
+  }
+
+  instances = (*env)->NewObjectArray(
+      env, (jsize)info.instance_count, instance_class, NULL);
+  if (clear_jni_exception(env) || instances == NULL) {
+    status = NUX_STATUS_RUNTIME_ERROR;
+    goto view_model_snapshot_cleanup;
+  }
+  values = (*env)->NewObjectArray(
+      env, (jsize)info.value_count, value_class, NULL);
+  if (clear_jni_exception(env) || values == NULL) {
+    status = NUX_STATUS_RUNTIME_ERROR;
+    goto view_model_snapshot_cleanup;
+  }
+
+  for (size_t index = 0; index < info.instance_count; ++index) {
+    struct NuxViewModelSnapshotInstanceView view;
+    memset(&view, 0, sizeof(view));
+    view.struct_size = (uint32_t)sizeof(view);
+    status = nux_view_model_snapshot_instance(snapshot, index, &view);
+    if (status != NUX_STATUS_OK || view.schema_index > INT64_MAX) {
+      if (status == NUX_STATUS_OK) status = NUX_STATUS_RUNTIME_ERROR;
+      goto view_model_snapshot_cleanup;
+    }
+    jobject instance = (*env)->NewObject(
+        env, instance_class, instance_constructor, (jlong)view.instance_id,
+        (jlong)view.schema_index);
+    if (clear_jni_exception(env) || instance == NULL) {
+      if (instance != NULL) (*env)->DeleteLocalRef(env, instance);
+      status = NUX_STATUS_RUNTIME_ERROR;
+      goto view_model_snapshot_cleanup;
+    }
+    (*env)->SetObjectArrayElement(env, instances, (jsize)index, instance);
+    (*env)->DeleteLocalRef(env, instance);
+    if (clear_jni_exception(env)) {
+      status = NUX_STATUS_RUNTIME_ERROR;
+      goto view_model_snapshot_cleanup;
+    }
+  }
+
+  for (size_t index = 0; index < info.value_count; ++index) {
+    struct NuxViewModelSnapshotValueView view;
+    memset(&view, 0, sizeof(view));
+    view.struct_size = (uint32_t)sizeof(view);
+    status = nux_view_model_snapshot_value(snapshot, index, &view);
+    if (status != NUX_STATUS_OK || view.property_index > INT64_MAX) {
+      if (status == NUX_STATUS_OK) status = NUX_STATUS_RUNTIME_ERROR;
+      goto view_model_snapshot_cleanup;
+    }
+    jstring name = new_string_view(env, view.name);
+    if (name == NULL) {
+      status = NUX_STATUS_RUNTIME_ERROR;
+      goto view_model_snapshot_cleanup;
+    }
+    jbyteArray bytes = new_byte_view(env, view.bytes_value);
+    if (bytes == NULL) {
+      (*env)->DeleteLocalRef(env, name);
+      status = NUX_STATUS_RUNTIME_ERROR;
+      goto view_model_snapshot_cleanup;
+    }
+    jobject value = (*env)->NewObject(
+        env, value_class, value_constructor, (jlong)view.owner_instance_id,
+        (jlong)view.property_index, name, (jint)view.kind, bytes,
+        (jlong)view.referenced_instance_id);
+    if (clear_jni_exception(env) || value == NULL) {
+      if (value != NULL) (*env)->DeleteLocalRef(env, value);
+      (*env)->DeleteLocalRef(env, bytes);
+      (*env)->DeleteLocalRef(env, name);
+      status = NUX_STATUS_RUNTIME_ERROR;
+      goto view_model_snapshot_cleanup;
+    }
+    (*env)->SetObjectArrayElement(env, values, (jsize)index, value);
+    (*env)->DeleteLocalRef(env, value);
+    (*env)->DeleteLocalRef(env, bytes);
+    (*env)->DeleteLocalRef(env, name);
+    if (clear_jni_exception(env)) {
+      status = NUX_STATUS_RUNTIME_ERROR;
+      goto view_model_snapshot_cleanup;
+    }
+  }
+
+  result = (*env)->NewObject(
+      env, snapshot_class, snapshot_constructor, (jlong)info.root_instance_id,
+      instances, values);
+  if (clear_jni_exception(env) || result == NULL) {
+    if (result != NULL) (*env)->DeleteLocalRef(env, result);
+    result = NULL;
+    status = NUX_STATUS_RUNTIME_ERROR;
+  }
+
+view_model_snapshot_cleanup:
+  if (values != NULL) (*env)->DeleteLocalRef(env, values);
+  if (instances != NULL) (*env)->DeleteLocalRef(env, instances);
+  if (snapshot_class != NULL) (*env)->DeleteLocalRef(env, snapshot_class);
+  if (value_class != NULL) (*env)->DeleteLocalRef(env, value_class);
+  if (instance_class != NULL) (*env)->DeleteLocalRef(env, instance_class);
+  if (snapshot != NULL) {
+    NuxStatus free_status = nux_view_model_snapshot_free(snapshot);
+    if (status == NUX_STATUS_OK) status = free_status;
+  }
+  if (status != NUX_STATUS_OK && result != NULL) {
+    (*env)->DeleteLocalRef(env, result);
+    result = NULL;
+  }
+  if (!set_status_out(env, status_out, status)) {
+    if (result != NULL) (*env)->DeleteLocalRef(env, result);
+    return NULL;
+  }
+  return status == NUX_STATUS_OK ? result : NULL;
+}
+
 JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeArtboardInstanceBindViewModel(
     JNIEnv *env, jobject self, jlong artboard, jlong view_model) {

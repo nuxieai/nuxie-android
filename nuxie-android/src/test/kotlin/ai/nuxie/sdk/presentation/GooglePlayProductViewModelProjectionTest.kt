@@ -50,6 +50,7 @@ class GooglePlayProductViewModelProjectionTest {
         assertEquals("Live Pro", item.authoredInstanceName)
         assertEquals(0, item.listIndex)
         assertTrue(item.selected)
+        assertEquals(string("primary"), item.values["placementId"])
         assertEquals(string("€9.99"), item.values["price"])
         assertEquals(string("year"), item.values["period"])
         assertEquals(number(1), item.values["periodCount"])

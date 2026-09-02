@@ -60,7 +60,10 @@ internal object GooglePlayProductViewModelProjection {
                 ?: invalid("Paywall product '$placementId' has no unique authored instance name")
             val listIndex = group.requiredNumber("list_index").toIntExact("list_index")
             val declaredPaths = group.mapTo(linkedSetOf(), Value::path)
-            val liveValues = facts.filterKeys { it in declaredPaths }
+            val liveValues = facts.filterKeys { it in declaredPaths }.toMutableMap()
+            if ("placementId" in declaredPaths) {
+                liveValues["placementId"] = string(placementId)
+            }
             val missingClaims = declaredPaths
                 .filter { it in COMMERCE_VALUE_PATHS && group.value(it).isVisibleClaim() }
                 .filterNot(liveValues::containsKey)

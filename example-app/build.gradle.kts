@@ -13,8 +13,8 @@ android {
     applicationId = "ai.nuxie.example"
     minSdk = 23
     targetSdk = 36
-    versionCode = 7
-    versionName = "0.1.6"
+    versionCode = 11
+    versionName = "0.1.10"
   }
 
   compileOptions {

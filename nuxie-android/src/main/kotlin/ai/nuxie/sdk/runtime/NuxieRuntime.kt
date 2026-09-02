@@ -297,6 +297,17 @@ internal class NuxieRuntimeViewModelState(
 ) {
     private val children = children.toMutableList()
 
+    /** Must be called on the owning runtime lane before the next player step. */
+    fun snapshot(): NuxieViewModelSnapshot {
+        val rootHandle = checkNotNull(root) { "Runtime view-model state is closed" }
+        return NuxieViewModelSnapshot.fromNative(
+            requireNativeValue(
+                native.snapshotViewModel(rootHandle),
+                "snapshot view model",
+            ),
+        )
+    }
+
     fun close() {
         val rootHandle = root ?: return
         root = null
