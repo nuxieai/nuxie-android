@@ -1,0 +1,29 @@
+package ai.nuxie.sdk.core
+
+import ai.nuxie.sdk.runtime.NuxieEmbeddedRuntimeCompatibility
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Test
+
+class EmbeddedRuntimeCompatibilityTest {
+    @Test
+    fun `release admission uses the cross-platform compatibility revision not native provenance`() {
+        val nativeSourceRevision = "native-runtime-build-revision"
+
+        val supported = supportedRuntimeForEmbeddedRuntime(nativeSourceRevision)
+
+        assertEquals(
+            setOf(NuxieEmbeddedRuntimeCompatibility.SOURCE_REVISION),
+            supported?.supportedRuntimeRevisions,
+        )
+        assertFalse(supported?.supportedRuntimeRevisions.orEmpty().contains(nativeSourceRevision))
+    }
+
+    @Test
+    fun `missing native runtime provenance keeps release admission closed`() {
+        assertNull(supportedRuntimeForEmbeddedRuntime(null))
+        assertNull(supportedRuntimeForEmbeddedRuntime(""))
+        assertNull(supportedRuntimeForEmbeddedRuntime("   "))
+    }
+}

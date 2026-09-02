@@ -53,6 +53,7 @@ import ai.nuxie.sdk.profile.ProfileLocaleSettings
 import ai.nuxie.sdk.segments.SegmentService
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.session.SessionService
+import ai.nuxie.sdk.runtime.NuxieEmbeddedRuntimeCompatibility
 import ai.nuxie.sdk.runtime.nuxieRuntimeSourceRevision
 import ai.nuxie.sdk.experiences.SupportedRuntime
 import ai.nuxie.sdk.experiences.ReleaseArtifactAcquirer
@@ -72,6 +73,24 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.util.Locale
+
+/** Native provenance proves the runtime is present; compatibility is a separate contract. */
+internal fun supportedRuntimeForEmbeddedRuntime(nativeSourceRevision: String?): SupportedRuntime? {
+    if (nativeSourceRevision.isNullOrBlank()) return null
+    return SupportedRuntime(
+        currentSdkVersion = ai.nuxie.sdk.SdkVersion.VALUE,
+        supportedRuntimeRevisions = setOf(NuxieEmbeddedRuntimeCompatibility.SOURCE_REVISION),
+        supportedLuauRevisions = mapOf(
+            NuxieEmbeddedRuntimeCompatibility.LUAU_REVISION to
+                NuxieEmbeddedRuntimeCompatibility.LUAU_BYTECODE_VERSIONS,
+        ),
+        sceneFormatMajor = NuxieEmbeddedRuntimeCompatibility.SCENE_FORMAT_MAJOR,
+        sceneFormatMinor = NuxieEmbeddedRuntimeCompatibility.SCENE_FORMAT_MINOR,
+        timezoneDataRevision = SignedTimezoneBundle.REVISION,
+        timezoneDataSha256 = SignedTimezoneBundle.SHA256,
+        supportedCapabilities = NuxieEmbeddedRuntimeCompatibility.CAPABILITIES,
+    )
+}
 
 /**
  * Constructor-injected composition root (iOS `NuxieCore` parity): concrete
@@ -518,17 +537,7 @@ internal class NuxieCore(
     /** Runtime absence closes the Journey enrollment front door. */
     private fun journeySupportedRuntime(): SupportedRuntime? {
         if (!AndroidRenderCapability.isAvailable()) return null
-        val sourceRevision = nuxieRuntimeSourceRevision() ?: return null
-        return SupportedRuntime(
-            currentSdkVersion = ai.nuxie.sdk.SdkVersion.VALUE,
-            supportedRuntimeRevisions = setOf(sourceRevision),
-            supportedLuauRevisions = mapOf("rive_0_36" to setOf(3, 6)),
-            sceneFormatMajor = 7,
-            sceneFormatMinor = 0,
-            timezoneDataRevision = SignedTimezoneBundle.REVISION,
-            timezoneDataSha256 = SignedTimezoneBundle.SHA256,
-            supportedCapabilities = setOf("rive", "text-input"),
-        )
+        return supportedRuntimeForEmbeddedRuntime(nuxieRuntimeSourceRevision())
     }
 
     private companion object {
