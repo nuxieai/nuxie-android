@@ -9,8 +9,9 @@ steps:
       export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
       export ANDROID_SDK_ROOT="$ANDROID_HOME"
       export PATH="$JAVA_HOME/bin:$PATH"
+      "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865"
       ./gradlew :nuxie-android:test :nuxie-android:apiCheck :nuxie-android:lint
-      ./gradlew :example-app:assembleDebug
+      ./gradlew verifyAndroidReleaseArtifacts
       scripts/verify-fixtures.sh
     agents:
       queue: nuxie-pr

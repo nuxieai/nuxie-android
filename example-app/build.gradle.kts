@@ -6,7 +6,8 @@ plugins {
 android {
   namespace = "ai.nuxie.example"
   compileSdk = 36
-  buildToolsVersion = "36.0.0"
+  buildToolsVersion = rootProject.extra["nuxieBuildToolsVersion"] as String
+  ndkVersion = rootProject.extra["nuxieNdkVersion"] as String
 
   defaultConfig {
     applicationId = "ai.nuxie.example"

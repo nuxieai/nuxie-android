@@ -37,7 +37,7 @@ jobs:
             platform-tools
             platforms;android-36
             build-tools;36.0.0
-            ndk;26.1.10909125
+            ndk;29.0.14206865
             cmake;3.22.1
 
       - name: Set up Gradle
@@ -53,4 +53,9 @@ jobs:
         run: scripts/verify-fixtures.sh
 
       - name: Run local gate
-        run: ./gradlew :nuxie-android:test :nuxie-android:apiCheck :nuxie-android:lint :example-app:assembleDebug
+        run: >-
+          ./gradlew
+          :nuxie-android:test
+          :nuxie-android:apiCheck
+          :nuxie-android:lint
+          verifyAndroidReleaseArtifacts
