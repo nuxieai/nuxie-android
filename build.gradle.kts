@@ -17,7 +17,7 @@ plugins {
 }
 
 group = "ai.nuxie"
-version = "0.1.0-SNAPSHOT"
+version = "0.1.0"
 
 apiValidation {
   ignoredProjects.add("example-app")
