@@ -7,6 +7,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.URL
+import java.util.zip.GZIPInputStream
 
 class NuxieApiTest {
     private class RecordingTransport(private val statusCode: Int = 200) : HttpTransport {
@@ -18,7 +19,7 @@ class NuxieApiTest {
     }
 
     @Test
-    fun batchBodyCarriesApiKeyAndItemBytesVerbatim() {
+    fun batchBodyIsGzipCompressedWithoutChangingItsCanonicalJson() {
         val transport = RecordingTransport()
         val api = NuxieApi("pk_test_key", NuxieEnvironment.DEVELOPMENT, transport)
 
@@ -31,16 +32,18 @@ class NuxieApiTest {
 
         val request = transport.requests.single()
         assertEquals("https://dev-i.nuxie.ai/batch", request.url.toString())
+        assertEquals("gzip", request.headers["Content-Encoding"])
+        val decodedBody = GZIPInputStream(request.body.inputStream())
+            .bufferedReader()
+            .use { it.readText() }
         assertEquals(
             """{"apiKey":"pk_test_key","batch":[""" +
                 """{"event":"one","idempotency_key":"id-1"},""" +
                 """{"event":"two","idempotency_key":"id-2"}]}""",
-            request.body.decodeToString(),
+            decodedBody,
         )
         assertEquals("application/json", request.headers["Content-Type"])
         assertTrue(request.headers["User-Agent"]!!.startsWith("Nuxie-Android-SDK/"))
-        // iOS parity: request bodies are not gzip-compressed.
-        assertEquals(null, request.headers["Content-Encoding"])
     }
 
     @Test
@@ -92,8 +95,11 @@ class NuxieApiTest {
         val transport = RecordingTransport()
         NuxieApi("pk\"quote\\slash", NuxieEnvironment.DEVELOPMENT, transport)
             .postBatch(listOf("{}"))
+        val decodedBody = GZIPInputStream(transport.requests.single().body.inputStream())
+            .bufferedReader()
+            .use { it.readText() }
         assertTrue(
-            transport.requests.single().body.decodeToString()
+            decodedBody
                 .startsWith("""{"apiKey":"pk\"quote\\slash""""),
         )
     }
