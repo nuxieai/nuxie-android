@@ -11,6 +11,10 @@ local.properties
 # Kotlin
 *.class
 
+# Python
+__pycache__/
+*.py[cod]
+
 # OS
 .DS_Store
 runtime/prebuilt/

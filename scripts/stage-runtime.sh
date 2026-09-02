@@ -11,6 +11,20 @@ if [[ $# -ne 1 ]]; then
 fi
 DEST="${REPO_ROOT}/runtime/prebuilt"
 RUNTIME_DIR="${REPO_ROOT}/runtime"
+TOOLCHAIN_FILE="${RUNTIME_DIR}/android-toolchain.properties"
+if [[ ! -f "${TOOLCHAIN_FILE}" ]]; then
+  echo "Android toolchain pin is missing: ${TOOLCHAIN_FILE}" >&2
+  exit 65
+fi
+# The committed file contains shell-safe key=value pairs so Gradle and this
+# staging boundary consume one exact toolchain pin.
+# shellcheck disable=SC1090
+source "${TOOLCHAIN_FILE}"
+if [[ -z "${ndkVersion:-}" ]]; then
+  echo "Android toolchain pin has no ndkVersion." >&2
+  exit 65
+fi
+PINNED_NDK_VERSION="${ndkVersion}"
 
 # Recover the previous complete tree before any input validation can exit.
 # A live tree wins when publication completed before the process died.
@@ -36,14 +50,24 @@ SRC="$(cd -- "$1" && pwd -P)"
 # along in jniLibs or System.loadLibrary fails at dlopen on device.
 NDK_ROOT="${ANDROID_NDK_HOME:-}"
 if [[ -z "${NDK_ROOT}" && -n "${ANDROID_HOME:-}" ]]; then
-  NDK_ROOT="$(find "${ANDROID_HOME}/ndk" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -V | tail -1)"
+  NDK_ROOT="${ANDROID_HOME}/ndk/${PINNED_NDK_VERSION}"
 fi
 if [[ -z "${NDK_ROOT}" || ! -d "${NDK_ROOT}" ]]; then
-  echo "Set ANDROID_NDK_HOME (or ANDROID_HOME with an installed ndk) to stage libc++_shared.so." >&2
+  echo "Install NDK ${PINNED_NDK_VERSION} under ANDROID_HOME or point ANDROID_NDK_HOME to that exact revision." >&2
   exit 65
 fi
-NDK_SYSROOT_LIB="${NDK_ROOT}/toolchains/llvm/prebuilt"
-NDK_SYSROOT_LIB="$(find "${NDK_SYSROOT_LIB}" -maxdepth 1 -mindepth 1 -type d | head -1)/sysroot/usr/lib"
+NDK_REVISION="$(sed -n 's/^Pkg\.Revision[[:space:]]*=[[:space:]]*//p' "${NDK_ROOT}/source.properties" 2>/dev/null)"
+if [[ "${NDK_REVISION}" != "${PINNED_NDK_VERSION}" ]]; then
+  echo "NDK provenance mismatch: expected ${PINNED_NDK_VERSION}, found ${NDK_REVISION:-unknown} at ${NDK_ROOT}." >&2
+  exit 65
+fi
+shopt -s nullglob
+NDK_PREBUILTS=("${NDK_ROOT}"/toolchains/llvm/prebuilt/*)
+if (( ${#NDK_PREBUILTS[@]} != 1 )) || [[ ! -d "${NDK_PREBUILTS[0]}" ]]; then
+  echo "NDK ${PINNED_NDK_VERSION} must contain exactly one host LLVM prebuilt." >&2
+  exit 65
+fi
+NDK_SYSROOT_LIB="${NDK_PREBUILTS[0]}/sysroot/usr/lib"
 
 SOURCE_ARTIFACTS=(
   "${SRC}/crates/nux-capi/include/nux_capi.generated.h"

@@ -1,11 +1,13 @@
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
+import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.util.Properties
 import java.util.UUID
 import java.util.zip.ZipInputStream
 
@@ -18,6 +20,23 @@ plugins {
 
 group = "ai.nuxie"
 version = "0.1.0"
+
+val androidToolchainFile = layout.projectDirectory.file("runtime/android-toolchain.properties").asFile
+val androidToolchain = Properties().apply {
+  androidToolchainFile.inputStream().use(::load)
+}
+fun requiredToolchainVersion(name: String): String =
+  androidToolchain.getProperty(name)?.takeIf(String::isNotBlank)
+    ?: throw GradleException("runtime/android-toolchain.properties must contain a non-empty '$name'.")
+
+extra["nuxieNdkVersion"] = requiredToolchainVersion("ndkVersion")
+extra["nuxieBuildToolsVersion"] = requiredToolchainVersion("buildToolsVersion")
+val bundletoolVersion = requiredToolchainVersion("bundletoolVersion")
+val bundletoolCli = configurations.create("bundletoolCli") {
+  isCanBeConsumed = false
+  isCanBeResolved = true
+}
+dependencies.add(bundletoolCli.name, "com.android.tools.build:bundletool:$bundletoolVersion")
 
 apiValidation {
   ignoredProjects.add("example-app")
@@ -599,4 +618,159 @@ project(":nuxie-android") {
   tasks.matching { it.name == "lint" }.configureEach {
     dependsOn(project(":runtime").tasks.named("boundary"))
   }
+}
+
+val releaseVerifier = layout.projectDirectory.file("scripts/verify-android-release.py").asFile
+val releaseVerifierTests = layout.projectDirectory.file("scripts/tests/test_verify_android_release.py").asFile
+val expectedNativeInventoryArguments = listOf(
+  "--expected-abi", "arm64-v8a",
+  "--expected-abi", "x86_64",
+  "--expected-library", "libc++_shared.so",
+  "--expected-library", "libnux_capi.so",
+  "--expected-library", "libnuxie_runtime_android.so",
+)
+
+fun configuredAndroidSdk(): File {
+  val environmentPath = sequenceOf("ANDROID_SDK_ROOT", "ANDROID_HOME")
+    .mapNotNull(System::getenv)
+    .firstOrNull(String::isNotBlank)
+  if (environmentPath != null) return file(environmentPath)
+
+  val localPropertiesFile = file("local.properties")
+  if (localPropertiesFile.isFile) {
+    val localProperties = Properties().apply {
+      localPropertiesFile.inputStream().use(::load)
+    }
+    localProperties.getProperty("sdk.dir")?.takeIf(String::isNotBlank)?.let(::file)?.let { return it }
+  }
+  throw GradleException("Set ANDROID_SDK_ROOT or ANDROID_HOME to the pinned Android SDK installation.")
+}
+
+val verifyAndroidReleaseVerifier by tasks.registering(Exec::class) {
+  group = "verification"
+  description = "Runs deterministic tests for the Android release artifact verifier."
+  commandLine("python3", "-m", "unittest", releaseVerifierTests)
+}
+
+val releaseAar = project(":nuxie-android").layout.buildDirectory.file(
+  "outputs/aar/nuxie-android-release.aar",
+)
+val verifyReleaseAar16KiB = project(":nuxie-android").tasks.register<Exec>("verifyReleaseAar16KiB") {
+  group = "verification"
+  description = "Verifies the complete release AAR native inventory and 16 KiB ELF contract."
+  doFirst {
+    commandLine(
+      "python3",
+      releaseVerifier,
+      "elf-archive",
+      releaseAar.get().asFile,
+      *expectedNativeInventoryArguments.toTypedArray(),
+    )
+  }
+}
+project(":nuxie-android").tasks.matching { it.name == "assembleRelease" }.configureEach {
+  finalizedBy(verifyReleaseAar16KiB)
+}
+verifyReleaseAar16KiB.configure { mustRunAfter(":nuxie-android:assembleRelease") }
+
+val exampleDebugApk = project(":example-app").layout.buildDirectory.file(
+  "outputs/apk/debug/example-app-debug.apk",
+)
+val verifyExampleApk16KiB = project(":example-app").tasks.register<Exec>("verifyDebugApk16KiB") {
+  group = "verification"
+  description = "Verifies the complete example APK native inventory, ELF contract, and ZIP alignment."
+  doFirst {
+    val buildTools = rootProject.extra["nuxieBuildToolsVersion"] as String
+    val zipalign = configuredAndroidSdk().resolve("build-tools/$buildTools/zipalign")
+    commandLine(
+      "python3",
+      releaseVerifier,
+      "apk",
+      exampleDebugApk.get().asFile,
+      "--zipalign",
+      zipalign,
+      *expectedNativeInventoryArguments.toTypedArray(),
+    )
+  }
+}
+project(":example-app").tasks.matching { it.name == "assembleDebug" }.configureEach {
+  finalizedBy(verifyExampleApk16KiB)
+}
+verifyExampleApk16KiB.configure { mustRunAfter(":example-app:assembleDebug") }
+
+val exampleReleaseBundle = project(":example-app").layout.buildDirectory.file(
+  "outputs/bundle/release/example-app-release.aab",
+)
+val bundleConfigDump = layout.buildDirectory.file(
+  "reports/android-release/example-app-bundle-config.txt",
+)
+val bundleConfigCapture = ByteArrayOutputStream()
+val dumpExampleBundleConfig = project(":example-app").tasks.register<JavaExec>("dumpReleaseBundleConfig") {
+  group = "verification"
+  description = "Dumps the release AAB configuration with the pinned bundletool."
+  classpath = bundletoolCli
+  mainClass.set("com.android.tools.build.bundletool.BundleToolMain")
+  args("dump", "config", "--bundle=${exampleReleaseBundle.get().asFile.absolutePath}")
+  standardOutput = bundleConfigCapture
+  outputs.file(bundleConfigDump)
+  outputs.upToDateWhen { false }
+  doFirst {
+    bundleConfigCapture.reset()
+    val destination = bundleConfigDump.get().asFile.toPath()
+    Files.createDirectories(destination.parent)
+    Files.deleteIfExists(destination)
+  }
+  doLast {
+    Files.write(bundleConfigDump.get().asFile.toPath(), bundleConfigCapture.toByteArray())
+  }
+}
+val verifyExampleBundleElfs16KiB = project(":example-app").tasks.register<Exec>("verifyReleaseBundleElfs16KiB") {
+  group = "verification"
+  description = "Verifies the complete release AAB native inventory and 16 KiB ELF contract."
+  doFirst {
+    commandLine(
+      "python3",
+      releaseVerifier,
+      "elf-archive",
+      exampleReleaseBundle.get().asFile,
+      *expectedNativeInventoryArguments.toTypedArray(),
+    )
+  }
+}
+val verifyExampleBundleConfig16KiB = project(":example-app").tasks.register<Exec>("verifyReleaseBundleConfig16KiB") {
+  group = "verification"
+  description = "Requires PAGE_ALIGNMENT_16K in the actual pinned-bundletool AAB config dump."
+  doFirst {
+    commandLine(
+      "python3",
+      releaseVerifier,
+      "bundle-config",
+      bundleConfigDump.get().asFile,
+    )
+  }
+}
+project(":example-app").tasks.matching { it.name == "bundleRelease" }.configureEach {
+  finalizedBy(verifyExampleBundleElfs16KiB, dumpExampleBundleConfig)
+}
+verifyExampleBundleElfs16KiB.configure { mustRunAfter(":example-app:bundleRelease") }
+dumpExampleBundleConfig.configure { mustRunAfter(":example-app:bundleRelease") }
+dumpExampleBundleConfig.configure {
+  finalizedBy(verifyExampleBundleConfig16KiB)
+}
+verifyExampleBundleConfig16KiB.configure { mustRunAfter(dumpExampleBundleConfig) }
+
+tasks.register("verifyAndroidReleaseArtifacts") {
+  group = "verification"
+  description = "Builds and verifies the release AAR, example APK, and example AAB native contracts."
+  dependsOn(
+    verifyAndroidReleaseVerifier,
+    ":nuxie-android:assembleRelease",
+    verifyReleaseAar16KiB,
+    ":example-app:assembleDebug",
+    verifyExampleApk16KiB,
+    ":example-app:bundleRelease",
+    verifyExampleBundleElfs16KiB,
+    dumpExampleBundleConfig,
+    verifyExampleBundleConfig16KiB,
+  )
 }
