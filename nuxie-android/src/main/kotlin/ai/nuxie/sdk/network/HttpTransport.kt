@@ -7,6 +7,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.zip.GZIPInputStream
 
 /**
  * Transport seam under [NuxieApi]. Production uses [HttpUrlConnectionTransport];
@@ -113,14 +114,25 @@ internal class HttpUrlConnectionTransport(
                 .filterKeys { it != null }
                 .mapKeys { (name, _) -> name!! }
                 .mapValues { (_, values) -> values.lastOrNull().orEmpty() }
+            val contentEncodings = headers.entries
+                .firstOrNull { (name, _) -> name.equals("content-encoding", ignoreCase = true) }
+                ?.value
+                .parseContentEncodings()
+            val decodedStream = stream
+                ?.decodeContentEncodings(contentEncodings)
+                ?: ByteArrayInputStream(ByteArray(0))
             return HttpTransport.StreamingResponse(
                 statusCode = statusCode,
-                body = stream ?: ByteArrayInputStream(ByteArray(0)),
+                body = decodedStream,
                 headers = headers,
                 finalUrl = connection.url,
-                declaredContentLength = headers.entries
-                    .firstOrNull { it.key.equals("content-length", ignoreCase = true) }
-                    ?.value?.toLongOrNull(),
+                declaredContentLength = if (contentEncodings.any { it != "identity" }) {
+                    null
+                } else {
+                    headers.entries
+                        .firstOrNull { it.key.equals("content-length", ignoreCase = true) }
+                        ?.value?.toLongOrNull()
+                },
                 closeAction = connection::disconnect,
             )
         } catch (error: Throwable) {
@@ -142,6 +154,23 @@ internal class HttpUrlConnectionTransport(
         }
         return output.toByteArray()
     }
+
+    private fun String?.parseContentEncodings(): List<String> =
+        this
+            ?.split(',')
+            ?.map(String::trim)
+            ?.filter(String::isNotEmpty)
+            ?.map(String::lowercase)
+            .orEmpty()
+
+    private fun InputStream.decodeContentEncodings(encodings: List<String>): InputStream =
+        encodings.asReversed().fold(this) { encodedStream, encoding ->
+            when (encoding) {
+                "identity" -> encodedStream
+                "gzip", "x-gzip" -> GZIPInputStream(encodedStream)
+                else -> throw IOException("Unsupported Content-Encoding: $encoding")
+            }
+        }
 
     private companion object {
         const val DEFAULT_MAX_RESPONSE_BYTES = 25L * 1024L * 1024L
