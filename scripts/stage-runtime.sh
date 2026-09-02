@@ -46,35 +46,34 @@ for stale in "${RUNTIME_DIR}"/.prebuilt-*.tmp; do rm -rf -- "${stale}"; done
 
 SRC="$(cd -- "$1" && pwd -P)"
 
-# The Vulkan engine links the NDK C++ runtime, so libc++_shared.so must ride
-# along in jniLibs or System.loadLibrary fails at dlopen on device.
-NDK_ROOT="${ANDROID_NDK_HOME:-}"
-if [[ -z "${NDK_ROOT}" && -n "${ANDROID_HOME:-}" ]]; then
-  NDK_ROOT="${ANDROID_HOME}/ndk/${PINNED_NDK_VERSION}"
+# Consume the runtime builder's verified publication tree rather than
+# reconstructing one from arbitrary Cargo and locally installed NDK outputs.
+# Its captured build inputs make the NDK source of libc++_shared.so explicit.
+RUNTIME_BUILD="${SRC}/target/nux-capi-android"
+RUNTIME_PREBUILT="${RUNTIME_BUILD}/build/prebuilt"
+RUNTIME_BUILD_INPUTS="${RUNTIME_BUILD}/NuxieRuntimeAndroid-BUILD_INPUTS.json"
+if [[ ! -f "${RUNTIME_BUILD_INPUTS}" ]]; then
+  echo "Runtime build provenance is missing: ${RUNTIME_BUILD_INPUTS}" >&2
+  exit 66
 fi
-if [[ -z "${NDK_ROOT}" || ! -d "${NDK_ROOT}" ]]; then
-  echo "Install NDK ${PINNED_NDK_VERSION} under ANDROID_HOME or point ANDROID_NDK_HOME to that exact revision." >&2
+BUILD_NDK_VERSION="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["configuration"]["androidNdk"])' "${RUNTIME_BUILD_INPUTS}")"
+BUILD_SOURCE_REVISION="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["sourceRevision"])' "${RUNTIME_BUILD_INPUTS}")"
+SOURCE_REVISION="$(git -C "${SRC}" rev-parse HEAD)"
+if [[ "${BUILD_NDK_VERSION}" != "${PINNED_NDK_VERSION}" ]]; then
+  echo "Runtime provenance mismatch: expected NDK ${PINNED_NDK_VERSION}, found ${BUILD_NDK_VERSION:-unknown}." >&2
   exit 65
 fi
-NDK_REVISION="$(sed -n 's/^Pkg\.Revision[[:space:]]*=[[:space:]]*//p' "${NDK_ROOT}/source.properties" 2>/dev/null)"
-if [[ "${NDK_REVISION}" != "${PINNED_NDK_VERSION}" ]]; then
-  echo "NDK provenance mismatch: expected ${PINNED_NDK_VERSION}, found ${NDK_REVISION:-unknown} at ${NDK_ROOT}." >&2
+if [[ "${BUILD_SOURCE_REVISION}" != "${SOURCE_REVISION}" ]]; then
+  echo "Runtime provenance mismatch: the staged build was not produced from the checkout's current HEAD." >&2
   exit 65
 fi
-shopt -s nullglob
-NDK_PREBUILTS=("${NDK_ROOT}"/toolchains/llvm/prebuilt/*)
-if (( ${#NDK_PREBUILTS[@]} != 1 )) || [[ ! -d "${NDK_PREBUILTS[0]}" ]]; then
-  echo "NDK ${PINNED_NDK_VERSION} must contain exactly one host LLVM prebuilt." >&2
-  exit 65
-fi
-NDK_SYSROOT_LIB="${NDK_PREBUILTS[0]}/sysroot/usr/lib"
 
 SOURCE_ARTIFACTS=(
-  "${SRC}/crates/nux-capi/include/nux_capi.generated.h"
-  "${SRC}/target/aarch64-linux-android/release/libnux_capi.so"
-  "${NDK_SYSROOT_LIB}/aarch64-linux-android/libc++_shared.so"
-  "${SRC}/target/x86_64-linux-android/release/libnux_capi.so"
-  "${NDK_SYSROOT_LIB}/x86_64-linux-android/libc++_shared.so"
+  "${RUNTIME_PREBUILT}/include/nux_capi.generated.h"
+  "${RUNTIME_PREBUILT}/jniLibs/arm64-v8a/libnux_capi.so"
+  "${RUNTIME_PREBUILT}/jniLibs/arm64-v8a/libc++_shared.so"
+  "${RUNTIME_PREBUILT}/jniLibs/x86_64/libnux_capi.so"
+  "${RUNTIME_PREBUILT}/jniLibs/x86_64/libc++_shared.so"
 )
 for artifact in "${SOURCE_ARTIFACTS[@]}"; do
   if [[ ! -f "${artifact}" ]]; then
