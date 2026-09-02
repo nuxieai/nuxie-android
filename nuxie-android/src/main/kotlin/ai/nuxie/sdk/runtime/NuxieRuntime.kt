@@ -74,7 +74,10 @@ internal class NuxieRuntime(
         require(listProperty.kind == NuxieViewModelPropertyKind.LIST) {
             "View-model property '${projection.listPath}' is not a list"
         }
-        require(listProperty.referencedSchemaIndex == itemSchema.index) {
+        require(
+            listProperty.referencedSchemaIndex == null ||
+                listProperty.referencedSchemaIndex == itemSchema.index,
+        ) {
             "View-model list '${projection.listPath}' does not contain '${projection.itemSchemaName}'"
         }
         projection.selectedItemPath?.let { path ->

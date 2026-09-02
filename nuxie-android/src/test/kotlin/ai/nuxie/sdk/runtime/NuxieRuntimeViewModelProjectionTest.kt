@@ -1,11 +1,12 @@
 package ai.nuxie.sdk.runtime
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class NuxieRuntimeViewModelProjectionTest {
     @Test
-    fun `live values and graph replacement happen before the root is bound`() {
+    fun `a list without a declared item schema binds projected values before the root`() {
         val native = ProjectionNative()
         val runtime = NuxieRuntime(native)
         val state = runtime.bindViewModelList(
@@ -48,7 +49,58 @@ class NuxieRuntimeViewModelProjectionTest {
         assertEquals(listOf("free:40", "free:41"), native.calls.takeLast(2))
     }
 
-    private class ProjectionNative : NuxieTypedRuntimeNative {
+    @Test
+    fun `a list with a different declared item schema is rejected`() {
+        val native = ProjectionNative(listReferencedSchemaIndex = 1)
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            NuxieRuntime(native).bindViewModelList(
+                file = NuxieRuntimeFile(10, native),
+                artboard = NuxieRuntimeArtboard(20, native) { "Runtime" },
+                projection = NuxieViewModelListProjection(
+                    rootSchemaName = "Runtime",
+                    listPath = "paywall/products",
+                    selectedItemPath = "paywall/selectedProduct",
+                    itemSchemaName = "PaywallProduct",
+                    items = emptyList(),
+                ),
+            )
+        }
+
+        assertEquals(
+            "View-model list 'paywall/products' does not contain 'PaywallProduct'",
+            error.message,
+        )
+        assertEquals(listOf("catalog"), native.calls)
+    }
+
+    @Test
+    fun `a selected view model without the exact item schema is rejected`() {
+        val native = ProjectionNative(selectedReferencedSchemaIndex = -1)
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            NuxieRuntime(native).bindViewModelList(
+                file = NuxieRuntimeFile(10, native),
+                artboard = NuxieRuntimeArtboard(20, native) { "Runtime" },
+                projection = NuxieViewModelListProjection(
+                    rootSchemaName = "Runtime",
+                    listPath = "paywall/products",
+                    selectedItemPath = "paywall/selectedProduct",
+                    itemSchemaName = "PaywallProduct",
+                    items = emptyList(),
+                ),
+            )
+        }
+
+        assertEquals(
+            "View-model property 'paywall/selectedProduct' does not reference 'PaywallProduct'",
+            error.message,
+        )
+        assertEquals(listOf("catalog"), native.calls)
+    }
+
+    private class ProjectionNative(
+        private val listReferencedSchemaIndex: Long = -1,
+        private val selectedReferencedSchemaIndex: Long = 2,
+    ) : NuxieTypedRuntimeNative {
         val calls = mutableListOf<String>()
 
         override fun viewModelCatalog(fileHandle: Long): NativeCallResult<NativeViewModelCatalog> {
@@ -63,8 +115,22 @@ class NuxieRuntimeViewModelProjectionTest {
                     ),
                     properties = arrayOf(
                         NativeViewModelProperty(0, 0, "paywall", 9, 1, emptyArray()),
-                        NativeViewModelProperty(1, 1, "products", 8, 2, emptyArray()),
-                        NativeViewModelProperty(1, 2, "selectedProduct", 9, 2, emptyArray()),
+                        NativeViewModelProperty(
+                            1,
+                            1,
+                            "products",
+                            8,
+                            listReferencedSchemaIndex,
+                            emptyArray(),
+                        ),
+                        NativeViewModelProperty(
+                            1,
+                            2,
+                            "selectedProduct",
+                            9,
+                            selectedReferencedSchemaIndex,
+                            emptyArray(),
+                        ),
                         NativeViewModelProperty(2, 3, "price", 1, -1, emptyArray()),
                         NativeViewModelProperty(2, 4, "hasTrial", 3, -1, emptyArray()),
                     ),
