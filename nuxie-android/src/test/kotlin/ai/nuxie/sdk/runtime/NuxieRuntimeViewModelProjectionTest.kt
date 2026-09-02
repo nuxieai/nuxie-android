@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.runtime
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -95,6 +96,95 @@ class NuxieRuntimeViewModelProjectionTest {
             error.message,
         )
         assertEquals(listOf("catalog"), native.calls)
+    }
+
+    @Test
+    fun `snapshot resolves the current selected product through nested references`() {
+        val native = SnapshotNative()
+        val state = NuxieRuntimeViewModelState(40, listOf(41, 42), native)
+
+        val first = state.snapshot()
+        assertEquals("primary", first.resolveString("paywall.selectedProduct.placementId"))
+        assertEquals("primary", first.resolveString("paywall/selectedProduct/placementId"))
+
+        native.selectedProductId = 42
+        val second = state.snapshot()
+        assertEquals("primary", first.resolveString("paywall.selectedProduct.placementId"))
+        assertEquals("annual", second.resolveString("paywall.selectedProduct.placementId"))
+        assertNull(second.resolveString("paywall.selectedProduct.missing"))
+        assertNull(second.resolveString("paywall.selectedProduct.price"))
+        assertNull(second.resolveString("paywall.optionalProduct.placementId"))
+        assertNull(second.resolveString("paywall..selectedProduct.placementId"))
+
+        state.close()
+        assertEquals(
+            listOf("snapshot:40", "snapshot:40", "free:40", "free:42", "free:41"),
+            native.calls,
+        )
+    }
+
+    private class SnapshotNative : NuxieTypedRuntimeNative {
+        val calls = mutableListOf<String>()
+        var selectedProductId = 41L
+
+        override fun snapshotViewModel(viewModelHandle: Long): NativeCallResult<NativeViewModelSnapshot> {
+            calls += "snapshot:$viewModelHandle"
+            return NativeCallResult(
+                0,
+                NativeViewModelSnapshot(
+                    rootInstanceId = 1,
+                    instances = arrayOf(
+                        NativeViewModelSnapshotInstance(1, 0),
+                        NativeViewModelSnapshotInstance(2, 1),
+                        NativeViewModelSnapshotInstance(41, 2),
+                        NativeViewModelSnapshotInstance(42, 2),
+                    ),
+                    values = arrayOf(
+                        referenceValue(1, 0, "paywall", 2),
+                        referenceValue(2, 1, "selectedProduct", selectedProductId),
+                        referenceValue(2, 2, "optionalProduct", 0),
+                        stringValue(41, 2, "placementId", "primary"),
+                        stringValue(41, 3, "price", "9.99", kind = 2),
+                        stringValue(42, 2, "placementId", "annual"),
+                        stringValue(42, 3, "price", "19.99", kind = 2),
+                    ),
+                ),
+            )
+        }
+
+        override fun freeViewModel(handle: Long): Int {
+            calls += "free:$handle"
+            return 0
+        }
+
+        private fun referenceValue(
+            owner: Long,
+            property: Long,
+            name: String,
+            referenced: Long,
+        ) = NativeViewModelSnapshotValue(
+            ownerInstanceId = owner,
+            propertyIndex = property,
+            name = name,
+            kind = NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue,
+            bytesValue = byteArrayOf(),
+            referencedInstanceId = referenced,
+        )
+
+        private fun stringValue(
+            owner: Long,
+            property: Long,
+            name: String,
+            value: String,
+            kind: Int = NuxieViewModelPropertyKind.STRING.nativeValue,
+        ) = NativeViewModelSnapshotValue(
+            ownerInstanceId = owner,
+            propertyIndex = property,
+            name = name,
+            kind = kind,
+            bytesValue = value.encodeToByteArray(),
+            referencedInstanceId = 0,
+        )
     }
 
     private class ProjectionNative(

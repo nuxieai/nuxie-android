@@ -11,6 +11,7 @@ import ai.nuxie.sdk.billing.ExperiencePurchasePreparer
 import ai.nuxie.sdk.billing.ExperiencePurchaseSession
 import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
 import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
+import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
@@ -93,9 +94,18 @@ internal data class PreparedPresentation(
     val commerce: ExperiencePurchaseSession? = null,
     val viewModelProjection: NuxieViewModelListProjection? = null,
 ) {
+    private val screenControlDispatcher = ExperienceScreenControlDispatcher(descriptor, screenId)
+
     /** Deliver only runtime events emitted by this authenticated presentation. */
-    fun handleRuntimeEvent(activity: Activity, event: NuxieRuntimeEvent) {
-        screenId?.let { commerce?.handle(activity, it, event) }
+    fun handleRuntimeEvent(
+        activity: Activity,
+        event: NuxieRuntimeEvent,
+        viewModelSnapshot: NuxieViewModelSnapshot? = null,
+    ) {
+        val activeScreenId = screenId ?: return
+        screenControlDispatcher.dispatch(event).forEach { routedEvent ->
+            commerce?.handle(activity, activeScreenId, routedEvent, viewModelSnapshot)
+        }
     }
 }
 

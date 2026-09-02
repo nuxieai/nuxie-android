@@ -7,6 +7,11 @@ import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
 import ai.nuxie.sdk.runtime.NuxieRuntimeEventProperty
 import ai.nuxie.sdk.runtime.NuxieRuntimeEventPropertyValue
+import ai.nuxie.sdk.runtime.NativeViewModelSnapshot
+import ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance
+import ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue
+import ai.nuxie.sdk.runtime.NuxieViewModelPropertyKind
+import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import android.app.Activity
 import com.android.billingclient.api.BillingClient
 import kotlinx.coroutines.Dispatchers
@@ -109,6 +114,35 @@ class ExperiencePurchaseTest {
         assertEquals(
             "Placement 'primary' references unknown Product 'missing'",
             error.message,
+        )
+    }
+
+    @Test
+    fun authenticatedCatalogRetainsAnAbsolutePlacementPathReference() {
+        val catalog = AuthenticatedExperiencePurchaseCatalog.parse(
+            release(
+                products = buildJsonArray {
+                    add(product("pro", "subscription", "play.pro", basePlanId = "annual"))
+                },
+                placements = buildJsonArray { add(placement("primary", "pro")) },
+                routes = buildJsonArray {
+                    add(route("purchase_tapped", buildJsonObject {
+                        put("type", "purchase")
+                        put("placementId", buildJsonObject {
+                            put("ref", buildJsonObject {
+                                put("kind", "path")
+                                put("path", "paywall.selectedProduct.placementId")
+                            })
+                        })
+                    }))
+                },
+            ),
+        )
+
+        val purchase = catalog.routes.single().action as ExperiencePurchaseAction.Purchase
+        assertEquals(
+            ExperiencePlacementValue.Path("paywall.selectedProduct.placementId"),
+            purchase.placement,
         )
     }
 
@@ -231,6 +265,72 @@ class ExperiencePurchaseTest {
         session.handle(activity, "paywall", event("purchase_tapped"))
 
         assertEquals(listOf(product), executor.purchased)
+    }
+
+    @Test
+    fun reportedRuntimeEventResolvesTheCurrentSignedPlacementPath() = runBlocking {
+        val executor = RecordingExecutor()
+        val primary = storeProduct("primary")
+        val annual = storeProduct("annual")
+        val session = ExperiencePurchaseSession(
+            products = listOf(primary, annual),
+            routes = listOf(
+                ExperiencePurchaseRoute(
+                    "paywall",
+                    "purchase_tapped",
+                    ExperiencePurchaseAction.Purchase(
+                        ExperiencePlacementValue.Path(
+                            "paywall.selectedProduct.placementId",
+                        ),
+                    ),
+                ),
+            ),
+            executor = executor,
+            programExecutor = RecordingProgramExecutor(),
+            scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined),
+            context = CONTEXT,
+        )
+        val snapshot = viewModelSnapshot(selectedProductId = 42)
+
+        session.handle(
+            Robolectric.buildActivity(Activity::class.java).get(),
+            "paywall",
+            event("purchase_tapped"),
+            snapshot,
+        )
+
+        assertEquals(listOf(annual), executor.purchased)
+    }
+
+    @Test
+    fun unresolvedSignedPlacementPathDoesNotStartCommerce() = runBlocking {
+        val executor = RecordingExecutor()
+        val session = ExperiencePurchaseSession(
+            products = listOf(storeProduct("primary")),
+            routes = listOf(
+                ExperiencePurchaseRoute(
+                    "paywall",
+                    "purchase_tapped",
+                    ExperiencePurchaseAction.Purchase(
+                        ExperiencePlacementValue.Path(
+                            "paywall.selectedProduct.placementId",
+                        ),
+                    ),
+                ),
+            ),
+            executor = executor,
+            programExecutor = RecordingProgramExecutor(),
+            scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined),
+            context = CONTEXT,
+        )
+
+        session.handle(
+            Robolectric.buildActivity(Activity::class.java).get(),
+            "paywall",
+            event("purchase_tapped"),
+        )
+
+        assertEquals(emptyList<StoreProduct>(), executor.purchased)
     }
 
     @Test
@@ -719,6 +819,51 @@ class ExperiencePurchaseTest {
         offerToken = null,
         isOfferPersonalized = false,
         productType = BillingClient.ProductType.INAPP,
+    )
+
+    private fun viewModelSnapshot(selectedProductId: Long): NuxieViewModelSnapshot =
+        NuxieViewModelSnapshot.fromNative(
+            NativeViewModelSnapshot(
+                rootInstanceId = 1,
+                instances = arrayOf(
+                    NativeViewModelSnapshotInstance(1, 0),
+                    NativeViewModelSnapshotInstance(2, 1),
+                    NativeViewModelSnapshotInstance(41, 2),
+                    NativeViewModelSnapshotInstance(42, 2),
+                ),
+                values = arrayOf(
+                    snapshotReference(1, "paywall", 2),
+                    snapshotReference(2, "selectedProduct", selectedProductId),
+                    snapshotString(41, "placementId", "primary"),
+                    snapshotString(42, "placementId", "annual"),
+                ),
+            ),
+        )
+
+    private fun snapshotReference(
+        ownerInstanceId: Long,
+        name: String,
+        referencedInstanceId: Long,
+    ) = NativeViewModelSnapshotValue(
+        ownerInstanceId = ownerInstanceId,
+        propertyIndex = 0,
+        name = name,
+        kind = NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue,
+        bytesValue = byteArrayOf(),
+        referencedInstanceId = referencedInstanceId,
+    )
+
+    private fun snapshotString(
+        ownerInstanceId: Long,
+        name: String,
+        value: String,
+    ) = NativeViewModelSnapshotValue(
+        ownerInstanceId = ownerInstanceId,
+        propertyIndex = 0,
+        name = name,
+        kind = NuxieViewModelPropertyKind.STRING.nativeValue,
+        bytesValue = value.encodeToByteArray(),
+        referencedInstanceId = 0,
     )
 
     companion object {

@@ -184,6 +184,12 @@ internal object NuxieRuntimeBridge {
 
     external fun nativeViewModelRootSchemaIndex(viewModel: Long, statusOut: IntArray): Long
 
+    /** Copies one retained instance's complete graph into JVM-owned values. */
+    external fun nativeViewModelInstanceSnapshot(
+        viewModel: Long,
+        statusOut: IntArray,
+    ): NativeViewModelSnapshot?
+
     external fun nativeArtboardInstanceBindViewModel(artboard: Long, viewModel: Long): Int
 
     external fun nativeViewModelMutate(

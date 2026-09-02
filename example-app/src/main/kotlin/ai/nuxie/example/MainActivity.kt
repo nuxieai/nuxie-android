@@ -4,6 +4,7 @@ import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.Nuxie
 import ai.nuxie.sdk.NuxieConfiguration
 import ai.nuxie.sdk.NuxieEnvironment
+import ai.nuxie.sdk.TriggerUpdate
 import android.app.Activity
 import android.os.Bundle
 import android.view.Gravity
@@ -35,7 +36,13 @@ class MainActivity : Activity() {
         Nuxie.trigger(
           intent.getStringExtra(EXTRA_TRIGGER_EVENT) ?: "\$app_opened",
         ) { update ->
-          runOnUiThread { status.text = update.toString() }
+          runOnUiThread {
+            status.text = when (update) {
+              is TriggerUpdate.Error ->
+                "${update.error.code}: ${update.error.message}"
+              else -> update.toString()
+            }
+          }
         }
       }
     }

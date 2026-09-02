@@ -3,6 +3,7 @@ package ai.nuxie.sdk.presentation
 import ai.nuxie.sdk.JourneyExitReason
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
+import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import ai.nuxie.sdk.billing.ExperiencePurchaseProgramHost
 import android.app.Activity
 import android.os.Bundle
@@ -110,8 +111,15 @@ internal class NuxieExperienceActivity :
                     fail(error)
                 }
 
-                override fun onRuntimeEvent(event: NuxieRuntimeEvent) {
-                    prepared.handleRuntimeEvent(this@NuxieExperienceActivity, event)
+                override fun onRuntimeEvent(
+                    event: NuxieRuntimeEvent,
+                    viewModelSnapshot: NuxieViewModelSnapshot?,
+                ) {
+                    prepared.handleRuntimeEvent(
+                        this@NuxieExperienceActivity,
+                        event,
+                        viewModelSnapshot,
+                    )
                 }
             },
         )

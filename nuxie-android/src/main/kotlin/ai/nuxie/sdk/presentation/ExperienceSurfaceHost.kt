@@ -11,6 +11,7 @@ import ai.nuxie.sdk.runtime.NuxieRuntimePlayer
 import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
 import ai.nuxie.sdk.runtime.NuxieRuntimeWindow
 import ai.nuxie.sdk.runtime.NuxieRuntimeViewModelState
+import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
 import android.content.Context
 import android.graphics.PixelFormat
@@ -47,7 +48,7 @@ internal class ExperienceSurfaceHost(
     interface Listener {
         fun onFirstFrame()
         fun onFailure(error: ExperiencePresentationException)
-        fun onRuntimeEvent(event: NuxieRuntimeEvent) {}
+        fun onRuntimeEvent(event: NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {}
     }
 
     /** Owned runtime wrappers; created, touched, and closed only on the runtime lane. */
@@ -327,9 +328,21 @@ internal class ExperienceSurfaceHost(
                 listener?.onFirstFrame()
             }
             if (outcome.events.isNotEmpty()) {
+                val viewModelSnapshot = try {
+                    viewModelState?.snapshot()
+                } catch (error: Throwable) {
+                    reportFailure(
+                        ExperiencePresentationException.Reason.HOST_FAILED,
+                        "Experience view-model snapshot failed",
+                        error,
+                    )
+                    return@enqueue
+                }
                 post {
                     if (!released.get()) {
-                        outcome.events.forEach { listener?.onRuntimeEvent(it) }
+                        outcome.events.forEach {
+                            listener?.onRuntimeEvent(it, viewModelSnapshot)
+                        }
                     }
                 }
             }

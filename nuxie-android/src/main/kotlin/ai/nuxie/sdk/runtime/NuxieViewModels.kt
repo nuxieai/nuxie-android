@@ -138,6 +138,87 @@ internal data class NuxieViewModelListProjection(
     )
 }
 
+/** Immutable, JVM-owned copy of one bound runtime view-model graph. */
+internal class NuxieViewModelSnapshot private constructor(
+    private val rootInstanceId: Long,
+    instances: List<Instance>,
+) {
+    private val instancesById = instances.associateBy(Instance::id)
+
+    /** Resolve a `/`- or `.`-separated path through nested view-model references. */
+    fun resolveString(path: String): String? {
+        val segments = path.split('/', '.')
+        if (segments.isEmpty() || segments.any(String::isEmpty)) return null
+        var instance = instancesById[rootInstanceId] ?: return null
+        segments.dropLast(1).forEach { segment ->
+            val reference = instance.values[segment] as? Value.Reference ?: return null
+            instance = instancesById[reference.instanceId] ?: return null
+        }
+        return (instance.values[segments.last()] as? Value.StringValue)?.value
+    }
+
+    private data class Instance(
+        val id: Long,
+        val values: Map<String, Value>,
+    )
+
+    private sealed interface Value {
+        data class StringValue(val value: String) : Value
+        data class Reference(val instanceId: Long) : Value
+        data object Unsupported : Value
+    }
+
+    companion object {
+        internal fun fromNative(snapshot: NativeViewModelSnapshot): NuxieViewModelSnapshot {
+            check(snapshot.rootInstanceId != 0L) {
+                "Native view-model snapshot has no root instance"
+            }
+            val valuesByInstance = linkedMapOf<Long, LinkedHashMap<String, Value>>()
+            snapshot.instances.forEach { instance ->
+                check(instance.id != 0L) { "Native view-model snapshot has a zero instance id" }
+                check(valuesByInstance.put(instance.id, linkedMapOf()) == null) {
+                    "Native view-model snapshot repeats instance ${instance.id}"
+                }
+            }
+            check(snapshot.rootInstanceId in valuesByInstance) {
+                "Native view-model snapshot omits its root instance"
+            }
+            snapshot.values.forEach { native ->
+                val owner = checkNotNull(valuesByInstance[native.ownerInstanceId]) {
+                    "Native view-model snapshot value references an unknown owner"
+                }
+                val kind = NuxieViewModelPropertyKind.fromNativeValue(native.kind)
+                val value = when (kind) {
+                    NuxieViewModelPropertyKind.STRING -> Value.StringValue(
+                        native.bytesValue.decodeToString(throwOnInvalidSequence = true),
+                    )
+                    NuxieViewModelPropertyKind.VIEW_MODEL ->
+                        native.referencedInstanceId.takeUnless { it == 0L }
+                            ?.let(Value::Reference)
+                            ?: Value.Unsupported
+                    else -> Value.Unsupported
+                }
+                check(owner.put(native.name, value) == null) {
+                    "Native view-model snapshot repeats property '${native.name}'"
+                }
+            }
+            valuesByInstance.values.forEach { values ->
+                values.values.filterIsInstance<Value.Reference>().forEach { reference ->
+                    check(reference.instanceId in valuesByInstance) {
+                        "Native view-model snapshot references an unknown instance"
+                    }
+                }
+            }
+            return NuxieViewModelSnapshot(
+                rootInstanceId = snapshot.rootInstanceId,
+                instances = valuesByInstance.map { (id, values) ->
+                    Instance(id, values.toMap())
+                },
+            )
+        }
+    }
+}
+
 internal data class NativeCallResult<out T>(val status: Int, val value: T?)
 
 /** Injectable raw seam; production delegates to [NuxieRuntimeBridge]. */
@@ -220,6 +301,9 @@ internal interface NuxieTypedRuntimeNative {
 
     fun viewModelRootSchemaIndex(viewModelHandle: Long): NativeCallResult<Long> =
         error("viewModelRootSchemaIndex is not implemented")
+
+    fun snapshotViewModel(viewModelHandle: Long): NativeCallResult<NativeViewModelSnapshot> =
+        error("snapshotViewModel is not implemented")
 
     fun bindViewModel(artboardHandle: Long, viewModelHandle: Long): Int =
         error("bindViewModel is not implemented")
@@ -363,6 +447,12 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
         val index = NuxieRuntimeBridge.nativeViewModelRootSchemaIndex(viewModelHandle, status)
         return NativeCallResult(status.single(), index.takeIf { status.single() == NUX_STATUS_OK })
+    }
+
+    override fun snapshotViewModel(viewModelHandle: Long): NativeCallResult<NativeViewModelSnapshot> {
+        val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
+        val snapshot = NuxieRuntimeBridge.nativeViewModelInstanceSnapshot(viewModelHandle, status)
+        return NativeCallResult(status.single(), snapshot)
     }
 
     override fun bindViewModel(artboardHandle: Long, viewModelHandle: Long): Int =
@@ -690,6 +780,26 @@ internal data class NativeViewModelAuthoredInstance(
     val schemaIndex: Long,
     val index: Long,
     val name: String?,
+)
+
+internal data class NativeViewModelSnapshot(
+    val rootInstanceId: Long,
+    val instances: Array<NativeViewModelSnapshotInstance>,
+    val values: Array<NativeViewModelSnapshotValue>,
+)
+
+internal data class NativeViewModelSnapshotInstance(
+    val id: Long,
+    val schemaIndex: Long,
+)
+
+internal data class NativeViewModelSnapshotValue(
+    val ownerInstanceId: Long,
+    val propertyIndex: Long,
+    val name: String,
+    val kind: Int,
+    val bytesValue: ByteArray,
+    val referencedInstanceId: Long,
 )
 
 internal fun NativeViewModelCatalog.toViewModelCatalog(): NuxieViewModelCatalog {

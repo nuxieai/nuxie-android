@@ -7,6 +7,7 @@ import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.features.FeatureAllowance
 import ai.nuxie.sdk.journey.JourneyService
 import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
+import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import android.app.Activity
 import com.android.billingclient.api.BillingClient
 import kotlinx.coroutines.CoroutineScope
@@ -253,10 +254,20 @@ internal data class AuthenticatedExperiencePurchaseCatalog(
                 if (literal !in placementIds) invalid("Purchase references unknown Placement '$literal'")
                 return ExperiencePlacementValue.Literal(literal)
             }
-            invalid(
-                "Dynamic purchase Placements require ViewModel routing, which this Android runtime " +
-                    "does not support yet",
-            )
+            val reference = (value as? JsonObject)?.get("ref") as? JsonObject
+                ?: invalid("Purchase Placement must be a literal or path reference")
+            if (reference.requiredString("kind", "Purchase Placement reference") != "path") {
+                invalid("Purchase Placement reference must use kind 'path'")
+            }
+            if (reference["viewModelName"] != null || reference["isRelative"] != null) {
+                invalid("Purchase Placement path must be absolute")
+            }
+            val path = reference.requiredString("path", "Purchase Placement reference")
+            val terminal = path.split('.', '/').lastOrNull()
+            if (terminal != "placementId") {
+                invalid("Purchase Placement path must resolve a placementId")
+            }
+            return ExperiencePlacementValue.Path(path)
         }
 
         private fun parseProgram(value: JsonElement?, outlet: String): ExperienceOutcomeProgram {
@@ -470,6 +481,7 @@ internal class AuthenticatedExperienceOutcomeProgramExecutor(
 
 internal sealed interface ExperiencePlacementValue {
     data class Literal(val placementId: String) : ExperiencePlacementValue
+    data class Path(val path: String) : ExperiencePlacementValue
 }
 
 internal interface ExperiencePurchaseExecutor {
@@ -565,7 +577,12 @@ internal class ExperiencePurchaseSession(
 
     internal fun resolvedProducts(): List<StoreProduct> = products
 
-    fun handle(activity: Activity, screenId: String, event: NuxieRuntimeEvent) {
+    fun handle(
+        activity: Activity,
+        screenId: String,
+        event: NuxieRuntimeEvent,
+        viewModelSnapshot: NuxieViewModelSnapshot? = null,
+    ) {
         if (retired.get() || activity.isFinishing || activity.isDestroyed) return
         val route = routes.singleOrNull {
             it.screenId == screenId && it.eventName == event.name
@@ -576,6 +593,8 @@ internal class ExperiencePurchaseSession(
             is ExperiencePurchaseAction.Purchase -> {
                 val placementId = when (val placement = action.placement) {
                     is ExperiencePlacementValue.Literal -> placement.placementId
+                    is ExperiencePlacementValue.Path ->
+                        viewModelSnapshot?.resolveString(placement.path)
                 }
                 val product = productsByPlacement[placementId]
                 if (product == null) {
