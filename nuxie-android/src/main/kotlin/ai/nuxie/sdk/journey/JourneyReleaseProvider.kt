@@ -11,6 +11,7 @@ import ai.nuxie.sdk.presentation.PresentationReleaseProvider
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /** Authenticated releases admitted for a device-local event trigger. */
 internal data class AdmittedJourneyRelease(
@@ -120,11 +121,16 @@ internal class JourneyReleaseCatalog(
             else -> return null
         }
         val endOnGoal = lifecycle.string("exitPolicy") in setOf("on_goal", "on_goal_or_stop")
-        val goalWindowMillis = lifecycle.long("goalWindowSeconds")?.times(1_000L)
+        val goal = (lifecycle["goal"] as? JsonObject)?.toSettingsGoal()
+        val goalWindowMillis = (lifecycle["goal"] as? JsonObject)
+            ?.long("windowSeconds")
+            ?.times(1_000L)
+        val timeLimitMillis = lifecycle.long("timeLimitSeconds")?.times(1_000L)
         val template = buildJsonObject {
-            put("goal", lifecycle["goal"] ?: kotlinx.serialization.json.JsonNull)
+            put("goal", goal ?: kotlinx.serialization.json.JsonNull)
             put("conversion_anchor", JsonPrimitive(lifecycle.string("conversionAnchor") ?: "journey_start"))
             put("goal_window_ms", goalWindowMillis?.let(::JsonPrimitive) ?: kotlinx.serialization.json.JsonNull)
+            put("time_limit_ms", timeLimitMillis?.let(::JsonPrimitive) ?: kotlinx.serialization.json.JsonNull)
             put("end_on_goal", JsonPrimitive(endOnGoal))
         }
         return AdmittedJourneyRelease(
@@ -141,4 +147,22 @@ internal class JourneyReleaseCatalog(
 
     private fun JsonObject.long(key: String): Long? =
         (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toLongOrNull()
+
+    private fun JsonObject.toSettingsGoal(): JsonObject? {
+        val kind = string("type") ?: return null
+        return buildJsonObject {
+            put("kind", kind)
+            when (kind) {
+                "event" -> {
+                    string("eventName")?.let { put("eventName", it) }
+                    this@toSettingsGoal["condition"]?.let { put("eventFilter", it) }
+                }
+                "milestone" -> string("milestoneId")?.let { put("milestoneId", it) }
+                "segment_enter", "segment_leave" ->
+                    string("segmentId")?.let { put("segmentId", it) }
+                "attribute" -> this@toSettingsGoal["expression"]?.let { put("attributeExpr", it) }
+            }
+            this@toSettingsGoal.long("windowSeconds")?.let { put("window", it) }
+        }
+    }
 }

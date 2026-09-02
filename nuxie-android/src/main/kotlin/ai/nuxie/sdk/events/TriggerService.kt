@@ -7,12 +7,8 @@ import ai.nuxie.sdk.TriggerDecision
 import ai.nuxie.sdk.TriggerError
 import ai.nuxie.sdk.TriggerErrorCode
 import ai.nuxie.sdk.TriggerUpdate
-import ai.nuxie.sdk.network.NuxieApi
-import ai.nuxie.sdk.journey.JourneyDownFactRouter
 import android.util.Log
 import kotlinx.coroutines.delay
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
 
 /**
  * The decision lane, ported from the iOS `TriggerService`: capture the
@@ -26,8 +22,7 @@ import kotlinx.serialization.json.jsonObject
  * semantics honest rather than optimistic.
  */
 internal class TriggerService(
-    private val eventLog: EventLog,
-    private val api: NuxieApi,
+    private val decisionEvents: DecisionEventCapturing,
     private val broker: TriggerBroker,
     private val journeys: JourneyRouter,
     private val features: FeatureGate,
@@ -80,21 +75,37 @@ internal class TriggerService(
         properties: Map<String, Any?>?,
         handler: (TriggerUpdate) -> Unit,
     ) {
-        // 1. Durable capture (persist + announce; delivery pending).
-        val stored = eventLog.captureForTrigger(event, properties)
+        // Durable capture, ordered predecessor delivery, `/event`, response
+        // application, and acknowledgement share the delivery actor.
+        val direct = runCatching {
+            decisionEvents.capture(
+                name = event,
+                properties = properties ?: emptyMap(),
+                distinctId = identityDistinctId(),
+            )
+        }.getOrElse { failure ->
+            Log.w(LOG_TAG, "Decision lane capture failed", failure)
+            handler(
+                TriggerUpdate.Error(
+                    TriggerError(
+                        TriggerErrorCode.TRIGGER_FAILED,
+                        failure.message ?: "decision lane failed",
+                    ),
+                ),
+            )
+            return
+        }
+        val stored = direct?.event
         if (stored == null) {
             handler(TriggerUpdate.Error(TriggerError(TriggerErrorCode.TRIGGER_FAILED, "Event capture failed")))
             return
         }
         val eventId = stored.id
 
-        // 2. Synchronous decision lane. A failed round trip is a trigger
-        //    error, but the captured event stays durable for batch delivery.
+        // A failed round trip is a trigger error, but the captured event stays
+        // durable for later recovery through the appropriate delivery lane.
         val gatePlan = runCatching {
-            val responseText = api.postEvent(BatchItemWireEncoder.encode(stored))
-            eventLog.markDeliveredViaDecisionLane(eventId)
-            val response = Json.parseToJsonElement(responseText).jsonObject
-            (journeys as? JourneyDownFactRouter)?.applyDownFacts(response, stored.distinctId)
+            val response = checkNotNull(direct.response) { "decision lane failed" }
             GatePlan.fromEventResponse(response)
         }.getOrElse { failure ->
             Log.w(LOG_TAG, "Decision lane request failed", failure)

@@ -37,7 +37,7 @@ internal class JourneyStore(
     fun load(distinctId: String, journeyId: String): JourneyRun? {
         val directory = runsDirectory(distinctId)
         val interrupted = decodeRun(File(directory, ".$journeyId.json.new"))
-            ?.takeIf { it.hasPendingHostDismissal() }
+            ?.takeIf { it.hasRecoverablePendingState() }
         return interrupted ?: decodeRun(File(directory, "$journeyId.json"))
     }
 
@@ -49,6 +49,32 @@ internal class JourneyStore(
         ?.mapNotNull(::decodeRun)
         ?.filter { it.state == JourneyRunState.ACTIVE }
         ?.sortedBy { it.id }
+        ?.toList()
+        ?: emptyList()
+
+    @Synchronized
+    fun loadPendingEnrollments(distinctId: String): List<JourneyRun> = runsDirectory(distinctId)
+        .listFiles()
+        ?.asSequence()
+        ?.filter { it.isRunSnapshot() }
+        ?.mapNotNull(::decodeRun)
+        ?.filter { it.state == JourneyRunState.ENROLLING }
+        ?.distinctBy(JourneyRun::id)
+        ?.sortedBy { it.id }
+        ?.toList()
+        ?: emptyList()
+
+    @Synchronized
+    fun loadPendingEnrollments(): List<JourneyRun> = File(root, "runs")
+        .listFiles()
+        ?.asSequence()
+        ?.filter(File::isDirectory)
+        ?.flatMap { directory -> directory.listFiles()?.asSequence() ?: emptySequence() }
+        ?.filter { it.isRunSnapshot() }
+        ?.mapNotNull(::decodeRun)
+        ?.filter { it.state == JourneyRunState.ENROLLING }
+        ?.distinctBy { it.distinctId to it.id }
+        ?.sortedWith(compareBy(JourneyRun::distinctId, JourneyRun::id))
         ?.toList()
         ?: emptyList()
 
@@ -122,6 +148,7 @@ internal class JourneyStore(
             plane = value.string("plane")?.let(JourneyPlane::valueOf) ?: return null,
             settingsSnapshot = value["settings_snapshot"] as? JsonObject ?: return null,
             state = value.string("state")?.let(JourneyRunState::valueOf) ?: return null,
+            pendingEnrollmentEventId = value.string("pending_enrollment_event_id"),
             resumePoint = (value["resume_point"] as? JsonObject)?.let { point ->
                 JourneyResumePoint(
                     nodeId = point.string("node_id") ?: return null,
@@ -186,6 +213,9 @@ internal class JourneyStore(
     private fun JourneyRun.hasPendingHostDismissal(): Boolean =
         pendingHostExitCapture || pendingHostCompletion || pendingHostTriggerCompletion
 
+    private fun JourneyRun.hasRecoverablePendingState(): Boolean =
+        state == JourneyRunState.ENROLLING || hasPendingHostDismissal()
+
     private fun encodeRun(run: JourneyRun): JsonObject = buildJsonObject {
         put("id", JsonPrimitive(run.id))
         put("distinct_id", JsonPrimitive(run.distinctId))
@@ -195,6 +225,10 @@ internal class JourneyStore(
         put("plane", JsonPrimitive(run.plane.name))
         put("settings_snapshot", run.settingsSnapshot)
         put("state", JsonPrimitive(run.state.name))
+        put(
+            "pending_enrollment_event_id",
+            run.pendingEnrollmentEventId?.let(::JsonPrimitive) ?: JsonNull,
+        )
         put("resume_point", run.resumePoint?.let { point ->
             buildJsonObject {
                 put("node_id", JsonPrimitive(point.nodeId))

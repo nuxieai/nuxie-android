@@ -530,7 +530,8 @@ class TriggerServiceTest {
 
     @Test
     fun coreStartupRecoversPendingHostDismissalTombstones() = runBlocking {
-        val core = core(transportWithGate(null))
+        val transport = transportWithGate(null)
+        val core = core(transport)
         val ownerDistinctId = core.identity.distinctId()
         val journeyId = "startup-recovery-${UUID.randomUUID()}"
         val store = JourneyStore(RuntimeEnvironment.getApplication().filesDir)
@@ -556,11 +557,14 @@ class TriggerServiceTest {
                 while (store.load(ownerDistinctId, journeyId) != null) delay(10L)
             }
 
+            val exitEventId = "journey-exited:$journeyId:7"
             assertTrue(
-                core.store.pendingBatch(100).any {
-                    it.id == "journey-exited:$journeyId:7"
+                transport.requests.any { request ->
+                    request.url.path == "/event" &&
+                        request.body.decodeToString().contains(exitEventId)
                 },
             )
+            assertTrue(core.store.pendingBatch(100).none { it.id == exitEventId })
         } finally {
             core.stop()
         }

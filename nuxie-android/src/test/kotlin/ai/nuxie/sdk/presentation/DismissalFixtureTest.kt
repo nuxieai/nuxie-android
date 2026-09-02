@@ -18,6 +18,7 @@ import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.journey.AdmittedJourneyRelease
 import ai.nuxie.sdk.journey.JourneyEventNames
 import ai.nuxie.sdk.journey.JourneyLedger
+import ai.nuxie.sdk.journey.CapturingDecisionEvents
 import ai.nuxie.sdk.journey.JourneyPlane
 import ai.nuxie.sdk.journey.JourneyReentry
 import ai.nuxie.sdk.journey.JourneyReleaseProvider
@@ -214,7 +215,7 @@ class DismissalFixtureTest {
             )
             val journeys = JourneyService(
                 store = runStore,
-                ledger = JourneyLedger(eventLog),
+                ledger = JourneyLedger(eventLog, CapturingDecisionEvents(eventLog)),
                 releases = JourneyReleaseProvider { _, _ -> emptyList() },
                 initialDistinctId = distinctId,
             )
@@ -284,7 +285,7 @@ class DismissalFixtureTest {
             )
             val restartedJourneys = JourneyService(
                 store = JourneyStore(root),
-                ledger = JourneyLedger(eventLog),
+                ledger = JourneyLedger(eventLog, CapturingDecisionEvents(eventLog)),
                 releases = JourneyReleaseProvider { _, _ -> listOf(oneTimeRelease) },
             )
             val admission = restartedJourneys.handleEventForTrigger(
@@ -345,7 +346,7 @@ class DismissalFixtureTest {
             check(runStore.load(distinctId, journeyId) != null) { "fixture Journey did not persist" }
             val journeys = JourneyService(
                 store = runStore,
-                ledger = JourneyLedger(eventLog),
+                ledger = JourneyLedger(eventLog, CapturingDecisionEvents(eventLog)),
                 releases = JourneyReleaseProvider { _, _ -> emptyList() },
                 nowMillis = { nowMillis },
                 initialDistinctId = distinctId,

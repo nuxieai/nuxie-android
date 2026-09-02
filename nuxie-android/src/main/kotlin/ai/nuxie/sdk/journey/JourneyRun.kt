@@ -13,6 +13,8 @@ internal data class JourneyRun(
     val plane: JourneyPlane,
     val settingsSnapshot: JsonObject,
     val state: JourneyRunState,
+    /** Stable `/event` identity retained while enrollment is unresolved. */
+    val pendingEnrollmentEventId: String? = null,
     val resumePoint: JourneyResumePoint? = null,
     val isGhost: Boolean = false,
     val convertedAtMillis: Long? = null,
@@ -30,7 +32,7 @@ internal data class JourneyRun(
 
 internal enum class JourneyPlane { DEVICE, SERVER }
 
-internal enum class JourneyRunState { ACTIVE, TRANSFERRED, TERMINAL }
+internal enum class JourneyRunState { ENROLLING, ACTIVE, TRANSFERRED, TERMINAL }
 
 /** Exact presentation outcome selected by the run's first terminal transition. */
 internal enum class JourneyRunPresentationOutcome {

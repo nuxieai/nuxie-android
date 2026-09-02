@@ -123,7 +123,12 @@ class JourneyConformanceTest {
             captured,
             log,
             runStore,
-            JourneyService(runStore, JourneyLedger(log), JourneyReleaseProvider { _, _ -> emptyList() }, { now }),
+            JourneyService(
+                runStore,
+                JourneyLedger(log, CapturingDecisionEvents(log)),
+                JourneyReleaseProvider { _, _ -> emptyList() },
+                { now },
+            ),
         )
     }
 

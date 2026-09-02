@@ -47,6 +47,11 @@ internal class EventLog(
         val newlyCaptured: Boolean,
     )
 
+    internal enum class ServerFactCommitResult {
+        INSERTED,
+        DUPLICATE,
+    }
+
     internal fun interface CommittedSubscription {
         suspend fun onCommitted(event: StoredEvent)
     }
@@ -74,6 +79,7 @@ internal class EventLog(
         data class CaptureForTrigger(
             val name: String,
             val properties: Map<String, Any?>?,
+            val distinctIdOverride: String?,
             val done: CompletableDeferred<StoredEvent?>,
         ) : Command
         data class CaptureIdempotently(
@@ -94,7 +100,7 @@ internal class EventLog(
         data class CommitServerFact(
             val event: StoredEvent,
             val receivedAtMillis: Long,
-            val done: CompletableDeferred<Boolean>,
+            val done: CompletableDeferred<ServerFactCommitResult>,
         ) : Command
         data class Barrier(val done: CompletableDeferred<Unit>) : Command
     }
@@ -120,7 +126,13 @@ internal class EventLog(
                 }
                     .onFailure { Log.w(LOG_TAG, "Event capture failed", it) }
                 is Command.CaptureForTrigger -> {
-                    val stored = runCatching { process(command.name, command.properties) }
+                    val stored = runCatching {
+                        process(
+                            command.name,
+                            command.properties,
+                            command.distinctIdOverride,
+                        )
+                    }
                         .onFailure { Log.w(LOG_TAG, "Trigger capture failed", it) }
                         .getOrNull()
                     command.done.complete(stored)
@@ -150,9 +162,9 @@ internal class EventLog(
                         .getOrDefault(false)
                     command.done.complete(captured)
                 }
-                is Command.CommitServerFact -> command.done.complete(
-                    commitServerFactNow(command.event, command.receivedAtMillis),
-                )
+                is Command.CommitServerFact -> runCatching {
+                    commitServerFactNow(command.event, command.receivedAtMillis)
+                }.fold(command.done::complete, command.done::completeExceptionally)
                 is Command.Barrier -> command.done.complete(Unit)
             }
         }
@@ -257,13 +269,21 @@ internal class EventLog(
      * the stored event back so the trigger service can run the synchronous
      * /event round trip in capture order.
      */
-    suspend fun captureForTrigger(name: String, properties: Map<String, Any?>?): StoredEvent? {
+    suspend fun captureForTrigger(
+        name: String,
+        properties: Map<String, Any?>?,
+        distinctIdOverride: String? = null,
+    ): StoredEvent? {
         if (name.isEmpty()) {
             Log.w(LOG_TAG, "Event name cannot be empty")
             return null
         }
         val done = CompletableDeferred<StoredEvent?>()
-        if (commands.trySend(Command.CaptureForTrigger(name, properties, done)).isFailure) return null
+        if (
+            commands.trySend(
+                Command.CaptureForTrigger(name, properties, distinctIdOverride, done),
+            ).isFailure
+        ) return null
         return done.await()
     }
 
@@ -312,7 +332,7 @@ internal class EventLog(
         applyBeforeSend = false,
     ).succeeded
 
-    private suspend fun captureIdempotentlyWithResult(
+    internal suspend fun captureIdempotentlyWithResult(
         name: String,
         properties: Map<String, Any?>,
         eventId: String,
@@ -357,7 +377,7 @@ internal class EventLog(
      * would dedupe server-side, but skipping the resend is cheaper).
      */
     suspend fun markDeliveredViaDecisionLane(eventId: String) {
-        runCatching { store.markDelivered(listOf(eventId)) }
+        store.markDelivered(listOf(eventId))
     }
 
     /**
@@ -367,10 +387,10 @@ internal class EventLog(
     suspend fun commitServerFact(
         event: StoredEvent,
         receivedAtMillis: Long = nowMillis(),
-    ): Boolean {
-        val done = CompletableDeferred<Boolean>()
+    ): ServerFactCommitResult {
+        val done = CompletableDeferred<ServerFactCommitResult>()
         val command = Command.CommitServerFact(event, receivedAtMillis, done)
-        if (commands.trySend(command).isFailure) return false
+        check(commands.trySend(command).isSuccess) { "Event capture pipeline is closed." }
         return done.await()
     }
 
@@ -469,10 +489,13 @@ internal class EventLog(
         )
     }
 
-    private suspend fun commitServerFactNow(event: StoredEvent, receivedAtMillis: Long): Boolean {
+    private suspend fun commitServerFactNow(
+        event: StoredEvent,
+        receivedAtMillis: Long,
+    ): ServerFactCommitResult {
         val admitted = event.withForwardingAdmission(forwardingAdmission(receivedAtMillis))
-        val inserted = runCatching { store.insertDeliveredIfAbsent(admitted) }.getOrElse { return false }
-        if (!inserted) return false
+        val inserted = store.insertDeliveredIfAbsent(admitted)
+        if (!inserted) return ServerFactCommitResult.DUPLICATE
         resolveForwarding(admitted)
         subscribers.forEach { subscriber ->
             if (subscriber.predicate(admitted)) {
@@ -480,7 +503,7 @@ internal class EventLog(
                     .onFailure { Log.w(LOG_TAG, "Committed-event subscriber failed", it) }
             }
         }
-        return true
+        return ServerFactCommitResult.INSERTED
     }
 
     private suspend fun processDeliveredIdempotently(

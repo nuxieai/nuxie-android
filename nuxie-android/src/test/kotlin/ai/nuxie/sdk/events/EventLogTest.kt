@@ -522,7 +522,10 @@ class EventLogTest {
             distinctId = "anon-1",
         )
 
-        assertTrue(eventLog.commitServerFact(fact))
+        assertEquals(
+            EventLog.ServerFactCommitResult.INSERTED,
+            eventLog.commitServerFact(fact),
+        )
 
         val committed = store.delivered.single()
         assertEquals(500L, committed.timestampMillis)
