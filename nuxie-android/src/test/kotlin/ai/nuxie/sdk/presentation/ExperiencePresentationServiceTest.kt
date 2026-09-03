@@ -2063,7 +2063,10 @@ class ExperiencePresentationServiceTest {
             ).decodeToString(),
         ).jsonObject
         val identity = requireNotNull(
-            ExperienceReleaseIdentity.fromJson(entry.getValue("locator").jsonObject),
+            ExperienceReleaseIdentity.fromJson(
+                entry.getValue("locator").jsonObject,
+                additionalKeys = setOf("legId"),
+            ),
         )
         val requirements = descriptor.getValue("requirements").jsonObject
         val luau = requirements.getValue("luau").jsonObject

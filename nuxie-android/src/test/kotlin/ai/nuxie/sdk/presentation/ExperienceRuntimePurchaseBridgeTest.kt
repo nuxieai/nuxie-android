@@ -370,7 +370,9 @@ class ExperienceRuntimeCommerceBridgeTest {
                 0,
                 NativePlayerStepOutcome(
                     keepGoing = true,
+                    pointerHits = intArrayOf(),
                     events = if (pointers.any { it.kind == 2 }) arrayOf(event) else emptyArray(),
+                    hostCommands = emptyArray(),
                     viewModelChanges = emptyArray(),
                 ),
             )

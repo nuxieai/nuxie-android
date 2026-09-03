@@ -124,7 +124,7 @@ internal class EventLog(
             val event: StoredEvent,
             val receivedAtMillis: Long,
             val admissionTickets: List<AdmissionTicket>,
-            val done: CompletableDeferred<Boolean>,
+            val done: CompletableDeferred<ServerFactCommitResult>,
         ) : Command
         data class Barrier(val done: CompletableDeferred<Unit>) : Command
     }
@@ -200,7 +200,7 @@ internal class EventLog(
                         )
                     }.onFailure { Log.w(LOG_TAG, "Idempotent event capture failed", it) }
                         .getOrDefault(StableEventCaptureResult(false, null))
-                    command.done.complete(captured)
+                    command.done.complete(result)
                 }
                 is Command.CaptureDeliveredIdempotently -> {
                     val captured = runCatching {
@@ -215,13 +215,13 @@ internal class EventLog(
                         .getOrDefault(false)
                     command.done.complete(captured)
                 }
-                is Command.CommitServerFact -> command.done.complete(
+                is Command.CommitServerFact -> runCatching {
                     commitServerFactNow(
                         command.event,
                         command.receivedAtMillis,
                         command.admissionTickets,
-                    ),
-                )
+                    )
+                }.fold(command.done::complete, command.done::completeExceptionally)
                 is Command.Barrier -> command.done.complete(Unit)
             }
             if (command !is Command.Barrier) commitProgress.incrementAndGet()
@@ -599,15 +599,15 @@ internal class EventLog(
     suspend fun commitServerFact(
         event: StoredEvent,
         receivedAtMillis: Long = nowMillis(),
-    ): Boolean {
-        val done = CompletableDeferred<Boolean>()
+    ): ServerFactCommitResult {
+        val done = CompletableDeferred<ServerFactCommitResult>()
         val command = Command.CommitServerFact(
             event,
             receivedAtMillis,
             sampleAdmissionTickets(),
             done,
         )
-        if (commands.trySend(command).isFailure) return false
+        check(commands.trySend(command).isSuccess) { "Event capture pipeline is closed." }
         return done.await()
     }
 
@@ -741,17 +741,15 @@ internal class EventLog(
         event: StoredEvent,
         receivedAtMillis: Long,
         admissionTickets: List<AdmissionTicket>,
-    ): Boolean {
+    ): ServerFactCommitResult {
         val admitted = event.withForwardingAdmission(forwardingAdmission(receivedAtMillis))
-        val commit = runCatching {
-            store.insertDeliveredIfAbsentAndStageRoute(admitted)
-        }.getOrElse { return false }
-        if (!commit.inserted) return false
+        val commit = store.insertDeliveredIfAbsentAndStageRoute(admitted)
+        if (!commit.inserted) return ServerFactCommitResult.DUPLICATE
         resolveForwarding(admitted)
         if (commit.localRoutePending && activeLocalRouteIds.add(admitted.id)) {
             resolveRoute(admitted, admissionTickets, localRouteEventId = admitted.id)
         }
-        return true
+        return ServerFactCommitResult.INSERTED
     }
 
     private suspend fun processDeliveredIdempotently(

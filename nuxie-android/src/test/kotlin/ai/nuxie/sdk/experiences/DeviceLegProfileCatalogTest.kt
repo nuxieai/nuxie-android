@@ -152,13 +152,13 @@ class DeviceLegProfileCatalogTest {
         val reference = snapshot.profile.armedLegs.single().reference
         val identity = snapshot.releasesByDigest.values.single().identity
         catalog.clear("customer")
-        highWater.promote(identity.streamKey, identity.publishedAtSeq + 10)
+        highWater.promote(identity.streamKey, identity.releaseSequence + 10)
 
         val pinned = catalog.authenticatePinnedRelease(entry, reference)
 
         assertEquals(reference.getValue("descriptorSha256").jsonPrimitive.content, pinned.descriptorSha256)
         assertEquals(identity, pinned.identity)
-        assertNull(pinned.publishedAtSeqToPromote)
+        assertNull(pinned.releaseSequenceToPromote)
     }
 
     @Test fun `a retained release cannot change shape or bound authority`() {

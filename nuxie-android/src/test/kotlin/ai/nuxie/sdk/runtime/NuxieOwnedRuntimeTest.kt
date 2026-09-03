@@ -284,6 +284,7 @@ class NuxieOwnedRuntimeTest {
                 status = 0,
                 value = NativePlayerStepOutcome(
                     keepGoing = true,
+                    pointerHits = intArrayOf(),
                     events = arrayOf(
                         NativeRuntimeEvent(
                             localIndex = 0,
@@ -295,6 +296,7 @@ class NuxieOwnedRuntimeTest {
                             properties = emptyArray(),
                         ),
                     ),
+                    hostCommands = emptyArray(),
                     viewModelChanges = emptyArray(),
                 ),
             )
