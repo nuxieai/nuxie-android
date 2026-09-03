@@ -33,6 +33,14 @@ class EmbeddedRuntimeCompatibilityTest {
     }
 
     @Test
+    fun `release admission advertises current rive scene format`() {
+        val supported = requireNotNull(supportedRuntimeForEmbeddedRuntime("native"))
+
+        assertEquals(7, supported.sceneFormatMajor)
+        assertEquals(3, supported.sceneFormatMinor)
+    }
+
+    @Test
     fun `missing native runtime provenance keeps release admission closed`() {
         assertNull(supportedRuntimeForEmbeddedRuntime(null))
         assertNull(supportedRuntimeForEmbeddedRuntime(""))

@@ -12,6 +12,6 @@ internal object NuxieEmbeddedRuntimeCompatibility {
     const val LUAU_REVISION = "rive_0_36"
     val LUAU_BYTECODE_VERSIONS = setOf(3, 6)
     const val SCENE_FORMAT_MAJOR = 7
-    const val SCENE_FORMAT_MINOR = 0
+    const val SCENE_FORMAT_MINOR = 3
     val CAPABILITIES = setOf("rive", "text-input")
 }
