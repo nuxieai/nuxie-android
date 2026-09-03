@@ -46,6 +46,11 @@ internal class RunArtifactPins(private val filesystemLock: CacheFilesystemLock) 
         if (file.exists() && !file.delete()) throw IOException("Could not release run artifact pin")
     }
 
+    fun retainedDigests(runKey: String): Set<String>? = filesystemLock.withLock {
+        val file = File(filesystemLock.runProtectionDirectory, "${owner(runKey)}.json")
+        file.takeIf(File::isFile)?.let(::read)
+    }
+
     fun digests(excludingOwnerId: String? = null): Set<String> = filesystemLock.withLock {
         val directory = filesystemLock.runProtectionDirectory
         if (!directory.exists()) return@withLock emptySet()

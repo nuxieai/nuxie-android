@@ -24,6 +24,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -74,6 +75,12 @@ class ReleaseArtifactAcquirerTest {
             )
             assertArrayEquals(rivBytes, first.rivFile.readBytes())
             assertEquals(first.rivFile, second.rivFile)
+            assertEquals(setOf(sha256(rivBytes)), first.artifactDigests)
+            acquirer.retainForRun("journey-run", first.artifactDigests)
+            assertEquals(first.artifactDigests, acquirer.retainedRunDigests("journey-run"))
+            assertTrue(first.rivFile.delete())
+            assertNull(acquirer.retainedRunDigests("journey-run"))
+            acquirer.releaseRun("journey-run")
         } finally {
             first.close()
             second.close()

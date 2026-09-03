@@ -1,7 +1,9 @@
 package ai.nuxie.sdk.profile
 
 import ai.nuxie.sdk.features.FeatureInfo
+import ai.nuxie.sdk.experiences.DeviceLegArtifactManager
 import ai.nuxie.sdk.experiences.DeviceLegProfileCatalog
+import ai.nuxie.sdk.experiences.PreparedDeviceLegArtifacts
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
@@ -54,6 +56,7 @@ internal class ProfileService(
     private val applyJourneyProfile: (distinctId: String, body: JsonObject) -> Unit = { _, _ -> },
     private val deviceLegProfiles: DeviceLegProfileCatalog? = null,
     private val deviceLegRuntime: DeviceLegProfileConsumer? = null,
+    private val deviceLegArtifacts: DeviceLegArtifactManager? = null,
     private val applyJourneyFacts: suspend (
         distinctId: String,
         body: JsonObject,
@@ -111,6 +114,11 @@ internal class ProfileService(
     )
 
     private enum class AuthoritySource { NETWORK, CACHE }
+
+    private data class PreparedPlane(
+        val catalog: DeviceLegProfileCatalog.Prepared,
+        val artifacts: PreparedDeviceLegArtifacts?,
+    )
 
     private sealed interface Signal {
         data class Refresh(val done: CompletableDeferred<Boolean>?) : Signal
@@ -370,62 +378,89 @@ internal class ProfileService(
                 return false
             }
             if (!authorityAccepted) return false
-            runCatching { catalog.prepare(cached.body, deliveryAuthority) }.getOrElse {
+            val prepared = runCatching {
+                catalog.prepare(cached.body, deliveryAuthority)
+            }.getOrElse {
                 Log.w(LOG_TAG, "Device leg plane profile rejected", it)
                 return false
             }
+            val artifacts = runCatching {
+                deviceLegArtifacts?.prepareDeviceLegs(prepared.snapshot)
+            }.getOrElse {
+                Log.w(LOG_TAG, "Device leg profile artifacts unavailable", it)
+                return false
+            }
+            PreparedPlane(prepared, artifacts)
         } else null
 
         var featurePublication: FeatureInfo.Mutation? = null
-        val admitted = withCurrentScope(admission.identityScope, admission.localeScope) {
-            synchronized(lock) {
-                if (admission.generation != nextProfileGeneration ||
-                    admission.generation < latestAppliedGeneration
-                ) {
-                    return@synchronized false
-                }
-                latestAppliedGeneration = admission.generation
-
-                if (planePrepared != null) {
-                    runCatching {
-                        deviceLegProfiles?.commit(cached.distinctId, planePrepared)
-                    }.getOrElse {
-                        Log.w(LOG_TAG, "Device leg plane profile commit failed", it)
+        val admitted = try {
+            withCurrentScope(admission.identityScope, admission.localeScope) {
+                synchronized(lock) {
+                    if (admission.generation != nextProfileGeneration ||
+                        admission.generation < latestAppliedGeneration
+                    ) {
                         return@synchronized false
                     }
-                } else {
-                    deviceLegProfiles?.clear(cached.distinctId)
+                    latestAppliedGeneration = admission.generation
+
+                    if (planePrepared != null) {
+                        runCatching {
+                            deviceLegProfiles?.commit(cached.distinctId, planePrepared.catalog)
+                        }.getOrElse {
+                            Log.w(LOG_TAG, "Device leg plane profile commit failed", it)
+                            return@synchronized false
+                        }
+                    } else {
+                        deviceLegProfiles?.clear(cached.distinctId)
+                    }
+                    periodicRefreshEnabled = planePrepared == null
+                    resident = cached
+                    persist(cached)
+                    segments.applySnapshot(
+                        cached.distinctId,
+                        cached.body["segmentMemberships"] as? JsonObject,
+                    )
+                    if (planePrepared == null) applyJourneyProfile(cached.distinctId, cached.body)
+                    featurePublication = stageFeatureProfile(
+                        cached.distinctId,
+                        cached.body,
+                        admission.featurePurchaseRevision,
+                        admission.featureAuthoritativeRevision,
+                        { isAdmissionCurrent(admission) },
+                    )
+                    true
                 }
-                periodicRefreshEnabled = planePrepared == null
-                resident = cached
-                persist(cached)
-                segments.applySnapshot(
-                    cached.distinctId,
-                    cached.body["segmentMemberships"] as? JsonObject,
-                )
-                if (planePrepared == null) applyJourneyProfile(cached.distinctId, cached.body)
-                featurePublication = stageFeatureProfile(
-                    cached.distinctId,
-                    cached.body,
-                    admission.featurePurchaseRevision,
-                    admission.featureAuthoritativeRevision,
-                    { isAdmissionCurrent(admission) },
-                )
-                true
-            }
-        } == true
+            } == true
+        } catch (failure: Throwable) {
+            planePrepared?.artifacts?.close()
+            throw failure
+        }
         if (!admitted) {
+            planePrepared?.artifacts?.close()
             Log.w(LOG_TAG, "Discarding stale profile admission")
         } else {
-            publishFeatureProfile(featurePublication)
+            try {
+                publishFeatureProfile(featurePublication)
+            } catch (failure: Throwable) {
+                planePrepared?.artifacts?.close()
+                throw failure
+            }
             runCatching {
                 if (planePrepared != null) {
-                    deviceLegRuntime?.profileDidCommit(
-                        planePrepared.snapshot,
-                        planePrepared.authority,
-                        cached.distinctId,
-                        admission.generation,
-                    )
+                    if (deviceLegRuntime == null) {
+                        planePrepared.artifacts?.close()
+                    } else {
+                        // Ownership transfers when publication begins. The
+                        // runtime closes rejected or superseded leases.
+                        deviceLegRuntime.profileDidCommit(
+                            planePrepared.catalog.snapshot,
+                            planePrepared.catalog.authority,
+                            cached.distinctId,
+                            admission.generation,
+                            planePrepared.artifacts,
+                        )
+                    }
                 } else {
                     deviceLegRuntime?.profileDidClear(
                         cached.distinctId,

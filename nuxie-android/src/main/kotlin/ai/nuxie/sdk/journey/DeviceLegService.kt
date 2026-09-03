@@ -4,8 +4,10 @@ import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.features.FeatureAccess
 import ai.nuxie.sdk.experiences.AuthenticatedDeviceLegRelease
+import ai.nuxie.sdk.experiences.DeviceLegArtifactManager
 import ai.nuxie.sdk.experiences.DeviceLegProfileCatalog
 import ai.nuxie.sdk.experiences.JourneyPlaneProfile
+import ai.nuxie.sdk.experiences.PreparedDeviceLegArtifacts
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.network.ProfileDeliveryAuthority
@@ -47,6 +49,7 @@ internal interface DeviceLegProfileConsumer {
         authority: ProfileDeliveryAuthority,
         distinctId: String,
         admissionGeneration: Long,
+        artifacts: PreparedDeviceLegArtifacts? = null,
     )
 
     suspend fun profileDidClear(distinctId: String, admissionGeneration: Long)
@@ -139,6 +142,7 @@ internal class DeviceLegService(
     private val beforeAdmission: suspend () -> Unit = {},
     private val beforeParkedResume: suspend () -> Unit = {},
     private val replayPendingLocalRoutes: suspend (String) -> Boolean = { true },
+    private val artifactManager: DeviceLegArtifactManager? = null,
     fixedStorageScope: DeviceLegStorageScope? = null,
 ) : DeviceLegProfileConsumer {
     private class WorkerContext(
@@ -152,6 +156,7 @@ internal class DeviceLegService(
         val generation: Long,
         val profileFenceToken: DeviceLegExecutionFenceToken,
         val executionFenceToken: DeviceLegExecutionFenceToken,
+        val artifacts: PreparedDeviceLegArtifacts?,
     )
 
     private data class ReentryCandidate(
@@ -172,6 +177,7 @@ internal class DeviceLegService(
             val distinctId: String,
             val profileFenceToken: DeviceLegExecutionFenceToken,
             val executionFenceToken: DeviceLegExecutionFenceToken,
+            val artifacts: PreparedDeviceLegArtifacts?,
             override val done: CompletableDeferred<Unit>,
         ) : Command
         data class ProfileClear(
@@ -248,6 +254,7 @@ internal class DeviceLegService(
                         command.distinctId,
                         command.profileFenceToken,
                         command.executionFenceToken,
+                        command.artifacts,
                     )
                     is Command.ProfileClear -> profileDidClearNow(
                         command.distinctId,
@@ -286,15 +293,22 @@ internal class DeviceLegService(
         authority: ProfileDeliveryAuthority,
         distinctId: String,
         admissionGeneration: Long,
-    ) = submitProfilePublication(admissionGeneration) { done, profileToken, executionToken ->
-        Command.ProfileCommit(
-            snapshot,
-            authority,
-            distinctId,
-            profileToken,
-            executionToken,
-            done,
-        )
+        artifacts: PreparedDeviceLegArtifacts?,
+    ) {
+        val accepted = submitProfilePublication(admissionGeneration) {
+                done, profileToken, executionToken,
+            ->
+            Command.ProfileCommit(
+                snapshot,
+                authority,
+                distinctId,
+                profileToken,
+                executionToken,
+                artifacts,
+                done,
+            )
+        }
+        if (!accepted) artifacts?.close()
     }
 
     override suspend fun profileDidClear(distinctId: String, admissionGeneration: Long) {
@@ -370,7 +384,7 @@ internal class DeviceLegService(
             DeviceLegExecutionFenceToken,
             DeviceLegExecutionFenceToken,
         ) -> Command,
-    ) {
+    ): Boolean {
         val done = CompletableDeferred<Unit>()
         val sent = synchronized(profilePublicationLock) {
             if (admissionGeneration < latestProfileAdmissionGeneration) {
@@ -388,6 +402,7 @@ internal class DeviceLegService(
             afterPublication()
             done.await()
         }
+        return sent
     }
 
     private suspend fun initializeNow() {
@@ -405,38 +420,48 @@ internal class DeviceLegService(
         distinctId: String,
         profileFenceToken: DeviceLegExecutionFenceToken,
         executionFenceToken: DeviceLegExecutionFenceToken,
+        artifacts: PreparedDeviceLegArtifacts?,
     ) {
-        if (identity.distinctId() != distinctId) return
-        if (acceptsAuthorityScope) {
-            val authenticated = DeviceLegStorageScope(authority)
-            if (storageScope != null && storageScope != authenticated) {
-                Log.e(LOG_TAG, "Authenticated device-leg authority changed")
-                return
+        var adoptedArtifacts = false
+        try {
+            if (identity.distinctId() != distinctId) return
+            if (acceptsAuthorityScope) {
+                val authenticated = DeviceLegStorageScope(authority)
+                if (storageScope != null && storageScope != authenticated) {
+                    Log.e(LOG_TAG, "Authenticated device-leg authority changed")
+                    return
+                }
+                storageScope = authenticated
             }
-            storageScope = authenticated
+            val generation = profileGeneration.incrementAndGet()
+            val state = ProfileState(
+                distinctId,
+                snapshot,
+                generation,
+                profileFenceToken,
+                executionFenceToken,
+                artifacts,
+            )
+            val previousArtifacts = profileState?.artifacts
+            profileState = state
+            adoptedArtifacts = true
+            previousArtifacts?.close()
+            currentProfilePublished = true
+            if (!initialized) return
+            if (!ensureJournal(distinctId)) return
+            resetForegroundReceiptsIfNeeded()
+            journal?.takeIf { it.distinctId == distinctId }?.let { current ->
+                val receipts = snapshot.profile.armedLegs.asSequence()
+                    .filter { it.entryCondition.text("type") != "event" }
+                    .map(::deviceLegStateArmReceipt)
+                    .toSet()
+                current.retainStateArmReceipts(receipts)
+                current.retainCheckmarks(liveReentryPolicies(snapshot), nowMillis())
+            }
+            reconcileNow(state.generation)
+        } finally {
+            if (!adoptedArtifacts) artifacts?.close()
         }
-        val generation = profileGeneration.incrementAndGet()
-        val state = ProfileState(
-            distinctId,
-            snapshot,
-            generation,
-            profileFenceToken,
-            executionFenceToken,
-        )
-        profileState = state
-        currentProfilePublished = true
-        if (!initialized) return
-        if (!ensureJournal(distinctId)) return
-        resetForegroundReceiptsIfNeeded()
-        journal?.takeIf { it.distinctId == distinctId }?.let { current ->
-            val receipts = snapshot.profile.armedLegs.asSequence()
-                .filter { it.entryCondition.text("type") != "event" }
-                .map(::deviceLegStateArmReceipt)
-                .toSet()
-            current.retainStateArmReceipts(receipts)
-            current.retainCheckmarks(liveReentryPolicies(snapshot), nowMillis())
-        }
-        reconcileNow(state.generation)
     }
 
     private suspend fun profileDidClearNow(distinctId: String?) {
@@ -447,6 +472,7 @@ internal class DeviceLegService(
         ) return
         cancelWake()
         profileGeneration.incrementAndGet()
+        profileState?.artifacts?.close()
         profileState = null
         currentProfilePublished = distinctId != null && identity.distinctId() == distinctId
         clearRetainedReleaseCache()
@@ -503,6 +529,7 @@ internal class DeviceLegService(
         }
         if (profileState?.distinctId == from) {
             profileGeneration.incrementAndGet()
+            profileState?.artifacts?.close()
             profileState = null
         }
         currentProfilePublished = false
@@ -559,7 +586,12 @@ internal class DeviceLegService(
             val opened = DeviceLegRunJournal(journalDirectory, distinctId, scope)
             clearRetainedReleaseCache()
             journal = opened
-            opened.recover(nowMillis())
+            opened.recover(nowMillis()) { run ->
+                val manager = artifactManager
+                manager == null || manager.retainedRunDigests(
+                    deviceLegArtifactRunKey(run),
+                ) == run.artifactDigests
+            }
             reporter(opened).flushPending()
             if (opened.finalizeRevocation()) revokingCustomers.remove(distinctId)
             else revokingCustomers += distinctId
@@ -588,7 +620,18 @@ internal class DeviceLegService(
         return true
     }
 
-    private fun reporter(target: DeviceLegRunJournal) = DeviceLegReporter(target, capture)
+    private fun reporter(target: DeviceLegRunJournal) = DeviceLegReporter(
+        target,
+        capture,
+    ) { run ->
+            if (run.artifactDigests.isNotEmpty()) {
+                runCatching {
+                    artifactManager?.releaseRun(deviceLegArtifactRunKey(run))
+                }.onFailure {
+                    Log.w(LOG_TAG, "Device-leg artifact pin release failed", it)
+                }
+            }
+        }
 
     private suspend fun reconcileNow(generation: Long) {
         val state = currentState()?.takeIf { it.generation == generation } ?: return
@@ -644,6 +687,12 @@ internal class DeviceLegService(
         val stateReceipt = arm.entryCondition.text("type")
             ?.takeIf { it != "event" }
             ?.let { deviceLegStateArmReceipt(arm) }
+        val artifactDigests = if (release.hasScreens() && artifactManager != null) {
+            state.artifacts?.digestsForRelease(digest)?.takeIf { it.isNotEmpty() }
+                ?: return
+        } else {
+            emptySet()
+        }
         val presentationReservation = if (presenter != null && release.hasScreens()) {
             presenter.reserve(state.distinctId) ?: return
         } else {
@@ -654,20 +703,48 @@ internal class DeviceLegService(
             val identityScope = identity.captureScope()
             if (identityScope.distinctId != state.distinctId || !isCurrent(state)) return
             beforeAdmission()
-            val run = profileFence.performIfCurrent(profileToken) {
-                identity.withCurrentScope(identityScope) {
-                    if (!isCurrent(state) ||
-                        (release.hasScreens() && !foreground.get())
-                    ) return@withCurrentScope null
-                    currentJournal.admit(
-                        admittedArm,
-                        reentry,
-                        entryStepId,
-                        nowMillis(),
-                        releasePin,
-                        stateReceipt,
-                    )
+            var retainedCandidate: DeviceLegRun? = null
+            val run = try {
+                profileFence.performIfCurrent(profileToken) {
+                    identity.withCurrentScope(identityScope) {
+                        if (!isCurrent(state) ||
+                            (release.hasScreens() && !foreground.get())
+                        ) return@withCurrentScope null
+                        currentJournal.admit(
+                            admittedArm,
+                            reentry,
+                            entryStepId,
+                            nowMillis(),
+                            releasePin,
+                            stateReceipt,
+                            artifactDigests,
+                            retainArtifacts = { candidate ->
+                                artifactManager?.retainForRun(
+                                    deviceLegArtifactRunKey(candidate),
+                                    candidate.artifactDigests,
+                                )
+                                retainedCandidate = candidate
+                            },
+                        )
+                    }
                 }
+            } catch (failure: Throwable) {
+                retainedCandidate?.let { candidate ->
+                    val published = runCatching {
+                        currentJournal.runs().any {
+                            it.id == candidate.id &&
+                                it.artifactDigests == candidate.artifactDigests
+                        }
+                    }.getOrNull()
+                    if (published == false) {
+                        runCatching {
+                            artifactManager?.releaseRun(deviceLegArtifactRunKey(candidate))
+                        }.onFailure {
+                            Log.w(LOG_TAG, "Device-leg artifact pin rollback failed", it)
+                        }
+                    }
+                }
+                throw failure
             } ?: return
             if (!isExecutionCurrent(executionToken, currentJournal)) {
                 finish(run, "abandoned", release.leg, currentJournal)

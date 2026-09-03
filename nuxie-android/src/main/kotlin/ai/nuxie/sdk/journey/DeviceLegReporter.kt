@@ -10,6 +10,16 @@ internal class DeviceLegReporter(
     private val journal: DeviceLegRunJournal,
     private val capture: suspend (String, Map<String, Any?>, String, String) -> Boolean,
 ) {
+    private var onRunRetired: (DeviceLegRun) -> Unit = {}
+
+    constructor(
+        journal: DeviceLegRunJournal,
+        capture: suspend (String, Map<String, Any?>, String, String) -> Boolean,
+        onRunRetired: (DeviceLegRun) -> Unit,
+    ) : this(journal, capture) {
+        this.onRunRetired = onRunRetired
+    }
+
     suspend fun flushPending() {
         for (run in journal.runs()) {
             if (!run.startedQueued) {
@@ -19,6 +29,7 @@ internal class DeviceLegReporter(
             if (run.completion != null) {
                 if (!queue(run, completion = true)) continue
                 journal.markCompletionQueued(run)
+                onRunRetired(run)
             }
         }
     }

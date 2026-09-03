@@ -35,6 +35,7 @@ internal data class DeviceLegRun(
     val effectReceipts: Map<String, String> = emptyMap(),
     val reentry: JourneyReentry? = null,
     val requiresReleasePin: Boolean = false,
+    val artifactDigests: Set<String> = emptySet(),
 ) {
     data class Park(val wakeAtMillis: Long?, val anchorAtMillis: Long? = null)
     data class Completion(val outcome: String, val atMillis: Long)
@@ -82,6 +83,8 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         atMillis: Long,
         release: JourneyPlaneProfile.Release? = null,
         stateArmReceipt: String? = null,
+        artifactDigests: Set<String> = emptySet(),
+        retainArtifacts: ((DeviceLegRun) -> Unit)? = null,
     ): DeviceLegRun? = update { state ->
         if (revocationFile.exists()) return@update null
         if (stateArmReceipt != null && stateArmReceipt in state.stateArmReceipts) {
@@ -114,6 +117,9 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         if (state.runs.size >= maximumRunCount) {
             throw IOException("Device leg run limit exceeded")
         }
+        if (artifactDigests.any { !DIGEST.matches(it) }) {
+            throw IOException("Invalid device leg artifact digest")
+        }
         val run = DeviceLegRun(
             journeyId,
             generation,
@@ -126,8 +132,10 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
             context = arm.context,
             reentry = reentry,
             requiresReleasePin = release != null,
+            artifactDigests = artifactDigests,
         )
         if (state.runs.containsKey(run.id)) return@update null
+        retainArtifacts?.invoke(run)
         if (release != null) retainReleasePin(release, arm, state)
         state.runs[run.id] = run
         stateArmReceipt?.let(state.stateArmReceipts::add)
@@ -226,14 +234,20 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
     }
 
     /** Launch recovery preserves expired parks for current-fact evaluation. */
-    fun recover(atMillis: Long): List<DeviceLegRun> = update { state ->
+    fun recover(
+        atMillis: Long,
+        artifactsRetained: (DeviceLegRun) -> Boolean = { true },
+    ): List<DeviceLegRun> = update { state ->
         val revoked = revocationFile.exists()
         for ((id, run) in state.runs.toMap()) if (run.completion == null) {
             val validPin = !run.requiresReleasePin || runCatching {
                 readReleasePin(run.reference.text("descriptorSha256"))
                     ?.let { releasePinMatches(it, run.reference) } == true
             }.getOrDefault(false)
-            if (revoked || run.park == null || !validPin) {
+            val validArtifacts = run.artifactDigests.isEmpty() || runCatching {
+                artifactsRetained(run)
+            }.getOrDefault(false)
+            if (revoked || run.park == null || !validPin || !validArtifacts) {
                 state.runs[id] = finish(
                     run,
                     outcome = "abandoned",
@@ -428,6 +442,7 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         put("effectReceipts", JsonObject(run.effectReceipts.mapValues { JsonPrimitive(it.value) }))
         run.reentry?.let { put("reentry", encodeReentry(it)) }
         put("requiresReleasePin", JsonPrimitive(run.requiresReleasePin))
+        put("artifactDigests", JsonArray(run.artifactDigests.sorted().map(::JsonPrimitive)))
         run.park?.let { park -> put("park", buildJsonObject {
             park.wakeAtMillis?.let { put("wakeAtMillis", JsonPrimitive(it)) }
             park.anchorAtMillis?.let { put("anchorAtMillis", JsonPrimitive(it)) }
@@ -451,6 +466,11 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         },
         reentry = value["reentry"]?.jsonObject?.let(::decodeReentry),
         requiresReleasePin = value["requiresReleasePin"]?.jsonPrimitive?.boolean ?: false,
+        artifactDigests = (value["artifactDigests"] as? JsonArray).orEmpty().mapTo(linkedSetOf()) {
+            it.jsonPrimitive.content.also { digest ->
+                if (!DIGEST.matches(digest)) throw IOException("Invalid retained artifact digest")
+            }
+        },
     )
 
     private fun retainReleasePin(
@@ -637,6 +657,7 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
 }
 
 private fun emptyOutputs() = JsonObject(mapOf("event" to JsonObject(emptyMap()), "responses" to JsonObject(emptyMap())))
+internal fun deviceLegArtifactRunKey(run: DeviceLegRun): String = "device-leg:${run.id}"
 internal fun deviceLegStateArmReceipt(arm: JourneyPlaneProfile.Arm): String {
     val kind = arm.entryCondition.text("type")
     val bindingType = arm.binding.text("type")
