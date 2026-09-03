@@ -25,6 +25,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.coroutineContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -135,8 +138,14 @@ internal class DeviceLegService(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val beforeAdmission: suspend () -> Unit = {},
     private val beforeParkedResume: suspend () -> Unit = {},
+    private val replayPendingLocalRoutes: suspend (String) -> Boolean = { true },
     fixedStorageScope: DeviceLegStorageScope? = null,
 ) : DeviceLegProfileConsumer {
+    private class WorkerContext(
+        val owner: DeviceLegService,
+    ) : AbstractCoroutineContextElement(Key) {
+        companion object Key : CoroutineContext.Key<WorkerContext>
+    }
     private data class ProfileState(
         val distinctId: String,
         val snapshot: DeviceLegProfileCatalog.Snapshot,
@@ -172,8 +181,10 @@ internal class DeviceLegService(
         data class Event(
             val event: StoredEvent,
             val admittedGeneration: Long,
-            override val done: CompletableDeferred<Unit>? = null,
-        ) : Command
+            val accepted: CompletableDeferred<Boolean>? = null,
+        ) : Command {
+            override val done: CompletableDeferred<Unit>? = null
+        }
         data class Background(override val done: CompletableDeferred<Unit>) : Command
         data class Foreground(override val done: CompletableDeferred<Unit>) : Command
         data class UserChange(
@@ -211,6 +222,7 @@ internal class DeviceLegService(
     private var storageScope: DeviceLegStorageScope? = fixedStorageScope
     private val acceptsAuthorityScope = fixedStorageScope == null
     private var initialized = false
+    private var currentProfilePublished = false
     // Setup can run from a receiver, worker, or service before any Activity is
     // visible. Keep screen-bearing admission closed until the lifecycle
     // coordinator observes the first Activity entering the foreground.
@@ -225,9 +237,9 @@ internal class DeviceLegService(
     private var wakeJob: Job? = null
     private var wakeGeneration = 0L
 
-    private val worker = scope.launch {
+    private val worker = scope.launch(WorkerContext(this)) {
         for (command in commands) {
-            runCatching {
+            val result = runCatching {
                 when (command) {
                     is Command.Initialize -> initializeNow()
                     is Command.ProfileCommit -> profileDidCommitNow(
@@ -252,6 +264,9 @@ internal class DeviceLegService(
                 }
             }.onFailure {
                 Log.w(LOG_TAG, "Device-leg command failed", it)
+            }
+            if (command is Command.Event) {
+                command.accepted?.complete(result.getOrNull() == true)
             }
             command.done?.complete(Unit)
         }
@@ -317,8 +332,16 @@ internal class DeviceLegService(
         commands.trySend(Command.Event(event, admittedGeneration))
     }
 
-    suspend fun handleEvent(event: StoredEvent, admittedGeneration: Long) =
-        submit { done -> Command.Event(event, admittedGeneration, done) }
+    suspend fun handleEvent(event: StoredEvent, admittedGeneration: Long): Boolean {
+        if (coroutineContext[WorkerContext]?.owner === this) {
+            return handleEventNow(event, admittedGeneration)
+        }
+        val accepted = CompletableDeferred<Boolean>()
+        if (commands.trySend(Command.Event(event, admittedGeneration, accepted)).isFailure) {
+            return false
+        }
+        return accepted.await()
+    }
 
     suspend fun onAppDidEnterBackground() {
         foreground.set(false)
@@ -373,9 +396,7 @@ internal class DeviceLegService(
         if (storageScope != null && !ensureJournal(identity.distinctId())) return
         resetForegroundReceiptsIfNeeded()
         val state = currentState() ?: return
-        resumeParkedRuns(state, null)
-        evaluateStateArms(state)
-        scheduleNextWake()
+        reconcileNow(state.generation)
     }
 
     private suspend fun profileDidCommitNow(
@@ -403,6 +424,7 @@ internal class DeviceLegService(
             executionFenceToken,
         )
         profileState = state
+        currentProfilePublished = true
         if (!initialized) return
         if (!ensureJournal(distinctId)) return
         resetForegroundReceiptsIfNeeded()
@@ -414,9 +436,7 @@ internal class DeviceLegService(
             current.retainStateArmReceipts(receipts)
             current.retainCheckmarks(liveReentryPolicies(snapshot), nowMillis())
         }
-        resumeParkedRuns(state, null)
-        evaluateStateArms(state)
-        scheduleNextWake()
+        reconcileNow(state.generation)
     }
 
     private suspend fun profileDidClearNow(distinctId: String?) {
@@ -428,22 +448,27 @@ internal class DeviceLegService(
         cancelWake()
         profileGeneration.incrementAndGet()
         profileState = null
+        currentProfilePublished = distinctId != null && identity.distinctId() == distinctId
         clearRetainedReleaseCache()
         foregroundReceiptResetCustomers.clear()
         currentJournal?.takeIf { distinctId == null || it.distinctId == distinctId }
             ?.let { abandonJournal(it) }
     }
 
-    private suspend fun handleEventNow(event: StoredEvent, admittedGeneration: Long) {
-        if (!initialized || event.distinctId != identity.distinctId() ||
-            event.name == JourneyEventNames.LEG_STARTED ||
+    private suspend fun handleEventNow(
+        event: StoredEvent,
+        admittedGeneration: Long,
+    ): Boolean {
+        if (event.distinctId != identity.distinctId()) return false
+        if (event.name == JourneyEventNames.LEG_STARTED ||
             event.name == JourneyEventNames.LEG_COMPLETED
-        ) return
-        val state = currentState() ?: return
+        ) return true
+        if (!initialized) return false
+        val state = currentState() ?: return currentProfilePublished
         resumeParkedRuns(state, event)
         if (!isCurrent(state) || admittedGeneration != state.generation) {
             scheduleNextWake()
-            return
+            return false
         }
         state.snapshot.profile.armedLegs.asSequence()
             .filter {
@@ -452,6 +477,7 @@ internal class DeviceLegService(
             }
             .forEach { arm -> attemptStart(arm, state, event) }
         scheduleNextWake()
+        return true
     }
 
     private fun backgroundNow() {
@@ -464,9 +490,7 @@ internal class DeviceLegService(
         foregroundReceiptResetCustomers.remove(identity.distinctId())
         resetForegroundReceiptsIfNeeded()
         val state = currentState() ?: return
-        resumeParkedRuns(state, null)
-        evaluateStateArms(state)
-        scheduleNextWake()
+        reconcileNow(state.generation)
     }
 
     private suspend fun userDidChangeNow(from: String, to: String) {
@@ -481,6 +505,7 @@ internal class DeviceLegService(
             profileGeneration.incrementAndGet()
             profileState = null
         }
+        currentProfilePublished = false
         clearRetainedReleaseCache()
         foregroundReceiptResetCustomers.clear()
         if (!departingRevoked) return
@@ -564,6 +589,19 @@ internal class DeviceLegService(
     }
 
     private fun reporter(target: DeviceLegRunJournal) = DeviceLegReporter(target, capture)
+
+    private suspend fun reconcileNow(generation: Long) {
+        val state = currentState()?.takeIf { it.generation == generation } ?: return
+        if (!ensureJournal(state.distinctId)) return
+        // A pending live route may still own its receipt while this command
+        // runs. It is already queued behind us and will acknowledge itself;
+        // every unowned receipt is replayed before fresh state-arm admission.
+        replayPendingLocalRoutes(state.distinctId)
+        if (!isCurrent(state)) return
+        resumeParkedRuns(state, null)
+        evaluateStateArms(state)
+        scheduleNextWake()
+    }
 
     private suspend fun evaluateStateArms(state: ProfileState) {
         if (!isCurrent(state)) return

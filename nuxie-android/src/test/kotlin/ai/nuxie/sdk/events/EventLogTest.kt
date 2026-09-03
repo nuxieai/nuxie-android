@@ -14,6 +14,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.JsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -38,11 +39,17 @@ class EventLogTest {
         val pending = mutableListOf<StoredEvent>()
         val stableDrops = mutableListOf<String>()
         val delivered = mutableListOf<StoredEvent>()
+        val pendingLocalRoutes = linkedSetOf<String>()
         var onPendingInserted: (StoredEvent) -> Unit = {}
 
         override suspend fun insertPending(event: StoredEvent) {
             pending.add(event)
             onPendingInserted(event)
+        }
+        override suspend fun insertPendingAndStageRoute(event: StoredEvent): EventRouteCommit {
+            insertPending(event)
+            pendingLocalRoutes += event.id
+            return EventRouteCommit(inserted = true, localRoutePending = true)
         }
         override suspend fun insertPendingIfAbsent(event: StoredEvent): Boolean {
             if (pending.any { it.id == event.id } || delivered.any { it.id == event.id } ||
@@ -51,12 +58,46 @@ class EventLogTest {
             pending.add(event)
             return true
         }
+        override suspend fun insertPendingIfAbsentAndStageRoute(
+            event: StoredEvent,
+        ): EventRouteCommit = commitLocalRoute(event)
+        override suspend fun insertPendingIfAbsentAndStageRoute(
+            event: StoredEvent,
+            admission: StableEventCommitAdmission,
+        ): EventRouteCommit? {
+            var result: EventRouteCommit? = null
+            val admitted = admission.commitIfCurrent {
+                result = commitLocalRoute(event)
+                true
+            }
+            return if (admitted == null) null else checkNotNull(result)
+        }
+        private fun commitLocalRoute(event: StoredEvent): EventRouteCommit {
+            val inserted = if (
+                pending.any { it.id == event.id } || delivered.any { it.id == event.id } ||
+                event.id in stableDrops
+            ) {
+                false
+            } else {
+                pending.add(event)
+                true
+            }
+            if (pending.any { it.id == event.id }) pendingLocalRoutes += event.id
+            return EventRouteCommit(inserted, event.id in pendingLocalRoutes)
+        }
         override suspend fun hasStableOutcome(eventId: String): Boolean =
             pending.any { it.id == eventId } || delivered.any { it.id == eventId } || eventId in stableDrops
         override suspend fun insertDeliveredIfAbsent(event: StoredEvent): Boolean {
             if (pending.any { it.id == event.id } || delivered.any { it.id == event.id }) return false
             delivered.add(event)
             return true
+        }
+        override suspend fun insertDeliveredIfAbsentAndStageRoute(
+            event: StoredEvent,
+        ): EventRouteCommit {
+            val inserted = insertDeliveredIfAbsent(event)
+            if (inserted) pendingLocalRoutes += event.id
+            return EventRouteCommit(inserted, inserted)
         }
         override suspend fun markDelivered(ids: List<String>) = Unit
         override suspend fun hasEvent(name: String, distinctId: String, sinceMillis: Long?) = false
@@ -76,6 +117,15 @@ class EventLogTest {
             if (eventId in stableDrops) return false
             stableDrops.add(eventId)
             return true
+        }
+        override suspend fun queryPendingLocalRoutes(distinctId: String): List<StoredEvent> =
+            pendingLocalRoutes.mapNotNull { eventId ->
+                (pending + delivered).firstOrNull {
+                    it.id == eventId && it.distinctId == distinctId
+                }
+            }
+        override suspend fun markLocalRouteDelivered(eventId: String) {
+            pendingLocalRoutes -= eventId
         }
         override suspend fun pendingBatch(limit: Int): List<StoredEvent> = pending.take(limit)
         override suspend fun close() = Unit
@@ -151,6 +201,7 @@ class EventLogTest {
         ) { event, admittedGeneration ->
             assertTrue(store.pending.any { it.id == event.id })
             observed += event.name to admittedGeneration
+            true
         }
 
         eventLog.capture("before-replacement")
@@ -207,6 +258,7 @@ class EventLogTest {
 
         assertTrue(eventLog.captureIdempotently("\$purchase_synced", emptyMap(), "stable-id", "owner-1"))
         assertTrue(eventLog.captureIdempotently("\$purchase_synced", emptyMap(), "stable-id", "owner-1"))
+        eventLog.awaitBarrier()
 
         assertEquals(listOf("stable-id"), store.pending.map { it.id })
         assertEquals("owner-1", store.pending.single().distinctId)
@@ -214,29 +266,49 @@ class EventLogTest {
     }
 
     @Test
-    fun stableIdCaptureReportsOnlyTheFirstDurableInsertAsNew() = runBlocking {
+    fun pendingLocalRouteReplaysOnceAfterRelaunch() = runBlocking {
+        val store = RecordingStore()
+        val event = StoredEvent(
+            id = "stable-route",
+            name = "recovered-event",
+            properties = JsonObject(emptyMap()),
+            timestampMillis = 1_000L,
+            distinctId = "owner-1",
+        )
+        assertTrue(store.insertPendingAndStageRoute(event).localRoutePending)
+        val eventLog = log(store)
+        val observed = mutableListOf<String>()
+        eventLog.subscribeCommitted { observed += it.name }
+
+        assertTrue(eventLog.replayPendingLocalRoutes("owner-1"))
+        assertTrue(eventLog.replayPendingLocalRoutes("owner-1"))
+
+        assertEquals(listOf("recovered-event"), observed)
+        assertTrue(store.pendingLocalRoutes.isEmpty())
+    }
+
+    @Test
+    fun rejectedAdmissionKeepsOrdinaryRoutePendingForReplay() = runBlocking {
         val store = RecordingStore()
         val eventLog = log(store)
+        var accepts = false
+        var attempts = 0
+        eventLog.subscribeCommittedWithAdmission(sampleGeneration = { 1L }) { _, _ ->
+            attempts += 1
+            accepts
+        }
 
-        val first = eventLog.captureIdempotentlyWithResult(
-            "\$purchase_completed",
-            emptyMap(),
-            "stable-id",
-            "owner-1",
-        )
-        val duplicate = eventLog.captureIdempotentlyWithResult(
-            "\$purchase_completed",
-            emptyMap(),
-            "stable-id",
-            "owner-1",
-        )
+        eventLog.capture("offline-trigger")
+        eventLog.awaitBarrier()
 
-        assertTrue(first.succeeded)
-        assertTrue(first.newlyCaptured)
-        assertEquals("stable-id", first.storedEvent?.id)
-        assertTrue(duplicate.succeeded)
-        assertFalse(duplicate.newlyCaptured)
-        assertNull(duplicate.storedEvent)
+        assertEquals(1, attempts)
+        assertEquals(1, store.pendingLocalRoutes.size)
+
+        accepts = true
+        assertTrue(eventLog.replayPendingLocalRoutes("anon-1"))
+
+        assertEquals(2, attempts)
+        assertTrue(store.pendingLocalRoutes.isEmpty())
     }
 
     @Test

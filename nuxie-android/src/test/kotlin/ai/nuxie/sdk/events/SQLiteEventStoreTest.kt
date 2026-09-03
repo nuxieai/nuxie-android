@@ -68,6 +68,34 @@ class SQLiteEventStoreTest {
     }
 
     @Test
+    fun localRouteSurvivesReopeningUntilAcknowledged() = runBlocking {
+        val event = storedEvent(
+            id = "stable-route",
+            timestampMillis = 1_000,
+            distinctId = "owner-1",
+            name = "journey-trigger",
+        )
+        var eventStore = SQLiteEventStore(context).also { store = it }
+        val committed = eventStore.insertPendingAndStageRoute(event)
+        assertTrue(committed.inserted)
+        assertTrue(committed.localRoutePending)
+        eventStore.close()
+
+        eventStore = SQLiteEventStore(context).also { store = it }
+        assertEquals(
+            listOf("stable-route"),
+            eventStore.queryPendingLocalRoutes("owner-1").map(StoredEvent::id),
+        )
+        assertTrue(eventStore.queryPendingLocalRoutes("other-owner").isEmpty())
+        eventStore.markLocalRouteDelivered("stable-route")
+        eventStore.close()
+
+        eventStore = SQLiteEventStore(context).also { store = it }
+        assertTrue(eventStore.queryPendingLocalRoutes("owner-1").isEmpty())
+        assertTrue(eventStore.hasStableOutcome("stable-route"))
+    }
+
+    @Test
     fun sessionQueriesReturnNewestEventsFirst() = runBlocking {
         val eventStore = SQLiteEventStore(context).also { store = it }
         eventStore.insertPending(storedEvent("oldest", 1_000, sessionId = "session-1"))
@@ -140,7 +168,7 @@ class SQLiteEventStoreTest {
     }
 
     @Test
-    fun migratesAnEmptyDatabaseToVersionThreeWithTheExactSchema() = runBlocking {
+    fun migratesAnEmptyDatabaseToVersionFourWithTheExactSchema() = runBlocking {
         val eventStore = SQLiteEventStore(context).also { store = it }
 
         assertEquals(emptyList<StoredEvent>(), eventStore.pendingBatch(limit = 1))
@@ -149,12 +177,18 @@ class SQLiteEventStoreTest {
 
         val connection = AndroidSQLiteDriver().open(File(databaseDirectory, "events.db").absolutePath)
         connection.use {
-            assertEquals(3L, it.queryLong("PRAGMA user_version;"))
+            assertEquals(4L, it.queryLong("PRAGMA user_version;"))
             assertEquals(
-                setOf("events", "stable_event_drops", "event_history_metadata"),
+                setOf(
+                    "events",
+                    "stable_event_drops",
+                    "event_local_routes",
+                    "event_history_metadata",
+                ),
                 it.queryStrings(
                     "SELECT name FROM sqlite_master " +
-                        "WHERE type = 'table' AND name IN ('events', 'stable_event_drops', 'event_history_metadata');",
+                        "WHERE type = 'table' AND name IN " +
+                        "('events', 'stable_event_drops', 'event_local_routes', 'event_history_metadata');",
                 ),
             )
             assertEquals(
