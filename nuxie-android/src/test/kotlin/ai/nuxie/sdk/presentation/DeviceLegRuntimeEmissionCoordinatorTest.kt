@@ -185,6 +185,73 @@ class DeviceLegRuntimeEmissionCoordinatorTest {
     }
 
     @Test
+    fun `ordinary event carrying the signed action id remains ordinary`() = runTest {
+        val fixture = generatedControlFixture
+        val actionId = fixture.getValue("signedActionId").jsonPrimitive.content
+        val batches = mutableListOf<DeviceLegScreenEmissionBatch>()
+        val coordinator = DeviceLegRuntimeEmissionCoordinator(
+            journeyId = "journey-1",
+            screenId = "survey",
+            descriptor = controlDescriptor(),
+            nextBatchSequence = 0,
+            nextEmissionSequence = 0,
+            onEmissionBatch = { batches += it; true },
+            onPresentationRevealed = {},
+        )
+        coordinator.reveal()
+
+        assertTrue(
+            coordinator.publish(
+                outcome(events = listOf(event("survey_submitted", property("actionId", actionId)))),
+                8uL,
+            ),
+        )
+
+        val batch = batches.single()
+        assertEquals("runtime:8", batch.source.actionId)
+        assertEquals(listOf("survey_submitted"), batch.emissions.map { it.name })
+        assertEquals(
+            actionId,
+            batch.emissions.single().payload.getValue("actionId").jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun `renderer navigation is rejected without dropping sibling ordinary effects`() = runTest {
+        val batches = mutableListOf<DeviceLegScreenEmissionBatch>()
+        val coordinator = DeviceLegRuntimeEmissionCoordinator(
+            journeyId = "journey-1",
+            screenId = "survey",
+            descriptor = JsonObject(emptyMap()),
+            nextBatchSequence = 0,
+            nextEmissionSequence = 0,
+            onEmissionBatch = { batches += it; true },
+            onPresentationRevealed = {},
+        )
+        coordinator.reveal()
+
+        assertTrue(
+            coordinator.publish(
+                outcome(
+                    hostCommands = listOf(
+                        NuxieHostCommand(
+                            name = "\$navigate",
+                            value = hostObject("screenId" to NuxieHostValue.String("other")),
+                        ),
+                        NuxieHostCommand(
+                            name = "survey_submitted",
+                            value = hostObject("answer" to NuxieHostValue.String("yes")),
+                        ),
+                    ),
+                ),
+                9uL,
+            ),
+        )
+
+        assertEquals(listOf("survey_submitted"), batches.single().emissions.map { it.name })
+    }
+
+    @Test
     fun `malformed generated control and multiple controls publish nothing`() = runTest {
         val batches = mutableListOf<DeviceLegScreenEmissionBatch>()
         val coordinator = DeviceLegRuntimeEmissionCoordinator(

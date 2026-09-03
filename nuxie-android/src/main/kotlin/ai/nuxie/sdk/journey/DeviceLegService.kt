@@ -978,7 +978,9 @@ internal class DeviceLegService(
         }) {
             if (!isCurrent(state)) return
             val park = parked.park ?: continue
-            if (event == null && (park.wakeAtMillis == null || park.wakeAtMillis > nowMillis())) {
+            if (event == null && !park.pendingResponsesChanged &&
+                (park.wakeAtMillis == null || park.wakeAtMillis > nowMillis())
+            ) {
                 continue
             }
             val release = releaseFor(
@@ -1012,7 +1014,9 @@ internal class DeviceLegService(
                     release,
                     state,
                     executionToken,
-                    executorSignal(event),
+                    executorSignal(event).copy(
+                        responsesChanged = park.pendingResponsesChanged,
+                    ),
                     checkpoint,
                     currentJournal,
                     presentationReservation,
@@ -1314,7 +1318,7 @@ internal class DeviceLegService(
                 target.clearPresentationPublication(
                     current.id,
                     publication.invocationId,
-                    consumePark = resumesForResponses,
+                    retainResponsesChanged = resumesForResponses,
                 )
             }
         }.getOrNull() ?: return acknowledgePublishedPresentationBatchFailure(

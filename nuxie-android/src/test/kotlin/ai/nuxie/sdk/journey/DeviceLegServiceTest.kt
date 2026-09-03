@@ -1,6 +1,10 @@
 package ai.nuxie.sdk.journey
 
+import ai.nuxie.sdk.LogLevel
+import ai.nuxie.sdk.NuxieEnvironment
+import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.JsonValueConverter
+import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.StableEventCaptureResult
 import ai.nuxie.sdk.events.StoredEvent
@@ -42,6 +46,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.addJsonObject
@@ -50,6 +55,7 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -309,6 +315,117 @@ class DeviceLegServiceTest {
             ).runs().isEmpty(),
         )
     }
+
+    @Test fun `shared renderer fixture replays one customer event through EventLog`() =
+        runBlocking {
+            val screenFixture = Json.parseToJsonElement(
+                FixtureRunner.fixturesRoot()
+                    .resolve("journeys/screen-emission-runtime/input-effect-persistence-replay.json")
+                    .readText(),
+            ).jsonObject
+            val input = screenFixture.getValue("input").jsonObject
+            val expected = screenFixture.getValue("expected").jsonObject
+            val customerEventIds = expected.getValue("customer_event_ids").jsonArray.map {
+                it.jsonPrimitive.content
+            }
+            val eventEffects = screenFixture.getValue("effects").jsonArray
+                .map(JsonElement::jsonObject)
+                .filter { it.getValue("kind").jsonPrimitive.content == "event" }
+            assertEquals(customerEventIds.size, eventEffects.size)
+
+            val identity = identity("customer")
+            val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+            val catalog = catalog(renderedEntry)
+            val renderedAuthority = authority(renderedEntry)
+            val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+            catalog.commit("customer", prepared)
+            val snapshot = requireNotNull(catalog.snapshot("customer"))
+            val release = snapshot.releasesByDigest.values.single()
+            val journal = DeviceLegRunJournal(
+                directory,
+                "customer",
+                DeviceLegStorageScope(renderedAuthority),
+            )
+            val run = requireNotNull(
+                journal.admit(
+                    snapshot.profile.armedLegs.single(),
+                    JourneyReentry.EveryTime,
+                    release.leg.getValue("entryStepId").jsonPrimitive.content,
+                    100_000L,
+                    release = snapshot.profile.releases.single(),
+                ),
+            )
+            journal.markStartedQueued(run)
+            val responses = expected.getValue("response_values").jsonObject
+            val publication = DeviceLegRun.PendingPresentationPublication(
+                invocationId = "fixture-recovery-invocation",
+                batchSequence = expected.getValue("batch_sequence").jsonPrimitive.long,
+                nextEmissionSequence = expected.getValue("emission_sequences").jsonArray
+                    .last().jsonPrimitive.long + 1,
+                sourceScreenId = release.leg.getValue("screens").jsonArray.first()
+                    .jsonObject.getValue("id").jsonPrimitive.content,
+                sourceActionId = input.getValue("action_id").jsonPrimitive.content,
+                sourceComponentId = input.getValue("component_id").jsonPrimitive.content,
+                sourceInstanceId = input.getValue("instance_id").jsonPrimitive.content,
+                responsesChanged = true,
+                items = eventEffects.mapIndexed { index, effect ->
+                    DeviceLegRun.PendingPresentationPublication.Item(
+                        name = effect.getValue("name").jsonPrimitive.content,
+                        properties = effect.getValue("payload").jsonObject,
+                        eventId = customerEventIds[index],
+                        occurredAtMillis = 101_000L,
+                    )
+                },
+            )
+            val runContext = JsonObject(run.context + ("responses" to responses))
+            assertTrue(
+                journal.stagePresentationPublication(
+                    run.id,
+                    run.stepId,
+                    runContext,
+                    publication,
+                ) != null,
+            )
+
+            val eventLog = EventLog(
+                store,
+                NuxieContextBuilder(
+                    this@DeviceLegServiceTest.context,
+                    NuxieEnvironment.DEVELOPMENT,
+                    LogLevel.DEBUG,
+                    identity,
+                ),
+                identity,
+                beforeSend = null,
+                scope = scope,
+                nowMillis = { 102_000L },
+            )
+            fun recoveringService() = DeviceLegService(
+                identity = identity,
+                events = store,
+                catalog = catalog,
+                journalDirectory = directory,
+                scope = scope,
+                capture = eventLog::captureSystemEvent,
+                captureScreenEvent = eventLog::captureScreenEvent,
+                nowMillis = { 102_000L },
+                fixedStorageScope = DeviceLegStorageScope(renderedAuthority),
+            )
+
+            recoveringService().initialize()
+            recoveringService().initialize()
+
+            val replayedCustomerEvents = store.pendingBatch(100).filter {
+                it.id in customerEventIds
+            }
+            assertEquals(
+                expected.getValue("replay_customer_event_count").jsonPrimitive.long,
+                replayedCustomerEvents.size.toLong(),
+            )
+            assertEquals(customerEventIds, replayedCustomerEvents.map { it.id })
+            assertEquals(eventEffects.map { it.getValue("name").jsonPrimitive.content },
+                replayedCustomerEvents.map { it.name })
+        }
 
     @Test fun `declined presentation remains parked for a later evaluation`() = runBlocking {
         val identity = identity("customer")

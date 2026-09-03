@@ -41,7 +41,11 @@ internal data class DeviceLegRun(
     val nextPresentationEmissionSequence: Long = 0,
     val pendingPresentationPublication: PendingPresentationPublication? = null,
 ) {
-    data class Park(val wakeAtMillis: Long?, val anchorAtMillis: Long? = null)
+    data class Park(
+        val wakeAtMillis: Long?,
+        val anchorAtMillis: Long? = null,
+        val pendingResponsesChanged: Boolean = false,
+    )
     data class Completion(val outcome: String, val atMillis: Long)
     data class PendingPresentationPublication(
         val invocationId: String,
@@ -254,14 +258,20 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
     fun clearPresentationPublication(
         id: String,
         invocationId: String,
-        consumePark: Boolean = false,
+        retainResponsesChanged: Boolean = false,
     ): DeviceLegRun? = update { state ->
         val run = state.runs[id] ?: return@update null
         val pending = run.pendingPresentationPublication
             ?.takeIf { it.invocationId == invocationId }
             ?: return@update null
         settlePresentationPublication(run, pending).copy(
-            park = if (consumePark) null else run.park,
+            park = run.park?.let { park ->
+                if (retainResponsesChanged) {
+                    park.copy(pendingResponsesChanged = true)
+                } else {
+                    park
+                }
+            },
         ).also { state.runs[id] = it }
     }
 
@@ -548,6 +558,9 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         run.park?.let { park -> put("park", buildJsonObject {
             park.wakeAtMillis?.let { put("wakeAtMillis", JsonPrimitive(it)) }
             park.anchorAtMillis?.let { put("anchorAtMillis", JsonPrimitive(it)) }
+            if (park.pendingResponsesChanged) {
+                put("pendingResponsesChanged", JsonPrimitive(true))
+            }
         }) }
         run.completion?.let { completion -> put("completion", buildJsonObject {
             put("outcome", JsonPrimitive(completion.outcome)); put("atMillis", JsonPrimitive(completion.atMillis))
@@ -560,8 +573,13 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         startedEventId = value.text("startedEventId"), completedEventId = value.text("completedEventId"),
         startedQueued = value.getValue("startedQueued").jsonPrimitive.boolean, stepId = value.text("stepId"),
         context = value.getValue("context").jsonObject, outputs = value.getValue("outputs").jsonObject,
-        park = value["park"]?.jsonObject?.let { DeviceLegRun.Park(it["wakeAtMillis"]?.jsonPrimitive?.long,
-            it["anchorAtMillis"]?.jsonPrimitive?.long) },
+        park = value["park"]?.jsonObject?.let {
+            DeviceLegRun.Park(
+                it["wakeAtMillis"]?.jsonPrimitive?.long,
+                it["anchorAtMillis"]?.jsonPrimitive?.long,
+                it["pendingResponsesChanged"]?.jsonPrimitive?.boolean ?: false,
+            )
+        },
         completion = value["completion"]?.jsonObject?.let { DeviceLegRun.Completion(it.text("outcome"), it.number("atMillis")) },
         effectReceipts = (value["effectReceipts"] as? JsonObject).orEmpty().mapValues {
             it.value.jsonPrimitive.content
