@@ -497,6 +497,7 @@ internal class NuxieCore(
         dispatcher = deviceLegDispatcher,
         presenter = deviceLegPresenter,
         nowMillis = nowMillis,
+        replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
     )
 
     val profile = ProfileService(
@@ -572,7 +573,7 @@ internal class NuxieCore(
         eventLog.subscribeCommittedWithAdmission(
             sampleGeneration = deviceLegRuntime::eventAdmissionGeneration,
         ) { event, admittedGeneration ->
-            deviceLegRuntime.enqueueEvent(event, admittedGeneration)
+            deviceLegRuntime.handleEvent(event, admittedGeneration)
         }
         eventLog.subscribeForwarding(
             isEnabled = forwardingEnabled,

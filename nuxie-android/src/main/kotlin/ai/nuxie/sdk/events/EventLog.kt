@@ -4,6 +4,8 @@ import ai.nuxie.sdk.NuxieEvent
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.journey.JourneyEventNames
 import android.util.Log
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
@@ -61,7 +63,8 @@ internal class EventLog(
     }
 
     internal fun interface AdmissionCommittedSubscription {
-        suspend fun onCommitted(event: StoredEvent, admissionGeneration: Long)
+        /** False keeps the durable local-route receipt pending for replay. */
+        suspend fun onCommitted(event: StoredEvent, admissionGeneration: Long): Boolean
     }
 
     private data class Subscriber(
@@ -130,8 +133,18 @@ internal class EventLog(
         data class Barrier(val done: CompletableDeferred<Unit>) : ForwardingCommand
     }
 
+    private sealed interface RouteCommand {
+        data class Event(
+            val event: StoredEvent,
+            val admissionTickets: List<AdmissionTicket>,
+            val localRouteEventId: String? = null,
+        ) : RouteCommand
+        data class Barrier(val done: CompletableDeferred<Unit>) : RouteCommand
+    }
+
     private val commands = Channel<Command>(capacity = Channel.UNLIMITED)
     private val forwardingCommands = Channel<ForwardingCommand>(capacity = Channel.UNLIMITED)
+    private val routeCommands = Channel<RouteCommand>(capacity = Channel.UNLIMITED)
 
     /** Guarded by the worker: subscribers are read only on the worker coroutine. */
     private val subscribers = java.util.concurrent.CopyOnWriteArrayList<Subscriber>()
@@ -139,6 +152,14 @@ internal class EventLog(
         java.util.concurrent.CopyOnWriteArrayList<ForwardingSubscriber>()
     private val admissionSubscribers =
         java.util.concurrent.CopyOnWriteArrayList<AdmissionSubscriber>()
+    private val activeLocalRouteIds = Collections.newSetFromMap(
+        ConcurrentHashMap<String, Boolean>(),
+    )
+    private val failedLocalRouteAcknowledgementIds =
+        Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    private val commitProgress = java.util.concurrent.atomic.AtomicLong(0)
+    private val routeProgress = java.util.concurrent.atomic.AtomicLong(0)
+    private val forwardingProgress = java.util.concurrent.atomic.AtomicLong(0)
 
     private val worker = scope.launch {
         for (command in commands) {
@@ -201,17 +222,44 @@ internal class EventLog(
                 )
                 is Command.Barrier -> command.done.complete(Unit)
             }
+            if (command !is Command.Barrier) commitProgress.incrementAndGet()
+        }
+    }
+
+    private val routeWorker = scope.launch {
+        for (command in routeCommands) {
+            when (command) {
+                is RouteCommand.Event -> {
+                    var accepted = announce(command.event, command.admissionTickets)
+                    if (!accepted) {
+                        val refreshedAdmissions = sampleAdmissionTickets()
+                        if (refreshedAdmissions != command.admissionTickets) {
+                            accepted = announceAdmissions(command.event, refreshedAdmissions)
+                        }
+                    }
+                    if (accepted) {
+                        acknowledgeLocalRouteIfNeeded(command.localRouteEventId)
+                    } else {
+                        command.localRouteEventId?.let(activeLocalRouteIds::remove)
+                    }
+                    routeProgress.incrementAndGet()
+                }
+                is RouteCommand.Barrier -> command.done.complete(Unit)
+            }
         }
     }
 
     private val forwardingWorker = scope.launch {
         for (command in forwardingCommands) {
             when (command) {
-                is ForwardingCommand.Event -> forwardingSubscribers.forEach { subscriber ->
-                    if (subscriber.isEnabled()) {
-                        runCatching { subscriber.handler.onForwarding(command.event) }
-                            .onFailure { Log.w(LOG_TAG, "Forwarding subscriber failed", it) }
+                is ForwardingCommand.Event -> {
+                    forwardingSubscribers.forEach { subscriber ->
+                        if (subscriber.isEnabled()) {
+                            runCatching { subscriber.handler.onForwarding(command.event) }
+                                .onFailure { Log.w(LOG_TAG, "Forwarding subscriber failed", it) }
+                        }
                     }
+                    forwardingProgress.incrementAndGet()
                 }
                 is ForwardingCommand.Barrier -> command.done.complete(Unit)
             }
@@ -282,10 +330,21 @@ internal class EventLog(
 
     /** Await everything enqueued before this call. Internal/testing only. */
     suspend fun awaitBarrier() {
-        awaitCommitBarrier()
-        awaitForwardingBarrier()
-        // A forwarding callback can synchronously enqueue another capture.
-        awaitCommitBarrier()
+        var previous = Triple(-1L, -1L, -1L)
+        repeat(MAX_BARRIER_PASSES) {
+            awaitCommitBarrier()
+            awaitRouteBarrier()
+            awaitForwardingBarrier()
+            retryFailedLocalRouteAcknowledgements()
+            val current = Triple(
+                commitProgress.get(),
+                routeProgress.get(),
+                forwardingProgress.get(),
+            )
+            if (current == previous) return
+            previous = current
+        }
+        Log.w(LOG_TAG, "Event pipeline did not quiesce after $MAX_BARRIER_PASSES passes")
     }
 
     private suspend fun awaitCommitBarrier() {
@@ -300,6 +359,12 @@ internal class EventLog(
         done.await()
     }
 
+    private suspend fun awaitRouteBarrier() {
+        val done = CompletableDeferred<Unit>()
+        if (routeCommands.trySend(RouteCommand.Barrier(done)).isFailure) return
+        done.await()
+    }
+
     suspend fun close() {
         closeWorkers()
         store.close()
@@ -310,6 +375,8 @@ internal class EventLog(
         awaitBarrier()
         commands.close()
         worker.join()
+        routeCommands.close()
+        routeWorker.join()
         forwardingCommands.close()
         forwardingWorker.join()
     }
@@ -333,7 +400,9 @@ internal class EventLog(
                 Command.CaptureForTrigger(name, properties, sampleAdmissionTickets(), done),
             ).isFailure
         ) return null
-        return done.await()
+        val stored = done.await()
+        awaitRouteBarrier()
+        return stored
     }
 
     /** Durably capture a stable-id event once, returning true for inserts and duplicates. */
@@ -503,9 +572,11 @@ internal class EventLog(
         }
 
         val stored = projectPostTransform(original, transformed)
-        store.insertPending(stored)
-        resolveForwarding(stored)
-        announce(stored, admissionTickets)
+        val commit = store.insertPendingAndStageRoute(stored)
+        if (commit.inserted) resolveForwarding(stored)
+        if (commit.localRoutePending && activeLocalRouteIds.add(stored.id)) {
+            resolveRoute(stored, admissionTickets, localRouteEventId = stored.id)
+        }
         return stored
     }
 
@@ -558,14 +629,16 @@ internal class EventLog(
             return IdempotentCaptureResult(true, null, false)
         }
         val stored = projectPostTransform(original, transformed)
-        val inserted = if (commitAdmission == null) {
-            store.insertPendingIfAbsent(stored)
+        val commit = if (commitAdmission == null) {
+            store.insertPendingIfAbsentAndStageRoute(stored)
         } else {
-            store.insertPendingIfAbsent(stored, commitAdmission) ?: return false
+            store.insertPendingIfAbsentAndStageRoute(stored, commitAdmission) ?: return false
         }
-        if (inserted) {
+        if (commit.inserted) {
             resolveForwarding(stored)
-            announce(stored, admissionTickets)
+        }
+        if (commit.localRoutePending && activeLocalRouteIds.add(stored.id)) {
+            resolveRoute(stored, admissionTickets, localRouteEventId = stored.id)
         }
         return IdempotentCaptureResult(
             succeeded = true,
@@ -580,10 +653,14 @@ internal class EventLog(
         admissionTickets: List<AdmissionTicket>,
     ): Boolean {
         val admitted = event.withForwardingAdmission(forwardingAdmission(receivedAtMillis))
-        val inserted = store.insertDeliveredIfAbsent(admitted)
-        if (!inserted) return ServerFactCommitResult.DUPLICATE
+        val commit = runCatching {
+            store.insertDeliveredIfAbsentAndStageRoute(admitted)
+        }.getOrElse { return false }
+        if (!commit.inserted) return false
         resolveForwarding(admitted)
-        announce(admitted, admissionTickets)
+        if (commit.localRoutePending && activeLocalRouteIds.add(admitted.id)) {
+            resolveRoute(admitted, admissionTickets, localRouteEventId = admitted.id)
+        }
         return true
     }
 
@@ -614,10 +691,12 @@ internal class EventLog(
             return true
         }
         val stored = projectPostTransform(original, transformed)
-        val inserted = store.insertDeliveredIfAbsent(stored)
-        if (inserted) {
+        val commit = store.insertDeliveredIfAbsentAndStageRoute(stored)
+        if (commit.inserted) {
             resolveForwarding(stored)
-            announce(stored, admissionTickets)
+        }
+        if (commit.localRoutePending && activeLocalRouteIds.add(stored.id)) {
+            resolveRoute(stored, admissionTickets, localRouteEventId = stored.id)
         }
         return true
     }
@@ -633,25 +712,90 @@ internal class EventLog(
         }
     }
 
+    private fun resolveRoute(
+        event: StoredEvent,
+        admissionTickets: List<AdmissionTicket>,
+        localRouteEventId: String? = null,
+    ) {
+        val result = routeCommands.trySend(
+            RouteCommand.Event(event, admissionTickets, localRouteEventId),
+        )
+        if (result.isFailure) {
+            localRouteEventId?.let(activeLocalRouteIds::remove)
+            Log.w(LOG_TAG, "Committed event '${event.name}' dropped: route pipeline is closed.")
+        }
+    }
+
+    /**
+     * Replays subscriber routes left pending by a prior process. This
+     * runs subscribers inline so a caller opening durable journey state can
+     * finish recovery before admitting fresh work.
+     */
+    suspend fun replayPendingLocalRoutes(distinctId: String): Boolean = runCatching {
+        val admissionTickets = sampleAdmissionTickets()
+        for (event in store.queryPendingLocalRoutes(distinctId)) {
+            if (!activeLocalRouteIds.add(event.id)) continue
+            if (announce(event, admissionTickets)) {
+                acknowledgeLocalRouteIfNeeded(event.id)
+            } else {
+                activeLocalRouteIds.remove(event.id)
+            }
+        }
+        retryFailedLocalRouteAcknowledgements()
+        store.queryPendingLocalRoutes(distinctId).isEmpty()
+    }.onFailure {
+        Log.w(LOG_TAG, "Failed to replay pending local routes", it)
+    }.getOrDefault(false)
+
+    private suspend fun acknowledgeLocalRouteIfNeeded(eventId: String?) {
+        if (eventId == null) return
+        runCatching { store.markLocalRouteDelivered(eventId) }
+            .onSuccess {
+                failedLocalRouteAcknowledgementIds.remove(eventId)
+                activeLocalRouteIds.remove(eventId)
+            }
+            .onFailure {
+                failedLocalRouteAcknowledgementIds.add(eventId)
+                Log.w(LOG_TAG, "Failed to acknowledge local route '$eventId'", it)
+            }
+    }
+
+    private suspend fun retryFailedLocalRouteAcknowledgements(): Boolean {
+        for (eventId in failedLocalRouteAcknowledgementIds.toList().sorted()) {
+            acknowledgeLocalRouteIfNeeded(eventId)
+        }
+        return failedLocalRouteAcknowledgementIds.isEmpty()
+    }
+
     private suspend fun announce(
         event: StoredEvent,
         admissionTickets: List<AdmissionTicket>,
-    ) {
+    ): Boolean {
         subscribers.forEach { subscriber ->
             if (subscriber.predicate(event)) {
                 runCatching { subscriber.handler.onCommitted(event) }
                     .onFailure { Log.w(LOG_TAG, "Committed-event subscriber failed", it) }
             }
         }
+        return announceAdmissions(event, admissionTickets)
+    }
+
+    private suspend fun announceAdmissions(
+        event: StoredEvent,
+        admissionTickets: List<AdmissionTicket>,
+    ): Boolean {
+        var admissionAccepted = true
         admissionTickets.forEach { ticket ->
             if (ticket.subscriber.predicate(event)) {
-                runCatching {
+                val accepted = runCatching {
                     ticket.subscriber.handler.onCommitted(event, ticket.generation)
                 }.onFailure {
                     Log.w(LOG_TAG, "Admission committed-event subscriber failed", it)
-                }
+                }.getOrDefault(false)
+                admissionAccepted = admissionAccepted && accepted
             }
         }
+        return admissionAccepted
     }
 
     private fun sampleAdmissionTickets(): List<AdmissionTicket> =
@@ -714,6 +858,7 @@ internal class EventLog(
     }
 
     private companion object {
+        const val MAX_BARRIER_PASSES = 100
         const val LOG_TAG = "Nuxie"
         const val DISTINCT_ID_PROPERTY = "\$distinct_id"
         const val SESSION_ID_PROPERTY = "\$session_id"

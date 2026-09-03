@@ -28,23 +28,18 @@ internal class SQLiteEventStore(
     private var closed = false
 
     override suspend fun insertPending(event: StoredEvent): Unit = onWriter { database ->
-        database.prepare(
-            """
-            INSERT INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
-            """.trimIndent(),
-        ).use { statement ->
-            statement.bindText(1, event.id)
-            statement.bindText(2, event.name)
-            statement.bindBlob(3, event.encodedProperties())
-            statement.bindLong(4, event.timestampMillis)
-            statement.bindText(5, event.distinctId)
-            event.sessionId?.let { statement.bindText(6, it) } ?: statement.bindNull(6)
-            statement.bindLong(7, DELIVERY_PENDING)
-            statement.bindText(8, event.origin)
-            statement.step()
-        }
+        insertPendingMutation(database, event)
         Unit
+    }
+
+    override suspend fun insertPendingAndStageRoute(
+        event: StoredEvent,
+    ): EventRouteCommit = onWriter { database ->
+        database.immediateTransaction {
+            insertPendingMutation(database, event)
+            stageLocalRoute(database, event.id)
+            EventRouteCommit(inserted = true, localRoutePending = true)
+        }
     }
 
     override suspend fun insertPendingIfAbsent(event: StoredEvent): Boolean = onWriter { database ->
@@ -58,33 +53,94 @@ internal class SQLiteEventStore(
         admission.commitIfCurrent { insertPendingIfAbsentNow(database, event) }
     }
 
+    override suspend fun insertPendingIfAbsentAndStageRoute(
+        event: StoredEvent,
+    ): EventRouteCommit = onWriter { database ->
+        commitPendingLocalRouteNow(database, event)
+    }
+
+    override suspend fun insertPendingIfAbsentAndStageRoute(
+        event: StoredEvent,
+        admission: StableEventCommitAdmission,
+    ): EventRouteCommit? = onWriter { database ->
+        var committed: EventRouteCommit? = null
+        val admitted = admission.commitIfCurrent {
+            committed = commitPendingLocalRouteNow(database, event)
+            true
+        }
+        if (admitted == null) null else checkNotNull(committed)
+    }
+
+    private fun commitPendingLocalRouteNow(
+        database: SQLiteConnection,
+        event: StoredEvent,
+    ): EventRouteCommit = database.immediateTransaction {
+        val inserted = insertPendingIfAbsentMutation(database, event)
+        stageLocalRoute(database, event.id)
+        val pending = database.prepare(
+            "SELECT delivery_state FROM event_local_routes WHERE event_id = ? LIMIT 1;",
+        ).use { statement ->
+            statement.bindText(1, event.id)
+            check(statement.step()) { "Local-route receipt disappeared." }
+            statement.getLong(0) == ROUTE_PENDING
+        }
+        EventRouteCommit(inserted, pending)
+    }
+
+    private fun insertPendingMutation(database: SQLiteConnection, event: StoredEvent) {
+        database.prepare(
+            """
+            INSERT INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            """.trimIndent(),
+        ).use { statement ->
+            statement.bindStoredEvent(event, DELIVERY_PENDING)
+            statement.step()
+        }
+    }
+
+    private fun stageLocalRoute(database: SQLiteConnection, eventId: String) {
+        database.prepare(
+            "INSERT OR IGNORE INTO event_local_routes (event_id) VALUES (?);",
+        ).use { statement ->
+            statement.bindText(1, eventId)
+            statement.step()
+        }
+    }
+
     private fun insertPendingIfAbsentNow(
         database: SQLiteConnection,
         event: StoredEvent,
-    ): Boolean =
-        database.immediateTransaction {
-            database.prepare(
-                """
-                INSERT OR IGNORE INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin)
-                SELECT ?, ?, ?, ?, ?, ?, ?, ?
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM stable_event_drops WHERE event_id = ?
-                );
-                """.trimIndent(),
-            ).use { statement ->
-                statement.bindText(1, event.id)
-                statement.bindText(2, event.name)
-                statement.bindBlob(3, event.encodedProperties())
-                statement.bindLong(4, event.timestampMillis)
-                statement.bindText(5, event.distinctId)
-                event.sessionId?.let { statement.bindText(6, it) } ?: statement.bindNull(6)
-                statement.bindLong(7, DELIVERY_PENDING)
-                statement.bindText(8, event.origin)
-                statement.bindText(9, event.id)
-                statement.step()
-            }
-            database.queryLong("SELECT changes();") == 1L
+    ): Boolean = database.immediateTransaction {
+        insertPendingIfAbsentMutation(database, event)
+    }
+
+    private fun insertPendingIfAbsentMutation(
+        database: SQLiteConnection,
+        event: StoredEvent,
+    ): Boolean {
+        database.prepare(
+            """
+            INSERT OR IGNORE INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM stable_event_drops WHERE event_id = ?
+            );
+            """.trimIndent(),
+        ).use { statement ->
+            statement.bindText(1, event.id)
+            statement.bindText(2, event.name)
+            statement.bindBlob(3, event.encodedProperties())
+            statement.bindLong(4, event.timestampMillis)
+            statement.bindText(5, event.distinctId)
+            event.sessionId?.let { statement.bindText(6, it) } ?: statement.bindNull(6)
+            statement.bindLong(7, DELIVERY_PENDING)
+            statement.bindText(8, event.origin)
+            statement.bindText(9, event.id)
+            statement.step()
         }
+        return database.queryLong("SELECT changes();") == 1L
+    }
 
     override suspend fun hasStableOutcome(eventId: String): Boolean = onWriter { database ->
         database.prepare(
@@ -105,24 +161,34 @@ internal class SQLiteEventStore(
 
     override suspend fun insertDeliveredIfAbsent(event: StoredEvent): Boolean = onWriter { database ->
         database.immediateTransaction {
-            database.prepare(
-                """
-                INSERT OR IGNORE INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
-                """.trimIndent(),
-            ).use { statement ->
-                statement.bindText(1, event.id)
-                statement.bindText(2, event.name)
-                statement.bindBlob(3, event.encodedProperties())
-                statement.bindLong(4, event.timestampMillis)
-                statement.bindText(5, event.distinctId)
-                event.sessionId?.let { statement.bindText(6, it) } ?: statement.bindNull(6)
-                statement.bindLong(7, DELIVERY_DELIVERED)
-                statement.bindText(8, event.origin)
-                statement.step()
-            }
-            database.queryLong("SELECT changes();") == 1L
+            insertDeliveredIfAbsentMutation(database, event)
         }
+    }
+
+    override suspend fun insertDeliveredIfAbsentAndStageRoute(
+        event: StoredEvent,
+    ): EventRouteCommit = onWriter { database ->
+        database.immediateTransaction {
+            val inserted = insertDeliveredIfAbsentMutation(database, event)
+            if (inserted) stageLocalRoute(database, event.id)
+            EventRouteCommit(inserted, inserted)
+        }
+    }
+
+    private fun insertDeliveredIfAbsentMutation(
+        database: SQLiteConnection,
+        event: StoredEvent,
+    ): Boolean {
+        database.prepare(
+            """
+            INSERT OR IGNORE INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            """.trimIndent(),
+        ).use { statement ->
+            statement.bindStoredEvent(event, DELIVERY_DELIVERED)
+            statement.step()
+        }
+        return database.queryLong("SELECT changes();") == 1L
     }
 
     override suspend fun markDelivered(ids: List<String>) {
@@ -310,6 +376,38 @@ internal class SQLiteEventStore(
         }
     }
 
+    override suspend fun queryPendingLocalRoutes(
+        distinctId: String,
+    ): List<StoredEvent> = onWriter { database ->
+        database.prepare(
+            """
+            SELECT events.id, events.name, events.properties, events.timestamp,
+                   events.user_id, events.session_id
+            FROM event_local_routes
+            JOIN events ON events.id = event_local_routes.event_id
+            WHERE event_local_routes.delivery_state = ? AND events.user_id = ?
+            ORDER BY event_local_routes.rowid ASC;
+            """.trimIndent(),
+        ).use { statement ->
+            statement.bindLong(1, ROUTE_PENDING)
+            statement.bindText(2, distinctId)
+            buildList {
+                while (statement.step()) add(statement.readStoredEvent())
+            }
+        }
+    }
+
+    override suspend fun markLocalRouteDelivered(eventId: String) {
+        onWriter { database ->
+            database.prepare(
+                "UPDATE event_local_routes SET delivery_state = ? WHERE event_id = ?;",
+            ).use { statement ->
+                statement.bindLong(1, ROUTE_DELIVERED)
+                statement.bindText(2, eventId)
+                statement.step()
+            }
+        }
+    }
     private fun recordStableDropNow(
         database: SQLiteConnection,
         eventId: String,
@@ -419,6 +517,10 @@ internal class SQLiteEventStore(
             """.trimIndent())
             database.execute("PRAGMA user_version = 3;")
         }
+        if (version < 4L) database.immediateTransaction {
+            database.execute(CREATE_LOCAL_ROUTES_TABLE)
+            database.execute("PRAGMA user_version = 4;")
+        }
     }
 
     private fun SQLiteConnection.readCoverage(): Long =
@@ -484,6 +586,20 @@ internal class SQLiteEventStore(
         untilMillis?.let { bindLong(index, it) }
     }
 
+    private fun SQLiteStatement.bindStoredEvent(
+        event: StoredEvent,
+        deliveryState: Long,
+    ) {
+        bindText(1, event.id)
+        bindText(2, event.name)
+        bindBlob(3, event.encodedProperties())
+        bindLong(4, event.timestampMillis)
+        bindText(5, event.distinctId)
+        event.sessionId?.let { bindText(6, it) } ?: bindNull(6)
+        bindLong(7, deliveryState)
+        bindText(8, event.origin)
+    }
+
     private fun SQLiteStatement.readStoredEvent(): StoredEvent = StoredEvent.fromStorage(
         id = getText(0),
         name = getText(1),
@@ -496,6 +612,8 @@ internal class SQLiteEventStore(
     private companion object {
         const val DELIVERY_PENDING = 0L
         const val DELIVERY_DELIVERED = 2L
+        const val ROUTE_PENDING = 0L
+        const val ROUTE_DELIVERED = 2L
         const val HISTORY_QUERY_LIMIT = 10_000
 
         val CREATE_EVENTS_TABLE =
@@ -516,6 +634,14 @@ internal class SQLiteEventStore(
             CREATE TABLE IF NOT EXISTS stable_event_drops (
                 event_id TEXT PRIMARY KEY,
                 created_at INTEGER NOT NULL
+            );
+            """.trimIndent()
+
+        val CREATE_LOCAL_ROUTES_TABLE =
+            """
+            CREATE TABLE IF NOT EXISTS event_local_routes (
+                event_id TEXT PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+                delivery_state INTEGER NOT NULL DEFAULT 0
             );
             """.trimIndent()
 
