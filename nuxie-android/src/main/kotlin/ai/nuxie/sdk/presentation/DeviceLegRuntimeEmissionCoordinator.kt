@@ -217,7 +217,10 @@ internal class DeviceLegRuntimeEmissionCoordinator(
                     val field = properties["field"]?.jsonPrimitive?.contentOrNull
                     if (field != null && field.isNotEmpty()) drafts += Draft.ResponseUnset(field)
                 }
-                NAVIGATE_EVENT -> Unit
+                NAVIGATE_EVENT -> Log.w(
+                    LOG_TAG,
+                    "Rejected renderer \$navigate command: Journey routes own navigation",
+                )
                 else -> {
                     drafts += Draft.Event(command.name, properties)
                     if (source == null) {

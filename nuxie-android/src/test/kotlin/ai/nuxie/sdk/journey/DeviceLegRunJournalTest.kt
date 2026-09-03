@@ -221,6 +221,7 @@ class DeviceLegRunJournalTest {
             journal.admit(arm(), JourneyReentry.EveryTime, screenId, 100_000),
         )
         journal.markStartedQueued(run)
+        journal.park(run.id, screenId, null)
         val context = JsonObject(
             run.context + (
                 "responses" to expected.getValue("response_values").jsonObject
@@ -272,7 +273,11 @@ class DeviceLegRunJournalTest {
 
         val cleared = requireNotNull(
             DeviceLegRunJournal(directory, customerId)
-                .clearPresentationPublication(run.id, "fixture-invocation"),
+                .clearPresentationPublication(
+                    run.id,
+                    "fixture-invocation",
+                    retainResponsesChanged = true,
+                ),
         )
         assertNull(cleared.pendingPresentationPublication)
         assertEquals(expected.number("pending_batch_count_after_drain"), listOfNotNull(
@@ -281,15 +286,23 @@ class DeviceLegRunJournalTest {
         assertEquals(expected.number("batch_sequence") + 1, cleared.nextPresentationBatchSequence)
         assertEquals(emissionSequences.last() + 1, cleared.nextPresentationEmissionSequence)
         assertEquals(expected.getValue("response_values"), cleared.context.getValue("responses"))
+        assertTrue(cleared.park?.pendingResponsesChanged == true)
 
         assertNull(
             DeviceLegRunJournal(directory, customerId)
                 .clearPresentationPublication(run.id, "fixture-invocation"),
         )
         val replayed = DeviceLegRunJournal(directory, customerId).runs().single()
-        assertEquals(0L, expected.number("replay_response_version_increment"))
+        val replayResponseVersionIncrement = if (
+            replayed.context.getValue("responses") == cleared.context.getValue("responses")
+        ) 0L else 1L
+        assertEquals(
+            expected.number("replay_response_version_increment"),
+            replayResponseVersionIncrement,
+        )
         assertEquals(cleared.nextPresentationEmissionSequence, replayed.nextPresentationEmissionSequence)
         assertEquals(expected.getValue("response_values"), replayed.context.getValue("responses"))
+        assertTrue(replayed.park?.pendingResponsesChanged == true)
     }
 
     @Test fun `partially published renderer batch abandons with responses before report retirement`() {
