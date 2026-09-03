@@ -747,6 +747,7 @@ internal class JourneyService(
     private fun CloseReason.toRunPresentationOutcome(): JourneyRunPresentationOutcome = when (this) {
         CloseReason.UserDismissed -> JourneyRunPresentationOutcome.USER_DISMISSED
         CloseReason.HostDismissed -> JourneyRunPresentationOutcome.HOST_DISMISSED
+        CloseReason.JourneyNavigation -> error("same-Journey navigation is not terminal")
         CloseReason.IdentityChanged -> JourneyRunPresentationOutcome.IDENTITY_CHANGED
         CloseReason.GoalMet -> JourneyRunPresentationOutcome.GOAL_MET
         CloseReason.PurchaseCompleted -> JourneyRunPresentationOutcome.PURCHASE_COMPLETED

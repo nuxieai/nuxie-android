@@ -3,9 +3,14 @@ package ai.nuxie.sdk.presentation
 import ai.nuxie.sdk.ExperienceRef
 import ai.nuxie.sdk.billing.ExperiencePurchasePreparer
 import ai.nuxie.sdk.experiences.AcquiredRelease
+import ai.nuxie.sdk.experiences.AuthenticatedDeviceLegRelease
 import ai.nuxie.sdk.experiences.AuthenticatedRelease
 import ai.nuxie.sdk.experiences.Delivery
+import ai.nuxie.sdk.experiences.DeviceLegReleaseVerifier
 import ai.nuxie.sdk.experiences.ExperienceReleaseIdentity
+import ai.nuxie.sdk.experiences.ReplayPolicy
+import ai.nuxie.sdk.experiences.SupportedRuntime
+import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.runtime.NuxieRuntimeFile
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import ai.nuxie.sdk.runtime.NuxieTypedRuntimeNative
@@ -13,6 +18,7 @@ import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import android.os.Looper
+import android.util.Base64
 import java.io.Closeable
 import java.io.File
 import java.util.concurrent.CountDownLatch
@@ -31,9 +37,14 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -295,9 +306,275 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun secondPresentDismissesFirstEvenBeforeItsFirstFrame() = runTest {
+    fun differentJourneyIsDeclinedWithoutTouchingCurrentPresentation() = runTest {
+        val resolved = mutableListOf<String>()
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val service = service(
+            provider = PresentationReleaseProvider { version ->
+                resolved += version
+                release("exp-$version", version)
+            },
+            launch = launched::add,
+            acquire = { acquired("exp-v1", "v1", lease) },
+        )
+
+        val first = async { service.present("v1", "journey-1", "customer-1") }
+        runCurrent()
+
+        val error = expectPresentationFailure {
+            service.present("v2", "journey-2", "customer-1")
+        }
+
+        assertEquals(ExperiencePresentationException.Reason.DECLINED, error.reason)
+        assertEquals(listOf("v1"), resolved)
+        assertEquals(1, launched.size)
+        assertFalse(lease.closed.get())
+        PresentationRegistry.reportFirstFrame(launched.single())
+        assertEquals("v1", first.await().experienceVersion)
+        service.dismiss()
+    }
+
+    @Test
+    fun secondStandalonePresentationIsDeclined() = runTest {
+        val launched = mutableListOf<String>()
+        val service = service(launch = launched::add)
+
+        val first = async { service.present("v1") }
+        runCurrent()
+
+        val error = expectPresentationFailure { service.present("v2") }
+
+        assertEquals(ExperiencePresentationException.Reason.DECLINED, error.reason)
+        assertEquals(1, launched.size)
+        PresentationRegistry.reportFirstFrame(launched.single())
+        first.await()
+        service.dismiss()
+    }
+
+    @Test
+    fun deviceLegReservationDeclinesOtherPresentationBeforeReleaseResolution() = runTest {
+        var resolved = false
+        val launched = mutableListOf<String>()
+        val service = service(
+            provider = PresentationReleaseProvider {
+                resolved = true
+                release("exp-1", it)
+            },
+            launch = launched::add,
+        )
+        val reservation = requireNotNull(service.reserveDeviceLeg("customer-1"))
+
+        val error = expectPresentationFailure {
+            service.present("v1", "journey-2", "customer-1")
+        }
+
+        assertEquals(ExperiencePresentationException.Reason.DECLINED, error.reason)
+        assertFalse(resolved)
+        assertTrue(launched.isEmpty())
+
+        reservation.close()
+        val shown = async { service.present("v1", "journey-2", "customer-1") }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        shown.await()
+        service.dismiss()
+    }
+
+    @Test
+    fun deviceLegPresentationUsesAuthenticatedScreenAndOwnsItsOutcome() = runTest {
+        val emitted = mutableListOf<Emitted>()
+        val launched = mutableListOf<String>()
+        val outcomes = mutableListOf<DeviceLegSurfaceOutcome>()
+        val transitionAttempts = mutableListOf<CloseReason>()
+        val reports = mutableListOf<CloseReason>()
+        val lease = Lease()
+        val release = renderedDeviceLegRelease()
+        val service = service(
+            emit = { name, properties, distinctId ->
+                emitted += Emitted(name, properties, distinctId)
+            },
+            launch = launched::add,
+            transitionOutcome = { outcome ->
+                transitionAttempts += outcome.reason
+                true
+            },
+            reportOutcome = { outcome -> reports += outcome.reason },
+        )
+        val reservation = requireNotNull(service.reserveDeviceLeg("customer-1"))
+
+        val shown = async {
+            service.presentDeviceLeg(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-1",
+                ownerDistinctId = "customer-1",
+                reservation = reservation,
+                acquire = {
+                    acquired(
+                        release.identity.experienceId,
+                        release.identity.experienceVersionId,
+                        lease,
+                    )
+                },
+                onOutcome = outcomes::add,
+            )
+        }
+        runCurrent()
+
+        val presentationId = launched.single()
+        val prepared = requireNotNull(PresentationRegistry.resolve(presentationId))
+        assertEquals("Welcome", prepared.artboardName)
+        assertEquals(release.descriptor, prepared.descriptor)
+        PresentationRegistry.reportFirstFrame(presentationId)
+        assertEquals(
+            ExperienceRef("experience_golden", "version_golden", "journey-1"),
+            shown.await(),
+        )
+
+        service.dismissFromHost("customer-1")
+
+        assertEquals(listOf(DeviceLegSurfaceOutcome.DISMISSED), outcomes)
+        assertTrue(transitionAttempts.isEmpty())
+        assertTrue(reports.isEmpty())
+        assertEquals(
+            listOf("\$experience_shown", "\$experience_dismissed"),
+            emitted.map(Emitted::name),
+        )
+        assertEquals("host", emitted.last().properties["reason"])
+        assertTrue(lease.closed.get())
+    }
+
+    @Test
+    fun deviceLegPresentationRechecksAdmissionAfterAcquisition() = runTest {
+        val acquisitionStarted = CompletableDeferred<Unit>()
+        val continueAcquisition = CompletableDeferred<Unit>()
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val release = renderedDeviceLegRelease()
+        var canPresent = true
+        val service = service(launch = launched::add)
+        val reservation = requireNotNull(service.reserveDeviceLeg("customer-1"))
+        val presentation = async(SupervisorJob()) {
+            service.presentDeviceLeg(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-1",
+                ownerDistinctId = "customer-1",
+                reservation = reservation,
+                canPresent = { canPresent },
+                acquire = {
+                    acquisitionStarted.complete(Unit)
+                    continueAcquisition.await()
+                    acquired(
+                        release.identity.experienceId,
+                        release.identity.experienceVersionId,
+                        lease,
+                    )
+                },
+                onOutcome = {},
+            )
+        }
+
+        try {
+            acquisitionStarted.await()
+            canPresent = false
+            continueAcquisition.complete(Unit)
+            runCurrent()
+
+            assertTrue("revoked presentation must finish", presentation.isCompleted)
+            assertTrue("revoked presentation must release its lease", lease.closed.get())
+            assertTrue("revoked presentation launched", launched.isEmpty())
+            val error = try {
+                presentation.await()
+                fail("revoked presentation should be superseded")
+                error("unreachable")
+            } catch (error: ExperiencePresentationException) {
+                error
+            }
+            assertEquals(ExperiencePresentationException.Reason.SUPERSEDED, error.reason)
+        } finally {
+            continueAcquisition.complete(Unit)
+            presentation.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun sameJourneyDeviceNavigationRetainsOwnershipWithoutClosingTheLeg() = runTest {
+        val emitted = mutableListOf<String>()
+        val launched = mutableListOf<String>()
+        val firstOutcomes = mutableListOf<DeviceLegSurfaceOutcome>()
+        val secondOutcomes = mutableListOf<DeviceLegSurfaceOutcome>()
+        val firstLease = Lease()
+        val secondLease = Lease()
+        val release = renderedDeviceLegRelease()
+        val service = service(
+            emit = { name, _, _ -> emitted += name },
+            launch = launched::add,
+        )
+        val reservation = requireNotNull(service.reserveDeviceLeg("customer-1"))
+        val first = async {
+            service.presentDeviceLeg(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-1",
+                ownerDistinctId = "customer-1",
+                reservation = reservation,
+                acquire = {
+                    acquired(
+                        release.identity.experienceId,
+                        release.identity.experienceVersionId,
+                        firstLease,
+                    )
+                },
+                onOutcome = firstOutcomes::add,
+            )
+        }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        first.await()
+
+        val second = async {
+            service.presentDeviceLeg(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-1",
+                ownerDistinctId = "customer-1",
+                reservation = null,
+                acquire = {
+                    acquired(
+                        release.identity.experienceId,
+                        release.identity.experienceVersionId,
+                        secondLease,
+                    )
+                },
+                onOutcome = secondOutcomes::add,
+            )
+        }
+        runCurrent()
+
+        assertEquals(2, launched.size)
+        assertTrue(firstLease.closed.get())
+        assertTrue(firstOutcomes.isEmpty())
+        assertEquals(0, emitted.count { it == "\$experience_dismissed" })
+        PresentationRegistry.reportFirstFrame(launched.last())
+        second.await()
+
+        service.dismissFromHost("customer-1")
+
+        assertTrue(firstOutcomes.isEmpty())
+        assertEquals(listOf(DeviceLegSurfaceOutcome.DISMISSED), secondOutcomes)
+        assertTrue(secondLease.closed.get())
+        assertEquals(2, emitted.count { it == "\$experience_shown" })
+        assertEquals(1, emitted.count { it == "\$experience_dismissed" })
+    }
+
+    @Test
+    fun sameJourneyReplacesFirstPresentationEvenBeforeItsFirstFrame() = runTest {
         val launched = mutableListOf<String>()
         val leases = mutableMapOf("v1" to Lease(), "v2" to Lease())
+        val transitionAttempts = mutableListOf<CloseReason>()
+        val reports = mutableListOf<CloseReason>()
         val service = service(
             provider = PresentationReleaseProvider { version -> release("exp-$version", version) },
             launch = launched::add,
@@ -308,11 +585,18 @@ class ExperiencePresentationServiceTest {
                     leases.getValue(admitted.release.identity.experienceVersionId),
                 )
             },
+            transitionOutcome = { outcome ->
+                transitionAttempts += outcome.reason
+                true
+            },
+            reportOutcome = { outcome -> reports += outcome.reason },
         )
 
-        val first = async(SupervisorJob()) { service.present("v1") }
+        val first = async(SupervisorJob()) {
+            service.present("v1", "journey-1", "customer-1")
+        }
         runCurrent()
-        val second = async { service.present("v2") }
+        val second = async { service.present("v2", "journey-1", "customer-1") }
         runCurrent()
 
         val firstError = try {
@@ -325,6 +609,8 @@ class ExperiencePresentationServiceTest {
         assertEquals(ExperiencePresentationException.Reason.SUPERSEDED, firstError.reason)
         assertTrue(leases.getValue("v1").closed.get())
         assertEquals(2, launched.size)
+        assertTrue(transitionAttempts.isEmpty())
+        assertTrue(reports.isEmpty())
 
         PresentationRegistry.reportFirstFrame(launched.last())
         assertEquals("v2", second.await().experienceVersion)
@@ -1676,6 +1962,60 @@ class ExperiencePresentationServiceTest {
             artifactsByKey = mapOf("renders/main.riv" to file) + extraArtifacts,
             rivFile = file,
             protection = lease,
+        )
+    }
+
+    private fun renderedDeviceLegRelease(): AuthenticatedDeviceLegRelease {
+        val fixture = Json.parseToJsonElement(
+            FixtureRunner.fixturesRoot().resolve("journeys/planes/release.json").readText(),
+        ).jsonObject
+        val entry = fixture.getValue("renderedEntry").jsonObject
+        val envelope = entry.getValue("envelope").jsonObject
+        val descriptor = Json.parseToJsonElement(
+            Base64.decode(
+                envelope.getValue("descriptorBytesBase64").jsonPrimitive.content,
+                Base64.NO_WRAP,
+            ).decodeToString(),
+        ).jsonObject
+        val identity = requireNotNull(
+            ExperienceReleaseIdentity.fromJson(entry.getValue("locator").jsonObject),
+        )
+        val requirements = descriptor.getValue("requirements").jsonObject
+        val luau = requirements.getValue("luau").jsonObject
+        val scene = requirements.getValue("sceneFormat").jsonObject
+        val timezone = requirements.getValue("timezoneData").jsonObject
+        val runtime = SupportedRuntime(
+            currentSdkVersion = requirements.getValue("minimumSdkVersion").jsonPrimitive.content,
+            supportedRuntimeRevisions = setOf(
+                requirements.getValue("runtimeRevision").jsonPrimitive.content,
+            ),
+            supportedLuauRevisions = mapOf(
+                luau.getValue("revision").jsonPrimitive.content to
+                    luau.getValue("bytecodeVersions").jsonArray
+                        .map { it.jsonPrimitive.int }
+                        .toSet(),
+            ),
+            sceneFormatMajor = scene.getValue("major").jsonPrimitive.int,
+            sceneFormatMinor = scene.getValue("minor").jsonPrimitive.int,
+            timezoneDataRevision = timezone.getValue("revision").jsonPrimitive.content,
+            timezoneDataSha256 = timezone.getValue("sha256").jsonPrimitive.content,
+            supportedCapabilities = requirements.getValue("requiredCapabilities").jsonArray
+                .map { it.jsonPrimitive.content }
+                .toSet(),
+        )
+        val trustedKeys = mapOf(
+            "TEST_ONLY_DEV_KEYPAIR" to Base64.decode(
+                fixture.getValue("publicKeyBase64").jsonPrimitive.content,
+                Base64.NO_WRAP,
+            ),
+        )
+        return DeviceLegReleaseVerifier.authenticate(
+            envelopeBytes = envelope.toString().encodeToByteArray(),
+            trustedKeys = trustedKeys,
+            expectedIdentity = identity,
+            expectedLegId = "a".repeat(64),
+            supportedRuntime = runtime,
+            replayPolicy = ReplayPolicy.Active(0),
         )
     }
 }

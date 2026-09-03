@@ -48,6 +48,20 @@ internal class SQLiteEventStore(
     }
 
     override suspend fun insertPendingIfAbsent(event: StoredEvent): Boolean = onWriter { database ->
+        insertPendingIfAbsentNow(database, event)
+    }
+
+    override suspend fun insertPendingIfAbsent(
+        event: StoredEvent,
+        admission: StableEventCommitAdmission,
+    ): Boolean? = onWriter { database ->
+        admission.commitIfCurrent { insertPendingIfAbsentNow(database, event) }
+    }
+
+    private fun insertPendingIfAbsentNow(
+        database: SQLiteConnection,
+        event: StoredEvent,
+    ): Boolean =
         database.immediateTransaction {
             database.prepare(
                 """
@@ -71,7 +85,6 @@ internal class SQLiteEventStore(
             }
             database.queryLong("SELECT changes();") == 1L
         }
-    }
 
     override suspend fun hasStableOutcome(eventId: String): Boolean = onWriter { database ->
         database.prepare(
@@ -284,6 +297,24 @@ internal class SQLiteEventStore(
         eventId: String,
         recordedAtMillis: Long,
     ): Boolean = onWriter { database ->
+        recordStableDropNow(database, eventId, recordedAtMillis)
+    }
+
+    override suspend fun recordStableDrop(
+        eventId: String,
+        recordedAtMillis: Long,
+        admission: StableEventCommitAdmission,
+    ): Boolean? = onWriter { database ->
+        admission.commitIfCurrent {
+            recordStableDropNow(database, eventId, recordedAtMillis)
+        }
+    }
+
+    private fun recordStableDropNow(
+        database: SQLiteConnection,
+        eventId: String,
+        recordedAtMillis: Long,
+    ): Boolean =
         database.immediateTransaction {
             database.prepare(
                 "INSERT OR IGNORE INTO stable_event_drops (event_id, created_at) VALUES (?, ?);",
@@ -294,7 +325,6 @@ internal class SQLiteEventStore(
             }
             database.queryLong("SELECT changes();") == 1L
         }
-    }
 
     override suspend fun pendingBatch(limit: Int): List<StoredEvent> = onWriter { database ->
         database.prepare(

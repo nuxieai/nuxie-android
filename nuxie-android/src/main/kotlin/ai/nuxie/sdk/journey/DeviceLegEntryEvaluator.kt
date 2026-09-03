@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.journey
 
 import ai.nuxie.sdk.events.EventStore
+import ai.nuxie.sdk.features.FeatureAccess
 import ai.nuxie.sdk.util.IsoDates
 import java.util.Calendar
 import kotlinx.coroutines.CancellationException
@@ -25,6 +26,7 @@ internal object DeviceLegEntryEvaluator {
         nowMillis: Long = System.currentTimeMillis(),
         events: EventStore? = null,
         distinctId: String? = null,
+        featureAccess: (suspend (String) -> FeatureAccess?)? = null,
     ): Boolean {
         val properties = facts["properties"] as? JsonObject ?: return false
         val memberships = facts["memberships"] as? JsonObject ?: return false
@@ -50,7 +52,15 @@ internal object DeviceLegEntryEvaluator {
         if (envelope["ir_version"].number() != 1.0) return false
         val minimumEngine = envelope["engine_min"].string()?.substringBefore('.')?.toIntOrNull()
         if (minimumEngine != null && minimumEngine > 1) return false
-        val context = Context(properties, memberships, event, nowMillis, events, distinctId)
+        val context = Context(
+            properties,
+            memberships,
+            event,
+            nowMillis,
+            events,
+            distinctId,
+            featureAccess,
+        )
         if (!context.available(envelope["expr"])) return false
         return try {
             context.evaluate(envelope["expr"])?.truthy() == true
@@ -69,6 +79,7 @@ internal object DeviceLegEntryEvaluator {
         val nowMillis: Long,
         val events: EventStore?,
         val distinctId: String?,
+        val featureAccess: (suspend (String) -> FeatureAccess?)?,
     ) {
         fun available(value: JsonElement?, hasEvent: Boolean = event != null, depth: Int = 0): Boolean {
             if (depth > 64) return false
@@ -88,6 +99,7 @@ internal object DeviceLegEntryEvaluator {
                 "Event", "Pred" -> hasEvent && expression["op"].string() in propertyOps && child("value")
                 "Segment" -> expression["op"].string() in setOf("is_member", "not_member", "in", "not_in") &&
                     expression["id"].string()?.let(memberships::containsKey) == true
+                "Feature" -> featureAccess != null && expression["op"].string() in featureOps && child("value")
                 "Events.Exists", "Events.Count", "Events.Aggregate" -> events != null && distinctId != null &&
                     child("since") && child("until") && child("within") &&
                     (expression["where"]?.let { predicateAvailable(it, depth + 1) } ?: true) &&
@@ -156,6 +168,7 @@ internal object DeviceLegEntryEvaluator {
                         else -> null // Transition queries are exclusively server-owned.
                     }
                 }
+                "Feature" -> featureOperation(expression)
                 "Compare" -> {
                     val left = evaluate(expression["left"]) ?: return null
                     val right = evaluate(expression["right"]) ?: return null
@@ -165,6 +178,29 @@ internal object DeviceLegEntryEvaluator {
                 // Other operators stay unknown until their adapters exist.
                 else -> null
             }
+        }
+
+        private suspend fun featureOperation(expression: JsonObject): JsonElement? {
+            val access = featureAccess?.invoke(expression["id"].string() ?: return null)
+            val result = when (expression["op"].string()) {
+                "has" -> access?.allowed ?: false
+                "not_has" -> access?.allowed != true
+                "is_unlimited" -> access?.unlimited ?: false
+                "credits_eq", "credits_neq", "credits_gt", "credits_gte", "credits_lt", "credits_lte" -> {
+                    val target = evaluate(expression["value"])?.number() ?: return null
+                    val balance = access?.balance ?: return JsonPrimitive(false)
+                    when (expression["op"].string()) {
+                        "credits_eq" -> balance == target
+                        "credits_neq" -> balance != target
+                        "credits_gt" -> balance > target
+                        "credits_gte" -> balance >= target
+                        "credits_lt" -> balance < target
+                        else -> balance <= target
+                    }
+                }
+                else -> return null
+            }
+            return JsonPrimitive(result)
         }
 
         private suspend fun propertyOperation(expression: JsonObject, actual: JsonElement): JsonElement? {
@@ -376,6 +412,17 @@ internal object DeviceLegEntryEvaluator {
     private val propertyOps = setOf("has", "eq", "neq", "icontains", "regex", "gt", "gte", "lt", "lte",
         "is_set", "is_not_set", "is_date_exact", "is_date_after", "is_date_before", "in", "not_in")
     private val compareOps = setOf("==", "!=", "<", "<=", ">", ">=", "in", "not_in")
+    private val featureOps = setOf(
+        "has",
+        "not_has",
+        "is_unlimited",
+        "credits_eq",
+        "credits_neq",
+        "credits_gt",
+        "credits_gte",
+        "credits_lt",
+        "credits_lte",
+    )
     private val aggregateOps = setOf("sum", "avg", "min", "max", "unique")
     private val windowSeconds = mapOf("hour" to 3600, "day" to 86400, "week" to 604800, "month" to 2592000, "year" to 31536000)
 }

@@ -1648,6 +1648,10 @@ class JourneyServiceTest {
             }
             val profileService = ProfileService(
                 context = context,
+                storageScope = ai.nuxie.sdk.profile.ProfileStorageScope(
+                    "pk_test_locale_fact",
+                    NuxieEnvironment.DEVELOPMENT,
+                ),
                 api = NuxieApi("pk_test_locale_fact", NuxieEnvironment.DEVELOPMENT, transport),
                 identity = identity,
                 segments = SegmentService(context),
