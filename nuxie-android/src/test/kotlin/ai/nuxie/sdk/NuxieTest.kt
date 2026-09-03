@@ -48,6 +48,22 @@ class NuxieTest {
     }
 
     @Test
+    fun shutdownReleasesTheActiveGraphAndAllowsFreshSetup() {
+        val listener = NuxieListener { _, _ -> }
+        Nuxie.listener = listener
+        Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_first"))
+        val firstCore = requireNotNull(Nuxie.core)
+
+        Nuxie.shutdown()
+
+        assertFalse(Nuxie.isSetup)
+        assertTrue(Nuxie.listener == null)
+        Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_second"))
+        assertTrue(Nuxie.isSetup)
+        assertTrue(firstCore !== Nuxie.core)
+    }
+
+    @Test
     fun versionIsExposed() {
         assertTrue(Nuxie.version.isNotBlank())
     }

@@ -97,6 +97,18 @@ object Nuxie {
         core.start()
     }
 
+    /** Stop the active SDK graph and return the singleton to its pre-setup state. */
+    @Synchronized
+    fun shutdown() {
+        val state = setupState ?: return
+        setupState = null
+        listener = null
+        state.core.stop()
+        kotlinx.coroutines.runBlocking {
+            featureInfoInstance.reset()
+        }
+    }
+
     // MARK: Trigger
 
     /** Capture an event for delivery and ordered Journey evaluation. */
@@ -412,10 +424,7 @@ object Nuxie {
 
     /** Testing seam: tear down the singleton between tests. Not public API. */
     internal fun resetForTesting() {
-        setupState?.core?.let { runCatching { it.stop() } }
-        setupState = null
-        listener = null
-        kotlinx.coroutines.runBlocking { featureInfoInstance.reset() }
+        shutdown()
     }
 
     private class SetupState(

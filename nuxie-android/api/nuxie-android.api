@@ -120,6 +120,7 @@ public final class ai/nuxie/sdk/Nuxie {
 	public final fun setPurchaseDelegate (Lai/nuxie/sdk/billing/NuxiePurchaseDelegate;)V
 	public final fun setPurchaseHandlingMode (Lai/nuxie/sdk/billing/PurchaseHandlingMode;)V
 	public final fun setup (Landroid/content/Context;Lai/nuxie/sdk/NuxieConfiguration;)V
+	public final fun shutdown ()V
 	public final fun trigger (Ljava/lang/String;Ljava/util/Map;)V
 	public static synthetic fun trigger$default (Lai/nuxie/sdk/Nuxie;Ljava/lang/String;Ljava/util/Map;ILjava/lang/Object;)V
 	public final fun useFeature (Ljava/lang/String;DLjava/lang/String;Ljava/util/Map;)V
