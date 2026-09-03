@@ -2,8 +2,11 @@ package ai.nuxie.sdk.journey
 
 import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.StoredEvent
+import ai.nuxie.sdk.experiences.AcquiredRelease
+import ai.nuxie.sdk.experiences.DeviceLegArtifactManager
 import ai.nuxie.sdk.experiences.DeviceLegProfileCatalog
 import ai.nuxie.sdk.experiences.JourneyPlaneProfile
+import ai.nuxie.sdk.experiences.PreparedDeviceLegArtifacts
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
 import ai.nuxie.sdk.experiences.SupportedRuntime
 import ai.nuxie.sdk.fixtures.FixtureRunner
@@ -18,6 +21,7 @@ import ai.nuxie.sdk.presentation.DeviceLegPresenting
 import ai.nuxie.sdk.presentation.DeviceLegSurfaceOutcome
 import android.util.Base64
 import java.io.File
+import java.io.Closeable
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -354,6 +358,67 @@ class DeviceLegServiceTest {
             journal.checkmark("experience_golden")?.outcome,
         )
     }
+
+    @Test fun `live rendered run retains artifacts across profile replacement until report`() =
+        runBlocking {
+            val identity = identity("customer")
+            val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+            val catalog = catalog(renderedEntry)
+            val renderedAuthority = authority(renderedEntry)
+            val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+            catalog.commit("customer", prepared)
+            val snapshot = requireNotNull(catalog.snapshot("customer"))
+            val manager = RecordingArtifactManager()
+            val firstLeaseCloses = AtomicInteger()
+            val secondLeaseCloses = AtomicInteger()
+            val presenter = RecordingDeviceLegPresenter()
+            val service = DeviceLegService(
+                identity = identity,
+                events = store,
+                catalog = catalog,
+                journalDirectory = directory,
+                scope = scope,
+                capture = { _, _, _, _ -> true },
+                presenter = presenter,
+                artifactManager = manager,
+                nowMillis = { 100_000L },
+            )
+            service.initialize()
+            service.onAppWillEnterForeground()
+
+            service.profileDidCommit(
+                snapshot,
+                renderedAuthority,
+                "customer",
+                1,
+                preparedArtifacts(snapshot, firstLeaseCloses),
+            )
+
+            val journal = DeviceLegRunJournal(
+                directory,
+                "customer",
+                DeviceLegStorageScope(renderedAuthority),
+            )
+            val run = journal.runs().single()
+            assertEquals(setOf(ARTIFACT_DIGEST), run.artifactDigests)
+            assertEquals(run.artifactDigests, manager.retainedRunDigests(deviceLegArtifactRunKey(run)))
+
+            service.profileDidCommit(
+                snapshot,
+                renderedAuthority,
+                "customer",
+                2,
+                preparedArtifacts(snapshot, secondLeaseCloses),
+            )
+
+            assertEquals(1, firstLeaseCloses.get())
+            assertEquals(run.artifactDigests, manager.retainedRunDigests(deviceLegArtifactRunKey(run)))
+
+            requireNotNull(presenter.request).onOutcome(DeviceLegSurfaceOutcome.DISMISSED)
+
+            assertNull(manager.retainedRunDigests(deviceLegArtifactRunKey(run)))
+            assertTrue(journal.runs().isEmpty())
+        }
 
     @Test fun `parked runs share one bounded retained release authentication`() = runBlocking {
         val identity = identity("customer")
@@ -1059,6 +1124,47 @@ class DeviceLegServiceTest {
         )
     }
 
+    private fun preparedArtifacts(
+        snapshot: DeviceLegProfileCatalog.Snapshot,
+        closes: AtomicInteger,
+    ): PreparedDeviceLegArtifacts {
+        val release = snapshot.releasesByDigest.values.single()
+        val riv = File.createTempFile("device-leg-artifact-", ".riv").apply {
+            writeText("fixture")
+            deleteOnExit()
+        }
+        return PreparedDeviceLegArtifacts(
+            mapOf(
+                release.descriptorSha256 to AcquiredRelease(
+                    identity = release.identity,
+                    artifactsByKey = mapOf("renders/fixture.riv" to riv),
+                    rivFile = riv,
+                    artifactDigests = setOf(ARTIFACT_DIGEST),
+                    protection = Closeable { closes.incrementAndGet() },
+                ),
+            ),
+        )
+    }
+
+    private class RecordingArtifactManager : DeviceLegArtifactManager {
+        private val retained = linkedMapOf<String, Set<String>>()
+
+        override suspend fun prepareDeviceLegs(
+            snapshot: DeviceLegProfileCatalog.Snapshot,
+        ): PreparedDeviceLegArtifacts = error("ProfileService owns preparation")
+
+        override fun retainForRun(runKey: String, digests: Set<String>) {
+            val previous = retained.putIfAbsent(runKey, digests)
+            check(previous == null || previous == digests)
+        }
+
+        override fun releaseRun(runKey: String) {
+            retained.remove(runKey)
+        }
+
+        override fun retainedRunDigests(runKey: String): Set<String>? = retained[runKey]
+    }
+
     private fun profile(
         entryCondition: JsonObject = buildJsonObject { put("type", "app_foregrounded") },
         releaseEntry: JsonObject = entry,
@@ -1144,5 +1250,10 @@ class DeviceLegServiceTest {
         override fun anonymousId() = distinctId
         override fun rawDistinctId(): String? = null
         override val isIdentified = false
+    }
+
+    private companion object {
+        const val ARTIFACT_DIGEST =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
 }

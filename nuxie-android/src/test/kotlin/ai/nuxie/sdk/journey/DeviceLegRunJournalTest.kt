@@ -376,6 +376,27 @@ class DeviceLegRunJournalTest {
         assertEquals(150_000L, abandoned.completion?.atMillis)
     }
 
+    @Test fun `recovery abandons a parked run whose artifact closure is missing`() {
+        val digest = "a".repeat(64)
+        val journal = DeviceLegRunJournal(directory, "customer")
+        val run = requireNotNull(
+            journal.admit(
+                arm(),
+                JourneyReentry.EveryTime,
+                "step",
+                100_000,
+                artifactDigests = setOf(digest),
+            ),
+        )
+        journal.markStartedQueued(run)
+        journal.park(run.id, "step", 200_000)
+
+        val reopened = DeviceLegRunJournal(directory, "customer")
+        assertEquals(setOf(digest), reopened.runs().single().artifactDigests)
+        assertTrue(reopened.recover(150_000) { false }.isEmpty())
+        assertEquals("abandoned", reopened.runs().single().completion?.outcome)
+    }
+
     @Test fun `failed journal publication removes its newly written release pin`() {
         val (release, pinnedArm, _) = retainedReleaseFixture()
         val invalidArm = pinnedArm.copy(

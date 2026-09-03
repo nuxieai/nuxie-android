@@ -3,7 +3,9 @@ package ai.nuxie.sdk.profile
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.experiences.DeviceLegArtifactManager
 import ai.nuxie.sdk.experiences.DeviceLegProfileCatalog
+import ai.nuxie.sdk.experiences.PreparedDeviceLegArtifacts
 import ai.nuxie.sdk.experiences.ExperienceTrustRoots
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
 import ai.nuxie.sdk.experiences.SupportedRuntime
@@ -227,7 +229,9 @@ class ProfileServiceTest {
             authority: ProfileDeliveryAuthority,
             distinctId: String,
             admissionGeneration: Long,
+            artifacts: PreparedDeviceLegArtifacts?,
         ) {
+            artifacts?.close()
             publications += Publication("commit", admissionGeneration)
         }
 
@@ -243,6 +247,21 @@ class ProfileServiceTest {
         }
     }
 
+    private class FailingArtifactManager : DeviceLegArtifactManager {
+        var preparations = 0
+
+        override suspend fun prepareDeviceLegs(
+            snapshot: DeviceLegProfileCatalog.Snapshot,
+        ): PreparedDeviceLegArtifacts {
+            preparations += 1
+            throw IOException("artifact unavailable")
+        }
+
+        override fun retainForRun(runKey: String, digests: Set<String>) = Unit
+        override fun releaseRun(runKey: String) = Unit
+        override fun retainedRunDigests(runKey: String): Set<String>? = null
+    }
+
     private inner class ProfileFixture(
         transport: HttpTransport,
         val distinctId: String,
@@ -251,6 +270,7 @@ class ProfileServiceTest {
         clearDisk: Boolean = true,
         deviceLegProfiles: DeviceLegProfileCatalog? = null,
         deviceLegRuntime: DeviceLegProfileConsumer? = null,
+        deviceLegArtifacts: DeviceLegArtifactManager? = null,
         publishFeatureProfile: suspend (FeatureInfo.Mutation?) -> Unit = {},
         refreshIntervalMillis: Long = 30L * 60L * 1000L,
     ) {
@@ -289,6 +309,7 @@ class ProfileServiceTest {
             },
             deviceLegProfiles = deviceLegProfiles,
             deviceLegRuntime = deviceLegRuntime,
+            deviceLegArtifacts = deviceLegArtifacts,
             stageFeatureProfile = { _, body, _, _, isCurrent ->
                 if (isCurrent()) {
                     (body["snapshot"] as? JsonPrimitive)?.content?.let {
@@ -724,6 +745,35 @@ class ProfileServiceTest {
         assertEquals("\"plane-v1\"", profileRequests.single { "If-None-Match" in it.headers }
             .headers["If-None-Match"])
         core.stop()
+    }
+
+    @Test
+    fun planeProfileDoesNotCommitWhenItsArtifactsCannotBePrepared() = runBlocking {
+        val plane = planeProfileFixture()
+        val catalog = DeviceLegProfileCatalog(
+            trustedKeys = ExperienceTrustRoots.keys(NuxieEnvironment.DEVELOPMENT),
+            highWater = ReleaseHighWaterStore(RuntimeEnvironment.getApplication()),
+            supportedRuntime = { plane.second },
+        )
+        val runtime = RuntimePublicationRecorder()
+        val artifacts = FailingArtifactManager()
+        val fixture = ProfileFixture(
+            transport = profileTransport(body = plane.first, etag = "\"plane-v1\""),
+            distinctId = "artifact-preparation-failure",
+            localeIdentifier = "en_US",
+            deviceLegProfiles = catalog,
+            deviceLegRuntime = runtime,
+            deviceLegArtifacts = artifacts,
+        )
+        try {
+            assertFalse(fixture.service.refreshAndWait())
+            assertEquals(1, artifacts.preparations)
+            assertNull(catalog.snapshot(fixture.distinctId))
+            assertTrue(runtime.publications.isEmpty())
+            assertNull(fixture.service.currentProfile())
+        } finally {
+            fixture.close()
+        }
     }
 
     @Test

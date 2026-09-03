@@ -4,6 +4,7 @@ import ai.nuxie.sdk.network.HttpTransport
 import android.content.Context
 import java.io.Closeable
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
@@ -17,15 +18,43 @@ internal class AcquiredRelease(
     val identity: ExperienceReleaseIdentity,
     val artifactsByKey: Map<String, File>,
     val rivFile: File,
+    val artifactDigests: Set<String> = emptySet(),
     private val protection: Closeable,
 ) : Closeable {
     override fun close() = protection.close()
 }
 
+/** Profile-owned leases for every screen-bearing release in one admission. */
+internal class PreparedDeviceLegArtifacts(
+    private val releasesByDigest: Map<String, AcquiredRelease>,
+) : Closeable {
+    private val closed = AtomicBoolean(false)
+
+    fun digestsForRelease(descriptorSha256: String): Set<String>? =
+        releasesByDigest[descriptorSha256]?.artifactDigests
+
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        releasesByDigest.values.forEach(AcquiredRelease::close)
+    }
+}
+
+internal interface DeviceLegArtifactManager {
+    suspend fun prepareDeviceLegs(
+        snapshot: DeviceLegProfileCatalog.Snapshot,
+    ): PreparedDeviceLegArtifacts
+
+    fun retainForRun(runKey: String, digests: Set<String>)
+
+    fun releaseRun(runKey: String)
+
+    fun retainedRunDigests(runKey: String): Set<String>?
+}
+
 /** Resolves authenticated descriptor artifacts into the content-addressed cache. */
 internal class ReleaseArtifactAcquirer(
     private val cache: ReleaseArtifactCache,
-) {
+) : DeviceLegArtifactManager {
     constructor(context: Context, transport: HttpTransport) : this(
         ReleaseArtifactCache(context, transport),
     )
@@ -34,6 +63,36 @@ internal class ReleaseArtifactAcquirer(
         release: AuthenticatedRelease,
         delivery: Delivery,
     ): AcquiredRelease = acquire(release.identity, release.descriptor, delivery)
+
+    override suspend fun prepareDeviceLegs(
+        snapshot: DeviceLegProfileCatalog.Snapshot,
+    ): PreparedDeviceLegArtifacts {
+        val acquired = linkedMapOf<String, AcquiredRelease>()
+        try {
+            snapshot.releasesByDigest.forEach { (digest, release) ->
+                if ((release.leg["screens"] as? JsonArray).orEmpty().isNotEmpty()) {
+                    acquired[digest] = acquire(release, snapshot.profile.delivery)
+                }
+            }
+            return PreparedDeviceLegArtifacts(acquired)
+        } catch (failure: Throwable) {
+            acquired.values.forEach(AcquiredRelease::close)
+            throw failure
+        }
+    }
+
+    override fun retainForRun(runKey: String, digests: Set<String>) {
+        cache.retainForRun(runKey, digests).close()
+    }
+
+    override fun releaseRun(runKey: String) = cache.releaseRun(runKey)
+
+    override fun retainedRunDigests(runKey: String): Set<String>? {
+        val retained = cache.retainedRunDigests(runKey) ?: return null
+        return retained.takeIf { digests ->
+            digests.all { digest -> cache.cachedFile(digest)?.isFile == true }
+        }
+    }
 
     suspend fun acquire(
         release: AuthenticatedDeviceLegRelease,
@@ -163,6 +222,7 @@ internal class ReleaseArtifactAcquirer(
                 identity = identity,
                 artifactsByKey = files.toMap(),
                 rivFile = files.getValue(riv.key),
+                artifactDigests = files.values.mapTo(linkedSetOf()) { file -> file.name },
                 protection = protection,
             )
         } catch (error: Throwable) {

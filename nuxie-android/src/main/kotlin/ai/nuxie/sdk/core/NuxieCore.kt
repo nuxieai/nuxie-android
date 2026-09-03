@@ -498,6 +498,7 @@ internal class NuxieCore(
         presenter = deviceLegPresenter,
         nowMillis = nowMillis,
         replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
+        artifactManager = releaseArtifactAcquirer,
     )
 
     val profile = ProfileService(
@@ -512,6 +513,7 @@ internal class NuxieCore(
         },
         deviceLegProfiles = deviceLegProfiles,
         deviceLegRuntime = deviceLegRuntime,
+        deviceLegArtifacts = releaseArtifactAcquirer,
         applyJourneyFacts = { distinctId, body ->
             journeys.applyDownFacts(body, distinctId)
         },
@@ -621,6 +623,7 @@ internal class NuxieCore(
         billing.close()
         presentations.close()
         kotlinx.coroutines.runBlocking {
+            runCatching { deviceLegRuntime.profileDidClearAll() }
             runCatching { profile.close() }
             runCatching { delivery.close() }
             runCatching { eventLog.closeWorkers() }

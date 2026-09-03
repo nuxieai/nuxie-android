@@ -140,6 +140,8 @@ internal class CacheProtectionRegistry(
 
     fun releaseRun(runKey: String) = runPins.release(runKey)
 
+    fun retainedRunDigests(runKey: String): Set<String>? = runPins.retainedDigests(runKey)
+
     fun register(digests: Set<String>): CacheProtectionLease {
         val ownerId = UUID.randomUUID().toString().lowercase()
         val marker = filesystemLock.withLock {
