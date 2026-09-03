@@ -159,6 +159,29 @@ internal class SQLiteEventStore(
         }
     }
 
+    override suspend fun stableEvent(eventId: String): StoredEvent? = onWriter { database ->
+        database.prepare(
+            """
+            SELECT id, name, properties, timestamp, user_id, session_id
+            FROM events
+            WHERE id = ?
+            LIMIT 1;
+            """.trimIndent(),
+        ).use { statement ->
+            statement.bindText(1, eventId)
+            if (statement.step()) statement.readStoredEvent() else null
+        }
+    }
+
+    override suspend fun isLocalRoutePending(eventId: String): Boolean = onWriter { database ->
+        database.prepare(
+            "SELECT delivery_state FROM event_local_routes WHERE event_id = ? LIMIT 1;",
+        ).use { statement ->
+            statement.bindText(1, eventId)
+            statement.step() && statement.getLong(0) == ROUTE_PENDING
+        }
+    }
+
     override suspend fun insertDeliveredIfAbsent(event: StoredEvent): Boolean = onWriter { database ->
         database.immediateTransaction {
             insertDeliveredIfAbsentMutation(database, event)

@@ -1,6 +1,8 @@
 package ai.nuxie.sdk.journey
 
+import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.events.SQLiteEventStore
+import ai.nuxie.sdk.events.StableEventCaptureResult
 import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.experiences.AcquiredRelease
 import ai.nuxie.sdk.experiences.DeviceLegArtifactManager
@@ -18,6 +20,9 @@ import ai.nuxie.sdk.presentation.DeviceLegPresentationRequest
 import ai.nuxie.sdk.presentation.DeviceLegPresentationReservation
 import ai.nuxie.sdk.presentation.DeviceLegPresentationResult
 import ai.nuxie.sdk.presentation.DeviceLegPresenting
+import ai.nuxie.sdk.presentation.DeviceLegScreenEmission
+import ai.nuxie.sdk.presentation.DeviceLegScreenEmissionBatch
+import ai.nuxie.sdk.presentation.DeviceLegScreenEmissionSource
 import ai.nuxie.sdk.presentation.DeviceLegSurfaceOutcome
 import android.util.Base64
 import java.io.File
@@ -185,6 +190,167 @@ class DeviceLegServiceTest {
         assertNull("an active screen is not a resumable park point", active.park)
         assertNull(active.completion)
         assertEquals("screen_welcome", presenter.request?.screenId)
+    }
+
+    @Test fun `renderer batches durably publish once and route the owning run`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val presenter = RecordingDeviceLegPresenter()
+        val systemCaptures = CopyOnWriteArrayList<String>()
+        val ordinaryCaptures = linkedMapOf<String, StoredEvent>()
+        val service = DeviceLegService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { name, _, _, _ ->
+                systemCaptures += name
+                true
+            },
+            captureScreenEvent = { name, properties, eventId, distinctId, occurredAt, admission ->
+                val event = StoredEvent(
+                    id = eventId,
+                    name = name,
+                    properties = JsonValueConverter.fromMap(properties),
+                    timestampMillis = occurredAt,
+                    distinctId = distinctId,
+                )
+                val settled = admission?.commitIfCurrent {
+                    ordinaryCaptures.putIfAbsent(eventId, event)
+                    true
+                } != null
+                StableEventCaptureResult(
+                    settled,
+                    ordinaryCaptures[eventId].takeIf { settled },
+                )
+            },
+            presenter = presenter,
+            nowMillis = { 100_000L },
+        )
+        service.initialize()
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+        val request = requireNotNull(presenter.request)
+        val run = DeviceLegRunJournal(
+            directory,
+            "customer",
+            DeviceLegStorageScope(renderedAuthority),
+        ).runs().single()
+        val first = DeviceLegScreenEmissionBatch(
+            journeyId = run.journeyId,
+            batchSequence = 0,
+            invocationId = "invocation-1",
+            source = DeviceLegScreenEmissionSource("screen_welcome", "submit"),
+            emissions = listOf(
+                DeviceLegScreenEmission(
+                    id = "emission-1",
+                    sequence = 0,
+                    occurredAtMillis = 90_000L,
+                    name = "survey_submitted",
+                    payload = JsonObject(mapOf("answer" to JsonPrimitive("premium"))),
+                ),
+            ),
+        )
+
+        assertTrue(request.onEmissionBatch(first))
+        assertTrue(request.onEmissionBatch(first))
+
+        val retained = DeviceLegRunJournal(
+            directory,
+            "customer",
+            DeviceLegStorageScope(renderedAuthority),
+        ).runs().single()
+        assertEquals(1L, retained.nextPresentationBatchSequence)
+        assertEquals(1L, retained.nextPresentationEmissionSequence)
+        assertEquals(setOf("emission-1"), ordinaryCaptures.keys)
+        val properties = ordinaryCaptures.getValue("emission-1").properties
+        assertEquals(run.journeyId, properties.getValue("journey_id").jsonPrimitive.content)
+        assertEquals("screen_welcome", properties.getValue("screen_id").jsonPrimitive.content)
+        assertEquals(90_000L, ordinaryCaptures.getValue("emission-1").timestampMillis)
+
+        assertTrue(
+            request.onEmissionBatch(
+                DeviceLegScreenEmissionBatch(
+                    journeyId = run.journeyId,
+                    batchSequence = 1,
+                    invocationId = "invocation-2",
+                    source = DeviceLegScreenEmissionSource("screen_welcome", "continue"),
+                    emissions = listOf(
+                        DeviceLegScreenEmission(
+                            id = "emission-2",
+                            sequence = 1,
+                            occurredAtMillis = 95_000L,
+                            name = "continue",
+                            payload = JsonObject(emptyMap()),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        // This lifecycle command is a FIFO barrier behind the routed continuation.
+        service.onAppDidEnterBackground()
+
+        assertEquals(setOf("emission-1", "emission-2"), ordinaryCaptures.keys)
+        assertEquals(
+            listOf(JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED),
+            systemCaptures,
+        )
+        assertTrue(
+            DeviceLegRunJournal(
+                directory,
+                "customer",
+                DeviceLegStorageScope(renderedAuthority),
+            ).runs().isEmpty(),
+        )
+    }
+
+    @Test fun `declined presentation remains parked for a later evaluation`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val captures = CopyOnWriteArrayList<String>()
+        val presenter = RecordingDeviceLegPresenter(
+            presentationResult = DeviceLegPresentationResult.Declined,
+        )
+        val service = DeviceLegService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { name, _, _, _ -> captures += name; true },
+            presenter = presenter,
+            nowMillis = { 100_000L },
+        )
+        service.initialize()
+        service.onAppWillEnterForeground()
+
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+
+        val journal = DeviceLegRunJournal(
+            directory,
+            "customer",
+            DeviceLegStorageScope(renderedAuthority),
+        )
+        assertEquals(100_000L, journal.runs().single().park?.wakeAtMillis)
+        assertEquals(listOf(JourneyEventNames.LEG_STARTED), captures)
+
+        presenter.presentationResult = DeviceLegPresentationResult.Shown
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 2)
+
+        assertEquals(2, presenter.shownCount.get())
+        assertNull(journal.runs().single().park)
+        assertNull(journal.runs().single().completion)
     }
 
     @Test fun `rendered state arm waits for foreground before admission`() = runBlocking {
@@ -1049,6 +1215,7 @@ class DeviceLegServiceTest {
 
     private class RecordingDeviceLegPresenter(
         @Volatile var available: Boolean = true,
+        @Volatile var presentationResult: DeviceLegPresentationResult? = null,
         private val beforePresent: suspend (DeviceLegPresentationRequest) -> Unit = {},
     ) : DeviceLegPresenting {
         @Volatile var request: DeviceLegPresentationRequest? = null
@@ -1063,7 +1230,11 @@ class DeviceLegServiceTest {
         ): DeviceLegPresentationResult {
             this.request = request
             beforePresent(request)
-            return if (request.canPresent()) {
+            val selected = presentationResult
+            return if (selected != null) {
+                shownCount.incrementAndGet()
+                selected
+            } else if (request.canPresent()) {
                 shownCount.incrementAndGet()
                 DeviceLegPresentationResult.Shown
             } else {

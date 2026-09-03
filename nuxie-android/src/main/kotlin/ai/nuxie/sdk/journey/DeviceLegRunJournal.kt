@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
@@ -36,9 +37,30 @@ internal data class DeviceLegRun(
     val reentry: JourneyReentry? = null,
     val requiresReleasePin: Boolean = false,
     val artifactDigests: Set<String> = emptySet(),
+    val nextPresentationBatchSequence: Long = 0,
+    val nextPresentationEmissionSequence: Long = 0,
+    val pendingPresentationPublication: PendingPresentationPublication? = null,
 ) {
     data class Park(val wakeAtMillis: Long?, val anchorAtMillis: Long? = null)
     data class Completion(val outcome: String, val atMillis: Long)
+    data class PendingPresentationPublication(
+        val invocationId: String,
+        val batchSequence: Long,
+        val nextEmissionSequence: Long,
+        val sourceScreenId: String,
+        val sourceActionId: String,
+        val sourceComponentId: String? = null,
+        val sourceInstanceId: String? = null,
+        val responsesChanged: Boolean,
+        val items: List<Item>,
+    ) {
+        data class Item(
+            val name: String,
+            val properties: JsonObject,
+            val eventId: String,
+            val occurredAtMillis: Long,
+        )
+    }
     val id get() = "$journeyId:$generation"
     val experienceId get() = reference.text("experienceId")
 }
@@ -200,15 +222,90 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         )
     }
 
+    /** Stages response mutations and ordinary renderer events in one durable run update. */
+    fun stagePresentationPublication(
+        id: String,
+        expectedStepId: String,
+        context: JsonObject,
+        publication: DeviceLegRun.PendingPresentationPublication,
+    ): DeviceLegRun? = update { state ->
+        val run = state.runs[id] ?: return@update null
+        if (run.completion != null || run.stepId != expectedStepId) return@update null
+        run.pendingPresentationPublication?.let { pending ->
+            return@update run.takeIf { pending == publication && run.context == context }
+        }
+        if (publication.invocationId.isEmpty() || publication.sourceScreenId.isEmpty() ||
+            publication.sourceActionId.isEmpty() ||
+            publication.batchSequence < 0 || publication.batchSequence == Long.MAX_VALUE ||
+            publication.nextEmissionSequence < 0 ||
+            publication.batchSequence != run.nextPresentationBatchSequence ||
+            publication.nextEmissionSequence < run.nextPresentationEmissionSequence ||
+            publication.items.any {
+                it.name.isEmpty() || it.eventId.isEmpty() ||
+                    it.occurredAtMillis < 0 || it.name.startsWith('$')
+            }
+        ) return@update null
+        run.copy(
+            context = context,
+            pendingPresentationPublication = publication,
+        ).also { state.runs[id] = it }
+    }
+
+    fun clearPresentationPublication(
+        id: String,
+        invocationId: String,
+        consumePark: Boolean = false,
+    ): DeviceLegRun? = update { state ->
+        val run = state.runs[id] ?: return@update null
+        val pending = run.pendingPresentationPublication
+            ?.takeIf { it.invocationId == invocationId }
+            ?: return@update null
+        settlePresentationPublication(run, pending).copy(
+            park = if (consumePark) null else run.park,
+        ).also { state.runs[id] = it }
+    }
+
+    /**
+     * Retires a run only after part of its renderer batch has escaped to the
+     * ordinary event log. The pending publication remains attached so its
+     * remaining observability can be replayed before the completion report.
+     */
+    fun abandonPendingPresentationPublication(
+        id: String,
+        invocationId: String,
+        atMillis: Long,
+    ): DeviceLegRun? = update { state ->
+        val run = state.runs[id] ?: return@update null
+        val pending = run.pendingPresentationPublication
+            ?.takeIf { it.invocationId == invocationId }
+            ?: return@update null
+        if (run.completion != null) return@update null
+        finish(
+            run = run,
+            outcome = "abandoned",
+            atMillis = atMillis,
+            eventOutputs = run.outputs.getValue("event").jsonObject,
+            responseOutputs = run.context.getValue("responses").jsonObject,
+        ).copy(
+            pendingPresentationPublication = pending,
+        ).also { state.runs[id] = it }
+    }
+
     /** Persist one executor transition before another step or effect runs. */
     fun transition(id: String, stepId: String, context: JsonObject,
         checkpoint: DeviceLegControlExecutor.Checkpoint? = null,
+        clearingPresentationPublication: String? = null,
     ) = update { state ->
         val run = checkNotNull(state.runs[id])
         check(run.startedQueued && run.completion == null)
-        state.runs[id] = run.copy(stepId = stepId, context = context,
+        val settled = clearingPresentationPublication?.let { invocationId ->
+            val pending = checkNotNull(run.pendingPresentationPublication)
+            check(pending.invocationId == invocationId)
+            settlePresentationPublication(run, pending)
+        } ?: run
+        state.runs[id] = settled.copy(stepId = stepId, context = context,
             park = checkpoint?.let { DeviceLegRun.Park(it.wakeAtMillis, it.anchorAtMillis) },
-            effectReceipts = run.effectReceipts - run.stepId)
+            effectReceipts = settled.effectReceipts - settled.stepId)
     }
 
     fun park(id: String, stepId: String, untilMillis: Long?) = update { state ->
@@ -443,6 +540,11 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         run.reentry?.let { put("reentry", encodeReentry(it)) }
         put("requiresReleasePin", JsonPrimitive(run.requiresReleasePin))
         put("artifactDigests", JsonArray(run.artifactDigests.sorted().map(::JsonPrimitive)))
+        put("nextPresentationBatchSequence", JsonPrimitive(run.nextPresentationBatchSequence))
+        put("nextPresentationEmissionSequence", JsonPrimitive(run.nextPresentationEmissionSequence))
+        run.pendingPresentationPublication?.let {
+            put("pendingPresentationPublication", encodePresentationPublication(it))
+        }
         run.park?.let { park -> put("park", buildJsonObject {
             park.wakeAtMillis?.let { put("wakeAtMillis", JsonPrimitive(it)) }
             park.anchorAtMillis?.let { put("anchorAtMillis", JsonPrimitive(it)) }
@@ -471,6 +573,65 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
                 if (!DIGEST.matches(digest)) throw IOException("Invalid retained artifact digest")
             }
         },
+        nextPresentationBatchSequence = value["nextPresentationBatchSequence"]
+            ?.jsonPrimitive?.long ?: 0,
+        nextPresentationEmissionSequence = value["nextPresentationEmissionSequence"]
+            ?.jsonPrimitive?.long ?: 0,
+        pendingPresentationPublication = value["pendingPresentationPublication"]
+            ?.jsonObject?.let(::decodePresentationPublication),
+    )
+
+    private fun encodePresentationPublication(
+        publication: DeviceLegRun.PendingPresentationPublication,
+    ): JsonObject = buildJsonObject {
+        put("invocationId", JsonPrimitive(publication.invocationId))
+        put("batchSequence", JsonPrimitive(publication.batchSequence))
+        put("nextEmissionSequence", JsonPrimitive(publication.nextEmissionSequence))
+        put("sourceScreenId", JsonPrimitive(publication.sourceScreenId))
+        put("sourceActionId", JsonPrimitive(publication.sourceActionId))
+        publication.sourceComponentId?.let { put("sourceComponentId", JsonPrimitive(it)) }
+        publication.sourceInstanceId?.let { put("sourceInstanceId", JsonPrimitive(it)) }
+        put("responsesChanged", JsonPrimitive(publication.responsesChanged))
+        put("items", JsonArray(publication.items.map { item ->
+            buildJsonObject {
+                put("name", JsonPrimitive(item.name))
+                put("properties", item.properties)
+                put("eventId", JsonPrimitive(item.eventId))
+                put("occurredAtMillis", JsonPrimitive(item.occurredAtMillis))
+            }
+        }))
+    }
+
+    private fun decodePresentationPublication(
+        value: JsonObject,
+    ): DeviceLegRun.PendingPresentationPublication =
+        DeviceLegRun.PendingPresentationPublication(
+            invocationId = value.text("invocationId"),
+            batchSequence = value.number("batchSequence"),
+            nextEmissionSequence = value.number("nextEmissionSequence"),
+            sourceScreenId = value.text("sourceScreenId"),
+            sourceActionId = value.text("sourceActionId"),
+            sourceComponentId = value["sourceComponentId"]?.jsonPrimitive?.content,
+            sourceInstanceId = value["sourceInstanceId"]?.jsonPrimitive?.content,
+            responsesChanged = value.getValue("responsesChanged").jsonPrimitive.boolean,
+            items = value.getValue("items").jsonArray.map { element ->
+                val item = element.jsonObject
+                DeviceLegRun.PendingPresentationPublication.Item(
+                    name = item.text("name"),
+                    properties = item.getValue("properties").jsonObject,
+                    eventId = item.text("eventId"),
+                    occurredAtMillis = item.number("occurredAtMillis"),
+                )
+            },
+        )
+
+    private fun settlePresentationPublication(
+        run: DeviceLegRun,
+        publication: DeviceLegRun.PendingPresentationPublication,
+    ): DeviceLegRun = run.copy(
+        nextPresentationBatchSequence = publication.batchSequence + 1,
+        nextPresentationEmissionSequence = publication.nextEmissionSequence,
+        pendingPresentationPublication = null,
     )
 
     private fun retainReleasePin(

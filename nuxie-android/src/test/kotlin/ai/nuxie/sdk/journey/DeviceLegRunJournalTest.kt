@@ -208,6 +208,105 @@ class DeviceLegRunJournalTest {
             .getValue("answer").jsonPrimitive.content)
     }
 
+    @Test fun `renderer publication survives reopen before advancing sequences`() {
+        val journal = DeviceLegRunJournal(directory, "customer")
+        val run = requireNotNull(
+            journal.admit(arm(), JourneyReentry.EveryTime, "survey", 100_000),
+        )
+        journal.markStartedQueued(run)
+        val context = JsonObject(
+            run.context + (
+                "responses" to JsonObject(mapOf("answer" to JsonPrimitive("premium")))
+            ),
+        )
+        val publication = DeviceLegRun.PendingPresentationPublication(
+            invocationId = "invocation-1",
+            batchSequence = 0,
+            nextEmissionSequence = 2,
+            sourceScreenId = "survey",
+            sourceActionId = "submit",
+            sourceComponentId = "submit-button",
+            sourceInstanceId = "survey-1",
+            responsesChanged = true,
+            items = listOf(
+                DeviceLegRun.PendingPresentationPublication.Item(
+                    name = "survey_submitted",
+                    properties = JsonObject(mapOf("answer" to JsonPrimitive("premium"))),
+                    eventId = "emission-2",
+                    occurredAtMillis = 101_000,
+                ),
+            ),
+        )
+
+        assertNotNull(
+            journal.stagePresentationPublication(run.id, "survey", context, publication),
+        )
+        assertNotNull(
+            journal.stagePresentationPublication(run.id, "survey", context, publication),
+        )
+
+        val staged = DeviceLegRunJournal(directory, "customer").runs().single()
+        assertEquals(publication, staged.pendingPresentationPublication)
+        assertEquals("premium", staged.context.getValue("responses").jsonObject
+            .getValue("answer").jsonPrimitive.content)
+        assertEquals(0L, staged.nextPresentationBatchSequence)
+        assertEquals(0L, staged.nextPresentationEmissionSequence)
+
+        val cleared = requireNotNull(
+            DeviceLegRunJournal(directory, "customer")
+                .clearPresentationPublication(run.id, "invocation-1"),
+        )
+        assertNull(cleared.pendingPresentationPublication)
+        assertEquals(1L, cleared.nextPresentationBatchSequence)
+        assertEquals(2L, cleared.nextPresentationEmissionSequence)
+        assertEquals("premium", cleared.context.getValue("responses").jsonObject
+            .getValue("answer").jsonPrimitive.content)
+    }
+
+    @Test fun `partially published renderer batch abandons with responses before report retirement`() {
+        val journal = DeviceLegRunJournal(directory, "customer")
+        val run = requireNotNull(
+            journal.admit(arm(), JourneyReentry.EveryTime, "survey", 100_000),
+        )
+        journal.markStartedQueued(run)
+        val context = JsonObject(
+            run.context + (
+                "responses" to JsonObject(mapOf("answer" to JsonPrimitive("premium")))
+                ),
+        )
+        val publication = DeviceLegRun.PendingPresentationPublication(
+            invocationId = "invocation-1",
+            batchSequence = 0,
+            nextEmissionSequence = 1,
+            sourceScreenId = "survey",
+            sourceActionId = "submit",
+            responsesChanged = true,
+            items = listOf(
+                DeviceLegRun.PendingPresentationPublication.Item(
+                    name = "survey_submitted",
+                    properties = JsonObject(emptyMap()),
+                    eventId = "event-1",
+                    occurredAtMillis = 100,
+                ),
+            ),
+        )
+        requireNotNull(
+            journal.stagePresentationPublication(run.id, run.stepId, context, publication),
+        )
+
+        val abandoned = requireNotNull(
+            journal.abandonPendingPresentationPublication(run.id, "invocation-1", 200),
+        )
+
+        assertEquals("abandoned", abandoned.completion?.outcome)
+        assertEquals(
+            JsonPrimitive("premium"),
+            abandoned.outputs.getValue("responses").jsonObject["answer"],
+        )
+        assertEquals(publication, abandoned.pendingPresentationPublication)
+        assertEquals(0L, abandoned.nextPresentationBatchSequence)
+    }
+
     @Test fun `continuations do not restart reentry windows or regress consumed chapters`() {
         val journal = DeviceLegRunJournal(directory, "customer")
         val policy = JourneyReentry.OncePerWindow(100_000)

@@ -107,9 +107,10 @@ internal class EventLog(
             val eventId: String,
             val distinctId: String,
             val applyBeforeSend: Boolean,
+            val occurredAtMillis: Long?,
             val commitAdmission: StableEventCommitAdmission?,
             val admissionTickets: List<AdmissionTicket>,
-            val done: CompletableDeferred<Boolean>,
+            val done: CompletableDeferred<StableEventCaptureResult>,
         ) : Command
         data class CaptureDeliveredIdempotently(
             val name: String,
@@ -193,12 +194,13 @@ internal class EventLog(
                             command.eventId,
                             command.distinctId,
                             command.applyBeforeSend,
+                            command.occurredAtMillis,
                             command.commitAdmission,
                             command.admissionTickets,
                         )
                     }.onFailure { Log.w(LOG_TAG, "Idempotent event capture failed", it) }
-                        .getOrElse { IdempotentCaptureResult(false, null, false) }
-                    command.done.complete(result)
+                        .getOrDefault(StableEventCaptureResult(false, null))
+                    command.done.complete(captured)
                 }
                 is Command.CaptureDeliveredIdempotently -> {
                     val captured = runCatching {
@@ -434,8 +436,9 @@ internal class EventLog(
         eventId,
         distinctId,
         applyBeforeSend = true,
+        occurredAtMillis = null,
         commitAdmission = null,
-    )
+    ).settled
 
     /** Stable capture whose final SQLite mutation is execution-fenced. */
     suspend fun captureIdempotentlyIfCurrent(
@@ -450,6 +453,25 @@ internal class EventLog(
         eventId,
         distinctId,
         applyBeforeSend = true,
+        occurredAtMillis = null,
+        commitAdmission = admission,
+    ).settled
+
+    /** Stable ordinary event capture preserving renderer occurrence time. */
+    suspend fun captureScreenEvent(
+        name: String,
+        properties: Map<String, Any?>,
+        eventId: String,
+        distinctId: String,
+        occurredAtMillis: Long,
+        admission: StableEventCommitAdmission?,
+    ): StableEventCaptureResult = captureIdempotently(
+        name,
+        properties,
+        eventId,
+        distinctId,
+        applyBeforeSend = true,
+        occurredAtMillis = occurredAtMillis,
         commitAdmission = admission,
     )
 
@@ -465,8 +487,9 @@ internal class EventLog(
         eventId,
         distinctId,
         applyBeforeSend = false,
+        occurredAtMillis = null,
         commitAdmission = null,
-    )
+    ).settled
 
     internal suspend fun captureIdempotentlyWithResult(
         name: String,
@@ -474,22 +497,26 @@ internal class EventLog(
         eventId: String,
         distinctId: String,
         applyBeforeSend: Boolean,
+        occurredAtMillis: Long?,
         commitAdmission: StableEventCommitAdmission?,
-    ): Boolean {
-        if (name.isEmpty() || eventId.isEmpty() || distinctId.isEmpty()) return false
-        val done = CompletableDeferred<Boolean>()
+    ): StableEventCaptureResult {
+        if (name.isEmpty() || eventId.isEmpty() || distinctId.isEmpty()) {
+            return StableEventCaptureResult(false, null)
+        }
+        val done = CompletableDeferred<StableEventCaptureResult>()
         val command = Command.CaptureIdempotently(
             name,
             properties,
             eventId,
             distinctId,
             applyBeforeSend,
+            occurredAtMillis,
             commitAdmission,
             sampleAdmissionTickets(),
             done,
         )
         if (commands.trySend(command).isFailure) {
-            return IdempotentCaptureResult(false, null, false)
+            return StableEventCaptureResult(false, null)
         }
         return done.await()
     }
@@ -586,10 +613,11 @@ internal class EventLog(
         eventId: String,
         distinctId: String,
         applyBeforeSend: Boolean,
+        occurredAtMillis: Long?,
         commitAdmission: StableEventCommitAdmission?,
         admissionTickets: List<AdmissionTicket>,
-    ): Boolean {
-        if (store.hasStableOutcome(eventId)) return true
+    ): StableEventCaptureResult {
+        existingStableCapture(eventId)?.let { return it }
         var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties)
         // Leg outputs are validated JSON. Keep their exact values through
         // analytics sanitization; beforeSend still governs the full event.
@@ -606,7 +634,7 @@ internal class EventLog(
             name = name,
             distinctId = distinctId,
             properties = contextBuilder.buildEnrichedProperties(sanitized),
-            timestampMillis = nowMillis(),
+            timestampMillis = occurredAtMillis ?: nowMillis(),
         )
         val transformed = if (applyBeforeSend) {
             applyBeforeSendPreservingStableIdentity(original)
@@ -624,15 +652,16 @@ internal class EventLog(
                     commitAdmission,
                 ) != null
             }
-            if (!recorded) return false
+            if (!recorded) return StableEventCaptureResult(false, null)
             Log.d(LOG_TAG, "Event '$name' terminally dropped by beforeSend hook")
-            return IdempotentCaptureResult(true, null, false)
+            return StableEventCaptureResult(true, null)
         }
         val stored = projectPostTransform(original, transformed)
         val commit = if (commitAdmission == null) {
             store.insertPendingIfAbsentAndStageRoute(stored)
         } else {
-            store.insertPendingIfAbsentAndStageRoute(stored, commitAdmission) ?: return false
+            store.insertPendingIfAbsentAndStageRoute(stored, commitAdmission)
+                ?: return StableEventCaptureResult(false, null)
         }
         if (commit.inserted) {
             resolveForwarding(stored)
@@ -640,11 +669,26 @@ internal class EventLog(
         if (commit.localRoutePending && activeLocalRouteIds.add(stored.id)) {
             resolveRoute(stored, admissionTickets, localRouteEventId = stored.id)
         }
-        return IdempotentCaptureResult(
-            succeeded = true,
-            storedEvent = stored.takeIf { inserted },
-            newlyCaptured = inserted,
-        )
+        return if (commit.inserted) {
+            StableEventCaptureResult(true, stored, commit.localRoutePending)
+        } else {
+            existingStableCapture(eventId) ?: StableEventCaptureResult(false, null)
+        }
+    }
+
+    private suspend fun existingStableCapture(eventId: String): StableEventCaptureResult? {
+        store.stableEvent(eventId)?.let {
+            return StableEventCaptureResult(
+                settled = true,
+                event = it,
+                localRoutePending = store.isLocalRoutePending(eventId),
+            )
+        }
+        return if (store.hasStableOutcome(eventId)) {
+            StableEventCaptureResult(true, null)
+        } else {
+            null
+        }
     }
 
     private suspend fun commitServerFactNow(

@@ -11,6 +11,7 @@ class NuxiePlayerStepOutcomeTest {
     fun `copies typed runtime events and view-model journal values`() {
         val native = NativePlayerStepOutcome(
             keepGoing = true,
+            pointerHits = intArrayOf(0, 2),
             events = arrayOf(
                 NativeRuntimeEvent(
                     localIndex = 7,
@@ -29,6 +30,32 @@ class NuxiePlayerStepOutcomeTest {
                     ),
                 ),
             ),
+            hostCommands = arrayOf(
+                NativeHostCommand(
+                    name = "\$response_set",
+                    value = NativeHostValue(
+                        kind = 5,
+                        boolValue = false,
+                        numberValue = 0.0,
+                        stringValue = "",
+                        listValue = emptyArray(),
+                        objectValue = arrayOf(
+                            NativeHostField("field", nativeString("answer")),
+                            NativeHostField(
+                                "value",
+                                NativeHostValue(
+                                    kind = 4,
+                                    boolValue = false,
+                                    numberValue = 0.0,
+                                    stringValue = "",
+                                    listValue = arrayOf(nativeString("yes")),
+                                    objectValue = emptyArray(),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
             viewModelChanges = arrayOf(
                 NativeViewModelChange(1, 23, 41, 2, 1, "done".encodeToByteArray(), 0f, 0, false, 0, longArrayOf()),
                 NativeViewModelChange(0, 24, 41, 3, 8, byteArrayOf(), 0f, 0, false, 0, longArrayOf(50, 51)),
@@ -38,6 +65,7 @@ class NuxiePlayerStepOutcomeTest {
         val outcome = native.toPlayerStepOutcome()
 
         assertTrue(outcome.keepGoing)
+        assertEquals(listOf(NuxiePlayerPointerHit.NONE, NuxiePlayerPointerHit.HIT_OPAQUE), outcome.pointerHits)
         val event = outcome.events.single()
         assertEquals(7, event.localIndex)
         assertEquals(NuxieRuntimeEventPropertyValue.Number(12.5f), event.properties[0].value)
@@ -49,6 +77,14 @@ class NuxiePlayerStepOutcomeTest {
         assertEquals(NuxieRuntimeEventPropertyValue.Color(0x80402010.toInt()), event.properties[3].value)
         assertEquals(NuxieRuntimeEventPropertyValue.Enum(3uL), event.properties[4].value)
         assertEquals(NuxieRuntimeEventPropertyValue.Trigger, event.properties[5].value)
+        assertEquals("\$response_set", outcome.hostCommands.single().name)
+        val hostPayload = outcome.hostCommands.single().value as NuxieHostValue.Object
+        assertEquals("field", hostPayload.fields[0].key)
+        assertEquals(NuxieHostValue.String("answer"), hostPayload.fields[0].value)
+        assertEquals(
+            NuxieHostValue.List(listOf(NuxieHostValue.String("yes"))),
+            hostPayload.fields[1].value,
+        )
 
         assertEquals(NuxieViewModelChangeOrigin.RUNTIME, outcome.viewModelChanges[0].origin)
         assertEquals(23uL, outcome.viewModelChanges[0].correlationId)
@@ -109,9 +145,20 @@ class NuxiePlayerStepOutcomeTest {
     private fun outcome(vararg changes: NativeViewModelChange): NuxiePlayerStepOutcome =
         NativePlayerStepOutcome(
             keepGoing = false,
+            pointerHits = intArrayOf(),
             events = emptyArray(),
+            hostCommands = emptyArray(),
             viewModelChanges = arrayOf(*changes),
         ).toPlayerStepOutcome()
+
+    private fun nativeString(value: String) = NativeHostValue(
+        kind = 3,
+        boolValue = false,
+        numberValue = 0.0,
+        stringValue = value,
+        listValue = emptyArray(),
+        objectValue = emptyArray(),
+    )
 
     private fun change(
         kind: Int,

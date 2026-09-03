@@ -27,6 +27,7 @@ internal class DeviceLegReporter(
                 journal.markStartedQueued(run)
             }
             if (run.completion != null) {
+                if (run.pendingPresentationPublication != null) continue
                 if (!queue(run, completion = true)) continue
                 journal.markCompletionQueued(run)
                 onRunRetired(run)
