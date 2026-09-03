@@ -428,6 +428,8 @@ internal class NuxieCore(
                 },
                 nextBatchSequence = request.nextBatchSequence,
                 nextEmissionSequence = request.nextEmissionSequence,
+                onScreenChanged = request.onScreenChanged,
+                onScreenDismissed = request.onScreenDismissed,
                 onEmissionBatch = request.onEmissionBatch,
                 onPresentationRevealed = request.onPresentationRevealed,
                 onOutcome = request.onOutcome,
@@ -436,10 +438,12 @@ internal class NuxieCore(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: ExperiencePresentationException) {
-            if (error.reason == ExperiencePresentationException.Reason.DECLINED) {
-                DeviceLegPresentationResult.Declined
-            } else {
-                DeviceLegPresentationResult.Failed
+            when (error.reason) {
+                ExperiencePresentationException.Reason.DECLINED ->
+                    DeviceLegPresentationResult.Declined
+                ExperiencePresentationException.Reason.JOURNEY_COMPLETED ->
+                    DeviceLegPresentationResult.Completed
+                else -> DeviceLegPresentationResult.Failed
             }
         } catch (_: Exception) {
             DeviceLegPresentationResult.Failed
@@ -447,6 +451,13 @@ internal class NuxieCore(
 
         override suspend fun shutdownOwnedBy(ownerDistinctId: String) {
             presentations.shutdownOwnedBy(ownerDistinctId)
+        }
+
+        override suspend fun shutdownPresentation(
+            ownerDistinctId: String,
+            journeyId: String,
+        ) {
+            presentations.shutdownDeviceLeg(ownerDistinctId, journeyId)
         }
     }
 
@@ -496,6 +507,7 @@ internal class NuxieCore(
         scope = scope,
         capture = eventLog::captureIdempotently,
         captureScreenEvent = eventLog::captureScreenEvent,
+        capturePresentationEvent = eventLog::captureRoutedSystemEvent,
         featureAccess = { featureId ->
             features.getCached(featureId, requiredBalance = null, entityId = null)
         },

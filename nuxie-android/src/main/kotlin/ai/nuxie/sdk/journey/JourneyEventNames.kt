@@ -15,4 +15,5 @@ internal object JourneyEventNames {
     const val EXPERIENCE_ARTIFACT_LOAD_FAILED = "\$experience_artifact_load_failed"
     const val EXPERIMENT_EXPOSURE = "\$experiment_exposure"
     const val EXPERIMENT_EXPOSURE_ERROR = "\$experiment_exposure_error"
+    const val EXPERIMENT_EXPOSURE_FALLBACK = "\$experiment_exposure_fallback"
 }

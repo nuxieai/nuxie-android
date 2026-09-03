@@ -8,6 +8,7 @@ import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.StableEventCaptureResult
 import ai.nuxie.sdk.events.StoredEvent
+import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.experiences.AcquiredRelease
 import ai.nuxie.sdk.experiences.DeviceLegArtifactManager
 import ai.nuxie.sdk.experiences.DeviceLegProfileCatalog
@@ -27,6 +28,7 @@ import ai.nuxie.sdk.presentation.DeviceLegPresenting
 import ai.nuxie.sdk.presentation.DeviceLegScreenEmission
 import ai.nuxie.sdk.presentation.DeviceLegScreenEmissionBatch
 import ai.nuxie.sdk.presentation.DeviceLegScreenEmissionSource
+import ai.nuxie.sdk.presentation.DeviceLegScreenDismissalResult
 import ai.nuxie.sdk.presentation.DeviceLegSurfaceOutcome
 import android.util.Base64
 import java.io.File
@@ -307,6 +309,7 @@ class DeviceLegServiceTest {
             listOf(JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED),
             systemCaptures,
         )
+        assertEquals(listOf("customer"), presenter.shutdowns)
         assertTrue(
             DeviceLegRunJournal(
                 directory,
@@ -353,6 +356,7 @@ class DeviceLegServiceTest {
                     release.leg.getValue("entryStepId").jsonPrimitive.content,
                     100_000L,
                     release = snapshot.profile.releases.single(),
+                    executionSnapshot = executionSnapshot(snapshot),
                 ),
             )
             journal.markStartedQueued(run)
@@ -463,9 +467,20 @@ class DeviceLegServiceTest {
         assertEquals(listOf(JourneyEventNames.LEG_STARTED), captures)
 
         presenter.presentationResult = DeviceLegPresentationResult.Shown
-        service.profileDidCommit(snapshot, renderedAuthority, "customer", 2)
+        val replacement = catalog.prepare(
+            profile(
+                releaseEntry = renderedEntry,
+                renderBaseUrl = "https://replacement-renders.example.com/",
+                assetBaseUrl = "https://replacement-assets.example.com/",
+            ),
+            renderedAuthority,
+        )
+        catalog.commit("customer", replacement)
+        val replacementSnapshot = requireNotNull(catalog.snapshot("customer"))
+        service.profileDidCommit(replacementSnapshot, renderedAuthority, "customer", 2)
 
         assertEquals(2, presenter.shownCount.get())
+        assertEquals(snapshot.profile.delivery, presenter.request?.delivery)
         assertNull(journal.runs().single().park)
         assertNull(journal.runs().single().completion)
     }
@@ -622,6 +637,13 @@ class DeviceLegServiceTest {
         service.initialize()
         service.onAppWillEnterForeground()
         service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+        val journal = DeviceLegRunJournal(
+            directory,
+            "customer",
+            DeviceLegStorageScope(renderedAuthority),
+        )
+        val active = journal.runs().single()
+        journal.transition(active.id, "cursor_changed_after_show", active.context)
 
         requireNotNull(presenter.request).onOutcome(DeviceLegSurfaceOutcome.DISMISSED)
 
@@ -630,17 +652,190 @@ class DeviceLegServiceTest {
             captures.map { it.first },
         )
         assertEquals("host_dismissed", captures.last().second["outcome"])
-        val journal = DeviceLegRunJournal(
-            directory,
-            "customer",
-            DeviceLegStorageScope(renderedAuthority),
-        )
         assertTrue(journal.runs().isEmpty())
         assertEquals(
             "host_dismissed",
             journal.checkmark("experience_golden")?.outcome,
         )
     }
+
+    @Test fun `screen lifecycle events publish with run identity and own user dismissal`() =
+        runBlocking {
+            val identity = identity("customer")
+            val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+            val catalog = catalog(renderedEntry)
+            val renderedAuthority = authority(renderedEntry)
+            val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+            catalog.commit("customer", prepared)
+            val snapshot = requireNotNull(catalog.snapshot("customer"))
+            val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+            val presenter = RecordingDeviceLegPresenter()
+            val service = DeviceLegService(
+                identity = identity,
+                events = store,
+                catalog = catalog,
+                journalDirectory = directory,
+                scope = scope,
+                capture = { name, properties, _, _ ->
+                    captures += name to properties
+                    true
+                },
+                presenter = presenter,
+                nowMillis = { 100_000L },
+            )
+            service.initialize()
+            service.onAppWillEnterForeground()
+            service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+            val request = requireNotNull(presenter.request)
+
+            assertTrue(request.onScreenChanged("screen_welcome"))
+            assertEquals(
+                DeviceLegScreenDismissalResult.COMPLETED,
+                request.onScreenDismissed("screen_welcome", null, "user"),
+            )
+
+            assertEquals(
+                listOf(
+                    JourneyEventNames.LEG_STARTED,
+                    SystemEventNames.SCREEN_SHOWN,
+                    SystemEventNames.SCREEN_DISMISSED,
+                    JourneyEventNames.LEG_COMPLETED,
+                ),
+                captures.map { it.first },
+            )
+            val shown = captures.single { it.first == SystemEventNames.SCREEN_SHOWN }.second
+            val dismissed = captures.single {
+                it.first == SystemEventNames.SCREEN_DISMISSED
+            }.second
+            for (properties in listOf(shown, dismissed)) {
+                assertEquals("experience_golden", properties["experience_id"])
+                assertEquals("version_golden", properties["experience_version"])
+                assertEquals("screen_welcome", properties["screen_id"])
+                assertEquals(0L, properties["leg_generation"])
+                assertTrue((properties["journey_id"] as? String).orEmpty().isNotEmpty())
+                assertEquals(
+                    renderedEntry.getValue("locator").jsonObject
+                        .getValue("legId").jsonPrimitive.content,
+                    properties["leg_id"],
+                )
+            }
+            assertEquals("user", dismissed["method"])
+            assertEquals(
+                "host_dismissed",
+                captures.last().second["outcome"],
+            )
+        }
+
+    @Test fun `presentation lifecycle callback cannot deadlock the blocked journey worker`() =
+        runBlocking {
+            val identity = identity("customer")
+            val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+            val catalog = catalog(renderedEntry)
+            val renderedAuthority = authority(renderedEntry)
+            val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+            catalog.commit("customer", prepared)
+            val snapshot = requireNotNull(catalog.snapshot("customer"))
+            val captures = CopyOnWriteArrayList<String>()
+            val presenter = RecordingDeviceLegPresenter(
+                beforePresent = { request ->
+                    assertTrue(
+                        scope.async {
+                            request.onScreenChanged("screen_welcome")
+                        }.await(),
+                    )
+                },
+            )
+            val service = DeviceLegService(
+                identity = identity,
+                events = store,
+                catalog = catalog,
+                journalDirectory = directory,
+                scope = scope,
+                capture = { name, _, _, _ -> captures.add(name) },
+                presenter = presenter,
+                nowMillis = { 100_000L },
+            )
+            service.initialize()
+            service.onAppWillEnterForeground()
+
+            withTimeout(5_000L) {
+                service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+            }
+
+            assertEquals(
+                listOf(JourneyEventNames.LEG_STARTED, SystemEventNames.SCREEN_SHOWN),
+                captures,
+            )
+        }
+
+    @Test fun `presentation reveal publishes only exposures bound to that screen`() =
+        runBlocking {
+            val identity = identity("customer")
+            val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+            val catalog = catalog(renderedEntry)
+            val renderedAuthority = authority(renderedEntry)
+            val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+            catalog.commit("customer", prepared)
+            val snapshot = requireNotNull(catalog.snapshot("customer"))
+            val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+            val presenter = RecordingDeviceLegPresenter()
+            val service = DeviceLegService(
+                identity = identity,
+                events = store,
+                catalog = catalog,
+                journalDirectory = directory,
+                scope = scope,
+                capture = { name, properties, _, _ ->
+                    captures += name to properties
+                    true
+                },
+                presenter = presenter,
+                nowMillis = { 100_000L },
+            )
+            service.initialize()
+            service.onAppWillEnterForeground()
+            service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+            val journal = DeviceLegRunJournal(
+                directory,
+                "customer",
+                DeviceLegStorageScope(renderedAuthority),
+            )
+            val run = journal.runs().single()
+            journal.transition(
+                run.id,
+                run.stepId,
+                run.context,
+                experimentExposure = DeviceLegRun.ExperimentExposure(
+                    experimentId = "checkout",
+                    variantId = "treatment",
+                    assignedVariantId = "treatment",
+                    isHoldout = true,
+                    kind = DeviceLegRun.ExperimentExposure.Kind.ASSIGNED,
+                    eventId = "exposure-1",
+                    selectedAtMillis = 99_000L,
+                ),
+            )
+            journal.bindExperimentExposures(run.id, "screen_welcome")
+            val request = requireNotNull(presenter.request)
+
+            request.onPresentationRevealed("different_screen")
+            assertTrue(captures.none { it.first == JourneyEventNames.EXPERIMENT_EXPOSURE })
+
+            request.onPresentationRevealed("screen_welcome")
+            request.onPresentationRevealed("screen_welcome")
+
+            val exposures = captures.filter {
+                it.first == JourneyEventNames.EXPERIMENT_EXPOSURE
+            }
+            assertEquals(1, exposures.size)
+            assertEquals("checkout", exposures.single().second["experiment_key"])
+            assertEquals("treatment", exposures.single().second["variant_key"])
+            assertEquals("profile", exposures.single().second["assignment_source"])
+            assertEquals(true, exposures.single().second["is_holdout"])
+            val persisted = journal.runs().single().experimentExposures.single()
+            assertEquals(100_000L, persisted.shownAtMillis)
+            assertTrue(persisted.queued)
+        }
 
     @Test fun `live rendered run retains artifacts across profile replacement until report`() =
         runBlocking {
@@ -724,6 +919,7 @@ class DeviceLegServiceTest {
                     entryStepId,
                     100_000L + index,
                     release = releaseEntry,
+                    executionSnapshot = executionSnapshot(snapshot),
                 ),
             )
             journal.markStartedQueued(run)
@@ -785,6 +981,7 @@ class DeviceLegServiceTest {
                     entryStepId,
                     100_000L,
                     release = releaseEntry,
+                    executionSnapshot = executionSnapshot(snapshot),
                 ),
             )
             journal.markStartedQueued(run)
@@ -897,6 +1094,7 @@ class DeviceLegServiceTest {
                     entryStepId,
                     100_000L,
                     release = releaseEntry,
+                    executionSnapshot = executionSnapshot(snapshot),
                 ),
             )
             journal.markStartedQueued(run)
@@ -1376,6 +1574,13 @@ class DeviceLegServiceTest {
         return requireNotNull(catalog.snapshot("customer"))
     }
 
+    private fun executionSnapshot(
+        snapshot: DeviceLegProfileCatalog.Snapshot,
+    ) = DeviceLegRun.ExecutionSnapshot(
+        delivery = snapshot.profile.delivery,
+        assignments = snapshot.profile.facts.getValue("assignments").jsonObject,
+    )
+
     private fun dispatchRequest(
         identity: IdentityService,
         action: JsonObject,
@@ -1456,6 +1661,8 @@ class DeviceLegServiceTest {
     private fun profile(
         entryCondition: JsonObject = buildJsonObject { put("type", "app_foregrounded") },
         releaseEntry: JsonObject = entry,
+        renderBaseUrl: String = "https://renders.example.com/",
+        assetBaseUrl: String = "https://assets.example.com/",
     ): JsonObject {
         val locator = releaseEntry.getValue("locator").jsonObject
         val envelope = releaseEntry.getValue("envelope").jsonObject
@@ -1463,8 +1670,8 @@ class DeviceLegServiceTest {
             put("schemaVersion", "nuxie.journey-plane-profile.v1")
             put("status", "ok")
             putJsonObject("delivery") {
-                put("renderBaseUrl", "https://renders.example.com/")
-                put("assetBaseUrl", "https://assets.example.com/")
+                put("renderBaseUrl", renderBaseUrl)
+                put("assetBaseUrl", assetBaseUrl)
             }
             putJsonArray("features") {}
             putJsonObject("facts") {

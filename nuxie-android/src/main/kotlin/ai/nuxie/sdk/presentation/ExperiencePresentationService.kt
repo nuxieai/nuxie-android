@@ -74,6 +74,7 @@ internal class ExperiencePresentationException(
         ACQUISITION_FAILED,
         PREPARATION_FAILED,
         HOST_FAILED,
+        JOURNEY_COMPLETED,
         FIRST_FRAME_TIMEOUT,
         SUPERSEDED,
         DECLINED,
@@ -367,8 +368,15 @@ internal class ExperiencePresentationService(
     private sealed interface OutcomeSink {
         data object Legacy : OutcomeSink
         class DeviceLeg(
+            val screenId: String,
             val onOutcome: suspend (DeviceLegSurfaceOutcome) -> Unit,
+            val onScreenDismissed: suspend (
+                String,
+                String?,
+                String,
+            ) -> DeviceLegScreenDismissalResult,
             val emissions: DeviceLegRuntimeEmissionCoordinator,
+            val screenDismissed: AtomicBoolean = AtomicBoolean(false),
         ) : OutcomeSink
     }
 
@@ -473,6 +481,14 @@ internal class ExperiencePresentationService(
         acquire: suspend () -> AcquiredRelease,
         nextBatchSequence: Long = 0,
         nextEmissionSequence: Long = 0,
+        onScreenChanged: suspend (String) -> Boolean = { true },
+        onScreenDismissed: suspend (
+            String,
+            String?,
+            String,
+        ) -> DeviceLegScreenDismissalResult = { _, _, _ ->
+            DeviceLegScreenDismissalResult.HANDLED
+        },
         onEmissionBatch: suspend (DeviceLegScreenEmissionBatch) -> Boolean = { true },
         onPresentationRevealed: suspend (String) -> Unit = {},
         onOutcome: suspend (DeviceLegSurfaceOutcome) -> Unit,
@@ -486,7 +502,9 @@ internal class ExperiencePresentationService(
             reservationId = reserved?.id,
             reservationRequired = true,
             outcomeSink = OutcomeSink.DeviceLeg(
+                screenId = screenId,
                 onOutcome = onOutcome,
+                onScreenDismissed = onScreenDismissed,
                 emissions = DeviceLegRuntimeEmissionCoordinator(
                     journeyId = journeyId,
                     screenId = screenId,
@@ -494,6 +512,7 @@ internal class ExperiencePresentationService(
                     nextBatchSequence = nextBatchSequence,
                     nextEmissionSequence = nextEmissionSequence,
                     onEmissionBatch = onEmissionBatch,
+                    onScreenChanged = onScreenChanged,
                     onPresentationRevealed = onPresentationRevealed,
                     onOpenLink = openLink,
                 ),
@@ -559,6 +578,23 @@ internal class ExperiencePresentationService(
                 }
 
                 existing?.let {
+                    val outgoing = it.outcomeSink as? OutcomeSink.DeviceLeg
+                    val incoming = outcomeSink as? OutcomeSink.DeviceLeg
+                    val dismissal = if (outgoing != null && incoming != null &&
+                        outgoing.screenDismissed.compareAndSet(false, true)
+                    ) {
+                        try {
+                            outgoing.onScreenDismissed(
+                                outgoing.screenId,
+                                incoming.screenId,
+                                "navigate",
+                            )
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Throwable) {
+                            DeviceLegScreenDismissalResult.REJECTED
+                        }
+                    } else null
                     PresentationRegistry.dismiss(it.id, CloseReason.JourneyNavigation)
                     attemptOutcome(
                         it,
@@ -569,6 +605,19 @@ internal class ExperiencePresentationService(
                         ),
                     )
                     it.finished.await()
+                    when (dismissal) {
+                        DeviceLegScreenDismissalResult.COMPLETED ->
+                            throw ExperiencePresentationException(
+                                ExperiencePresentationException.Reason.JOURNEY_COMPLETED,
+                                "Journey completed while dismissing its previous screen",
+                            )
+                        DeviceLegScreenDismissalResult.REJECTED ->
+                            throw ExperiencePresentationException(
+                                ExperiencePresentationException.Reason.HOST_FAILED,
+                                "Journey screen dismissal was rejected",
+                            )
+                        DeviceLegScreenDismissalResult.HANDLED, null -> Unit
+                    }
                 }
 
                 val source = try {
@@ -740,6 +789,23 @@ internal class ExperiencePresentationService(
         joinAll(active.finished, active.runTransitionFinished)
     }
 
+    /** Closes only the terminal Journey surface without injecting another outcome. */
+    suspend fun shutdownDeviceLeg(ownerDistinctId: String, journeyId: String) {
+        val active = synchronized(stateLock) {
+            current?.takeIf { it.isOwnedBy(journeyId, ownerDistinctId) }
+        } ?: return
+        PresentationRegistry.dismiss(active.id, CloseReason.JourneyNavigation)
+        attemptOutcome(
+            active,
+            PresentationOutcome(
+                ref = active.ref,
+                reason = CloseReason.JourneyNavigation,
+                ownerDistinctId = active.ownerDistinctId,
+            ),
+        )
+        joinAll(active.finished, active.runTransitionFinished)
+    }
+
     fun close() = dismiss(CloseReason.UserDismissed)
 
     private fun supersededByIdentityTransition() = ExperiencePresentationException(
@@ -761,7 +827,28 @@ internal class ExperiencePresentationService(
             this.ownerDistinctId == ownerDistinctId
 
     private fun firstFrame(active: ActivePresentation) {
-        val accepted = synchronized(active.factLock) {
+        val deviceLeg = active.outcomeSink as? OutcomeSink.DeviceLeg
+        if (deviceLeg == null) {
+            if (markShown(active)) active.firstFrame.complete(active.ref)
+            return
+        }
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            if (deviceLeg.emissions.reveal() && markShown(active)) {
+                active.firstFrame.complete(active.ref)
+            } else if (!active.closed.get()) {
+                PresentationRegistry.reportFailure(
+                    active.id,
+                    ExperiencePresentationException(
+                        ExperiencePresentationException.Reason.HOST_FAILED,
+                        "Journey presentation reveal was rejected",
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun markShown(active: ActivePresentation): Boolean =
+        synchronized(active.factLock) {
             if (
                 active.closed.get() ||
                 active.runTransitionFinished.isCompleted ||
@@ -780,26 +867,6 @@ internal class ExperiencePresentationService(
             }
             true
         }
-        if (!accepted) return
-        val deviceLeg = active.outcomeSink as? OutcomeSink.DeviceLeg
-        if (deviceLeg == null) {
-            active.firstFrame.complete(active.ref)
-            return
-        }
-        scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            if (deviceLeg.emissions.reveal()) {
-                active.firstFrame.complete(active.ref)
-            } else if (!active.closed.get()) {
-                PresentationRegistry.reportFailure(
-                    active.id,
-                    ExperiencePresentationException(
-                        ExperiencePresentationException.Reason.HOST_FAILED,
-                        "Journey presentation reveal was rejected",
-                    ),
-                )
-            }
-        }
-    }
 
     private fun runtimeStep(
         active: ActivePresentation,
@@ -876,7 +943,24 @@ internal class ExperiencePresentationService(
             scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 try {
                     deviceLeg.emissions.close()
-                    deviceLeg.onOutcome(outcome.reason.deviceLegOutcome())
+                    val dismissal = outcome.reason.screenDismissalMethod()?.let { method ->
+                        if (deviceLeg.screenDismissed.compareAndSet(false, true)) {
+                            deviceLeg.onScreenDismissed(
+                                deviceLeg.screenId,
+                                null,
+                                method,
+                            )
+                        } else {
+                            DeviceLegScreenDismissalResult.HANDLED
+                        }
+                    }
+                    when (dismissal) {
+                        DeviceLegScreenDismissalResult.HANDLED,
+                        DeviceLegScreenDismissalResult.COMPLETED -> Unit
+                        DeviceLegScreenDismissalResult.REJECTED ->
+                            deviceLeg.onOutcome(DeviceLegSurfaceOutcome.ABANDONED)
+                        null -> deviceLeg.onOutcome(outcome.reason.deviceLegOutcome())
+                    }
                 } finally {
                     val emitClose = synchronized(active.factLock) {
                         active.runTransitionFinished.complete(Unit)
@@ -1042,6 +1126,16 @@ private fun JsonObject.presentationShell(): PresentationShell {
 private fun CloseReason.deviceLegOutcome(): DeviceLegSurfaceOutcome = when (this) {
     CloseReason.UserDismissed, CloseReason.HostDismissed -> DeviceLegSurfaceOutcome.DISMISSED
     else -> DeviceLegSurfaceOutcome.ABANDONED
+}
+
+private fun CloseReason.screenDismissalMethod(): String? = when (this) {
+    CloseReason.UserDismissed -> "user"
+    CloseReason.GoalMet, CloseReason.PurchaseCompleted -> "goal_met"
+    CloseReason.Timeout, is CloseReason.Error -> "error"
+    CloseReason.HostDismissed,
+    CloseReason.JourneyNavigation,
+    CloseReason.IdentityChanged,
+    -> null
 }
 
 private fun JsonObject.string(key: String): String? =

@@ -34,6 +34,7 @@ internal class DeviceLegRuntimeEmissionCoordinator(
     nextBatchSequence: Long,
     nextEmissionSequence: Long,
     private val onEmissionBatch: suspend (DeviceLegScreenEmissionBatch) -> Boolean,
+    private val onScreenChanged: suspend (String) -> Boolean = { true },
     private val onPresentationRevealed: suspend (String) -> Unit,
     private val onOpenLink: (String, String?) -> Unit = { _, _ -> },
     private val createId: () -> String = { UUID.randomUUID().toString() },
@@ -57,6 +58,7 @@ internal class DeviceLegRuntimeEmissionCoordinator(
         if (closed) return@withLock false
         if (revealed.isCompleted) return@withLock true
         return@withLock runCatching {
+            check(onScreenChanged(screenId)) { "Journey screen activation was rejected" }
             onPresentationRevealed(screenId)
             revealed.complete(Unit)
             true

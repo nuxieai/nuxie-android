@@ -3,6 +3,7 @@ package ai.nuxie.sdk.journey
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -18,9 +19,26 @@ internal class DeviceLegControlExecutor(
     data class Checkpoint(val anchorAtMillis: Long, val wakeAtMillis: Long)
     data class Event(val name: String, val occurredAtMillis: Long, val properties: JsonObject)
     data class Signal(val event: Event? = null, val responsesChanged: Boolean = false)
+    data class ExperimentSelection(
+        val experimentId: String,
+        val variantId: String,
+        val assignedVariantId: String?,
+        val isHoldout: Boolean,
+        val source: Source,
+    ) {
+        enum class Source {
+            PROFILE,
+            NO_ASSIGNMENT,
+            INVALID_ASSIGNMENT,
+        }
+    }
 
     sealed interface Result {
-        data class Advance(val stepId: String, val context: JsonObject) : Result
+        data class Advance(
+            val stepId: String,
+            val context: JsonObject,
+            val experimentSelection: ExperimentSelection? = null,
+        ) : Result
         data class Park(val stepId: String, val checkpoint: Checkpoint) : Result
         data class Complete(val outcome: String) : Result
         data class Dispatch(val stepId: String, val action: JsonObject) : Result
@@ -86,8 +104,25 @@ internal class DeviceLegControlExecutor(
         val variants = action["variants"] as? JsonArray ?: return Result.Invalid
         val available = variants.mapNotNull { (it as? JsonObject)?.text("id") }
         if (available.isEmpty()) return Result.Invalid
-        val assigned = (assignments[experimentId] as? JsonObject)?.text("variantId")
-        return advance(outlets, assigned?.takeIf(available::contains) ?: available.first(), context)
+        val assignment = assignments[experimentId] as? JsonObject
+        val assigned = assignment?.text("variantId")
+        val selected = assigned?.takeIf(available::contains) ?: available.first()
+        val source = when {
+            assigned == null -> ExperimentSelection.Source.NO_ASSIGNMENT
+            assigned == selected -> ExperimentSelection.Source.PROFILE
+            else -> ExperimentSelection.Source.INVALID_ASSIGNMENT
+        }
+        val advanced = advance(outlets, selected, context)
+        if (advanced !is Result.Advance) return advanced
+        return advanced.copy(
+            experimentSelection = ExperimentSelection(
+                experimentId = experimentId,
+                variantId = selected,
+                assignedVariantId = assigned,
+                isHoldout = assignment?.get("isHoldout")?.jsonPrimitive?.booleanOrNull ?: false,
+                source = source,
+            ),
+        )
     }
 
     private fun timeWindow(
