@@ -5,14 +5,12 @@
     "constant": "JourneyEvents.appActionRequested",
     "docs": false,
     "emitters": [
-      "Sources/Nuxie/Journey/Execution/JourneyRunner.swift:3836"
+      "Sources/Nuxie/Journey/Execution/JourneyEffectDispatcher.swift"
     ],
     "endpoint": "batch",
-    "fixtures": [
-      "fixtures/events/experience-events.json"
-    ],
+    "fixtures": [],
     "forwarding": "hidden: delivered through didRequestAppAction",
-    "lane": "processCapture",
+    "lane": "captureStableSystemEvent",
     "persists": true,
     "properties": {
       "experience_id": {
@@ -35,9 +33,19 @@
         "source": "sanitized resolved AppActionStep payload",
         "type": "object"
       },
-      "screen_id": {
-        "required": false,
-        "source": "active authored-action screen",
+      "experience_version_id": {
+        "required": true,
+        "source": "authenticated Journey run",
+        "type": "String"
+      },
+      "leg_generation": {
+        "required": true,
+        "source": "authenticated Journey run",
+        "type": "Int"
+      },
+      "leg_id": {
+        "required": true,
+        "source": "authenticated Journey run",
         "type": "String"
       }
     },
@@ -50,12 +58,12 @@
     "constant": "SystemEventNames.appBackgrounded",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Core/AppLifecycleTracker.swift:63"
+      "Sources/Nuxie/Core/AppLifecycleTracker.swift"
     ],
-    "endpoint": "/i/event response lane",
+    "endpoint": "batch",
     "fixtures": [],
     "forwarding": "appBackgrounded",
-    "lane": "trackForTrigger",
+    "lane": "processCapture",
     "persists": true,
     "properties": {
       "background_date": {
@@ -78,12 +86,12 @@
     "constant": "SystemEventNames.appInstalled",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Core/AppLifecycleTracker.swift:47"
+      "Sources/Nuxie/Core/AppLifecycleTracker.swift"
     ],
-    "endpoint": "/i/event response lane",
+    "endpoint": "batch",
     "fixtures": [],
     "forwarding": "appInstalled",
-    "lane": "trackForTrigger",
+    "lane": "processCapture",
     "persists": true,
     "properties": {
       "app_version": {
@@ -111,13 +119,12 @@
     "constant": "SystemEventNames.appOpened",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Core/AppLifecycleTracker.swift:58",
-      "Sources/Nuxie/Core/AppLifecycleTracker.swift:73"
+      "Sources/Nuxie/Core/AppLifecycleTracker.swift"
     ],
-    "endpoint": "/i/event response lane",
+    "endpoint": "batch",
     "fixtures": [],
     "forwarding": "appOpened",
-    "lane": "trackForTrigger",
+    "lane": "processCapture",
     "persists": true,
     "properties": {
       "app_version": {
@@ -165,12 +172,12 @@
     "constant": "SystemEventNames.appUpdated",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Core/AppLifecycleTracker.swift:53"
+      "Sources/Nuxie/Core/AppLifecycleTracker.swift"
     ],
-    "endpoint": "/i/event response lane",
+    "endpoint": "batch",
     "fixtures": [],
     "forwarding": "appUpdated",
-    "lane": "trackForTrigger",
+    "lane": "processCapture",
     "persists": true,
     "properties": {
       "app_version": {
@@ -203,14 +210,12 @@
     "constant": "JourneyEvents.customerUpdated",
     "docs": false,
     "emitters": [
-      "Sources/Nuxie/Journey/Execution/JourneyRunner.swift:3530"
+      "Sources/Nuxie/Journey/Execution/JourneyEffectDispatcher.swift"
     ],
     "endpoint": "batch",
-    "fixtures": [
-      "fixtures/events/experience-events.json"
-    ],
+    "fixtures": [],
     "forwarding": "hidden: identity and PII rider",
-    "lane": "processCapture",
+    "lane": "captureStableSystemEvent",
     "persists": true,
     "properties": {
       "attributes_updated": {
@@ -228,57 +233,19 @@
         "source": "JourneyEvents.customerUpdatedProperties journey snapshot",
         "type": "String"
       },
-      "screen_id": {
-        "required": false,
-        "source": "active authored-action screen",
-        "type": "String"
-      }
-    },
-    "status": "active",
-    "wire": true
-  },
-  "$event_sent": {
-    "authoredBy": "designer",
-    "beforeSend": "governed",
-    "constant": "JourneyEvents.eventSent",
-    "docs": false,
-    "emitters": [
-      "Sources/Nuxie/Journey/Execution/JourneyRunner.swift:3400",
-      "Sources/Nuxie/Journey/JourneyService.swift:3266",
-      "Sources/Nuxie/Journey/JourneyService.swift:4106",
-      "Sources/Nuxie/Journey/JourneyService.swift:4245"
-    ],
-    "endpoint": "batch",
-    "fixtures": [
-      "fixtures/events/experience-events.json"
-    ],
-    "forwarding": "hidden: authored event remains Nuxie-internal",
-    "lane": "processCapture",
-    "persists": true,
-    "properties": {
-      "event_name": {
+      "experience_version_id": {
         "required": true,
-        "source": "designer-authored SendEventAction name",
+        "source": "authenticated Journey run",
         "type": "String"
       },
-      "event_properties": {
+      "leg_generation": {
         "required": true,
-        "source": "resolved SendEventAction payload",
-        "type": "object"
+        "source": "authenticated Journey run",
+        "type": "Int"
       },
-      "experience_id": {
+      "leg_id": {
         "required": true,
-        "source": "JourneyEvents.eventSentProperties journey snapshot",
-        "type": "String"
-      },
-      "journey_id": {
-        "required": true,
-        "source": "JourneyEvents.eventSentProperties journey snapshot",
-        "type": "String"
-      },
-      "screen_id": {
-        "required": false,
-        "source": "active authored-action screen",
+        "source": "authenticated Journey run",
         "type": "String"
       }
     },
@@ -291,12 +258,10 @@
     "constant": "JourneyEvents.experienceArtifactLoadFailed",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Experiences/ExperienceViewModel.swift:370"
+      "Sources/Nuxie/Experiences/ExperienceViewModel.swift"
     ],
     "endpoint": "batch",
-    "fixtures": [
-      "fixtures/events/experience-events.json"
-    ],
+    "fixtures": [],
     "forwarding": "experienceLoadFailed",
     "lane": "processCapture",
     "persists": true,
@@ -341,12 +306,10 @@
     "constant": "JourneyEvents.experienceArtifactLoadSucceeded",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Experiences/ExperienceViewModel.swift:352"
+      "Sources/Nuxie/Experiences/ExperienceViewModel.swift"
     ],
     "endpoint": "batch",
-    "fixtures": [
-      "fixtures/events/experience-events.json"
-    ],
+    "fixtures": [],
     "forwarding": "hidden: successful artifact load is noise",
     "lane": "processCapture",
     "persists": true,
@@ -386,12 +349,10 @@
     "constant": "JourneyEvents.experienceDismissed",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Experiences/ExperiencePresentationService.swift:864"
+      "Sources/Nuxie/Experiences/ExperiencePresentationService.swift"
     ],
     "endpoint": "batch",
-    "fixtures": [
-      "fixtures/events/experience-events.json"
-    ],
+    "fixtures": [],
     "forwarding": "experienceDismissed",
     "lane": "processCapture",
     "persists": true,
@@ -426,12 +387,10 @@
     "constant": "JourneyEvents.experienceErrored",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Experiences/ExperiencePresentationService.swift:876"
+      "Sources/Nuxie/Experiences/ExperiencePresentationService.swift"
     ],
     "endpoint": "batch",
-    "fixtures": [
-      "fixtures/events/experience-events.json"
-    ],
+    "fixtures": [],
     "forwarding": "experienceErrored",
     "lane": "processCapture",
     "persists": true,
@@ -466,12 +425,10 @@
     "constant": "JourneyEvents.experienceShown",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Experiences/ExperiencePresentationService.swift:432"
+      "Sources/Nuxie/Experiences/ExperiencePresentationService.swift"
     ],
     "endpoint": "batch",
-    "fixtures": [
-      "fixtures/events/experience-events.json"
-    ],
+    "fixtures": [],
     "forwarding": "experienceShown",
     "lane": "processCapture",
     "persists": true,
@@ -501,14 +458,14 @@
     "constant": "JourneyEvents.experimentExposure",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Journey/Execution/JourneyRunner.swift:3298"
+      "Sources/Nuxie/Journey/Events/JourneyReporter.swift"
     ],
     "endpoint": "batch",
     "fixtures": [
-      "fixtures/events/experience-events.json"
+      "fixtures/journeys/planes/executor-controls.json"
     ],
     "forwarding": "experimentExposure",
-    "lane": "processCapture",
+    "lane": "captureStableSystemEvent",
     "persists": true,
     "properties": {
       "assignment_source": {
@@ -545,119 +502,37 @@
         "required": true,
         "source": "resolved ExperimentAction variant id",
         "type": "String"
+      },
+      "leg_id": {
+        "required": true,
+        "source": "authenticated Journey run",
+        "type": "String"
+      },
+      "leg_generation": {
+        "required": true,
+        "source": "authenticated Journey run",
+        "type": "Int"
       }
     },
     "status": "active",
-    "wire": true
-  },
-  "$experiment_exposure_error": {
-    "authoredBy": "platform",
-    "beforeSend": "governed",
-    "constant": "JourneyEvents.experimentExposureError",
-    "docs": false,
-    "emitters": [
-      "Sources/Nuxie/Journey/Execution/JourneyRunner.swift:3257"
-    ],
-    "endpoint": "batch",
-    "fixtures": [],
-    "forwarding": "experimentError",
-    "lane": "processCapture",
-    "persists": true,
-    "properties": {
-      "experience_id": {
-        "required": true,
-        "source": "JourneySnapshot.experienceId",
-        "type": "String"
-      },
-      "experience_version": {
-        "required": true,
-        "source": "JourneySnapshot.experienceVersion",
-        "type": "String"
-      },
-      "experiment_key": {
-        "required": true,
-        "source": "ExperimentAction.experimentId",
-        "type": "String"
-      },
-      "journey_id": {
-        "required": true,
-        "source": "JourneySnapshot.id",
-        "type": "String"
-      },
-      "reason": {
-        "required": true,
-        "source": "JourneyRunner constant variant_not_found",
-        "type": "String"
-      },
-      "variant_key": {
-        "required": true,
-        "source": "unknown server-assigned variant key",
-        "type": "String"
-      }
-    },
-    "status": "active",
-    "wire": true
-  },
-  "$experiment_exposure_fallback": {
-    "authoredBy": "platform",
-    "beforeSend": "governed",
-    "constant": "JourneyEvents.experimentExposureFallback",
-    "docs": false,
-    "emitters": [
-      "Sources/Nuxie/Journey/Execution/JourneyRunner.swift:3314"
-    ],
-    "endpoint": "batch",
-    "fixtures": [],
-    "forwarding": "hidden: default-variant diagnostic is not an exposure",
-    "lane": "processCapture",
-    "persistenceNote": "UNIV-2582 classifies this as a diagnostic pending rename.",
-    "persists": true,
-    "properties": {
-      "assignment_source": {
-        "required": true,
-        "source": "ExperimentResolver fallback assignment source",
-        "type": "String"
-      },
-      "experience_id": {
-        "required": true,
-        "source": "JourneySnapshot.experienceId",
-        "type": "String"
-      },
-      "experience_version": {
-        "required": true,
-        "source": "JourneySnapshot.experienceVersion",
-        "type": "String"
-      },
-      "experiment_key": {
-        "required": true,
-        "source": "ExperimentAction.experimentId",
-        "type": "String"
-      },
-      "journey_id": {
-        "required": true,
-        "source": "JourneySnapshot.id",
-        "type": "String"
-      },
-      "variant_key": {
-        "required": true,
-        "source": "default authored variant id",
-        "type": "String"
-      }
-    },
-    "status": "renaming",
     "wire": true
   },
   "$feature_used": {
     "authoredBy": "platform",
-    "beforeSend": "governed",
+    "beforeSend": [
+      "governed",
+      "governed"
+    ],
     "constant": "SystemEventNames.featureUsed",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Features/FeatureUseCommandQueue.swift:550",
-      "Sources/Nuxie/Features/FeatureUseCommandQueue.swift:705",
-      "Sources/Nuxie/NuxieSDK.swift:1206"
+      "Sources/Nuxie/Features/FeatureUseCommandQueue.swift",
+      "Sources/Nuxie/NuxieSDK.swift"
     ],
-    "endpoint": "/i/event response lane",
+    "endpoint": [
+      "/event",
+      "none"
+    ],
     "fixtures": [
       "fixtures/events/batch-item-encoding.json"
     ],
@@ -666,8 +541,10 @@
       "featureCommand",
       "storePreparedEventInHistory"
     ],
-    "persistenceNote": "The command is durable before its first response-lane send. Its accepted result is then mirrored as delivered history under the same operation id.",
-    "persists": true,
+    "persists": [
+      true,
+      true
+    ],
     "properties": {
       "amount": {
         "required": true,
@@ -691,7 +568,10 @@
       }
     },
     "status": "active",
-    "wire": true
+    "wire": [
+      true,
+      false
+    ]
   },
   "$identify": {
     "authoredBy": "platform",
@@ -699,7 +579,7 @@
     "constant": "SystemEventNames.identify",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/NuxieSDK.swift:665"
+      "Sources/Nuxie/NuxieSDK.swift"
     ],
     "endpoint": "batch",
     "fixtures": [
@@ -733,377 +613,19 @@
     "status": "active",
     "wire": true
   },
-  "$journey_claimed": {
-    "authoredBy": "platform",
-    "beforeSend": "exempt",
-    "constant": "JourneyEvents.journeyClaimed",
-    "docs": true,
-    "emitters": [
-      "Sources/Nuxie/Journey/JourneyService.swift:984"
-    ],
-    "endpoint": "/i/event response lane",
-    "fixtures": [],
-    "forwarding": "hidden: journey ownership protocol",
-    "lane": "trackForTrigger",
-    "persists": true,
-    "properties": {
-      "claimant": {
-        "required": true,
-        "source": "IdentityService anonymous id",
-        "type": "String"
-      },
-      "epoch": {
-        "required": true,
-        "source": "mailbox offer epoch",
-        "type": "String"
-      },
-      "journey_id": {
-        "required": true,
-        "source": "mailbox offer journey id",
-        "type": "String"
-      }
-    },
-    "status": "active",
-    "wire": true
-  },
-  "$journey_converted": {
-    "authoredBy": [
-      "platform",
-      "server"
-    ],
-    "beforeSend": "exempt",
-    "constant": "JourneyEvents.journeyConverted",
-    "docs": true,
-    "emitters": [
-      "Sources/Nuxie/Journey/JourneyService.swift:5408",
-      "Sources/Nuxie/Events/EventLog.swift:1966"
-    ],
-    "endpoint": [
-      "/i/event response lane",
-      "none"
-    ],
-    "fixtures": [
-      "fixtures/events/down-facts/converted.json"
-    ],
-    "forwarding": "journeyConverted",
-    "lane": [
-      "trackWithResponse",
-      "commitServerFacts"
-    ],
-    "pathNotes": [
-      "The device-authored path emits experience_id and experience_version from the JourneySnapshot.",
-      "Both paths require experience_id and experience_version since nuxie-ios#369; the server down-fact decode rejects payloads missing either."
-    ],
-    "persistenceNote": "Device goal evaluation uses trackWithResponse; the same name can also arrive through commitServerFacts and is then not uploaded.",
-    "persists": true,
-    "properties": {
-      "at": {
-        "required": true,
-        "source": "goal evaluation time or server down-fact conversion time in ISO 8601",
-        "type": "String"
-      },
-      "epoch": {
-        "required": false,
-        "source": "device-authored JourneySnapshot only",
-        "type": "String"
-      },
-      "experience_id": {
-        "required": true,
-        "source": "required on both paths since nuxie-ios#369: the device path supplies it from JourneySnapshot and the server down-fact decode rejects payloads missing it",
-        "type": "String"
-      },
-      "experience_version": {
-        "required": true,
-        "source": "required on both paths since nuxie-ios#369: the device path supplies it from JourneySnapshot and the server down-fact decode rejects payloads missing it",
-        "type": "String"
-      },
-      "journey_id": {
-        "required": true,
-        "source": "JourneySnapshot or server down-fact",
-        "type": "String"
-      },
-      "source_fact_ref": {
-        "required": true,
-        "source": "qualifying event id or server source fact reference",
-        "type": "String"
-      }
-    },
-    "status": "active",
-    "wire": [
-      true,
-      false
-    ]
-  },
-  "$journey_effect_completed": {
-    "authoredBy": "server",
-    "beforeSend": "exempt",
-    "constant": "JourneyEvents.journeyEffectCompleted",
-    "docs": true,
-    "emitters": [
-      "Sources/Nuxie/Events/EventLog.swift:1966"
-    ],
-    "endpoint": "none",
-    "fixtures": [],
-    "forwarding": "hidden: journey effect protocol",
-    "lane": "commitServerFacts",
-    "persists": true,
-    "properties": {
-      "error": {
-        "required": false,
-        "source": "JourneyDownFact effect completion error",
-        "type": "Any"
-      },
-      "invocation_id": {
-        "required": true,
-        "source": "JourneyDownFact effect invocation id",
-        "type": "String"
-      },
-      "journey_id": {
-        "required": true,
-        "source": "JourneyDownFact journey id",
-        "type": "String"
-      },
-      "node_id": {
-        "required": true,
-        "source": "JourneyDownFact node id",
-        "type": "String"
-      },
-      "result": {
-        "required": false,
-        "source": "JourneyDownFact effect result",
-        "type": "Any"
-      },
-      "status": {
-        "required": true,
-        "source": "JourneyDownFact effect completion status",
-        "type": "String"
-      }
-    },
-    "status": "active",
-    "wire": false
-  },
-  "$journey_effect_requested": {
-    "authoredBy": "platform",
-    "beforeSend": "governed",
-    "constant": "JourneyEvents.journeyEffectRequested",
-    "docs": true,
-    "emitters": [
-      "Sources/Nuxie/Journey/Execution/JourneyRunner.swift:4143"
-    ],
-    "endpoint": "batch",
-    "fixtures": [
-      "fixtures/journeys/effects/round-trip.json"
-    ],
-    "forwarding": "hidden: journey effect protocol",
-    "lane": "processCapture",
-    "persistenceNote": "Code reality uses processCapture, so beforeSend governs this protocol fact despite the forwarding spec's general protocol exemption.",
-    "persists": true,
-    "properties": {
-      "effect": {
-        "required": true,
-        "source": "structured effect descriptor handled by JourneyRunner.handleServerEffect",
-        "type": "object"
-      },
-      "epoch": {
-        "required": true,
-        "source": "JourneySnapshot ownership epoch",
-        "type": "String"
-      },
-      "invocation_id": {
-        "required": true,
-        "source": "stable JourneyRunner effect invocation id",
-        "type": "String"
-      },
-      "journey_id": {
-        "required": true,
-        "source": "JourneyRunner journey id",
-        "type": "String"
-      },
-      "node_id": {
-        "required": true,
-        "source": "authored or derived effect node id",
-        "type": "String"
-      },
-      "payload": {
-        "required": true,
-        "source": "resolved EffectAction payload",
-        "type": "object"
-      }
-    },
-    "status": "active",
-    "wire": true
-  },
-  "$journey_enrolled": {
-    "authoredBy": "platform",
-    "beforeSend": "exempt",
-    "constant": "JourneyEvents.journeyEnrolled",
-    "docs": true,
-    "emitters": [
-      "Sources/Nuxie/Journey/JourneyService.swift:658"
-    ],
-    "endpoint": "/i/event response lane",
-    "fixtures": [],
-    "forwarding": "journeyStarted",
-    "lane": "trackWithResponse",
-    "persists": true,
-    "properties": {
-      "epoch": {
-        "required": true,
-        "source": "JourneySnapshot ownership epoch",
-        "type": "String"
-      },
-      "experience_id": {
-        "required": true,
-        "source": "enrolled Experience id",
-        "type": "String"
-      },
-      "experience_version": {
-        "required": true,
-        "source": "enrolled Experience versionId",
-        "type": "String"
-      },
-      "journey_id": {
-        "required": true,
-        "source": "JourneySnapshot id",
-        "type": "String"
-      },
-      "plane": {
-        "required": true,
-        "source": "JourneyEvents constant device",
-        "type": "String"
-      },
-      "settings_snapshot": {
-        "required": true,
-        "source": "JourneySnapshot goal, conversion, and exit settings",
-        "type": "object"
-      },
-      "trigger_ref": {
-        "required": true,
-        "source": "origin event id or stable device fallback",
-        "type": "String"
-      }
-    },
-    "status": "active",
-    "wire": true
-  },
-  "$journey_exited": {
-    "authoredBy": "platform",
-    "beforeSend": [
-      "exempt",
-      "governed"
-    ],
-    "constant": "JourneyEvents.journeyExited",
-    "docs": true,
-    "emitters": [
-      "Sources/Nuxie/Journey/JourneyService.swift:4912",
-      "Sources/Nuxie/Journey/JourneyService.swift:5092",
-      "Sources/Nuxie/Journey/JourneyService.swift:5917"
-    ],
-    "endpoint": [
-      "/i/event response lane",
-      "batch"
-    ],
-    "fixtures": [],
-    "forwarding": "journeyEnded",
-    "lane": [
-      "trackWithResponse",
-      "captureStableSystemEvent"
-    ],
-    "persistenceNote": "Ordinary exits use beforeSend-exempt trackWithResponse; host exits use beforeSend-governed captureStableSystemEvent under a deterministic id.",
-    "persists": true,
-    "properties": {
-      "at": {
-        "required": true,
-        "source": "Journey completion time in ISO 8601",
-        "type": "String"
-      },
-      "dismissed_by": {
-        "required": false,
-        "source": "user or host dismissal source",
-        "type": "String"
-      },
-      "epoch": {
-        "required": true,
-        "source": "JourneySnapshot terminal epoch",
-        "type": "String"
-      },
-      "experience_id": {
-        "required": true,
-        "source": "JourneySnapshot.experienceId",
-        "type": "String"
-      },
-      "experience_version": {
-        "required": true,
-        "source": "JourneySnapshot.experienceVersion",
-        "type": "String"
-      },
-      "journey_id": {
-        "required": true,
-        "source": "JourneySnapshot id",
-        "type": "String"
-      },
-      "reason": {
-        "required": true,
-        "source": "JourneyExitReason execution reason or dismissed override",
-        "type": "String"
-      }
-    },
-    "status": "active",
-    "wire": true
-  },
-  "$journey_handoff": {
-    "authoredBy": "platform",
-    "beforeSend": "exempt",
-    "constant": "JourneyEvents.journeyHandoff",
-    "docs": true,
-    "emitters": [
-      "Sources/Nuxie/Journey/JourneyService.swift:4539"
-    ],
-    "endpoint": "/i/event response lane",
-    "fixtures": [
-      "fixtures/events/batch-item-encoding.json"
-    ],
-    "forwarding": "hidden: journey ownership protocol",
-    "lane": "trackForTrigger",
-    "persists": true,
-    "properties": {
-      "direction": {
-        "required": true,
-        "source": "JourneyEvents constant device_to_server",
-        "type": "String"
-      },
-      "envelope": {
-        "required": true,
-        "source": "encoded JourneyStateEnvelope",
-        "type": "object"
-      },
-      "epoch": {
-        "required": true,
-        "source": "JourneySnapshot ownership epoch",
-        "type": "String"
-      },
-      "journey_id": {
-        "required": true,
-        "source": "JourneySnapshot id",
-        "type": "String"
-      }
-    },
-    "status": "active",
-    "wire": true
-  },
   "$journey_leg_completed": {
     "authoredBy": "platform",
     "beforeSend": "governed",
-    "constant": "JourneyEvents.journeyLegCompleted",
+    "constant": "JourneyEvents.journeyCompleted",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Journey/Events/DeviceLegReporter.swift:41"
+      "Sources/Nuxie/Journey/Events/JourneyReporter.swift"
     ],
     "endpoint": "batch",
     "fixtures": [
       "fixtures/journeys/planes/reports.json"
     ],
-    "forwarding": "journeyLegCompleted",
+    "forwarding": "journeyCompleted",
     "lane": "captureStableSystemEvent",
     "persists": true,
     "properties": {
@@ -1159,16 +681,16 @@
   "$journey_leg_started": {
     "authoredBy": "platform",
     "beforeSend": "governed",
-    "constant": "JourneyEvents.journeyLegStarted",
+    "constant": "JourneyEvents.journeyStarted",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Journey/Events/DeviceLegReporter.swift:41"
+      "Sources/Nuxie/Journey/Events/JourneyReporter.swift"
     ],
     "endpoint": "batch",
     "fixtures": [
       "fixtures/journeys/planes/reports.json"
     ],
-    "forwarding": "journeyLegStarted",
+    "forwarding": "journeyStarted",
     "lane": "captureStableSystemEvent",
     "persists": true,
     "properties": {
@@ -1208,253 +730,47 @@
   },
   "$journey_milestone": {
     "authoredBy": "platform",
-    "beforeSend": [
-      "exempt",
-      "exempt"
-    ],
+    "beforeSend": "governed",
     "constant": "JourneyEvents.journeyMilestone",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Journey/Execution/JourneyRunner.swift:3492",
-      "Sources/Nuxie/Journey/JourneyService.swift:3147"
+      "Sources/Nuxie/Journey/Execution/JourneyEffectDispatcher.swift"
     ],
-    "endpoint": [
-      "/i/event response lane",
-      "/i/event response lane"
-    ],
+    "endpoint": "batch",
     "fixtures": [],
     "forwarding": "milestoneReached",
-    "lane": [
-      "trackWithResponse",
-      "trackForTrigger"
-    ],
-    "pathNotes": [
-      "JourneyRunner fallback sends and persists through trackWithResponse.",
-      "The scoped path sends through trackScopedEvent/trackForTrigger with persistence disabled, then persists the prepared event through storePreparedEventInHistory."
-    ],
-    "persists": [
-      true,
-      true
-    ],
+    "lane": "captureStableSystemEvent",
+    "persists": true,
     "properties": {
-      "epoch": {
-        "required": true,
-        "source": "JourneySnapshot ownership epoch",
-        "type": "String"
-      },
       "experience_id": {
         "required": true,
-        "source": "JourneySnapshot.experienceId",
+        "source": "authenticated Journey run",
         "type": "String"
       },
-      "experience_version": {
+      "experience_version_id": {
         "required": true,
-        "source": "JourneySnapshot.experienceVersion",
+        "source": "authenticated Journey run",
         "type": "String"
       },
       "journey_id": {
         "required": true,
-        "source": "JourneySnapshot id",
+        "source": "authenticated Journey run",
+        "type": "String"
+      },
+      "leg_generation": {
+        "required": true,
+        "source": "authenticated Journey run",
+        "type": "Int"
+      },
+      "leg_id": {
+        "required": true,
+        "source": "authenticated Journey run",
         "type": "String"
       },
       "milestone_id": {
         "required": true,
         "source": "authored MilestoneAction id",
         "type": "String"
-      }
-    },
-    "status": "active",
-    "wire": [
-      true,
-      true
-    ]
-  },
-  "$journey_parked": {
-    "authoredBy": "platform",
-    "beforeSend": "governed",
-    "constant": "JourneyEvents.journeyParked",
-    "docs": true,
-    "emitters": [
-      "Sources/Nuxie/Journey/JourneyService.swift:4762"
-    ],
-    "endpoint": "batch",
-    "fixtures": [],
-    "forwarding": "hidden: journey checkpoint protocol",
-    "lane": "processCapture",
-    "persistenceNote": "Code reality uses processCapture, so beforeSend governs this protocol fact despite the forwarding spec's general protocol exemption.",
-    "persists": true,
-    "properties": {
-      "checkpoint": {
-        "required": true,
-        "source": "encoded JourneyStateEnvelope checkpoint",
-        "type": "object"
-      },
-      "epoch": {
-        "required": true,
-        "source": "JourneySnapshot ownership epoch",
-        "type": "String"
-      },
-      "journey_id": {
-        "required": true,
-        "source": "JourneySnapshot id",
-        "type": "String"
-      },
-      "pending_deadline_at": {
-        "required": false,
-        "source": "pending action deadline in ISO 8601",
-        "type": "String"
-      },
-      "reason": {
-        "required": true,
-        "source": "JourneyParkingReason raw value",
-        "type": "String"
-      }
-    },
-    "status": "active",
-    "wire": true
-  },
-  "$journey_started": {
-    "authoredBy": "platform",
-    "beforeSend": "exempt",
-    "constant": "SystemEventNames.journeyStarted",
-    "docs": false,
-    "emitters": [],
-    "endpoint": "none",
-    "fixtures": [],
-    "forwarding": "hidden: retired runtime control",
-    "lane": "none",
-    "persistenceNote": "Declared as a retired runtime control input; no production emitter exists.",
-    "persists": false,
-    "properties": {},
-    "status": "retired",
-    "wire": false
-  },
-  "$journey_superseded": {
-    "authoredBy": "server",
-    "beforeSend": "exempt",
-    "constant": "JourneyEvents.journeySuperseded",
-    "docs": true,
-    "emitters": [
-      "Sources/Nuxie/Events/EventLog.swift:1966"
-    ],
-    "endpoint": "none",
-    "fixtures": [],
-    "forwarding": "journeyEnded",
-    "lane": "commitServerFacts",
-    "persists": true,
-    "properties": {
-      "journey_id": {
-        "required": true,
-        "source": "JourneyDownFact superseded journey id",
-        "type": "String"
-      },
-      "winner_journey_id": {
-        "required": false,
-        "source": "JourneyDownFact winning journey id",
-        "type": "String"
-      }
-    },
-    "status": "active",
-    "wire": false
-  },
-  "$journey_transition": {
-    "authoredBy": "platform",
-    "beforeSend": [
-      "exempt",
-      "governed"
-    ],
-    "constant": "JourneyEvents.journeyTransition",
-    "docs": true,
-    "emitters": [
-      "Sources/Nuxie/Journey/JourneyService.swift:1371",
-      "Sources/Nuxie/Journey/JourneyService.swift:1423",
-      "Sources/Nuxie/Journey/Execution/JourneyRunner.swift:1894",
-      "Sources/Nuxie/Journey/Execution/JourneyRunner.swift:2722"
-    ],
-    "endpoint": [
-      "/i/event response lane",
-      "batch"
-    ],
-    "fixtures": [
-      "fixtures/events/batch-item-encoding.json",
-      "fixtures/events/response-bearing-event-encoding.json"
-    ],
-    "forwarding": "hidden: journey state-sync protocol",
-    "lane": [
-      "trackWithResponse",
-      "processCapture"
-    ],
-    "persists": true,
-    "properties": {
-      "actual_response_version": {
-        "required": false,
-        "source": "response-snapshot conflict path current version or none",
-        "type": "String"
-      },
-      "epoch": {
-        "required": false,
-        "source": "canonical state-transition path JourneySnapshot ownership epoch",
-        "type": "String"
-      },
-      "error": {
-        "required": false,
-        "source": "response_snapshot_conflict on the pending-action conflict path",
-        "type": "String"
-      },
-      "expected_response_version": {
-        "required": false,
-        "source": "response-snapshot conflict path pending version or none",
-        "type": "String"
-      },
-      "from_node": {
-        "required": false,
-        "source": "canonical state-transition path previous Journey node when non-empty",
-        "type": "String"
-      },
-      "journey_id": {
-        "required": true,
-        "source": "JourneySnapshot id",
-        "type": "String"
-      },
-      "node_id": {
-        "required": false,
-        "source": "response-snapshot conflict path pending handler id",
-        "type": "String"
-      },
-      "plane": {
-        "required": false,
-        "source": "canonical state-transition path JourneyEvents constant device",
-        "type": "String"
-      },
-      "region": {
-        "required": false,
-        "source": "canonical state-transition path region, default device-main",
-        "type": "String"
-      },
-      "to_node": {
-        "required": false,
-        "source": "canonical state-transition path destination Journey node",
-        "type": "String"
-      }
-    },
-    "propertyVariants": {
-      "response_snapshot_conflict": {
-        "required": [
-          "actual_response_version",
-          "error",
-          "expected_response_version",
-          "journey_id",
-          "node_id"
-        ]
-      },
-      "state_transition": {
-        "required": [
-          "epoch",
-          "journey_id",
-          "plane",
-          "region",
-          "to_node"
-        ]
       }
     },
     "status": "active",
@@ -1469,22 +785,18 @@
     "constant": "SystemEventNames.notificationsDenied",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Journey/JourneyService.swift:3051",
-      "Sources/Nuxie/Experiences/ExperienceViewController.swift:871"
+      "Sources/Nuxie/Experiences/ExperienceViewController.swift",
+      "Sources/Nuxie/Journey/JourneyService.swift"
     ],
     "endpoint": [
-      "/i/event response lane",
-      "/i/event response lane"
+      "batch",
+      "batch"
     ],
     "fixtures": [],
     "forwarding": "permissionResolved",
     "lane": [
-      "trackForTrigger",
-      "trackForTrigger"
-    ],
-    "pathNotes": [
-      "The Journey-scoped path uses trackScopedEvent/trackForTrigger with persistence and beforeSend.",
-      "The unscoped SystemEventSink.emit path uses TriggerService.trackForTrigger with persistence and beforeSend."
+      "processCapture",
+      "captureStableSystemEvent"
     ],
     "persists": [
       true,
@@ -1504,6 +816,16 @@
       "journey_id": {
         "required": false,
         "source": "requesting Journey when scoped",
+        "type": "String"
+      },
+      "leg_generation": {
+        "required": false,
+        "source": "Journey run generation",
+        "type": "Int"
+      },
+      "leg_id": {
+        "required": false,
+        "source": "signed Journey release identifier",
         "type": "String"
       }
     },
@@ -1522,22 +844,18 @@
     "constant": "SystemEventNames.notificationsEnabled",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Journey/JourneyService.swift:3051",
-      "Sources/Nuxie/Experiences/ExperienceViewController.swift:871"
+      "Sources/Nuxie/Experiences/ExperienceViewController.swift",
+      "Sources/Nuxie/Journey/JourneyService.swift"
     ],
     "endpoint": [
-      "/i/event response lane",
-      "/i/event response lane"
+      "batch",
+      "batch"
     ],
     "fixtures": [],
     "forwarding": "permissionResolved",
     "lane": [
-      "trackForTrigger",
-      "trackForTrigger"
-    ],
-    "pathNotes": [
-      "The Journey-scoped path uses trackScopedEvent/trackForTrigger with persistence and beforeSend.",
-      "The unscoped SystemEventSink.emit path uses TriggerService.trackForTrigger with persistence and beforeSend."
+      "processCapture",
+      "captureStableSystemEvent"
     ],
     "persists": [
       true,
@@ -1557,6 +875,16 @@
       "journey_id": {
         "required": false,
         "source": "requesting Journey when scoped",
+        "type": "String"
+      },
+      "leg_generation": {
+        "required": false,
+        "source": "Journey run generation",
+        "type": "Int"
+      },
+      "leg_id": {
+        "required": false,
+        "source": "signed Journey release identifier",
         "type": "String"
       }
     },
@@ -1575,23 +903,18 @@
     "constant": "SystemEventNames.permissionDenied",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Journey/JourneyService.swift:3051",
-      "Sources/Nuxie/Journey/JourneyService.swift:3466",
-      "Sources/Nuxie/Experiences/ExperienceViewController.swift:871"
+      "Sources/Nuxie/Experiences/ExperienceViewController.swift",
+      "Sources/Nuxie/Journey/JourneyService.swift"
     ],
     "endpoint": [
-      "/i/event response lane",
-      "/i/event response lane"
+      "batch",
+      "batch"
     ],
     "fixtures": [],
     "forwarding": "permissionResolved",
     "lane": [
-      "trackForTrigger",
-      "trackForTrigger"
-    ],
-    "pathNotes": [
-      "The Journey-scoped path uses trackScopedEvent/trackForTrigger with persistence and beforeSend.",
-      "The unscoped SystemEventSink.emit path uses TriggerService.trackForTrigger with persistence and beforeSend."
+      "processCapture",
+      "captureStableSystemEvent"
     ],
     "persists": [
       true,
@@ -1611,6 +934,16 @@
       "journey_id": {
         "required": false,
         "source": "requesting Journey when scoped",
+        "type": "String"
+      },
+      "leg_generation": {
+        "required": false,
+        "source": "Journey run generation",
+        "type": "Int"
+      },
+      "leg_id": {
+        "required": false,
+        "source": "signed Journey release identifier",
         "type": "String"
       },
       "type": {
@@ -1634,22 +967,18 @@
     "constant": "SystemEventNames.permissionGranted",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Journey/JourneyService.swift:3051",
-      "Sources/Nuxie/Experiences/ExperienceViewController.swift:871"
+      "Sources/Nuxie/Experiences/ExperienceViewController.swift",
+      "Sources/Nuxie/Journey/JourneyService.swift"
     ],
     "endpoint": [
-      "/i/event response lane",
-      "/i/event response lane"
+      "batch",
+      "batch"
     ],
     "fixtures": [],
     "forwarding": "permissionResolved",
     "lane": [
-      "trackForTrigger",
-      "trackForTrigger"
-    ],
-    "pathNotes": [
-      "The Journey-scoped path uses trackScopedEvent/trackForTrigger with persistence and beforeSend.",
-      "The unscoped SystemEventSink.emit path uses TriggerService.trackForTrigger with persistence and beforeSend."
+      "processCapture",
+      "captureStableSystemEvent"
     ],
     "persists": [
       true,
@@ -1671,6 +1000,16 @@
         "source": "requesting Journey when scoped",
         "type": "String"
       },
+      "leg_generation": {
+        "required": false,
+        "source": "Journey run generation",
+        "type": "Int"
+      },
+      "leg_id": {
+        "required": false,
+        "source": "signed Journey release identifier",
+        "type": "String"
+      },
       "type": {
         "required": true,
         "source": "authored permission type",
@@ -1689,32 +1028,42 @@
     "constant": "SystemEventNames.productsUnavailable",
     "docs": false,
     "emitters": [
-      "Sources/Nuxie/Journey/Execution/JourneyRunner.swift:992"
+      "Sources/Nuxie/Journey/JourneyService.swift"
     ],
     "endpoint": "batch",
     "fixtures": [],
     "forwarding": "productsUnavailable",
-    "lane": "processCapture",
+    "lane": "captureStableSystemEvent",
     "persists": true,
     "properties": {
       "experience_id": {
         "required": true,
-        "source": "JourneyRunner active Experience id",
+        "source": "active Journey Experience id",
         "type": "String"
       },
       "experience_version": {
         "required": true,
-        "source": "JourneyRunner active Experience versionId",
+        "source": "active Journey Experience version",
         "type": "String"
       },
       "journey_id": {
         "required": true,
-        "source": "JourneyRunner active Journey id",
+        "source": "active Journey id",
+        "type": "String"
+      },
+      "leg_generation": {
+        "required": true,
+        "source": "authenticated Journey run",
+        "type": "Int"
+      },
+      "leg_id": {
+        "required": true,
+        "source": "authenticated Journey run",
         "type": "String"
       },
       "product_ids": {
         "required": true,
-        "source": "JourneyRunner active Experience products",
+        "source": "active Experience product references",
         "type": "[String]"
       }
     },
@@ -1723,17 +1072,29 @@
   },
   "$purchase_cancelled": {
     "authoredBy": "platform",
-    "beforeSend": "governed",
+    "beforeSend": [
+      "governed",
+      "governed"
+    ],
     "constant": "SystemEventNames.purchaseCancelled",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Experiences/ExperienceViewController.swift:2174"
+      "Sources/Nuxie/Experiences/ExperienceViewController.swift"
     ],
-    "endpoint": "/i/event response lane",
+    "endpoint": [
+      "batch",
+      "batch"
+    ],
     "fixtures": [],
     "forwarding": "purchaseCancelled",
-    "lane": "trackForTrigger",
-    "persists": true,
+    "lane": [
+      "processCapture",
+      "captureStableSystemEvent"
+    ],
+    "persists": [
+      true,
+      true
+    ],
     "properties": {
       "placement_id": {
         "required": true,
@@ -1757,7 +1118,10 @@
       }
     },
     "status": "active",
-    "wire": true
+    "wire": [
+      true,
+      true
+    ]
   },
   "$purchase_completed": {
     "authoredBy": "platform",
@@ -1765,7 +1129,7 @@
     "constant": "SystemEventNames.purchaseCompleted",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/StoreKit/Transactions/TransactionObserver.swift:1558"
+      "Sources/Nuxie/StoreKit/Transactions/TransactionObserver.swift"
     ],
     "endpoint": "batch",
     "fixtures": [
@@ -1773,9 +1137,6 @@
     ],
     "forwarding": "purchaseCompleted",
     "lane": "captureStableSystemEvent",
-    "pathNotes": [
-      "The TransactionObserver committer captures every verified or external declaration under its evidence or callback-operation identity and queues batch delivery."
-    ],
     "persists": true,
     "properties": {
       "display_price": {
@@ -1829,22 +1190,30 @@
   },
   "$purchase_failed": {
     "authoredBy": "platform",
-    "beforeSend": "governed",
+    "beforeSend": [
+      "governed",
+      "governed"
+    ],
     "constant": "SystemEventNames.purchaseFailed",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Experiences/ExperienceViewController.swift:2158",
-      "Sources/Nuxie/Experiences/ExperienceViewController.swift:2216",
-      "Sources/Nuxie/Experiences/ExperienceViewController.swift:2239",
-      "Sources/Nuxie/StoreKit/Transactions/TransactionService.swift:559",
-      "Sources/Nuxie/StoreKit/Transactions/TransactionService.swift:572",
-      "Sources/Nuxie/StoreKit/Transactions/TransactionService.swift:593"
+      "Sources/Nuxie/Experiences/ExperienceViewController.swift",
+      "Sources/Nuxie/StoreKit/Transactions/TransactionService.swift"
     ],
-    "endpoint": "/i/event response lane",
+    "endpoint": [
+      "batch",
+      "batch"
+    ],
     "fixtures": [],
     "forwarding": "purchaseFailed",
-    "lane": "trackForTrigger",
-    "persists": true,
+    "lane": [
+      "processCapture",
+      "captureStableSystemEvent"
+    ],
+    "persists": [
+      true,
+      true
+    ],
     "properties": {
       "error": {
         "required": false,
@@ -1878,7 +1247,10 @@
       }
     },
     "status": "active",
-    "wire": true
+    "wire": [
+      true,
+      true
+    ]
   },
   "$purchase_pending": {
     "authoredBy": "platform",
@@ -1886,12 +1258,12 @@
     "constant": "SystemEventNames.purchasePending",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Experiences/ExperienceViewController.swift:2188"
+      "Sources/Nuxie/Experiences/ExperienceViewController.swift"
     ],
-    "endpoint": "/i/event response lane",
+    "endpoint": "batch",
     "fixtures": [],
     "forwarding": "purchasePending",
-    "lane": "trackForTrigger",
+    "lane": "processCapture",
     "persists": true,
     "properties": {
       "placement_id": {
@@ -1927,24 +1299,19 @@
     "constant": "SystemEventNames.purchaseSynced",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/StoreKit/Transactions/TransactionObserver.swift:1863",
-      "Sources/Nuxie/StoreKit/Transactions/TransactionObserver.swift:2058"
+      "Sources/Nuxie/StoreKit/Transactions/TransactionObserver.swift"
     ],
     "endpoint": [
       "batch",
-      "/i/event response lane"
+      "batch"
     ],
     "fixtures": [
       "fixtures/events/atomic-purchase-sync.json"
     ],
     "forwarding": "purchaseSynced",
     "lane": [
-      "captureStableSystemEvent",
-      "trackForTrigger"
-    ],
-    "pathNotes": [
-      "Atomic purchase-backed usage uses captureStableSystemEvent and queues batch delivery.",
-      "The ordinary sync path uses SystemEventSink.emit, which enters trackForTrigger and sends through /i/event."
+      "processCapture",
+      "captureStableSystemEvent"
     ],
     "persists": [
       true,
@@ -1993,59 +1360,6 @@
       true
     ]
   },
-  "$response_set": {
-    "authoredBy": "designer",
-    "beforeSend": "exempt",
-    "constant": "SystemEventNames.responseSet",
-    "docs": true,
-    "emitters": [
-      "Sources/Nuxie/Experiences/Runtime/ScreenEmissionDispatcher.swift:494"
-    ],
-    "endpoint": "none",
-    "fixtures": [],
-    "forwarding": "hidden: local response control state",
-    "lane": "none",
-    "persistenceNote": "Response control is stored in Journey response state, not in the event store.",
-    "persists": false,
-    "properties": {
-      "field": {
-        "required": true,
-        "source": "published response action field",
-        "type": "String"
-      },
-      "value": {
-        "required": true,
-        "source": "published response action or native text input value",
-        "type": "Any"
-      }
-    },
-    "status": "active",
-    "wire": false
-  },
-  "$response_unset": {
-    "authoredBy": "designer",
-    "beforeSend": "exempt",
-    "constant": "SystemEventNames.responseUnset",
-    "docs": true,
-    "emitters": [
-      "Sources/Nuxie/Experiences/Runtime/ScreenEmissionDispatcher.swift:497"
-    ],
-    "endpoint": "none",
-    "fixtures": [],
-    "forwarding": "hidden: local response control state",
-    "lane": "none",
-    "persistenceNote": "Response control is stored in Journey response state, not in the event store.",
-    "persists": false,
-    "properties": {
-      "field": {
-        "required": true,
-        "source": "published response action field",
-        "type": "String"
-      }
-    },
-    "status": "active",
-    "wire": false
-  },
   "$restore_completed": {
     "authoredBy": "platform",
     "beforeSend": [
@@ -2055,24 +1369,20 @@
     "constant": "SystemEventNames.restoreCompleted",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/StoreKit/Transactions/TransactionObserver.swift:1116",
-      "Sources/Nuxie/StoreKit/Transactions/TransactionService.swift:934"
+      "Sources/Nuxie/StoreKit/Transactions/TransactionObserver.swift",
+      "Sources/Nuxie/StoreKit/Transactions/TransactionService.swift"
     ],
     "endpoint": [
       "batch",
-      "/i/event response lane"
+      "batch"
     ],
     "fixtures": [
       "fixtures/purchases/outcome-commit.json"
     ],
     "forwarding": "restoreCompleted",
     "lane": [
-      "captureStableSystemEvent",
-      "trackForTrigger"
-    ],
-    "pathNotes": [
-      "External delegate restore declarations are captured under their callback-operation identity and queue batch delivery.",
-      "Native and test-store restore outcomes use SystemEventSink.emit and send through /i/event."
+      "processCapture",
+      "captureStableSystemEvent"
     ],
     "persists": [
       true,
@@ -2098,19 +1408,30 @@
   },
   "$restore_failed": {
     "authoredBy": "platform",
-    "beforeSend": "governed",
+    "beforeSend": [
+      "governed",
+      "governed"
+    ],
     "constant": "SystemEventNames.restoreFailed",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Experiences/ExperienceViewController.swift:2262",
-      "Sources/Nuxie/StoreKit/Transactions/TransactionService.swift:880",
-      "Sources/Nuxie/StoreKit/Transactions/TransactionService.swift:943"
+      "Sources/Nuxie/Experiences/ExperienceViewController.swift",
+      "Sources/Nuxie/StoreKit/Transactions/TransactionService.swift"
     ],
-    "endpoint": "/i/event response lane",
+    "endpoint": [
+      "batch",
+      "batch"
+    ],
     "fixtures": [],
     "forwarding": "restoreFailed",
-    "lane": "trackForTrigger",
-    "persists": true,
+    "lane": [
+      "processCapture",
+      "captureStableSystemEvent"
+    ],
+    "persists": [
+      true,
+      true
+    ],
     "properties": {
       "error": {
         "required": true,
@@ -2124,22 +1445,36 @@
       }
     },
     "status": "active",
-    "wire": true
+    "wire": [
+      true,
+      true
+    ]
   },
   "$restore_no_purchases": {
     "authoredBy": "platform",
-    "beforeSend": "governed",
+    "beforeSend": [
+      "governed",
+      "governed"
+    ],
     "constant": "SystemEventNames.restoreNoPurchases",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/StoreKit/Transactions/TransactionService.swift:889",
-      "Sources/Nuxie/StoreKit/Transactions/TransactionService.swift:954"
+      "Sources/Nuxie/StoreKit/Transactions/TransactionService.swift"
     ],
-    "endpoint": "/i/event response lane",
+    "endpoint": [
+      "batch",
+      "batch"
+    ],
     "fixtures": [],
     "forwarding": "restoreNoPurchases",
-    "lane": "trackForTrigger",
-    "persists": true,
+    "lane": [
+      "processCapture",
+      "captureStableSystemEvent"
+    ],
+    "persists": [
+      true,
+      true
+    ],
     "properties": {
       "test_store": {
         "required": false,
@@ -2148,7 +1483,10 @@
       }
     },
     "status": "active",
-    "wire": true
+    "wire": [
+      true,
+      true
+    ]
   },
   "$screen_dismissed": {
     "authoredBy": "platform",
@@ -2156,32 +1494,47 @@
     "constant": "SystemEventNames.screenDismissed",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Journey/Execution/JourneyRunner.swift:761"
+      "Sources/Nuxie/Journey/JourneyService.swift"
     ],
     "endpoint": "batch",
     "fixtures": [],
     "forwarding": "screenDismissed",
-    "lane": "processCapture",
+    "lane": "captureStableSystemEvent",
     "persists": true,
     "properties": {
       "experience_id": {
         "required": true,
-        "source": "JourneyRunner active Experience id",
+        "source": "active Journey Experience id",
         "type": "String"
       },
       "experience_version": {
         "required": true,
-        "source": "JourneyRunner active Experience version",
+        "source": "active Journey Experience version",
         "type": "String"
       },
       "journey_id": {
         "required": true,
-        "source": "JourneyRunner active Journey id",
+        "source": "active Journey id",
+        "type": "String"
+      },
+      "leg_generation": {
+        "required": true,
+        "source": "authenticated Journey run",
+        "type": "Int"
+      },
+      "leg_id": {
+        "required": true,
+        "source": "authenticated Journey run",
         "type": "String"
       },
       "method": {
         "required": true,
         "source": "screen dismissal method",
+        "type": "String"
+      },
+      "revealing_screen_id": {
+        "required": false,
+        "source": "screen revealed after native navigation dismissal",
         "type": "String"
       },
       "screen_id": {
@@ -2199,27 +1552,37 @@
     "constant": "SystemEventNames.screenShown",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Journey/Execution/JourneyRunner.swift:698"
+      "Sources/Nuxie/Journey/JourneyService.swift"
     ],
     "endpoint": "batch",
     "fixtures": [],
     "forwarding": "screenShown",
-    "lane": "processCapture",
+    "lane": "captureStableSystemEvent",
     "persists": true,
     "properties": {
       "experience_id": {
         "required": true,
-        "source": "JourneyRunner active Experience id",
+        "source": "active Journey Experience id",
         "type": "String"
       },
       "experience_version": {
         "required": true,
-        "source": "JourneyRunner active Experience version",
+        "source": "active Journey Experience version",
         "type": "String"
       },
       "journey_id": {
         "required": true,
-        "source": "JourneyRunner active Journey id",
+        "source": "active Journey id",
+        "type": "String"
+      },
+      "leg_generation": {
+        "required": true,
+        "source": "authenticated Journey run",
+        "type": "Int"
+      },
+      "leg_id": {
+        "required": true,
+        "source": "authenticated Journey run",
         "type": "String"
       },
       "screen_id": {
@@ -2240,22 +1603,18 @@
     "constant": "SystemEventNames.trackingAuthorized",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Journey/JourneyService.swift:3051",
-      "Sources/Nuxie/Experiences/ExperienceViewController.swift:871"
+      "Sources/Nuxie/Experiences/ExperienceViewController.swift",
+      "Sources/Nuxie/Journey/JourneyService.swift"
     ],
     "endpoint": [
-      "/i/event response lane",
-      "/i/event response lane"
+      "batch",
+      "batch"
     ],
     "fixtures": [],
     "forwarding": "permissionResolved",
     "lane": [
-      "trackForTrigger",
-      "trackForTrigger"
-    ],
-    "pathNotes": [
-      "The Journey-scoped path uses trackScopedEvent/trackForTrigger with persistence and beforeSend.",
-      "The unscoped SystemEventSink.emit path uses TriggerService.trackForTrigger with persistence and beforeSend."
+      "processCapture",
+      "captureStableSystemEvent"
     ],
     "persists": [
       true,
@@ -2275,6 +1634,16 @@
       "journey_id": {
         "required": false,
         "source": "requesting Journey when scoped",
+        "type": "String"
+      },
+      "leg_generation": {
+        "required": false,
+        "source": "Journey run generation",
+        "type": "Int"
+      },
+      "leg_id": {
+        "required": false,
+        "source": "signed Journey release identifier",
         "type": "String"
       }
     },
@@ -2293,22 +1662,18 @@
     "constant": "SystemEventNames.trackingDenied",
     "docs": true,
     "emitters": [
-      "Sources/Nuxie/Journey/JourneyService.swift:3051",
-      "Sources/Nuxie/Experiences/ExperienceViewController.swift:871"
+      "Sources/Nuxie/Experiences/ExperienceViewController.swift",
+      "Sources/Nuxie/Journey/JourneyService.swift"
     ],
     "endpoint": [
-      "/i/event response lane",
-      "/i/event response lane"
+      "batch",
+      "batch"
     ],
     "fixtures": [],
     "forwarding": "permissionResolved",
     "lane": [
-      "trackForTrigger",
-      "trackForTrigger"
-    ],
-    "pathNotes": [
-      "The Journey-scoped path uses trackScopedEvent/trackForTrigger with persistence and beforeSend.",
-      "The unscoped SystemEventSink.emit path uses TriggerService.trackForTrigger with persistence and beforeSend."
+      "processCapture",
+      "captureStableSystemEvent"
     ],
     "persists": [
       true,
@@ -2328,6 +1693,16 @@
       "journey_id": {
         "required": false,
         "source": "requesting Journey when scoped",
+        "type": "String"
+      },
+      "leg_generation": {
+        "required": false,
+        "source": "Journey run generation",
+        "type": "Int"
+      },
+      "leg_id": {
+        "required": false,
+        "source": "signed Journey release identifier",
         "type": "String"
       }
     },

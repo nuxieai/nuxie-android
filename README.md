@@ -90,10 +90,10 @@ is unset, the dedicated task skips them with the named assumption
 
 ## Wrapper contract
 
-Device leg reporting adds `JourneyLegStarted` and `JourneyLegCompleted`
-activities, with flat names `journey_leg_started` and `journey_leg_completed`.
-They carry the experience/version, journey, leg ID, and generation; completion
-also carries the outcome. Leg completion does not imply the journey ended.
+Journey reporting adds `JourneyStarted` and `JourneyCompleted` activities, with
+flat names `journey_started` and `journey_completed`. They carry the
+experience/version, journey, leg ID, and generation; completion also carries
+the outcome. A leg completion does not imply that the entire journey ended.
 Activity timestamps preserve occurrence time; `receivedAtMillis` records local
 capture. Buffered answers stay in the ordinary report and are not copied into
 the flat activity view. Host `beforeSend` privacy policy applies to both reports.

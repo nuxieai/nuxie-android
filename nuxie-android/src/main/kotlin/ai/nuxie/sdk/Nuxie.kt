@@ -99,69 +99,16 @@ object Nuxie {
 
     // MARK: Trigger
 
-    /**
-     * Name the moment. The remotely published Experiences decide what
-     * happens; [handler] receives progressive updates through the terminal
-     * outcome. Fire-and-forget when [handler] is null.
-     */
+    /** Capture an event for delivery and ordered Journey evaluation. */
     fun trigger(
         event: String,
         properties: Map<String, Any?>? = null,
-        handler: ((TriggerUpdate) -> Unit)? = null,
     ) {
         val core = core ?: run {
-            handler?.invoke(
-                TriggerUpdate.Error(
-                    TriggerError(TriggerErrorCode.NOT_CONFIGURED, "Call Nuxie.setup first."),
-                ),
-            )
+            Log.w(LOG_TAG, "trigger called before SDK setup")
             return
         }
-        core.scope.launch {
-            core.triggers.trigger(event, properties, handler ?: {})
-        }
-    }
-
-    /**
-     * Trigger and await the terminal outcome. [progress] observes every
-     * update on the way there.
-     */
-    suspend fun triggerAndWait(
-        event: String,
-        properties: Map<String, Any?>? = null,
-        progress: ((TriggerUpdate) -> Unit)? = null,
-    ): TriggerResult {
-        val core = core
-            ?: return TriggerResult.Error(
-                TriggerError(TriggerErrorCode.NOT_CONFIGURED, "Call Nuxie.setup first."),
-            )
-        val done = kotlinx.coroutines.CompletableDeferred<TriggerResult>()
-        core.scope.launch {
-            core.triggers.trigger(event, properties) { update ->
-                progress?.invoke(update)
-                val terminal: TriggerResult? = when (update) {
-                    is TriggerUpdate.Error -> TriggerResult.Error(update.error)
-                    is TriggerUpdate.Decision -> when (update.decision) {
-                        is TriggerDecision.AllowedImmediate -> TriggerResult.Allowed
-                        is TriggerDecision.DeniedImmediate -> TriggerResult.Denied
-                        is TriggerDecision.NoMatch -> TriggerResult.NoMatch
-                        // Suppression and gate-terminal presentation resolve as
-                        // the sequence fallback (iOS parity).
-                        is TriggerDecision.Suppressed -> TriggerResult.NoMatch
-                        is TriggerDecision.ExperienceShown -> TriggerResult.NoMatch
-                        else -> null
-                    }
-                    is TriggerUpdate.FeatureAccess -> when (update.update) {
-                        is FeatureAccessUpdate.Allowed -> TriggerResult.Allowed
-                        is FeatureAccessUpdate.Denied -> TriggerResult.Denied
-                        is FeatureAccessUpdate.Pending -> null
-                    }
-                    is TriggerUpdate.Journey -> TriggerResult.JourneyCompleted(update.update)
-                }
-                terminal?.let { done.complete(it) }
-            }
-        }
-        return done.await()
+        core.eventLog.capture(event, properties)
     }
 
     // MARK: Feature access
@@ -332,11 +279,10 @@ object Nuxie {
 
     // MARK: Profile
 
-    /** Change the profile locale and await a refresh for the new locale. */
+    /** Use this locale at the next launch/foreground profile synchronization. */
     suspend fun setLocaleIdentifier(localeIdentifier: String?) {
         val core = core ?: return
         core.profile.setLocaleIdentifier(localeIdentifier)
-        core.profile.refreshAndWait()
     }
 
     // MARK: Presentation
@@ -356,7 +302,7 @@ object Nuxie {
         deliverOnMain("App Action") { it.onAppActionRequested(this, action) }
     }
 
-    /** Device-leg publication admitted under its execution and identity fences. */
+    /** Journey publication admitted under its execution and identity fences. */
     internal suspend fun deliverAppAction(
         action: AppAction,
         publishIfCurrent: ((() -> Unit) -> Boolean),

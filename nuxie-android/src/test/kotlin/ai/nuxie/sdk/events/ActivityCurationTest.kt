@@ -1,7 +1,6 @@
 package ai.nuxie.sdk.events
 
 import ai.nuxie.sdk.DismissReason
-import ai.nuxie.sdk.JourneyExitReason
 import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieActivityValue
 import ai.nuxie.sdk.journey.JourneyEventNames
@@ -31,11 +30,29 @@ class ActivityCurationTest {
         assertEquals(DismissReason.USER, dismissed.reason)
         assertEquals("version-1", dismissed.experience.experienceVersion)
 
-        val ended = ActivityCuration.activity(
-            JourneyEventNames.EXITED,
-            JsonObject(ref + mapOf("reason" to JsonPrimitive("cancelled"), "dismissed_by" to JsonPrimitive("user"))),
-        ) as NuxieActivity.JourneyEnded
-        assertEquals(JourneyExitReason.DISMISSED, ended.exitReason)
+        val started = ActivityCuration.activity(
+            JourneyEventNames.LEG_STARTED,
+            JsonObject(
+                ref + mapOf(
+                    "leg_id" to JsonPrimitive("leg-1"),
+                    "leg_generation" to JsonPrimitive(2),
+                ),
+            ),
+        ) as NuxieActivity.JourneyStarted
+        assertEquals("leg-1", started.legId)
+        assertEquals(2L, started.generation)
+
+        val completed = ActivityCuration.activity(
+            JourneyEventNames.LEG_COMPLETED,
+            JsonObject(
+                ref + mapOf(
+                    "leg_id" to JsonPrimitive("leg-1"),
+                    "leg_generation" to JsonPrimitive(2),
+                    "outcome" to JsonPrimitive("continue"),
+                ),
+            ),
+        ) as NuxieActivity.JourneyCompleted
+        assertEquals("continue", completed.outcome)
 
         val products = ActivityCuration.activity(
             SystemEventNames.PRODUCTS_UNAVAILABLE,

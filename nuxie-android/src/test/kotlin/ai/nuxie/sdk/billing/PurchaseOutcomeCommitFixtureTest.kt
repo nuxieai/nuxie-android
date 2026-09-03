@@ -6,7 +6,6 @@ import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.SystemEventNames
-import ai.nuxie.sdk.events.TriggerService
 import ai.nuxie.sdk.features.FeatureAllowance
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.network.HttpTransport
@@ -126,6 +125,7 @@ class PurchaseOutcomeCommitFixtureTest {
                 harness.observeOverlay()
             }
             runCurrent()
+            harness.core.eventLog.awaitBarrier()
             assertVector(contract, vector, harness)
         } finally {
             harness.close()
@@ -845,10 +845,6 @@ class PurchaseOutcomeCommitFixtureTest {
         val ownerDistinctId = "purchase_outcome_owner_$vectorIndex"
         val transport = RecordingPurchaseTransport(ownerDistinctId, catalogProductsByStore)
         val journeyEvents = mutableListOf<StoredEvent>()
-        private val journeyRouter = TriggerService.JourneyRouter { event ->
-            journeyEvents += event
-            emptyList()
-        }
         val core = NuxieCore(
             context = RuntimeEnvironment.getApplication(),
             apiKey = "pk_test_purchase_outcome_$vectorIndex",
@@ -859,11 +855,18 @@ class PurchaseOutcomeCommitFixtureTest {
                 transport = transport,
                 nowMillis = { FIXED_NOW_MILLIS + vectorIndex },
                 registerLifecycle = false,
-                journeys = journeyRouter,
                 requestInitialProfileRefresh = false,
                 billingClientFactory = InertBillingClientAdapter.factory,
             ),
-        ).also { it.identity.setDistinctId(ownerDistinctId) }
+        ).also { core ->
+            core.identity.setDistinctId(ownerDistinctId)
+            core.eventLog.subscribeCommittedWithAdmission(
+                sampleGeneration = { 0L },
+            ) { event, _ ->
+                journeyEvents += event
+                true
+            }
+        }
         val store = RecordingEvidenceStore()
         val billing = FakeBilling()
         val settings = PurchaseSettings(delegate = null, handlingMode = PurchaseHandlingMode.NUXIE_MANAGED)

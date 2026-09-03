@@ -21,7 +21,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 
 @RunWith(RobolectricTestRunner::class)
-class FeatureAccessListenerDeliveryTest {
+class FeatureAccessListenerJourneyReleaseDeliveryTest {
     @Before
     fun setUp() {
         Nuxie.resetForTesting()

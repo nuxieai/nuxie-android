@@ -9,6 +9,8 @@ import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.testsupport.FakeTransport
+import ai.nuxie.sdk.testsupport.canonicalJourneyProfileText
+import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponseBody
 import java.io.File
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CancellationException
@@ -72,7 +74,10 @@ class FeatureServiceTest {
         return core
     }
 
-    private fun profile(features: String): String = """{"segments":[],"features":$features}"""
+    private fun profile(features: String): String = canonicalJourneyProfileText(features)
+
+    private fun profileResponse(features: String): HttpTransport.Response =
+        canonicalJourneyProfileResponseBody(profile(features))
 
     private suspend fun applyTestPurchase(
         core: NuxieCore,
@@ -262,7 +267,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -398,7 +403,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -523,59 +528,6 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun optimisticOverlayIsDisplayOnlyForCacheFirstChecksAndJourneyGates() = runBlocking {
-        lateinit var core: NuxieCore
-        val transport = FakeTransport().apply {
-            respond = { request ->
-                when (request.url.path) {
-                    "/entitled" -> HttpTransport.Response(
-                        200,
-                        featureResponse(
-                            customerId = core.identity.distinctId(),
-                            featureId = "pro",
-                            requiredBalance = 1.0,
-                            allowed = false,
-                            balance = "null",
-                            type = "boolean",
-                        ).encodeToByteArray(),
-                    )
-                    "/event" -> HttpTransport.Response(
-                        200,
-                        """{"status":"ok","payload":{"gate":{"decision":"require_feature","featureId":"pro","policy":"cache_only"}}}"""
-                            .encodeToByteArray(),
-                    )
-                    else -> HttpTransport.Response(200, profile("[]").encodeToByteArray())
-                }
-            }
-        }
-        core = core(transport)
-        val customer = core.identity.distinctId()
-        core.features.hydrateProfile(
-            customer,
-            Json.parseToJsonElement(profile("[]")).jsonObject,
-        )
-        core.features.applyOptimisticPurchaseProjection(
-            customer,
-            mapOf("pro" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null)),
-        )
-
-        assertTrue(core.featureInfo.isAllowed("pro"))
-        assertTrue(core.features.getAllCached().isEmpty())
-        assertFalse(core.features.checkWithCache("pro").allowed)
-        assertTrue(core.featureInfo.isAllowed("pro"))
-
-        val updates = mutableListOf<ai.nuxie.sdk.TriggerUpdate>()
-        core.triggers.trigger("moment", null) { updates += it }
-
-        assertEquals(
-            ai.nuxie.sdk.FeatureAccessUpdate.Denied,
-            (updates.single() as ai.nuxie.sdk.TriggerUpdate.FeatureAccess).update,
-        )
-        assertTrue(core.featureInfo.isAllowed("pro"))
-        core.stop()
-    }
-
-    @Test
     fun stagedOptimisticProjectionPublishesOnlyAfterItsCoordinationLockIsReleased() = runBlocking {
         val core = core(FakeTransport())
         val customer = core.identity.distinctId()
@@ -607,7 +559,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -651,12 +603,9 @@ class FeatureServiceTest {
                 if (request.url.path == "/profile") {
                     fetchStarted.countDown()
                     assertTrue(releaseFetch.await(5, TimeUnit.SECONDS))
-                    HttpTransport.Response(
-                        200,
-                        profile(
+                    profileResponse(
                             """[{"id":"exports","type":"metered","balance":0,"unlimited":false}]""",
-                        ).encodeToByteArray(),
-                    )
+                        )
                 } else {
                     HttpTransport.Response(200, "{}".encodeToByteArray())
                 }
@@ -687,10 +636,7 @@ class FeatureServiceTest {
                 if (request.url.path == "/profile") {
                     fetchStarted.countDown()
                     assertTrue(releaseFetch.await(5, TimeUnit.SECONDS))
-                    HttpTransport.Response(
-                        200,
-                        profile("[]").encodeToByteArray(),
-                    )
+                    profileResponse("[]")
                 } else {
                     HttpTransport.Response(200, "{}".encodeToByteArray())
                 }
@@ -721,7 +667,7 @@ class FeatureServiceTest {
             FakeTransport().apply {
                 respond = { request ->
                     if (request.url.path == "/profile") {
-                        HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                        profileResponse("[]")
                     } else {
                         HttpTransport.Response(200, "{}".encodeToByteArray())
                     }
@@ -766,7 +712,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -807,7 +753,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -849,7 +795,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -897,7 +843,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -947,7 +893,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -1037,7 +983,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -1091,7 +1037,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -1138,7 +1084,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -1177,7 +1123,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -1238,7 +1184,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -1277,7 +1223,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -1332,7 +1278,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -1382,7 +1328,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -1442,7 +1388,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -1587,7 +1533,7 @@ class FeatureServiceTest {
                         200,
                         featureResponse("customer", "exports", 2.0).encodeToByteArray(),
                     )
-                    else -> HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    else -> profileResponse("[]")
                 }
             }
         }
@@ -1623,7 +1569,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -1666,7 +1612,7 @@ class FeatureServiceTest {
                         ).encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    profileResponse("[]")
                 }
             }
         }
@@ -1714,7 +1660,7 @@ class FeatureServiceTest {
                         200,
                         featureResponse("customer", "exports", 1.0, balance = "1").encodeToByteArray(),
                     )
-                } else HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                } else profileResponse("[]")
             }
         }
         val core = core(transport, ttlMillis = 10)
@@ -1809,7 +1755,7 @@ class FeatureServiceTest {
                             balance = if (checks == 1) "5" else "0",
                         ).encodeToByteArray(),
                     )
-                } else HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                } else profileResponse("[]")
             }
         }
         val core = core(transport)
@@ -1899,7 +1845,7 @@ class FeatureServiceTest {
         val transport = FakeTransport().apply {
             respond = respond@{ request ->
                 if (request.url.path != "/entitled") {
-                    return@respond HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                    return@respond profileResponse("[]")
                 }
                 val checkNumber = exportsChecks.incrementAndGet()
                 if (checkNumber == 1) {
@@ -2019,7 +1965,7 @@ class FeatureServiceTest {
                             balance = "5",
                         ).encodeToByteArray(),
                     )
-                } else HttpTransport.Response(200, profile("[]").encodeToByteArray())
+                } else profileResponse("[]")
             }
         }
         core = core(transport)
@@ -2062,31 +2008,4 @@ class FeatureServiceTest {
         core.stop()
     }
 
-    @Test
-    fun triggerFeatureGateUsesCachedThenCheckedFeatureAccess() = runBlocking {
-        val transport = FakeTransport().apply {
-            respond = { request ->
-                when (request.url.path) {
-                    "/event" -> HttpTransport.Response(
-                        200,
-                        """{"status":"ok","payload":{"gate":{"decision":"require_feature","featureId":"pro"}}}"""
-                            .encodeToByteArray(),
-                    )
-                    else -> HttpTransport.Response(200, profile("[]").encodeToByteArray())
-                }
-            }
-        }
-        val core = core(transport)
-        core.features.hydrateProfile(
-            core.identity.distinctId(),
-            Json.parseToJsonElement(profile("""[{"id":"pro","type":"boolean","unlimited":false}]""")).jsonObject,
-        )
-        val updates = mutableListOf<ai.nuxie.sdk.TriggerUpdate>()
-
-        core.triggers.trigger("moment", null) { updates += it }
-
-        assertEquals(ai.nuxie.sdk.FeatureAccessUpdate.Allowed, (updates.single() as ai.nuxie.sdk.TriggerUpdate.FeatureAccess).update)
-        assertTrue(transport.requests.none { it.url.path == "/entitled" })
-        core.stop()
-    }
 }

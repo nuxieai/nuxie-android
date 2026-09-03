@@ -1,11 +1,14 @@
 package ai.nuxie.sdk.presentation
 
-import ai.nuxie.sdk.JourneyExitReason
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
-import ai.nuxie.sdk.billing.ExperiencePurchaseProgramHost
+import android.Manifest
 import android.app.Activity
+import android.app.NotificationManager
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.graphics.Outline
@@ -16,6 +19,9 @@ import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 internal class ScreenCloseState(
     private val report: (CloseReason) -> Unit = {},
@@ -50,14 +56,15 @@ internal class ScreenCloseState(
  */
 internal class NuxieExperienceActivity :
     Activity(),
-    PresentationActivityHandle,
-    ExperiencePurchaseProgramHost {
+    PresentationActivityHandle {
     private var host: ExperienceSurfaceHost? = null
     private var lane: NuxieRuntimeLane? = null
     private var presentationId: String? = null
     private val screenClose = ScreenCloseState(::reportSelectedClose)
     private var dismissible = true
     private var predictiveBackCallback: android.window.OnBackInvokedCallback? = null
+    private var pendingPermission: Pair<Int, CompletableDeferred<Boolean>>? = null
+    private var nextPermissionRequestCode = PERMISSION_REQUEST_CODE_START
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -110,11 +117,13 @@ internal class NuxieExperienceActivity :
                 override fun onRuntimeStep(
                     outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
                     correlationId: ULong,
+                    viewModelSnapshot: NuxieViewModelSnapshot?,
                 ) {
                     PresentationRegistry.reportRuntimeStep(
                         presentationId,
                         outcome,
                         correlationId,
+                        viewModelSnapshot,
                     )
                 }
 
@@ -125,13 +134,7 @@ internal class NuxieExperienceActivity :
                 override fun onRuntimeEvent(
                     event: NuxieRuntimeEvent,
                     viewModelSnapshot: NuxieViewModelSnapshot?,
-                ) {
-                    prepared.handleRuntimeEvent(
-                        this@NuxieExperienceActivity,
-                        event,
-                        viewModelSnapshot,
-                    )
-                }
+                ) = Unit
             },
         )
         this.host = host
@@ -162,22 +165,92 @@ internal class NuxieExperienceActivity :
             Unit
         }
         lane?.shutdown(completeTeardown) ?: completeTeardown()
+        pendingPermission?.second?.complete(false)
+        pendingPermission = null
     }
 
     override fun requestCloseFromService(reason: CloseReason): Boolean = screenClose.select(reason)
 
     override fun screenCloseReason(): CloseReason? = screenClose.reason
 
-    override fun dismissFromAuthenticatedProgram() {
-        finishTerminal(CloseReason.UserDismissed)
-    }
-
-    override fun exitFromAuthenticatedProgram(reason: JourneyExitReason) {
-        finishTerminal(CloseReason.AuthenticatedExit(reason))
-    }
-
     override fun finishAfterServiceClose() {
         runOnUiThread { finish() }
+    }
+
+    override fun purchaseActivity(): Activity = this
+
+    override suspend fun resolveJourneyPermission(request: JourneyPermissionRequest): Boolean =
+        withContext(Dispatchers.Main.immediate) {
+            when (request) {
+                JourneyPermissionRequest.TRACKING,
+                JourneyPermissionRequest.UNSUPPORTED,
+                -> false
+                JourneyPermissionRequest.NOTIFICATIONS -> resolveNotificationPermission()
+                else -> resolveRuntimePermission(request.androidPermission())
+            }
+        }
+
+    @Deprecated("Deprecated in Android SDK; required for minSdk-compatible permission delivery")
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        val pending = pendingPermission?.takeIf { it.first == requestCode } ?: return
+        pendingPermission = null
+        pending.second.complete(
+            grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED },
+        )
+    }
+
+    private suspend fun resolveNotificationPermission(): Boolean {
+        if (Build.VERSION.SDK_INT < 33) {
+            return if (Build.VERSION.SDK_INT < 24) {
+                true
+            } else {
+                (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                    .areNotificationsEnabled()
+            }
+        }
+        return resolveRuntimePermission(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    private suspend fun resolveRuntimePermission(permission: String): Boolean {
+        if (checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED) return true
+        val declared = runCatching {
+            packageManager.getPackageInfo(packageName, PackageManager.GET_PERMISSIONS)
+                .requestedPermissions
+                .orEmpty()
+                .contains(permission)
+        }.getOrDefault(false)
+        if (!declared || pendingPermission != null || isFinishing || isDestroyed) return false
+        val requestCode = nextPermissionRequestCode
+        nextPermissionRequestCode = if (requestCode == PERMISSION_REQUEST_CODE_END) {
+            PERMISSION_REQUEST_CODE_START
+        } else {
+            requestCode + 1
+        }
+        val result = CompletableDeferred<Boolean>()
+        pendingPermission = requestCode to result
+        requestPermissions(arrayOf(permission), requestCode)
+        return try {
+            result.await()
+        } finally {
+            if (pendingPermission?.first == requestCode) pendingPermission = null
+        }
+    }
+
+    private fun JourneyPermissionRequest.androidPermission(): String = when (this) {
+        JourneyPermissionRequest.CAMERA -> Manifest.permission.CAMERA
+        JourneyPermissionRequest.LOCATION -> Manifest.permission.ACCESS_FINE_LOCATION
+        JourneyPermissionRequest.MICROPHONE -> Manifest.permission.RECORD_AUDIO
+        JourneyPermissionRequest.PHOTOS -> if (Build.VERSION.SDK_INT >= 33) {
+            Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        else -> error("Permission request has no Android runtime permission")
     }
 
     private fun fail(error: Throwable) {
@@ -311,6 +384,8 @@ internal class NuxieExperienceActivity :
         const val SCRIM_COLOR = 0x66000000
 
         const val EXTRA_PRESENTATION_ID = "ai.nuxie.sdk.internal.PRESENTATION_ID"
+        const val PERMISSION_REQUEST_CODE_START = 0x4E00
+        const val PERMISSION_REQUEST_CODE_END = 0x4EFF
 
         internal fun isColdRecreation(savedInstanceState: Bundle?, presentationId: String?): Boolean =
             savedInstanceState != null &&

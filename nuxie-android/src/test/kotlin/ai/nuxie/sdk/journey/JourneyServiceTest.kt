@@ -1,2149 +1,2035 @@
 package ai.nuxie.sdk.journey
 
-import ai.nuxie.sdk.ExperienceRef
-import ai.nuxie.sdk.JourneyExitReason
 import ai.nuxie.sdk.LogLevel
-import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieEnvironment
-import ai.nuxie.sdk.NuxieActivityInfo
-import ai.nuxie.sdk.NuxieEvent
-import ai.nuxie.sdk.SuppressReason
-import ai.nuxie.sdk.TriggerUpdate
-import ai.nuxie.sdk.events.ActivityForwarder
 import ai.nuxie.sdk.events.EventLog
-import ai.nuxie.sdk.events.EventStore
+import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.events.NuxieContextBuilder
+import ai.nuxie.sdk.events.SQLiteEventStore
+import ai.nuxie.sdk.events.StableEventCaptureResult
 import ai.nuxie.sdk.events.StoredEvent
-import ai.nuxie.sdk.events.TriggerBroker
-import ai.nuxie.sdk.experiences.AuthenticatedRelease
-import ai.nuxie.sdk.experiences.ExperienceReleaseIdentity
-import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
-import ai.nuxie.sdk.experiences.SupportedRuntime
+import ai.nuxie.sdk.events.SystemEventNames
+import ai.nuxie.sdk.experiences.AcquiredJourneyRelease
+import ai.nuxie.sdk.experiences.AuthenticatedJourneyRelease
+import ai.nuxie.sdk.experiences.JourneyArtifactManager
+import ai.nuxie.sdk.experiences.JourneyProfileCatalog
+import ai.nuxie.sdk.experiences.JourneyPlaneProfile
+import ai.nuxie.sdk.experiences.PreparedJourneyArtifacts
+import ai.nuxie.sdk.experiences.JourneyReleaseHighWaterStore
+import ai.nuxie.sdk.experiences.JourneyReleaseEnvelope
+import ai.nuxie.sdk.experiences.JourneyReleaseSupportedRuntime
+import ai.nuxie.sdk.fixtures.FixtureRunner
+import ai.nuxie.sdk.testsupport.JourneyTestFixtures
 import ai.nuxie.sdk.identity.IdentityProvider
-import ai.nuxie.sdk.network.HttpTransport
-import ai.nuxie.sdk.network.NuxieApi
-import ai.nuxie.sdk.presentation.CloseReason
-import ai.nuxie.sdk.profile.ProfileLocaleSettings
-import ai.nuxie.sdk.profile.ProfileService
-import ai.nuxie.sdk.segments.SegmentService
+import ai.nuxie.sdk.identity.IdentityScope
+import ai.nuxie.sdk.identity.IdentityService
+import ai.nuxie.sdk.network.ProfileDeliveryAuthority
+import ai.nuxie.sdk.presentation.JourneyPresentationActionResult
+import ai.nuxie.sdk.presentation.JourneyPresentationOwner
+import ai.nuxie.sdk.presentation.JourneyPresentationRequest
+import ai.nuxie.sdk.presentation.JourneyPresentationReservation
+import ai.nuxie.sdk.presentation.JourneyPresentationResult
+import ai.nuxie.sdk.presentation.JourneyPresenting
+import ai.nuxie.sdk.presentation.JourneyScreenEmission
+import ai.nuxie.sdk.presentation.JourneyScreenEmissionBatch
+import ai.nuxie.sdk.presentation.JourneyScreenEmissionSource
+import ai.nuxie.sdk.presentation.JourneyScreenDismissalResult
+import ai.nuxie.sdk.presentation.JourneySurfaceOutcome
+import android.util.Base64
 import java.io.File
+import java.io.Closeable
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
-import kotlin.io.path.createTempDirectory
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
-import org.robolectric.shadows.ShadowLog
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.SQLiteMode
 
 @RunWith(RobolectricTestRunner::class)
+@Config(sdk = [23])
+@SQLiteMode(SQLiteMode.Mode.NATIVE)
 class JourneyServiceTest {
+    private val context get() = RuntimeEnvironment.getApplication()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val roots = mutableListOf<File>()
-    private var now = 1_784_462_400_000L
+    private lateinit var store: SQLiteEventStore
+    private lateinit var directory: File
 
-    private class Identity : IdentityProvider {
-        var currentDistinctId = "customer-1"
-
-        override fun distinctId() = currentDistinctId
-        override fun anonymousId() = currentDistinctId
-        override fun rawDistinctId(): String? = null
-        override val isIdentified = false
-    }
-
-    private class Store : EventStore {
-        val events = linkedMapOf<String, StoredEvent>()
-        val delivered = mutableSetOf<String>()
-        var failNextPendingInsert = false
-        var failNextServerFactInsert = false
-        var beforePendingInsert: ((StoredEvent) -> Unit)? = null
-        var serverFactInsertStarted: CompletableDeferred<Unit>? = null
-        var serverFactInsertGate: CompletableDeferred<Unit>? = null
-        override suspend fun insertPending(event: StoredEvent) {
-            beforePendingInsert?.invoke(event)
-            if (failNextPendingInsert) {
-                failNextPendingInsert = false
-                error("pending insert failed")
-            }
-            check(events.putIfAbsent(event.id, event) == null) { "duplicate event" }
-        }
-        override suspend fun insertDeliveredIfAbsent(event: StoredEvent): Boolean {
-            serverFactInsertStarted?.complete(Unit)
-            serverFactInsertGate?.await()
-            if (failNextServerFactInsert) {
-                failNextServerFactInsert = false
-                error("server fact insert failed")
-            }
-            if (events.putIfAbsent(event.id, event) != null) return false
-            delivered += event.id
-            return true
-        }
-        override suspend fun markDelivered(ids: List<String>) { delivered += ids }
-        override suspend fun hasEvent(name: String, distinctId: String, sinceMillis: Long?) = false
-        override suspend fun countEvents(name: String, distinctId: String, sinceMillis: Long?, untilMillis: Long?) = 0
-        override suspend fun getFirstEventTime(name: String, distinctId: String, sinceMillis: Long?, untilMillis: Long?) = null
-        override suspend fun getLastEventTime(name: String, distinctId: String, sinceMillis: Long?, untilMillis: Long?) = null
-        override suspend fun querySessionEvents(sessionId: String) = emptyList<StoredEvent>()
-        override suspend fun reassignEvents(from: String, to: String) = 0
-        override suspend fun deleteOldestDeliveredEvents(keeping: Int) = 0
-        override suspend fun recordStableDrop(eventId: String, recordedAtMillis: Long) = true
-        override suspend fun pendingBatch(limit: Int) = events.values.filterNot { it.id in delivered }.take(limit)
-        override suspend fun close() = Unit
-    }
-
-    private data class Harness(
-        val root: File,
-        val store: Store,
-        val log: EventLog,
-        val service: JourneyService,
-        val broker: TriggerBroker,
-        val releases: JourneyReleaseProvider,
-        val journeyStore: JourneyStore,
+    private val fixture = Json.parseToJsonElement(
+        FixtureRunner.fixturesRoot().resolve("journeys/planes/release.json").readText(),
+    ).jsonObject
+    private val entry get() = fixture.getValue("entry").jsonObject
+    private val authority get() = ProfileDeliveryAuthority(
+        entry.getValue("locator").jsonObject.getValue("appId").jsonPrimitive.content,
+        entry.getValue("locator").jsonObject.getValue("environment").jsonPrimitive.content,
     )
 
-    private fun harness(
-        reentry: JourneyReentry = JourneyReentry.EveryTime,
-        forwardingEnabled: () -> Boolean = { false },
-        identity: Identity = Identity(),
-        beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
-        onJourneyClockRead: () -> Unit = {},
-        onJourneyReleaseRead: () -> Unit = {},
-        hostDismissRetrySleep: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
-        decisionResponse: (StoredEvent) -> JsonObject? = {
-            buildJsonObject {
-                put("status", JsonPrimitive("ok"))
-                put("facts", JsonArray(emptyList()))
-            }
-        },
-        onDecisionCaptured: (JourneyStore, StoredEvent) -> Unit = { _, _ -> },
-    ): Harness {
-        val root = createTempDirectory("nuxie-journey-").toFile().also(roots::add)
-        val eventStore = Store()
-        val eventLog = EventLog(
-            store = eventStore,
-            contextBuilder = NuxieContextBuilder(RuntimeEnvironment.getApplication(), NuxieEnvironment.DEVELOPMENT, LogLevel.NONE, identity),
+    @Before fun setUp() {
+        File(context.filesDir, "nuxie").deleteRecursively()
+        directory = File(context.filesDir, "nuxie")
+        store = SQLiteEventStore(context, nowMillis = { 0L })
+        context.getSharedPreferences("nuxie_journey_release_high_water", 0).edit().clear().commit()
+    }
+
+    @After fun tearDown() {
+        runBlocking {
+        store.close()
+        scope.cancel()
+        directory.deleteRecursively()
+        }
+    }
+
+    @Test fun `foreground arm executes its authenticated leg once across revalidation`() = runBlocking {
+        val identity = identity("customer")
+        val catalog = catalog()
+        val prepared = catalog.prepare(profile(), authority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        var now = 100_000L
+        val service = JourneyService(
             identity = identity,
-            beforeSend = beforeSend,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
             scope = scope,
+            capture = { name, properties, _, _ ->
+                captures += name to properties
+                true
+            },
             nowMillis = { now },
-        ).also { log ->
-            log.subscribeForwarding(isEnabled = forwardingEnabled) {}
-        }
-        val release = AdmittedJourneyRelease(
-            experienceId = "experience-1",
-            experienceVersion = "version-1",
-            triggerEventName = "opened",
-            reentry = reentry,
-            settingsTemplate = buildJsonObject {
-                put("goal", buildJsonObject {
-                    put("kind", JsonPrimitive("milestone"))
-                    put("milestoneId", JsonPrimitive("reached-a"))
-                })
-                put("conversion_anchor", JsonPrimitive("journey_start"))
-                put("goal_window_ms", JsonPrimitive(1_000L))
-                put("end_on_goal", JsonPrimitive(true))
-            },
-        )
-        val broker = TriggerBroker()
-        val releases = JourneyReleaseProvider { _, name ->
-            onJourneyReleaseRead()
-            if (name == "opened") listOf(release) else emptyList()
-        }
-        val journeyStore = JourneyStore(root)
-        lateinit var service: JourneyService
-        val decisionEvents = CapturingDecisionEvents(
-            eventLog = eventLog,
-            responseFor = { event ->
-                onDecisionCaptured(journeyStore, event)
-                decisionResponse(event)
-            },
-            applyResponse = { event, response -> service.applyDecisionResponse(event, response) },
-        )
-        service = JourneyService(
-            journeyStore,
-            JourneyLedger(eventLog, decisionEvents),
-            releases,
-            {
-                onJourneyClockRead()
-                now
-            },
-            triggerBroker = broker,
-            hostDismissRetrySleep = hostDismissRetrySleep,
-        )
-        return Harness(
-            root,
-            eventStore,
-            eventLog,
-            service,
-            broker,
-            releases,
-            journeyStore,
-        )
-    }
-
-
-    @Test
-    fun enrollmentWithoutAnAcceptedDecisionDoesNotStartOrPersistAnActiveRun() = runBlocking {
-        val h = harness(decisionResponse = { null })
-        try {
-            val result = h.service.handleEventForTrigger(
-                StoredEvent(
-                    "trigger-no-response",
-                    "opened",
-                    timestampMillis = now,
-                    distinctId = "customer-1",
-                ),
-            )
-
-            assertTrue(result.single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Failed)
-            assertTrue(h.journeyStore.loadActive("customer-1").isEmpty())
-            assertEquals(
-                1,
-                h.journeyStore.loadPendingEnrollments("customer-1").size,
-            )
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun enrollmentPersistsRecoverableRunBeforeSendingItsDecisionEvent() = runBlocking {
-        var persistedBeforeSend: JourneyRun? = null
-        val h = harness(
-            onDecisionCaptured = { store, event ->
-                if (event.name == JourneyEventNames.ENROLLED) {
-                    val journeyId = (event.properties.getValue("journey_id") as JsonPrimitive).content
-                    persistedBeforeSend = store.load(event.distinctId, journeyId)
-                }
-            },
-        )
-        try {
-            val result = h.service.handleEventForTrigger(
-                StoredEvent(
-                    "trigger-crash-boundary",
-                    "opened",
-                    timestampMillis = now,
-                    distinctId = "customer-1",
-                ),
-            )
-
-            assertTrue(result.single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started)
-            assertEquals(JourneyRunState.ENROLLING, persistedBeforeSend?.state)
-            assertTrue(persistedBeforeSend?.pendingEnrollmentEventId != null)
-            assertEquals(JourneyRunState.ACTIVE, h.journeyStore.loadActive("customer-1").single().state)
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun enrollmentDecisionCannotBeDroppedByBeforeSend() = runBlocking {
-        val h = harness(beforeSend = { null })
-        try {
-            val result = h.service.handleEventForTrigger(
-                StoredEvent(
-                    "trigger-before-send",
-                    "opened",
-                    timestampMillis = now,
-                    distinctId = "customer-1",
-                ),
-            )
-
-            assertTrue(result.single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started)
-            assertEquals(JourneyRunState.ACTIVE, h.journeyStore.loadActive("customer-1").single().state)
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun pendingEnrollmentRecoversWithItsOriginalEventIdentity() = runBlocking {
-        val h = harness()
-        try {
-            val pending = JourneyRun(
-                id = "018fc8e0-7b00-7000-8000-000000000011",
-                distinctId = "customer-1",
-                experienceId = "experience-1",
-                experienceVersion = "version-1",
-                epoch = 0,
-                plane = JourneyPlane.DEVICE,
-                settingsSnapshot = buildJsonObject {},
-                state = JourneyRunState.ENROLLING,
-                pendingEnrollmentEventId = "018fc8e0-7b00-7000-8000-000000000012",
-                triggerRef = "trigger-recovery",
-            )
-            h.journeyStore.save(pending)
-            val originalEventId = requireNotNull(pending.pendingEnrollmentEventId)
-
-            lateinit var recoveredService: JourneyService
-            val recoveringEvents = CapturingDecisionEvents(
-                eventLog = h.log,
-                responseFor = {
-                    buildJsonObject {
-                        put("status", JsonPrimitive("ok"))
-                        put("facts", JsonArray(emptyList()))
-                    }
-                },
-                applyResponse = { event, response ->
-                    recoveredService.applyDecisionResponse(event, response)
-                },
-            )
-            recoveredService = JourneyService(
-                h.journeyStore,
-                JourneyLedger(h.log, recoveringEvents),
-                JourneyReleaseProvider { _, _ -> emptyList() },
-                nowMillis = { now },
-                initialDistinctId = "customer-1",
-            )
-
-            recoveredService.recoverPendingEnrollments()
-
-            assertEquals(originalEventId, h.store.events.getValue(originalEventId).id)
-            assertTrue(h.journeyStore.loadPendingEnrollments("customer-1").isEmpty())
-            val active = h.journeyStore.loadActive("customer-1").single()
-            assertEquals(pending.id, active.id)
-            assertEquals(null, active.pendingEnrollmentEventId)
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun terminalEnrollmentRejectionRemovesOnlyItsMatchingPendingRun() = runBlocking {
-        val h = harness(decisionResponse = { null })
-        try {
-            h.service.handleEventForTrigger(
-                StoredEvent(
-                    "trigger-rejected",
-                    "opened",
-                    timestampMillis = now,
-                    distinctId = "customer-1",
-                ),
-            )
-            val pending = h.journeyStore.loadPendingEnrollments("customer-1").single()
-            val event = h.store.events.getValue(requireNotNull(pending.pendingEnrollmentEventId))
-
-            h.service.rejectDecisionEvent(event)
-
-            assertEquals(null, h.journeyStore.load("customer-1", pending.id))
-            assertTrue(h.journeyStore.loadPendingEnrollments("customer-1").isEmpty())
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun unresolvedEnrollmentSuppressesASecondAdmission() = runBlocking {
-        val h = harness(decisionResponse = { null })
-        try {
-            val first = h.service.handleEventForTrigger(
-                StoredEvent("trigger-pending-1", "opened", distinctId = "customer-1"),
-            )
-            val second = h.service.handleEventForTrigger(
-                StoredEvent("trigger-pending-2", "opened", distinctId = "customer-1"),
-            )
-
-            assertTrue(first.single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Failed)
-            assertEquals(
-                SuppressReason.ALREADY_ACTIVE,
-                (second.single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed).reason,
-            )
-            assertEquals(1, h.journeyStore.loadPendingEnrollments("customer-1").size)
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @After fun tearDown() = runBlocking {
-        scope.coroutineContext[Job]?.cancelAndJoin()
-        roots.asReversed().forEach(File::deleteRecursively)
-        roots.clear()
-    }
-
-    @Test
-    fun enrollmentAndFiveFactsUseTheDocumentedWireProperties() = runBlocking {
-        val h = harness()
-        try {
-            val result = h.service.handleEventForTrigger(StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"))
-            val id = (result.single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started).ref.journeyId!!
-            h.service.transition("customer-1", id, null, "screen-a")
-            h.service.milestone("customer-1", id, "reached-a")
-            val first = h.service.requestEffect("customer-1", id, "effect-a", 2, "send_push", JsonObject(emptyMap()))
-            val retry = h.service.requestEffect("customer-1", id, "effect-a", 2, "send_push", JsonObject(emptyMap()))
-            h.service.exit("customer-1", id, "completed")
-            h.log.awaitBarrier()
-
-            assertEquals(first, retry)
-            val enrollment = h.store.events.values.first { it.name == JourneyEventNames.ENROLLED }
-            assertEquals(
-                setOf("journey_id", "epoch", "experience_id", "experience_version", "trigger_ref", "plane", "settings_snapshot"),
-                enrollment.properties.keys.filterNot { it.startsWith("$") }.toSet(),
-            )
-            val settings = enrollment.properties.getValue("settings_snapshot") as JsonObject
-            assertEquals(
-                buildJsonObject {
-                    put("kind", JsonPrimitive("milestone"))
-                    put("milestoneId", JsonPrimitive("reached-a"))
-                },
-                settings.getValue("goal"),
-            )
-            assertEquals("journey_start", (settings.getValue("conversion_anchor") as JsonPrimitive).content)
-            assertEquals("2026-07-19T12:00:00.000Z", (settings.getValue("conversion_anchor_at") as JsonPrimitive).content)
-            assertEquals("2026-07-19T12:00:01.000Z", (settings.getValue("goal_window_ends_at") as JsonPrimitive).content)
-            assertEquals(true, (settings.getValue("end_on_goal") as JsonPrimitive).content.toBooleanStrict())
-            assertEquals(JsonNull, settings.getValue("time_limit_at"))
-            assertEquals(
-                setOf("journey_id", "epoch", "to_node", "region", "plane"),
-                h.store.events.values.first { it.name == JourneyEventNames.TRANSITION }.properties.keys.filterNot { it.startsWith("$") }.toSet(),
-            )
-            assertEquals(
-                setOf("journey_id", "epoch", "milestone_id"),
-                h.store.events.values.first { it.name == JourneyEventNames.MILESTONE }.properties.keys.filterNot { it.startsWith("$") }.toSet(),
-            )
-            assertEquals(
-                setOf("journey_id", "epoch", "node_id", "invocation_id", "effect", "payload"),
-                h.store.events.values.first { it.name == JourneyEventNames.EFFECT_REQUESTED }.properties.keys.filterNot { it.startsWith("$") }.toSet(),
-            )
-            assertEquals(
-                setOf("journey_id", "epoch", "experience_id", "experience_version", "reason", "at"),
-                h.store.events.values.first { it.name == JourneyEventNames.EXITED }.properties.keys.filterNot { it.startsWith("$") }.toSet(),
-            )
-        } finally { h.root.deleteRecursively() }
-    }
-
-    @Test
-    fun milestoneAppliesConversionFromItsDecisionResponse() = runBlocking {
-        val convertedAt = now + 750L
-        val h = harness(decisionResponse = { event ->
-            if (event.name != JourneyEventNames.MILESTONE) {
-                buildJsonObject {
-                    put("status", JsonPrimitive("ok"))
-                    put("facts", JsonArray(emptyList()))
-                }
-            } else {
-                val journeyId = (event.properties.getValue("journey_id") as JsonPrimitive).content
-                buildJsonObject {
-                    put("status", JsonPrimitive("ok"))
-                    put("facts", JsonArray(listOf(buildJsonObject {
-                        put("id", JsonPrimitive("server:converted:$journeyId"))
-                        put("event", JsonPrimitive(JourneyEventNames.CONVERTED))
-                        put("timestamp", JsonPrimitive("2026-07-19T12:00:00.750Z"))
-                        put("properties", buildJsonObject {
-                            put("journey_id", JsonPrimitive(journeyId))
-                            put("at", JsonPrimitive("2026-07-19T12:00:00.750Z"))
-                        })
-                    })))
-                }
-            }
-        })
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = requireNotNull(started.ref.journeyId)
-
-            h.service.milestone("customer-1", journeyId, "reached-a")
-
-            val run = requireNotNull(JourneyStore(h.root).load("customer-1", journeyId))
-            assertEquals(convertedAt, run.convertedAtMillis)
-            assertTrue("server:converted:$journeyId" in h.store.delivered)
-        } finally { h.root.deleteRecursively() }
-    }
-
-    @Test
-    fun presentationDrivenExitForwardsJourneyEndedWithExperienceReference() = runBlocking {
-        val h = harness(forwardingEnabled = { true })
-        val forwarded = mutableListOf<NuxieActivityInfo>()
-        h.log.subscribeForwarding(
-            handler = ActivityForwarder(
-                resolveExperience = { _, _ -> null },
-                deliver = { forwarded += it },
-            )::onCommitted,
-        )
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-
-            transitionAndComplete(
-                h,
-                "customer-1",
-                started.ref.journeyId!!,
-                CloseReason.UserDismissed,
-            )
-            h.log.awaitBarrier()
-
-            assertEquals(
-                NuxieActivity.JourneyEnded(
-                    ExperienceRef("experience-1", "version-1", started.ref.journeyId),
-                    JourneyExitReason.DISMISSED,
-                ),
-                forwarded.single { it.activity is NuxieActivity.JourneyEnded }.activity,
-            )
-        } finally { h.root.deleteRecursively() }
-    }
-
-    @Test
-    fun hostDismissalBookkeepingPersistsTombstoneBeforeCapturingAttributedExit() = runBlocking {
-        val h = harness()
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = started.ref.journeyId!!
-            markHostDismissed(h, journeyId)
-            var persistedAtCapture: JourneyRun? = null
-            h.store.beforePendingInsert = { event ->
-                if (event.name == JourneyEventNames.EXITED) {
-                    persistedAtCapture = JourneyStore(h.root).load("customer-1", journeyId)
-                }
-            }
-
-            val completed = h.service.completePresentationOutcome("customer-1", journeyId)
-
-            assertTrue(completed)
-            val durableTombstone = requireNotNull(persistedAtCapture)
-            assertEquals(JourneyRunState.TERMINAL, durableTombstone.state)
-            assertEquals("dismissed", durableTombstone.terminalReason)
-            assertEquals(now, durableTombstone.completedAtMillis)
-            assertTrue(durableTombstone.pendingHostExitCapture)
-            assertTrue(durableTombstone.pendingHostCompletion)
-            assertTrue(durableTombstone.pendingHostTriggerCompletion)
-            val exit = h.store.events.values.single { it.name == JourneyEventNames.EXITED }
-            assertEquals("journey-exited:$journeyId:0", exit.id)
-            assertEquals("customer-1", exit.distinctId)
-            assertEquals("dismissed", exit.properties.stringValue("reason"))
-            assertEquals("host", exit.properties.stringValue("dismissed_by"))
-            assertEquals("2026-07-19T12:00:00.000Z", exit.properties.stringValue("at"))
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun hostDismissalRemainsAuthoritativeForAGhostJourney() = runBlocking {
-        val h = harness()
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = started.ref.journeyId!!
-            h.service.applyDownFacts(
-                buildJsonObject {
-                    put("facts", JsonArray(listOf(buildJsonObject {
-                        put("id", JsonPrimitive("superseded-before-dismissal"))
-                        put("event", JsonPrimitive(JourneyEventNames.SUPERSEDED))
-                        put("timestamp", JsonPrimitive(now))
-                        put("properties", buildJsonObject {
-                            put("journey_id", JsonPrimitive(journeyId))
-                        })
-                    })))
-                },
-                "customer-1",
-            )
-            markHostDismissed(h, journeyId)
-
-            assertTrue(
-                h.service.completePresentationOutcome("customer-1", journeyId),
-            )
-
-            val exit = h.store.events.values.single { it.name == JourneyEventNames.EXITED }
-            assertEquals("host", exit.properties.stringValue("dismissed_by"))
-            assertEquals("dismissed", exit.properties.stringValue("reason"))
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun userDismissalPreservesCancelledWireReasonAndUserAttribution() = runBlocking {
-        val h = harness()
-        try {
-            val updates = mutableListOf<TriggerUpdate>()
-            h.broker.register("trigger-1", updates::add)
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-
-            assertTrue(
-                transitionAndComplete(
-                    h,
-                    "customer-1",
-                    started.ref.journeyId!!,
-                    CloseReason.UserDismissed,
-                ),
-            )
-
-            val exit = h.store.events.values.single { it.name == JourneyEventNames.EXITED }
-            assertEquals("cancelled", exit.properties.stringValue("reason"))
-            assertEquals("user", exit.properties.stringValue("dismissed_by"))
-            assertEquals("2026-07-19T12:00:00.000Z", exit.properties.stringValue("at"))
-            val terminal = requireNotNull(
-                JourneyStore(h.root).load("customer-1", started.ref.journeyId!!),
-            )
-            assertEquals("dismissed", terminal.terminalReason)
-            assertTrue(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
-            val completion = updates.single() as TriggerUpdate.Journey
-            assertEquals(JourneyExitReason.DISMISSED, completion.update.exitReason)
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun userDismissalPersistsOwnerAttributedExitWhenBeforeSendDropsAndIdentityChanges() = runBlocking {
-        val identity = Identity()
-        var changeIdentityOnJourneyClockRead = false
-        val h = harness(
-            identity = identity,
-            beforeSend = { event ->
-                if (event.name == JourneyEventNames.EXITED) null else event
-            },
-            onJourneyClockRead = {
-                if (changeIdentityOnJourneyClockRead) {
-                    identity.currentDistinctId = "customer-2"
-                }
-            },
-        )
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent(
-                    "trigger-1",
-                    "opened",
-                    timestampMillis = now,
-                    distinctId = "customer-1",
-                ),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            changeIdentityOnJourneyClockRead = true
-
-            assertTrue(
-                transitionAndComplete(
-                    h,
-                    "customer-1",
-                    started.ref.journeyId!!,
-                    CloseReason.UserDismissed,
-                ),
-            )
-
-            assertEquals("customer-2", identity.currentDistinctId)
-            val exit = h.store.events.values.single { it.name == JourneyEventNames.EXITED }
-            assertEquals("journey-exited:${started.ref.journeyId}:0", exit.id)
-            assertEquals("customer-1", exit.distinctId)
-            assertEquals("customer-1", exit.properties.stringValue("\$distinct_id"))
-            assertEquals("cancelled", exit.properties.stringValue("reason"))
-            assertEquals("user", exit.properties.stringValue("dismissed_by"))
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun runTransitionRecordsExactIdentityWinnerAndRejectsEveryLaterOutcome() = runBlocking {
-        val h = harness()
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = requireNotNull(started.ref.journeyId)
-
-            assertTrue(
-                h.service.transitionPresentationOutcome(
-                    ownerDistinctId = "customer-1",
-                    journeyId = journeyId,
-                    reason = CloseReason.IdentityChanged,
-                    initiatingDistinctId = "customer-2",
-                ),
-            )
-            assertFalse(
-                h.service.transitionPresentationOutcome(
-                    ownerDistinctId = "customer-1",
-                    journeyId = journeyId,
-                    reason = CloseReason.GoalMet,
-                    initiatingDistinctId = "customer-1",
-                ),
-            )
-            h.service.completePresentationOutcome("customer-1", journeyId)
-
-            val terminal = requireNotNull(JourneyStore(h.root).load("customer-1", journeyId))
-            assertEquals(JourneyRunState.TERMINAL, terminal.state)
-            assertEquals("identity_changed", terminal.terminalReason)
-            assertEquals(
-                JourneyRunPresentationOutcome.IDENTITY_CHANGED,
-                terminal.terminalPresentationOutcome,
-            )
-            assertEquals("customer-1", terminal.distinctId)
-            assertEquals("customer-2", terminal.terminalInitiatingDistinctId)
-            assertEquals(
-                0,
-                h.store.events.values.count { it.name == JourneyEventNames.EXITED },
-            )
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun hostDismissalResolvesTheOriginatingTriggerAsJourneyCompletedDismissed() = runBlocking {
-        val h = harness()
-        try {
-            val updates = mutableListOf<TriggerUpdate>()
-            h.broker.register("trigger-1", updates::add)
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = started.ref.journeyId!!
-            h.service.applyDownFacts(
-                buildJsonObject {
-                    put("facts", JsonArray(listOf(buildJsonObject {
-                        put("id", JsonPrimitive("converted-before-dismissal"))
-                        put("event", JsonPrimitive(JourneyEventNames.CONVERTED))
-                        put("timestamp", JsonPrimitive(now))
-                        put("properties", buildJsonObject {
-                            put("journey_id", JsonPrimitive(journeyId))
-                            put("at", JsonPrimitive(now - 1))
-                        })
-                    })))
-                },
-                "customer-1",
-            )
-            markHostDismissed(h, journeyId)
-
-            assertTrue(
-                h.service.completePresentationOutcome("customer-1", started.ref.journeyId!!),
-            )
-
-            val completion = updates.single() as TriggerUpdate.Journey
-            assertEquals(started.ref, completion.update.ref)
-            assertEquals(JourneyExitReason.DISMISSED, completion.update.exitReason)
-            assertTrue(completion.update.goalMet)
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun hostDismissalWinsConcurrentTerminalRacesAndWriteBehindConvergesUnderLoad() = runBlocking {
-        val blockNextJourneyClockRead = AtomicBoolean(false)
-        var hostWriterInsideTransition = CountDownLatch(0)
-        var releaseHostWriter = CountDownLatch(0)
-        val h = harness(
-            reentry = JourneyReentry.OneTime,
-            onJourneyClockRead = {
-                if (blockNextJourneyClockRead.compareAndSet(true, false)) {
-                    hostWriterInsideTransition.countDown()
-                    check(releaseHostWriter.await(5, TimeUnit.SECONDS))
-                }
-            },
-        )
-        try {
-            repeat(32) { attempt ->
-                val distinctId = "host-winner-customer-$attempt"
-                val started = h.service.handleEventForTrigger(
-                    StoredEvent(
-                        "host-winner-trigger-$attempt",
-                        "opened",
-                        timestampMillis = now,
-                        distinctId = distinctId,
-                    ),
-                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-                val journeyId = requireNotNull(started.ref.journeyId)
-                hostWriterInsideTransition = CountDownLatch(1)
-                releaseHostWriter = CountDownLatch(1)
-                blockNextJourneyClockRead.set(true)
-
-                val hostWriter = async(Dispatchers.Default) {
-                    h.service.transitionPresentationOutcome(
-                        distinctId,
-                        journeyId,
-                        CloseReason.HostDismissed,
-                        distinctId,
-                    )
-                }
-                assertTrue(hostWriterInsideTransition.await(5, TimeUnit.SECONDS))
-                // Undispatched startup makes both detached lanes reach the
-                // held run lock before the winning transition is released.
-                val competingWriter = async(
-                    context = Dispatchers.Default,
-                    start = CoroutineStart.UNDISPATCHED,
-                ) {
-                    h.service.exit(distinctId, journeyId, "error")
-                }
-                val writeBehind = async(
-                    context = Dispatchers.Default,
-                    start = CoroutineStart.UNDISPATCHED,
-                ) {
-                    h.service.completePresentationOutcome(distinctId, journeyId)
-                }
-
-                releaseHostWriter.countDown()
-
-                assertTrue("attempt $attempt: host writer did not win in memory", hostWriter.await())
-                competingWriter.await()
-                assertTrue("attempt $attempt: write-behind rejected the in-memory winner", writeBehind.await())
-                assertNull(JourneyStore(h.root).load(distinctId, journeyId))
-                assertTrue(JourneyStore(h.root).hasCompleted(distinctId, "experience-1"))
-                val admission = h.service.handleEventForTrigger(
-                    StoredEvent(
-                        "host-winner-retrigger-$attempt",
-                        "opened",
-                        timestampMillis = now,
-                        distinctId = distinctId,
-                    ),
-                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed
-                assertEquals(SuppressReason.REENTRY_LIMITED, admission.reason)
-            }
-        } finally {
-            releaseHostWriter.countDown()
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun competingExitWinsConcurrentTerminalRacesAndLoserWriteBehindCannotOverwriteUnderLoad() = runBlocking {
-        val blockNextJourneyClockRead = AtomicBoolean(false)
-        var competingWriterInsideTransition = CountDownLatch(0)
-        var releaseCompetingWriter = CountDownLatch(0)
-        val h = harness(
-            reentry = JourneyReentry.OneTime,
-            onJourneyClockRead = {
-                if (blockNextJourneyClockRead.compareAndSet(true, false)) {
-                    competingWriterInsideTransition.countDown()
-                    check(releaseCompetingWriter.await(5, TimeUnit.SECONDS))
-                }
-            },
-        )
-        try {
-            repeat(32) { attempt ->
-                val distinctId = "exit-winner-customer-$attempt"
-                val started = h.service.handleEventForTrigger(
-                    StoredEvent(
-                        "exit-winner-trigger-$attempt",
-                        "opened",
-                        timestampMillis = now,
-                        distinctId = distinctId,
-                    ),
-                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-                val journeyId = requireNotNull(started.ref.journeyId)
-                competingWriterInsideTransition = CountDownLatch(1)
-                releaseCompetingWriter = CountDownLatch(1)
-                blockNextJourneyClockRead.set(true)
-
-                val competingWriter = async(Dispatchers.Default) {
-                    h.service.exit(distinctId, journeyId, "error")
-                }
-                assertTrue(competingWriterInsideTransition.await(5, TimeUnit.SECONDS))
-                // Both losing host lanes are queued before the winner exits
-                // the critical section, including its detached write-behind.
-                val hostWriter = async(
-                    context = Dispatchers.Default,
-                    start = CoroutineStart.UNDISPATCHED,
-                ) {
-                    h.service.transitionPresentationOutcome(
-                        distinctId,
-                        journeyId,
-                        CloseReason.HostDismissed,
-                        distinctId,
-                    )
-                }
-                val loserWriteBehind = async(
-                    context = Dispatchers.Default,
-                    start = CoroutineStart.UNDISPATCHED,
-                ) {
-                    h.service.completePresentationOutcome(distinctId, journeyId)
-                }
-
-                releaseCompetingWriter.countDown()
-
-                competingWriter.await()
-                assertFalse("attempt $attempt: both terminal writers won in memory", hostWriter.await())
-                assertFalse("attempt $attempt: loser write-behind accepted the winner", loserWriteBehind.await())
-                val durableRun = requireNotNull(JourneyStore(h.root).load(distinctId, journeyId))
-                assertEquals(JourneyRunState.TERMINAL, durableRun.state)
-                assertEquals("error", durableRun.terminalReason)
-                assertFalse(JourneyStore(h.root).hasCompleted(distinctId, "experience-1"))
-                assertTrue(
-                    h.service.handleEventForTrigger(
-                        StoredEvent(
-                            "exit-winner-retrigger-$attempt",
-                            "opened",
-                            timestampMillis = now,
-                            distinctId = distinctId,
-                        ),
-                    ).single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started,
-                )
-            }
-        } finally {
-            releaseCompetingWriter.countDown()
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun terminalRunRefusesRunFactsBeforeWriteBehindPersistence() = runBlocking {
-        val h = harness()
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = requireNotNull(started.ref.journeyId)
-
-            markHostDismissed(h, journeyId)
-            assertEquals(
-                JourneyRunState.ACTIVE,
-                JourneyStore(h.root).load("customer-1", journeyId)?.state,
-            )
-
-            h.service.transition("customer-1", journeyId, null, "screen-a")
-            h.service.milestone("customer-1", journeyId, "reached-a")
-            val invocationId = h.service.requestEffect(
-                "customer-1",
-                journeyId,
-                "effect-a",
-                1,
-                "send_push",
-                JsonObject(emptyMap()),
-            )
-            h.log.awaitBarrier()
-
-            assertNull(invocationId)
-            assertTrue(
-                h.store.events.values.none {
-                    it.name == JourneyEventNames.TRANSITION ||
-                        it.name == JourneyEventNames.MILESTONE ||
-                        it.name == JourneyEventNames.EFFECT_REQUESTED
-                },
-            )
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun terminalRunRefusesDownFactMutationsBeforeWriteBehindPersistence() = runBlocking {
-        val h = harness()
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = requireNotNull(started.ref.journeyId)
-            markHostDismissed(h, journeyId)
-            val superseded = buildJsonObject {
-                put("id", JsonPrimitive("superseded-after-host-exit"))
-                put("event", JsonPrimitive(JourneyEventNames.SUPERSEDED))
-                put("timestamp", JsonPrimitive(now))
-                put("properties", buildJsonObject {
-                    put("journey_id", JsonPrimitive(journeyId))
-                })
-            }
-            val converted = buildJsonObject {
-                put("id", JsonPrimitive("converted-after-host-exit"))
-                put("event", JsonPrimitive(JourneyEventNames.CONVERTED))
-                put("timestamp", JsonPrimitive(now))
-                put("properties", buildJsonObject {
-                    put("journey_id", JsonPrimitive(journeyId))
-                    put("at", JsonPrimitive(now))
-                })
-            }
-
-            h.service.applyDownFacts(
-                buildJsonObject { put("facts", JsonArray(listOf(superseded, converted))) },
-                "customer-1",
-            )
-
-            val durableRun = requireNotNull(JourneyStore(h.root).load("customer-1", journeyId))
-            assertEquals(JourneyRunState.ACTIVE, durableRun.state)
-            assertFalse(durableRun.isGhost)
-            assertNull(durableRun.convertedAtMillis)
-            assertTrue("superseded-after-host-exit" in h.store.events)
-            assertTrue("converted-after-host-exit" in h.store.events)
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun failedInitialTombstoneWriteRetriesWithBackoffOnTheDetachedLane() = runBlocking {
-        val retryDelays = Channel<Long>(Channel.UNLIMITED)
-        val allowRetry = Channel<Unit>(Channel.UNLIMITED)
-        val h = harness(
-            hostDismissRetrySleep = { delayMillis ->
-                retryDelays.send(delayMillis)
-                allowRetry.receive()
-            },
-        )
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = requireNotNull(started.ref.journeyId)
-            markHostDismissed(h, journeyId)
-            val runFile = File(h.root, "nuxie/journeys/runs")
-                .walkTopDown()
-                .single { it.isFile && it.name == "$journeyId.json" }
-            val blockedTemporary = File(runFile.parentFile, ".$journeyId.json.new")
-            assertTrue(blockedTemporary.mkdir())
-
-            val bookkeeping = async {
-                h.service.completePresentationOutcome("customer-1", journeyId)
-            }
-            assertEquals(1_000L, retryDelays.receive())
-            assertEquals(
-                JourneyRunState.ACTIVE,
-                JourneyStore(h.root).load("customer-1", journeyId)?.state,
-            )
-            assertFalse("failed bookkeeping did not enter backoff", bookkeeping.isCompleted)
-
-            allowRetry.send(Unit)
-            assertEquals(2_000L, retryDelays.receive())
-            assertTrue(blockedTemporary.delete())
-            allowRetry.send(Unit)
-            assertTrue(bookkeeping.await())
-
-            assertEquals(1, h.store.events.values.count { it.name == JourneyEventNames.EXITED })
-            assertTrue(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
-            assertNull(JourneyStore(h.root).load("customer-1", journeyId))
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun foregroundReattemptPersistsFailedInitialTombstoneForStartupRecovery() = runBlocking {
-        val retryDelays = Channel<Long>(Channel.UNLIMITED)
-        val holdDetachedRetry = Channel<Unit>()
-        val h = harness(
-            hostDismissRetrySleep = { delayMillis ->
-                retryDelays.send(delayMillis)
-                holdDetachedRetry.receive()
-            },
-        )
-        try {
-            val updates = mutableListOf<TriggerUpdate>()
-            var failTriggerCompletion = true
-            h.broker.register("trigger-1") { update ->
-                if (failTriggerCompletion) error("trigger completion failed")
-                updates += update
-            }
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = requireNotNull(started.ref.journeyId)
-            markHostDismissed(h, journeyId)
-            val runFile = File(h.root, "nuxie/journeys/runs")
-                .walkTopDown()
-                .single { it.isFile && it.name == "$journeyId.json" }
-            val blockedTemporary = File(runFile.parentFile, ".$journeyId.json.new")
-            assertTrue(blockedTemporary.mkdir())
-            val bookkeeping = async {
-                h.service.completePresentationOutcome("customer-1", journeyId)
-            }
-            assertEquals(1_000L, retryDelays.receive())
-
-            assertTrue(blockedTemporary.delete())
-            h.store.beforePendingInsert = { event ->
-                if (event.name == JourneyEventNames.EXITED) error("exit capture failed")
-            }
-            val blockedCompletionsDirectory = File(h.root, "nuxie/journeys/completions").apply {
-                parentFile!!.mkdirs()
-                writeText("blocked")
-            }
-
-            h.service.recoverPendingHostDismissals()
-
-            val tombstone = requireNotNull(JourneyStore(h.root).load("customer-1", journeyId))
-            assertEquals(JourneyRunState.TERMINAL, tombstone.state)
-            assertTrue(tombstone.pendingHostExitCapture)
-            assertTrue(tombstone.pendingHostCompletion)
-            assertTrue(tombstone.pendingHostTriggerCompletion)
-            bookkeeping.cancelAndJoin()
-
-            h.store.beforePendingInsert = null
-            assertTrue(blockedCompletionsDirectory.delete())
-            failTriggerCompletion = false
-            val restartedService = JourneyService(
-                JourneyStore(h.root),
-                JourneyLedger(h.log, CapturingDecisionEvents(h.log)),
-                h.releases,
-                { now },
-                initialDistinctId = "customer-1",
-                triggerBroker = h.broker,
-            )
-            restartedService.recoverPendingHostDismissals()
-
-            assertEquals(1, h.store.events.values.count { it.name == JourneyEventNames.EXITED })
-            assertTrue(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
-            assertEquals(1, updates.size)
-            assertNull(JourneyStore(h.root).load("customer-1", journeyId))
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun postTerminalHostExitCaptureFailureTearsDownAndRecovers() = runBlocking {
-        val h = harness()
-        try {
-            val updates = mutableListOf<TriggerUpdate>()
-            h.broker.register("trigger-1", updates::add)
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = started.ref.journeyId!!
-            markHostDismissed(h, journeyId)
-            h.store.failNextPendingInsert = true
-
-            assertTrue(
-                h.service.completePresentationOutcome("customer-1", journeyId),
-            )
-            assertEquals(1, updates.size)
-            assertTrue(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
-            assertTrue(h.store.events.values.none { it.name == JourneyEventNames.EXITED })
-
-            val afterReturn = requireNotNull(JourneyStore(h.root).load("customer-1", journeyId))
-            assertEquals(JourneyRunState.TERMINAL, afterReturn.state)
-            assertTrue(afterReturn.pendingHostExitCapture)
-            assertFalse(afterReturn.pendingHostCompletion)
-            assertFalse(afterReturn.pendingHostTriggerCompletion)
-
-            val restartedService = JourneyService(
-                JourneyStore(h.root),
-                JourneyLedger(h.log, CapturingDecisionEvents(h.log)),
-                h.releases,
-                { now },
-                triggerBroker = h.broker,
-            )
-            restartedService.recoverPendingHostDismissals()
-            assertEquals(1, updates.size)
-            assertEquals(1, h.store.events.values.count { it.name == JourneyEventNames.EXITED })
-            assertNull(JourneyStore(h.root).load("customer-1", journeyId))
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun pendingHostExitCaptureRecoversAtStartup() = runBlocking {
-        val h = harness()
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            markHostDismissed(h, started.ref.journeyId!!)
-            h.store.failNextPendingInsert = true
-            assertTrue(
-                h.service.completePresentationOutcome("customer-1", started.ref.journeyId!!),
-            )
-
-            h.service.recoverPendingHostDismissals()
-            h.service.recoverPendingHostDismissals()
-
-            assertEquals(1, h.store.events.values.count { it.name == JourneyEventNames.EXITED })
-            val recovered = JourneyStore(h.root).load("customer-1", started.ref.journeyId!!)
-            assertNull(recovered)
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun foregroundRecoveryIsolatesTombstoneFailuresAndRetriesThemOnTheNextScan() = runBlocking {
-        val h = harness()
-        try {
-            val journeyStore = JourneyStore(h.root)
-            val journeyIds = listOf("customer-a", "customer-b").associateWith { distinctId ->
-                val started = h.service.handleEventForTrigger(
-                    StoredEvent(
-                        "trigger-$distinctId",
-                        "opened",
-                        timestampMillis = now,
-                        distinctId = distinctId,
-                    ),
-                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-                val journeyId = requireNotNull(started.ref.journeyId)
-                val active = requireNotNull(journeyStore.load(distinctId, journeyId))
-                journeyStore.save(
-                    active.copy(
-                        state = JourneyRunState.TERMINAL,
-                        terminalReason = "dismissed",
-                        completedAtMillis = now,
-                        pendingHostExitCapture = true,
-                        pendingHostCompletion = true,
-                        pendingHostTriggerCompletion = true,
-                    ),
-                )
-                journeyId
-            }
-            val firstJourneyId = requireNotNull(journeyIds["customer-a"])
-            val firstRunFile = File(h.root, "nuxie/journeys/runs")
-                .walkTopDown()
-                .single { it.isFile && it.name == "$firstJourneyId.json" }
-            val blockedFirstRewrite = File(firstRunFile.parentFile, ".$firstJourneyId.json.new")
-            assertTrue(blockedFirstRewrite.mkdir())
-            ShadowLog.clear()
-            val recoveringService = JourneyService(
-                JourneyStore(h.root),
-                JourneyLedger(h.log, CapturingDecisionEvents(h.log)),
-                h.releases,
-                { now },
-                triggerBroker = h.broker,
-            )
-
-            recoveringService.recoverPendingHostDismissals()
-
-            assertTrue(JourneyStore(h.root).load("customer-a", firstJourneyId)?.pendingHostExitCapture == true)
-            assertNull(JourneyStore(h.root).load("customer-b", requireNotNull(journeyIds["customer-b"])))
-            val failureLog = ShadowLog.getLogsForTag("Nuxie").single {
-                it.msg.contains("Pending host-dismissal recovery failed")
-            }
-            assertTrue(failureLog.msg.contains(firstJourneyId))
-            assertTrue(failureLog.throwable is java.io.FileNotFoundException)
-
-            assertTrue(blockedFirstRewrite.delete())
-            recoveringService.recoverPendingHostDismissals()
-
-            assertNull(JourneyStore(h.root).load("customer-a", firstJourneyId))
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun interruptedInitialTombstoneReplacementRecoversAfterRestart() = runBlocking {
-        val h = harness()
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = requireNotNull(started.ref.journeyId)
-            val journeyStore = JourneyStore(h.root)
-            val active = requireNotNull(journeyStore.load("customer-1", journeyId))
-            val runFile = File(h.root, "nuxie/journeys/runs")
-                .walkTopDown()
-                .single { it.isFile && it.name == "$journeyId.json" }
-            val activeJson = runFile.readText()
-            journeyStore.save(
-                active.copy(
-                    state = JourneyRunState.TERMINAL,
-                    terminalReason = "dismissed",
-                    completedAtMillis = now,
-                    pendingHostExitCapture = true,
-                    pendingHostCompletion = true,
-                    pendingHostTriggerCompletion = true,
-                ),
-            )
-            val terminalJson = runFile.readText()
-            runFile.writeText(activeJson)
-            File(runFile.parentFile, ".$journeyId.json.new").writeText(terminalJson)
-
-            val restartedService = JourneyService(
-                JourneyStore(h.root),
-                JourneyLedger(h.log, CapturingDecisionEvents(h.log)),
-                h.releases,
-                { now },
-                triggerBroker = h.broker,
-            )
-            restartedService.recoverPendingHostDismissals()
-
-            assertEquals(1, h.store.events.values.count { it.name == JourneyEventNames.EXITED })
-            assertTrue(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
-            assertNull(JourneyStore(h.root).load("customer-1", journeyId))
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun pendingHostCompletionBlocksOneTimeReenrollmentUntilReceiptRecovery() = runBlocking {
-        val h = harness(JourneyReentry.OneTime)
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = started.ref.journeyId!!
-            markHostDismissed(h, journeyId)
-            val blockedCompletionsDirectory = File(h.root, "nuxie/journeys/completions").apply {
-                parentFile!!.mkdirs()
-                writeText("blocked")
-            }
-
-            assertTrue(
-                h.service.completePresentationOutcome("customer-1", journeyId),
-            )
-            val tombstone = requireNotNull(JourneyStore(h.root).load("customer-1", journeyId))
-            assertTrue(tombstone.pendingHostCompletion)
-            assertFalse(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
-
-            val whilePending = h.service.handleEventForTrigger(
-                StoredEvent("trigger-2", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single()
-            assertTrue(whilePending is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed)
-            assertEquals(
-                SuppressReason.REENTRY_LIMITED,
-                (whilePending as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed).reason,
-            )
-
-            assertTrue(blockedCompletionsDirectory.delete())
-            h.service.recoverPendingHostDismissals()
-            assertTrue(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
-            assertNull(JourneyStore(h.root).load("customer-1", journeyId))
-
-            val afterRecovery = h.service.handleEventForTrigger(
-                StoredEvent("trigger-3", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single()
-            assertTrue(afterRecovery is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed)
-            assertEquals(
-                SuppressReason.REENTRY_LIMITED,
-                (afterRecovery as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed).reason,
-            )
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun pendingHostCompletionUsesItsCompletionTimeForWindowedReenrollment() = runBlocking {
-        val h = harness(JourneyReentry.OncePerWindow(1_000))
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = started.ref.journeyId!!
-            markHostDismissed(h, journeyId)
-            val blockedCompletionsDirectory = File(h.root, "nuxie/journeys/completions").apply {
-                parentFile!!.mkdirs()
-                writeText("blocked")
-            }
-
-            assertTrue(
-                h.service.completePresentationOutcome("customer-1", journeyId),
-            )
-            val whilePending = h.service.handleEventForTrigger(
-                StoredEvent("trigger-2", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single()
-            assertTrue(whilePending is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed)
-            assertEquals(
-                SuppressReason.REENTRY_LIMITED,
-                (whilePending as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed).reason,
-            )
-
-            assertTrue(blockedCompletionsDirectory.delete())
-            h.service.recoverPendingHostDismissals()
-            val afterRecovery = h.service.handleEventForTrigger(
-                StoredEvent("trigger-3", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single()
-            assertTrue(afterRecovery is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed)
-
-            now += 1_000
-            assertTrue(
-                h.service.handleEventForTrigger(
-                    StoredEvent("trigger-4", "opened", timestampMillis = now, distinctId = "customer-1"),
-                ).single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started,
-            )
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun terminalRunImmediatelyGatesOneTimeReentryBeforeWriteBehind() = runBlocking {
-        val h = harness(JourneyReentry.OneTime)
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = requireNotNull(started.ref.journeyId)
-
-            markHostDismissed(h, journeyId)
-
-            val durableRun = requireNotNull(JourneyStore(h.root).load("customer-1", journeyId))
-            assertEquals(JourneyRunState.ACTIVE, durableRun.state)
-            assertFalse(JourneyStore(h.root).hasCompleted("customer-1", "experience-1"))
-            val retrigger = h.service.handleEventForTrigger(
-                StoredEvent("trigger-2", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed
-            assertEquals(SuppressReason.REENTRY_LIMITED, retrigger.reason)
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun terminalRunImmediatelyGatesWindowedReentryBeforeWriteBehind() = runBlocking {
-        val h = harness(JourneyReentry.OncePerWindow(1_000))
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-
-            markHostDismissed(h, requireNotNull(started.ref.journeyId))
-
-            val retrigger = h.service.handleEventForTrigger(
-                StoredEvent("trigger-2", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed
-            assertEquals(SuppressReason.REENTRY_LIMITED, retrigger.reason)
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun racingAdmissionAgainstHostDismissalNeverDoubleAdmitsAOneTimeJourney() = runBlocking {
-        val admissionReachedPolicy = AtomicReference(CountDownLatch(0))
-        val admissionThread = AtomicReference<Thread>()
-        val h = harness(
-            reentry = JourneyReentry.OneTime,
-            onJourneyReleaseRead = {
-                admissionThread.set(Thread.currentThread())
-                admissionReachedPolicy.get().countDown()
-            },
-        )
-        try {
-            repeat(32) { attempt ->
-                val distinctId = "host-dismiss-admission-race-$attempt"
-                val started = h.service.handleEventForTrigger(
-                    StoredEvent(
-                        "initial-trigger-$attempt",
-                        "opened",
-                        timestampMillis = now,
-                        distinctId = distinctId,
-                    ),
-                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-                val journeyId = requireNotNull(started.ref.journeyId)
-                val storeMonitorHeld = CountDownLatch(1)
-                val releaseStoreMonitor = CountDownLatch(1)
-                val storeBlocker = Thread {
-                    synchronized(h.journeyStore) {
-                        storeMonitorHeld.countDown()
-                        check(releaseStoreMonitor.await(5, TimeUnit.SECONDS))
-                    }
-                }.apply { start() }
-                assertTrue(storeMonitorHeld.await(5, TimeUnit.SECONDS))
-
-                admissionReachedPolicy.set(CountDownLatch(1))
-                val admission = async(Dispatchers.Default) {
-                    h.service.handleEventForTrigger(
-                        StoredEvent(
-                            "racing-trigger-$attempt",
-                            "opened",
-                            timestampMillis = now,
-                            distinctId = distinctId,
-                        ),
-                    ).single()
-                }
-                assertTrue(admissionReachedPolicy.get().await(5, TimeUnit.SECONDS))
-                val blockedAdmissionThread = requireNotNull(admissionThread.get())
-                val blockedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-                while (blockedAdmissionThread.state != Thread.State.BLOCKED &&
-                    System.nanoTime() < blockedDeadline
-                ) {
-                    Thread.yield()
-                }
-                assertEquals(Thread.State.BLOCKED, blockedAdmissionThread.state)
-
-                val dismissal = async(
-                    context = Dispatchers.Default,
-                    start = CoroutineStart.UNDISPATCHED,
-                ) {
-                    h.service.transitionPresentationOutcome(
-                        distinctId,
-                        journeyId,
-                        CloseReason.HostDismissed,
-                        distinctId,
-                    )
-                }
-                releaseStoreMonitor.countDown()
-
-                val result = admission.await()
-                assertTrue(
-                    "attempt $attempt double-admitted a OneTime Journey",
-                    result is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed,
-                )
-                assertTrue(dismissal.await())
-                storeBlocker.join(5_000)
-                assertFalse("attempt $attempt left the JourneyStore monitor blocked", storeBlocker.isAlive)
-            }
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun terminalRunImmediatelyAllowsEveryTimeReentryBeforeWriteBehind() = runBlocking {
-        val h = harness(JourneyReentry.EveryTime)
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = requireNotNull(started.ref.journeyId)
-
-            markHostDismissed(h, journeyId)
-
-            assertEquals(
-                JourneyRunState.ACTIVE,
-                JourneyStore(h.root).load("customer-1", journeyId)?.state,
-            )
-            val retrigger = h.service.handleEventForTrigger(
-                StoredEvent("trigger-2", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            assertTrue(retrigger.ref.journeyId != journeyId)
-        } finally {
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun reentryAndAlreadyActiveAdmissionsAreSuppressed() = runBlocking {
-        val h = harness(JourneyReentry.OncePerWindow(1_000))
-        try {
-            val event = StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1")
-            val first = h.service.handleEventForTrigger(event).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            assertTrue(h.service.handleEventForTrigger(event).single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed)
-            h.service.exit("customer-1", first.ref.journeyId!!, "completed")
-            assertTrue(h.service.handleEventForTrigger(event).single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Suppressed)
-            now += 1_000
-            assertTrue(h.service.handleEventForTrigger(event).single() is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started)
-        } finally { h.root.deleteRecursively() }
-    }
-
-    @Test
-    fun failedEnrollmentCaptureRetainsRecoverableIntentAndCanRetry() = runBlocking {
-        val h = harness()
-        try {
-            h.store.failNextPendingInsert = true
-            val event = StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1")
-
-            val failed = h.service.handleEventForTrigger(event).single()
-            assertTrue(failed is ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Failed)
-            assertTrue(JourneyStore(h.root).loadActive("customer-1").isEmpty())
-            assertEquals(1, h.journeyStore.loadPendingEnrollments("customer-1").size)
-
-            h.service.recoverPendingEnrollments()
-
-            assertEquals(JourneyRunState.ACTIVE, h.journeyStore.loadActive("customer-1").single().state)
-            assertTrue(h.journeyStore.loadPendingEnrollments("customer-1").isEmpty())
-        } finally { h.root.deleteRecursively() }
-    }
-
-    @Test
-    fun downFactsCommitOnceNeverUploadAndSupersedeGhostsTheRun() = runBlocking {
-        val h = harness()
-        try {
-            val started = h.service.handleEventForTrigger(StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"))
-                .single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = started.ref.journeyId!!
-            val fact = buildJsonObject {
-                put("id", JsonPrimitive("fact-1"))
-                put("event", JsonPrimitive(JourneyEventNames.SUPERSEDED))
-                put("timestamp", JsonPrimitive(1L))
-                put("properties", buildJsonObject { put("journey_id", JsonPrimitive(journeyId)) })
-            }
-            val body = buildJsonObject { put("facts", JsonArray(listOf(fact))) }
-            val committed = mutableListOf<StoredEvent>()
-            h.log.subscribeCommitted({ it.id == "fact-1" }) { committed += it }
-            h.service.applyDownFacts(body, "customer-1")
-            h.service.applyDownFacts(body, "customer-1")
-            h.service.exit("customer-1", journeyId, "completed")
-            h.log.awaitBarrier()
-            assertTrue(JourneyStore(h.root).load("customer-1", journeyId)!!.isGhost)
-            assertEquals(1, h.store.events.values.count { it.id == "fact-1" })
-            assertTrue("server fact must never upload", "fact-1" in h.store.delivered)
-            assertEquals("fact routes only after its first atomic commit", 1, committed.size)
-            assertEquals("fact-1", h.store.events.getValue("fact-1").properties.stringValue("\$server_fact_id"))
-            assertEquals("server", h.store.events.getValue("fact-1").properties.stringValue("\$nuxie_event_origin"))
-            assertNull(h.store.events.values.firstOrNull { it.name == JourneyEventNames.EXITED && it.properties["journey_id"]?.toString()?.contains(journeyId) == true })
-        } finally { h.root.deleteRecursively() }
-    }
-
-    @Test
-    fun downFactStorageFailurePropagatesWithoutApplyingTheFact() = runBlocking {
-        val h = harness()
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = requireNotNull(started.ref.journeyId)
-            val fact = buildJsonObject {
-                put("id", JsonPrimitive("fact-storage-failure"))
-                put("event", JsonPrimitive(JourneyEventNames.SUPERSEDED))
-                put("timestamp", JsonPrimitive(now))
-                put("properties", buildJsonObject {
-                    put("journey_id", JsonPrimitive(journeyId))
-                })
-            }
-            h.store.failNextServerFactInsert = true
-
-            val failure = runCatching {
-                h.service.applyDownFacts(
-                    buildJsonObject { put("facts", JsonArray(listOf(fact))) },
-                    "customer-1",
-                )
-            }.exceptionOrNull()
-
-            assertEquals("server fact insert failed", failure?.message)
-            assertFalse(JourneyStore(h.root).load("customer-1", journeyId)!!.isGhost)
-            assertFalse("fact-storage-failure" in h.store.events)
-        } finally { h.root.deleteRecursively() }
-    }
-
-    @Test
-    fun factFetchedBeforeLocaleFlipStillCommitsAndRoutesForItsCustomer() = runBlocking {
-        val identity = Identity().apply { currentDistinctId = "locale-fact-customer" }
-        val h = harness(identity = identity)
-        val context = RuntimeEnvironment.getApplication()
-        var profile: ProfileService? = null
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent(
-                    "trigger-locale-fact",
-                    "opened",
-                    timestampMillis = now,
-                    distinctId = identity.currentDistinctId,
-                ),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = checkNotNull(started.ref.journeyId)
-            val fact = buildJsonObject {
-                put("id", JsonPrimitive("locale-independent-fact"))
-                put("event", JsonPrimitive(JourneyEventNames.SUPERSEDED))
-                put("timestamp", JsonPrimitive(now))
-                put("properties", buildJsonObject {
-                    put("journey_id", JsonPrimitive(journeyId))
-                })
-            }
-            val requestStarted = CompletableDeferred<Unit>()
-            val releaseResponse = CompletableDeferred<Unit>()
-            val transport = HttpTransport { request ->
-                check(request.url.path == "/profile")
-                requestStarted.complete(Unit)
-                runBlocking { releaseResponse.await() }
-                HttpTransport.Response(
-                    statusCode = 200,
-                    body = buildJsonObject {
-                        put("facts", JsonArray(listOf(fact)))
-                    }.toString().encodeToByteArray(),
-                )
-            }
-            val profileService = ProfileService(
-                context = context,
-                storageScope = ai.nuxie.sdk.profile.ProfileStorageScope(
-                    "pk_test_locale_fact",
-                    NuxieEnvironment.DEVELOPMENT,
-                ),
-                api = NuxieApi("pk_test_locale_fact", NuxieEnvironment.DEVELOPMENT, transport),
-                identity = identity,
-                segments = SegmentService(context),
-                applyUserProperties = {},
-                applyJourneyFacts = { distinctId, body ->
-                    h.service.applyDownFacts(body, distinctId)
-                },
-                scope = scope,
-                localeSettings = ProfileLocaleSettings("en_US") { "device_TEST" },
-                nowMillis = { now },
-            )
-            profile = profileService
-
-            val refresh = async(Dispatchers.Default) { profileService.refreshAndWait() }
-            requestStarted.await()
-            profileService.setLocaleIdentifier("fr_FR")
-            releaseResponse.complete(Unit)
-
-            assertFalse(refresh.await())
-            h.log.awaitBarrier()
-            assertTrue("locale-independent-fact" in h.store.events)
-            assertTrue(JourneyStore(h.root).load(identity.currentDistinctId, journeyId)!!.isGhost)
-        } finally {
-            profile?.close()
-            h.root.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun convertedFactsPersistTheEarliestServerAuthoredAt() = runBlocking {
-        val h = harness()
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = started.ref.journeyId!!
-            fun fact(id: String, at: Long) = buildJsonObject {
-                put("id", JsonPrimitive(id))
-                put("event", JsonPrimitive(JourneyEventNames.CONVERTED))
-                put("timestamp", JsonPrimitive(now))
-                put("properties", buildJsonObject {
-                    put("journey_id", JsonPrimitive(journeyId))
-                    put("at", JsonPrimitive(at))
-                })
-            }
-
-            h.service.applyDownFacts(buildJsonObject { put("facts", JsonArray(listOf(fact("later", 50L), fact("earlier", 10L)))) }, "customer-1")
-
-            assertEquals(10L, JourneyStore(h.root).load("customer-1", journeyId)!!.convertedAtMillis)
-        } finally { h.root.deleteRecursively() }
-    }
-
-    @Test
-    fun convertedFactUsesTheConversionPayloadTimeForTheCommittedActivity() = runBlocking {
-        val h = harness(forwardingEnabled = { true })
-        try {
-            val fact = buildJsonObject {
-                put("id", JsonPrimitive("converted-fact"))
-                put("event", JsonPrimitive(JourneyEventNames.CONVERTED))
-                put("timestamp", JsonPrimitive(50L))
-                put("properties", buildJsonObject {
-                    put("journey_id", JsonPrimitive("journey-1"))
-                    put("experience_id", JsonPrimitive("experience-1"))
-                    put("experience_version", JsonPrimitive("version-1"))
-                    put("at", JsonPrimitive(10L))
-                })
-            }
-
-            h.service.applyDownFacts(
-                buildJsonObject { put("facts", JsonArray(listOf(fact))) },
-                "customer-1",
-            )
-
-            val delivered = mutableListOf<NuxieActivityInfo>()
-            ActivityForwarder(
-                resolveExperience = { _, _ -> null },
-                deliver = { delivered += it },
-            ).onCommitted(h.store.events.getValue("converted-fact"))
-
-            val info = delivered.single()
-            assertEquals(10L, info.timestampMillis)
-            assertTrue(info.activity is NuxieActivity.JourneyConverted)
-        } finally { h.root.deleteRecursively() }
-    }
-
-    @Test
-    fun downFactsFromOneResponseShareOneLocalReceiptTime() = runBlocking {
-        val h = harness(forwardingEnabled = { true })
-        try {
-            fun fact(id: String, timestamp: Long) = buildJsonObject {
-                put("id", JsonPrimitive(id))
-                put("event", JsonPrimitive(JourneyEventNames.CONVERTED))
-                put("timestamp", JsonPrimitive(timestamp))
-                put("properties", buildJsonObject { put("journey_id", JsonPrimitive("journey-1")) })
-            }
-            h.log.subscribeCommitted({ it.id == "first" }) { now += 5_000L }
-
-            h.service.applyDownFacts(
-                buildJsonObject { put("facts", JsonArray(listOf(fact("first", 10L), fact("second", 20L)))) },
-                "customer-1",
-            )
-
-            assertEquals(10L, h.store.events.getValue("first").timestampMillis)
-            assertEquals(20L, h.store.events.getValue("second").timestampMillis)
-            assertEquals(
-                h.store.events.getValue("first").forwardingReceivedAtMillis,
-                h.store.events.getValue("second").forwardingReceivedAtMillis,
-            )
-            assertEquals(1_784_462_400_000L, h.store.events.getValue("second").forwardingReceivedAtMillis)
-        } finally { h.root.deleteRecursively() }
-    }
-
-    @Test
-    fun supersedeCommitAndExitAreSerializedSoAGhostNeverEmitsAnExit() = runBlocking {
-        val h = harness()
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = started.ref.journeyId!!
-            val superseded = buildJsonObject {
-                put("id", JsonPrimitive("superseded-race"))
-                put("event", JsonPrimitive(JourneyEventNames.SUPERSEDED))
-                put("timestamp", JsonPrimitive(now))
-                put("properties", buildJsonObject { put("journey_id", JsonPrimitive(journeyId)) })
-            }
-
-            val insertStarted = CompletableDeferred<Unit>()
-            val releaseInsert = CompletableDeferred<Unit>()
-            h.store.serverFactInsertStarted = insertStarted
-            h.store.serverFactInsertGate = releaseInsert
-            val route = async(Dispatchers.Default) {
-                h.service.applyDownFacts(buildJsonObject { put("facts", JsonArray(listOf(superseded))) }, "customer-1")
-            }
-            insertStarted.await()
-            val exiting = async(Dispatchers.Default) { h.service.exit("customer-1", journeyId, "completed") }
-            releaseInsert.complete(Unit)
-            awaitAll(route, exiting)
-            h.log.awaitBarrier()
-
-            assertTrue(JourneyStore(h.root).load("customer-1", journeyId)!!.isGhost)
-            assertTrue(h.store.events.values.none { it.name == JourneyEventNames.EXITED })
-        } finally { h.root.deleteRecursively() }
-    }
-
-    @Test
-    fun supersedeArrivingAfterATerminalExitIsANoOp() = runBlocking {
-        // iOS parity (applySupersededDownFactIfNeeded guards on a live run):
-        // when the exit durably commits before the supersede fact arrives,
-        // the exit stands, the late supersede does not ghost the terminal
-        // run, and the server reconciles the committed exit on its side.
-        val h = harness()
-        try {
-            val started = h.service.handleEventForTrigger(
-                StoredEvent("trigger-1", "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started
-            val journeyId = started.ref.journeyId!!
-
-            h.service.exit("customer-1", journeyId, "completed")
-            h.log.awaitBarrier()
-            assertTrue(h.store.events.values.any { it.name == JourneyEventNames.EXITED })
-
-            val superseded = buildJsonObject {
-                put("id", JsonPrimitive("superseded-late"))
-                put("event", JsonPrimitive(JourneyEventNames.SUPERSEDED))
-                put("timestamp", JsonPrimitive(now))
-                put("properties", buildJsonObject { put("journey_id", JsonPrimitive(journeyId)) })
-            }
-            h.service.applyDownFacts(buildJsonObject { put("facts", JsonArray(listOf(superseded))) }, "customer-1")
-            h.log.awaitBarrier()
-
-            val run = JourneyStore(h.root).load("customer-1", journeyId)!!
-            assertEquals(JourneyRunState.TERMINAL, run.state)
-            assertTrue("a late supersede must not ghost a terminal run", !run.isGhost)
-            // The fact itself still commits once for the durable ledger.
-            assertTrue("superseded-late" in h.store.events)
-        } finally { h.root.deleteRecursively() }
-    }
-
-    @Test
-    fun authenticatedExitPreservesItsSignedJourneyReasonAndCompletionPolicy() = runBlocking {
-        val h = harness()
-        try {
-            val updates = mutableListOf<TriggerUpdate>()
-            suspend fun start(triggerId: String): String =
-                (h.service.handleEventForTrigger(
-                    StoredEvent(
-                        triggerId,
-                        "opened",
-                        timestampMillis = now,
-                        distinctId = "customer-1",
-                    ),
-                ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started)
-                    .ref.journeyId!!
-
-            h.broker.register("authenticated-expired", updates::add)
-            val expired = start("authenticated-expired")
-            assertTrue(
-                h.service.transitionPresentationOutcome(
-                    "customer-1",
-                    expired,
-                    CloseReason.AuthenticatedExit(JourneyExitReason.EXPIRED),
-                ),
-            )
-            assertTrue(h.service.completePresentationOutcome("customer-1", expired))
-            h.log.awaitBarrier()
-
-            val expiredRun = h.journeyStore.load("customer-1", expired)!!
-            assertEquals("time_limit", expiredRun.terminalReason)
-            assertEquals(JourneyExitReason.EXPIRED, expiredRun.terminalTriggerExitReason)
-            val expiredEvent = h.store.events.values.single {
-                it.name == JourneyEventNames.EXITED &&
-                    it.properties.stringValue("journey_id") == expired
-            }
-            assertEquals(
-                "time_limit",
-                expiredEvent.properties.stringValue("reason"),
-            )
-            assertEquals("2026-07-19T12:00:00.000Z", expiredEvent.properties.stringValue("at"))
-            assertEquals(1, h.journeyStore.completionCount("customer-1", "experience-1"))
-            assertEquals(
-                JourneyExitReason.EXPIRED,
-                (updates.single() as TriggerUpdate.Journey).update.exitReason,
-            )
-
-            updates.clear()
-            h.broker.register("authenticated-cancelled", updates::add)
-            val cancelled = start("authenticated-cancelled")
-            assertTrue(
-                h.service.transitionPresentationOutcome(
-                    "customer-1",
-                    cancelled,
-                    CloseReason.AuthenticatedExit(JourneyExitReason.CANCELLED),
-                ),
-            )
-            assertTrue(h.service.completePresentationOutcome("customer-1", cancelled))
-            h.log.awaitBarrier()
-
-            assertEquals(
-                "cancelled",
-                h.journeyStore.load("customer-1", cancelled)!!.terminalReason,
-            )
-            assertEquals(1, h.journeyStore.completionCount("customer-1", "experience-1"))
-            assertEquals(
-                JourneyExitReason.CANCELLED,
-                (updates.single() as TriggerUpdate.Journey).update.exitReason,
-            )
-        } finally { h.root.deleteRecursively() }
-    }
-
-    @Test
-    fun authenticatedExitReasonsUseTheServerExecutionVocabulary() {
-        val expected = mapOf(
-            JourneyExitReason.COMPLETED to "completed",
-            JourneyExitReason.DISMISSED to "cancelled",
-            JourneyExitReason.GOAL_MET to "converted_exit",
-            JourneyExitReason.TRIGGER_UNMATCHED to "stopped_matching",
-            JourneyExitReason.EXPIRED to "time_limit",
-            JourneyExitReason.CANCELLED to "cancelled",
-            JourneyExitReason.ERROR to "error",
-            JourneyExitReason.SUPERSEDED to "superseded",
         )
 
-        expected.forEach { (reason, wire) -> assertEquals(wire, reason.executionReason()) }
-    }
+        service.initialize()
 
-    @Test
-    fun authenticatedExitCompletesItsTriggerWaiterBeforeCompletionPersistenceFails() = runBlocking {
-        val h = harness()
-        try {
-            val triggerId = "authenticated-persistence-failure"
-            val journeyId = (h.service.handleEventForTrigger(
-                StoredEvent(triggerId, "opened", timestampMillis = now, distinctId = "customer-1"),
-            ).single() as ai.nuxie.sdk.events.TriggerService.JourneyTriggerResult.Started)
-                .ref.journeyId!!
-            val terminalUpdate = CompletableDeferred<TriggerUpdate>()
-            h.broker.register(triggerId) { update ->
-                terminalUpdate.complete(update)
-                h.broker.complete(triggerId)
-            }
-            File(h.root, "nuxie/journeys/completions").apply {
-                parentFile?.mkdirs()
-                writeText("blocks the completion directory")
-            }
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(snapshot, authority, "customer", 1)
 
-            assertTrue(
-                h.service.transitionPresentationOutcome(
-                    "customer-1",
-                    journeyId,
-                    CloseReason.AuthenticatedExit(JourneyExitReason.EXPIRED),
-                ),
-            )
-            val failure = runCatching {
-                h.service.completePresentationOutcome("customer-1", journeyId)
-            }.exceptionOrNull()
-
-            assertTrue("the failed completion receipt must remain observable", failure != null)
-            assertTrue("the trigger waiter must complete before the disk failure", terminalUpdate.isCompleted)
-            assertEquals(
-                JourneyExitReason.EXPIRED,
-                (terminalUpdate.await() as TriggerUpdate.Journey).update.exitReason,
-            )
-            assertEquals(0, h.journeyStore.completionCount("customer-1", "experience-1"))
-        } finally { h.root.deleteRecursively() }
-    }
-
-    @Test
-    fun catalogReleasesAreScopedToTheProfileDistinctId() {
-        val identity = ExperienceReleaseIdentity(
-            appId = "app", environment = "development", experienceId = "experience-1",
-            experienceVersionId = "version-1", buildId = "build-1", versionNumber = 1,
-            releaseCreatedAt = "2026-01-01T00:00:00.000Z", releaseSequence = 1,
-        )
-        val release = AuthenticatedRelease(
-            keyId = "test", descriptorSha256 = "sha", identity = identity,
-            descriptorBytes = ByteArray(0),
-            descriptor = buildJsonObject {
-                put("enrollment", buildJsonObject {
-                    put("trigger", buildJsonObject {
-                        put("type", JsonPrimitive("event"))
-                        put("eventName", JsonPrimitive("opened"))
-                    })
-                })
-                put("lifecycle", buildJsonObject {
-                    put("reentry", buildJsonObject { put("type", JsonPrimitive("every_time")) })
-                    put("exitPolicy", JsonPrimitive("manual"))
-                })
-            },
-            releaseSequenceToPromote = null,
-        )
-        val catalog = JourneyReleaseCatalog(
-            trustedKeys = emptyMap(),
-            highWater = ReleaseHighWaterStore(RuntimeEnvironment.getApplication()),
-            supportedRuntime = { supportedRuntime() },
-            authenticate = { _, _ -> release },
-        )
-        val profile = buildJsonObject {
-            put("releases", buildJsonObject {
-                put("delivery", buildJsonObject {
-                    put("renderBaseUrl", JsonPrimitive("https://example.test/renders/"))
-                    put("assetBaseUrl", JsonPrimitive("https://example.test/assets/"))
-                })
-                put("active", JsonArray(listOf(buildJsonObject {
-                    put("locator", buildJsonObject {
-                        put("appId", JsonPrimitive(identity.appId))
-                        put("environment", JsonPrimitive(identity.environment))
-                        put("experienceId", JsonPrimitive(identity.experienceId))
-                        put("experienceVersionId", JsonPrimitive(identity.experienceVersionId))
-                        put("buildId", JsonPrimitive(identity.buildId))
-                        put("versionNumber", JsonPrimitive(identity.versionNumber))
-                        put("releaseCreatedAt", JsonPrimitive(identity.releaseCreatedAt))
-                        put("releaseSequence", JsonPrimitive(identity.releaseSequence))
-                    })
-                    put("descriptorSha256", JsonPrimitive("sha"))
-                    put("envelopeBytesBase64", JsonPrimitive("eA=="))
-                })))
-                put("pinned", JsonArray(emptyList()))
-            })
-        }
-
-        catalog.applyProfile("user-a", profile)
-        assertEquals(1, catalog.releasesFor("user-a", "opened").size)
-        assertTrue(catalog.releasesFor("user-b", "opened").isEmpty())
-
-        catalog.applyProfile("user-b", profile)
-        assertTrue(catalog.releasesFor("user-a", "opened").isEmpty())
-        assertEquals(1, catalog.releasesFor("user-b", "opened").size)
-    }
-
-    @Test
-    fun catalogConvertsReleaseLifecycleIntoTheJourneySettingsWireShape() {
-        val identity = ExperienceReleaseIdentity(
-            appId = "app", environment = "development", experienceId = "experience-1",
-            experienceVersionId = "version-1", buildId = "build-1", versionNumber = 1,
-            releaseCreatedAt = "2026-01-01T00:00:00.000Z", releaseSequence = 1,
-        )
-        val condition = buildJsonObject {
-            put("ir_version", JsonPrimitive(1))
-            put("expr", buildJsonObject {
-                put("type", JsonPrimitive("Pred"))
-                put("key", JsonPrimitive("milestone_id"))
-                put("op", JsonPrimitive("eq"))
-                put("value", buildJsonObject {
-                    put("type", JsonPrimitive("String"))
-                    put("value", JsonPrimitive("paywall_converted"))
-                })
-            })
-        }
-        val release = AuthenticatedRelease(
-            keyId = "test",
-            descriptorSha256 = "sha",
-            identity = identity,
-            descriptorBytes = ByteArray(0),
-            descriptor = buildJsonObject {
-                put("enrollment", buildJsonObject {
-                    put("trigger", buildJsonObject {
-                        put("type", JsonPrimitive("event"))
-                        put("eventName", JsonPrimitive("opened"))
-                    })
-                })
-                put("lifecycle", buildJsonObject {
-                    put("reentry", buildJsonObject { put("type", JsonPrimitive("every_time")) })
-                    put("exitPolicy", JsonPrimitive("on_goal"))
-                    put("conversionAnchor", JsonPrimitive("last_experience_shown"))
-                    put("goal", buildJsonObject {
-                        put("type", JsonPrimitive("event"))
-                        put("eventName", JsonPrimitive(JourneyEventNames.MILESTONE))
-                        put("condition", condition)
-                        put("windowSeconds", JsonPrimitive(86_400L))
-                    })
-                    put("timeLimitSeconds", JsonPrimitive(604_800L))
-                })
-            },
-            releaseSequenceToPromote = null,
-        )
-        val catalog = JourneyReleaseCatalog(
-            trustedKeys = emptyMap(),
-            highWater = ReleaseHighWaterStore(RuntimeEnvironment.getApplication()),
-            supportedRuntime = { supportedRuntime() },
-            authenticate = { _, _ -> release },
-        )
-
-        catalog.applyProfile("user-a", profileFor(identity))
-
-        val settings = catalog.releasesFor("user-a", "opened").single().settingsTemplate
         assertEquals(
-            buildJsonObject {
-                put("kind", JsonPrimitive("event"))
-                put("eventName", JsonPrimitive(JourneyEventNames.MILESTONE))
-                put("eventFilter", condition)
-                put("window", JsonPrimitive(86_400L))
-            },
-            settings.getValue("goal"),
+            listOf(JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED),
+            captures.map { it.first },
         )
-        assertEquals("last_experience_shown", (settings.getValue("conversion_anchor") as JsonPrimitive).content)
-        assertEquals(86_400_000L, (settings.getValue("goal_window_ms") as JsonPrimitive).content.toLong())
-        assertEquals(604_800_000L, (settings.getValue("time_limit_ms") as JsonPrimitive).content.toLong())
-        assertEquals(true, (settings.getValue("end_on_goal") as JsonPrimitive).content.toBooleanStrict())
+        val completion = captures.last().second
+        assertEquals("continue", completion["outcome"])
+        assertEquals(entry.getValue("locator").jsonObject.getValue("legId").jsonPrimitive.content,
+            completion["leg_id"])
+        val journal = JourneyRunJournal(
+            directory,
+            "customer",
+            JourneyStorageScope(authority),
+        )
+        assertTrue(journal.runs().isEmpty())
+        assertEquals("continue", journal.checkmark("experience_golden")?.outcome)
+
+        now += 1_000
+        service.profileDidCommit(snapshot, authority, "customer", 2)
+        assertEquals(2, captures.size)
     }
 
-    private fun profileFor(identity: ExperienceReleaseIdentity) = buildJsonObject {
-        put("releases", buildJsonObject {
-            put("delivery", buildJsonObject {
-                put("renderBaseUrl", JsonPrimitive("https://example.test/renders/"))
-                put("assetBaseUrl", JsonPrimitive("https://example.test/assets/"))
-            })
-            put("active", JsonArray(listOf(buildJsonObject {
-                put("locator", buildJsonObject {
-                    put("appId", JsonPrimitive(identity.appId))
-                    put("environment", JsonPrimitive(identity.environment))
-                    put("experienceId", JsonPrimitive(identity.experienceId))
-                    put("experienceVersionId", JsonPrimitive(identity.experienceVersionId))
-                    put("buildId", JsonPrimitive(identity.buildId))
-                    put("versionNumber", JsonPrimitive(identity.versionNumber))
-                    put("releaseCreatedAt", JsonPrimitive(identity.releaseCreatedAt))
-                    put("releaseSequence", JsonPrimitive(identity.releaseSequence))
-                })
-                put("descriptorSha256", JsonPrimitive("sha"))
-                put("envelopeBytesBase64", JsonPrimitive("eA=="))
-            })))
-            put("pinned", JsonArray(emptyList()))
-        })
+    @Test fun `busy presentation leaves the rendered arm unconsumed for a later evaluation`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val presenter = RecordingJourneyPresenter(available = false)
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { name, properties, _, _ ->
+                captures += name to properties
+                true
+            },
+            presenter = presenter,
+            nowMillis = { 100_000L },
+        )
+        service.initialize()
+        service.onAppWillEnterForeground()
+
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+
+        val journal = JourneyRunJournal(
+            directory,
+            "customer",
+            JourneyStorageScope(renderedAuthority),
+        )
+        assertTrue(captures.isEmpty())
+        assertTrue(journal.runs().isEmpty())
+        assertNull(journal.checkmark("experience_golden"))
+
+        presenter.available = true
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 2)
+
+        assertEquals(listOf(JourneyEventNames.LEG_STARTED), captures.map { it.first })
+        val active = journal.runs().single()
+        assertNull("an active screen is not a resumable park point", active.park)
+        assertNull(active.completion)
+        assertEquals("screen_welcome", presenter.request?.screenId)
     }
 
-    private fun supportedRuntime() = SupportedRuntime(
-        currentSdkVersion = "1.0.0", supportedRuntimeRevisions = emptySet(), supportedLuauRevisions = emptyMap(),
-        sceneFormatMajor = 0, sceneFormatMinor = 0, timezoneDataRevision = "", timezoneDataSha256 = "",
-        supportedCapabilities = emptySet(),
+    @Test fun `renderer batches durably publish once and route the owning run`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val presenter = RecordingJourneyPresenter()
+        val systemCaptures = CopyOnWriteArrayList<String>()
+        val ordinaryCaptures = linkedMapOf<String, StoredEvent>()
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { name, _, _, _ ->
+                systemCaptures += name
+                true
+            },
+            captureScreenEvent = { name, properties, eventId, distinctId, occurredAt, admission ->
+                val event = StoredEvent(
+                    id = eventId,
+                    name = name,
+                    properties = JsonValueConverter.fromMap(properties),
+                    timestampMillis = occurredAt,
+                    distinctId = distinctId,
+                )
+                val settled = admission?.commitIfCurrent {
+                    ordinaryCaptures.putIfAbsent(eventId, event)
+                    true
+                } != null
+                StableEventCaptureResult(
+                    settled,
+                    ordinaryCaptures[eventId].takeIf { settled },
+                )
+            },
+            presenter = presenter,
+            nowMillis = { 100_000L },
+        )
+        service.initialize()
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+        val request = requireNotNull(presenter.request)
+        val run = JourneyRunJournal(
+            directory,
+            "customer",
+            JourneyStorageScope(renderedAuthority),
+        ).runs().single()
+        val first = JourneyScreenEmissionBatch(
+            journeyId = run.journeyId,
+            batchSequence = 0,
+            invocationId = "invocation-1",
+            source = JourneyScreenEmissionSource("screen_welcome", "submit"),
+            emissions = listOf(
+                JourneyScreenEmission(
+                    id = "emission-1",
+                    sequence = 0,
+                    occurredAtMillis = 90_000L,
+                    name = "survey_submitted",
+                    payload = JsonObject(mapOf("answer" to JsonPrimitive("premium"))),
+                ),
+            ),
+        )
+
+        assertTrue(request.onEmissionBatch(first))
+        assertTrue(request.onEmissionBatch(first))
+
+        val retained = JourneyRunJournal(
+            directory,
+            "customer",
+            JourneyStorageScope(renderedAuthority),
+        ).runs().single()
+        assertEquals(1L, retained.nextPresentationBatchSequence)
+        assertEquals(1L, retained.nextPresentationEmissionSequence)
+        assertEquals(setOf("emission-1"), ordinaryCaptures.keys)
+        val properties = ordinaryCaptures.getValue("emission-1").properties
+        assertEquals(run.journeyId, properties.getValue("journey_id").jsonPrimitive.content)
+        assertEquals("screen_welcome", properties.getValue("screen_id").jsonPrimitive.content)
+        assertEquals(90_000L, ordinaryCaptures.getValue("emission-1").timestampMillis)
+
+        assertTrue(
+            request.onEmissionBatch(
+                JourneyScreenEmissionBatch(
+                    journeyId = run.journeyId,
+                    batchSequence = 1,
+                    invocationId = "invocation-2",
+                    source = JourneyScreenEmissionSource("screen_welcome", "continue"),
+                    emissions = listOf(
+                        JourneyScreenEmission(
+                            id = "emission-2",
+                            sequence = 1,
+                            occurredAtMillis = 95_000L,
+                            name = "continue",
+                            payload = JsonObject(emptyMap()),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        // This lifecycle command is a FIFO barrier behind the routed continuation.
+        service.onAppDidEnterBackground()
+
+        assertEquals(setOf("emission-1", "emission-2"), ordinaryCaptures.keys)
+        assertEquals(
+            listOf(JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED),
+            systemCaptures,
+        )
+        assertEquals(listOf("customer"), presenter.shutdowns)
+        assertTrue(
+            JourneyRunJournal(
+                directory,
+                "customer",
+                JourneyStorageScope(renderedAuthority),
+            ).runs().isEmpty(),
+        )
+    }
+
+    @Test fun `shared renderer fixture replays one customer event through EventLog`() =
+        runBlocking {
+            val screenFixture = JourneyTestFixtures.rendererPublication
+            val input = screenFixture.getValue("input").jsonObject
+            val expected = screenFixture.getValue("expected").jsonObject
+            val customerEventIds = expected.getValue("customer_event_ids").jsonArray.map {
+                it.jsonPrimitive.content
+            }
+            val eventEffects = screenFixture.getValue("effects").jsonArray
+                .map(JsonElement::jsonObject)
+                .filter { it.getValue("kind").jsonPrimitive.content == "event" }
+            assertEquals(customerEventIds.size, eventEffects.size)
+
+            val identity = identity("customer")
+            val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+            val catalog = catalog(renderedEntry)
+            val renderedAuthority = authority(renderedEntry)
+            val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+            catalog.commit("customer", prepared)
+            val snapshot = requireNotNull(catalog.snapshot("customer"))
+            val release = snapshot.releasesByDigest.values.single()
+            val journal = JourneyRunJournal(
+                directory,
+                "customer",
+                JourneyStorageScope(renderedAuthority),
+            )
+            val run = requireNotNull(
+                journal.admit(
+                    snapshot.profile.armedLegs.single(),
+                    JourneyReentry.EveryTime,
+                    release.leg.getValue("entryStepId").jsonPrimitive.content,
+                    100_000L,
+                    release = snapshot.profile.releases.single(),
+                    executionSnapshot = executionSnapshot(snapshot),
+                ),
+            )
+            journal.markStartedQueued(run)
+            val responses = expected.getValue("response_values").jsonObject
+            val publication = JourneyRun.PendingPresentationPublication(
+                invocationId = "fixture-recovery-invocation",
+                batchSequence = expected.getValue("batch_sequence").jsonPrimitive.long,
+                nextEmissionSequence = expected.getValue("emission_sequences").jsonArray
+                    .last().jsonPrimitive.long + 1,
+                sourceScreenId = release.leg.getValue("screens").jsonArray.first()
+                    .jsonObject.getValue("id").jsonPrimitive.content,
+                sourceActionId = input.getValue("action_id").jsonPrimitive.content,
+                sourceComponentId = input.getValue("component_id").jsonPrimitive.content,
+                sourceInstanceId = input.getValue("instance_id").jsonPrimitive.content,
+                responsesChanged = true,
+                items = eventEffects.mapIndexed { index, effect ->
+                    JourneyRun.PendingPresentationPublication.Item(
+                        name = effect.getValue("name").jsonPrimitive.content,
+                        properties = effect.getValue("payload").jsonObject,
+                        eventId = customerEventIds[index],
+                        occurredAtMillis = 101_000L,
+                    )
+                },
+            )
+            val runContext = JsonObject(run.context + ("responses" to responses))
+            assertTrue(
+                journal.stagePresentationPublication(
+                    run.id,
+                    run.stepId,
+                    runContext,
+                    publication,
+                ) != null,
+            )
+
+            val eventLog = EventLog(
+                store,
+                NuxieContextBuilder(
+                    this@JourneyServiceTest.context,
+                    NuxieEnvironment.DEVELOPMENT,
+                    LogLevel.DEBUG,
+                    identity,
+                ),
+                identity,
+                beforeSend = null,
+                scope = scope,
+                nowMillis = { 102_000L },
+            )
+            fun recoveringService() = JourneyService(
+                identity = identity,
+                events = store,
+                catalog = catalog,
+                journalDirectory = directory,
+                scope = scope,
+                capture = eventLog::captureSystemEvent,
+                captureScreenEvent = eventLog::captureScreenEvent,
+                nowMillis = { 102_000L },
+                fixedStorageScope = JourneyStorageScope(renderedAuthority),
+            )
+
+            recoveringService().initialize()
+            recoveringService().initialize()
+
+            val replayedCustomerEvents = store.pendingBatch(100).filter {
+                it.id in customerEventIds
+            }
+            assertEquals(
+                expected.getValue("replay_customer_event_count").jsonPrimitive.long,
+                replayedCustomerEvents.size.toLong(),
+            )
+            assertEquals(customerEventIds, replayedCustomerEvents.map { it.id })
+            assertEquals(eventEffects.map { it.getValue("name").jsonPrimitive.content },
+                replayedCustomerEvents.map { it.name })
+        }
+
+    @Test fun `declined presentation remains parked for a later evaluation`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val captures = CopyOnWriteArrayList<String>()
+        val presenter = RecordingJourneyPresenter(
+            presentationResult = JourneyPresentationResult.Declined,
+        )
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { name, _, _, _ -> captures += name; true },
+            presenter = presenter,
+            nowMillis = { 100_000L },
+        )
+        service.initialize()
+        service.onAppWillEnterForeground()
+
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+
+        val journal = JourneyRunJournal(
+            directory,
+            "customer",
+            JourneyStorageScope(renderedAuthority),
+        )
+        assertEquals(100_000L, journal.runs().single().park?.wakeAtMillis)
+        assertEquals(listOf(JourneyEventNames.LEG_STARTED), captures)
+
+        presenter.presentationResult = JourneyPresentationResult.Shown
+        val replacement = catalog.prepare(
+            profile(
+                releaseEntry = renderedEntry,
+                renderBaseUrl = "https://replacement-renders.example.com/",
+                assetBaseUrl = "https://replacement-assets.example.com/",
+            ),
+            renderedAuthority,
+        )
+        catalog.commit("customer", replacement)
+        val replacementSnapshot = requireNotNull(catalog.snapshot("customer"))
+        service.profileDidCommit(replacementSnapshot, renderedAuthority, "customer", 2)
+
+        assertEquals(2, presenter.shownCount.get())
+        assertEquals(snapshot.profile.delivery, presenter.request?.delivery)
+        assertNull(journal.runs().single().park)
+        assertNull(journal.runs().single().completion)
+    }
+
+    @Test fun `rendered state arm waits for foreground before admission`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val presenter = RecordingJourneyPresenter()
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { name, properties, _, _ ->
+                captures += name to properties
+                true
+            },
+            presenter = presenter,
+            nowMillis = { 100_000L },
+        )
+        service.initialize()
+
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+
+        assertTrue(captures.isEmpty())
+        assertNull(presenter.request)
+        val journal = JourneyRunJournal(
+            directory,
+            "customer",
+            JourneyStorageScope(renderedAuthority),
+        )
+        assertTrue(journal.runs().isEmpty())
+        assertNull(journal.checkmark("experience_golden"))
+
+        service.onAppWillEnterForeground()
+
+        assertEquals(listOf(JourneyEventNames.LEG_STARTED), captures.map { it.first })
+        assertEquals("screen_welcome", presenter.request?.screenId)
+        assertNull(journal.runs().single().park)
+    }
+
+    @Test fun `unavailable products enter the authored Journey route`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val baseline = requireNotNull(catalog.snapshot("customer"))
+        val original = baseline.releasesByDigest.values.single()
+        val route = buildJsonObject {
+            putJsonObject("host") {
+                put("kind", "screen")
+                put("screenId", "screen_welcome")
+            }
+            put("eventName", SystemEventNames.PRODUCTS_UNAVAILABLE)
+            put("entryStepId", "report")
+        }
+        val leg = JsonObject(
+            original.leg + (
+                "routes" to JsonArray(
+                    original.leg.getValue("routes").jsonArray + route,
+                )
+            ),
+        )
+        val release = AuthenticatedJourneyRelease(
+            JourneyReleaseEnvelope.authenticate(
+                renderedEntry.getValue("envelope").toString().encodeToByteArray(),
+                mapOf(
+                    "TEST_ONLY_DEV_KEYPAIR" to Base64.decode(
+                        fixture.getValue("publicKeyBase64").jsonPrimitive.content,
+                        Base64.NO_WRAP,
+                    ),
+                ),
+            ),
+            original.identity,
+            JsonObject(original.descriptor + ("leg" to leg)),
+            original.publishedAtSeqToPromote,
+        )
+        val snapshot = baseline.copy(
+            releasesByDigest = mapOf(release.descriptorSha256 to release),
+        )
+        val captured = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val presenter = RecordingJourneyPresenter(
+            presentationResult = JourneyPresentationResult.ProductsUnavailable,
+        )
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { name, properties, _, _ ->
+                captured += name to properties
+                true
+            },
+            presenter = presenter,
+            nowMillis = { 100_000L },
+        )
+        service.initialize()
+        service.onAppWillEnterForeground()
+
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+
+        val productEvent = captured.single { it.first == SystemEventNames.PRODUCTS_UNAVAILABLE }
+        assertEquals(listOf("monthly", "yearly"), productEvent.second["product_ids"])
+        val completion = captured.single { it.first == JourneyEventNames.LEG_COMPLETED }
+        assertEquals("continue", completion.second["outcome"])
+    }
+
+    @Test fun `profile revocation tears down the active Journey surface`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val presenter = RecordingJourneyPresenter()
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { _, _, _, _ -> true },
+            presenter = presenter,
+            nowMillis = { 100_000L },
+        )
+        service.initialize()
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+        requireNotNull(presenter.request)
+
+        service.profileDidClear("customer", 2)
+
+        assertEquals(listOf("customer"), presenter.shutdowns)
+    }
+
+    @Test fun `profile withdrawal stops admission without abandoning the active Journey`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val presenter = RecordingJourneyPresenter()
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { _, _, _, _ -> true },
+            presenter = presenter,
+            nowMillis = { 100_000L },
+        )
+        service.initialize()
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+        val journal = JourneyRunJournal(
+            directory,
+            "customer",
+            JourneyStorageScope(renderedAuthority),
+        )
+        assertNull(journal.runs().single().completion)
+
+        service.profileDidWithdraw("customer", 2)
+
+        assertTrue(presenter.shutdowns.isEmpty())
+        assertNull(journal.runs().single().completion)
+    }
+
+    @Test fun `background fences a suspended presentation before publication`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val presentationStarted = CompletableDeferred<Unit>()
+        val allowPresentation = CompletableDeferred<Unit>()
+        val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val presenter = RecordingJourneyPresenter(
+            beforePresent = {
+                presentationStarted.complete(Unit)
+                allowPresentation.await()
+            },
+        )
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { name, properties, _, _ ->
+                captures += name to properties
+                true
+            },
+            presenter = presenter,
+            nowMillis = { 100_000L },
+        )
+        service.initialize()
+        service.onAppWillEnterForeground()
+        val commit = async {
+            service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+        }
+        withTimeout(5_000L) { presentationStarted.await() }
+
+        val background = async(start = CoroutineStart.UNDISPATCHED) {
+            service.onAppDidEnterBackground()
+        }
+        assertTrue(!requireNotNull(presenter.request).canPresent())
+        allowPresentation.complete(Unit)
+        commit.await()
+        background.await()
+
+        assertEquals(0, presenter.shownCount.get())
+        assertEquals(
+            listOf(JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED),
+            captures.map { it.first },
+        )
+        assertEquals("abandoned", captures.last().second["outcome"])
+    }
+
+    @Test fun `unhandled host dismissal completes the active Journey`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val presenter = RecordingJourneyPresenter()
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { name, properties, _, _ ->
+                captures += name to properties
+                true
+            },
+            presenter = presenter,
+            nowMillis = { 100_000L },
+        )
+        service.initialize()
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+        val journal = JourneyRunJournal(
+            directory,
+            "customer",
+            JourneyStorageScope(renderedAuthority),
+        )
+        val active = journal.runs().single()
+        journal.transition(active.id, "cursor_changed_after_show", active.context)
+
+        requireNotNull(presenter.request).onOutcome(JourneySurfaceOutcome.DISMISSED)
+
+        assertEquals(
+            listOf(JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED),
+            captures.map { it.first },
+        )
+        assertEquals("host_dismissed", captures.last().second["outcome"])
+        assertTrue(journal.runs().isEmpty())
+        assertEquals(
+            "host_dismissed",
+            journal.checkmark("experience_golden")?.outcome,
+        )
+    }
+
+    @Test fun `screen lifecycle events publish with run identity and own user dismissal`() =
+        runBlocking {
+            val identity = identity("customer")
+            val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+            val catalog = catalog(renderedEntry)
+            val renderedAuthority = authority(renderedEntry)
+            val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+            catalog.commit("customer", prepared)
+            val snapshot = requireNotNull(catalog.snapshot("customer"))
+            val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+            val presenter = RecordingJourneyPresenter()
+            val service = JourneyService(
+                identity = identity,
+                events = store,
+                catalog = catalog,
+                journalDirectory = directory,
+                scope = scope,
+                capture = { name, properties, _, _ ->
+                    captures += name to properties
+                    true
+                },
+                presenter = presenter,
+                nowMillis = { 100_000L },
+            )
+            service.initialize()
+            service.onAppWillEnterForeground()
+            service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+            val request = requireNotNull(presenter.request)
+
+            assertTrue(request.onScreenChanged("screen_welcome"))
+            assertEquals(
+                JourneyScreenDismissalResult.COMPLETED,
+                request.onScreenDismissed("screen_welcome", null, "user"),
+            )
+
+            assertEquals(
+                listOf(
+                    JourneyEventNames.LEG_STARTED,
+                    SystemEventNames.SCREEN_SHOWN,
+                    SystemEventNames.SCREEN_DISMISSED,
+                    JourneyEventNames.LEG_COMPLETED,
+                ),
+                captures.map { it.first },
+            )
+            val shown = captures.single { it.first == SystemEventNames.SCREEN_SHOWN }.second
+            val dismissed = captures.single {
+                it.first == SystemEventNames.SCREEN_DISMISSED
+            }.second
+            for (properties in listOf(shown, dismissed)) {
+                assertEquals("experience_golden", properties["experience_id"])
+                assertEquals("version_golden", properties["experience_version"])
+                assertEquals("screen_welcome", properties["screen_id"])
+                assertEquals(0L, properties["leg_generation"])
+                assertTrue((properties["journey_id"] as? String).orEmpty().isNotEmpty())
+                assertEquals(
+                    renderedEntry.getValue("locator").jsonObject
+                        .getValue("legId").jsonPrimitive.content,
+                    properties["leg_id"],
+                )
+            }
+            assertEquals("user", dismissed["method"])
+            assertEquals(
+                "host_dismissed",
+                captures.last().second["outcome"],
+            )
+        }
+
+    @Test fun `presentation lifecycle callback cannot deadlock the blocked journey worker`() =
+        runBlocking {
+            val identity = identity("customer")
+            val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+            val catalog = catalog(renderedEntry)
+            val renderedAuthority = authority(renderedEntry)
+            val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+            catalog.commit("customer", prepared)
+            val snapshot = requireNotNull(catalog.snapshot("customer"))
+            val captures = CopyOnWriteArrayList<String>()
+            val presenter = RecordingJourneyPresenter(
+                beforePresent = { request ->
+                    assertTrue(
+                        scope.async {
+                            request.onScreenChanged("screen_welcome")
+                        }.await(),
+                    )
+                },
+            )
+            val service = JourneyService(
+                identity = identity,
+                events = store,
+                catalog = catalog,
+                journalDirectory = directory,
+                scope = scope,
+                capture = { name, _, _, _ -> captures.add(name) },
+                presenter = presenter,
+                nowMillis = { 100_000L },
+            )
+            service.initialize()
+            service.onAppWillEnterForeground()
+
+            withTimeout(5_000L) {
+                service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+            }
+
+            assertEquals(
+                listOf(JourneyEventNames.LEG_STARTED, SystemEventNames.SCREEN_SHOWN),
+                captures,
+            )
+        }
+
+    @Test fun `presentation reveal publishes only exposures bound to that screen`() =
+        runBlocking {
+            val identity = identity("customer")
+            val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+            val catalog = catalog(renderedEntry)
+            val renderedAuthority = authority(renderedEntry)
+            val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+            catalog.commit("customer", prepared)
+            val snapshot = requireNotNull(catalog.snapshot("customer"))
+            val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+            val presenter = RecordingJourneyPresenter()
+            val service = JourneyService(
+                identity = identity,
+                events = store,
+                catalog = catalog,
+                journalDirectory = directory,
+                scope = scope,
+                capture = { name, properties, _, _ ->
+                    captures += name to properties
+                    true
+                },
+                presenter = presenter,
+                nowMillis = { 100_000L },
+            )
+            service.initialize()
+            service.onAppWillEnterForeground()
+            service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+            val journal = JourneyRunJournal(
+                directory,
+                "customer",
+                JourneyStorageScope(renderedAuthority),
+            )
+            val run = journal.runs().single()
+            journal.transition(
+                run.id,
+                run.stepId,
+                run.context,
+                experimentExposure = JourneyRun.ExperimentExposure(
+                    experimentId = "checkout",
+                    variantId = "treatment",
+                    isHoldout = true,
+                    kind = JourneyRun.ExperimentExposure.Kind.ASSIGNED,
+                    eventId = "exposure-1",
+                    selectedAtMillis = 99_000L,
+                ),
+            )
+            journal.bindExperimentExposures(run.id, "screen_welcome")
+            val request = requireNotNull(presenter.request)
+
+            request.onPresentationRevealed("different_screen")
+            assertTrue(captures.none { it.first == JourneyEventNames.EXPERIMENT_EXPOSURE })
+
+            request.onPresentationRevealed("screen_welcome")
+            request.onPresentationRevealed("screen_welcome")
+
+            val exposures = captures.filter {
+                it.first == JourneyEventNames.EXPERIMENT_EXPOSURE
+            }
+            assertEquals(1, exposures.size)
+            assertEquals("checkout", exposures.single().second["experiment_key"])
+            assertEquals("treatment", exposures.single().second["variant_key"])
+            assertEquals("profile", exposures.single().second["assignment_source"])
+            assertEquals(true, exposures.single().second["is_holdout"])
+            val persisted = journal.runs().single().experimentExposures.single()
+            assertEquals(100_000L, persisted.shownAtMillis)
+            assertTrue(persisted.queued)
+        }
+
+    @Test fun `live rendered run retains artifacts across profile replacement until report`() =
+        runBlocking {
+            val identity = identity("customer")
+            val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+            val catalog = catalog(renderedEntry)
+            val renderedAuthority = authority(renderedEntry)
+            val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+            catalog.commit("customer", prepared)
+            val snapshot = requireNotNull(catalog.snapshot("customer"))
+            val manager = RecordingArtifactManager()
+            val firstLeaseCloses = AtomicInteger()
+            val secondLeaseCloses = AtomicInteger()
+            val presenter = RecordingJourneyPresenter()
+            val service = JourneyService(
+                identity = identity,
+                events = store,
+                catalog = catalog,
+                journalDirectory = directory,
+                scope = scope,
+                capture = { _, _, _, _ -> true },
+                presenter = presenter,
+                artifactManager = manager,
+                nowMillis = { 100_000L },
+            )
+            service.initialize()
+            service.onAppWillEnterForeground()
+
+            service.profileDidCommit(
+                snapshot,
+                renderedAuthority,
+                "customer",
+                1,
+                preparedArtifacts(snapshot, firstLeaseCloses),
+            )
+
+            val journal = JourneyRunJournal(
+                directory,
+                "customer",
+                JourneyStorageScope(renderedAuthority),
+            )
+            val run = journal.runs().single()
+            assertEquals(setOf(ARTIFACT_DIGEST), run.artifactDigests)
+            assertEquals(run.artifactDigests, manager.retainedRunDigests(journeyArtifactRunKey(run)))
+
+            service.profileDidCommit(
+                snapshot,
+                renderedAuthority,
+                "customer",
+                2,
+                preparedArtifacts(snapshot, secondLeaseCloses),
+            )
+
+            assertEquals(1, firstLeaseCloses.get())
+            assertEquals(run.artifactDigests, manager.retainedRunDigests(journeyArtifactRunKey(run)))
+
+            requireNotNull(presenter.request).onOutcome(JourneySurfaceOutcome.DISMISSED)
+
+            assertNull(manager.retainedRunDigests(journeyArtifactRunKey(run)))
+            assertTrue(journal.runs().isEmpty())
+        }
+
+    @Test fun `parked runs share one bounded retained release authentication`() = runBlocking {
+        val identity = identity("customer")
+        val catalog = catalog()
+        val snapshot = authenticatedSnapshot(catalog)
+        val arm = snapshot.profile.armedLegs.single()
+        val releaseEntry = snapshot.profile.releases.single()
+        val entryStepId = snapshot.releasesByDigest.values.single().leg
+            .getValue("entryStepId").jsonPrimitive.content
+        val journal = JourneyRunJournal(
+            directory,
+            "customer",
+            JourneyStorageScope(authority),
+        )
+        repeat(2) { index ->
+            val run = requireNotNull(
+                journal.admit(
+                    arm,
+                    JourneyReentry.EveryTime,
+                    entryStepId,
+                    100_000L + index,
+                    release = releaseEntry,
+                    executionSnapshot = executionSnapshot(snapshot),
+                ),
+            )
+            journal.markStartedQueued(run)
+            journal.park(run.id, entryStepId, 150_000L)
+        }
+        var authentications = 0
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { _, _, _, _ -> true },
+            pinnedReleaseAuthenticator = { pin, reference ->
+                authentications += 1
+                catalog.authenticatePinnedRelease(pin, reference)
+            },
+            nowMillis = { 200_000L },
+        )
+
+        service.initialize()
+
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(
+            snapshot.copy(releasesByDigest = emptyMap()),
+            authority,
+            "customer",
+            1,
+        )
+
+        assertEquals(1, authentications)
+        assertTrue(
+            JourneyRunJournal(
+                directory,
+                "customer",
+                JourneyStorageScope(authority),
+            ).runs().isEmpty(),
+        )
+    }
+
+    @Test fun `profile clear fences parked recovery before retained release publication`() =
+        runBlocking {
+            val identity = identity("customer")
+            val catalog = catalog()
+            val snapshot = authenticatedSnapshot(catalog)
+            val arm = snapshot.profile.armedLegs.single()
+            val releaseEntry = snapshot.profile.releases.single()
+            val entryStepId = snapshot.releasesByDigest.values.single().leg
+                .getValue("entryStepId").jsonPrimitive.content
+            val journal = JourneyRunJournal(
+                directory,
+                "customer",
+                JourneyStorageScope(authority),
+            )
+            val run = requireNotNull(
+                journal.admit(
+                    arm,
+                    JourneyReentry.EveryTime,
+                    entryStepId,
+                    100_000L,
+                    release = releaseEntry,
+                    executionSnapshot = executionSnapshot(snapshot),
+                ),
+            )
+            journal.markStartedQueued(run)
+            journal.park(run.id, entryStepId, 150_000L)
+            val authenticationStarted = CompletableDeferred<Unit>()
+            val resumeAuthentication = CountDownLatch(1)
+            val dispatches = AtomicInteger()
+            val service = JourneyService(
+                identity = identity,
+                events = store,
+                catalog = catalog,
+                journalDirectory = directory,
+                scope = scope,
+                capture = { _, _, _, _ -> true },
+                dispatcher = JourneyDispatching {
+                    dispatches.incrementAndGet()
+                    JourneyDispatchResult.Unsupported
+                },
+                pinnedReleaseAuthenticator = { pin, reference ->
+                    authenticationStarted.complete(Unit)
+                    check(resumeAuthentication.await(5, TimeUnit.SECONDS))
+                    catalog.authenticatePinnedRelease(pin, reference)
+                },
+                nowMillis = { 200_000L },
+            )
+
+            service.initialize()
+
+            service.onAppWillEnterForeground()
+            val commit = async {
+                service.profileDidCommit(
+                    snapshot.copy(releasesByDigest = emptyMap()),
+                    authority,
+                    "customer",
+                    1,
+                )
+            }
+            withTimeout(5_000L) { authenticationStarted.await() }
+            val clear = async(start = CoroutineStart.UNDISPATCHED) {
+                service.profileDidClear("customer", 2)
+            }
+            resumeAuthentication.countDown()
+            commit.await()
+            clear.await()
+
+            assertEquals(0, dispatches.get())
+            assertTrue(
+                JourneyRunJournal(
+                    directory,
+                    "customer",
+                    JourneyStorageScope(authority),
+                ).runs().isEmpty(),
+            )
+        }
+
+    @Test fun `profile replacement fences a parked resume before its journal mutation`() =
+        runBlocking {
+            val identity = identity("customer")
+            val catalog = catalog()
+            val snapshot = authenticatedSnapshot(catalog)
+            val firstResumeStarted = CompletableDeferred<Unit>()
+            val allowFirstResume = CompletableDeferred<Unit>()
+            val replacementResumeStarted = CompletableDeferred<Unit>()
+            val allowReplacementResume = CompletableDeferred<Unit>()
+            val resumeAttempts = AtomicInteger()
+            val dispatches = AtomicInteger()
+            val service = JourneyService(
+                identity = identity,
+                events = store,
+                catalog = catalog,
+                journalDirectory = directory,
+                scope = scope,
+                capture = { _, _, _, _ -> true },
+                dispatcher = JourneyDispatching {
+                    dispatches.incrementAndGet()
+                    JourneyDispatchResult.Unsupported
+                },
+                beforeParkedResume = {
+                    when (resumeAttempts.incrementAndGet()) {
+                        1 -> {
+                            firstResumeStarted.complete(Unit)
+                            allowFirstResume.await()
+                        }
+                        2 -> {
+                            replacementResumeStarted.complete(Unit)
+                            allowReplacementResume.await()
+                        }
+                    }
+                },
+                nowMillis = { 200_000L },
+            )
+
+            service.initialize()
+
+            service.onAppWillEnterForeground()
+            service.profileDidCommit(snapshot, authority, "customer", 1)
+            val arm = snapshot.profile.armedLegs.single()
+            val releaseEntry = snapshot.profile.releases.single()
+            val entryStepId = snapshot.releasesByDigest.values.single().leg
+                .getValue("entryStepId").jsonPrimitive.content
+            val journal = JourneyRunJournal(
+                directory,
+                "customer",
+                JourneyStorageScope(authority),
+            )
+            val run = requireNotNull(
+                journal.admit(
+                    arm,
+                    JourneyReentry.EveryTime,
+                    entryStepId,
+                    100_000L,
+                    release = releaseEntry,
+                    executionSnapshot = executionSnapshot(snapshot),
+                ),
+            )
+            journal.markStartedQueued(run)
+            journal.park(run.id, entryStepId, 150_000L)
+            service.onAppDidEnterBackground()
+
+            val foreground = async { service.onAppWillEnterForeground() }
+            withTimeout(5_000L) { firstResumeStarted.await() }
+            val replacement = async(start = CoroutineStart.UNDISPATCHED) {
+                service.profileDidCommit(snapshot, authority, "customer", 2)
+            }
+            allowFirstResume.complete(Unit)
+            withTimeout(5_000L) { replacementResumeStarted.await() }
+
+            val stillParked = JourneyRunJournal(
+                directory,
+                "customer",
+                JourneyStorageScope(authority),
+            ).runs().single { it.id == run.id }
+            assertTrue(stillParked.park != null)
+            assertEquals(0, dispatches.get())
+
+            allowReplacementResume.complete(Unit)
+            foreground.await()
+            replacement.await()
+        }
+
+    @Test fun `queued initialization preserves an admitted startup event`() = runBlocking {
+        val identity = identity("customer")
+        val catalog = catalog()
+        val authenticated = authenticatedSnapshot(catalog)
+        val snapshot = JourneyProfileCatalog.Snapshot(
+            profile = JourneyPlaneProfile.decode(
+                profile(
+                    buildJsonObject {
+                        put("type", "event")
+                        put("eventName", "inventory_opened")
+                    },
+                ).toString().encodeToByteArray(),
+            ),
+            releasesByDigest = authenticated.releasesByDigest,
+        )
+        val captures = CopyOnWriteArrayList<String>()
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { name, _, _, _ ->
+                captures += name
+                true
+            },
+            nowMillis = { 100_000L },
+        )
+
+        service.profileDidCommit(snapshot, authority, "customer", 1)
+        val admittedGeneration = service.eventAdmissionGeneration()
+        service.enqueueInitialization()
+        service.handleEvent(
+            StoredEvent(
+                id = "startup-event",
+                name = "inventory_opened",
+                timestampMillis = 100_000L,
+                distinctId = "customer",
+            ),
+            admittedGeneration,
+        )
+
+        assertEquals(
+            listOf(JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED),
+            captures,
+        )
+    }
+
+    @Test fun `journal admission is fenced against an identity mutation`() = runBlocking {
+        val identity = object : IdentityProvider {
+            private var current = "customer"
+            private var revision = 0L
+
+            override fun distinctId() = current
+            override fun anonymousId() = current
+            override fun rawDistinctId(): String? = current
+            override val isIdentified = true
+            override fun captureScope() = IdentityScope(current, revision)
+            override fun isCurrentScope(scope: IdentityScope) =
+                scope.distinctId == current && scope.revision == revision
+
+            override fun <T> withCurrentScope(scope: IdentityScope, block: () -> T): T? {
+                current = "replacement"
+                revision += 1
+                return null
+            }
+        }
+        val catalog = catalog()
+        val snapshot = authenticatedSnapshot(catalog)
+        val captures = CopyOnWriteArrayList<String>()
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { name, _, _, _ -> captures.add(name) },
+            nowMillis = { 100_000L },
+        )
+
+        service.initialize()
+
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(snapshot, authority, "customer", 1)
+
+        assertTrue(captures.isEmpty())
+        assertTrue(
+            JourneyRunJournal(
+                directory,
+                "customer",
+                JourneyStorageScope(authority),
+            ).runs().isEmpty(),
+        )
+    }
+
+    @Test fun `profile clear accepted before journal admission prevents the stale arm`() =
+        runBlocking {
+            val identity = identity("customer")
+            val catalog = catalog()
+            val snapshot = authenticatedSnapshot(catalog)
+            val admissionStarted = CompletableDeferred<Unit>()
+            val resumeAdmission = CompletableDeferred<Unit>()
+            val captures = CopyOnWriteArrayList<String>()
+            val service = JourneyService(
+                identity = identity,
+                events = store,
+                catalog = catalog,
+                journalDirectory = directory,
+                scope = scope,
+                capture = { name, _, _, _ -> captures.add(name) },
+                beforeAdmission = {
+                    admissionStarted.complete(Unit)
+                    resumeAdmission.await()
+                },
+                nowMillis = { 100_000L },
+            )
+
+            service.initialize()
+
+            service.onAppWillEnterForeground()
+            val commit = async {
+                service.profileDidCommit(snapshot, authority, "customer", 1)
+            }
+            withTimeout(5_000L) { admissionStarted.await() }
+            val clear = async(start = CoroutineStart.UNDISPATCHED) {
+                service.profileDidClear("customer", 2)
+            }
+            resumeAdmission.complete(Unit)
+            commit.await()
+            clear.await()
+
+            assertTrue(captures.isEmpty())
+            assertTrue(
+                JourneyRunJournal(
+                    directory,
+                    "customer",
+                    JourneyStorageScope(authority),
+                ).runs().isEmpty(),
+            )
+        }
+
+    @Test fun `newer profile publication fences delayed commits and clears`() = runBlocking {
+        val identity = identity("customer")
+        val catalog = catalog()
+        val snapshot = authenticatedSnapshot(catalog)
+        val captures = CopyOnWriteArrayList<String>()
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { name, _, _, _ ->
+                captures += name
+                true
+            },
+            nowMillis = { 100_000L },
+        )
+        service.initialize()
+        service.onAppWillEnterForeground()
+
+        service.profileDidClear("customer", admissionGeneration = 2)
+        service.profileDidCommit(snapshot, authority, "customer", admissionGeneration = 1)
+        assertEquals(0L, service.eventAdmissionGeneration())
+        assertTrue(captures.isEmpty())
+
+        service.profileDidCommit(snapshot, authority, "customer", admissionGeneration = 3)
+        val acceptedGeneration = service.eventAdmissionGeneration()
+        assertEquals(1L, acceptedGeneration)
+        assertEquals(2, captures.size)
+
+        service.profileDidClear("customer", admissionGeneration = 2)
+        assertEquals(acceptedGeneration, service.eventAdmissionGeneration())
+        assertEquals(2, captures.size)
+    }
+
+    @Test fun `profile revocation fences a suspended effect before queued cleanup`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = ProfileDeliveryAuthority(
+            renderedEntry.getValue("locator").jsonObject
+                .getValue("appId").jsonPrimitive.content,
+            renderedEntry.getValue("locator").jsonObject
+                .getValue("environment").jsonPrimitive.content,
+        )
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val dispatchStarted = CompletableDeferred<JourneyDispatchRequest>()
+        val resumeDispatch = CompletableDeferred<Unit>()
+        val effectPublications = AtomicInteger()
+        val dispatcher = JourneyDispatching { request ->
+            dispatchStarted.complete(request)
+            resumeDispatch.await()
+            val published = request.executionFence.performIfCurrent(
+                request.executionFenceToken,
+            ) {
+                effectPublications.incrementAndGet()
+            }
+            if (published == null) {
+                JourneyDispatchResult.Failed
+            } else {
+                JourneyDispatchResult.Unsupported
+            }
+        }
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { _, _, _, _ -> true },
+            dispatcher = dispatcher,
+            nowMillis = { 100_000L },
+        )
+
+        service.initialize()
+
+        service.onAppWillEnterForeground()
+        val commit = async {
+            service.profileDidCommit(snapshot, renderedAuthority, "customer", 3)
+        }
+        val request = withTimeout(5_000L) { dispatchStarted.await() }
+
+        // A delayed older clear is discarded without revoking current work.
+        service.profileDidClear("customer", admissionGeneration = 2)
+        assertTrue(request.executionFence.isCurrent(request.executionFenceToken))
+
+        val clear = async {
+            service.profileDidClear("customer", admissionGeneration = 4)
+        }
+        withTimeout(5_000L) {
+            while (request.executionFence.isCurrent(request.executionFenceToken)) {
+                kotlinx.coroutines.yield()
+            }
+        }
+        resumeDispatch.complete(Unit)
+        commit.await()
+        clear.await()
+
+        assertEquals(0, effectPublications.get())
+    }
+
+    @Test fun `profile revalidation preserves a suspended admitted effect`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = ProfileDeliveryAuthority(
+            renderedEntry.getValue("locator").jsonObject
+                .getValue("appId").jsonPrimitive.content,
+            renderedEntry.getValue("locator").jsonObject
+                .getValue("environment").jsonPrimitive.content,
+        )
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val dispatchStarted = CompletableDeferred<JourneyDispatchRequest>()
+        val resumeDispatch = CompletableDeferred<Unit>()
+        val effectPublications = AtomicInteger()
+        val dispatcher = JourneyDispatching { request ->
+            dispatchStarted.complete(request)
+            resumeDispatch.await()
+            val published = request.executionFence.performIfCurrent(
+                request.executionFenceToken,
+            ) {
+                effectPublications.incrementAndGet()
+            }
+            if (published == null) {
+                JourneyDispatchResult.Failed
+            } else {
+                JourneyDispatchResult.Unsupported
+            }
+        }
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { _, _, _, _ -> true },
+            dispatcher = dispatcher,
+            nowMillis = { 100_000L },
+        )
+
+        service.initialize()
+
+        service.onAppWillEnterForeground()
+        val initialCommit = async {
+            service.profileDidCommit(snapshot, renderedAuthority, "customer", 3)
+        }
+        val request = withTimeout(5_000L) { dispatchStarted.await() }
+
+        val replacementCommit = async(start = CoroutineStart.UNDISPATCHED) {
+            service.profileDidCommit(snapshot, renderedAuthority, "customer", 4)
+        }
+        assertTrue(request.executionFence.isCurrent(request.executionFenceToken))
+        resumeDispatch.complete(Unit)
+        initialCommit.await()
+        replacementCommit.await()
+
+        assertEquals(1, effectPublications.get())
+    }
+
+    @Test fun `app action does not publish across an identity fence change`() = runBlocking {
+        val identity = IdentityService(context).also { it.setDistinctId("customer") }
+        val request = dispatchRequest(
+            identity,
+            buildJsonObject {
+                put("type", "app_action")
+                put("name", "open_inventory")
+            },
+        )
+        val delivered = mutableListOf<String>()
+        val dispatcher = JourneyEffectDispatcher(
+            identity = identity,
+            capture = { _, _, _, _, _ -> error("revoked app action must not capture its rider") },
+            deliverAppAction = { action, publishIfCurrent ->
+                identity.setDistinctId("replacement")
+                publishIfCurrent { delivered += action.name }
+            },
+        )
+
+        assertEquals(JourneyDispatchResult.Failed, dispatcher.dispatch(request))
+        assertTrue(delivered.isEmpty())
+    }
+
+    @Test fun `event effect cannot commit after its identity fence is revoked`() = runBlocking {
+        val identity = IdentityService(context).also { it.setDistinctId("customer") }
+        val request = dispatchRequest(
+            identity,
+            buildJsonObject {
+                put("type", "send_event")
+                put("eventName", "inventory_checked")
+            },
+        )
+        var commits = 0
+        val dispatcher = JourneyEffectDispatcher(
+            identity = identity,
+            capture = { _, _, _, _, admission ->
+                identity.setDistinctId("replacement")
+                admission.commitIfCurrent {
+                    commits += 1
+                    true
+                } != null
+            },
+            deliverAppAction = { _, _ -> error("send_event must not publish an app action") },
+        )
+
+        assertEquals(JourneyDispatchResult.Failed, dispatcher.dispatch(request))
+        assertEquals(0, commits)
+    }
+
+    @Test fun `admitted app action publishes and captures its attributed rider`() = runBlocking {
+        val identity = IdentityService(context).also { it.setDistinctId("customer") }
+        val request = dispatchRequest(
+            identity,
+            buildJsonObject {
+                put("type", "app_action")
+                put("name", "open_inventory")
+            },
+        )
+        val delivered = mutableListOf<String>()
+        val captures = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val dispatcher = JourneyEffectDispatcher(
+            identity = identity,
+            capture = { name, properties, _, _, admission ->
+                admission.commitIfCurrent {
+                    captures += name to properties
+                    true
+                } != null
+            },
+            deliverAppAction = { action, publishIfCurrent ->
+                publishIfCurrent { delivered += action.name }
+            },
+        )
+
+        assertEquals(JourneyDispatchResult.Outlet("next"), dispatcher.dispatch(request))
+        assertEquals(listOf("open_inventory"), delivered)
+        assertEquals(listOf("\$app_action_requested"), captures.map { it.first })
+        assertEquals(request.run.journeyId, captures.single().second["journey_id"])
+        assertEquals(request.run.generation, captures.single().second["leg_generation"])
+    }
+
+    @Test fun `purchase advances only from its correlated Journey outcome`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val baseline = requireNotNull(catalog.snapshot("customer"))
+        val original = baseline.releasesByDigest.values.single()
+        val leg = original.leg
+        val purchaseStep = buildJsonObject {
+            put("kind", "action")
+            put("id", "purchase")
+            putJsonObject("action") {
+                put("type", "purchase")
+                put("placementId", "golden:monthly")
+            }
+            putJsonObject("outlets") {
+                put("completed", "completed")
+                put("failed", "failed")
+                put("cancelled", "cancelled")
+            }
+        }
+        fun completion(id: String) = buildJsonObject {
+            put("kind", "complete")
+            put("id", id)
+            put("outcome", "continue")
+        }
+        val commerceLeg = JsonObject(
+            leg + mapOf(
+                "steps" to JsonArray(
+                    listOf(
+                        leg.getValue("steps").jsonArray.first(),
+                        purchaseStep,
+                        completion("completed"),
+                        completion("failed"),
+                        completion("cancelled"),
+                    ),
+                ),
+                "routes" to JsonArray(
+                    listOf(
+                        buildJsonObject {
+                            putJsonObject("host") {
+                                put("kind", "screen")
+                                put("screenId", "screen_welcome")
+                            }
+                            put("eventName", SystemEventNames.SCREEN_SHOWN)
+                            put("entryStepId", "purchase")
+                        },
+                    ),
+                ),
+            ),
+        )
+        val descriptor = JsonObject(original.descriptor + ("leg" to commerceLeg))
+        val envelope = JourneyReleaseEnvelope.authenticate(
+            renderedEntry.getValue("envelope").toString().encodeToByteArray(),
+            mapOf(
+                "TEST_ONLY_DEV_KEYPAIR" to Base64.decode(
+                    fixture.getValue("publicKeyBase64").jsonPrimitive.content,
+                    Base64.NO_WRAP,
+                ),
+            ),
+        )
+        val release = AuthenticatedJourneyRelease(
+            envelope,
+            original.identity,
+            descriptor,
+            original.publishedAtSeqToPromote,
+        )
+        val snapshot = baseline.copy(
+            releasesByDigest = mapOf(release.descriptorSha256 to release),
+        )
+        val presenter = RecordingJourneyPresenter(
+            actionResult = JourneyPresentationActionResult.AwaitingOutcome,
+        )
+        val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val service = JourneyService(
+            identity = identity,
+            events = store,
+            catalog = catalog,
+            journalDirectory = directory,
+            scope = scope,
+            capture = { name, properties, _, _ ->
+                captures += name to properties
+                true
+            },
+            capturePresentationEvent = {
+                    name,
+                    properties,
+                    eventId,
+                    distinctId,
+                    occurredAt,
+                    admission,
+                ->
+                val event = StoredEvent(
+                    eventId,
+                    name,
+                    JsonValueConverter.fromMap(properties),
+                    occurredAt,
+                    distinctId,
+                )
+                val settled = admission?.commitIfCurrent { true } != null
+                StableEventCaptureResult(settled, event.takeIf { settled })
+            },
+            presenter = presenter,
+            nowMillis = { 100_000L },
+        )
+        service.initialize()
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+
+        assertTrue(requireNotNull(presenter.request).onScreenChanged("screen_welcome"))
+        val effectId = presenter.actions.single().second
+        val journal = JourneyRunJournal(
+            directory,
+            "customer",
+            JourneyStorageScope(renderedAuthority),
+        )
+        assertEquals("purchase", journal.runs().single().stepId)
+
+        val outcomeProperties = JsonObject(
+            mapOf(
+                "placement_id" to JsonPrimitive("golden:monthly"),
+                "experience_id" to JsonPrimitive(release.identity.experienceId),
+            ),
+        )
+        service.handleEvent(
+            StoredEvent(
+                "wrong-effect",
+                SystemEventNames.PURCHASE_COMPLETED,
+                outcomeProperties,
+                100_001L,
+                "customer",
+            ),
+            service.eventAdmissionGeneration(),
+        )
+        assertEquals("purchase", journal.runs().single().stepId)
+
+        service.handleEvent(
+            StoredEvent(
+                effectId,
+                SystemEventNames.PURCHASE_COMPLETED,
+                outcomeProperties,
+                100_002L,
+                "customer",
+            ),
+            service.eventAdmissionGeneration(),
+        )
+
+        assertTrue(journal.runs().isEmpty())
+        assertEquals("continue", journal.checkmark(release.identity.experienceId)?.outcome)
+        assertEquals(
+            listOf(JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED),
+            captures.map { it.first },
+        )
+    }
+
+    private fun catalog(
+        releaseEntry: JsonObject = entry,
+    ): JourneyProfileCatalog {
+        val keys = mapOf(
+            "TEST_ONLY_DEV_KEYPAIR" to Base64.decode(
+                fixture.getValue("publicKeyBase64").jsonPrimitive.content,
+                Base64.NO_WRAP,
+            ),
+        )
+        return JourneyProfileCatalog(keys, JourneyReleaseHighWaterStore(context)) {
+            runtime(releaseEntry)
+        }
+    }
+
+    private fun authority(releaseEntry: JsonObject): ProfileDeliveryAuthority =
+        ProfileDeliveryAuthority(
+            releaseEntry.getValue("locator").jsonObject
+                .getValue("appId").jsonPrimitive.content,
+            releaseEntry.getValue("locator").jsonObject
+                .getValue("environment").jsonPrimitive.content,
+        )
+
+    private class RecordingJourneyPresenter(
+        @Volatile var available: Boolean = true,
+        @Volatile var presentationResult: JourneyPresentationResult? = null,
+        @Volatile var actionResult: JourneyPresentationActionResult? = null,
+        private val beforePresent: suspend (JourneyPresentationRequest) -> Unit = {},
+    ) : JourneyPresenting {
+        @Volatile var request: JourneyPresentationRequest? = null
+        val shutdowns = CopyOnWriteArrayList<String>()
+        val shownCount = AtomicInteger()
+        val actions = CopyOnWriteArrayList<Pair<JsonObject, String>>()
+
+        override fun reserve(ownerDistinctId: String): JourneyPresentationReservation? =
+            if (available) Reservation() else null
+
+        override suspend fun present(
+            request: JourneyPresentationRequest,
+        ): JourneyPresentationResult {
+            this.request = request
+            beforePresent(request)
+            val selected = presentationResult
+            return if (selected != null) {
+                shownCount.incrementAndGet()
+                selected
+            } else if (request.canPresent()) {
+                shownCount.incrementAndGet()
+                JourneyPresentationResult.Shown
+            } else {
+                JourneyPresentationResult.Failed
+            }
+        }
+
+        override fun owns(owner: JourneyPresentationOwner): Boolean = request?.let {
+            it.journeyId == owner.journeyId && it.ownerDistinctId == owner.distinctId
+        } == true
+
+        override fun screenId(owner: JourneyPresentationOwner): String? =
+            request?.takeIf {
+                it.journeyId == owner.journeyId && it.ownerDistinctId == owner.distinctId
+            }?.screenId
+
+        override suspend fun dispatchAction(
+            owner: JourneyPresentationOwner,
+            action: JsonObject,
+            effectId: String,
+        ): JourneyPresentationActionResult {
+            actions += action to effectId
+            return actionResult ?: JourneyPresentationActionResult.Failed
+        }
+
+        override suspend fun shutdownOwnedBy(ownerDistinctId: String) {
+            shutdowns += ownerDistinctId
+        }
+
+        private class Reservation : JourneyPresentationReservation {
+            override fun close() = Unit
+        }
+    }
+
+    private fun authenticatedSnapshot(
+        catalog: JourneyProfileCatalog,
+    ): JourneyProfileCatalog.Snapshot {
+        val prepared = catalog.prepare(profile(), authority)
+        catalog.commit("customer", prepared)
+        return requireNotNull(catalog.snapshot("customer"))
+    }
+
+    private fun executionSnapshot(
+        snapshot: JourneyProfileCatalog.Snapshot,
+    ) = JourneyRun.ExecutionSnapshot(
+        delivery = snapshot.profile.delivery,
+        assignments = snapshot.profile.facts.getValue("assignments").jsonObject,
     )
 
-    private fun JsonObject.stringValue(key: String): String? =
-        (this[key] as? JsonPrimitive)?.content
+    private fun dispatchRequest(
+        identity: IdentityService,
+        action: JsonObject,
+    ): JourneyDispatchRequest {
+        val catalog = catalog()
+        val prepared = catalog.prepare(profile(), authority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val arm = snapshot.profile.armedLegs.single()
+        val release = snapshot.releasesByDigest.values.single()
+        val run = JourneyRun(
+            journeyId = "018f0000-0000-7000-8000-000000000001",
+            generation = 0,
+            reference = arm.reference,
+            startedAtMillis = 100_000,
+            isEnrollment = true,
+            startedEventId = "started",
+            completedEventId = "completed",
+            startedQueued = true,
+            stepId = "effect",
+            context = arm.context,
+        )
+        val fence = JourneyExecutionFence()
+        return JourneyDispatchRequest(
+            run = run,
+            release = release,
+            stepId = "effect",
+            action = action,
+            effectId = "effect-id",
+            distinctId = "customer",
+            identityScope = identity.captureScope(),
+            executionFence = fence,
+            executionFenceToken = fence.token(),
+        )
+    }
 
-    private suspend fun markHostDismissed(h: Harness, journeyId: String) {
-        assertTrue(
-            h.service.transitionPresentationOutcome(
-                ownerDistinctId = "customer-1",
-                journeyId = journeyId,
-                reason = CloseReason.HostDismissed,
-                initiatingDistinctId = "customer-1",
+    private fun preparedArtifacts(
+        snapshot: JourneyProfileCatalog.Snapshot,
+        closes: AtomicInteger,
+    ): PreparedJourneyArtifacts {
+        val release = snapshot.releasesByDigest.values.single()
+        val riv = File.createTempFile("journey-artifact-", ".riv").apply {
+            writeText("fixture")
+            deleteOnExit()
+        }
+        return PreparedJourneyArtifacts(
+            mapOf(
+                release.descriptorSha256 to AcquiredJourneyRelease(
+                    identity = release.identity,
+                    artifactsByKey = mapOf("renders/fixture.riv" to riv),
+                    rivFile = riv,
+                    artifactDigests = setOf(ARTIFACT_DIGEST),
+                    protection = Closeable { closes.incrementAndGet() },
+                ),
             ),
         )
     }
 
-    private suspend fun transitionAndComplete(
-        h: Harness,
-        distinctId: String,
-        journeyId: String,
-        reason: CloseReason,
-    ): Boolean {
-        val won = h.service.transitionPresentationOutcome(distinctId, journeyId, reason)
-        if (won) h.service.completePresentationOutcome(distinctId, journeyId)
-        return won
+    private class RecordingArtifactManager : JourneyArtifactManager {
+        private val retained = linkedMapOf<String, Set<String>>()
+
+        override suspend fun prepareJourneys(
+            snapshot: JourneyProfileCatalog.Snapshot,
+        ): PreparedJourneyArtifacts = error("ProfileService owns preparation")
+
+        override fun retainForRun(runKey: String, digests: Set<String>) {
+            val previous = retained.putIfAbsent(runKey, digests)
+            check(previous == null || previous == digests)
+        }
+
+        override fun releaseRun(runKey: String) {
+            retained.remove(runKey)
+        }
+
+        override fun retainedRunDigests(runKey: String): Set<String>? = retained[runKey]
+    }
+
+    private fun profile(
+        entryCondition: JsonObject = buildJsonObject { put("type", "app_foregrounded") },
+        releaseEntry: JsonObject = entry,
+        renderBaseUrl: String = "https://renders.example.com/",
+        assetBaseUrl: String = "https://assets.example.com/",
+    ): JsonObject {
+        val locator = releaseEntry.getValue("locator").jsonObject
+        val envelope = releaseEntry.getValue("envelope").jsonObject
+        return buildJsonObject {
+            put("schemaVersion", "nuxie.journey-plane-profile.v1")
+            put("status", "ok")
+            putJsonObject("delivery") {
+                put("renderBaseUrl", renderBaseUrl)
+                put("assetBaseUrl", assetBaseUrl)
+            }
+            putJsonArray("features") {}
+            putJsonObject("facts") {
+                putJsonObject("properties") {}
+                putJsonObject("memberships") {}
+                putJsonObject("assignments") {}
+            }
+            put("releases", JsonArray(listOf(releaseEntry)))
+            putJsonArray("armedLegs") {
+                addJsonObject {
+                    putJsonObject("reference") {
+                        put("experienceId", locator.getValue("experienceId"))
+                        put("versionId", locator.getValue("experienceVersionId"))
+                        put("legId", locator.getValue("legId"))
+                        put("descriptorSha256", envelope.getValue("descriptorSha256"))
+                    }
+                    putJsonObject("binding") { put("type", "new") }
+                    put("entryCondition", entryCondition)
+                    putJsonObject("context") {
+                        putJsonObject("event") {}
+                        putJsonObject("responses") {}
+                    }
+                }
+            }
+        }
+    }
+
+    private fun runtime(
+        releaseEntry: JsonObject = entry,
+    ): JourneyReleaseSupportedRuntime {
+        val envelope = releaseEntry.getValue("envelope").jsonObject
+        val descriptor = Json.parseToJsonElement(
+            Base64.decode(
+                envelope.getValue("descriptorBytesBase64").jsonPrimitive.content,
+                Base64.NO_WRAP,
+            ).decodeToString(),
+        ).jsonObject
+        val requirements = descriptor["requirements"] as? JsonObject
+            ?: return JourneyReleaseSupportedRuntime(
+                "0.1.0",
+                emptySet(),
+                emptyMap(),
+                1,
+                0,
+                "unused",
+                "unused",
+                emptySet(),
+            )
+        fun JsonObject.string(key: String) = getValue(key).jsonPrimitive.content
+        val luau = requirements.getValue("luau").jsonObject
+        val scene = requirements.getValue("sceneFormat").jsonObject
+        val timezone = requirements.getValue("timezoneData").jsonObject
+        return JourneyReleaseSupportedRuntime(
+            requirements.string("minimumSdkVersion"),
+            setOf(requirements.string("runtimeRevision")),
+            mapOf(
+                luau.string("revision") to luau.getValue("bytecodeVersions")
+                    .jsonArray.map { it.jsonPrimitive.int }.toSet(),
+            ),
+            scene.getValue("major").jsonPrimitive.int,
+            scene.getValue("minor").jsonPrimitive.int,
+            timezone.string("revision"),
+            timezone.string("sha256"),
+            requirements.getValue("requiredCapabilities").jsonArray
+                .map { it.jsonPrimitive.content }.toSet(),
+        )
+    }
+
+    private fun identity(distinctId: String) = object : IdentityProvider {
+        override fun distinctId() = distinctId
+        override fun anonymousId() = distinctId
+        override fun rawDistinctId(): String? = null
+        override val isIdentified = false
+    }
+
+    private companion object {
+        const val ARTIFACT_DIGEST =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
 }

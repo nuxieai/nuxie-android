@@ -19,9 +19,9 @@ private const val PROFILE_APP_ID_HEADER = "Nuxie-App-Id"
 private const val PROFILE_APP_ENVIRONMENT_HEADER = "Nuxie-App-Environment"
 
 /**
- * The API client, ported from the iOS `NuxieApi`: all POST, gzip request
- * bodies, `Nuxie-Android-SDK/<version>` user agent. Only `/batch` exists in
- * this slice; other endpoints arrive with their subsystems.
+ * The API client, ported from the iOS `NuxieApi`. Ordinary captured events
+ * use `/batch`; `/event` remains the synchronous Feature-usage command lane.
+ * Requests carry the `Nuxie-Android-SDK/<version>` user agent.
  */
 internal class NuxieApi(
     private val apiKey: String,
@@ -269,7 +269,7 @@ internal class NuxieApi(
     }
 
     /**
-     * POST /event: the synchronous decision lane. The body is the batch-item
+     * POST /event: the synchronous Feature command lane. The body is the batch-item
      * projection of the captured event (same encoder, same lift rules) plus
      * apiKey. Returns the duplicate-key-validated response body text.
      */

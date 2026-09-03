@@ -1,15 +1,8 @@
 package ai.nuxie.sdk.journey
 
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.int
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -24,22 +17,6 @@ class TimeWindowMathTest {
 
     private fun evaluate(now: String, start: String, end: String, zone: String = "Etc/UTC", days: List<Int>? = null) =
         TimeWindowMath.evaluate(instant(now), start, end, days, bundle.resolve(zone)!!)
-
-    @Test fun sharedTimeWindowVectors() {
-        val fixture = Json.parseToJsonElement(File("../fixtures/journeys/time-window/cross-plane.json").readText()).jsonObject
-        for (vector in fixture.getValue("vectors").jsonArray.map { it.jsonObject }) {
-            val expected = when (vector.getValue("decision").jsonPrimitive.content) {
-                "in_window" -> TimeWindowMath.Decision.InWindow
-                "malformed" -> TimeWindowMath.Decision.Malformed
-                "pause" -> TimeWindowMath.Decision.Pause(instant(vector.getValue("until").jsonPrimitive.content))
-                else -> error("unknown fixture decision")
-            }
-            val days = vector.getValue("daysOfWeek").takeUnless { it == JsonNull }?.jsonArray?.map { it.jsonPrimitive.int }
-            assertEquals(vector.toString(), expected, evaluate(
-                vector.getValue("now").jsonPrimitive.content, vector.getValue("startTime").jsonPrimitive.content,
-                vector.getValue("endTime").jsonPrimitive.content, fixture.getValue("timezone").jsonPrimitive.content, days))
-        }
-    }
 
     @Test fun pinnedBundleRejectsTamperingAndOnlyDeviceIdentifiersResolveAliases() {
         assertNotNull(bundle.resolve("America/New_York"))

@@ -6,6 +6,7 @@ import ai.nuxie.sdk.features.FeatureCheckPolicy
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.testsupport.FakeTransport
+import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponse
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.double
@@ -40,10 +41,8 @@ class NuxieHasFeatureTest {
         val transport = FakeTransport().apply {
             respond = { request ->
                 when (request.url.path) {
-                    "/profile" -> HttpTransport.Response(
-                        200,
-                        """{"segments":[],"features":[{"id":"exports","type":"metered","balance":3.5,"unlimited":false}]}"""
-                            .encodeToByteArray(),
+                    "/profile" -> canonicalJourneyProfileResponse(
+                        """[{"id":"exports","type":"metered","balance":3.5,"unlimited":false}]""",
                     )
                     else -> error("Unexpected request: ${request.url.path}")
                 }
@@ -64,10 +63,8 @@ class NuxieHasFeatureTest {
         val transport = FakeTransport().apply {
             respond = { request ->
                 when (request.url.path) {
-                    "/profile" -> HttpTransport.Response(
-                        200,
-                        """{"segments":[],"features":[{"id":"exports","type":"metered","balance":9,"unlimited":false}]}"""
-                            .encodeToByteArray(),
+                    "/profile" -> canonicalJourneyProfileResponse(
+                        """[{"id":"exports","type":"metered","balance":9,"unlimited":false}]""",
                     )
                     "/entitled" -> HttpTransport.Response(
                         200,
@@ -129,10 +126,7 @@ class NuxieHasFeatureTest {
         val transport = FakeTransport().apply {
             respond = { request ->
                 when (request.url.path) {
-                    "/profile" -> HttpTransport.Response(
-                        200,
-                        """{"segments":[],"features":[]}""".encodeToByteArray(),
-                    )
+                    "/profile" -> canonicalJourneyProfileResponse()
                     "/entitled" -> throw failure
                     else -> error("Unexpected request: ${request.url.path}")
                 }
@@ -154,10 +148,7 @@ class NuxieHasFeatureTest {
         val transport = FakeTransport().apply {
             respond = { request ->
                 when (request.url.path) {
-                    "/profile" -> HttpTransport.Response(
-                        200,
-                        """{"segments":[],"features":[]}""".encodeToByteArray(),
-                    )
+                    "/profile" -> canonicalJourneyProfileResponse()
                     "/entitled" -> HttpTransport.Response(
                         200,
                         """{"customerId":"${requireNotNull(Nuxie.core).identity.distinctId()}","featureId":"pro","requiredBalance":1.0,"code":"denied","allowed":false,"unlimited":false,"balance":null,"type":"boolean"}"""
@@ -196,10 +187,7 @@ class NuxieHasFeatureTest {
                                 .encodeToByteArray(),
                         )
                     }
-                    else -> HttpTransport.Response(
-                        200,
-                        """{"segments":[],"features":[]}""".encodeToByteArray(),
-                    )
+                    else -> canonicalJourneyProfileResponse()
                 }
             }
         }

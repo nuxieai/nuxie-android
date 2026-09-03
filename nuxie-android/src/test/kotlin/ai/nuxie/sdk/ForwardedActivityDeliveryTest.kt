@@ -15,7 +15,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 
 @RunWith(RobolectricTestRunner::class)
-class ForwardedActivityDeliveryTest {
+class ForwardedActivityJourneyReleaseDeliveryTest {
     @After
     fun tearDown() {
         Nuxie.listener = null

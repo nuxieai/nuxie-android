@@ -65,7 +65,7 @@ class NuxieTest {
     }
 
     @Test
-    fun configuredAndRuntimeLocalesReachProfileRequests() = runBlocking {
+    fun runtimeLocaleChangesWaitForTheNextProfileSyncPoint() = runBlocking {
         val transport = FakeTransport()
         Nuxie.overridesForTesting = NuxieCore.Overrides(
             transport = transport,
@@ -82,12 +82,21 @@ class NuxieTest {
         assertTrue(core.profile.refreshAndWait())
         assertEquals("en_US", lastProfileLocale(transport))
 
+        val initialRequestCount = profileRequestCount(transport)
         Nuxie.setLocaleIdentifier("fr_FR")
+        assertEquals(initialRequestCount, profileRequestCount(transport))
+        assertTrue(core.profile.refreshAndWait())
         assertEquals("fr_FR", lastProfileLocale(transport))
 
+        val frenchRequestCount = profileRequestCount(transport)
         Nuxie.setLocaleIdentifier(null)
+        assertEquals(frenchRequestCount, profileRequestCount(transport))
+        assertTrue(core.profile.refreshAndWait())
         assertEquals("device_TEST", lastProfileLocale(transport))
     }
+
+    private fun profileRequestCount(transport: FakeTransport): Int =
+        transport.requests.count { it.url.path == "/profile" }
 
     private fun lastProfileLocale(transport: FakeTransport): String {
         val body = transport.requests.last { it.url.path == "/profile" }.body.decodeToString()

@@ -29,7 +29,7 @@ internal object GooglePlayProductViewModelProjection {
         screenId: String?,
         locale: Locale = Locale.getDefault(),
     ): NuxieViewModelListProjection? {
-        val values = ((descriptor["journey"] as? JsonObject)?.get("viewModelValues") as? JsonArray)
+        val values = (descriptor["viewModelValues"] as? JsonArray)
             ?.mapIndexed { index, element -> parseValue(element, index) }
             .orEmpty()
         val productGroups = values
@@ -252,7 +252,7 @@ internal object GooglePlayProductViewModelProjection {
         }
 
     private fun rootViewModelName(descriptor: JsonObject, screenId: String?): String? {
-        val screens = ((descriptor["journey"] as? JsonObject)?.get("screens") as? JsonArray)
+        val screens = ((descriptor["leg"] as? JsonObject)?.get("screens") as? JsonArray)
             ?.mapNotNull { it as? JsonObject }
             .orEmpty()
         val screen = screenId?.let { id ->

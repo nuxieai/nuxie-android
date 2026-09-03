@@ -1,16 +1,15 @@
 package ai.nuxie.sdk.profile
 
 import ai.nuxie.sdk.features.FeatureInfo
-import ai.nuxie.sdk.experiences.DeviceLegArtifactManager
-import ai.nuxie.sdk.experiences.DeviceLegProfileCatalog
-import ai.nuxie.sdk.experiences.PreparedDeviceLegArtifacts
+import ai.nuxie.sdk.experiences.JourneyArtifactManager
+import ai.nuxie.sdk.experiences.JourneyProfileCatalog
+import ai.nuxie.sdk.experiences.PreparedJourneyArtifacts
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.network.ProfileDeliveryAuthority
-import ai.nuxie.sdk.journey.DeviceLegProfileConsumer
-import ai.nuxie.sdk.segments.SegmentService
+import ai.nuxie.sdk.journey.JourneyProfileConsumer
 import android.content.Context
 import android.util.Log
 import java.io.File
@@ -19,8 +18,6 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.selects.onTimeout
-import kotlinx.coroutines.selects.select
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -30,18 +27,16 @@ import kotlinx.serialization.json.jsonObject
 /**
  * Profile fetch + cache, porting the iOS `ProfileService` data-plane policy:
  *
- * - Legacy profiles expire after 24 hours. Canonical plane profiles remain
- *   usable offline after that refresh age and revalidate on every foreground.
+ * - Canonical plane profiles remain usable offline and revalidate on every
+ *   launch and foreground.
  * - Conditional refetch via the scoped ETag validator (locale-keyed).
  * - Atomic admission by identity decision, effective locale, and monotonic
  *   profile generation before every locale-scoped mutation.
- * - Canonical plane profiles synchronize at launch and foreground only;
- *   legacy profiles retain the 30-minute transition refresh. On user change
- *   a fresh-enough cache (< 5 min) is served without an immediate network hit.
- * - Locale-scoped profile cache, segment membership, release authority, and
- *   visible Features share one admission. User properties and server facts
- *   are customer-scoped instead; Android has no profile-mailbox consumer in
- *   this slice.
+ * - Profiles synchronize at launch and foreground only. User changes may
+ *   hydrate an existing canonical cache, while locale changes withdraw the
+ *   current delivery; neither introduces another sync point.
+ * - Locale-scoped profile cache, release authority, visible Features, and
+ *   Journey runtime state share one admission.
  *
  * The profile body is retained as raw JSON (duplicate-key validated at the
  * network layer); typed models arrive with their consumers.
@@ -51,16 +46,9 @@ internal class ProfileService(
     storageScope: ProfileStorageScope,
     private val api: NuxieApi,
     private val identity: IdentityProvider,
-    private val segments: SegmentService,
-    private val applyUserProperties: (Map<String, Any?>) -> Unit,
-    private val applyJourneyProfile: (distinctId: String, body: JsonObject) -> Unit = { _, _ -> },
-    private val deviceLegProfiles: DeviceLegProfileCatalog? = null,
-    private val deviceLegRuntime: DeviceLegProfileConsumer? = null,
-    private val deviceLegArtifacts: DeviceLegArtifactManager? = null,
-    private val applyJourneyFacts: suspend (
-        distinctId: String,
-        body: JsonObject,
-    ) -> Unit = { _, _ -> },
+    private val journeyProfiles: JourneyProfileCatalog,
+    private val journeys: JourneyProfileConsumer,
+    private val journeyArtifacts: JourneyArtifactManager? = null,
     private val stageFeatureProfile: (
         distinctId: String,
         body: JsonObject,
@@ -74,7 +62,6 @@ internal class ProfileService(
     scope: CoroutineScope,
     private val localeSettings: ProfileLocaleSettings,
     private val nowMillis: () -> Long = System::currentTimeMillis,
-    private val refreshIntervalMillis: Long = REFRESH_INTERVAL_MILLIS,
     cacheDirectory: File? = null,
 ) {
     class CachedProfile(
@@ -95,20 +82,12 @@ internal class ProfileService(
     private var nextProfileGeneration = 0L
 
     @Volatile
-    private var nextCustomerGeneration = 0L
-
-    @Volatile
     private var latestAppliedGeneration = 0L
-
-    /** Legacy payloads retain their periodic refresh during the transition.
-     * Canonical plane delivery synchronizes only at launch and foreground. */
-    private var periodicRefreshEnabled = true
 
     private data class Admission(
         val identityScope: IdentityScope,
         val localeScope: ProfileLocaleScope,
         val generation: Long,
-        val customerGeneration: Long,
         val featurePurchaseRevision: Long,
         val featureAuthoritativeRevision: Long,
     )
@@ -116,8 +95,8 @@ internal class ProfileService(
     private enum class AuthoritySource { NETWORK, CACHE }
 
     private data class PreparedPlane(
-        val catalog: DeviceLegProfileCatalog.Prepared,
-        val artifacts: PreparedDeviceLegArtifacts?,
+        val catalog: JourneyProfileCatalog.Prepared,
+        val artifacts: PreparedJourneyArtifacts?,
     )
 
     private sealed interface Signal {
@@ -136,12 +115,7 @@ internal class ProfileService(
             Log.w(LOG_TAG, "Profile startup hydration failed; continuing without cache", failure)
         }
         while (true) {
-            val signal = select<Signal?> {
-                signals.onReceiveCatching { it.getOrNull() }
-                if (synchronized(lock) { periodicRefreshEnabled }) {
-                    onTimeout(refreshIntervalMillis) { Signal.Refresh(null) }
-                }
-            } ?: break
+            val signal = signals.receiveCatching().getOrNull() ?: break
             when (signal) {
                 is Signal.Refresh -> {
                     var refreshed = false
@@ -200,17 +174,26 @@ internal class ProfileService(
         return done.await()
     }
 
-    /** Change the effective locale and invalidate all older locale-scoped work. */
-    fun setLocaleIdentifier(localeIdentifier: String?) {
-        // Preserve the global lock order: locale -> profile (identity is not
-        // needed because locale invalidation is customer-agnostic).
-        localeSettings.setLocaleIdentifier(localeIdentifier)
-        synchronized(lock) {
-            nextProfileGeneration += 1
-        }
+    /** Change the effective locale and withdraw the old locale's delivery. */
+    suspend fun setLocaleIdentifier(localeIdentifier: String?) {
+        val previousLocale = localeSettings.captureScope()
+        val localeScope = localeSettings.setLocaleIdentifier(localeIdentifier)
+        if (localeScope == previousLocale) return
+
+        val identityScope = identity.captureScope()
+        val withdrawal = withCurrentScope(identityScope, localeScope) {
+            synchronized(lock) {
+                nextProfileGeneration += 1
+                latestAppliedGeneration = nextProfileGeneration
+                if (resident?.distinctId == identityScope.distinctId) resident = null
+                journeyProfiles.clear(identityScope.distinctId)
+                identityScope.distinctId to nextProfileGeneration
+            }
+        } ?: return
+        journeys.profileDidWithdraw(withdrawal.first, withdrawal.second)
     }
 
-    /** User-transition observer: reset/refresh per the iOS coordinator rules. */
+    /** User-transition observer: clear the old owner and hydrate cached authority only. */
     val transitionObserver = UserTransitionCoordinator.Observer { kind, from, to ->
         if (kind == UserTransitionCoordinator.Kind.RESET) {
             // Ordered cleanup belongs to the old identity's keys. A newer
@@ -237,17 +220,12 @@ internal class ProfileService(
         if (cached != null && cached.locale == admission.localeScope.identifier && isUsable(cached)) {
             if (!applyProfile(cached, admission, AuthoritySource.CACHE)) {
                 evictCache(newDistinctId, admission)
-                refreshNow()
-                return
             }
-            // Fresh enough to skip an immediate network hit?
-            if (nowMillis() - cached.cachedAtMillis < BACKGROUND_REFRESH_AGE_MILLIS) return
         } else if (cached != null) {
-            // Expired OR from another locale: evict before any use so a cold
-            // start cannot rehydrate old-locale state (segments included).
+            // Unsupported or differently localized state cannot become
+            // canonical authority for the new customer.
             evictCache(newDistinctId, admission)
         }
-        refreshNow()
     }
 
     private suspend fun loadFromDisk() {
@@ -259,8 +237,8 @@ internal class ProfileService(
                 evictCache(distinctId, admission)
             }
         } else if (cached != null) {
-            // Expired OR from another locale: evict before any use so a cold
-            // start cannot rehydrate old-locale state (segments included).
+            // Unsupported or differently localized state cannot become
+            // canonical authority at launch.
             evictCache(distinctId, admission)
         }
     }
@@ -353,45 +331,43 @@ internal class ProfileService(
         admission: Admission,
         authoritySource: AuthoritySource,
     ): Boolean {
-        val schemaVersion = (cached.body["schemaVersion"] as? JsonPrimitive)
-            ?.takeIf { it.isString }
-            ?.content
-        val planePrepared = if (schemaVersion == "nuxie.journey-plane-profile.v1") {
-            val catalog = deviceLegProfiles ?: return false
-            val deliveryAuthority = cached.validator?.authority ?: return false
-            val authorityAccepted = runCatching {
-                withCurrentScope(admission.identityScope, admission.localeScope) {
-                    synchronized(lock) {
-                        if (admission.generation != nextProfileGeneration ||
-                            admission.generation < latestAppliedGeneration
-                        ) {
-                            return@synchronized false
-                        }
-                        when (authoritySource) {
-                            AuthoritySource.NETWORK -> authorityStore.bind(deliveryAuthority)
-                            AuthoritySource.CACHE -> authorityStore.authority() == deliveryAuthority
-                        }
+        if (!isCanonical(cached.body)) {
+            Log.w(LOG_TAG, "Profile rejected: unsupported Journey profile schema")
+            return false
+        }
+        val deliveryAuthority = cached.validator?.authority ?: return false
+        val authorityAccepted = runCatching {
+            withCurrentScope(admission.identityScope, admission.localeScope) {
+                synchronized(lock) {
+                    if (admission.generation != nextProfileGeneration ||
+                        admission.generation < latestAppliedGeneration
+                    ) {
+                        return@synchronized false
                     }
-                } == true
-            }.getOrElse {
-                Log.w(LOG_TAG, "Profile authority binding failed", it)
-                return false
-            }
-            if (!authorityAccepted) return false
-            val prepared = runCatching {
-                catalog.prepare(cached.body, deliveryAuthority)
-            }.getOrElse {
-                Log.w(LOG_TAG, "Device leg plane profile rejected", it)
-                return false
-            }
-            val artifacts = runCatching {
-                deviceLegArtifacts?.prepareDeviceLegs(prepared.snapshot)
-            }.getOrElse {
-                Log.w(LOG_TAG, "Device leg profile artifacts unavailable", it)
-                return false
-            }
-            PreparedPlane(prepared, artifacts)
-        } else null
+                    when (authoritySource) {
+                        AuthoritySource.NETWORK -> authorityStore.bind(deliveryAuthority)
+                        AuthoritySource.CACHE -> authorityStore.authority() == deliveryAuthority
+                    }
+                }
+            } == true
+        }.getOrElse {
+            Log.w(LOG_TAG, "Profile authority binding failed", it)
+            return false
+        }
+        if (!authorityAccepted) return false
+        val prepared = runCatching {
+            journeyProfiles.prepare(cached.body, deliveryAuthority)
+        }.getOrElse {
+            Log.w(LOG_TAG, "Journey plane profile rejected", it)
+            return false
+        }
+        val artifacts = runCatching {
+            journeyArtifacts?.prepareJourneys(prepared.snapshot)
+        }.getOrElse {
+            Log.w(LOG_TAG, "Journey profile artifacts unavailable", it)
+            return false
+        }
+        val planePrepared = PreparedPlane(prepared, artifacts)
 
         var featurePublication: FeatureInfo.Mutation? = null
         val admitted = try {
@@ -404,24 +380,14 @@ internal class ProfileService(
                     }
                     latestAppliedGeneration = admission.generation
 
-                    if (planePrepared != null) {
-                        runCatching {
-                            deviceLegProfiles?.commit(cached.distinctId, planePrepared.catalog)
-                        }.getOrElse {
-                            Log.w(LOG_TAG, "Device leg plane profile commit failed", it)
-                            return@synchronized false
-                        }
-                    } else {
-                        deviceLegProfiles?.clear(cached.distinctId)
+                    runCatching {
+                        journeyProfiles.commit(cached.distinctId, planePrepared.catalog)
+                    }.getOrElse {
+                        Log.w(LOG_TAG, "Journey plane profile commit failed", it)
+                        return@synchronized false
                     }
-                    periodicRefreshEnabled = planePrepared == null
                     resident = cached
                     persist(cached)
-                    segments.applySnapshot(
-                        cached.distinctId,
-                        cached.body["segmentMemberships"] as? JsonObject,
-                    )
-                    if (planePrepared == null) applyJourneyProfile(cached.distinctId, cached.body)
                     featurePublication = stageFeatureProfile(
                         cached.distinctId,
                         cached.body,
@@ -433,72 +399,35 @@ internal class ProfileService(
                 }
             } == true
         } catch (failure: Throwable) {
-            planePrepared?.artifacts?.close()
+            planePrepared.artifacts?.close()
             throw failure
         }
         if (!admitted) {
-            planePrepared?.artifacts?.close()
+            planePrepared.artifacts?.close()
             Log.w(LOG_TAG, "Discarding stale profile admission")
         } else {
             try {
                 publishFeatureProfile(featurePublication)
             } catch (failure: Throwable) {
-                planePrepared?.artifacts?.close()
+                planePrepared.artifacts?.close()
                 throw failure
             }
             runCatching {
-                if (planePrepared != null) {
-                    if (deviceLegRuntime == null) {
-                        planePrepared.artifacts?.close()
-                    } else {
-                        // Ownership transfers when publication begins. The
-                        // runtime closes rejected or superseded leases.
-                        deviceLegRuntime.profileDidCommit(
-                            planePrepared.catalog.snapshot,
-                            planePrepared.catalog.authority,
-                            cached.distinctId,
-                            admission.generation,
-                            planePrepared.artifacts,
-                        )
-                    }
-                } else {
-                    deviceLegRuntime?.profileDidClear(
-                        cached.distinctId,
-                        admission.generation,
-                    )
-                }
+                // Ownership transfers when publication begins. The runtime
+                // closes rejected or superseded leases.
+                journeys.profileDidCommit(
+                    planePrepared.catalog.snapshot,
+                    planePrepared.catalog.authority,
+                    cached.distinctId,
+                    admission.generation,
+                    planePrepared.artifacts,
+                )
             }.onFailure {
-                Log.w(LOG_TAG, "Device-leg runtime profile publication failed", it)
+                Log.w(LOG_TAG, "Journey runtime profile publication failed", it)
             }
         }
 
-        // Customer-scoped payloads (properties, server facts) are locale-
-        // independent and still commit from a LOCALE-FLIP discard: the same
-        // payloads arrive under any locale and their dedupe is correct. A
-        // discard whose effective locale equals the admission's is
-        // indistinguishable from supersession by a newer fetch, and
-        // superseded responses contribute nothing (they redeliver on the
-        // replacement fetch).
-        val localeFlipDiscard = !admitted &&
-            localeSettings.captureScope().identifier != admission.localeScope.identifier
-        if (admitted || (localeFlipDiscard && isCustomerAdmissionCurrent(admission))) {
-            applyCustomerProperties(cached, admission)
-            if (planePrepared == null && isCustomerAdmissionCurrent(admission)) {
-                applyJourneyFacts(cached.distinctId, cached.body)
-            }
-        }
         return admitted
-    }
-
-    private fun applyCustomerProperties(cached: CachedProfile, admission: Admission) {
-        identity.withCurrentScope(admission.identityScope) current@ {
-            synchronized(lock) {
-                if (admission.customerGeneration != nextCustomerGeneration) return@current
-                (cached.body["userProperties"] as? JsonObject)?.let { properties ->
-                    applyUserProperties(properties.mapValues { (_, value) -> value })
-                }
-            }
-        }
     }
 
     private fun beginAdmission(expectedDistinctId: String? = null): Admission? {
@@ -513,12 +442,10 @@ internal class ProfileService(
                     return@synchronized null
                 }
                 nextProfileGeneration += 1
-                nextCustomerGeneration += 1
                 Admission(
                     identityScope = identityScope,
                     localeScope = localeScope,
                     generation = nextProfileGeneration,
-                    customerGeneration = nextCustomerGeneration,
                     featurePurchaseRevision = captureFeaturePurchaseRevision(),
                     featureAuthoritativeRevision = reserveFeatureAuthoritativeRevision(),
                 )
@@ -531,10 +458,6 @@ internal class ProfileService(
             localeSettings.isCurrentScope(admission.localeScope) &&
             nextProfileGeneration == admission.generation &&
             latestAppliedGeneration == admission.generation
-
-    private fun isCustomerAdmissionCurrent(admission: Admission): Boolean =
-        identity.isCurrentScope(admission.identityScope) &&
-            nextCustomerGeneration == admission.customerGeneration
 
     private fun <T> withCurrentScope(
         identityScope: IdentityScope,
@@ -552,9 +475,8 @@ internal class ProfileService(
             fileFor(distinctId).delete()
             nextProfileGeneration
         }
-        segments.clearSegments(distinctId)
-        deviceLegProfiles?.clear(distinctId)
-        deviceLegRuntime?.profileDidClear(distinctId, admissionGeneration)
+        journeyProfiles.clear(distinctId)
+        journeys.profileDidClear(distinctId, admissionGeneration)
     }
 
     private suspend fun evictCache(distinctId: String, admission: Admission) {
@@ -568,23 +490,17 @@ internal class ProfileService(
                 latestAppliedGeneration = admission.generation
                 if (resident?.distinctId == distinctId) resident = null
                 fileFor(distinctId).delete()
-                // The persisted segment mirror is locale-scoped state admitted
-                // with the profile; it must not survive the profile's eviction.
-                segments.clearSegments(distinctId)
-                deviceLegProfiles?.clear(distinctId)
+                journeyProfiles.clear(distinctId)
                 true
             }
         } == true
         if (evicted) {
-            deviceLegRuntime?.profileDidClear(distinctId, admission.generation)
+            journeys.profileDidClear(distinctId, admission.generation)
         }
     }
 
-    private fun isFresh(cached: CachedProfile): Boolean =
-        nowMillis() - cached.cachedAtMillis < CACHE_TTL_MILLIS
-
     private fun isUsable(cached: CachedProfile): Boolean =
-        isFresh(cached) || isCanonical(cached.body)
+        isCanonical(cached.body)
 
     private fun isCanonical(body: JsonObject): Boolean =
         body["schemaVersion"] == JsonPrimitive("nuxie.journey-plane-profile.v1")
@@ -664,8 +580,5 @@ internal class ProfileService(
 
     private companion object {
         const val LOG_TAG = "Nuxie"
-        const val CACHE_TTL_MILLIS = 24L * 60L * 60L * 1000L
-        const val BACKGROUND_REFRESH_AGE_MILLIS = 5L * 60L * 1000L
-        const val REFRESH_INTERVAL_MILLIS = 30L * 60L * 1000L
     }
 }

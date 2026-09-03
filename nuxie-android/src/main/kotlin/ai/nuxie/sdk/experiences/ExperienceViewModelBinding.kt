@@ -19,7 +19,7 @@ internal object ExperienceViewModelBinding {
             }) { "Experience artboard '$artboardName' must identify exactly one render screen" }
         }
         val screenId = renderScreen.requiredString("id")
-        val journeyScreen = requireNotNull(screens(descriptor, "journey").singleOrNull {
+        val journeyScreen = requireNotNull(screens(descriptor, "leg").singleOrNull {
             it.requiredString("id") == screenId
         }) { "Experience Journey has no screen '$screenId'" }
 
@@ -32,19 +32,19 @@ internal object ExperienceViewModelBinding {
 
     private fun screens(descriptor: JsonObject, section: String): List<JsonObject> {
         val owner = requireNotNull(descriptor[section] as? JsonObject) {
-            "Experience release $section is missing"
+            "Journey release $section is missing"
         }
         val values = requireNotNull(owner["screens"] as? JsonArray) {
-            "Experience release $section.screens is missing"
+            "Journey release $section.screens is missing"
         }
         val records = values.mapIndexed { index, value ->
             requireNotNull(value as? JsonObject) {
-                "Experience release $section.screens[$index] is invalid"
+                "Journey release $section.screens[$index] is invalid"
             }
         }
         val ids = records.map { it.requiredString("id") }
         require(ids.distinct().size == ids.size) {
-            "Experience release $section.screens contains duplicate identities"
+            "Journey release $section.screens contains duplicate identities"
         }
         return records
     }
@@ -59,7 +59,7 @@ internal object ExperienceViewModelBinding {
         // trim names or reinterpret defaultInstanceId as an instance selector.
         require(value != null && value.isNotEmpty() && value.length <= maximumUtf16 &&
             (!rejectNul || '\u0000' !in value)
-        ) { "Experience release $key is invalid" }
+        ) { "Journey release $key is invalid" }
         return value
     }
 }

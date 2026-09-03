@@ -1,61 +1,42 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.ExperienceRef
-import ai.nuxie.sdk.billing.ExperiencePurchasePreparer
-import ai.nuxie.sdk.experiences.AcquiredRelease
-import ai.nuxie.sdk.experiences.AuthenticatedDeviceLegRelease
-import ai.nuxie.sdk.experiences.AuthenticatedRelease
-import ai.nuxie.sdk.experiences.Delivery
-import ai.nuxie.sdk.experiences.DeviceLegReleaseVerifier
-import ai.nuxie.sdk.experiences.ExperienceReleaseIdentity
-import ai.nuxie.sdk.experiences.ReplayPolicy
-import ai.nuxie.sdk.experiences.SupportedRuntime
+import ai.nuxie.sdk.events.SystemEventNames
+import ai.nuxie.sdk.experiences.AcquiredJourneyRelease
+import ai.nuxie.sdk.experiences.AuthenticatedJourneyRelease
+import ai.nuxie.sdk.experiences.JourneyReleaseIdentity
+import ai.nuxie.sdk.experiences.JourneyReleaseReplayPolicy
+import ai.nuxie.sdk.experiences.JourneyReleaseSupportedRuntime
+import ai.nuxie.sdk.experiences.JourneyReleaseVerifier
 import ai.nuxie.sdk.fixtures.FixtureRunner
-import ai.nuxie.sdk.runtime.NuxieRuntimeFile
-import ai.nuxie.sdk.runtime.NuxieRuntimeLane
-import ai.nuxie.sdk.runtime.NuxieTypedRuntimeNative
-import android.app.Activity
-import android.content.Intent
-import android.os.Bundle
-import android.os.Looper
 import android.util.Base64
 import java.io.Closeable
 import java.io.File
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.advanceTimeBy
-import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
-import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -63,13 +44,30 @@ class ExperiencePresentationServiceTest {
     private data class Emitted(
         val name: String,
         val properties: Map<String, Any?>,
-        val distinctId: String? = null,
+        val distinctId: String?,
     )
 
     private class Lease : Closeable {
         val closed = AtomicBoolean(false)
+
         override fun close() {
             closed.set(true)
+        }
+    }
+
+    private class AttachedHost : PresentationActivityHandle {
+        var requestedReason: CloseReason? = null
+        var finished = false
+
+        override fun requestCloseFromService(reason: CloseReason): Boolean {
+            requestedReason = reason
+            return true
+        }
+
+        override fun screenCloseReason(): CloseReason? = requestedReason
+
+        override fun finishAfterServiceClose() {
+            finished = true
         }
     }
 
@@ -79,355 +77,36 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun successfulPresentReturnsRefAndEmitsShownOnceAtFirstFrame() = runTest {
+    fun `authenticated Journey shows its signed screen and closes through Journey lifecycle`() = runTest {
+        val release = renderedJourneyRelease()
         val emitted = mutableListOf<Emitted>()
         val launched = mutableListOf<String>()
+        val revealed = mutableListOf<String>()
+        val dismissals = mutableListOf<Triple<String, String?, String>>()
         val lease = Lease()
         val service = service(
-            emit = { name, properties, _ -> emitted += Emitted(name, properties) },
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-        )
-
-        val result = async { service.present("v1", "journey-1") }
-        runCurrent()
-        assertEquals(1, launched.size)
-        assertFalse(result.isCompleted)
-
-        PresentationRegistry.reportFirstFrame(launched.single())
-        PresentationRegistry.reportFirstFrame(launched.single())
-
-        assertEquals(ExperienceRef("exp-1", "v1", "journey-1"), result.await())
-        assertEquals(listOf("\$experience_shown"), emitted.map { it.name })
-        assertEquals("journey-1", emitted.single().properties["journey_id"])
-        assertFalse("acquisition lease spans the visible presentation", lease.closed.get())
-
-        service.dismiss()
-        assertTrue(lease.closed.get())
-    }
-
-    @Test
-    fun authenticatedCommerceIsPreparedBeforeTheExperienceLaunches() = runTest {
-        val preparedVersions = mutableListOf<String>()
-        val launched = mutableListOf<String>()
-        val service = service(
-            commerce = ExperiencePurchasePreparer { release, _, _ ->
-                preparedVersions += release.identity.experienceVersionId
-                null
-            },
-            launch = launched::add,
-        )
-
-        val result = async { service.present("v1") }
-        runCurrent()
-
-        assertEquals(listOf("v1"), preparedVersions)
-        assertEquals(1, launched.size)
-        PresentationRegistry.reportFirstFrame(launched.single())
-        result.await()
-    }
-
-    @Test
-    fun cancellingSuspendableCommercePreparationClosesTheAcquiredRelease() = runTest {
-        val lease = Lease()
-        val preparationStarted = CompletableDeferred<Unit>()
-        val service = service(
-            acquire = { acquired("exp-1", "v1", lease) },
-            commerce = ExperiencePurchasePreparer { _, _, _ ->
-                preparationStarted.complete(Unit)
-                awaitCancellation()
-            },
-        )
-
-        val presentation = async { service.present("v1") }
-        preparationStarted.await()
-
-        presentation.cancelAndJoin()
-
-        assertTrue("cancelled commerce preparation leaked its release", lease.closed.get())
-    }
-
-    @Test
-    fun standaloneExperienceEmitsOneCloseFactWithoutInventingARunWinner() = runTest {
-        val emitted = mutableListOf<String>()
-        val transitionAttempts = mutableListOf<CloseReason>()
-        val launched = mutableListOf<String>()
-        val service = service(
-            emit = { name, _, _ -> emitted += name },
-            launch = launched::add,
-            transitionOutcome = { outcome ->
-                transitionAttempts += outcome.reason
-                false
-            },
-        )
-        val shown = async { service.present("v1") }
-        runCurrent()
-        PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-
-        service.dismiss()
-        runCurrent()
-
-        assertEquals(listOf<CloseReason>(CloseReason.UserDismissed), transitionAttempts)
-        assertEquals(1, emitted.count { it == "\$experience_dismissed" })
-    }
-
-    @Test
-    fun standaloneCloseRacingFirstFrameEmitsShownBeforeClose() = runTest {
-        val emitted = CopyOnWriteArrayList<String>()
-        val launched = mutableListOf<String>()
-        val shownEmissionStarted = CountDownLatch(1)
-        val releaseShownEmission = CountDownLatch(1)
-        val closeEmissionStarted = CountDownLatch(1)
-        val service = service(
-            emit = { name, _, _ ->
-                if (name == "\$experience_shown") {
-                    shownEmissionStarted.countDown()
-                    check(releaseShownEmission.await(2, TimeUnit.SECONDS)) {
-                        "SHOWN emission was not released"
-                    }
-                } else {
-                    closeEmissionStarted.countDown()
-                }
-                emitted += name
-            },
-            launch = launched::add,
-            transitionOutcome = { false },
-        )
-        val presentation = async(SupervisorJob()) { service.present("v1") }
-        runCurrent()
-        val firstFrame = Thread {
-            PresentationRegistry.reportFirstFrame(launched.single())
-        }
-        val close = Thread(service::dismiss)
-
-        firstFrame.start()
-        assertTrue(
-            "first frame did not reach SHOWN emission",
-            shownEmissionStarted.await(2, TimeUnit.SECONDS),
-        )
-        close.start()
-        try {
-            assertFalse(
-                "standalone CLOSE overtook an in-flight SHOWN emission",
-                closeEmissionStarted.await(250, TimeUnit.MILLISECONDS),
-            )
-        } finally {
-            releaseShownEmission.countDown()
-            firstFrame.join(2_000)
-            close.join(2_000)
-        }
-
-        assertFalse("first-frame callback remained blocked", firstFrame.isAlive)
-        assertFalse("standalone close remained blocked", close.isAlive)
-        assertEquals(
-            listOf("\$experience_shown", "\$experience_dismissed"),
-            emitted,
-        )
-        presentation.cancelAndJoin()
-    }
-
-    @Test
-    fun shownEmissionKeepsItsOwnerAfterIdentityChanges() = runTest {
-        val emitted = mutableListOf<Emitted>()
-        val launched = mutableListOf<String>()
-        var currentDistinctId = "customer-1"
-        val service = service(
-            emit = { name, properties, distinctIdOverride ->
-                emitted += Emitted(
-                    name,
-                    properties,
-                    distinctIdOverride ?: currentDistinctId,
-                )
-            },
-            launch = launched::add,
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-
-        currentDistinctId = "customer-2"
-        PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-
-        val event = emitted.single()
-        assertEquals("\$experience_shown", event.name)
-        assertEquals("customer-1", event.distinctId)
-    }
-
-    @Test
-    fun acquiredExternalArtifactsReachPreparedPresentationWithoutDiagnosticFallback() = runTest {
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val imageKey = "assets/sha256/${"b".repeat(64)}.png"
-        val imageFile = File.createTempFile("prepared-image-", ".png").apply {
-            writeBytes(byteArrayOf(1, 2, 3))
-            deleteOnExit()
-        }
-        val service = service(
-            launch = launched::add,
-            acquire = {
-                acquired(
-                    experienceId = "exp-1",
-                    version = "v1",
-                    lease = lease,
-                    extraArtifacts = mapOf(imageKey to imageFile),
-                )
-            },
-        )
-
-        val shown = async { service.present("v1") }
-        runCurrent()
-
-        val prepared = PresentationRegistry.resolve(launched.single())
-            ?: error("prepared presentation missing")
-        assertEquals(imageFile, prepared.artifactsByKey[imageKey])
-        PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-        service.dismiss()
-    }
-
-    @Test
-    fun runtimeUnavailableIsTypedAndNeverResolvesOrLaunches() = runTest {
-        var resolved = false
-        var launched = false
-        val service = service(
-            runtimeAvailable = false,
-            provider = PresentationReleaseProvider {
-                resolved = true
-                release("exp-1", it)
-            },
-            launch = { launched = true },
-        )
-
-        val error = expectPresentationFailure { service.present("v1") }
-        assertEquals(ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE, error.reason)
-        assertFalse(resolved)
-        assertFalse(launched)
-    }
-
-    @Test
-    fun differentJourneyIsDeclinedWithoutTouchingCurrentPresentation() = runTest {
-        val resolved = mutableListOf<String>()
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val service = service(
-            provider = PresentationReleaseProvider { version ->
-                resolved += version
-                release("exp-$version", version)
-            },
-            launch = launched::add,
-            acquire = { acquired("exp-v1", "v1", lease) },
-        )
-
-        val first = async { service.present("v1", "journey-1", "customer-1") }
-        runCurrent()
-
-        val error = expectPresentationFailure {
-            service.present("v2", "journey-2", "customer-1")
-        }
-
-        assertEquals(ExperiencePresentationException.Reason.DECLINED, error.reason)
-        assertEquals(listOf("v1"), resolved)
-        assertEquals(1, launched.size)
-        assertFalse(lease.closed.get())
-        PresentationRegistry.reportFirstFrame(launched.single())
-        assertEquals("v1", first.await().experienceVersion)
-        service.dismiss()
-    }
-
-    @Test
-    fun secondStandalonePresentationIsDeclined() = runTest {
-        val launched = mutableListOf<String>()
-        val service = service(launch = launched::add)
-
-        val first = async { service.present("v1") }
-        runCurrent()
-
-        val error = expectPresentationFailure { service.present("v2") }
-
-        assertEquals(ExperiencePresentationException.Reason.DECLINED, error.reason)
-        assertEquals(1, launched.size)
-        PresentationRegistry.reportFirstFrame(launched.single())
-        first.await()
-        service.dismiss()
-    }
-
-    @Test
-    fun deviceLegReservationDeclinesOtherPresentationBeforeReleaseResolution() = runTest {
-        var resolved = false
-        val launched = mutableListOf<String>()
-        val service = service(
-            provider = PresentationReleaseProvider {
-                resolved = true
-                release("exp-1", it)
-            },
-            launch = launched::add,
-        )
-        val reservation = requireNotNull(service.reserveDeviceLeg("customer-1"))
-
-        val error = expectPresentationFailure {
-            service.present("v1", "journey-2", "customer-1")
-        }
-
-        assertEquals(ExperiencePresentationException.Reason.DECLINED, error.reason)
-        assertFalse(resolved)
-        assertTrue(launched.isEmpty())
-
-        reservation.close()
-        val shown = async { service.present("v1", "journey-2", "customer-1") }
-        runCurrent()
-        PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-        service.dismiss()
-    }
-
-    @Test
-    fun deviceLegPresentationUsesAuthenticatedScreenAndOwnsItsOutcome() = runTest {
-        val emitted = mutableListOf<Emitted>()
-        val launched = mutableListOf<String>()
-        val outcomes = mutableListOf<DeviceLegSurfaceOutcome>()
-        val changedScreens = mutableListOf<String>()
-        val dismissedScreens = mutableListOf<Triple<String, String?, String>>()
-        val transitionAttempts = mutableListOf<CloseReason>()
-        val reports = mutableListOf<CloseReason>()
-        val lease = Lease()
-        val release = renderedDeviceLegRelease()
-        val service = service(
+            scope = this,
             emit = { name, properties, distinctId ->
                 emitted += Emitted(name, properties, distinctId)
             },
             launch = launched::add,
-            transitionOutcome = { outcome ->
-                transitionAttempts += outcome.reason
-                true
-            },
-            reportOutcome = { outcome -> reports += outcome.reason },
         )
-        val reservation = requireNotNull(service.reserveDeviceLeg("customer-1"))
+        val reservation = requireNotNull(service.reserveJourney("customer-1"))
 
-        val shown = async {
-            service.presentDeviceLeg(
+        val presentation = async(SupervisorJob()) {
+            service.presentJourney(
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
                 ownerDistinctId = "customer-1",
                 reservation = reservation,
-                acquire = {
-                    acquired(
-                        release.identity.experienceId,
-                        release.identity.experienceVersionId,
-                        lease,
-                    )
-                },
-                onScreenChanged = { screenId ->
-                    changedScreens += screenId
-                    true
-                },
+                acquire = { acquired(release.identity, lease) },
+                onPresentationRevealed = revealed::add,
                 onScreenDismissed = { screenId, revealingScreenId, method ->
-                    dismissedScreens += Triple(screenId, revealingScreenId, method)
-                    DeviceLegScreenDismissalResult.HANDLED
+                    dismissals += Triple(screenId, revealingScreenId, method)
+                    JourneyScreenDismissalResult.HANDLED
                 },
-                onOutcome = outcomes::add,
+                onOutcome = { fail("handled dismissal must not abandon the Journey") },
             )
         }
         runCurrent()
@@ -435,40 +114,133 @@ class ExperiencePresentationServiceTest {
         val presentationId = launched.single()
         val prepared = requireNotNull(PresentationRegistry.resolve(presentationId))
         assertEquals("Welcome", prepared.artboardName)
+        assertEquals("screen_welcome", prepared.screenId)
         assertEquals(release.descriptor, prepared.descriptor)
         PresentationRegistry.reportFirstFrame(presentationId)
+
         assertEquals(
             ExperienceRef("experience_golden", "version_golden", "journey-1"),
-            shown.await(),
+            presentation.await(),
         )
+        assertEquals(listOf("screen_welcome"), revealed)
+        assertEquals(listOf(SystemEventNames.EXPERIENCE_SHOWN), emitted.map(Emitted::name))
+        assertEquals("customer-1", emitted.single().distinctId)
+        assertFalse(lease.closed.get())
 
-        service.dismissFromHost("customer-1")
+        service.dismiss()
+        runCurrent()
 
-        assertEquals(listOf(DeviceLegSurfaceOutcome.DISMISSED), outcomes)
-        assertEquals(listOf("screen_welcome"), changedScreens)
-        assertTrue(dismissedScreens.isEmpty())
-        assertTrue(transitionAttempts.isEmpty())
-        assertTrue(reports.isEmpty())
         assertEquals(
-            listOf("\$experience_shown", "\$experience_dismissed"),
+            listOf(Triple("screen_welcome", null, "user")),
+            dismissals,
+        )
+        assertEquals(
+            listOf(SystemEventNames.EXPERIENCE_SHOWN, SystemEventNames.EXPERIENCE_DISMISSED),
             emitted.map(Emitted::name),
         )
-        assertEquals("host", emitted.last().properties["reason"])
+        assertEquals("user", emitted.last().properties["reason"])
         assertTrue(lease.closed.get())
     }
 
     @Test
-    fun deviceLegPresentationRechecksAdmissionAfterAcquisition() = runTest {
+    fun `prepared Journey includes every acquired external artifact`() = runTest {
+        val release = renderedJourneyRelease()
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val asset = File.createTempFile("journey-asset-", ".png")
+        val service = service(this, launch = launched::add)
+        val reservation = requireNotNull(service.reserveJourney("customer-1"))
+
+        val presentation = async(SupervisorJob()) {
+            service.presentJourney(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-1",
+                ownerDistinctId = "customer-1",
+                reservation = reservation,
+                acquire = {
+                    acquired(
+                        release.identity,
+                        lease,
+                        mapOf("assets/hero.png" to asset),
+                    )
+                },
+                onOutcome = {},
+            )
+        }
+        runCurrent()
+
+        val presentationId = launched.single()
+        assertEquals(
+            asset,
+            PresentationRegistry.resolve(presentationId)?.artifactsByKey?.get("assets/hero.png"),
+        )
+        PresentationRegistry.reportFirstFrame(presentationId)
+        presentation.await()
+        service.dismissFromHost("customer-1")
+        assertTrue(lease.closed.get())
+    }
+
+    @Test
+    fun `renderer unavailability fails before Journey artifact acquisition`() = runTest {
+        val release = renderedJourneyRelease()
+        var didAcquire = false
+        val service = service(this, runtimeAvailable = { false })
+        val reservation = requireNotNull(service.reserveJourney("customer-1"))
+
+        val error = expectPresentationFailure {
+            service.presentJourney(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-1",
+                ownerDistinctId = "customer-1",
+                reservation = reservation,
+                acquire = {
+                    didAcquire = true
+                    acquired(release.identity, Lease())
+                },
+                onOutcome = {},
+            )
+        }
+
+        assertEquals(ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE, error.reason)
+        assertFalse(didAcquire)
+    }
+
+    @Test
+    fun `artifact acquisition failure is a typed Journey presentation failure`() = runTest {
+        val release = renderedJourneyRelease()
+        val service = service(this)
+        val reservation = requireNotNull(service.reserveJourney("customer-1"))
+
+        val error = expectPresentationFailure {
+            service.presentJourney(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-1",
+                ownerDistinctId = "customer-1",
+                reservation = reservation,
+                acquire = { throw java.io.IOException("offline") },
+                onOutcome = {},
+            )
+        }
+
+        assertEquals(ExperiencePresentationException.Reason.ACQUISITION_FAILED, error.reason)
+        assertTrue(error.cause is java.io.IOException)
+    }
+
+    @Test
+    fun `Journey admission is rechecked after artifact acquisition`() = runTest {
+        val release = renderedJourneyRelease()
         val acquisitionStarted = CompletableDeferred<Unit>()
         val continueAcquisition = CompletableDeferred<Unit>()
         val launched = mutableListOf<String>()
         val lease = Lease()
-        val release = renderedDeviceLegRelease()
         var canPresent = true
-        val service = service(launch = launched::add)
-        val reservation = requireNotNull(service.reserveDeviceLeg("customer-1"))
+        val service = service(this, launch = launched::add)
+        val reservation = requireNotNull(service.reserveJourney("customer-1"))
         val presentation = async(SupervisorJob()) {
-            service.presentDeviceLeg(
+            service.presentJourney(
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
@@ -478,71 +250,95 @@ class ExperiencePresentationServiceTest {
                 acquire = {
                     acquisitionStarted.complete(Unit)
                     continueAcquisition.await()
-                    acquired(
-                        release.identity.experienceId,
-                        release.identity.experienceVersionId,
-                        lease,
-                    )
+                    acquired(release.identity, lease)
                 },
                 onOutcome = {},
             )
         }
 
-        try {
-            acquisitionStarted.await()
-            canPresent = false
-            continueAcquisition.complete(Unit)
-            runCurrent()
+        acquisitionStarted.await()
+        canPresent = false
+        continueAcquisition.complete(Unit)
+        runCurrent()
 
-            assertTrue("revoked presentation must finish", presentation.isCompleted)
-            assertTrue("revoked presentation must release its lease", lease.closed.get())
-            assertTrue("revoked presentation launched", launched.isEmpty())
-            val error = try {
-                presentation.await()
-                fail("revoked presentation should be superseded")
-                error("unreachable")
-            } catch (error: ExperiencePresentationException) {
-                error
-            }
-            assertEquals(ExperiencePresentationException.Reason.SUPERSEDED, error.reason)
-        } finally {
-            continueAcquisition.complete(Unit)
-            presentation.cancelAndJoin()
-        }
+        val error = expectPresentationFailure { presentation.await() }
+        assertEquals(ExperiencePresentationException.Reason.SUPERSEDED, error.reason)
+        assertTrue(lease.closed.get())
+        assertTrue(launched.isEmpty())
     }
 
     @Test
-    fun sameJourneyDeviceNavigationRetainsOwnershipWithoutClosingTheLeg() = runTest {
-        val emitted = mutableListOf<String>()
+    fun `one Journey prevents another Journey from stealing its surface`() = runTest {
+        val release = renderedJourneyRelease()
         val launched = mutableListOf<String>()
-        val firstOutcomes = mutableListOf<DeviceLegSurfaceOutcome>()
-        val secondOutcomes = mutableListOf<DeviceLegSurfaceOutcome>()
-        val lifecycle = mutableListOf<Triple<String, String?, String>>()
         val firstLease = Lease()
-        val secondLease = Lease()
-        val release = renderedDeviceLegRelease()
-        val service = service(
-            emit = { name, _, _ -> emitted += name },
-            launch = launched::add,
-        )
-        val reservation = requireNotNull(service.reserveDeviceLeg("customer-1"))
+        var secondAcquired = false
+        val service = service(this, launch = launched::add)
+        val reservation = requireNotNull(service.reserveJourney("customer-1"))
         val first = async {
-            service.presentDeviceLeg(
+            service.presentJourney(
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
                 ownerDistinctId = "customer-1",
                 reservation = reservation,
+                acquire = { acquired(release.identity, firstLease) },
+                onOutcome = {},
+            )
+        }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        first.await()
+
+        val error = expectPresentationFailure {
+            service.presentJourney(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-2",
+                ownerDistinctId = "customer-1",
+                reservation = null,
                 acquire = {
-                    acquired(
-                        release.identity.experienceId,
-                        release.identity.experienceVersionId,
-                        firstLease,
-                    )
+                    secondAcquired = true
+                    acquired(release.identity, Lease())
                 },
+                onOutcome = {},
+            )
+        }
+
+        assertEquals(ExperiencePresentationException.Reason.DECLINED, error.reason)
+        assertFalse(secondAcquired)
+        assertEquals(1, launched.size)
+        service.shutdownJourney("customer-1", "journey-1")
+        assertTrue(firstLease.closed.get())
+    }
+
+    @Test
+    fun `same Journey navigation replaces the screen without a false terminal outcome`() = runTest {
+        val release = renderedJourneyRelease()
+        val emitted = mutableListOf<String>()
+        val launched = mutableListOf<String>()
+        val lifecycle = mutableListOf<Triple<String, String?, String>>()
+        val firstOutcomes = mutableListOf<JourneySurfaceOutcome>()
+        val secondOutcomes = mutableListOf<JourneySurfaceOutcome>()
+        val firstLease = Lease()
+        val secondLease = Lease()
+        val service = service(
+            scope = this,
+            emit = { name, _, _ -> emitted += name },
+            launch = launched::add,
+        )
+        val reservation = requireNotNull(service.reserveJourney("customer-1"))
+        val first = async {
+            service.presentJourney(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-1",
+                ownerDistinctId = "customer-1",
+                reservation = reservation,
+                acquire = { acquired(release.identity, firstLease) },
                 onScreenDismissed = { screenId, revealingScreenId, method ->
                     lifecycle += Triple(screenId, revealingScreenId, method)
-                    DeviceLegScreenDismissalResult.HANDLED
+                    JourneyScreenDismissalResult.HANDLED
                 },
                 onOutcome = firstOutcomes::add,
             )
@@ -552,19 +348,13 @@ class ExperiencePresentationServiceTest {
         first.await()
 
         val second = async {
-            service.presentDeviceLeg(
+            service.presentJourney(
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
                 ownerDistinctId = "customer-1",
                 reservation = null,
-                acquire = {
-                    acquired(
-                        release.identity.experienceId,
-                        release.identity.experienceVersionId,
-                        secondLease,
-                    )
-                },
+                acquire = { acquired(release.identity, secondLease) },
                 onOutcome = secondOutcomes::add,
             )
         }
@@ -577,44 +367,35 @@ class ExperiencePresentationServiceTest {
             listOf(Triple("screen_welcome", "screen_welcome", "navigate")),
             lifecycle,
         )
-        assertEquals(0, emitted.count { it == "\$experience_dismissed" })
+        assertEquals(0, emitted.count { it == SystemEventNames.EXPERIENCE_DISMISSED })
+
         PresentationRegistry.reportFirstFrame(launched.last())
         second.await()
-
         service.dismissFromHost("customer-1")
 
-        assertTrue(firstOutcomes.isEmpty())
-        assertEquals(listOf(DeviceLegSurfaceOutcome.DISMISSED), secondOutcomes)
+        assertEquals(listOf(JourneySurfaceOutcome.DISMISSED), secondOutcomes)
         assertTrue(secondLease.closed.get())
-        assertEquals(2, emitted.count { it == "\$experience_shown" })
-        assertEquals(1, emitted.count { it == "\$experience_dismissed" })
+        assertEquals(2, emitted.count { it == SystemEventNames.EXPERIENCE_SHOWN })
+        assertEquals(1, emitted.count { it == SystemEventNames.EXPERIENCE_DISMISSED })
     }
 
     @Test
-    fun completedScreenDismissalStopsSameJourneyNavigationBeforeDestinationLaunch() = runTest {
+    fun `completed dismissal prevents same Journey destination acquisition`() = runTest {
+        val release = renderedJourneyRelease()
         val launched = mutableListOf<String>()
         val firstLease = Lease()
-        val secondLease = Lease()
-        val release = renderedDeviceLegRelease()
-        val service = service(launch = launched::add)
-        val reservation = requireNotNull(service.reserveDeviceLeg("customer-1"))
+        var secondAcquired = false
+        val service = service(this, launch = launched::add)
+        val reservation = requireNotNull(service.reserveJourney("customer-1"))
         val first = async {
-            service.presentDeviceLeg(
+            service.presentJourney(
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
                 ownerDistinctId = "customer-1",
                 reservation = reservation,
-                acquire = {
-                    acquired(
-                        release.identity.experienceId,
-                        release.identity.experienceVersionId,
-                        firstLease,
-                    )
-                },
-                onScreenDismissed = { _, _, _ ->
-                    DeviceLegScreenDismissalResult.COMPLETED
-                },
+                acquire = { acquired(release.identity, firstLease) },
+                onScreenDismissed = { _, _, _ -> JourneyScreenDismissalResult.COMPLETED },
                 onOutcome = {},
             )
         }
@@ -622,1377 +403,182 @@ class ExperiencePresentationServiceTest {
         PresentationRegistry.reportFirstFrame(launched.single())
         first.await()
 
-        val second = async(SupervisorJob()) {
-            service.presentDeviceLeg(
+        val error = expectPresentationFailure {
+            service.presentJourney(
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
                 ownerDistinctId = "customer-1",
                 reservation = null,
                 acquire = {
-                    acquired(
-                        release.identity.experienceId,
-                        release.identity.experienceVersionId,
-                        secondLease,
-                    )
+                    secondAcquired = true
+                    acquired(release.identity, Lease())
                 },
+                onOutcome = {},
+            )
+        }
+
+        assertEquals(ExperiencePresentationException.Reason.JOURNEY_COMPLETED, error.reason)
+        assertFalse(secondAcquired)
+        assertTrue(firstLease.closed.get())
+        assertEquals(1, launched.size)
+    }
+
+    @Test
+    fun `first frame timeout releases the Journey artifact lease`() = runTest {
+        val release = renderedJourneyRelease()
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val service = service(
+            scope = this,
+            launch = launched::add,
+            firstFrameTimeoutMillis = 10,
+        )
+        val reservation = requireNotNull(service.reserveJourney("customer-1"))
+        val presentation = async(SupervisorJob()) {
+            service.presentJourney(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-1",
+                ownerDistinctId = "customer-1",
+                reservation = reservation,
+                acquire = { acquired(release.identity, lease) },
                 onOutcome = {},
             )
         }
         runCurrent()
 
-        val error = try {
-            second.await()
-            fail("completed Journey should stop destination presentation")
-            error("unreachable")
-        } catch (error: ExperiencePresentationException) {
-            error
-        }
-        assertEquals(ExperiencePresentationException.Reason.JOURNEY_COMPLETED, error.reason)
         assertEquals(1, launched.size)
-        assertTrue(firstLease.closed.get())
-        assertFalse(secondLease.closed.get())
-    }
-
-    @Test
-    fun sameJourneyReplacesFirstPresentationEvenBeforeItsFirstFrame() = runTest {
-        val launched = mutableListOf<String>()
-        val leases = mutableMapOf("v1" to Lease(), "v2" to Lease())
-        val transitionAttempts = mutableListOf<CloseReason>()
-        val reports = mutableListOf<CloseReason>()
-        val service = service(
-            provider = PresentationReleaseProvider { version -> release("exp-$version", version) },
-            launch = launched::add,
-            acquire = { admitted ->
-                acquired(
-                    admitted.release.identity.experienceId,
-                    admitted.release.identity.experienceVersionId,
-                    leases.getValue(admitted.release.identity.experienceVersionId),
-                )
-            },
-            transitionOutcome = { outcome ->
-                transitionAttempts += outcome.reason
-                true
-            },
-            reportOutcome = { outcome -> reports += outcome.reason },
-        )
-
-        val first = async(SupervisorJob()) {
-            service.present("v1", "journey-1", "customer-1")
-        }
-        runCurrent()
-        val second = async { service.present("v2", "journey-1", "customer-1") }
+        advanceTimeBy(11)
         runCurrent()
 
-        val firstError = try {
-            first.await()
-            fail("first presentation should be superseded")
-            error("unreachable")
-        } catch (error: ExperiencePresentationException) {
-            error
-        }
-        assertEquals(ExperiencePresentationException.Reason.SUPERSEDED, firstError.reason)
-        assertTrue(leases.getValue("v1").closed.get())
-        assertEquals(2, launched.size)
-        assertTrue(transitionAttempts.isEmpty())
-        assertTrue(reports.isEmpty())
-
-        PresentationRegistry.reportFirstFrame(launched.last())
-        assertEquals("v2", second.await().experienceVersion)
-        assertFalse(leases.getValue("v2").closed.get())
+        val error = expectPresentationFailure { presentation.await() }
+        assertEquals(ExperiencePresentationException.Reason.FIRST_FRAME_TIMEOUT, error.reason)
+        assertTrue(lease.closed.get())
+        assertNull(PresentationRegistry.resolve(launched.single()))
     }
 
     @Test
-    fun acquisitionFailureSurfacesAsTypedPresentationError() = runTest {
-        val service = service(
-            acquire = { throw java.io.IOException("offline") },
-        )
-
-        val error = expectPresentationFailure { service.present("v1") }
-        assertEquals(ExperiencePresentationException.Reason.ACQUISITION_FAILED, error.reason)
-        assertTrue(error.cause is java.io.IOException)
-    }
-
-    @Test
-    fun hostFailureSurfacesTypedAndReleasesAcquisitionLease() = runTest {
+    fun `renderer failure is typed and releases the Journey artifact lease`() = runTest {
+        val release = renderedJourneyRelease()
         val launched = mutableListOf<String>()
         val lease = Lease()
-        val service = service(
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-        )
-        val result = async(SupervisorJob()) { service.present("v1") }
+        val service = service(this, launch = launched::add)
+        val reservation = requireNotNull(service.reserveJourney("customer-1"))
+        val presentation = async(SupervisorJob()) {
+            service.presentJourney(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-1",
+                ownerDistinctId = "customer-1",
+                reservation = reservation,
+                acquire = { acquired(release.identity, lease) },
+                onOutcome = {},
+            )
+        }
         runCurrent()
 
-        PresentationRegistry.reportFailure(launched.single(), IllegalStateException("renderer"))
+        PresentationRegistry.reportFailure(launched.single(), IllegalStateException("renderer failed"))
+        runCurrent()
 
-        val error = try {
-            result.await()
-            fail("host failure should fail presentation")
-            error("unreachable")
-        } catch (error: ExperiencePresentationException) {
-            error
-        }
+        val error = expectPresentationFailure { presentation.await() }
         assertEquals(ExperiencePresentationException.Reason.HOST_FAILED, error.reason)
         assertTrue(lease.closed.get())
+        assertNull(PresentationRegistry.resolve(launched.single()))
     }
 
     @Test
-    fun launchThatNeverAttachesTimesOutAndReleasesRegistryAndLease() = runTest {
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val service = service(
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-            firstFrameTimeoutMillis = 1_000,
-        )
-        val result = async(SupervisorJob()) { service.present("v1") }
-        runCurrent()
-
-        advanceTimeBy(1_001)
-        runCurrent()
-
-        val error = try {
-            result.await()
-            fail("missing Activity attachment should time out")
-            error("unreachable")
-        } catch (error: ExperiencePresentationException) {
-            error
-        }
-        assertEquals(ExperiencePresentationException.Reason.FIRST_FRAME_TIMEOUT, error.reason)
-        assertEquals(null, PresentationRegistry.resolve(launched.single()))
-        assertTrue(lease.closed.get())
-    }
-
-    @Test
-    fun closeOutcomeKeepsJourneyLinkage() = runTest {
-        val launched = mutableListOf<String>()
-        val outcomes = mutableListOf<PresentationOutcome>()
-        val service = service(
-            launch = launched::add,
-            reportOutcome = { outcomes += it; true },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        PresentationRegistry.reportFirstFrame(launched.single())
-        assertEquals("journey-7", shown.await().journeyId)
-
-        service.dismiss(CloseReason.GoalMet)
-        runCurrent()
-
-        assertEquals("journey-7", outcomes.single().ref.journeyId)
-        assertEquals(CloseReason.GoalMet, outcomes.single().reason)
-    }
-
-    @Test
-    fun journeyOutcomeBeforeQueuedFirstFrameEmitsNoExperienceFacts() = runTest {
-        val emitted = mutableListOf<String>()
-        val launched = mutableListOf<String>()
-        val outcomeWon = AtomicBoolean(false)
-        val service = service(
-            emit = { name, _, _ -> emitted += name },
-            launch = launched::add,
-            transitionOutcome = { outcomeWon.compareAndSet(false, true) },
-        )
-        val presentation = async(SupervisorJob()) {
-            service.present("v1", "journey-7", "customer-1")
-        }
-        runCurrent()
-        val presentationId = launched.single()
-        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        setActivityField(activity, "presentationId", presentationId)
-        assertTrue(PresentationRegistry.attach(presentationId, activity))
-
-        service.dismiss(CloseReason.GoalMet)
-        runCurrent()
-        assertTrue("winning outcome did not request teardown", activity.isFinishing)
-
-        PresentationRegistry.reportFirstFrame(presentationId)
-        runCurrent()
-        invokeOnDestroy(activity)
-        runCurrent()
-
-        assertEquals("a terminal Journey emitted an orphan Experience fact", emptyList<String>(), emitted)
-        val error = try {
-            presentation.await()
-            fail("presentation should end before its first frame")
-            error("unreachable")
-        } catch (error: ExperiencePresentationException) {
-            error
-        }
-        assertEquals(ExperiencePresentationException.Reason.SUPERSEDED, error.reason)
-    }
-
-    @Test
-    fun purchaseCloseEmissionKeepsItsOwnerAfterIdentityChanges() = runTest {
-        val emitted = mutableListOf<Emitted>()
-        val launched = mutableListOf<String>()
-        var currentDistinctId = "customer-1"
-        val service = service(
-            emit = { name, properties, distinctIdOverride ->
-                emitted += Emitted(
-                    name,
-                    properties,
-                    distinctIdOverride ?: currentDistinctId,
-                )
-            },
-            launch = launched::add,
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-
-        currentDistinctId = "customer-2"
-        service.dismiss(CloseReason.PurchaseCompleted)
-
-        val close = emitted.last()
-        assertEquals("\$experience_purchased", close.name)
-        assertEquals("customer-1", close.distinctId)
-    }
-
-    @Test
-    fun timeoutCloseEmissionKeepsItsOwnerAfterIdentityChanges() = runTest {
-        val emitted = mutableListOf<Emitted>()
-        val launched = mutableListOf<String>()
-        var currentDistinctId = "customer-1"
-        val service = service(
-            emit = { name, properties, distinctIdOverride ->
-                emitted += Emitted(
-                    name,
-                    properties,
-                    distinctIdOverride ?: currentDistinctId,
-                )
-            },
-            launch = launched::add,
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-
-        currentDistinctId = "customer-2"
-        service.dismiss(CloseReason.Timeout)
-
-        val close = emitted.last()
-        assertEquals("\$experience_timed_out", close.name)
-        assertEquals("customer-1", close.distinctId)
-    }
-
-    @Test
-    fun errorCloseEmissionKeepsItsOwnerAfterIdentityChanges() = runTest {
-        val emitted = mutableListOf<Emitted>()
-        val launched = mutableListOf<String>()
-        var currentDistinctId = "customer-1"
-        val service = service(
-            emit = { name, properties, distinctIdOverride ->
-                emitted += Emitted(
-                    name,
-                    properties,
-                    distinctIdOverride ?: currentDistinctId,
-                )
-            },
-            launch = launched::add,
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        val presentationId = launched.single()
-        PresentationRegistry.reportFirstFrame(presentationId)
-        shown.await()
-
-        currentDistinctId = "customer-2"
-        PresentationRegistry.reportFailure(
-            presentationId,
-            IllegalStateException("renderer failed"),
-        )
-
-        val close = emitted.last()
-        assertEquals("\$experience_errored", close.name)
-        assertEquals("customer-1", close.distinctId)
-    }
-
-    @Test
-    fun hostDismissalRequestsTeardownBeforeBlockedRunTransition() = runTest {
-        val launched = mutableListOf<String>()
-        val transitionStarted = CompletableDeferred<Unit>()
-        val releaseTransition = CompletableDeferred<Unit>()
-        val service = service(
-            launch = launched::add,
-            transitionOutcome = {
-                transitionStarted.complete(Unit)
-                releaseTransition.await()
-                true
-            },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        val presentationId = launched.single()
-        PresentationRegistry.reportFirstFrame(presentationId)
-        shown.await()
-        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        setActivityField(activity, "presentationId", presentationId)
-        assertTrue(PresentationRegistry.attach(presentationId, activity))
-
-        val dismissal = async { service.dismissFromHost("customer-1") }
-        transitionStarted.await()
-
-        try {
-            assertEquals(CloseReason.HostDismissed, activity.screenCloseReason())
-            assertTrue("blocked run transition kept the screen open", activity.isFinishing)
-            assertFalse("dismissal completed before the run transition", dismissal.isCompleted)
-        } finally {
-            releaseTransition.complete(Unit)
-            runCurrent()
-            if (activity.isFinishing) invokeOnDestroy(activity)
-        }
-
-        dismissal.await()
-    }
-
-    @Test
-    fun concurrentHostDismissalLoserWaitsForWinnerRunTransitionAfterTeardown() = runTest {
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val transitionStarted = CompletableDeferred<Unit>()
-        val releaseTransition = CompletableDeferred<Unit>()
-        val service = service(
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-            transitionOutcome = {
-                transitionStarted.complete(Unit)
-                releaseTransition.await()
-                true
-            },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        val presentationId = launched.single()
-        PresentationRegistry.reportFirstFrame(presentationId)
-        shown.await()
-        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        setActivityField(activity, "presentationId", presentationId)
-        assertTrue(PresentationRegistry.attach(presentationId, activity))
-
-        val winner = async { service.dismissFromHost("customer-1") }
-        transitionStarted.await()
-        val loser = async { service.dismissFromHost("customer-1") }
-        runCurrent()
-
-        try {
-            invokeOnDestroy(activity)
-            runCurrent()
-
-            assertTrue("Activity teardown did not release the presentation", lease.closed.get())
-            assertFalse("winner completed before its run transition", winner.isCompleted)
-            assertFalse("loser completed before the winner's run transition", loser.isCompleted)
-        } finally {
-            releaseTransition.complete(Unit)
-            if (activity.isFinishing && !lease.closed.get()) invokeOnDestroy(activity)
-        }
-
-        winner.await()
-        loser.await()
-    }
-
-    @Test
-    fun inFlightUserRunTransitionCannotBeSuppressedByHostTeardown() = runTest {
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val transitionAttempts = mutableListOf<CloseReason>()
-        val reports = mutableListOf<CloseReason>()
-        val emitted = mutableListOf<String>()
-        val userTransitionStarted = CompletableDeferred<Unit>()
-        val releaseUserTransition = CompletableDeferred<Unit>()
-        var winner: CloseReason? = null
-        lateinit var activity: NuxieExperienceActivity
-        val service = service(
-            emit = { name, _, _ -> emitted += name },
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-            transitionOutcome = { outcome ->
-                transitionAttempts += outcome.reason
-                when (outcome.reason) {
-                    CloseReason.UserDismissed -> {
-                        userTransitionStarted.complete(Unit)
-                        releaseUserTransition.await()
-                        if (winner == null) {
-                            winner = CloseReason.UserDismissed
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    CloseReason.HostDismissed -> {
-                        releaseUserTransition.await()
-                        false
-                    }
-                    else -> false
-                }
-            },
-            reportOutcome = { reports += it.reason },
-            beforeHostTeardownForTesting = {
-                invokeOnDestroy(activity)
-            },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        val presentationId = launched.single()
-        PresentationRegistry.reportFirstFrame(presentationId)
-        shown.await()
-        activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        setActivityField(activity, "presentationId", presentationId)
-        assertTrue(PresentationRegistry.attach(presentationId, activity))
-        activity.onBackPressed()
-
-        val hostDismissal = async { service.dismissFromHost("customer-1") }
-        userTransitionStarted.await()
-        runCurrent()
-        assertFalse(hostDismissal.isCompleted)
-
-        releaseUserTransition.complete(Unit)
-        hostDismissal.await()
-        runCurrent()
-
-        assertEquals(CloseReason.UserDismissed, winner)
-        assertTrue(CloseReason.UserDismissed in transitionAttempts)
-        assertTrue(CloseReason.HostDismissed in transitionAttempts)
-        assertEquals(listOf<CloseReason>(CloseReason.UserDismissed), reports)
-        assertEquals(1, emitted.count { it == "\$experience_dismissed" })
-        assertTrue(lease.closed.get())
-    }
-
-    @Test
-    fun failureBeforeRunTransitionNeverWinsAndHostAttemptWinsNormally() = runTest {
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val attempts = mutableListOf<CloseReason>()
-        val reports = mutableListOf<CloseReason>()
-        val failure = IllegalStateException("renderer failed")
-        lateinit var activity: NuxieExperienceActivity
-        val service = service(
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-            transitionOutcome = { outcome ->
-                attempts += outcome.reason
-                if (outcome.reason is CloseReason.Error) {
-                    error("failed before the run transition")
-                }
-                assertEquals(CloseReason.HostDismissed, outcome.reason)
-                true
-            },
-            reportOutcome = { reports += it.reason },
-            beforeHostTeardownForTesting = {
-                PresentationRegistry.reportFailure(launched.single(), failure)
-                invokeOnDestroy(activity)
-            },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        val presentationId = launched.single()
-        PresentationRegistry.reportFirstFrame(presentationId)
-        shown.await()
-        activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        setActivityField(activity, "presentationId", presentationId)
-        assertTrue(PresentationRegistry.attach(presentationId, activity))
-
-        service.dismissFromHost("customer-1")
-        runCurrent()
-
-        assertTrue(lease.closed.get())
-        assertTrue(attempts.any { it is CloseReason.Error })
-        assertTrue(CloseReason.HostDismissed in attempts)
-        assertEquals(listOf<CloseReason>(CloseReason.HostDismissed), reports)
-    }
-
-    @Test
-    fun hostDismissalReturnsAfterPresentationTeardownWithoutAwaitingBookkeeping() = runTest {
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val bookkeepingStarted = CompletableDeferred<PresentationOutcome>()
-        val releaseBookkeepingCompletion = CompletableDeferred<Unit>()
-        val service = service(
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-            reportOutcome = { outcome ->
-                bookkeepingStarted.complete(outcome)
-                releaseBookkeepingCompletion.await()
-                true
-            },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-
-        try {
-            service.dismissFromHost("customer-1")
-
-            val pendingOutcome = bookkeepingStarted.await()
-            assertEquals(CloseReason.HostDismissed, pendingOutcome.reason)
-            assertEquals("customer-1", pendingOutcome.ownerDistinctId)
-            assertEquals("customer-1", pendingOutcome.initiatingDistinctId)
-            assertTrue(lease.closed.get())
-        } finally {
-            releaseBookkeepingCompletion.complete(Unit)
-        }
-    }
-
-    @Test
-    fun hostDismissalTearsDownWhenBookkeepingFails() = runTest {
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val service = service(
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-            reportOutcome = { throw IllegalStateException("bookkeeping failed") },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-
-        service.dismissFromHost("customer-1")
-        runCurrent()
-
-        assertTrue(lease.closed.get())
-        assertEquals(null, PresentationRegistry.resolve(launched.single()))
-    }
-
-    @Test
-    fun hostDismissalAfterIdentityChangedTransitionsAsOwnerAttributedIdentityOutcome() = runTest {
-        val launched = mutableListOf<String>()
-        val emitted = mutableListOf<String>()
-        val lease = Lease()
-        var outcomeReports = 0
-        val marks = mutableListOf<PresentationOutcome>()
-        val service = service(
-            emit = { name, _, _ -> emitted += name },
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-            transitionOutcome = { outcome ->
-                marks += outcome
-                true
-            },
-            reportOutcome = {
-                outcomeReports += 1
-                true
-            },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-
-        service.dismissFromHost("customer-2")
-
-        assertEquals("customer-1", marks.single().ownerDistinctId)
-        assertEquals("customer-2", marks.single().initiatingDistinctId)
-        assertEquals(CloseReason.IdentityChanged, marks.single().reason)
-        assertEquals(1, outcomeReports)
-        assertFalse("identity transition emitted a dismissal", "\$experience_dismissed" in emitted)
-        assertTrue(lease.closed.get())
-        assertEquals(null, PresentationRegistry.resolve(launched.single()))
-    }
-
-    @Test
-    fun identityChangeShutdownOnlyClosesTheDepartingCustomersPresentation() = runTest {
+    fun `identity shutdown only tears down the departing owners Journey`() = runTest {
+        val release = renderedJourneyRelease()
         val emitted = mutableListOf<String>()
         val launched = mutableListOf<String>()
         val lease = Lease()
-        var outcomeReports = 0
         val service = service(
+            scope = this,
             emit = { name, _, _ -> emitted += name },
             launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-            reportOutcome = {
-                outcomeReports += 1
-                true
-            },
         )
-        val shown = async { service.present("v1", "journey-7", "customer-2") }
+        val reservation = requireNotNull(service.reserveJourney("customer-1"))
+        val presentation = async {
+            service.presentJourney(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-1",
+                ownerDistinctId = "customer-1",
+                reservation = reservation,
+                acquire = { acquired(release.identity, lease) },
+                onOutcome = {},
+            )
+        }
         runCurrent()
         PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-
-        service.shutdownOwnedBy("customer-1")
-
-        assertFalse(lease.closed.get())
-        assertTrue(PresentationRegistry.resolve(launched.single()) != null)
+        presentation.await()
 
         service.shutdownOwnedBy("customer-2")
+        assertFalse(lease.closed.get())
+        assertNotNull(PresentationRegistry.resolve(launched.single()))
 
+        service.shutdownOwnedBy("customer-1")
         assertTrue(lease.closed.get())
-        assertEquals(null, PresentationRegistry.resolve(launched.single()))
-        assertEquals(listOf("\$experience_shown"), emitted)
-        assertEquals(1, outcomeReports)
+        assertNull(PresentationRegistry.resolve(launched.single()))
+        assertEquals(listOf(SystemEventNames.EXPERIENCE_SHOWN), emitted)
     }
 
     @Test
-    fun identityShutdownRejectsSameOwnerPresentationStillAcquiring() = runTest {
-        val acquisitionStarted = CompletableDeferred<Unit>()
-        val continueAcquisition = CompletableDeferred<Unit>()
+    fun `host dismissal waits for its attached runtime to detach`() = runTest {
+        val release = renderedJourneyRelease()
         val launched = mutableListOf<String>()
         val lease = Lease()
-        val service = service(
-            launch = launched::add,
-            acquire = {
-                acquisitionStarted.complete(Unit)
-                continueAcquisition.await()
-                acquired("exp-1", "v1", lease)
-            },
-        )
-        val presentation = async(SupervisorJob()) {
-            service.present("v1", "journey-7", "customer-1")
-        }
-
-        try {
-            acquisitionStarted.await()
-            service.shutdownOwnedBy("customer-1")
-
-            continueAcquisition.complete(Unit)
-            runCurrent()
-
-            assertTrue("rejected acquisition must finish", presentation.isCompleted)
-            assertTrue("rejected acquisition must release its lease", lease.closed.get())
-            assertTrue("old-owner presentation launched after identity teardown", launched.isEmpty())
-            val error = try {
-                presentation.await()
-                fail("old-owner presentation should be superseded")
-                error("unreachable")
-            } catch (error: ExperiencePresentationException) {
-                error
-            }
-            assertEquals(ExperiencePresentationException.Reason.SUPERSEDED, error.reason)
-        } finally {
-            presentation.cancelAndJoin()
-        }
-    }
-
-    @Test
-    fun identityShutdownRejectsSameOwnerPresentationQueuedBeforeTeardown() = runTest {
-        val firstAcquisitionStarted = CompletableDeferred<Unit>()
-        val continueFirstAcquisition = CompletableDeferred<Unit>()
-        val launched = mutableListOf<String>()
-        var acquisitionCount = 0
-        val service = service(
-            launch = launched::add,
-            acquire = { admitted ->
-                acquisitionCount += 1
-                if (acquisitionCount == 1) {
-                    firstAcquisitionStarted.complete(Unit)
-                    continueFirstAcquisition.await()
-                }
-                acquired(
-                    admitted.release.identity.experienceId,
-                    admitted.release.identity.experienceVersionId,
-                    Lease(),
-                )
-            },
-        )
-        val mutexHolder = async(SupervisorJob()) {
-            service.present("v1", "journey-7", "customer-2")
-        }
-
-        firstAcquisitionStarted.await()
-        val queuedOldOwner = async(SupervisorJob()) {
-            service.present("v1", "journey-7", "customer-1")
-        }
-
-        try {
-            runCurrent()
-            service.shutdownOwnedBy("customer-1")
-
-            continueFirstAcquisition.complete(Unit)
-            runCurrent()
-
-            assertEquals("queued old-owner request launched after identity teardown", 1, launched.size)
-            assertTrue("queued old-owner request must finish", queuedOldOwner.isCompleted)
-            val error = try {
-                queuedOldOwner.await()
-                fail("queued old-owner request should be superseded")
-                error("unreachable")
-            } catch (error: ExperiencePresentationException) {
-                error
-            }
-            assertEquals(ExperiencePresentationException.Reason.SUPERSEDED, error.reason)
-        } finally {
-            continueFirstAcquisition.complete(Unit)
-            runCurrent()
-            service.shutdownOwnedBy("customer-1")
-            service.shutdownOwnedBy("customer-2")
-            queuedOldOwner.cancelAndJoin()
-            mutexHolder.cancelAndJoin()
-        }
-    }
-
-    @Test
-    fun identityShutdownLeavesDifferentOwnerPresentationAcquiring() = runTest {
-        val acquisitionStarted = CompletableDeferred<Unit>()
-        val continueAcquisition = CompletableDeferred<Unit>()
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val service = service(
-            launch = launched::add,
-            acquire = {
-                acquisitionStarted.complete(Unit)
-                continueAcquisition.await()
-                acquired("exp-1", "v1", lease)
-            },
-        )
-        val presentation = async(SupervisorJob()) {
-            service.present("v1", "journey-7", "customer-2")
-        }
-
-        try {
-            acquisitionStarted.await()
-            service.shutdownOwnedBy("customer-1")
-
-            continueAcquisition.complete(Unit)
-            runCurrent()
-
-            PresentationRegistry.reportFirstFrame(launched.single())
-            assertEquals("v1", presentation.await().experienceVersion)
-            assertFalse("different-owner acquisition was rejected", lease.closed.get())
-        } finally {
-            continueAcquisition.complete(Unit)
-            runCurrent()
-            service.shutdownOwnedBy("customer-2")
-            presentation.cancelAndJoin()
-        }
-        assertTrue(lease.closed.get())
-    }
-
-    @Test
-    fun admittedHostDismissalKeepsItsOwnerAfterIdentityChanges() = runTest {
-        val launched = mutableListOf<String>()
-        val outcomes = mutableListOf<PresentationOutcome>()
-        var currentDistinctId = "customer-1"
-        val service = service(
-            launch = launched::add,
-            transitionOutcome = { outcome ->
-                val admitted = outcome.ownerDistinctId == currentDistinctId &&
-                    outcome.initiatingDistinctId == currentDistinctId
-                currentDistinctId = "customer-2"
-                admitted
-            },
-            reportOutcome = { outcome ->
-                outcomes += outcome
-                true
-            },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-
-        service.dismissFromHost("customer-1")
-        runCurrent()
-
-        assertEquals("customer-1", outcomes.single().ownerDistinctId)
-        assertEquals("customer-1", outcomes.single().initiatingDistinctId)
-    }
-
-    @Test
-    fun hostDismissalSelectionWinsACompetingUserDismissal() = runTest {
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val bookkeepingStarted = CompletableDeferred<Unit>()
-        val finishBookkeeping = CompletableDeferred<Unit>()
-        val outcomes = mutableListOf<CloseReason>()
-        val service = service(
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-            reportOutcome = { outcome ->
-                outcomes += outcome.reason
-                bookkeepingStarted.complete(Unit)
-                finishBookkeeping.await()
-                true
-            },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-
-        val hostDismissal = async { service.dismissFromHost("customer-1") }
-        bookkeepingStarted.await()
-        service.dismiss(CloseReason.UserDismissed)
-        runCurrent()
-
-        assertTrue(lease.closed.get())
-        assertEquals(listOf<CloseReason>(CloseReason.HostDismissed), outcomes)
-
-        finishBookkeeping.complete(Unit)
-        hostDismissal.await()
-        assertEquals(listOf<CloseReason>(CloseReason.HostDismissed), outcomes)
-    }
-
-    @Test
-    fun hostDismissalTeardownSelectionSurvivesARacingFirstFrameFailure() = runTest {
-        val launched = mutableListOf<String>()
-        val failure = IllegalStateException("first frame failed")
-        val service = service(
-            launch = launched::add,
-            transitionOutcome = {
-                PresentationRegistry.reportFailure(launched.single(), failure)
-                true
-            },
-        )
-        val presentation = async(SupervisorJob()) { service.present("v1", ownerDistinctId = "customer-1") }
-        runCurrent()
-        val presentationId = launched.single()
-        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        setActivityField(activity, "presentationId", presentationId)
-        assertTrue(PresentationRegistry.attach(presentationId, activity))
-
-        val dismissal = async { service.dismissFromHost("customer-1") }
-        runCurrent()
-
-        assertFalse("dismissal completed before Activity teardown", dismissal.isCompleted)
-        assertEquals(CloseReason.HostDismissed, activity.screenCloseReason())
-        assertTrue("Activity finish was not delivered", activity.isFinishing)
-        assertTrue("registry completed before Activity teardown", PresentationRegistry.resolve(presentationId) != null)
-
-        NuxieExperienceActivity::class.java
-            .getDeclaredMethod("onDestroy")
-            .apply { isAccessible = true }
-            .invoke(activity)
-
-        dismissal.await()
-        assertEquals(null, PresentationRegistry.resolve(presentationId))
-        val error = try {
-            presentation.await()
-            fail("first-frame failure should fail presentation")
-            error("unreachable")
-        } catch (error: ExperiencePresentationException) {
-            error
-        }
-        assertEquals(ExperiencePresentationException.Reason.SUPERSEDED, error.reason)
-    }
-
-    @Test
-    fun hostDismissalWithoutAPresentationIsANoop() = runTest {
-        var outcomeReports = 0
-        val service = service(
-            reportOutcome = {
-                outcomeReports += 1
-                true
-            },
-        )
-
-        service.dismissFromHost("customer-1")
-
-        assertEquals(0, outcomeReports)
-    }
-
-    @Test
-    fun signedDrawerShellIsPreparedForTheActivity() = runTest {
-        val launched = mutableListOf<String>()
-        val presentation = buildJsonObject {
-            put("style", "drawer")
-            put("backgroundColor", "#112233FF")
-            put("drawer", buildJsonObject {
-                put("edge", "trailing")
-                put("extentRatio", 0.4)
-                put("cornerRadius", 12)
-                put("dismissible", false)
-            })
-        }
-        val service = service(
-            provider = PresentationReleaseProvider { release("exp-1", it, presentation) },
-            launch = launched::add,
-        )
-
-        val shown = async { service.present("v1") }
-        runCurrent()
-
-        assertEquals(
-            PresentationShell.Drawer(
-                edge = PresentationShell.Drawer.Edge.TRAILING,
-                extentRatio = 0.4f,
-                cornerRadiusDp = 12f,
-                dismissible = false,
-            ),
-            PresentationRegistry.resolve(launched.single())?.shell,
-        )
-        PresentationRegistry.reportFirstFrame(launched.single())
-        shown.await()
-    }
-
-    @Test
-    fun coldRecreatedActivityFinishesWhenProcessLocalStateIsAbsent() {
-        val presentationId = "process-death"
-        val intent = Intent(
-            RuntimeEnvironment.getApplication(),
-            NuxieExperienceActivity::class.java,
-        ).putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, presentationId)
-
-        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java, intent)
-            .create(Bundle())
-            .get()
-
-        assertTrue(activity.isFinishing)
-        assertEquals(null, PresentationRegistry.resolve(presentationId))
-    }
-
-    @Test
-    fun savedStateWithLiveRegistryEntryIsSameProcessRecreation() {
-        val presentationId = "configuration-change"
-        PresentationRegistry.register(
-            id = presentationId,
-            content = PreparedPresentation(
-                File("does-not-exist"),
-                null,
-                0,
-                PresentationShell.FullScreen,
-            ),
-            onFirstFrame = {},
-            onFailure = {},
-            onDismissed = {},
-            onOutcome = {},
-        )
-
-        assertFalse(
-            NuxieExperienceActivity.isColdRecreation(Bundle(), presentationId),
-        )
-        PresentationRegistry.clearForTesting()
-        assertTrue(
-            NuxieExperienceActivity.isColdRecreation(Bundle(), presentationId),
-        )
-    }
-
-    @Test
-    fun dismissalBetweenConfigurationInstancesEndsPresentation() {
-        val presentationId = "configuration-handoff"
-        val dismissed = mutableListOf<CloseReason>()
-        val oldActivity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        PresentationRegistry.register(
-            id = presentationId,
-            content = PreparedPresentation(
-                File("does-not-exist"),
-                null,
-                0,
-                PresentationShell.FullScreen,
-            ),
-            onFirstFrame = {},
-            onFailure = {},
-            onDismissed = dismissed::add,
-            onOutcome = {},
-        )
-        assertTrue(PresentationRegistry.attach(presentationId, oldActivity))
-
-        PresentationRegistry.detach(presentationId, oldActivity)
-        PresentationRegistry.dismiss(presentationId, CloseReason.GoalMet)
-
-        assertEquals(listOf<CloseReason>(CloseReason.GoalMet), dismissed)
-        assertEquals(null, PresentationRegistry.resolve(presentationId))
-    }
-
-    @Test
-    fun screenCloseReasonIsPublishedAtomicallyWithConfigurationDetach() {
-        val presentationId = "configuration-terminal"
-        val dismissed = mutableListOf<CloseReason>()
-        val oldActivity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        PresentationRegistry.register(
-            id = presentationId,
-            content = PreparedPresentation(
-                File("does-not-exist"),
-                null,
-                0,
-                PresentationShell.FullScreen,
-            ),
-            onFirstFrame = {},
-            onFailure = {},
-            onDismissed = dismissed::add,
-            onOutcome = {},
-        )
-        assertTrue(PresentationRegistry.attach(presentationId, oldActivity))
-        assertTrue(oldActivity.requestCloseFromService(CloseReason.GoalMet))
-
-        PresentationRegistry.detach(presentationId, oldActivity)
-        PresentationRegistry.dismiss(presentationId, CloseReason.Timeout)
-
-        assertEquals(listOf<CloseReason>(CloseReason.GoalMet), dismissed)
-        assertEquals(null, PresentationRegistry.resolve(presentationId))
-    }
-
-    @Test
-    fun recreatedActivityIsRejectedAfterDismissalSelectsOldInstance() = runTest {
-        val launched = mutableListOf<String>()
-        val service = service(launch = launched::add)
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        val presentationId = launched.single()
-        PresentationRegistry.reportFirstFrame(presentationId)
-        shown.await()
-
-        val oldActivity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        setActivityField(oldActivity, "presentationId", presentationId)
-        assertTrue(PresentationRegistry.attach(presentationId, oldActivity))
-
-        val dismissal = async { service.dismissFromHost("customer-1") }
-        runCurrent()
-        assertEquals(CloseReason.HostDismissed, oldActivity.screenCloseReason())
-        assertFalse("dismissal completed before Activity teardown", dismissal.isCompleted)
-
-        val attachCandidate = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        assertFalse(
-            "recreated Activity replaced the dismissal-selected instance",
-            PresentationRegistry.attach(presentationId, attachCandidate),
-        )
-        val recreationIntent = Intent(
-            RuntimeEnvironment.getApplication(),
-            NuxieExperienceActivity::class.java,
-        ).putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, presentationId)
-        val recreatedActivity = Robolectric.buildActivity(
-            NuxieExperienceActivity::class.java,
-            recreationIntent,
-        ).create(Bundle()).get()
-        assertTrue("recreated Activity remained visible", recreatedActivity.isFinishing)
-
-        NuxieExperienceActivity::class.java
-            .getDeclaredMethod("onDestroy")
-            .apply { isAccessible = true }
-            .invoke(oldActivity)
-        dismissal.await()
-
-        assertEquals(null, PresentationRegistry.resolve(presentationId))
-    }
-
-    @Test
-    fun screenCloseReasonSelectionIsAtomic() {
-        val reported = mutableListOf<CloseReason>()
-        val screenClose = ScreenCloseState(reported::add)
-
-        assertTrue(screenClose.select(CloseReason.UserDismissed))
-        assertFalse(screenClose.select(CloseReason.GoalMet))
-        assertEquals(CloseReason.UserDismissed, screenClose.reason)
-        assertEquals(emptyList<CloseReason>(), reported)
-
-        screenClose.reportAtTeardown(isChangingConfigurations = false)
-
-        assertEquals(listOf<CloseReason>(CloseReason.UserDismissed), reported)
-    }
-
-    @Test
-    fun activityOnDestroyReturnsPromptlyWhenRuntimeLaneIsStuck() {
-        val lane = NuxieRuntimeLane()
-        val laneBlocked = CountDownLatch(1)
-        val unblockLane = CountDownLatch(1)
-        assertTrue(lane.enqueue {
-            laneBlocked.countDown()
-            check(unblockLane.await(5, TimeUnit.SECONDS)) { "runtime lane was not released" }
-        })
-        assertTrue(laneBlocked.await(2, TimeUnit.SECONDS))
-
-        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        setActivityField(activity, "lane", lane)
-
-        assertEquals(Looper.getMainLooper(), Looper.myLooper())
-        val startedAtNanos = System.nanoTime()
-        try {
-            NuxieExperienceActivity::class.java
-                .getDeclaredMethod("onDestroy")
-                .apply { isAccessible = true }
-                .invoke(activity)
-        } finally {
-            unblockLane.countDown()
-        }
-        val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos)
-
-        assertTrue("onDestroy blocked on the runtime lane for ${elapsedMillis}ms", elapsedMillis < 250)
-        assertTrue("Runtime lane did not finish", lane.awaitQuiescence(2_000))
-    }
-
-    @Test
-    fun hostDismissalCompletesOnlyAfterQueuedNativeHandleRelease() = runTest {
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val service = service(
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        val presentationId = launched.single()
-        PresentationRegistry.reportFirstFrame(presentationId)
-        shown.await()
-
-        val lane = NuxieRuntimeLane()
-        val laneBlocked = CountDownLatch(1)
-        val unblockLane = CountDownLatch(1)
-        val releaseThread = AtomicReference<String?>()
-        val file = NuxieRuntimeFile(
-            handle = 42L,
-            native = object : NuxieTypedRuntimeNative {
-                override fun freeFile(handle: Long) {
-                    assertEquals(42L, handle)
-                    releaseThread.set(Thread.currentThread().name)
-                }
-            },
-        )
-        assertTrue(lane.enqueue {
-            laneBlocked.countDown()
-            check(unblockLane.await(5, TimeUnit.SECONDS)) { "runtime lane was not released" }
-        })
-        assertTrue(laneBlocked.await(2, TimeUnit.SECONDS))
-        assertTrue(lane.enqueue(file::close))
-
-        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        setActivityField(activity, "presentationId", presentationId)
-        setActivityField(activity, "lane", lane)
-        assertTrue(PresentationRegistry.attach(presentationId, activity))
-
-        val dismissal = async { service.dismissFromHost("customer-1") }
-        runCurrent()
-        assertEquals(CloseReason.HostDismissed, activity.screenCloseReason())
-
-        try {
-            NuxieExperienceActivity::class.java
-                .getDeclaredMethod("onDestroy")
-                .apply { isAccessible = true }
-                .invoke(activity)
-            runCurrent()
-
-            assertFalse("dismiss completed before native release", dismissal.isCompleted)
-            assertFalse("acquisition lease closed before native release", lease.closed.get())
-            assertEquals(null, releaseThread.get())
-        } finally {
-            unblockLane.countDown()
-        }
-
-        dismissal.await()
-        assertTrue(lease.closed.get())
-        assertEquals("com.nuxie.runtime.android.native", releaseThread.get())
-    }
-
-    @Test
-    fun hostDismissalAfterRecreationWaitsForBothActivitiesNativeHandleRelease() = runTest {
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val service = service(
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        val presentationId = launched.single()
-        PresentationRegistry.reportFirstFrame(presentationId)
-        shown.await()
-
-        val oldLane = NuxieRuntimeLane()
-        val oldLaneBlocked = CountDownLatch(1)
-        val unblockOldLane = CountDownLatch(1)
-        val oldNativeReleased = AtomicBoolean(false)
-        val oldFile = NuxieRuntimeFile(
-            handle = 41L,
-            native = object : NuxieTypedRuntimeNative {
-                override fun freeFile(handle: Long) {
-                    assertEquals(41L, handle)
-                    oldNativeReleased.set(true)
-                }
-            },
-        )
-        assertTrue(oldLane.enqueue {
-            oldLaneBlocked.countDown()
-            check(unblockOldLane.await(5, TimeUnit.SECONDS)) { "old runtime lane was not released" }
-        })
-        assertTrue(oldLaneBlocked.await(2, TimeUnit.SECONDS))
-        assertTrue(oldLane.enqueue(oldFile::close))
-
-        val oldActivity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        setActivityField(oldActivity, "presentationId", presentationId)
-        setActivityField(oldActivity, "lane", oldLane)
-        setChangingConfigurations(oldActivity)
-        assertTrue(PresentationRegistry.attach(presentationId, oldActivity))
-        invokeOnDestroy(oldActivity)
-
-        val newLane = NuxieRuntimeLane()
-        val newLaneBlocked = CountDownLatch(1)
-        val unblockNewLane = CountDownLatch(1)
-        val newNativeReleased = AtomicBoolean(false)
-        val newFile = NuxieRuntimeFile(
-            handle = 42L,
-            native = object : NuxieTypedRuntimeNative {
-                override fun freeFile(handle: Long) {
-                    assertEquals(42L, handle)
-                    newNativeReleased.set(true)
-                }
-            },
-        )
-        assertTrue(newLane.enqueue {
-            newLaneBlocked.countDown()
-            check(unblockNewLane.await(5, TimeUnit.SECONDS)) { "new runtime lane was not released" }
-        })
-        assertTrue(newLaneBlocked.await(2, TimeUnit.SECONDS))
-        assertTrue(newLane.enqueue(newFile::close))
-
-        val recreatedActivity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        setActivityField(recreatedActivity, "presentationId", presentationId)
-        setActivityField(recreatedActivity, "lane", newLane)
-        assertTrue(PresentationRegistry.attach(presentationId, recreatedActivity))
-
-        val dismissal = async { service.dismissFromHost("customer-1") }
-        runCurrent()
-        assertEquals(CloseReason.HostDismissed, recreatedActivity.screenCloseReason())
-        invokeOnDestroy(recreatedActivity)
-
-        try {
-            unblockNewLane.countDown()
-            assertTrue("recreated runtime lane did not finish", newLane.awaitQuiescence(2_000))
-            runCurrent()
-
-            assertTrue("recreated Activity did not release its native handle", newNativeReleased.get())
-            assertFalse("old Activity released before its lane was unblocked", oldNativeReleased.get())
-            assertFalse("dismissal ignored the old Activity teardown", dismissal.isCompleted)
-            assertFalse("acquisition lease closed before both Activities tore down", lease.closed.get())
-        } finally {
-            unblockOldLane.countDown()
-            unblockNewLane.countDown()
-        }
-
-        dismissal.await()
-        assertTrue("old Activity did not release its native handle", oldNativeReleased.get())
-        assertTrue(lease.closed.get())
-        assertEquals(null, PresentationRegistry.resolve(presentationId))
-    }
-
-    @Test
-    fun cancellingHostDismissalOnlyDetachesCallerWhileBookkeepingCompletes() = runTest {
-        val launched = mutableListOf<String>()
-        val lease = Lease()
-        val bookkeepingStarted = CompletableDeferred<PresentationOutcome>()
-        val allowBookkeepingToComplete = CompletableDeferred<Unit>()
-        val bookkeepingCompleted = CompletableDeferred<Unit>()
-        val service = service(
-            launch = launched::add,
-            acquire = { acquired("exp-1", "v1", lease) },
-            reportOutcome = { outcome ->
-                bookkeepingStarted.complete(outcome)
-                allowBookkeepingToComplete.await()
-                bookkeepingCompleted.complete(Unit)
-            },
-        )
-        val shown = async { service.present("v1", "journey-7", "customer-1") }
-        runCurrent()
-        val presentationId = launched.single()
-        PresentationRegistry.reportFirstFrame(presentationId)
-        shown.await()
-
-        val lane = NuxieRuntimeLane()
-        val laneBlocked = CountDownLatch(1)
-        val unblockLane = CountDownLatch(1)
-        val file = NuxieRuntimeFile(
-            handle = 42L,
-            native = object : NuxieTypedRuntimeNative {
-                override fun freeFile(handle: Long) = Unit
-            },
-        )
-        assertTrue(lane.enqueue {
-            laneBlocked.countDown()
-            check(unblockLane.await(5, TimeUnit.SECONDS)) { "runtime lane was not released" }
-        })
-        assertTrue(laneBlocked.await(2, TimeUnit.SECONDS))
-        assertTrue(lane.enqueue(file::close))
-
-        val activity = Robolectric.buildActivity(NuxieExperienceActivity::class.java).get()
-        setActivityField(activity, "presentationId", presentationId)
-        setActivityField(activity, "lane", lane)
-        assertTrue(PresentationRegistry.attach(presentationId, activity))
-
-        val dismissal = async { service.dismissFromHost("customer-1") }
-        runCurrent()
-        val outcome = bookkeepingStarted.await()
-        assertEquals(CloseReason.HostDismissed, outcome.reason)
-        assertEquals("customer-1", outcome.ownerDistinctId)
-        assertEquals("customer-1", outcome.initiatingDistinctId)
-
-        NuxieExperienceActivity::class.java
-            .getDeclaredMethod("onDestroy")
-            .apply { isAccessible = true }
-            .invoke(activity)
-        runCurrent()
-
-        try {
-            assertFalse("dismissal completed before native release", dismissal.isCompleted)
-            assertFalse("acquisition lease closed before native release", lease.closed.get())
-
-            dismissal.cancelAndJoin()
-            assertTrue("dismissal caller was not cancelled", dismissal.isCancelled)
-            assertFalse("caller cancellation completed bookkeeping", bookkeepingCompleted.isCompleted)
-            assertFalse("caller cancellation completed teardown", lease.closed.get())
-
-            allowBookkeepingToComplete.complete(Unit)
-            runCurrent()
-
-            assertTrue(
-                "caller cancellation cancelled detached bookkeeping",
-                bookkeepingCompleted.isCompleted,
+        val outcomes = mutableListOf<JourneySurfaceOutcome>()
+        val service = service(this, launch = launched::add)
+        val reservation = requireNotNull(service.reserveJourney("customer-1"))
+        val presentation = async {
+            service.presentJourney(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-1",
+                ownerDistinctId = "customer-1",
+                reservation = reservation,
+                acquire = { acquired(release.identity, lease) },
+                onOutcome = outcomes::add,
             )
-            assertFalse("bookkeeping completion bypassed native teardown", lease.closed.get())
-        } finally {
-            unblockLane.countDown()
         }
+        runCurrent()
+        val presentationId = launched.single()
+        val host = AttachedHost()
+        assertTrue(PresentationRegistry.attach(presentationId, host))
+        PresentationRegistry.reportFirstFrame(presentationId)
+        presentation.await()
 
-        assertTrue("Runtime lane did not finish", lane.awaitQuiescence(2_000))
+        val dismissal = async { service.dismissFromHost("customer-1") }
+        runCurrent()
+
+        assertFalse(dismissal.isCompleted)
+        assertEquals(CloseReason.HostDismissed, host.requestedReason)
+        assertTrue(host.finished)
+        assertFalse(lease.closed.get())
+        assertEquals(listOf(JourneySurfaceOutcome.DISMISSED), outcomes)
+
+        PresentationRegistry.detach(presentationId, host)
+        runCurrent()
+        dismissal.await()
+
         assertTrue(lease.closed.get())
-        assertEquals(null, PresentationRegistry.resolve(presentationId))
-    }
-
-    private fun setActivityField(
-        activity: NuxieExperienceActivity,
-        name: String,
-        value: Any?,
-    ) {
-        NuxieExperienceActivity::class.java.getDeclaredField(name).apply {
-            isAccessible = true
-            set(activity, value)
-        }
-    }
-
-    private fun setChangingConfigurations(activity: Activity) {
-        Activity::class.java.getDeclaredField("mChangingConfigurations").apply {
-            isAccessible = true
-            setBoolean(activity, true)
-        }
-    }
-
-    private fun invokeOnDestroy(activity: NuxieExperienceActivity) {
-        NuxieExperienceActivity::class.java
-            .getDeclaredMethod("onDestroy")
-            .apply { isAccessible = true }
-            .invoke(activity)
+        assertNull(PresentationRegistry.resolve(presentationId))
     }
 
     private fun service(
-        runtimeAvailable: Boolean = true,
-        provider: PresentationReleaseProvider = PresentationReleaseProvider { release("exp-1", it) },
-        acquire: suspend (PresentationRelease) -> AcquiredRelease = { admitted ->
-            acquired(
-                admitted.release.identity.experienceId,
-                admitted.release.identity.experienceVersionId,
-                Lease(),
-            )
-        },
+        scope: CoroutineScope,
+        runtimeAvailable: () -> Boolean = { true },
         emit: (String, Map<String, Any?>, String?) -> Unit = { _, _, _ -> },
         launch: (String) -> Unit = {},
-        commerce: ExperiencePurchasePreparer = ExperiencePurchasePreparer.NONE,
-        transitionOutcome: suspend (PresentationOutcome) -> Boolean = { true },
-        reportOutcome: suspend (PresentationOutcome) -> Unit = {},
         firstFrameTimeoutMillis: Long = 30_000,
-        beforeHostTeardownForTesting: () -> Unit = {},
     ) = ExperiencePresentationService(
-        releases = provider,
-        acquire = acquire,
         emit = emit,
-        scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined),
-        runtimeAvailable = { runtimeAvailable },
+        scope = scope,
+        runtimeAvailable = runtimeAvailable,
         launch = launch,
-        commerce = commerce,
-        transitionOutcome = transitionOutcome,
-        reportOutcome = reportOutcome,
         firstFrameTimeoutMillis = firstFrameTimeoutMillis,
-        beforeHostTeardownForTesting = beforeHostTeardownForTesting,
     )
 
     private suspend fun expectPresentationFailure(
@@ -2005,52 +591,23 @@ class ExperiencePresentationServiceTest {
         error
     }
 
-    private fun release(
-        experienceId: String,
-        version: String,
-        presentation: JsonObject = buildJsonObject { put("backgroundColor", "#112233") },
-    ): PresentationRelease {
-        val identity = ExperienceReleaseIdentity(
-            appId = "app",
-            environment = "development",
-            experienceId = experienceId,
-            experienceVersionId = version,
-            buildId = "build-$version",
-            versionNumber = 1,
-            releaseCreatedAt = "2026-08-24T00:00:00Z",
-            releaseSequence = 1,
-        )
-        val descriptor = buildJsonObject {
-            put("render", buildJsonObject {
-                put("assets", buildJsonArray {})
-            })
-            put("screenBehaviors", buildJsonArray {})
-            put("presentation", presentation)
-        }
-        return PresentationRelease(
-            AuthenticatedRelease("key", "sha", identity, ByteArray(0), descriptor, 1),
-            Delivery("https://render.example/", "https://assets.example/"),
-        )
-    }
-
     private fun acquired(
-        experienceId: String,
-        version: String,
+        identity: JourneyReleaseIdentity,
         lease: Lease,
         extraArtifacts: Map<String, File> = emptyMap(),
-    ): AcquiredRelease {
-        val file = File.createTempFile("presentation-", ".riv").apply { writeBytes(byteArrayOf(1)) }
-        return AcquiredRelease(
-            identity = ExperienceReleaseIdentity(
-                "app", "development", experienceId, version, "build", 1, "now", 1,
-            ),
+    ): AcquiredJourneyRelease {
+        val file = File.createTempFile("journey-presentation-", ".riv").apply {
+            writeBytes(byteArrayOf(1))
+        }
+        return AcquiredJourneyRelease(
+            identity = identity,
             artifactsByKey = mapOf("renders/main.riv" to file) + extraArtifacts,
             rivFile = file,
             protection = lease,
         )
     }
 
-    private fun renderedDeviceLegRelease(): AuthenticatedDeviceLegRelease {
+    private fun renderedJourneyRelease(): AuthenticatedJourneyRelease {
         val fixture = Json.parseToJsonElement(
             FixtureRunner.fixturesRoot().resolve("journeys/planes/release.json").readText(),
         ).jsonObject
@@ -2063,7 +620,7 @@ class ExperiencePresentationServiceTest {
             ).decodeToString(),
         ).jsonObject
         val identity = requireNotNull(
-            ExperienceReleaseIdentity.fromJson(
+            JourneyReleaseIdentity.fromJson(
                 entry.getValue("locator").jsonObject,
                 additionalKeys = setOf("legId"),
             ),
@@ -2072,7 +629,7 @@ class ExperiencePresentationServiceTest {
         val luau = requirements.getValue("luau").jsonObject
         val scene = requirements.getValue("sceneFormat").jsonObject
         val timezone = requirements.getValue("timezoneData").jsonObject
-        val runtime = SupportedRuntime(
+        val runtime = JourneyReleaseSupportedRuntime(
             currentSdkVersion = requirements.getValue("minimumSdkVersion").jsonPrimitive.content,
             supportedRuntimeRevisions = setOf(
                 requirements.getValue("runtimeRevision").jsonPrimitive.content,
@@ -2097,13 +654,13 @@ class ExperiencePresentationServiceTest {
                 Base64.NO_WRAP,
             ),
         )
-        return DeviceLegReleaseVerifier.authenticate(
+        return JourneyReleaseVerifier.authenticate(
             envelopeBytes = envelope.toString().encodeToByteArray(),
             trustedKeys = trustedKeys,
             expectedIdentity = identity,
             expectedLegId = "a".repeat(64),
             supportedRuntime = runtime,
-            replayPolicy = ReplayPolicy.Active(0),
+            replayPolicy = JourneyReleaseReplayPolicy.Active(0),
         )
     }
 }

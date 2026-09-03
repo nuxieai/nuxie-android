@@ -20,9 +20,8 @@ class ExperienceViewModelBindingTest {
     @Test
     fun `shared iOS descriptor selects its declared default without reinterpreting instance id`() {
         val envelope = Json.parseToJsonElement(
-            File(FixtureRunner.fixturesRoot(), "experience-release-descriptor/envelope.json")
-                .readText(),
-        ).jsonObject
+            File(FixtureRunner.fixturesRoot(), "journeys/planes/release.json").readText(),
+        ).jsonObject.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
         val descriptor = Json.parseToJsonElement(
             Base64.getDecoder().decode(
                 envelope.getValue("descriptorBytesBase64").jsonPrimitive.content,
@@ -138,10 +137,10 @@ class ExperienceViewModelBindingTest {
         val good = descriptor()
         val invalid = listOf(
             JsonObject(good - "render"),
-            JsonObject(good - "journey"),
-            JsonObject(good + ("journey" to JsonNull)),
-            JsonObject(good + ("journey" to JsonObject(mapOf("screens" to JsonPrimitive("invalid"))))),
-            JsonObject(good + ("journey" to JsonObject(mapOf("screens" to JsonArray(listOf(JsonNull)))))),
+            JsonObject(good - "leg"),
+            JsonObject(good + ("leg" to JsonNull)),
+            JsonObject(good + ("leg" to JsonObject(mapOf("screens" to JsonPrimitive("invalid"))))),
+            JsonObject(good + ("leg" to JsonObject(mapOf("screens" to JsonArray(listOf(JsonNull)))))),
         )
         invalid.forEach { value ->
             assertThrows(IllegalArgumentException::class.java) {
@@ -155,7 +154,7 @@ class ExperienceViewModelBindingTest {
         journeyScreens: List<JsonObject> = listOf(journey("first", "First"), journey("second", "Second")),
     ): JsonObject = JsonObject(mapOf(
         "render" to JsonObject(mapOf("screens" to JsonArray(renderScreens))),
-        "journey" to JsonObject(mapOf("screens" to JsonArray(journeyScreens))),
+        "leg" to JsonObject(mapOf("screens" to JsonArray(journeyScreens))),
     ))
 
     private fun render(id: String, artboard: String): JsonObject = JsonObject(mapOf(

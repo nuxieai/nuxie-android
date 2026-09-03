@@ -68,10 +68,12 @@ internal sealed interface ExternalPurchaseDeclaration {
         override val operationId: String,
         override val ownerDistinctId: String,
         val product: StoreProduct,
+        val outcomeEventId: String? = null,
     ) : ExternalPurchaseDeclaration
 
     data class Restore(
         override val operationId: String,
         override val ownerDistinctId: String,
+        val outcomeEventId: String? = null,
     ) : ExternalPurchaseDeclaration
 }

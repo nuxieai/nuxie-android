@@ -1916,27 +1916,6 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     return NULL;
   }
 
-  jsize pointer_count = (*env)->GetArrayLength(env, pointer_kind_array);
-  if (clear_jni_exception(env)) {
-    set_status_out(env, status_out, NUX_STATUS_RUNTIME_ERROR);
-    return NULL;
-  }
-  jsize pointer_x_count = (*env)->GetArrayLength(env, pointer_x_array);
-  jsize pointer_y_count = (*env)->GetArrayLength(env, pointer_y_array);
-  jsize pointer_id_count = (*env)->GetArrayLength(env, pointer_id_array);
-  jsize pointer_timestamp_count =
-      (*env)->GetArrayLength(env, pointer_timestamp_array);
-  if (clear_jni_exception(env)) {
-    set_status_out(env, status_out, NUX_STATUS_RUNTIME_ERROR);
-    return NULL;
-  }
-  if (pointer_x_count != pointer_count || pointer_y_count != pointer_count ||
-      pointer_id_count != pointer_count ||
-      pointer_timestamp_count != pointer_count) {
-    set_status_out(env, status_out, NUX_STATUS_INVALID_ARGUMENT);
-    return NULL;
-  }
-
   size_t allocation_count = count == 0 ? 1u : (size_t)count;
   kinds = calloc(allocation_count, sizeof(*kinds));
   bool_values = calloc(allocation_count, sizeof(*bool_values));
@@ -1960,23 +1939,6 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     goto typed_step_cleanup;
   }
 
-  size_t pointer_allocation_count =
-      pointer_count == 0 ? 1u : (size_t)pointer_count;
-  pointer_kinds = calloc(pointer_allocation_count, sizeof(*pointer_kinds));
-  pointer_x_values =
-      calloc(pointer_allocation_count, sizeof(*pointer_x_values));
-  pointer_y_values =
-      calloc(pointer_allocation_count, sizeof(*pointer_y_values));
-  pointer_ids = calloc(pointer_allocation_count, sizeof(*pointer_ids));
-  pointer_timestamps =
-      calloc(pointer_allocation_count, sizeof(*pointer_timestamps));
-  pointers = calloc(pointer_allocation_count, sizeof(*pointers));
-  if (pointer_kinds == NULL || pointer_x_values == NULL ||
-      pointer_y_values == NULL || pointer_ids == NULL ||
-      pointer_timestamps == NULL || pointers == NULL) {
-    failed = 1;
-    goto typed_step_cleanup;
-  }
   if (count != 0) {
     (*env)->GetIntArrayRegion(env, input_kind_array, 0, count, kinds);
     if (clear_jni_exception(env)) {
@@ -2063,36 +2025,6 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     inputs[index].name.len = (size_t)name_len;
     inputs[index].bool_value = bool_values[index] == JNI_TRUE ? 1u : 0u;
     inputs[index].number_value = number_values[index];
-  }
-
-  if (pointer_count != 0) {
-    (*env)->GetIntArrayRegion(env, pointer_kind_array, 0, pointer_count,
-                              pointer_kinds);
-    (*env)->GetFloatArrayRegion(env, pointer_x_array, 0, pointer_count,
-                                pointer_x_values);
-    (*env)->GetFloatArrayRegion(env, pointer_y_array, 0, pointer_count,
-                                pointer_y_values);
-    (*env)->GetIntArrayRegion(env, pointer_id_array, 0, pointer_count,
-                              pointer_ids);
-    (*env)->GetFloatArrayRegion(env, pointer_timestamp_array, 0, pointer_count,
-                                pointer_timestamps);
-    if (clear_jni_exception(env)) {
-      failed = 1;
-      goto typed_step_cleanup;
-    }
-  }
-  for (jsize index = 0; index < pointer_count; index++) {
-    if (pointer_kinds[index] < NUX_PLAYER_POINTER_KIND_DOWN ||
-        pointer_kinds[index] > NUX_PLAYER_POINTER_KIND_EXIT) {
-      reported_status = NUX_STATUS_INVALID_ARGUMENT;
-      failed = 1;
-      goto typed_step_cleanup;
-    }
-    pointers[index].kind = (uint32_t)pointer_kinds[index];
-    pointers[index].x = pointer_x_values[index];
-    pointers[index].y = pointer_y_values[index];
-    pointers[index].pointer_id = (int32_t)pointer_ids[index];
-    pointers[index].timestamp_seconds = pointer_timestamps[index];
   }
 
   struct NuxPlayerStep step;

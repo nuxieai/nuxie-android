@@ -9,7 +9,6 @@ import ai.nuxie.sdk.events.ActivityCuration
 import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.SystemEventNames
-import ai.nuxie.sdk.events.TriggerService
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.features.FeatureAllowance
 import ai.nuxie.sdk.network.NuxieApi
@@ -42,6 +41,7 @@ import kotlinx.serialization.json.jsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -66,7 +66,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun billingClientDeliveryIsTheTrustBoundaryWhenNoLicensingKeyIsConfigured() = runTest {
+    fun billingClientJourneyReleaseDeliveryIsTheTrustBoundaryWhenNoLicensingKeyIsConfigured() = runTest {
         val fixture = fixture(this)
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
         val checkout = async {
@@ -1109,6 +1109,53 @@ class PurchaseServiceTest {
 
         assertEquals(1, journeyEvents.size)
         assertEquals(SystemEventNames.PURCHASE_COMPLETED, journeyEvents.single().name)
+        fixture.close()
+    }
+
+    @Test
+    fun JourneyCheckoutUsesItsClaimedEffectIdForTheTerminalPurchaseEvent() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(),
+                null,
+                expectedOwnerDistinctId = owner,
+                outcomeCorrelation = CommerceOutcomeCorrelation("journey-effect", owner),
+            )
+        }
+        runCurrent()
+        val purchase = playPurchase("journey-correlated").forCheckout(fixture)
+
+        fixture.service.onPurchasesUpdated(okUpdate(purchase))
+
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertEquals(listOf("journey-effect"), fixture.purchaseCompletionEventIds)
+        assertEquals(
+            "journey-effect",
+            fixture.store.load().getValue("journey-correlated").checkoutCompletionEventId,
+        )
+        assertNull(
+            fixture.store.loadBindings().single().outcomeEventId,
+        )
+        fixture.close()
+    }
+
+    @Test
+    fun JourneyRestoreUsesItsClaimedEffectIdForNoPurchases() = runTest {
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, emissions = emissions)
+        val owner = fixture.core.identity.distinctId()
+
+        val result = fixture.service.restorePurchases(
+            expectedOwnerDistinctId = owner,
+            outcomeCorrelation = CommerceOutcomeCorrelation("restore-effect", owner),
+        )
+
+        assertEquals(RestoreResult.NoPurchases, result)
+        assertEquals(listOf("restore-effect"), fixture.purchaseCompletionEventIds)
+        assertEquals(SystemEventNames.RESTORE_NO_PURCHASES, emissions.single().first)
         fixture.close()
     }
 
@@ -2532,16 +2579,22 @@ class PurchaseServiceTest {
                 registerLifecycle = false,
                 eventDatabaseFile = File(storageDirectory, "events.db"),
                 profileCacheDirectory = File(storageDirectory, "profiles"),
-                journeys = journeyEvents?.let { events ->
-                    TriggerService.JourneyRouter { event ->
-                        events += event
-                        emptyList()
-                    }
-                },
                 requestInitialProfileRefresh = false,
                 billingClientFactory = InertBillingClientAdapter.factory,
             ),
         )
+        journeyEvents?.let { events ->
+            core.eventLog.subscribeCommittedWithAdmission(
+                sampleGeneration = { 0L },
+            ) { event, _ ->
+                if (event.distinctId == core.identity.distinctId()) {
+                    events += event
+                    true
+                } else {
+                    false
+                }
+            }
+        }
         kotlinx.coroutines.runBlocking { core.purchases.awaitInitialProjection() }
         store.actions = actions
         val billing = FakeBilling(actions)

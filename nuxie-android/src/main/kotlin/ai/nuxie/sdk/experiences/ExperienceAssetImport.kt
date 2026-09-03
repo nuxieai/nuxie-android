@@ -69,12 +69,12 @@ internal object ExperienceAssetImportBuilder {
 
     private fun declarations(descriptor: JsonObject): List<Declaration> {
         val render = descriptor["render"] as? JsonObject
-            ?: error("Experience release render is missing")
+            ?: error("Journey release render is missing")
         val assets = render["assets"] as? JsonArray
-            ?: error("Experience release assets are missing")
+            ?: error("Journey release assets are missing")
         return assets.mapIndexedNotNull { index, value ->
             val asset = value as? JsonObject
-                ?: error("Experience release asset $index is invalid")
+                ?: error("Journey release asset $index is invalid")
             val kind = when (asset.string("kind")) {
                 "image" -> FileAssetKind.IMAGE
                 "font" -> FileAssetKind.FONT
@@ -82,20 +82,20 @@ internal object ExperienceAssetImportBuilder {
                 // are represented by the complete native catalog but have no
                 // external provider entry in the authoritative iOS binding.
                 "script", "shader" -> return@mapIndexedNotNull null
-                else -> error("Experience release asset $index has an unsupported kind")
+                else -> error("Journey release asset $index has an unsupported kind")
             }
             Declaration(
                 kind = kind,
                 authoredId = asset.long("riveAssetId")
                     ?.takeIf { it in 0..UINT32_MAX }
-                    ?: error("Experience release asset $index has an invalid authored id"),
+                    ?: error("Journey release asset $index has an invalid authored id"),
                 uniqueName = asset.string("riveUniqueName")
                     ?.takeIf(String::isNotBlank)
-                    ?: error("Experience release asset $index has no unique name"),
+                    ?: error("Journey release asset $index has no unique name"),
                 artifactKey = asset.string("key")
-                    ?: error("Experience release asset $index has no artifact key"),
+                    ?: error("Journey release asset $index has no artifact key"),
                 required = (asset["required"] as? JsonPrimitive)?.booleanOrNull
-                    ?: error("Experience release asset $index has no required flag"),
+                    ?: error("Journey release asset $index has no required flag"),
             )
         }
     }

@@ -48,7 +48,7 @@ internal class NuxieLifecycleCoordinator(
                     }
                     Transition.FOREGROUND -> {
                         sessions.onAppBecameActive()
-                        // Canonical profile revalidation and device-leg
+                        // Canonical profile revalidation and journey
                         // activation finish before the foreground edge enters
                         // event routing, so stale authority cannot consume it.
                         runBestEffort("Foreground recovery", onForeground)

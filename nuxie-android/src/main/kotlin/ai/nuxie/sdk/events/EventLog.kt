@@ -31,7 +31,7 @@ import kotlinx.coroutines.launch
  *   terminally drops the event and records a stable drop so recovery never
  *   resurrects it. Required SDK-authored system events use an owner-scoped
  *   stable lane that bypasses beforeSend.
- * - Delivery is a later PR: events accumulate as pending.
+ * - JourneyReleaseDelivery is a later PR: events accumulate as pending.
  */
 internal class EventLog(
     private val store: EventStore,
@@ -94,12 +94,6 @@ internal class EventLog(
             val properties: Map<String, Any?>?,
             val distinctIdOverride: String?,
             val admissionTickets: List<AdmissionTicket>,
-        ) : Command
-        data class CaptureForTrigger(
-            val name: String,
-            val properties: Map<String, Any?>?,
-            val admissionTickets: List<AdmissionTicket>,
-            val done: CompletableDeferred<StoredEvent?>,
         ) : Command
         data class CaptureIdempotently(
             val name: String,
@@ -174,18 +168,6 @@ internal class EventLog(
                     )
                 }
                     .onFailure { Log.w(LOG_TAG, "Event capture failed", it) }
-                is Command.CaptureForTrigger -> {
-                    val stored = runCatching {
-                        process(
-                            command.name,
-                            command.properties,
-                            admissionTickets = command.admissionTickets,
-                        )
-                    }
-                        .onFailure { Log.w(LOG_TAG, "Trigger capture failed", it) }
-                        .getOrNull()
-                    command.done.complete(stored)
-                }
                 is Command.CaptureIdempotently -> {
                     val result = runCatching {
                         processIdempotently(
@@ -383,30 +365,6 @@ internal class EventLog(
         forwardingWorker.join()
     }
 
-    /**
-     * Decision-lane capture: persist + announce like every capture, then hand
-     * the stored event back so the trigger service can run the synchronous
-     * /event round trip in capture order.
-     */
-    suspend fun captureForTrigger(
-        name: String,
-        properties: Map<String, Any?>?,
-        distinctIdOverride: String? = null,
-    ): StoredEvent? {
-        if (name.isEmpty()) {
-            Log.w(LOG_TAG, "Event name cannot be empty")
-            return null
-        }
-        val done = CompletableDeferred<StoredEvent?>()
-        if (commands.trySend(
-                Command.CaptureForTrigger(name, properties, sampleAdmissionTickets(), done),
-            ).isFailure
-        ) return null
-        val stored = done.await()
-        awaitRouteBarrier()
-        return stored
-    }
-
     /** Durably capture a stable-id event once, returning true for inserts and duplicates. */
     suspend fun captureIdempotently(
         name: String,
@@ -581,15 +539,6 @@ internal class EventLog(
         )
         if (commands.trySend(command).isFailure) return false
         return done.await()
-    }
-
-    /**
-     * The decision lane delivered this event synchronously via /event; mark
-     * it so batch delivery does not redundantly resend (the idempotency key
-     * would dedupe server-side, but skipping the resend is cheaper).
-     */
-    suspend fun markDeliveredViaDecisionLane(eventId: String) {
-        store.markDelivered(listOf(eventId))
     }
 
     /**

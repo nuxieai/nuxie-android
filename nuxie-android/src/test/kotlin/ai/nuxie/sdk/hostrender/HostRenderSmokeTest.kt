@@ -188,7 +188,7 @@ class HostRenderSmokeTest {
                     })
                 })
             })
-            put("journey", buildJsonObject {
+            put("leg", buildJsonObject {
                 put("screens", buildJsonArray {
                     add(buildJsonObject { put("id", "image-smoke") })
                 })
@@ -225,7 +225,7 @@ class HostRenderSmokeTest {
                     })
                 })
             })
-            put("journey", buildJsonObject {
+            put("leg", buildJsonObject {
                 put("screens", buildJsonArray {
                     add(buildJsonObject { put("id", "script-smoke") })
                 })
