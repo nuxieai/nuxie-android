@@ -248,6 +248,33 @@ class ReleaseAuthenticationTest {
     }
 
     @Test
+    fun sceneFormatAdmissionAcceptsSupportedMinorVersionsAndRejectsNewerOnes() {
+        val envelope = Json.parseToJsonElement(envelopeBytes().decodeToString()).jsonObject
+        val descriptorBytes = Base64.decode(
+            envelope.getValue("descriptorBytesBase64").jsonPrimitive.content,
+            Base64.NO_WRAP,
+        )
+        val requirements = Json.parseToJsonElement(descriptorBytes.decodeToString())
+            .jsonObject.getValue("requirements").jsonObject
+        val sceneFormat = requirements.getValue("sceneFormat").jsonObject
+        fun requirementsForMinor(minor: Int) = JsonObject(
+            requirements + (
+                "sceneFormat" to JsonObject(
+                    sceneFormat + ("minor" to JsonPrimitive(minor)),
+                )
+            ),
+        )
+        val supported = supportedRuntime().copy(sceneFormatMinor = 3)
+
+        ExperienceReleaseVerifier.validateRequirements(requirementsForMinor(0), supported)
+        ExperienceReleaseVerifier.validateRequirements(requirementsForMinor(3), supported)
+        val failure = assertThrows(ReleaseAuthenticationException::class.java) {
+            ExperienceReleaseVerifier.validateRequirements(requirementsForMinor(4), supported)
+        }
+        assertTrue(failure.message!!.contains("scene format"))
+    }
+
+    @Test
     fun olderSdkThanMinimumFails() {
         val old = supportedRuntime().copy(currentSdkVersion = "1.1.9")
         assertThrows(ReleaseAuthenticationException::class.java) {
