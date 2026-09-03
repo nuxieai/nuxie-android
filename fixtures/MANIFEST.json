@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "806a5df6e0a7d26208650990c16366376e6cb65f",
+  "sourceCommit": "5bbc612eb8ad24aa9013fbb082c01abff485f61f",
   "files": {
     "README.md": "6b7625d6b650852dd6313338f18cbee7dc07cb53ed54b49269b17bf49e08e96b",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
@@ -13,7 +13,7 @@
     "events/generated-control-routing.json": "f461826c8a2e79d2f08178a1b3a27b03cbcda52ed208f572b995fa7165fef77a",
     "features/optimistic-entitlement-projection.json": "8c9a89b1273a873cf913804897a63ec0704ad092af8bec71de16a3b85aaef59b",
     "ir/eval-vectors.json": "f1a5a7a0f0cfaea29d62999cddf5082dade701ae07a9d3e523dc671e999e3d7d",
-    "ir/response-field-conformance.json": "4b7bce196877d89947116ec5dcc6368ed5946119df2f77f223b6ec2eb400e4eb",
+    "ir/response-field-conformance.json": "9871fd7126131f34c4e3ef91a89eddb50612152a9e0fbe987fed77e2b69e4001",
     "journeys/planes/admission.json": "2f5c73b5cfde568f0696eeb0044661183219d8719207dd11b129d05baf0f18f3",
     "journeys/planes/entry-evaluation.json": "361608607b5cef842e89e712013dc5449b37a50265bf375b5d7c0545e1b42d33",
     "journeys/planes/executor-controls.json": "f49c98b1a3dce0bfcb64c6fc278fd3facb372e62c1ec5fc46d87916b382587b0",
