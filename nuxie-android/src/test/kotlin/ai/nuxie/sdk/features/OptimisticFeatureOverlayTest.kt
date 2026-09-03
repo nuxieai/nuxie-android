@@ -106,7 +106,7 @@ class OptimisticFeatureOverlayTest {
         core.features.hydrateProfile(
             customer,
             Json.parseToJsonElement(
-                """{"segments":[],"features":[{"id":"exports","type":"metered","balance":null,"unlimited":true}]}""",
+                """{"features":[{"id":"exports","type":"metered","balance":null,"unlimited":true}]}""",
             ).jsonObject,
         )
 
@@ -633,9 +633,9 @@ class OptimisticFeatureOverlayTest {
 
     private fun profile(exportsBalance: Double?) = Json.parseToJsonElement(
         if (exportsBalance == null) {
-            """{"segments":[],"features":[]}"""
+            """{"features":[]}"""
         } else {
-            """{"segments":[],"features":[{"id":"exports","type":"metered","balance":$exportsBalance,"unlimited":false}]}"""
+            """{"features":[{"id":"exports","type":"metered","balance":$exportsBalance,"unlimited":false}]}"""
         },
     ).jsonObject
 

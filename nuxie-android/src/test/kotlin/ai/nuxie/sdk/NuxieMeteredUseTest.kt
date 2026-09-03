@@ -15,6 +15,7 @@ import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.identity.IdentityService
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.testsupport.FakeTransport
+import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponse
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -197,7 +198,7 @@ class NuxieMeteredUseTest {
         core.features.hydrateProfile(
             core.identity.distinctId(),
             Json.parseToJsonElement(
-                """{"segments":[],"features":[{"id":"exports","type":"metered","balance":5,"unlimited":false}]}""",
+                """{"features":[{"id":"exports","type":"metered","balance":5,"unlimited":false}]}""",
             ).jsonObject,
         )
 
@@ -327,7 +328,7 @@ class NuxieMeteredUseTest {
                     }
                     HttpTransport.Response(200, body.encodeToByteArray())
                 } else {
-                    HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
+                    canonicalJourneyProfileResponse()
                 }
             }
         }
@@ -390,7 +391,7 @@ class NuxieMeteredUseTest {
                     """{"status":"ok","message":"recorded","usage":{"current":2,"limit":10,"remaining":$remaining}}"""
                         .encodeToByteArray(),
                 )
-                else -> HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
+                else -> canonicalJourneyProfileResponse()
             }
         }
     }

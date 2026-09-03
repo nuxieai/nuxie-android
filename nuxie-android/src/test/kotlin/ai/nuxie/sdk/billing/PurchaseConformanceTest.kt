@@ -6,6 +6,7 @@ import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.testsupport.FakeTransport
+import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponse
 import android.app.Activity
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.BillingResult
@@ -68,7 +69,7 @@ class PurchaseConformanceTest {
                                 .encodeToByteArray(),
                         )
                     }
-                    "/profile" -> HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
+                    "/profile" -> canonicalJourneyProfileResponse()
                     else -> HttpTransport.Response(200, ByteArray(0))
                 }
             }

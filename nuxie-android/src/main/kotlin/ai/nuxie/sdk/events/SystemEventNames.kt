@@ -29,8 +29,6 @@ internal object SystemEventNames {
     // Experience presentation
     const val EXPERIENCE_SHOWN = "\$experience_shown"
     const val EXPERIENCE_DISMISSED = "\$experience_dismissed"
-    const val EXPERIENCE_PURCHASED = "\$experience_purchased"
-    const val EXPERIENCE_TIMED_OUT = "\$experience_timed_out"
     const val EXPERIENCE_ERRORED = "\$experience_errored"
 
     // Screens

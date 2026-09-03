@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.billing
 
 import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
+import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponse
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.core.NuxieCore
@@ -987,6 +988,7 @@ class PurchaseOutcomeCommitFixtureTest {
 
         override fun execute(request: HttpTransport.Request): HttpTransport.Response {
             requests += request
+            if (request.url.path == "/profile") return canonicalJourneyProfileResponse()
             val body = when (request.url.path) {
                 "/purchase" -> {
                     val report = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
@@ -1026,7 +1028,6 @@ class PurchaseOutcomeCommitFixtureTest {
                         ),
                     )).toString()
                 }
-                "/profile" -> """{"segments":[]}"""
                 else -> "{}"
             }
             return HttpTransport.Response(200, body.encodeToByteArray())

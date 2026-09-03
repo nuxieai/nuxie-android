@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.network
 
+import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponse
+
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.billing.ActivePurchasesResult
@@ -637,7 +639,7 @@ private object PurchaseWireFixtures {
 
         override fun execute(request: HttpTransport.Request): HttpTransport.Response {
             if (request.url.path != "/entitled") {
-                return HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
+                return canonicalJourneyProfileResponse()
             }
             requestBodies += request.body.copyOf()
             if (requestBodies.size == 1) return HttpTransport.Response(503, ByteArray(0))
