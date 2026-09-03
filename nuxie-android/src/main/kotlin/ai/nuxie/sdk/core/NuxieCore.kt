@@ -82,7 +82,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.util.Locale
-import java.io.File
 
 /** Native provenance proves the runtime is present; compatibility is a separate contract. */
 internal fun supportedRuntimeForEmbeddedRuntime(nativeSourceRevision: String?): SupportedRuntime? {

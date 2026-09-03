@@ -2226,9 +2226,9 @@ internal class DeviceLegService(
         return compareValuesBy(
             this,
             other,
-            { it.release.identity.publishedAtSeq },
+            { it.release.identity.releaseSequence },
             { it.release.identity.versionNumber },
-            { it.release.identity.publishedAt },
+            { it.release.identity.releaseCreatedAt },
             { it.release.identity.experienceVersionId },
             { it.release.identity.buildId },
             { it.release.descriptorSha256 },

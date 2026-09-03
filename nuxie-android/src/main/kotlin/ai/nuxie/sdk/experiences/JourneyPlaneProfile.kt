@@ -115,7 +115,7 @@ internal class JourneyPlaneProfile private constructor(
                 release["locator"],
                 setOf(
                     "appId", "environment", "experienceId", "experienceVersionId",
-                    "versionNumber", "buildId", "publishedAt", "publishedAtSeq", "legId",
+                    "versionNumber", "buildId", "releaseCreatedAt", "releaseSequence", "legId",
                 ),
             )
             val legId = hash(locator["legId"])
@@ -125,9 +125,9 @@ internal class JourneyPlaneProfile private constructor(
             }
             if (text(locator["environment"]) !in setOf("test", "live")) fail("environment")
             integer(locator["versionNumber"], minimum = 1)
-            integer(locator["publishedAtSeq"])
-            ReleaseJson.timestamp(locator["publishedAt"])
-            val identity = ExperienceReleaseIdentity.fromJson(locator) ?: fail("identity")
+            integer(locator["releaseSequence"])
+            ReleaseJson.timestamp(locator["releaseCreatedAt"])
+            val identity = ExperienceReleaseIdentity.fromJson(locator, setOf("legId")) ?: fail("identity")
             val envelope = record(release["envelope"])
             SignedReleaseEnvelope.validateShape(
                 envelope.toString().encodeToByteArray(),

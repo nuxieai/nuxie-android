@@ -135,7 +135,16 @@ class ExperienceSurfaceHostPointerTest {
             correlationId: Long,
         ): NativeCallResult<NativePlayerStepOutcome> {
             pointerSteps += pointers
-            return NativeCallResult(0, NativePlayerStepOutcome(true, emptyArray(), emptyArray()))
+            return NativeCallResult(
+                0,
+                NativePlayerStepOutcome(
+                    keepGoing = true,
+                    pointerHits = intArrayOf(),
+                    events = emptyArray(),
+                    hostCommands = emptyArray(),
+                    viewModelChanges = emptyArray(),
+                ),
+            )
         }
 
         override fun renderAndPresent(
