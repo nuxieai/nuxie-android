@@ -97,6 +97,25 @@
       "descriptor": {}
     },
     {
+      "name": "server action device_available",
+      "valid": false,
+      "entry": "entry",
+      "leg": {
+        "steps": [
+          {
+            "kind": "action",
+            "id": "report",
+            "action": {
+              "type": "device_available",
+              "claimWithinMs": 1000
+            },
+            "outlets": {}
+          }
+        ]
+      },
+      "descriptor": {}
+    },
+    {
       "name": "chain fields",
       "valid": false,
       "entry": "entry",
