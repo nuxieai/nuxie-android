@@ -23,6 +23,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
@@ -209,58 +210,86 @@ class DeviceLegRunJournalTest {
     }
 
     @Test fun `renderer publication survives reopen before advancing sequences`() {
-        val journal = DeviceLegRunJournal(directory, "customer")
+        val fixture = screenEmissionFixture()
+        val fixtureRun = fixture.getValue("run").jsonObject
+        val input = fixture.getValue("input").jsonObject
+        val expected = fixture.getValue("expected").jsonObject
+        val customerId = fixtureRun.text("customer_id")
+        val screenId = fixtureRun.text("screen_id")
+        val journal = DeviceLegRunJournal(directory, customerId)
         val run = requireNotNull(
-            journal.admit(arm(), JourneyReentry.EveryTime, "survey", 100_000),
+            journal.admit(arm(), JourneyReentry.EveryTime, screenId, 100_000),
         )
         journal.markStartedQueued(run)
         val context = JsonObject(
             run.context + (
-                "responses" to JsonObject(mapOf("answer" to JsonPrimitive("premium")))
+                "responses" to expected.getValue("response_values").jsonObject
             ),
         )
+        val emissionSequences = expected.getValue("emission_sequences").jsonArray.map {
+            it.jsonPrimitive.long
+        }
+        val emissionIds = expected.getValue("emission_ids").jsonArray.map {
+            it.jsonPrimitive.content
+        }
+        val eventEffects = fixture.getValue("effects").jsonArray.map(JsonElement::jsonObject)
+            .filter { it.text("kind") == "event" }
+        val customerEventIds = expected.getValue("customer_event_ids").jsonArray.map {
+            it.jsonPrimitive.content
+        }
         val publication = DeviceLegRun.PendingPresentationPublication(
-            invocationId = "invocation-1",
-            batchSequence = 0,
-            nextEmissionSequence = 2,
-            sourceScreenId = "survey",
-            sourceActionId = "submit",
-            sourceComponentId = "submit-button",
-            sourceInstanceId = "survey-1",
+            invocationId = "fixture-invocation",
+            batchSequence = expected.number("batch_sequence"),
+            nextEmissionSequence = emissionSequences.last() + 1,
+            sourceScreenId = screenId,
+            sourceActionId = input.text("action_id"),
+            sourceComponentId = input.text("component_id"),
+            sourceInstanceId = input.text("instance_id"),
             responsesChanged = true,
-            items = listOf(
+            items = eventEffects.mapIndexed { index, effect ->
                 DeviceLegRun.PendingPresentationPublication.Item(
-                    name = "survey_submitted",
-                    properties = JsonObject(mapOf("answer" to JsonPrimitive("premium"))),
-                    eventId = "emission-2",
+                    name = effect.text("name"),
+                    properties = effect.getValue("payload").jsonObject,
+                    eventId = customerEventIds[index],
                     occurredAtMillis = 101_000,
-                ),
-            ),
+                )
+            },
         )
 
         assertNotNull(
-            journal.stagePresentationPublication(run.id, "survey", context, publication),
+            journal.stagePresentationPublication(run.id, screenId, context, publication),
         )
         assertNotNull(
-            journal.stagePresentationPublication(run.id, "survey", context, publication),
+            journal.stagePresentationPublication(run.id, screenId, context, publication),
         )
 
-        val staged = DeviceLegRunJournal(directory, "customer").runs().single()
+        val staged = DeviceLegRunJournal(directory, customerId).runs().single()
         assertEquals(publication, staged.pendingPresentationPublication)
-        assertEquals("premium", staged.context.getValue("responses").jsonObject
-            .getValue("answer").jsonPrimitive.content)
-        assertEquals(0L, staged.nextPresentationBatchSequence)
-        assertEquals(0L, staged.nextPresentationEmissionSequence)
+        assertEquals(expected.getValue("response_values"), staged.context.getValue("responses"))
+        assertEquals(expected.number("batch_sequence"), staged.nextPresentationBatchSequence)
+        assertEquals(emissionSequences.first(), staged.nextPresentationEmissionSequence)
+        assertEquals(emissionIds.size, emissionSequences.size)
 
         val cleared = requireNotNull(
-            DeviceLegRunJournal(directory, "customer")
-                .clearPresentationPublication(run.id, "invocation-1"),
+            DeviceLegRunJournal(directory, customerId)
+                .clearPresentationPublication(run.id, "fixture-invocation"),
         )
         assertNull(cleared.pendingPresentationPublication)
-        assertEquals(1L, cleared.nextPresentationBatchSequence)
-        assertEquals(2L, cleared.nextPresentationEmissionSequence)
-        assertEquals("premium", cleared.context.getValue("responses").jsonObject
-            .getValue("answer").jsonPrimitive.content)
+        assertEquals(expected.number("pending_batch_count_after_drain"), listOfNotNull(
+            cleared.pendingPresentationPublication,
+        ).size.toLong())
+        assertEquals(expected.number("batch_sequence") + 1, cleared.nextPresentationBatchSequence)
+        assertEquals(emissionSequences.last() + 1, cleared.nextPresentationEmissionSequence)
+        assertEquals(expected.getValue("response_values"), cleared.context.getValue("responses"))
+
+        assertNull(
+            DeviceLegRunJournal(directory, customerId)
+                .clearPresentationPublication(run.id, "fixture-invocation"),
+        )
+        val replayed = DeviceLegRunJournal(directory, customerId).runs().single()
+        assertEquals(0L, expected.number("replay_response_version_increment"))
+        assertEquals(cleared.nextPresentationEmissionSequence, replayed.nextPresentationEmissionSequence)
+        assertEquals(expected.getValue("response_values"), replayed.context.getValue("responses"))
     }
 
     @Test fun `partially published renderer batch abandons with responses before report retirement`() {
@@ -740,6 +769,17 @@ class DeviceLegRunJournalTest {
 
     private fun fixture(name: String) = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
         .resolve("journeys/planes/$name").readText()).jsonObject
+    private fun screenEmissionFixture() = Json.parseToJsonElement(
+        FixtureRunner.fixturesRoot()
+            .resolve("journeys/screen-emission-runtime/input-effect-persistence-replay.json")
+            .readText(),
+    ).jsonObject.also {
+        assertEquals(
+            "journeys/screen-emission-runtime",
+            it.getValue("suite").jsonPrimitive.content,
+        )
+        assertEquals(1L, it.getValue("version").jsonPrimitive.long)
+    }
     private fun JsonObject.text(key: String) = getValue(key).jsonPrimitive.content
     private fun JsonObject.number(key: String) = getValue(key).jsonPrimitive.long
 
