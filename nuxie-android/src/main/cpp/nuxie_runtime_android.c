@@ -506,6 +506,127 @@ static jbyteArray new_byte_view(JNIEnv *env, struct NuxByteView view) {
   return value;
 }
 
+struct host_value_jni_context {
+  jclass value_class;
+  jclass field_class;
+  jmethodID value_constructor;
+  jmethodID field_constructor;
+};
+
+static jobject copy_host_value(
+    JNIEnv *env, const struct NuxPlayerStepResult *result, size_t value_index,
+    size_t depth, const struct host_value_jni_context *context,
+    NuxStatus *reported_status) {
+  if (depth > 64u) return NULL;
+
+  struct NuxHostValueView view;
+  memset(&view, 0, sizeof(view));
+  view.struct_size = (uint32_t)sizeof(view);
+  NuxStatus status =
+      nux_player_step_result_host_value(result, value_index, &view);
+  if (status != NUX_STATUS_OK) {
+    *reported_status = status;
+    return NULL;
+  }
+  if (view.kind > NUX_HOST_VALUE_KIND_OBJECT ||
+      view.child_count > INT32_MAX ||
+      (view.kind != NUX_HOST_VALUE_KIND_LIST &&
+       view.kind != NUX_HOST_VALUE_KIND_OBJECT && view.child_count != 0)) {
+    return NULL;
+  }
+
+  struct NuxStringView empty_string;
+  memset(&empty_string, 0, sizeof(empty_string));
+  jstring string_value = new_string_view(
+      env, view.kind == NUX_HOST_VALUE_KIND_STRING ? view.string_value
+                                                   : empty_string);
+  if (string_value == NULL) return NULL;
+
+  jsize list_count = view.kind == NUX_HOST_VALUE_KIND_LIST
+                         ? (jsize)view.child_count
+                         : 0;
+  jsize object_count = view.kind == NUX_HOST_VALUE_KIND_OBJECT
+                           ? (jsize)view.child_count
+                           : 0;
+  jobjectArray list_values =
+      (*env)->NewObjectArray(env, list_count, context->value_class, NULL);
+  jobjectArray object_values =
+      (*env)->NewObjectArray(env, object_count, context->field_class, NULL);
+  if (clear_jni_exception(env) || list_values == NULL || object_values == NULL) {
+    if (object_values != NULL) (*env)->DeleteLocalRef(env, object_values);
+    if (list_values != NULL) (*env)->DeleteLocalRef(env, list_values);
+    (*env)->DeleteLocalRef(env, string_value);
+    return NULL;
+  }
+
+  int failed = 0;
+  for (size_t child_index = 0; child_index < view.child_count; child_index++) {
+    struct NuxHostValueChildView child;
+    memset(&child, 0, sizeof(child));
+    child.struct_size = (uint32_t)sizeof(child);
+    status = nux_player_step_result_host_value_child(
+        result, value_index, child_index, &child);
+    if (status != NUX_STATUS_OK) {
+      *reported_status = status;
+      failed = 1;
+      break;
+    }
+    if (view.kind == NUX_HOST_VALUE_KIND_LIST &&
+        (child.key.data != NULL || child.key.len != 0)) {
+      failed = 1;
+      break;
+    }
+    jobject child_value = copy_host_value(
+        env, result, child.value_index, depth + 1u, context, reported_status);
+    if (child_value == NULL) {
+      failed = 1;
+      break;
+    }
+    if (view.kind == NUX_HOST_VALUE_KIND_LIST) {
+      (*env)->SetObjectArrayElement(env, list_values, (jsize)child_index,
+                                    child_value);
+      if (clear_jni_exception(env)) failed = 1;
+    } else {
+      jstring key = new_string_view(env, child.key);
+      jobject field = NULL;
+      if (key == NULL) {
+        failed = 1;
+      } else {
+        field = (*env)->NewObject(env, context->field_class,
+                                  context->field_constructor, key, child_value);
+        if (clear_jni_exception(env) || field == NULL) {
+          failed = 1;
+        } else {
+          (*env)->SetObjectArrayElement(env, object_values,
+                                        (jsize)child_index, field);
+          if (clear_jni_exception(env)) failed = 1;
+        }
+      }
+      if (field != NULL) (*env)->DeleteLocalRef(env, field);
+      if (key != NULL) (*env)->DeleteLocalRef(env, key);
+    }
+    (*env)->DeleteLocalRef(env, child_value);
+    if (failed) break;
+  }
+
+  jobject value = NULL;
+  if (!failed) {
+    value = (*env)->NewObject(
+        env, context->value_class, context->value_constructor, (jint)view.kind,
+        (jboolean)(view.bool_value ? JNI_TRUE : JNI_FALSE),
+        (jdouble)view.number_value, string_value, list_values, object_values);
+    if (clear_jni_exception(env) || value == NULL) failed = 1;
+  }
+  if (failed && value != NULL) {
+    (*env)->DeleteLocalRef(env, value);
+    value = NULL;
+  }
+  (*env)->DeleteLocalRef(env, object_values);
+  (*env)->DeleteLocalRef(env, list_values);
+  (*env)->DeleteLocalRef(env, string_value);
+  return value;
+}
+
 JNIEXPORT jobjectArray JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileInspectAssets(
     JNIEnv *env, jobject self, jbyteArray bytes) {
@@ -1738,9 +1859,14 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
   struct NuxPlayerStepResult *step_result = NULL;
   jclass property_class = NULL;
   jclass event_class = NULL;
+  jclass host_command_class = NULL;
+  jclass host_value_class = NULL;
+  jclass host_field_class = NULL;
   jclass change_class = NULL;
   jclass outcome_class = NULL;
+  jintArray pointer_hits = NULL;
   jobjectArray events = NULL;
+  jobjectArray host_commands = NULL;
   jobjectArray changes = NULL;
   jobject outcome = NULL;
   int failed = 0;
@@ -1790,6 +1916,27 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     return NULL;
   }
 
+  jsize pointer_count = (*env)->GetArrayLength(env, pointer_kind_array);
+  if (clear_jni_exception(env)) {
+    set_status_out(env, status_out, NUX_STATUS_RUNTIME_ERROR);
+    return NULL;
+  }
+  jsize pointer_x_count = (*env)->GetArrayLength(env, pointer_x_array);
+  jsize pointer_y_count = (*env)->GetArrayLength(env, pointer_y_array);
+  jsize pointer_id_count = (*env)->GetArrayLength(env, pointer_id_array);
+  jsize pointer_timestamp_count =
+      (*env)->GetArrayLength(env, pointer_timestamp_array);
+  if (clear_jni_exception(env)) {
+    set_status_out(env, status_out, NUX_STATUS_RUNTIME_ERROR);
+    return NULL;
+  }
+  if (pointer_x_count != pointer_count || pointer_y_count != pointer_count ||
+      pointer_id_count != pointer_count ||
+      pointer_timestamp_count != pointer_count) {
+    set_status_out(env, status_out, NUX_STATUS_INVALID_ARGUMENT);
+    return NULL;
+  }
+
   size_t allocation_count = count == 0 ? 1u : (size_t)count;
   kinds = calloc(allocation_count, sizeof(*kinds));
   bool_values = calloc(allocation_count, sizeof(*bool_values));
@@ -1808,6 +1955,24 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
   if (kinds == NULL || bool_values == NULL || number_values == NULL ||
       names == NULL || inputs == NULL || pointer_kinds == NULL ||
       pointer_xs == NULL || pointer_ys == NULL || pointer_ids == NULL ||
+      pointer_timestamps == NULL || pointers == NULL) {
+    failed = 1;
+    goto typed_step_cleanup;
+  }
+
+  size_t pointer_allocation_count =
+      pointer_count == 0 ? 1u : (size_t)pointer_count;
+  pointer_kinds = calloc(pointer_allocation_count, sizeof(*pointer_kinds));
+  pointer_x_values =
+      calloc(pointer_allocation_count, sizeof(*pointer_x_values));
+  pointer_y_values =
+      calloc(pointer_allocation_count, sizeof(*pointer_y_values));
+  pointer_ids = calloc(pointer_allocation_count, sizeof(*pointer_ids));
+  pointer_timestamps =
+      calloc(pointer_allocation_count, sizeof(*pointer_timestamps));
+  pointers = calloc(pointer_allocation_count, sizeof(*pointers));
+  if (pointer_kinds == NULL || pointer_x_values == NULL ||
+      pointer_y_values == NULL || pointer_ids == NULL ||
       pointer_timestamps == NULL || pointers == NULL) {
     failed = 1;
     goto typed_step_cleanup;
@@ -1900,6 +2065,36 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     inputs[index].number_value = number_values[index];
   }
 
+  if (pointer_count != 0) {
+    (*env)->GetIntArrayRegion(env, pointer_kind_array, 0, pointer_count,
+                              pointer_kinds);
+    (*env)->GetFloatArrayRegion(env, pointer_x_array, 0, pointer_count,
+                                pointer_x_values);
+    (*env)->GetFloatArrayRegion(env, pointer_y_array, 0, pointer_count,
+                                pointer_y_values);
+    (*env)->GetIntArrayRegion(env, pointer_id_array, 0, pointer_count,
+                              pointer_ids);
+    (*env)->GetFloatArrayRegion(env, pointer_timestamp_array, 0, pointer_count,
+                                pointer_timestamps);
+    if (clear_jni_exception(env)) {
+      failed = 1;
+      goto typed_step_cleanup;
+    }
+  }
+  for (jsize index = 0; index < pointer_count; index++) {
+    if (pointer_kinds[index] < NUX_PLAYER_POINTER_KIND_DOWN ||
+        pointer_kinds[index] > NUX_PLAYER_POINTER_KIND_EXIT) {
+      reported_status = NUX_STATUS_INVALID_ARGUMENT;
+      failed = 1;
+      goto typed_step_cleanup;
+    }
+    pointers[index].kind = (uint32_t)pointer_kinds[index];
+    pointers[index].x = pointer_x_values[index];
+    pointers[index].y = pointer_y_values[index];
+    pointers[index].pointer_id = (int32_t)pointer_ids[index];
+    pointers[index].timestamp_seconds = pointer_timestamps[index];
+  }
+
   struct NuxPlayerStep step;
   memset(&step, 0, sizeof(step));
   step.struct_size = (uint32_t)sizeof(step);
@@ -1955,7 +2150,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     failed = 1;
     goto typed_step_cleanup;
   }
-  if (info.event_count > INT32_MAX ||
+  if (info.pointer_result_count > INT32_MAX ||
+      info.event_count > INT32_MAX || info.host_command_count > INT32_MAX ||
       info.view_model_change_count > INT32_MAX) {
     failed = 1;
     goto typed_step_cleanup;
@@ -1970,6 +2166,24 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
   event_class = (*env)->FindClass(
       env, "ai/nuxie/sdk/runtime/NativeRuntimeEvent");
   if (clear_jni_exception(env) || event_class == NULL) {
+    failed = 1;
+    goto typed_step_cleanup;
+  }
+  host_command_class = (*env)->FindClass(
+      env, "ai/nuxie/sdk/runtime/NativeHostCommand");
+  if (clear_jni_exception(env) || host_command_class == NULL) {
+    failed = 1;
+    goto typed_step_cleanup;
+  }
+  host_value_class = (*env)->FindClass(
+      env, "ai/nuxie/sdk/runtime/NativeHostValue");
+  if (clear_jni_exception(env) || host_value_class == NULL) {
+    failed = 1;
+    goto typed_step_cleanup;
+  }
+  host_field_class = (*env)->FindClass(
+      env, "ai/nuxie/sdk/runtime/NativeHostField");
+  if (clear_jni_exception(env) || host_field_class == NULL) {
     failed = 1;
     goto typed_step_cleanup;
   }
@@ -1999,6 +2213,28 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     failed = 1;
     goto typed_step_cleanup;
   }
+  jmethodID host_value_constructor = (*env)->GetMethodID(
+      env, host_value_class, "<init>",
+      "(IZDLjava/lang/String;[Lai/nuxie/sdk/runtime/NativeHostValue;"
+      "[Lai/nuxie/sdk/runtime/NativeHostField;)V");
+  if (clear_jni_exception(env) || host_value_constructor == NULL) {
+    failed = 1;
+    goto typed_step_cleanup;
+  }
+  jmethodID host_field_constructor = (*env)->GetMethodID(
+      env, host_field_class, "<init>",
+      "(Ljava/lang/String;Lai/nuxie/sdk/runtime/NativeHostValue;)V");
+  if (clear_jni_exception(env) || host_field_constructor == NULL) {
+    failed = 1;
+    goto typed_step_cleanup;
+  }
+  jmethodID host_command_constructor = (*env)->GetMethodID(
+      env, host_command_class, "<init>",
+      "(Ljava/lang/String;Lai/nuxie/sdk/runtime/NativeHostValue;)V");
+  if (clear_jni_exception(env) || host_command_constructor == NULL) {
+    failed = 1;
+    goto typed_step_cleanup;
+  }
   jmethodID change_constructor = (*env)->GetMethodID(
       env, change_class, "<init>", "(IJJJI[BFJZJ[J)V");
   if (clear_jni_exception(env) || change_constructor == NULL) {
@@ -2007,12 +2243,42 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
   }
   jmethodID outcome_constructor = (*env)->GetMethodID(
       env, outcome_class, "<init>",
-      "(Z[Lai/nuxie/sdk/runtime/NativeRuntimeEvent;"
+      "(Z[I[Lai/nuxie/sdk/runtime/NativeRuntimeEvent;"
+      "[Lai/nuxie/sdk/runtime/NativeHostCommand;"
       "[Lai/nuxie/sdk/runtime/NativeViewModelChange;)V");
   if (clear_jni_exception(env) || outcome_constructor == NULL) {
     failed = 1;
     goto typed_step_cleanup;
   }
+
+  pointer_hits = (*env)->NewIntArray(env, (jsize)info.pointer_result_count);
+  if (clear_jni_exception(env) || pointer_hits == NULL) {
+    failed = 1;
+    goto typed_step_cleanup;
+  }
+  for (size_t pointer_index = 0;
+       pointer_index < info.pointer_result_count; pointer_index++) {
+    uint32_t raw_hit = UINT32_MAX;
+    accessor_status =
+        nux_player_step_result_pointer(step_result, pointer_index, &raw_hit);
+    if (accessor_status != NUX_STATUS_OK) {
+      reported_status = accessor_status;
+      failed = 1;
+      break;
+    }
+    if (raw_hit > NUX_PLAYER_POINTER_HIT_HIT_OPAQUE) {
+      failed = 1;
+      break;
+    }
+    jint hit = (jint)raw_hit;
+    (*env)->SetIntArrayRegion(env, pointer_hits, (jsize)pointer_index, 1,
+                              &hit);
+    if (clear_jni_exception(env)) {
+      failed = 1;
+      break;
+    }
+  }
+  if (failed) goto typed_step_cleanup;
 
   events = (*env)->NewObjectArray(env, (jsize)info.event_count,
                                   event_class, NULL);
@@ -2144,6 +2410,52 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
   }
 
   if (!failed) {
+    host_commands = (*env)->NewObjectArray(
+        env, (jsize)info.host_command_count, host_command_class, NULL);
+    if (clear_jni_exception(env) || host_commands == NULL) failed = 1;
+  }
+  struct host_value_jni_context host_context = {
+      .value_class = host_value_class,
+      .field_class = host_field_class,
+      .value_constructor = host_value_constructor,
+      .field_constructor = host_field_constructor,
+  };
+  for (size_t command_index = 0;
+       !failed && command_index < info.host_command_count; command_index++) {
+    struct NuxHostCommandView view;
+    memset(&view, 0, sizeof(view));
+    view.struct_size = (uint32_t)sizeof(view);
+    accessor_status = nux_player_step_result_host_command(
+        step_result, command_index, &view);
+    if (accessor_status != NUX_STATUS_OK) {
+      reported_status = accessor_status;
+      failed = 1;
+      break;
+    }
+    jstring name = new_string_view(env, view.name);
+    jobject value = copy_host_value(
+        env, step_result, view.root_value_index, 0u, &host_context,
+        &reported_status);
+    jobject command = NULL;
+    if (name == NULL || value == NULL) {
+      failed = 1;
+    } else {
+      command = (*env)->NewObject(env, host_command_class,
+                                  host_command_constructor, name, value);
+      if (clear_jni_exception(env) || command == NULL) {
+        failed = 1;
+      } else {
+        (*env)->SetObjectArrayElement(env, host_commands,
+                                      (jsize)command_index, command);
+        if (clear_jni_exception(env)) failed = 1;
+      }
+    }
+    if (command != NULL) (*env)->DeleteLocalRef(env, command);
+    if (value != NULL) (*env)->DeleteLocalRef(env, value);
+    if (name != NULL) (*env)->DeleteLocalRef(env, name);
+  }
+
+  if (!failed) {
     changes = (*env)->NewObjectArray(env, (jsize)info.view_model_change_count,
                                      change_class, NULL);
     if (clear_jni_exception(env) || changes == NULL) failed = 1;
@@ -2227,7 +2539,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
   if (!failed) {
     outcome = (*env)->NewObject(
         env, outcome_class, outcome_constructor,
-        (jboolean)(info.keep_going ? JNI_TRUE : JNI_FALSE), events, changes);
+        (jboolean)(info.keep_going ? JNI_TRUE : JNI_FALSE), pointer_hits,
+        events, host_commands, changes);
     if (clear_jni_exception(env) || outcome == NULL) failed = 1;
   }
 
@@ -2237,9 +2550,14 @@ typed_step_cleanup:
     log_cleanup_failure("player_step_result_free", free_status);
   }
   if (changes != NULL) (*env)->DeleteLocalRef(env, changes);
+  if (host_commands != NULL) (*env)->DeleteLocalRef(env, host_commands);
   if (events != NULL) (*env)->DeleteLocalRef(env, events);
+  if (pointer_hits != NULL) (*env)->DeleteLocalRef(env, pointer_hits);
   if (outcome_class != NULL) (*env)->DeleteLocalRef(env, outcome_class);
   if (change_class != NULL) (*env)->DeleteLocalRef(env, change_class);
+  if (host_field_class != NULL) (*env)->DeleteLocalRef(env, host_field_class);
+  if (host_value_class != NULL) (*env)->DeleteLocalRef(env, host_value_class);
+  if (host_command_class != NULL) (*env)->DeleteLocalRef(env, host_command_class);
   if (event_class != NULL) (*env)->DeleteLocalRef(env, event_class);
   if (property_class != NULL) (*env)->DeleteLocalRef(env, property_class);
   if (names != NULL) {

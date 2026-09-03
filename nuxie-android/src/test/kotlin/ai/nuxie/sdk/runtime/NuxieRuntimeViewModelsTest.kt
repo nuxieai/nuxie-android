@@ -117,7 +117,16 @@ class NuxieRuntimeViewModelsTest {
             assertEquals(listOf(NativePlayerInput(2, "submit", false, 0f)), inputs)
             assertEquals(emptyList<NativePlayerPointer>(), pointers)
             assertEquals(55L, correlationId)
-            return NativeCallResult(0, NativePlayerStepOutcome(true, emptyArray(), emptyArray()))
+            return NativeCallResult(
+                0,
+                NativePlayerStepOutcome(
+                    keepGoing = true,
+                    pointerHits = intArrayOf(),
+                    events = emptyArray(),
+                    hostCommands = emptyArray(),
+                    viewModelChanges = emptyArray(),
+                ),
+            )
         }
 
         override fun freeViewModel(handle: Long): Int {

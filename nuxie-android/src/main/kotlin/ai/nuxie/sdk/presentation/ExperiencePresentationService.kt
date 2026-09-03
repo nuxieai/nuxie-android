@@ -10,12 +10,14 @@ import ai.nuxie.sdk.experiences.Delivery
 import ai.nuxie.sdk.experiences.ReleaseArtifactAcquirer
 import ai.nuxie.sdk.billing.ExperiencePurchasePreparer
 import ai.nuxie.sdk.billing.ExperiencePurchaseSession
+import ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome
 import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
 import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.Collections
@@ -158,6 +160,7 @@ internal object PresentationRegistry {
         val onFailure: (Throwable) -> Unit,
         val onDismissed: (CloseReason) -> Unit,
         val onOutcome: (CloseReason) -> Unit,
+        val onRuntimeStep: (NuxiePlayerStepOutcome, ULong) -> Unit,
     ) {
         val terminal = AtomicBoolean(false)
         val firstFrame = AtomicBoolean(false)
@@ -179,10 +182,18 @@ internal object PresentationRegistry {
         onFailure: (Throwable) -> Unit,
         onDismissed: (CloseReason) -> Unit,
         onOutcome: (CloseReason) -> Unit,
+        onRuntimeStep: (NuxiePlayerStepOutcome, ULong) -> Unit = { _, _ -> },
     ) {
         synchronized(lock) {
             check(id !in entries) { "duplicate presentation id" }
-            entries[id] = Entry(content, onFirstFrame, onFailure, onDismissed, onOutcome)
+            entries[id] = Entry(
+                content,
+                onFirstFrame,
+                onFailure,
+                onDismissed,
+                onOutcome,
+                onRuntimeStep,
+            )
         }
     }
 
@@ -243,6 +254,13 @@ internal object PresentationRegistry {
         callback(reason)
     }
 
+    fun reportRuntimeStep(id: String, outcome: NuxiePlayerStepOutcome, correlationId: ULong) {
+        val callback = synchronized(lock) {
+            entries[id]?.takeUnless { it.terminal.get() }?.onRuntimeStep
+        } ?: return
+        callback(outcome, correlationId)
+    }
+
     fun dismiss(id: String, reason: CloseReason) {
         var completion: (() -> Unit)? = null
         val activityToFinish = synchronized(lock) {
@@ -294,6 +312,7 @@ internal class ExperiencePresentationService(
     private val runtimeAvailable: () -> Boolean,
     private val launch: (String) -> Unit,
     private val commerce: ExperiencePurchasePreparer = ExperiencePurchasePreparer.NONE,
+    private val openLink: (String, String?) -> Unit = { _, _ -> },
     private val transitionOutcome: suspend (PresentationOutcome) -> Boolean = { true },
     private val reportOutcome: suspend (PresentationOutcome) -> Unit = {},
     private val firstFrameTimeoutMillis: Long = FIRST_FRAME_TIMEOUT_MILLIS,
@@ -317,6 +336,11 @@ internal class ExperiencePresentationService(
         runtimeAvailable = runtimeAvailable,
         launch = AndroidPresentationLauncher(context.applicationContext ?: context),
         commerce = commerce,
+        openLink = { url, _ ->
+            (context.applicationContext ?: context).startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        },
         transitionOutcome = transitionOutcome,
         reportOutcome = reportOutcome,
         firstFrameTimeoutMillis = FIRST_FRAME_TIMEOUT_MILLIS,
@@ -344,6 +368,7 @@ internal class ExperiencePresentationService(
         data object Legacy : OutcomeSink
         class DeviceLeg(
             val onOutcome: suspend (DeviceLegSurfaceOutcome) -> Unit,
+            val emissions: DeviceLegRuntimeEmissionCoordinator,
         ) : OutcomeSink
     }
 
@@ -446,6 +471,10 @@ internal class ExperiencePresentationService(
         reservation: DeviceLegPresentationReservation?,
         canPresent: () -> Boolean = { true },
         acquire: suspend () -> AcquiredRelease,
+        nextBatchSequence: Long = 0,
+        nextEmissionSequence: Long = 0,
+        onEmissionBatch: suspend (DeviceLegScreenEmissionBatch) -> Boolean = { true },
+        onPresentationRevealed: suspend (String) -> Unit = {},
         onOutcome: suspend (DeviceLegSurfaceOutcome) -> Unit,
     ): ExperienceRef {
         val reserved = reservation as? DeviceLegReservation
@@ -456,7 +485,19 @@ internal class ExperiencePresentationService(
             journeyId = journeyId,
             reservationId = reserved?.id,
             reservationRequired = true,
-            outcomeSink = OutcomeSink.DeviceLeg(onOutcome),
+            outcomeSink = OutcomeSink.DeviceLeg(
+                onOutcome = onOutcome,
+                emissions = DeviceLegRuntimeEmissionCoordinator(
+                    journeyId = journeyId,
+                    screenId = screenId,
+                    descriptor = release.descriptor,
+                    nextBatchSequence = nextBatchSequence,
+                    nextEmissionSequence = nextEmissionSequence,
+                    onEmissionBatch = onEmissionBatch,
+                    onPresentationRevealed = onPresentationRevealed,
+                    onOpenLink = openLink,
+                ),
+            ),
             canPresent = canPresent,
         ) {
             val artboardName = release.descriptor.artboardName(screenId)
@@ -592,6 +633,9 @@ internal class ExperiencePresentationService(
                                     ),
                                 )
                             },
+                            onRuntimeStep = { outcome, correlationId ->
+                                runtimeStep(pending, outcome, correlationId)
+                            },
                         )
                         try {
                             launch(id)
@@ -717,12 +761,12 @@ internal class ExperiencePresentationService(
             this.ownerDistinctId == ownerDistinctId
 
     private fun firstFrame(active: ActivePresentation) {
-        synchronized(active.factLock) {
+        val accepted = synchronized(active.factLock) {
             if (
                 active.closed.get() ||
                 active.runTransitionFinished.isCompleted ||
                 !active.shown.compareAndSet(false, true)
-            ) return
+            ) return@synchronized false
             runCatching {
                 emit(
                     SystemEventNames.EXPERIENCE_SHOWN,
@@ -734,8 +778,49 @@ internal class ExperiencePresentationService(
                     active.ownerDistinctId,
                 )
             }
+            true
         }
-        active.firstFrame.complete(active.ref)
+        if (!accepted) return
+        val deviceLeg = active.outcomeSink as? OutcomeSink.DeviceLeg
+        if (deviceLeg == null) {
+            active.firstFrame.complete(active.ref)
+            return
+        }
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            if (deviceLeg.emissions.reveal()) {
+                active.firstFrame.complete(active.ref)
+            } else if (!active.closed.get()) {
+                PresentationRegistry.reportFailure(
+                    active.id,
+                    ExperiencePresentationException(
+                        ExperiencePresentationException.Reason.HOST_FAILED,
+                        "Journey presentation reveal was rejected",
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun runtimeStep(
+        active: ActivePresentation,
+        outcome: NuxiePlayerStepOutcome,
+        correlationId: ULong,
+    ) {
+        val deviceLeg = active.outcomeSink as? OutcomeSink.DeviceLeg ?: return
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            val accepted = runCatching {
+                deviceLeg.emissions.publish(outcome, correlationId)
+            }.getOrDefault(false)
+            if (!accepted && !active.closed.get()) {
+                PresentationRegistry.reportFailure(
+                    active.id,
+                    ExperiencePresentationException(
+                        ExperiencePresentationException.Reason.HOST_FAILED,
+                        "Journey renderer effects crossed a stale publication boundary",
+                    ),
+                )
+            }
+        }
     }
 
     private fun failed(active: ActivePresentation, error: Throwable) {
@@ -777,6 +862,11 @@ internal class ExperiencePresentationService(
         outcome: PresentationOutcome,
     ) {
         if (outcome.reason == CloseReason.JourneyNavigation) {
+            (active.outcomeSink as? OutcomeSink.DeviceLeg)?.let { deviceLeg ->
+                scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                    deviceLeg.emissions.close()
+                }
+            }
             active.runTransitionFinished.complete(Unit)
             return
         }
@@ -785,6 +875,7 @@ internal class ExperiencePresentationService(
             if (!active.outcomeStarted.compareAndSet(false, true)) return
             scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 try {
+                    deviceLeg.emissions.close()
                     deviceLeg.onOutcome(outcome.reason.deviceLegOutcome())
                 } finally {
                     val emitClose = synchronized(active.factLock) {

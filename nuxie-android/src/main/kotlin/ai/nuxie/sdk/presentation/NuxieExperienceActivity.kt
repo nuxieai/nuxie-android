@@ -107,6 +107,17 @@ internal class NuxieExperienceActivity :
                     PresentationRegistry.reportFirstFrame(presentationId)
                 }
 
+                override fun onRuntimeStep(
+                    outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
+                    correlationId: ULong,
+                ) {
+                    PresentationRegistry.reportRuntimeStep(
+                        presentationId,
+                        outcome,
+                        correlationId,
+                    )
+                }
+
                 override fun onFailure(error: ExperiencePresentationException) {
                     fail(error)
                 }

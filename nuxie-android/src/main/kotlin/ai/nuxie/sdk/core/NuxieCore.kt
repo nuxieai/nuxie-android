@@ -426,6 +426,10 @@ internal class NuxieCore(
                 acquire = {
                     releaseArtifactAcquirer.acquire(request.release, request.delivery)
                 },
+                nextBatchSequence = request.nextBatchSequence,
+                nextEmissionSequence = request.nextEmissionSequence,
+                onEmissionBatch = request.onEmissionBatch,
+                onPresentationRevealed = request.onPresentationRevealed,
                 onOutcome = request.onOutcome,
             )
             DeviceLegPresentationResult.Shown
@@ -491,6 +495,7 @@ internal class NuxieCore(
         journalDirectory = File(appContext.filesDir, "nuxie"),
         scope = scope,
         capture = eventLog::captureIdempotently,
+        captureScreenEvent = eventLog::captureScreenEvent,
         featureAccess = { featureId ->
             features.getCached(featureId, requiredBalance = null, entityId = null)
         },

@@ -386,23 +386,36 @@ internal class NuxieRuntimePlayer internal constructor(
     fun stepWithEvents(
         elapsedSeconds: Double,
         pointers: List<NuxiePlayerPointerEvent> = emptyList(),
+    ): NuxiePlayerStepOutcome = stepTyped(
+        inputs = emptyList(),
+        pointers = pointers,
+        elapsedSeconds = elapsedSeconds,
+    )
+
+    fun stepTyped(
+        inputs: List<NuxiePlayerInput> = emptyList(),
+        pointers: List<NuxiePlayerPointerEvent> = emptyList(),
+        elapsedSeconds: Double,
+        correlationId: ULong = 0uL,
     ): NuxiePlayerStepOutcome {
         require(elapsedSeconds.isFinite() && elapsedSeconds >= 0.0) {
             "Player elapsed seconds must be finite and nonnegative"
         }
         val nativeElapsed = elapsedSeconds.toFloat()
         require(nativeElapsed.isFinite()) { "Player elapsed seconds exceed the native Float range" }
-        val encodedPointers = encodePlayerPointers(pointers)
-        return requireNativeValue(
-            native.stepPlayer(
-                playerHandle = owned.require(),
-                inputs = emptyList(),
-                pointers = encodedPointers,
-                elapsedSeconds = nativeElapsed,
-                correlationId = 0L,
-            ),
-            "step configured player",
-        ).toPlayerStepOutcome()
+        val result = native.stepPlayer(
+            playerHandle = owned.require(),
+            inputs = encodePlayerInputs(inputs),
+            pointers = encodePlayerPointers(pointers),
+            elapsedSeconds = nativeElapsed,
+            correlationId = correlationId.toLong(),
+        )
+        if (result.status != NUX_STATUS_OK) {
+            throw NuxieRuntimeCallException("step player", result.status)
+        }
+        return checkNotNull(result.value) {
+            "Native runtime step player returned no value"
+        }.toPlayerStepOutcome()
     }
 
     fun close() = owned.close()

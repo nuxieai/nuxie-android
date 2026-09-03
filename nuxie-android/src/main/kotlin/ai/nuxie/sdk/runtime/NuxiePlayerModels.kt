@@ -28,6 +28,9 @@ internal data class NuxiePlayerPointerEvent(
     val timestampSeconds: Float,
 )
 
+/** Compatibility name used by the typed renderer publication path. */
+internal typealias NuxiePlayerPointer = NuxiePlayerPointerEvent
+
 /** Fixed construction shape for `NuxPlayerInputChange`. */
 internal data class NativePlayerInput(
     val kind: Int,
@@ -126,6 +129,39 @@ internal data class NuxieRuntimeEvent(
     val properties: List<NuxieRuntimeEventProperty>,
 )
 
+internal enum class NuxiePlayerPointerHit(val nativeValue: Int) {
+    NONE(0),
+    HIT(1),
+    HIT_OPAQUE(2),
+    ;
+
+    companion object {
+        fun fromNativeValue(value: Int): NuxiePlayerPointerHit? =
+            entries.firstOrNull { it.nativeValue == value }
+    }
+}
+
+internal sealed interface NuxieHostValue {
+    data object Null : NuxieHostValue
+
+    data class Bool(val value: Boolean) : NuxieHostValue
+
+    data class Number(val value: Double) : NuxieHostValue
+
+    data class String(val value: kotlin.String) : NuxieHostValue
+
+    data class List(val values: kotlin.collections.List<NuxieHostValue>) : NuxieHostValue
+
+    data class Object(val fields: kotlin.collections.List<Field>) : NuxieHostValue {
+        data class Field(val key: kotlin.String, val value: NuxieHostValue)
+    }
+}
+
+internal data class NuxieHostCommand(
+    val name: String,
+    val value: NuxieHostValue,
+)
+
 internal sealed interface NuxieViewModelValue {
     data object Unsupported : NuxieViewModelValue
 
@@ -163,15 +199,38 @@ internal data class NuxieViewModelChange(
 
 internal data class NuxiePlayerStepOutcome(
     val keepGoing: Boolean,
+    val pointerHits: List<NuxiePlayerPointerHit>,
     val events: List<NuxieRuntimeEvent>,
+    val hostCommands: List<NuxieHostCommand>,
     val viewModelChanges: List<NuxieViewModelChange>,
 )
 
 /** JNI construction shapes copied from one owned `NuxPlayerStepResult`. */
 internal data class NativePlayerStepOutcome(
     val keepGoing: Boolean,
+    val pointerHits: IntArray,
     val events: Array<NativeRuntimeEvent>,
+    val hostCommands: Array<NativeHostCommand>,
     val viewModelChanges: Array<NativeViewModelChange>,
+)
+
+internal data class NativeHostCommand(
+    val name: String,
+    val value: NativeHostValue,
+)
+
+internal data class NativeHostValue(
+    val kind: Int,
+    val boolValue: Boolean,
+    val numberValue: Double,
+    val stringValue: String,
+    val listValue: Array<NativeHostValue>,
+    val objectValue: Array<NativeHostField>,
+)
+
+internal data class NativeHostField(
+    val key: String,
+    val value: NativeHostValue,
 )
 
 internal data class NativeRuntimeEvent(
@@ -211,6 +270,11 @@ internal data class NativeViewModelChange(
 internal fun NativePlayerStepOutcome.toPlayerStepOutcome(): NuxiePlayerStepOutcome =
     NuxiePlayerStepOutcome(
         keepGoing = keepGoing,
+        pointerHits = pointerHits.map { value ->
+            checkNotNull(NuxiePlayerPointerHit.fromNativeValue(value)) {
+                "Unknown native pointer result $value"
+            }
+        },
         events = events.map { event ->
             NuxieRuntimeEvent(
                 localIndex = event.localIndex.checkedNativeIndex("event local index"),
@@ -227,6 +291,12 @@ internal fun NativePlayerStepOutcome.toPlayerStepOutcome(): NuxiePlayerStepOutco
                 },
             )
         },
+        hostCommands = hostCommands.map { command ->
+            NuxieHostCommand(
+                name = command.name,
+                value = command.value.toHostValue(),
+            )
+        },
         viewModelChanges = viewModelChanges.map { change ->
             NuxieViewModelChange(
                 origin = checkNotNull(NuxieViewModelChangeOrigin.fromNativeValue(change.origin)) {
@@ -241,6 +311,27 @@ internal fun NativePlayerStepOutcome.toPlayerStepOutcome(): NuxiePlayerStepOutco
             )
         },
     )
+
+private fun NativeHostValue.toHostValue(): NuxieHostValue = when (kind) {
+    0 -> NuxieHostValue.Null
+    1 -> NuxieHostValue.Bool(boolValue)
+    2 -> {
+        check(numberValue.isFinite()) { "Native host number must be finite" }
+        NuxieHostValue.Number(numberValue)
+    }
+    3 -> NuxieHostValue.String(stringValue)
+    4 -> NuxieHostValue.List(listValue.map(NativeHostValue::toHostValue))
+    5 -> {
+        val keys = objectValue.map(NativeHostField::key)
+        check(keys.size == keys.toSet().size) { "Native host object contains duplicate keys" }
+        NuxieHostValue.Object(
+            objectValue.map { field ->
+                NuxieHostValue.Object.Field(field.key, field.value.toHostValue())
+            },
+        )
+    }
+    else -> error("Unknown native host value kind $kind")
+}
 
 private fun NativeRuntimeEventProperty.toEventPropertyValue(): NuxieRuntimeEventPropertyValue =
     when (kind) {

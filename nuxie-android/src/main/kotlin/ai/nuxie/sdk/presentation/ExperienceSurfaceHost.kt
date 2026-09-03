@@ -3,6 +3,7 @@ package ai.nuxie.sdk.presentation
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
 import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
 import ai.nuxie.sdk.runtime.NuxieAndroidVulkanRenderer
+import ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome
 import ai.nuxie.sdk.runtime.NuxieRuntime
 import ai.nuxie.sdk.runtime.NuxieRuntimeArtboard
 import ai.nuxie.sdk.runtime.NuxieRuntimeFile
@@ -47,6 +48,7 @@ internal class ExperienceSurfaceHost(
 ) : SurfaceView(context), SurfaceHolder.Callback, Choreographer.FrameCallback {
     interface Listener {
         fun onFirstFrame()
+        fun onRuntimeStep(outcome: NuxiePlayerStepOutcome, correlationId: ULong) {}
         fun onFailure(error: ExperiencePresentationException)
         fun onRuntimeEvent(event: NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {}
     }
@@ -58,6 +60,9 @@ internal class ExperienceSurfaceHost(
     private var file: NuxieRuntimeFile? = null
     private var artboard: NuxieRuntimeArtboard? = null
     private var viewModelState: NuxieRuntimeViewModelState? = null
+    private var nextCorrelationId = 1uL
+    private var firstFramePresented = false
+    private val unpublishedSteps = ArrayDeque<PublishedStep>()
 
     /**
      * Lane-confined surface attachment. Jobs already queued when the
@@ -304,10 +309,17 @@ internal class ExperienceSurfaceHost(
             // window, so attached implies a live window; this null-check is
             // a type-level guard, never a reachable behavior change.
             val window = window ?: return@enqueue
+            val correlationId = nextCorrelationId
+            nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) {
+                1uL
+            } else {
+                nextCorrelationId + 1uL
+            }
             val outcome = try {
-                player.stepWithEvents(
+                player.stepTyped(
                     elapsedSeconds = elapsedSeconds,
                     pointers = pointerInput.takeBatch(),
+                    correlationId = correlationId,
                 )
             } catch (error: Throwable) {
                 reportFailure(
@@ -317,6 +329,9 @@ internal class ExperienceSurfaceHost(
                 )
                 return@enqueue
             }
+            if (outcome.hasPublishableEffects()) {
+                unpublishedSteps.addLast(PublishedStep(correlationId, outcome))
+            }
             val disposition = renderer.renderAndPresent(player, window, clearColor, true)
             if (disposition < 0) {
                 Log.w(LOG_TAG, "render_player failed with status ${-disposition}")
@@ -325,7 +340,14 @@ internal class ExperienceSurfaceHost(
                     "Experience rendering failed with status ${-disposition}",
                 )
             } else if (disposition > 0) {
-                listener?.onFirstFrame()
+                if (!firstFramePresented) {
+                    firstFramePresented = true
+                    listener?.onFirstFrame()
+                }
+                while (unpublishedSteps.isNotEmpty()) {
+                    val step = unpublishedSteps.removeFirst()
+                    listener?.onRuntimeStep(step.outcome, step.correlationId)
+                }
             }
             if (outcome.events.isNotEmpty()) {
                 val viewModelSnapshot = try {
@@ -377,6 +399,7 @@ internal class ExperienceSurfaceHost(
             artboard = null
             file = null
             renderer = null
+            unpublishedSteps.clear()
             var firstFailure: Throwable? = null
             closeHandles.forEach { close ->
                 try {
@@ -396,6 +419,14 @@ internal class ExperienceSurfaceHost(
     ) {
         listener?.onFailure(ExperiencePresentationException(reason, message, cause))
     }
+
+    private fun NuxiePlayerStepOutcome.hasPublishableEffects(): Boolean =
+        events.isNotEmpty() || hostCommands.isNotEmpty() || viewModelChanges.isNotEmpty()
+
+    private data class PublishedStep(
+        val correlationId: ULong,
+        val outcome: NuxiePlayerStepOutcome,
+    )
 
     /**
      * Exact upstream import is factory-first. A renderer therefore exists

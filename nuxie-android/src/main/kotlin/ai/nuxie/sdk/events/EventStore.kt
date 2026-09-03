@@ -12,6 +12,13 @@ internal data class EventRouteCommit(
     val localRoutePending: Boolean,
 )
 
+/** Settled stable capture. A null event is a durable beforeSend drop. */
+internal data class StableEventCaptureResult(
+    val settled: Boolean,
+    val event: StoredEvent?,
+    val localRoutePending: Boolean = false,
+)
+
 /** Persistence seam used by the future capture and delivery pipeline. */
 internal interface EventStore {
     suspend fun insertPending(event: StoredEvent)
@@ -60,6 +67,11 @@ internal interface EventStore {
 
     /** True when this stable id was already captured as an event or terminal drop. */
     suspend fun hasStableOutcome(eventId: String): Boolean = false
+
+    /** Returns the immutable event for an already-settled stable id, when it was retained. */
+    suspend fun stableEvent(eventId: String): StoredEvent? = null
+
+    suspend fun isLocalRoutePending(eventId: String): Boolean = false
 
     /**
      * Inserts a server-authored fact directly into local history. The fact is
