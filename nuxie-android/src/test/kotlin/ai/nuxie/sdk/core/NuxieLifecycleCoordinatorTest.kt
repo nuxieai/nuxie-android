@@ -49,7 +49,7 @@ class NuxieLifecycleCoordinatorTest {
             scope = scope,
             onForeground = {
                 order += "profile-revalidated"
-                order += "device-legs-activated"
+                order += "journeys-activated"
             },
         )
         val activity: Activity = Robolectric.buildActivity(Activity::class.java).get()
@@ -63,9 +63,9 @@ class NuxieLifecycleCoordinatorTest {
             assertEquals(
                 listOf(
                     "profile-revalidated",
-                    "device-legs-activated",
+                    "journeys-activated",
                     "profile-revalidated",
-                    "device-legs-activated",
+                    "journeys-activated",
                     "foreground-event",
                 ),
                 order,

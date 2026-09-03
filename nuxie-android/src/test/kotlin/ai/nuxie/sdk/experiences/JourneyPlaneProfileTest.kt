@@ -45,6 +45,27 @@ class JourneyPlaneProfileTest {
         assertEquals(1, profile.releases.size)
     }
 
+    @Test fun `malformed experiment assignments remain recoverable as unavailable facts`() {
+        val original = fixture()
+        val facts = original.getValue("facts").jsonObject
+        val assignments = buildJsonObject {
+            putJsonObject("checkout") {
+                put("variantId", "removed")
+                put("unexpected", true)
+            }
+        }
+        val profile = JourneyPlaneProfile.decode(
+            JsonObject(
+                original + ("facts" to JsonObject(facts + ("assignments" to assignments))),
+            ).toString().encodeToByteArray(),
+        )
+
+        assertEquals(
+            JsonNull,
+            profile.facts.getValue("assignments").jsonObject["checkout"],
+        )
+    }
+
     @Test fun `rejects legacy authority and incomplete or duplicate release bindings`() {
         val root = fixture()
         val arm = root.getValue("armedLegs").jsonArray.single()
@@ -53,7 +74,7 @@ class JourneyPlaneProfileTest {
             mapOf("releases" to JsonArray(emptyList())),
             mapOf("armedLegs" to JsonArray(emptyList())),
             mapOf("armedLegs" to JsonArray(listOf(arm, arm))),
-        )) assertThrows(ReleaseAuthenticationException::class.java) {
+        )) assertThrows(JourneyReleaseAuthenticationException::class.java) {
             JourneyPlaneProfile.decode(JsonObject(root + change).toString().encodeToByteArray())
         }
     }
@@ -66,7 +87,7 @@ class JourneyPlaneProfileTest {
             original.replace("\"present\":false", "\"present\":false,\"value\":0"),
             original.replace("\"opaque\":false", "\"opaque\":0"),
             original.replace("00000000-0000-7000-8000", "00000000-0000-4000-8000"),
-        )) assertThrows(ReleaseAuthenticationException::class.java) { JourneyPlaneProfile.decode(bad.encodeToByteArray()) }
+        )) assertThrows(JourneyReleaseAuthenticationException::class.java) { JourneyPlaneProfile.decode(bad.encodeToByteArray()) }
     }
 
     @Test fun `validates locator envelope and delivery origins before replacement`() {
@@ -80,7 +101,7 @@ class JourneyPlaneProfileTest {
             original.replace("https://assets.example.com/", "https://assets.example.com/base"),
             original.replace("https://assets.example.com/", "https://assets.example.com/?query=1"),
             original.replace("https://assets.example.com/", "http://assets.example.com/"),
-        )) assertThrows(ReleaseAuthenticationException::class.java) { JourneyPlaneProfile.decode(bad.encodeToByteArray()) }
+        )) assertThrows(JourneyReleaseAuthenticationException::class.java) { JourneyPlaneProfile.decode(bad.encodeToByteArray()) }
     }
 
     @Test fun `cached runs may receive fresh facts without being rearmed`() {
@@ -97,7 +118,7 @@ class JourneyPlaneProfileTest {
         }
         val root = JsonObject(fixture() + ("features" to JsonArray(listOf(feature))))
         assertEquals(feature, JourneyPlaneProfile.decode(root.toString().encodeToByteArray()).features.single())
-        assertThrows(ReleaseAuthenticationException::class.java) {
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
             JourneyPlaneProfile.decode(root.toString().replace("semiAnnual", "fortnight").encodeToByteArray())
         }
     }
@@ -106,22 +127,22 @@ class JourneyPlaneProfileTest {
         val original = fixture().toString()
         for (expr in listOf("{}", "{\"type\":\"Bool\",\"value\":\"false\"}", "{\"type\":\"Number\",\"value\":false}")) {
             val invalid = original.replace("\"type\":\"app_foregrounded\"", "\"type\":\"app_foregrounded\",\"condition\":{\"ir_version\":1,\"expr\":$expr}")
-            assertThrows(ReleaseAuthenticationException::class.java) { JourneyPlaneProfile.decode(invalid.encodeToByteArray()) }
+            assertThrows(JourneyReleaseAuthenticationException::class.java) { JourneyPlaneProfile.decode(invalid.encodeToByteArray()) }
         }
         val precise = original.replace("2026-08-12T12:00:00.000Z", "2026-08-12T12:00:00.123456Z")
-        assertEquals("2026-08-12T12:00:00.123456Z", JourneyPlaneProfile.decode(precise.encodeToByteArray()).releases.single().locator.releaseCreatedAt)
+        assertEquals("2026-08-12T12:00:00.123456Z", JourneyPlaneProfile.decode(precise.encodeToByteArray()).releases.single().locator.publishedAt)
     }
 
     @Test fun `canonical numbers cannot duplicate arm authority or smuggle non JSON facts`() {
         val root = fixture()
         val arm = root.getValue("armedLegs").jsonArray.single().jsonObject
         val equivalent = JsonObject(arm + ("binding" to JsonObject(arm.getValue("binding").jsonObject + ("generation" to JsonPrimitive(7.0)))))
-        assertThrows(ReleaseAuthenticationException::class.java) {
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
             JourneyPlaneProfile.decode(JsonObject(root + ("armedLegs" to JsonArray(listOf(arm, equivalent)))).toString().encodeToByteArray())
         }
         for (invalid in listOf("NaN", "Infinity", "unquoted_value", "1e999", "01", "+1")) {
             val body = root.toString().replace("\"present\":true,\"value\":null", "\"present\":true,\"value\":$invalid")
-            assertThrows(invalid, ReleaseAuthenticationException::class.java) { JourneyPlaneProfile.decode(body.encodeToByteArray()) }
+            assertThrows(invalid, JourneyReleaseAuthenticationException::class.java) { JourneyPlaneProfile.decode(body.encodeToByteArray()) }
         }
     }
 }

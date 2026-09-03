@@ -15,7 +15,7 @@ import org.robolectric.Shadows.shadowOf
 import kotlinx.coroutines.runBlocking
 
 @RunWith(RobolectricTestRunner::class)
-class AppActionDeliveryTest {
+class AppActionJourneyReleaseDeliveryTest {
     @After
     fun tearDown() {
         Nuxie.listener = null

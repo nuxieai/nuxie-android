@@ -47,14 +47,18 @@ sealed interface NuxieActivity {
     data class ExperienceDismissed(val experience: ExperienceRef, val reason: DismissReason) : NuxieActivity
     data class ExperienceErrored(val experience: ExperienceRef, val message: String) : NuxieActivity
 
-    data class JourneyStarted(val experience: ExperienceRef) : NuxieActivity
-    /** This device started one leg of a pinned journey. */
-    data class JourneyLegStarted(val experience: ExperienceRef, val legId: String, val generation: Long) : NuxieActivity
-    /** Queued leg completion; the server may continue the journey chain. */
-    data class JourneyLegCompleted(val experience: ExperienceRef, val legId: String, val generation: Long, val outcome: String) : NuxieActivity
+    data class JourneyStarted(
+        val experience: ExperienceRef,
+        val legId: String,
+        val generation: Long,
+    ) : NuxieActivity
+    data class JourneyCompleted(
+        val experience: ExperienceRef,
+        val legId: String,
+        val generation: Long,
+        val outcome: String,
+    ) : NuxieActivity
     data class MilestoneReached(val experience: ExperienceRef, val milestoneId: String) : NuxieActivity
-    data class JourneyConverted(val experience: ExperienceRef, val journeyId: String) : NuxieActivity
-    data class JourneyEnded(val experience: ExperienceRef, val exitReason: JourneyExitReason) : NuxieActivity
 
     data class PurchaseCompleted(val info: PurchaseInfo) : NuxieActivity
     data class PurchaseFailed(val info: PurchaseInfo, val message: String) : NuxieActivity
@@ -90,12 +94,6 @@ sealed interface NuxieActivity {
         val experimentKey: String,
         val variantKey: String,
         val isHoldout: Boolean,
-    ) : NuxieActivity
-
-    data class ExperimentError(
-        val experience: ExperienceRef,
-        val experimentKey: String,
-        val message: String,
     ) : NuxieActivity
 
     data class ProductsUnavailable(val experience: ExperienceRef, val productIds: List<String>) : NuxieActivity
@@ -168,11 +166,8 @@ private fun NuxieActivity.wireName(): String = when (this) {
         is NuxieActivity.ExperienceDismissed -> "experience_dismissed"
         is NuxieActivity.ExperienceErrored -> "experience_errored"
         is NuxieActivity.JourneyStarted -> "journey_started"
-        is NuxieActivity.JourneyLegStarted -> "journey_leg_started"
-        is NuxieActivity.JourneyLegCompleted -> "journey_leg_completed"
+        is NuxieActivity.JourneyCompleted -> "journey_completed"
         is NuxieActivity.MilestoneReached -> "milestone_reached"
-        is NuxieActivity.JourneyConverted -> "journey_converted"
-        is NuxieActivity.JourneyEnded -> "journey_ended"
         is NuxieActivity.PurchaseCompleted -> "purchase_completed"
         is NuxieActivity.PurchaseFailed -> "purchase_failed"
         is NuxieActivity.PurchaseCancelled -> "purchase_cancelled"
@@ -183,7 +178,6 @@ private fun NuxieActivity.wireName(): String = when (this) {
         is NuxieActivity.PurchaseSynced -> "purchase_synced"
         is NuxieActivity.FeatureUsed -> "feature_used"
         is NuxieActivity.ExperimentExposure -> "experiment_exposure"
-        is NuxieActivity.ExperimentError -> "experiment_error"
         is NuxieActivity.ProductsUnavailable -> "products_unavailable"
         is NuxieActivity.ScreenShown -> "screen_shown"
         is NuxieActivity.ScreenDismissed -> "screen_dismissed"
@@ -206,13 +200,12 @@ private fun NuxieActivity.wireProperties(): Map<String, NuxieActivityValue> = bu
                 add(activity.experience)
                 put("message", activity.message.activityValue())
             }
-            is NuxieActivity.JourneyStarted -> add(activity.experience)
-            is NuxieActivity.JourneyLegStarted -> {
+            is NuxieActivity.JourneyStarted -> {
                 add(activity.experience)
                 put("leg_id", activity.legId.activityValue())
                 put("leg_generation", NuxieActivityValue.Int(activity.generation))
             }
-            is NuxieActivity.JourneyLegCompleted -> {
+            is NuxieActivity.JourneyCompleted -> {
                 add(activity.experience)
                 put("leg_id", activity.legId.activityValue())
                 put("leg_generation", NuxieActivityValue.Int(activity.generation))
@@ -221,14 +214,6 @@ private fun NuxieActivity.wireProperties(): Map<String, NuxieActivityValue> = bu
             is NuxieActivity.MilestoneReached -> {
                 add(activity.experience)
                 put("milestone_id", activity.milestoneId.activityValue())
-            }
-            is NuxieActivity.JourneyConverted -> {
-                add(activity.experience)
-                put("journey_id", activity.journeyId.activityValue())
-            }
-            is NuxieActivity.JourneyEnded -> {
-                add(activity.experience)
-                put("exit_reason", activity.exitReason.wireValue().activityValue())
             }
             is NuxieActivity.PurchaseCompleted -> add(activity.info)
             is NuxieActivity.PurchaseFailed -> {
@@ -263,11 +248,6 @@ private fun NuxieActivity.wireProperties(): Map<String, NuxieActivityValue> = bu
                 put("experiment_key", activity.experimentKey.activityValue())
                 put("variant_key", activity.variantKey.activityValue())
                 put("is_holdout", NuxieActivityValue.Bool(activity.isHoldout))
-            }
-            is NuxieActivity.ExperimentError -> {
-                add(activity.experience)
-                put("experiment_key", activity.experimentKey.activityValue())
-                put("message", activity.message.activityValue())
             }
             is NuxieActivity.ProductsUnavailable -> {
                 add(activity.experience)
@@ -331,15 +311,4 @@ private fun PermissionKind.wireValue() = when (this) {
     PermissionKind.NOTIFICATIONS -> "notifications"
     PermissionKind.TRACKING -> "tracking"
     PermissionKind.OTHER -> "other"
-}
-
-internal fun JourneyExitReason.wireValue() = when (this) {
-    JourneyExitReason.COMPLETED -> "completed"
-    JourneyExitReason.DISMISSED -> "dismissed"
-    JourneyExitReason.GOAL_MET -> "goal_met"
-    JourneyExitReason.TRIGGER_UNMATCHED -> "trigger_unmatched"
-    JourneyExitReason.EXPIRED -> "expired"
-    JourneyExitReason.CANCELLED -> "cancelled"
-    JourneyExitReason.ERROR -> "error"
-    JourneyExitReason.SUPERSEDED -> "superseded"
 }

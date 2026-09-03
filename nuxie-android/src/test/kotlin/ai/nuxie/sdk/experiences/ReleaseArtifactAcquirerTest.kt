@@ -35,7 +35,12 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
-class ReleaseArtifactAcquirerTest {
+class JourneyReleaseArtifactAcquirerTest {
+    private data class TestJourneyRelease(
+        val identity: JourneyReleaseIdentity,
+        val descriptor: JsonObject,
+    )
+
     @get:Rule
     val temporaryFolder = TemporaryFolder()
 
@@ -57,12 +62,12 @@ class ReleaseArtifactAcquirerTest {
                 headers = mapOf("Content-Type" to "application/vnd.rive"),
             )
         }
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             context = RuntimeEnvironment.getApplication(),
             transport = transport,
             cacheDirectory = temporaryFolder.newFolder("cache"),
         )
-        val acquirer = ReleaseArtifactAcquirer(cache)
+        val acquirer = JourneyReleaseArtifactAcquirer(cache)
 
         val first = acquirer.acquire(release(riv), delivery())
         val second = acquirer.acquire(release(riv), delivery())
@@ -96,7 +101,7 @@ class ReleaseArtifactAcquirerTest {
             contentType = "application/vnd.rive",
         )
         var requestCount = 0
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             context = RuntimeEnvironment.getApplication(),
             transport = HttpTransport {
                 requestCount += 1
@@ -108,7 +113,7 @@ class ReleaseArtifactAcquirerTest {
             },
             cacheDirectory = temporaryFolder.newFolder("repair-corrupt-cache"),
         )
-        val acquirer = ReleaseArtifactAcquirer(cache)
+        val acquirer = JourneyReleaseArtifactAcquirer(cache)
         val cachedFile = acquirer.acquire(release(riv), delivery()).use { acquired ->
             acquired.rivFile
         }
@@ -131,7 +136,7 @@ class ReleaseArtifactAcquirerTest {
             declaredSha256 = sha256(expected),
         )
         val cacheDirectory = temporaryFolder.newFolder("digest-mismatch")
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             context = RuntimeEnvironment.getApplication(),
             transport = HttpTransport {
                 HttpTransport.Response(
@@ -144,12 +149,12 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
+            JourneyReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
         }
 
         assertEquals(riv.getValue("key").jsonPrimitive.content, failure.artifactKey)
         assertEquals(
-            ReleaseArtifactAcquisitionException.Reason.DIGEST_MISMATCH,
+            JourneyReleaseArtifactAcquisitionException.Reason.DIGEST_MISMATCH,
             failure.reason,
         )
         assertEquals(emptyList<String>(), cacheDirectory.list()?.toList().orEmpty())
@@ -177,17 +182,17 @@ class ReleaseArtifactAcquirerTest {
             )
         }
         val cacheDirectory = temporaryFolder.newFolder("size-overrun")
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             transport,
             cacheDirectory = cacheDirectory,
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
+            JourneyReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.SIZE_OVERRUN, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.SIZE_OVERRUN, failure.reason)
         assertEquals(declared.size + 1, tracking.bytesRead)
         assertEquals(true, tracking.closed)
         assertEquals(emptyList<String>(), cacheDirectory.list()?.toList().orEmpty())
@@ -200,10 +205,10 @@ class ReleaseArtifactAcquirerTest {
             key = "renders/sha256/${sha256(rivBytes)}.riv",
             bytes = rivBytes,
             contentType = "application/vnd.rive",
-            declaredSizeBytes = ExperienceReleaseLimits.RIV_ARTIFACT_BYTES + 1,
+            declaredSizeBytes = JourneyReleaseLimits.RIV_ARTIFACT_BYTES + 1,
         )
         var requestCount = 0
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 requestCount += 1
@@ -213,10 +218,10 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
+            JourneyReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
         assertEquals(0, requestCount)
     }
 
@@ -233,12 +238,12 @@ class ReleaseArtifactAcquirerTest {
             key = "assets/sha256/${sha256(assetBytes)}.png",
             bytes = assetBytes,
             contentType = "image/png",
-            declaredSizeBytes = ExperienceReleaseLimits.EXTERNAL_ASSET_BYTES + 1,
+            declaredSizeBytes = JourneyReleaseLimits.EXTERNAL_ASSET_BYTES + 1,
             kind = "image",
             required = false,
         )
         var requestCount = 0
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 requestCount += 1
@@ -248,13 +253,13 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(
+            JourneyReleaseArtifactAcquirer(cache).acquire(
                 release(riv, assets = listOf(asset)),
                 delivery(),
             )
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
         assertEquals(0, requestCount)
     }
 
@@ -271,10 +276,10 @@ class ReleaseArtifactAcquirerTest {
             key = "screen-behavior/sha256/${sha256(scriptBytes)}.bin",
             bytes = scriptBytes,
             contentType = "application/octet-stream",
-            declaredSizeBytes = ExperienceReleaseLimits.EXTERNAL_ASSET_BYTES + 1,
+            declaredSizeBytes = JourneyReleaseLimits.EXTERNAL_ASSET_BYTES + 1,
         )
         var requestCount = 0
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 requestCount += 1
@@ -284,13 +289,13 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(
+            JourneyReleaseArtifactAcquirer(cache).acquire(
                 release(riv, scripts = listOf(script)),
                 delivery(),
             )
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
         assertEquals(0, requestCount)
     }
 
@@ -313,7 +318,7 @@ class ReleaseArtifactAcquirerTest {
             )
         }
         var requestCount = 0
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 requestCount += 1
@@ -323,10 +328,10 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(release(riv, scripts = scripts), delivery())
+            JourneyReleaseArtifactAcquirer(cache).acquire(release(riv, scripts = scripts), delivery())
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
         assertEquals(0, requestCount)
     }
 
@@ -346,7 +351,7 @@ class ReleaseArtifactAcquirerTest {
             declaredSizeBytes = 5 * 1024 * 1024,
         )
         val requested = mutableListOf<URL>()
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { request ->
                 requested += request.url
@@ -368,13 +373,13 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(
+            JourneyReleaseArtifactAcquirer(cache).acquire(
                 release(riv, scripts = listOf(script)),
                 delivery(),
             )
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.SIZE_MISMATCH, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.SIZE_MISMATCH, failure.reason)
         assertEquals(2, requested.size)
         assertTrue(requested.last().path.startsWith("/assets/screen-behavior/"))
     }
@@ -388,7 +393,7 @@ class ReleaseArtifactAcquirerTest {
             key = "renders/sha256/${sha256(rivBytes)}.riv",
             bytes = rivBytes,
             contentType = "application/vnd.rive",
-            declaredSizeBytes = ExperienceReleaseLimits.RIV_ARTIFACT_BYTES,
+            declaredSizeBytes = JourneyReleaseLimits.RIV_ARTIFACT_BYTES,
         )
         val assets = assetBytes.mapIndexed { index, bytes ->
             artifact(
@@ -396,7 +401,7 @@ class ReleaseArtifactAcquirerTest {
                 bytes = bytes,
                 contentType = "image/png",
                 declaredSizeBytes = if (index < 2) {
-                    ExperienceReleaseLimits.EXTERNAL_ASSET_BYTES
+                    JourneyReleaseLimits.EXTERNAL_ASSET_BYTES
                 } else {
                     1
                 },
@@ -404,7 +409,7 @@ class ReleaseArtifactAcquirerTest {
             )
         }
         var requestCount = 0
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 requestCount += 1
@@ -414,10 +419,10 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(release(riv, assets), delivery())
+            JourneyReleaseArtifactAcquirer(cache).acquire(release(riv, assets), delivery())
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
         assertEquals(0, requestCount)
     }
 
@@ -429,18 +434,18 @@ class ReleaseArtifactAcquirerTest {
             bytes = rivBytes,
             contentType = "application/vnd.rive",
         )
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { HttpTransport.Response(503, ByteArray(0)) },
             cacheDirectory = temporaryFolder.newFolder("status"),
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
+            JourneyReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
         }
 
         assertEquals(riv.getValue("key").jsonPrimitive.content, failure.artifactKey)
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.HTTP_STATUS, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.HTTP_STATUS, failure.reason)
     }
 
     @Test
@@ -452,7 +457,7 @@ class ReleaseArtifactAcquirerTest {
             contentType = "application/vnd.rive",
         )
         val requested = mutableListOf<URL>()
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { request ->
                 requested += request.url
@@ -466,11 +471,11 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
+            JourneyReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
         }
 
         assertEquals(
-            ReleaseArtifactAcquisitionException.Reason.REDIRECT_ESCAPED_ORIGIN,
+            JourneyReleaseArtifactAcquisitionException.Reason.REDIRECT_ESCAPED_ORIGIN,
             failure.reason,
         )
         assertEquals(listOf(URL("https://cdn.nuxie.test/renders/sha256/${sha256(rivBytes)}.riv")), requested)
@@ -484,7 +489,7 @@ class ReleaseArtifactAcquirerTest {
             bytes = rivBytes,
             contentType = "application/vnd.rive",
         )
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 HttpTransport.Response(
@@ -497,11 +502,11 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
+            JourneyReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
         }
 
         assertEquals(
-            ReleaseArtifactAcquisitionException.Reason.CONTENT_TYPE_MISMATCH,
+            JourneyReleaseArtifactAcquisitionException.Reason.CONTENT_TYPE_MISMATCH,
             failure.reason,
         )
     }
@@ -521,7 +526,7 @@ class ReleaseArtifactAcquirerTest {
             contentType = "application/octet-stream",
         )
         val requested = mutableListOf<URL>()
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { request ->
                 requested += request.url
@@ -543,7 +548,7 @@ class ReleaseArtifactAcquirerTest {
             cacheDirectory = temporaryFolder.newFolder("screen-script"),
         )
 
-        ReleaseArtifactAcquirer(cache).acquire(
+        JourneyReleaseArtifactAcquirer(cache).acquire(
             release(riv, scripts = listOf(script)),
             delivery(),
         ).use { acquired ->
@@ -570,7 +575,7 @@ class ReleaseArtifactAcquirerTest {
             bytes = scriptBytes,
             contentType = "application/octet-stream",
         )
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { request ->
                 if (request.url.path.startsWith("/renders/")) {
@@ -587,13 +592,13 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(
+            JourneyReleaseArtifactAcquirer(cache).acquire(
                 release(riv, scripts = listOf(script)),
                 delivery(),
             )
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.HTTP_STATUS, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.HTTP_STATUS, failure.reason)
         assertEquals(script.getValue("key").jsonPrimitive.content, failure.artifactKey)
     }
 
@@ -612,7 +617,7 @@ class ReleaseArtifactAcquirerTest {
             contentType = "application/octet-stream",
         )
         val requestCount = AtomicInteger()
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { request ->
                 requestCount.incrementAndGet()
@@ -634,7 +639,7 @@ class ReleaseArtifactAcquirerTest {
             cacheDirectory = temporaryFolder.newFolder("shared-script"),
         )
 
-        ReleaseArtifactAcquirer(cache).acquire(
+        JourneyReleaseArtifactAcquirer(cache).acquire(
             release(riv, scripts = listOf(script, script)),
             delivery(),
         ).use {
@@ -666,7 +671,7 @@ class ReleaseArtifactAcquirerTest {
             declaredSizeBytes = scriptBytes.size + 1,
         )
         val requestCount = AtomicInteger()
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { request ->
                 requestCount.incrementAndGet()
@@ -686,7 +691,7 @@ class ReleaseArtifactAcquirerTest {
             },
             cacheDirectory = temporaryFolder.newFolder("metadata-conflict"),
         )
-        val acquirer = ReleaseArtifactAcquirer(cache)
+        val acquirer = JourneyReleaseArtifactAcquirer(cache)
         val acquired = acquirer.acquire(release(riv, scripts = listOf(script)), delivery())
         val leasedScript = acquired.artifactsByKey.getValue(scriptKey)
         val completedRequests = requestCount.get()
@@ -698,7 +703,7 @@ class ReleaseArtifactAcquirerTest {
                 )
             }
 
-            assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+            assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
             assertEquals(completedRequests, requestCount.get())
             assertTrue(leasedScript.exists())
             assertArrayEquals(scriptBytes, leasedScript.readBytes())
@@ -731,7 +736,7 @@ class ReleaseArtifactAcquirerTest {
             kind = "script",
         )
         var requestCount = 0
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 requestCount += 1
@@ -741,13 +746,13 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(
+            JourneyReleaseArtifactAcquirer(cache).acquire(
                 release(riv, assets = listOf(first, conflicting)),
                 delivery(),
             )
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
         assertEquals(0, requestCount)
     }
 
@@ -775,7 +780,7 @@ class ReleaseArtifactAcquirerTest {
             kind = "image",
             required = true,
         )
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { request ->
                 if (request.url.path.startsWith("/renders/")) {
@@ -792,13 +797,13 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(
+            JourneyReleaseArtifactAcquirer(cache).acquire(
                 release(riv, assets = listOf(optionalAsset, requiredAsset)),
                 delivery(),
             )
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.HTTP_STATUS, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.HTTP_STATUS, failure.reason)
         assertEquals(assetKey, failure.artifactKey)
     }
 
@@ -836,7 +841,7 @@ class ReleaseArtifactAcquirerTest {
         assertAssetFailure(
             required = true,
             name = "required-transport",
-            expectedReason = ReleaseArtifactAcquisitionException.Reason.TRANSPORT,
+            expectedReason = JourneyReleaseArtifactAcquisitionException.Reason.TRANSPORT,
         ) {
             throw IOException("offline")
         }
@@ -854,7 +859,7 @@ class ReleaseArtifactAcquirerTest {
         assertAssetFailure(
             required = true,
             name = "required-server",
-            expectedReason = ReleaseArtifactAcquisitionException.Reason.HTTP_STATUS,
+            expectedReason = JourneyReleaseArtifactAcquisitionException.Reason.HTTP_STATUS,
         ) {
             HttpTransport.Response(503, ByteArray(0))
         }
@@ -872,7 +877,7 @@ class ReleaseArtifactAcquirerTest {
         assertAssetFailure(
             required = true,
             name = "required-short-body",
-            expectedReason = ReleaseArtifactAcquisitionException.Reason.SIZE_MISMATCH,
+            expectedReason = JourneyReleaseArtifactAcquisitionException.Reason.SIZE_MISMATCH,
         ) {
             HttpTransport.Response(200, ByteArray(0), mapOf("Content-Type" to "image/png"))
         }
@@ -905,7 +910,7 @@ class ReleaseArtifactAcquirerTest {
             kind = "image",
             required = false,
         )
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { request ->
                 if (request.url.path.startsWith("/renders/")) {
@@ -921,7 +926,7 @@ class ReleaseArtifactAcquirerTest {
             cacheDirectory = temporaryFolder.newFolder("optional-not-found"),
         )
 
-        ReleaseArtifactAcquirer(cache).acquire(
+        JourneyReleaseArtifactAcquirer(cache).acquire(
             release(riv, assets = listOf(asset)),
             delivery(),
         ).use { acquired ->
@@ -945,7 +950,7 @@ class ReleaseArtifactAcquirerTest {
             kind = "image",
             required = true,
         )
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { request ->
                 if (request.url.path.startsWith("/renders/")) {
@@ -958,13 +963,13 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(
+            JourneyReleaseArtifactAcquirer(cache).acquire(
                 release(riv, assets = listOf(asset)),
                 delivery(),
             )
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.HTTP_STATUS, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.HTTP_STATUS, failure.reason)
         assertEquals(asset.getValue("key").jsonPrimitive.content, failure.artifactKey)
     }
 
@@ -978,7 +983,7 @@ class ReleaseArtifactAcquirerTest {
         )
         val requestStarted = CountDownLatch(1)
         val requestCount = AtomicInteger()
-        lateinit var firstCache: ReleaseArtifactCache
+        lateinit var firstCache: JourneyReleaseArtifactCache
         val transport = HttpTransport {
             requestCount.incrementAndGet()
             requestStarted.countDown()
@@ -996,16 +1001,16 @@ class ReleaseArtifactAcquirerTest {
             )
         }
         val cacheDirectory = temporaryFolder.newFolder("concurrent")
-        firstCache = ReleaseArtifactCache(
+        firstCache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             transport,
             cacheDirectory = cacheDirectory,
         )
-        val firstAcquirer = ReleaseArtifactAcquirer(
+        val firstAcquirer = JourneyReleaseArtifactAcquirer(
             firstCache,
         )
-        val secondAcquirer = ReleaseArtifactAcquirer(
-            ReleaseArtifactCache(
+        val secondAcquirer = JourneyReleaseArtifactAcquirer(
+            JourneyReleaseArtifactCache(
                 RuntimeEnvironment.getApplication(),
                 transport,
                 cacheDirectory = cacheDirectory,
@@ -1021,7 +1026,7 @@ class ReleaseArtifactAcquirerTest {
             assertEquals(results[0].rivFile, results[1].rivFile)
             assertArrayEquals(rivBytes, results[0].rivFile.readBytes())
         } finally {
-            results.forEach(AcquiredRelease::close)
+            results.forEach(AcquiredJourneyRelease::close)
         }
     }
 
@@ -1041,7 +1046,7 @@ class ReleaseArtifactAcquirerTest {
             kind = "image",
         )
         val requested = mutableListOf<URL>()
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { request ->
                 requested += request.url
@@ -1063,7 +1068,7 @@ class ReleaseArtifactAcquirerTest {
             cacheDirectory = temporaryFolder.newFolder("protected"),
         )
 
-        val acquired = ReleaseArtifactAcquirer(cache).acquire(
+        val acquired = JourneyReleaseArtifactAcquirer(cache).acquire(
             release(riv, assets = listOf(asset)),
             delivery(),
         )
@@ -1086,17 +1091,17 @@ class ReleaseArtifactAcquirerTest {
     fun parkedRunPinSurvivesAcquiredLeaseAndCacheReconstruction() = runTest {
         val retainedBytes = "retained".encodeToByteArray()
         val cacheDirectory = temporaryFolder.newFolder("parked-pin")
-        val cache = ReleaseArtifactCache(RuntimeEnvironment.getApplication(), HttpTransport {
+        val cache = JourneyReleaseArtifactCache(RuntimeEnvironment.getApplication(), HttpTransport {
             HttpTransport.Response(200, retainedBytes, mapOf("Content-Type" to "application/vnd.rive"))
         }, maxTotalBytes = 12, cacheDirectory = cacheDirectory)
         val riv = artifact("renders/sha256/${sha256(retainedBytes)}.riv", retainedBytes, "application/vnd.rive")
-        val acquired = ReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
+        val acquired = JourneyReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
         cache.retainForRun("customer/journey/generation", listOf(sha256(retainedBytes))).close()
         acquired.close()
         acquired.rivFile.setLastModified(System.currentTimeMillis() - 60_000)
 
         var outsider = "outsider".encodeToByteArray()
-        val restarted = ReleaseArtifactCache(RuntimeEnvironment.getApplication(), HttpTransport {
+        val restarted = JourneyReleaseArtifactCache(RuntimeEnvironment.getApplication(), HttpTransport {
             HttpTransport.Response(200, outsider)
         }, maxTotalBytes = 12, cacheDirectory = cacheDirectory)
         restarted.acquire("first", sha256(outsider), 8, 8, "https://cdn.nuxie.test/")
@@ -1119,7 +1124,7 @@ class ReleaseArtifactAcquirerTest {
             contentType = "application/vnd.rive",
         )
         val cacheDirectory = temporaryFolder.newFolder("consumption-lease")
-        val releaseCache = ReleaseArtifactCache(
+        val releaseCache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 HttpTransport.Response(
@@ -1132,14 +1137,14 @@ class ReleaseArtifactAcquirerTest {
             cacheDirectory = cacheDirectory,
         )
         var outsiderBytes = firstOutsiderBytes
-        val pruningCache = ReleaseArtifactCache(
+        val pruningCache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { HttpTransport.Response(200, outsiderBytes) },
             maxTotalBytes = 12,
             cacheDirectory = cacheDirectory,
         )
 
-        val acquired = ReleaseArtifactAcquirer(releaseCache).acquire(release(riv), delivery())
+        val acquired = JourneyReleaseArtifactAcquirer(releaseCache).acquire(release(riv), delivery())
         try {
             acquired.rivFile.setLastModified(System.currentTimeMillis() - 60_000)
             pruningCache.acquire(
@@ -1184,7 +1189,7 @@ class ReleaseArtifactAcquirerTest {
             required = false,
         )
         var requestCount = 0
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 requestCount += 1
@@ -1194,13 +1199,13 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(
+            JourneyReleaseArtifactAcquirer(cache).acquire(
                 release(riv, assets = listOf(asset)),
                 delivery(),
             )
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
         assertEquals(asset.getValue("key").jsonPrimitive.content, failure.artifactKey)
         assertEquals(0, requestCount)
     }
@@ -1220,7 +1225,7 @@ class ReleaseArtifactAcquirerTest {
             contentType = "application/octet-stream",
         )
         var requestCount = 0
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 requestCount += 1
@@ -1230,13 +1235,13 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(
+            JourneyReleaseArtifactAcquirer(cache).acquire(
                 release(riv, scripts = listOf(script)),
                 delivery(),
             )
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
         assertEquals(script.getValue("key").jsonPrimitive.content, failure.artifactKey)
         assertEquals(0, requestCount)
     }
@@ -1263,7 +1268,7 @@ class ReleaseArtifactAcquirerTest {
             contentType = "application/octet-stream",
         )
         var requestCount = 0
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 requestCount += 1
@@ -1273,13 +1278,13 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(
+            JourneyReleaseArtifactAcquirer(cache).acquire(
                 release(riv, assets = listOf(asset), scripts = listOf(script)),
                 delivery(),
             )
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
         assertEquals(0, requestCount)
     }
 
@@ -1293,7 +1298,7 @@ class ReleaseArtifactAcquirerTest {
         )
         var requestCount = 0
         val cacheDirectory = temporaryFolder.newFolder("retry")
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 requestCount += 1
@@ -1306,11 +1311,11 @@ class ReleaseArtifactAcquirerTest {
             },
             cacheDirectory = cacheDirectory,
         )
-        val acquirer = ReleaseArtifactAcquirer(cache)
+        val acquirer = JourneyReleaseArtifactAcquirer(cache)
 
         val failure = acquisitionFailure { acquirer.acquire(release(riv), delivery()) }
         acquirer.acquire(release(riv), delivery()).use { acquired ->
-            assertEquals(ReleaseArtifactAcquisitionException.Reason.TRANSPORT, failure.reason)
+            assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.TRANSPORT, failure.reason)
             assertEquals(2, requestCount)
             assertArrayEquals(rivBytes, acquired.rivFile.readBytes())
             assertEquals(1, cacheDirectory.list()?.size)
@@ -1324,7 +1329,7 @@ class ReleaseArtifactAcquirerTest {
         orphan.writeBytes("partial".encodeToByteArray())
         orphan.setLastModified(System.currentTimeMillis() - 120_000)
 
-        ReleaseArtifactCache(
+        JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { error("No request is expected") },
             cacheDirectory = cacheDirectory,
@@ -1343,7 +1348,7 @@ class ReleaseArtifactAcquirerTest {
         val ownership = owner.channel.lock()
         try {
             val content = "abcdefgh".encodeToByteArray()
-            val cache = ReleaseArtifactCache(
+            val cache = JourneyReleaseArtifactCache(
                 RuntimeEnvironment.getApplication(),
                 HttpTransport { HttpTransport.Response(200, content) },
                 maxTotalBytes = 8,
@@ -1383,7 +1388,7 @@ class ReleaseArtifactAcquirerTest {
             kind = "image",
         )
         var requestCount = 0
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 requestCount += 1
@@ -1393,13 +1398,13 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val failure = acquisitionFailure {
-            ReleaseArtifactAcquirer(cache).acquire(
+            JourneyReleaseArtifactAcquirer(cache).acquire(
                 release(riv, assets = listOf(asset)),
                 delivery(),
             )
         }
 
-        assertEquals(ReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
+        assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.INVALID_DESCRIPTOR, failure.reason)
         assertEquals(duplicateKey, failure.artifactKey)
         assertEquals(0, requestCount)
     }
@@ -1423,7 +1428,7 @@ class ReleaseArtifactAcquirerTest {
         val assetRequestStarted = CountDownLatch(1)
         val completeAssetRequest = CountDownLatch(1)
         val cacheDirectory = temporaryFolder.newFolder("shared-protection")
-        val releaseCache = ReleaseArtifactCache(
+        val releaseCache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { request ->
                 when (request.url.path) {
@@ -1447,7 +1452,7 @@ class ReleaseArtifactAcquirerTest {
             maxTotalBytes = 12,
             cacheDirectory = cacheDirectory,
         )
-        val pruningCache = ReleaseArtifactCache(
+        val pruningCache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 HttpTransport.Response(200, outsiderBytes)
@@ -1457,7 +1462,7 @@ class ReleaseArtifactAcquirerTest {
         )
 
         val acquisition = async {
-            ReleaseArtifactAcquirer(releaseCache).acquire(
+            JourneyReleaseArtifactAcquirer(releaseCache).acquire(
                 release(riv, assets = listOf(asset)),
                 delivery(),
             )
@@ -1490,11 +1495,8 @@ class ReleaseArtifactAcquirerTest {
         riv: JsonObject,
         assets: List<JsonObject> = emptyList(),
         scripts: List<JsonObject> = emptyList(),
-    ) = AuthenticatedRelease(
-        keyId = "test-key",
-        descriptorSha256 = "0".repeat(64),
+    ) = TestJourneyRelease(
         identity = TEST_IDENTITY,
-        descriptorBytes = ByteArray(0),
         descriptor = buildJsonObject {
             put("screenBehaviors", buildJsonArray {
                 scripts.forEachIndexed { index, script ->
@@ -1518,8 +1520,12 @@ class ReleaseArtifactAcquirerTest {
                 put("assets", buildJsonArray { assets.forEach(::add) })
             })
         },
-        releaseSequenceToPromote = null,
     )
+
+    private suspend fun JourneyReleaseArtifactAcquirer.acquire(
+        release: TestJourneyRelease,
+        delivery: JourneyReleaseDelivery,
+    ): AcquiredJourneyRelease = acquire(release.identity, release.descriptor, delivery)
 
     private fun artifact(
         key: String,
@@ -1542,17 +1548,17 @@ class ReleaseArtifactAcquirerTest {
 
     private suspend fun acquisitionFailure(
         block: suspend () -> Unit,
-    ): ReleaseArtifactAcquisitionException = try {
+    ): JourneyReleaseArtifactAcquisitionException = try {
         block()
         throw AssertionError("Expected acquisition to fail")
-    } catch (error: ReleaseArtifactAcquisitionException) {
+    } catch (error: JourneyReleaseArtifactAcquisitionException) {
         error
     }
 
     private suspend fun assertAssetFailure(
         required: Boolean,
         name: String,
-        expectedReason: ReleaseArtifactAcquisitionException.Reason? = null,
+        expectedReason: JourneyReleaseArtifactAcquisitionException.Reason? = null,
         response: (ByteArray) -> HttpTransport.Response,
     ) {
         val rivBytes = "$name-riv".encodeToByteArray()
@@ -1569,7 +1575,7 @@ class ReleaseArtifactAcquirerTest {
             kind = "image",
             required = required,
         )
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport { request ->
                 if (request.url.path.startsWith("/renders/")) {
@@ -1586,7 +1592,7 @@ class ReleaseArtifactAcquirerTest {
         )
 
         if (expectedReason == null) {
-            val acquired = ReleaseArtifactAcquirer(cache).acquire(
+            val acquired = JourneyReleaseArtifactAcquirer(cache).acquire(
                 release(riv, assets = listOf(asset)),
                 delivery(),
             )
@@ -1597,7 +1603,7 @@ class ReleaseArtifactAcquirerTest {
             }
         } else {
             val failure = acquisitionFailure {
-                ReleaseArtifactAcquirer(cache).acquire(
+                JourneyReleaseArtifactAcquirer(cache).acquire(
                     release(riv, assets = listOf(asset)),
                     delivery(),
                 )
@@ -1624,7 +1630,7 @@ class ReleaseArtifactAcquirerTest {
         }
     }
 
-    private fun delivery() = Delivery(
+    private fun delivery() = JourneyReleaseDelivery(
         renderBaseUrl = "https://cdn.nuxie.test/renders/",
         assetBaseUrl = "https://cdn.nuxie.test/assets/",
     )
@@ -1634,15 +1640,15 @@ class ReleaseArtifactAcquirerTest {
             .joinToString("") { "%02x".format(it) }
 
     private companion object {
-        val TEST_IDENTITY = ExperienceReleaseIdentity(
+        val TEST_IDENTITY = JourneyReleaseIdentity(
             appId = "app",
             environment = "development",
             experienceId = "experience",
             experienceVersionId = "version",
             buildId = "build",
             versionNumber = 1,
-            releaseCreatedAt = "2026-08-24T00:00:00Z",
-            releaseSequence = 1,
+            publishedAt = "2026-08-24T00:00:00Z",
+            publishedAtSeq = 1,
         )
     }
 }

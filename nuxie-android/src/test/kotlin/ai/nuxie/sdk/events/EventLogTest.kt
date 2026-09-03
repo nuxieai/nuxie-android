@@ -503,10 +503,9 @@ class EventLogTest {
                 )
             },
         )
-        val forwarder = ActivityForwarder(
-            resolveExperience = { _, _ -> null },
-            deliver = { forwardedTimestamps += it.timestampMillis to it.receivedAtMillis },
-        )
+        val forwarder = ActivityForwarder {
+            forwardedTimestamps += it.timestampMillis to it.receivedAtMillis
+        }
         eventLog.subscribeForwarding { event -> forwarder.onCommitted(event) }
 
         assertTrue(
@@ -539,10 +538,7 @@ class EventLogTest {
                 )
             },
         )
-        val forwarder = ActivityForwarder(
-            resolveExperience = { _, _ -> null },
-            deliver = { forwarded += it },
-        )
+        val forwarder = ActivityForwarder { forwarded += it }
         eventLog.subscribeForwarding { event -> forwarder.onCommitted(event) }
 
         eventLog.capture(
@@ -573,10 +569,7 @@ class EventLogTest {
                 )
             },
         )
-        val forwarder = ActivityForwarder(
-            resolveExperience = { _, _ -> null },
-            deliver = { forwarded += it },
-        )
+        val forwarder = ActivityForwarder { forwarded += it }
         eventLog.subscribeForwarding { event -> forwarder.onCommitted(event) }
 
         eventLog.capture(SystemEventNames.APP_OPENED)
@@ -691,7 +684,7 @@ class EventLogTest {
         val eventLog = log(store, forwardingEnabled = { true }, nowMillis = { 2_000L })
         val fact = StoredEvent(
             id = "server-fact",
-            name = JourneyEventNames.CONVERTED,
+            name = JourneyEventNames.MILESTONE,
             timestampMillis = 500L,
             distinctId = "anon-1",
         )

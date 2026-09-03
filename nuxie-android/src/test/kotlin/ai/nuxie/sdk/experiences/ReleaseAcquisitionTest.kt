@@ -1,11 +1,8 @@
 package ai.nuxie.sdk.experiences
 
-import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.network.HttpTransport
 import java.io.File
 import java.security.MessageDigest
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
@@ -36,31 +33,11 @@ class ReleaseAcquisitionTest {
     }
 
     @Test
-    fun profileFixtureParsesActiveAndPinnedEntries() {
-        val fixture = Json.parseToJsonElement(
-            File(FixtureRunner.fixturesRoot(), "experience-release-profile-v1/profile.json").readText(),
-        ).jsonObject
-        val profile = requireNotNull(
-            ExperienceReleaseProfile.fromProfileBody(
-                kotlinx.serialization.json.buildJsonObject {
-                    put("releases", fixture.getValue("wire"))
-                },
-            ),
-        )
-        // The fixture's expectations.
-        assertEquals("version_active", profile.active.single().locator.experienceVersionId)
-        assertEquals(42L, profile.active.single().locator.releaseSequence)
-        assertEquals("version_pinned", profile.pinned.single().locator.experienceVersionId)
-        assertEquals("build_pinned", profile.pinned.single().locator.buildId)
-        assertTrue(profile.renderBaseUrl.startsWith("https://cdn.nuxie.test/"))
-    }
-
-    @Test
     fun acquisitionVerifiesDigestAndCaches() {
         val content = "riv-bytes".encodeToByteArray()
         val digest = sha(content)
         val transport = ScriptedTransport { HttpTransport.Response(200, content) }
-        val cache = ReleaseArtifactCache(RuntimeEnvironment.getApplication(), transport)
+        val cache = JourneyReleaseArtifactCache(RuntimeEnvironment.getApplication(), transport)
 
         val file = cache.acquire(
             key = "renders/sha256/$digest",
@@ -88,11 +65,11 @@ class ReleaseAcquisitionTest {
     fun digestMismatchCachesNothing() {
         val content = "corrupted".encodeToByteArray()
         val claimed = sha("expected".encodeToByteArray())
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             ScriptedTransport { HttpTransport.Response(200, content) },
         )
-        assertThrows(ReleaseArtifactCache.AcquisitionException::class.java) {
+        assertThrows(JourneyReleaseArtifactCache.AcquisitionException::class.java) {
             cache.acquire("k", claimed, content.size.toLong(), 1024, "https://cdn.nuxie.test/renders/")
         }
         assertEquals(null, cache.cachedFile(claimed))
@@ -100,12 +77,12 @@ class ReleaseAcquisitionTest {
 
     @Test
     fun urlsAreConfinedToTheSignedOrigin() {
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             ScriptedTransport { HttpTransport.Response(200, ByteArray(0)) },
         )
         val digest = sha(ByteArray(1))
-        assertThrows(ReleaseArtifactCache.AcquisitionException::class.java) {
+        assertThrows(JourneyReleaseArtifactCache.AcquisitionException::class.java) {
             cache.acquire(
                 key = "https://evil.example/steal",
                 sha256 = digest,
@@ -114,7 +91,7 @@ class ReleaseAcquisitionTest {
                 signedBaseUrl = "https://cdn.nuxie.test/renders/",
             )
         }
-        assertThrows(ReleaseArtifactCache.AcquisitionException::class.java) {
+        assertThrows(JourneyReleaseArtifactCache.AcquisitionException::class.java) {
             cache.acquire(
                 key = "../../escape",
                 sha256 = digest,
@@ -128,8 +105,8 @@ class ReleaseAcquisitionTest {
     @Test
     fun oversizedDeclarationsAreRejectedBeforeDownload() {
         val transport = ScriptedTransport { HttpTransport.Response(200, ByteArray(0)) }
-        val cache = ReleaseArtifactCache(RuntimeEnvironment.getApplication(), transport)
-        assertThrows(ReleaseArtifactCache.AcquisitionException::class.java) {
+        val cache = JourneyReleaseArtifactCache(RuntimeEnvironment.getApplication(), transport)
+        assertThrows(JourneyReleaseArtifactCache.AcquisitionException::class.java) {
             cache.acquire(
                 "k", sha(ByteArray(1)), expectedSizeBytes = 100, maxBytes = 10,
                 signedBaseUrl = "https://cdn.nuxie.test/renders/",
@@ -145,7 +122,7 @@ class ReleaseAcquisitionTest {
         val shaA = sha(contentA)
         val shaB = sha(contentB)
         var body = contentA
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             ScriptedTransport { HttpTransport.Response(200, body) },
             maxTotalBytes = 1000,
@@ -164,7 +141,7 @@ class ReleaseAcquisitionTest {
     fun prunedDigestDoesNotRetainAnUnreferencedLock() {
         val content = "pruned".encodeToByteArray()
         val digest = sha(content)
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             ScriptedTransport { HttpTransport.Response(200, content) },
             maxTotalBytes = 0,
@@ -186,7 +163,7 @@ class ReleaseAcquisitionTest {
     fun cachedDigestDoesNotRetainAnUnreferencedLock() {
         val content = "cached".encodeToByteArray()
         val digest = sha(content)
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             ScriptedTransport { HttpTransport.Response(200, content) },
         )
@@ -208,7 +185,7 @@ class ReleaseAcquisitionTest {
         val content = "leased-release".encodeToByteArray()
         val digest = sha(content)
         val cacheDirectory = temporaryFolder.newFolder("protected-mismatch")
-        val cache = ReleaseArtifactCache(
+        val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             ScriptedTransport { HttpTransport.Response(200, content) },
             cacheDirectory = cacheDirectory,
@@ -221,14 +198,14 @@ class ReleaseAcquisitionTest {
             "https://cdn.nuxie.test/",
         )
         val firstProtection = cache.protect(setOf(digest))
-        val secondCache = ReleaseArtifactCache(
+        val secondCache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             ScriptedTransport { error("protected mismatch must not fetch") },
             cacheDirectory = cacheDirectory,
         )
         val secondProtection = secondCache.protect(setOf(digest))
         try {
-            val failure = assertThrows(ReleaseArtifactAcquisitionException::class.java) {
+            val failure = assertThrows(JourneyReleaseArtifactAcquisitionException::class.java) {
                 secondCache.acquire(
                     "second-release",
                     digest,
@@ -239,7 +216,7 @@ class ReleaseAcquisitionTest {
                 )
             }
 
-            assertEquals(ReleaseArtifactAcquisitionException.Reason.SIZE_MISMATCH, failure.reason)
+            assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.SIZE_MISMATCH, failure.reason)
             assertTrue(leasedFile.exists())
             assertEquals(content.toList(), leasedFile.readBytes().toList())
         } finally {

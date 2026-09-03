@@ -147,6 +147,7 @@ internal class PurchaseService(
         val priorTokens: Set<String>,
         val product: StoreProduct,
         val nuxieManaged: Boolean,
+        val outcomeEventId: String?,
     )
 
     private sealed interface UsageCoordination {
@@ -185,6 +186,7 @@ internal class PurchaseService(
         val product: StoreProduct,
         val ownerDistinctId: String,
         val outcome: PurchaseOutcome,
+        val eventId: String?,
     )
 
     /**
@@ -336,6 +338,7 @@ internal class PurchaseService(
                     completion.checkout.product,
                     completion.outcome,
                     completion.checkout.owner,
+                    completion.checkout.outcomeEventId,
                 )
                 completion.checkout.result.complete(completion.outcome.toPurchaseResult())
             }.onFailure { completionFailure ->
@@ -348,6 +351,7 @@ internal class PurchaseService(
                     emission.product,
                     emission.outcome,
                     emission.ownerDistinctId,
+                    emission.eventId,
                 )
             }.onFailure { completionFailure ->
                 failure = aggregateFailure(failure, completionFailure)
@@ -468,8 +472,23 @@ internal class PurchaseService(
     private suspend fun markCompletionCaptured(purchaseToken: String): Boolean =
         projectionRefresh.withLock {
             val current = evidenceStore.load()[purchaseToken] ?: return@withLock false
-            current.completionEmitted || evidenceStore.upsert(current.copy(completionEmitted = true))
+            val marked = current.completionEmitted ||
+                evidenceStore.upsert(current.copy(completionEmitted = true))
+            marked && clearOutcomeCorrelation(current.checkoutCompletionEventId)
         }
+
+    private fun clearOutcomeCorrelation(eventId: String?): Boolean {
+        if (eventId == null) return true
+        var cleared = true
+        evidenceStore.loadBindings()
+            .filter { it.outcomeEventId == eventId }
+            .forEach { binding ->
+                if (!evidenceStore.upsertBinding(binding.copy(outcomeEventId = null))) {
+                    cleared = false
+                }
+            }
+        return cleared
+    }
 
     private val products = ConcurrentHashMap<StoredProductIdentity, StoreProduct>()
     private val inFlight = ConcurrentHashMap<String, InFlightPurchase>()
@@ -739,6 +758,7 @@ internal class PurchaseService(
         product: StoreProduct,
         replacement: SubscriptionReplacement?,
         expectedOwnerDistinctId: String? = null,
+        outcomeCorrelation: CommerceOutcomeCorrelation? = null,
     ): PurchaseResult {
         val initiatingOwner = distinctId()
         if (expectedOwnerDistinctId != null && initiatingOwner != expectedOwnerDistinctId) {
@@ -754,24 +774,33 @@ internal class PurchaseService(
                         operationId = newExternalOperationId(),
                         ownerDistinctId = initiatingOwner,
                         product = product,
+                        outcomeEventId = outcomeCorrelation?.eventId,
                     ),
                 )
             } else {
                 result.toPurchaseOutcome(PurchaseOutcomeSource.EXTERNAL_DELEGATE)
             }
-            return commitStandaloneOutcome(product, initiatingOwner, outcome)
+            return commitStandaloneOutcome(
+                product,
+                initiatingOwner,
+                outcome,
+                outcomeCorrelation?.eventId,
+            )
         }
         products[product.productIdentity()] = product
         val owner = initiatingOwner
         val accountId = sha256(owner)
         if (!evidenceStore.upsertProductMapping(product.toMapping()) ||
-            !evidenceStore.upsertBinding(product.toBinding(accountId, owner))
+            !evidenceStore.upsertBinding(
+                product.toBinding(accountId, owner, outcomeCorrelation?.eventId),
+            )
         ) {
             return failed(
                 product,
                 IllegalStateException("Could not persist purchase catalog mapping."),
                 owner,
                 PurchaseOutcomeSource.CHECKOUT,
+                outcomeCorrelation?.eventId,
             )
         }
         val active = when (val queried = billing.queryActive(product.productType)) {
@@ -780,6 +809,7 @@ internal class PurchaseService(
                 BillingUnavailableException(queried.responseCode, queried.debugMessage),
                 owner,
                 PurchaseOutcomeSource.CHECKOUT,
+                outcomeCorrelation?.eventId,
             )
             is ActivePurchasesResult.Success -> queried.purchases
         }
@@ -789,6 +819,7 @@ internal class PurchaseService(
                 SubscriptionReplacementRequiredException(),
                 owner,
                 PurchaseOutcomeSource.CHECKOUT,
+                outcomeCorrelation?.eventId,
             )
         }
         val priorTokens = active.mapTo(mutableSetOf()) { it.purchaseToken }
@@ -801,6 +832,7 @@ internal class PurchaseService(
             priorTokens,
             product,
             settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED,
+            outcomeCorrelation?.eventId,
         )
         val registered = synchronized(inFlight) {
             if (inFlight.isNotEmpty()) false else {
@@ -814,6 +846,7 @@ internal class PurchaseService(
                 IllegalStateException("Another Play purchase is already in flight."),
                 owner,
                 PurchaseOutcomeSource.CHECKOUT,
+                outcomeCorrelation?.eventId,
             )
         }
         val launch = runCatching {
@@ -823,7 +856,13 @@ internal class PurchaseService(
             )
         }.getOrElse {
             inFlight.remove(product.storeProductId, pending)
-            return failed(product, it, owner, PurchaseOutcomeSource.CHECKOUT)
+            return failed(
+                product,
+                it,
+                owner,
+                PurchaseOutcomeSource.CHECKOUT,
+                outcomeCorrelation?.eventId,
+            )
         }
         if (launch.responseCode != BillingClient.BillingResponseCode.OK) {
             inFlight.remove(product.storeProductId, pending)
@@ -832,6 +871,7 @@ internal class PurchaseService(
                     product,
                     owner,
                     PurchaseOutcome.Cancelled(PurchaseOutcomeSource.CHECKOUT),
+                    outcomeCorrelation?.eventId,
                 )
             } else {
                 failed(
@@ -839,13 +879,17 @@ internal class PurchaseService(
                     BillingUnavailableException(launch.responseCode, launch.debugMessage),
                     owner,
                     PurchaseOutcomeSource.CHECKOUT,
+                    outcomeCorrelation?.eventId,
                 )
             }
         }
         return result.await()
     }
 
-    suspend fun restorePurchases(expectedOwnerDistinctId: String? = null): RestoreResult {
+    suspend fun restorePurchases(
+        expectedOwnerDistinctId: String? = null,
+        outcomeCorrelation: CommerceOutcomeCorrelation? = null,
+    ): RestoreResult {
         val initiatingOwner = distinctId()
         if (expectedOwnerDistinctId != null && initiatingOwner != expectedOwnerDistinctId) {
             return RestoreResult.Failed(
@@ -861,6 +905,7 @@ internal class PurchaseService(
                             ExternalPurchaseDeclaration.Restore(
                                 newExternalOperationId(),
                                 initiatingOwner,
+                                outcomeCorrelation?.eventId,
                             ),
                         ),
                         effects,
@@ -868,7 +913,8 @@ internal class PurchaseService(
                 }
                 return result
             }
-            return result.also { emitRestoreOutcome(it, initiatingOwner) }
+            emitRestoreOutcome(result, initiatingOwner, outcomeCorrelation?.eventId)
+            return result
         }
         val revocationSnapshot = withProcessingDecision { missingRevocationSnapshot() }
         val found = mutableListOf<PlayPurchase>()
@@ -877,7 +923,9 @@ internal class PurchaseService(
                 is ActivePurchasesResult.Success -> found += result.purchases
                 is ActivePurchasesResult.Failed -> return RestoreResult.Failed(
                     BillingUnavailableException(result.responseCode, result.debugMessage),
-                ).also { emitRestoreOutcome(it, initiatingOwner) }
+                ).also {
+                    emitRestoreOutcome(it, initiatingOwner, outcomeCorrelation?.eventId)
+                }
             }
         }
         val decision = withProcessingDecision { effects ->
@@ -913,7 +961,8 @@ internal class PurchaseService(
         } else {
             decision.outcome
         }
-        return outcome.also { emitRestoreOutcome(it, initiatingOwner) }
+        emitRestoreOutcome(outcome, initiatingOwner, outcomeCorrelation?.eventId)
+        return outcome
     }
 
     /**
@@ -1103,6 +1152,8 @@ internal class PurchaseService(
                 evidence,
                 PurchaseOutcomeSource.STARTUP_RECOVERY,
             ),
+            eventId = evidence.checkoutCompletionEventId
+                ?: purchaseCommitEventId(identity),
         )
     }
 
@@ -1164,6 +1215,7 @@ internal class PurchaseService(
         effects: ProcessingEffects,
         directProduct: StoreProduct? = null,
         directOwner: String? = null,
+        directOutcomeEventId: String? = null,
     ): PurchaseEvidence? = when (outcome) {
         is PurchaseOutcome.Verified -> error(
             "Verified outcomes are finalized only after a Play purchase observation is verified.",
@@ -1177,6 +1229,7 @@ internal class PurchaseService(
                     directProduct,
                     checkNotNull(directOwner),
                     outcome,
+                    directOutcomeEventId,
                 )
                 null
             } else {
@@ -1208,6 +1261,7 @@ internal class PurchaseService(
                     directProduct,
                     checkNotNull(directOwner),
                     outcome,
+                    directOutcomeEventId,
                 )
             } else {
                 effects.completeAllAfterPublications(outcome)
@@ -1231,13 +1285,16 @@ internal class PurchaseService(
                     declaration.product,
                     source = PurchaseOutcomeSource.EXTERNAL_DELEGATE,
                 ),
+                eventId = declaration.outcomeEventId
+                    ?: purchaseCommitEventId(identity),
                 bestEffort = true,
             )
             is ExternalPurchaseDeclaration.Restore -> PendingPurchaseCommit(
                 identity = identity,
                 operation = operation,
                 eventName = SystemEventNames.RESTORE_COMPLETED,
-                eventId = purchaseCommitEventId(identity),
+                eventId = declaration.outcomeEventId
+                    ?: purchaseCommitEventId(identity),
                 ownerDistinctId = declaration.ownerDistinctId,
                 properties = mapOf(
                     "source" to PurchaseOutcomeSource.EXTERNAL_DELEGATE.wireValue,
@@ -1288,9 +1345,16 @@ internal class PurchaseService(
         product: StoreProduct,
         ownerDistinctId: String,
         outcome: PurchaseOutcome,
+        outcomeEventId: String? = null,
     ): PurchaseResult {
         withProcessingDecision { effects ->
-            commitPurchaseOutcome(outcome, effects, product, ownerDistinctId)
+            commitPurchaseOutcome(
+                outcome,
+                effects,
+                product,
+                ownerDistinctId,
+                outcomeEventId,
+            )
         }
         return outcome.toPurchaseResult()
     }
@@ -1412,6 +1476,9 @@ internal class PurchaseService(
             authorityScope = purchaseStorageScope,
             revoked = false,
             backendSyncedAtMillis = existing?.backendSyncedAtMillis,
+            checkoutCompletionEventId = existing?.checkoutCompletionEventId
+                ?: checkoutFlight?.outcomeEventId
+                ?: exactBinding?.outcomeEventId,
         )
         // D2: evidence is durable before projection, facts, sync, acknowledge, or consume.
         val evidence = upsertEvidence(evidenceCandidate)
@@ -1541,6 +1608,8 @@ internal class PurchaseService(
                 operation = checkNotNull(operation),
                 ownerDistinctId = evidence.ownerDistinctId!!,
                 properties = purchaseCompletionProperties(evidence, source),
+                eventId = evidence.checkoutCompletionEventId
+                    ?: purchaseCommitEventId(identity),
                 afterCapture = ::finalizeVerifiedOutcome,
                 onFailure = {
                     reservedCheckout?.let(claimedCheckoutCompletions::remove)
@@ -1832,6 +1901,8 @@ internal class PurchaseService(
                 current?.signatureVerificationRequired == true,
             signatureVerified = candidate.signatureVerified || current?.signatureVerified == true,
             backendSyncedAtMillis = candidate.backendSyncedAtMillis ?: current?.backendSyncedAtMillis,
+            checkoutCompletionEventId = current?.checkoutCompletionEventId
+                ?: candidate.checkoutCompletionEventId,
             pinnedFeatureAllowances = current?.pinnedFeatureAllowances
                 ?: candidate.pinnedFeatureAllowances,
         )
@@ -1969,6 +2040,7 @@ internal class PurchaseService(
         operation: CompletableDeferred<Unit>,
         ownerDistinctId: String,
         properties: Map<String, Any?>,
+        eventId: String = purchaseCommitEventId(identity),
         afterCapture: suspend (ProcessingEffects) -> Unit = {},
         onFailure: () -> Unit = {},
         bestEffort: Boolean = false,
@@ -1976,7 +2048,7 @@ internal class PurchaseService(
         identity = identity,
         operation = operation,
         eventName = SystemEventNames.PURCHASE_COMPLETED,
-        eventId = purchaseCommitEventId(identity),
+        eventId = eventId,
         ownerDistinctId = ownerDistinctId,
         properties = properties,
         afterCapture = afterCapture,
@@ -2000,9 +2072,14 @@ internal class PurchaseService(
         },
     )
 
-    private fun complete(checkout: InFlightPurchase, outcome: PurchaseOutcome) {
+    private suspend fun complete(checkout: InFlightPurchase, outcome: PurchaseOutcome) {
         if (!inFlight.remove(checkout.product.storeProductId, checkout)) return
-        emitPurchaseOutcome(checkout.product, outcome, checkout.owner)
+        emitPurchaseOutcome(
+            checkout.product,
+            outcome,
+            checkout.owner,
+            checkout.outcomeEventId,
+        )
         checkout.result.complete(outcome.toPurchaseResult())
     }
 
@@ -2028,16 +2105,19 @@ internal class PurchaseService(
         cause: Throwable,
         initiatingOwner: String,
         source: PurchaseOutcomeSource,
+        outcomeEventId: String? = null,
     ): PurchaseResult.Failed = commitStandaloneOutcome(
         product,
         initiatingOwner,
         PurchaseOutcome.Failed(cause, source),
+        outcomeEventId,
     ) as PurchaseResult.Failed
 
-    private fun emitPurchaseOutcome(
+    private suspend fun emitPurchaseOutcome(
         product: StoreProduct,
         outcome: PurchaseOutcome,
         initiatingOwner: String,
+        outcomeEventId: String? = null,
     ) {
         if (distinctId() != initiatingOwner) return
         val price = product.storePrice()
@@ -2054,11 +2134,41 @@ internal class PurchaseService(
             is PurchaseOutcome.Verified,
             is PurchaseOutcome.External,
             -> return
-            is PurchaseOutcome.Cancelled -> emit(SystemEventNames.PURCHASE_CANCELLED, properties)
+            is PurchaseOutcome.Cancelled -> captureOrEmitPurchaseOutcome(
+                SystemEventNames.PURCHASE_CANCELLED,
+                properties,
+                outcomeEventId,
+                initiatingOwner,
+            )
             is PurchaseOutcome.Pending -> emit(SystemEventNames.PURCHASE_PENDING, properties)
             is PurchaseOutcome.Failed -> {
                 properties["error"] = outcome.reason.message ?: outcome.reason.javaClass.simpleName
-                emit(SystemEventNames.PURCHASE_FAILED, properties)
+                captureOrEmitPurchaseOutcome(
+                    SystemEventNames.PURCHASE_FAILED,
+                    properties,
+                    outcomeEventId,
+                    initiatingOwner,
+                )
+            }
+        }
+        if (outcome is PurchaseOutcome.Cancelled || outcome is PurchaseOutcome.Failed) {
+            check(clearOutcomeCorrelation(outcomeEventId)) {
+                "Could not clear the completed Journey purchase correlation."
+            }
+        }
+    }
+
+    private suspend fun captureOrEmitPurchaseOutcome(
+        name: String,
+        properties: Map<String, Any?>,
+        outcomeEventId: String?,
+        initiatingOwner: String,
+    ) {
+        if (outcomeEventId == null) {
+            emit(name, properties)
+        } else {
+            check(capturePurchaseEvent(name, properties, outcomeEventId, initiatingOwner)) {
+                "Could not durably capture the Journey purchase outcome event."
             }
         }
     }
@@ -2079,22 +2189,33 @@ internal class PurchaseService(
         is PurchaseResult.Failed -> PurchaseOutcome.Failed(cause, source)
     }
 
-    private fun emitRestoreOutcome(result: RestoreResult, initiatingOwner: String) {
+    private suspend fun emitRestoreOutcome(
+        result: RestoreResult,
+        initiatingOwner: String,
+        outcomeEventId: String? = null,
+    ) {
         if (distinctId() != initiatingOwner) return
-        when (result) {
-            // Native restores emit fire-and-forget like iOS (its TransactionService
-            // uses eventSink.emit); only EXTERNAL restore declarations route to
-            // journeys through the committer's stable capture (UNIV-2901 parity).
-            RestoreResult.Restored -> emit(SystemEventNames.RESTORE_COMPLETED, emptyMap())
-            RestoreResult.NoPurchases -> emit(SystemEventNames.RESTORE_NO_PURCHASES, emptyMap())
-            is RestoreResult.Failed -> emit(
-                SystemEventNames.RESTORE_FAILED,
-                mapOf("error" to (result.cause.message ?: result.cause.javaClass.simpleName)),
+        val (name, properties) = when (result) {
+            RestoreResult.Restored -> SystemEventNames.RESTORE_COMPLETED to emptyMap()
+            RestoreResult.NoPurchases -> SystemEventNames.RESTORE_NO_PURCHASES to emptyMap()
+            is RestoreResult.Failed -> SystemEventNames.RESTORE_FAILED to mapOf(
+                "error" to (result.cause.message ?: result.cause.javaClass.simpleName),
             )
+        }
+        if (outcomeEventId == null) {
+            emit(name, properties)
+        } else {
+            check(capturePurchaseEvent(name, properties, outcomeEventId, initiatingOwner)) {
+                "Could not durably capture the Journey restore outcome event."
+            }
         }
     }
 
-    private fun StoreProduct.toBinding(accountId: String, owner: String) = StoredPurchaseBinding(
+    private fun StoreProduct.toBinding(
+        accountId: String,
+        owner: String,
+        outcomeEventId: String? = null,
+    ) = StoredPurchaseBinding(
         obfuscatedAccountId = accountId,
         distinctId = owner,
         storeProductId = storeProductId,
@@ -2108,6 +2229,7 @@ internal class PurchaseService(
         featureAllowances = featureAllowances.toStoredAllowances(),
         licensingPublicKey = licensingPublicKey,
         nuxieManaged = settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED,
+        outcomeEventId = outcomeEventId,
     )
 
     internal fun rememberProduct(product: StoreProduct): Boolean =

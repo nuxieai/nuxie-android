@@ -44,9 +44,9 @@ internal class HostRenderHarness(
         require(descriptorFile.isFile) { "Input is missing $DESCRIPTOR_FILE" }
         val descriptor = Json.parseToJsonElement(descriptorFile.readText()).jsonObject
         val render = descriptor["render"] as? JsonObject
-            ?: error("Experience release render is missing")
+            ?: error("Journey release render is missing")
         require(render.string("renderer") == "rive") {
-            "Experience release renderer must be rive"
+            "Journey release renderer must be rive"
         }
         val rivFile = resolveRiv(input, render)
         val size = options.size ?: render.defaultSize()
@@ -135,7 +135,7 @@ internal class HostRenderHarness(
 
     private fun resolveRiv(input: File, render: JsonObject): File {
         val key = (render["riv"] as? JsonObject)?.string("key")
-            ?: error("Experience release riv key is missing")
+            ?: error("Journey release riv key is missing")
         val declared = File(input, key)
         if (declared.isFile) return declared
         val topLevel = File(input, File(key).name)
@@ -176,11 +176,11 @@ internal class HostRenderHarness(
         // artboard extent in the release contract. nux_capi has no separate
         // bounds accessor for an opaque artboard handle.
         val first = (this["screens"] as? JsonArray)?.firstOrNull() as? JsonObject
-            ?: error("Experience release has no screen size; pass --size WxH")
+            ?: error("Journey release has no screen size; pass --size WxH")
         val width = first["width"]?.jsonPrimitive?.intOrNull
         val height = first["height"]?.jsonPrimitive?.intOrNull
         require(width != null && height != null) {
-            "Experience release has no valid screen size; pass --size WxH"
+            "Journey release has no valid screen size; pass --size WxH"
         }
         return HostRenderSize(width, height)
     }

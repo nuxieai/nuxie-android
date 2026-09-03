@@ -141,7 +141,7 @@ class GooglePlayProductViewModelProjectionTest {
         ) + values.map { (path, value) -> value(path, value) }
         return JsonObject(
             mapOf(
-                "journey" to JsonObject(
+                "leg" to JsonObject(
                     mapOf(
                         "screens" to JsonArray(
                             listOf(
@@ -153,9 +153,9 @@ class GooglePlayProductViewModelProjectionTest {
                                 ),
                             ),
                         ),
-                        "viewModelValues" to JsonArray(productValues),
                     ),
                 ),
+                "viewModelValues" to JsonArray(productValues),
             ),
         )
     }

@@ -84,7 +84,6 @@ class EventDeliveryWorkerTest {
     private fun worker(store: EventStore, transport: HttpTransport): EventDeliveryWorker =
         EventDeliveryWorker(
             store = store,
-            eventLog = eventLog(store),
             api = NuxieApi("pk_test", NuxieEnvironment.DEVELOPMENT, transport),
             scope = scope,
             nowMillis = { now },
@@ -112,7 +111,7 @@ class EventDeliveryWorkerTest {
     }
 
     @Test
-    fun flushDeliversInBatchesAndFlipsDeliveryState() = runBlocking {
+    fun flushDeliversInBatchesAndFlipsJourneyReleaseDeliveryState() = runBlocking {
         val store = store()
         val transport = ScriptedTransport()
         val delivery = worker(store, transport)
@@ -163,7 +162,6 @@ class EventDeliveryWorkerTest {
         val store = store()
         val delivery = EventDeliveryWorker(
             store = store,
-            eventLog = eventLog(store),
             api = NuxieApi("pk_test", NuxieEnvironment.DEVELOPMENT, ScriptedTransport()),
             scope = scope,
             maxEventsStored = 10,

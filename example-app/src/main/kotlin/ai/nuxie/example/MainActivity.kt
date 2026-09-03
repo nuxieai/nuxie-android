@@ -4,7 +4,6 @@ import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.Nuxie
 import ai.nuxie.sdk.NuxieConfiguration
 import ai.nuxie.sdk.NuxieEnvironment
-import ai.nuxie.sdk.TriggerUpdate
 import android.app.Activity
 import android.os.Bundle
 import android.view.Gravity
@@ -29,21 +28,15 @@ class MainActivity : Activity() {
     status = TextView(this).apply {
       gravity = Gravity.CENTER_HORIZONTAL
     }
-    val showExperience = Button(this).apply {
-      text = "Show purchase experience"
+    val triggerJourney = Button(this).apply {
+      text = "Trigger purchase journey"
       setOnClickListener {
-        status.text = "Triggering signed experience…"
+        val event = intent.getStringExtra(EXTRA_TRIGGER_EVENT) ?: "\$app_opened"
+        status.text = "Capturing $event…"
         Nuxie.trigger(
-          intent.getStringExtra(EXTRA_TRIGGER_EVENT) ?: "\$app_opened",
-        ) { update ->
-          runOnUiThread {
-            status.text = when (update) {
-              is TriggerUpdate.Error ->
-                "${update.error.code}: ${update.error.message}"
-              else -> update.toString()
-            }
-          }
-        }
+          event,
+        )
+        status.text = "Journey event captured"
       }
     }
     val restore = Button(this).apply {
@@ -66,7 +59,7 @@ class MainActivity : Activity() {
         val inset = (24 * resources.displayMetrics.density).toInt()
         setPadding(inset, inset, inset, inset)
         addView(status)
-        addView(showExperience)
+        addView(triggerJourney)
         addView(restore)
       },
     )
@@ -75,7 +68,7 @@ class MainActivity : Activity() {
       ?: getString(R.string.nuxie_api_key)
     if (apiKey.isBlank() || apiKey == "replace-with-your-api-key") {
       status.text = "Launch with --es $EXTRA_API_KEY <public-test-key>."
-      showExperience.isEnabled = false
+      triggerJourney.isEnabled = false
       restore.isEnabled = false
       return
     }

@@ -88,7 +88,7 @@ object ExperienceRenderProbe {
         onFailure: (String) -> Unit,
     ): View {
         val descriptor = Json.parseToJsonElement(descriptorJson) as? JsonObject
-            ?: error("Synthetic Experience release descriptor must be a JSON object")
+            ?: error("Synthetic Journey release descriptor must be a JSON object")
         val lane = NuxieRuntimeLane()
         val firstFrameReported = AtomicBoolean(false)
         val host = ExperienceSurfaceHost(

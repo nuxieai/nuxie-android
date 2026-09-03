@@ -46,7 +46,7 @@ class EventHistoryCoverageTest {
     @Test fun `history coverage matches the pinned iOS vectors`() = runBlocking {
         val file = FixtureRunner.fixturesRoot().resolve("journeys/planes/history-coverage.json")
         val suite = Json.parseToJsonElement(file.readText()).jsonObject
-        assertEquals("device-leg-history-coverage-v1", suite.getValue("suite").jsonPrimitive.content)
+        assertEquals("journey-history-coverage-v1", suite.getValue("suite").jsonPrimitive.content)
         for (element in suite.getValue("cases").jsonArray) {
             val vector = element.jsonObject
             val name = vector.getValue("name").jsonPrimitive.content

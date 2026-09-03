@@ -64,6 +64,7 @@ internal data class StoredPurchaseBinding(
     val featureAllowances: List<StoredFeatureAllowance> = emptyList(),
     val licensingPublicKey: String? = null,
     val nuxieManaged: Boolean,
+    val outcomeEventId: String? = null,
 )
 
 internal data class StoredProductMapping(
@@ -169,6 +170,7 @@ internal data class PurchaseEvidence(
     val authorityScope: String? = null,
     val revoked: Boolean = false,
     val backendSyncedAtMillis: Long? = null,
+    val checkoutCompletionEventId: String? = null,
 )
 
 internal interface PurchaseEvidenceStore {
@@ -326,6 +328,9 @@ internal class FilePurchaseEvidenceStore(
             evidence.authorityScope?.let { put("authorityScope", JsonPrimitive(it)) }
             put("revoked", JsonPrimitive(evidence.revoked))
             evidence.backendSyncedAtMillis?.let { put("backendSyncedAtMillis", JsonPrimitive(it)) }
+            evidence.checkoutCompletionEventId?.let {
+                put("checkoutCompletionEventId", JsonPrimitive(it))
+            }
         },
     )
 
@@ -366,6 +371,7 @@ internal class FilePurchaseEvidenceStore(
             authorityScope = raw.string("authorityScope"),
             revoked = raw.boolean("revoked"),
             backendSyncedAtMillis = (raw["backendSyncedAtMillis"] as? JsonPrimitive)?.longOrNull,
+            checkoutCompletionEventId = raw.string("checkoutCompletionEventId"),
         )
     }.getOrNull()
 
@@ -384,6 +390,7 @@ internal class FilePurchaseEvidenceStore(
             put("featureAllowances", JsonArray(binding.featureAllowances.map(::encodeAllowance)))
             binding.licensingPublicKey?.let { put("licensingPublicKey", JsonPrimitive(it)) }
             put("nuxieManaged", JsonPrimitive(binding.nuxieManaged))
+            binding.outcomeEventId?.let { put("outcomeEventId", JsonPrimitive(it)) }
         },
     )
 
@@ -403,6 +410,7 @@ internal class FilePurchaseEvidenceStore(
                 .orEmpty().mapNotNull(::decodeAllowance),
             licensingPublicKey = raw.string("licensingPublicKey"),
             nuxieManaged = raw.boolean("nuxieManaged"),
+            outcomeEventId = raw.string("outcomeEventId"),
         )
     }.getOrNull()
 

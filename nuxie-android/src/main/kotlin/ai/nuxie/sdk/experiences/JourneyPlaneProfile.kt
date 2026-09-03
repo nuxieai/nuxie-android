@@ -12,7 +12,7 @@ import kotlinx.serialization.json.doubleOrNull
 /** Validated delivery structure, separate from signed program admission. The
  * consumer must authenticate each release before execution or cache promotion. */
 internal class JourneyPlaneProfile private constructor(
-    val delivery: Delivery,
+    val delivery: JourneyReleaseDelivery,
     val features: JsonArray,
     val facts: JsonObject,
     val armedLegs: List<Arm>,
@@ -20,7 +20,7 @@ internal class JourneyPlaneProfile private constructor(
 ) {
     data class Arm(val reference: JsonObject, val binding: JsonObject,
         val entryCondition: JsonObject, val context: JsonObject)
-    data class Release(val locator: ExperienceReleaseIdentity, val legId: String, val envelope: JsonObject)
+    data class Release(val locator: JourneyReleaseIdentity, val legId: String, val envelope: JsonObject)
 
     companion object {
         private const val PROFILE_BYTES = 24 * 1024 * 1024
@@ -29,7 +29,7 @@ internal class JourneyPlaneProfile private constructor(
 
         fun decode(bytes: ByteArray): JourneyPlaneProfile {
             if (bytes.size > PROFILE_BYTES) fail("profile size")
-            val root = exact(SignedReleaseEnvelope.parseObject(bytes), setOf("schemaVersion", "status", "delivery", "features", "facts", "armedLegs", "releases"))
+            val root = exact(JourneyReleaseEnvelope.parseObject(bytes), setOf("schemaVersion", "status", "delivery", "features", "facts", "armedLegs", "releases"))
             if (text(root["schemaVersion"]) != "nuxie.journey-plane-profile.v1" || text(root["status"]) != "ok") fail("profile version")
             val delivery = exact(root["delivery"], setOf("renderBaseUrl", "assetBaseUrl"))
             val origins = listOf("renderBaseUrl", "assetBaseUrl").map { key ->
@@ -43,23 +43,33 @@ internal class JourneyPlaneProfile private constructor(
             }
             val features = array(root["features"])
             for (value in features) validateFeature(value)
-            val facts = exact(root["facts"], setOf("properties", "memberships", "assignments"))
-            for ((key, value) in record(facts["properties"])) {
+            val rawFacts = exact(root["facts"], setOf("properties", "memberships", "assignments"))
+            for ((key, value) in record(rawFacts["properties"])) {
                 id(JsonPrimitive(key))
                 val property = record(value)
                 val present = boolean(property["present"])
                 exact(property, if (present) setOf("present", "value") else setOf("present"))
             }
-            for ((key, value) in record(facts["memberships"])) { id(JsonPrimitive(key)); boolean(value) }
-            for ((key, value) in record(facts["assignments"])) {
+            for ((key, value) in record(rawFacts["memberships"])) {
                 id(JsonPrimitive(key))
-                if (value == JsonNull) continue
-                val assignment = exact(value, setOf("variantId", "isHoldout"))
-                id(assignment["variantId"]); boolean(assignment["isHoldout"])
+                boolean(value)
             }
+            val assignments = linkedMapOf<String, JsonElement>()
+            for ((key, value) in record(rawFacts["assignments"])) {
+                if (runCatching { id(JsonPrimitive(key)) }.isFailure) continue
+                val assignment = value as? JsonObject
+                val valid = assignment != null &&
+                    assignment.keys == setOf("variantId", "isHoldout") &&
+                    runCatching { id(assignment["variantId"]) }.isSuccess &&
+                    runCatching { boolean(assignment["isHoldout"]) }.isSuccess
+                assignments[key] = if (valid) requireNotNull(assignment) else JsonNull
+            }
+            val facts = JsonObject(
+                rawFacts + ("assignments" to JsonObject(assignments)),
+            )
             val releases = array(root["releases"]).also { if (it.size > 1024) fail("release count") }.map { value ->
                 val release = exact(value, setOf("locator", "envelope"))
-                val locator = exact(release["locator"], setOf("appId", "environment", "experienceId", "experienceVersionId", "versionNumber", "buildId", "releaseCreatedAt", "releaseSequence", "legId"))
+                val locator = exact(release["locator"], setOf("appId", "environment", "experienceId", "experienceVersionId", "versionNumber", "buildId", "publishedAt", "publishedAtSeq", "legId"))
                 val legId = hash(locator["legId"])
                 for (key in listOf("appId", "experienceId", "experienceVersionId", "buildId")) {
                     val identifier = id(locator[key])
@@ -67,11 +77,11 @@ internal class JourneyPlaneProfile private constructor(
                 }
                 if (text(locator["environment"]) !in setOf("test", "live")) fail("environment")
                 integer(locator["versionNumber"], minimum = 1)
-                integer(locator["releaseSequence"])
-                ReleaseJson.timestamp(locator["releaseCreatedAt"])
-                val identity = ExperienceReleaseIdentity.fromJson(locator, setOf("legId")) ?: fail("identity")
+                integer(locator["publishedAtSeq"])
+                JourneyReleaseJson.timestamp(locator["publishedAt"])
+                val identity = JourneyReleaseIdentity.fromJson(locator, setOf("legId")) ?: fail("identity")
                 val envelope = record(release["envelope"])
-                SignedReleaseEnvelope.validateShape(envelope.toString().encodeToByteArray(), SignedReleaseEnvelope.Format.DEVICE_LEG)
+                JourneyReleaseEnvelope.validateShape(envelope.toString().encodeToByteArray())
                 Release(identity, legId, envelope)
             }
             val byDigest = releases.associateBy { hash(it.envelope["descriptorSha256"]) }
@@ -105,7 +115,7 @@ internal class JourneyPlaneProfile private constructor(
                 Arm(reference, binding, entry, context)
             }
             if (referenced != byDigest.keys) fail("unreferenced release")
-            return JourneyPlaneProfile(Delivery(origins[0], origins[1]), features, facts, arms, releases)
+            return JourneyPlaneProfile(JourneyReleaseDelivery(origins[0], origins[1]), features, facts, arms, releases)
         }
 
         /** Applies the same exact release-entry validation to a retained pin. */
@@ -115,7 +125,7 @@ internal class JourneyPlaneProfile private constructor(
                 release["locator"],
                 setOf(
                     "appId", "environment", "experienceId", "experienceVersionId",
-                    "versionNumber", "buildId", "releaseCreatedAt", "releaseSequence", "legId",
+                    "versionNumber", "buildId", "publishedAt", "publishedAtSeq", "legId",
                 ),
             )
             val legId = hash(locator["legId"])
@@ -125,14 +135,11 @@ internal class JourneyPlaneProfile private constructor(
             }
             if (text(locator["environment"]) !in setOf("test", "live")) fail("environment")
             integer(locator["versionNumber"], minimum = 1)
-            integer(locator["releaseSequence"])
-            ReleaseJson.timestamp(locator["releaseCreatedAt"])
-            val identity = ExperienceReleaseIdentity.fromJson(locator, setOf("legId")) ?: fail("identity")
+            integer(locator["publishedAtSeq"])
+            JourneyReleaseJson.timestamp(locator["publishedAt"])
+            val identity = JourneyReleaseIdentity.fromJson(locator, setOf("legId")) ?: fail("identity")
             val envelope = record(release["envelope"])
-            SignedReleaseEnvelope.validateShape(
-                envelope.toString().encodeToByteArray(),
-                SignedReleaseEnvelope.Format.DEVICE_LEG,
-            )
+            JourneyReleaseEnvelope.validateShape(envelope.toString().encodeToByteArray())
             return Release(identity, legId, envelope)
         }
 
@@ -185,6 +192,6 @@ internal class JourneyPlaneProfile private constructor(
         private fun exact(value: JsonElement?, required: Set<String>, optional: Set<String> = emptySet()): JsonObject = record(value).also {
             if (!it.keys.containsAll(required) || (it.keys - required - optional).isNotEmpty()) fail("unknown or missing fields")
         }
-        private fun fail(message: String): Nothing = throw ReleaseAuthenticationException(message)
+        private fun fail(message: String): Nothing = throw JourneyReleaseAuthenticationException(message)
     }
 }

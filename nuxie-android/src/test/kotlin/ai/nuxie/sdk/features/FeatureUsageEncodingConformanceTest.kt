@@ -8,6 +8,8 @@ import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.testsupport.FakeTransport
+import ai.nuxie.sdk.testsupport.canonicalJourneyProfileText
+import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponseBody
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -130,9 +132,8 @@ class FeatureUsageEncodingConformanceTest {
         val transport = FakeTransport().apply {
             respond = { request ->
                 when (request.url.path) {
-                    "/profile" -> HttpTransport.Response(
-                        200,
-                        profileResponse(featureId, expected, policy).encodeToByteArray(),
+                    "/profile" -> canonicalJourneyProfileResponseBody(
+                        profileResponse(featureId, expected, policy),
                     )
                     "/entitled" -> HttpTransport.Response(
                         200,
@@ -183,7 +184,7 @@ class FeatureUsageEncodingConformanceTest {
         } else {
             "[]"
         }
-        return """{"segments":[],"features":$features}"""
+        return canonicalJourneyProfileText(features)
     }
 
     private fun remoteResponse(

@@ -6,9 +6,9 @@ package ai.nuxie.sdk.events
  * no bare string literals at emitter sites. The full catalog (when each fires,
  * properties, delivery guarantees) lives in the iOS repo's `docs/sdk-events.md`.
  *
- * The `$experience_*` names are enumerated by
- * `fixtures/events/experience-events.json` and emitted by the presentation
- * service rather than the capture pipeline.
+ * The event contract is enumerated by `fixtures/events/catalog.json`.
+ * Presentation lifecycle events are emitted by the presentation service
+ * rather than the capture pipeline.
  */
 internal object SystemEventNames {
     // Identity

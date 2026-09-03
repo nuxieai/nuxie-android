@@ -11,43 +11,32 @@ import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.EventDeliveryWorker
-import ai.nuxie.sdk.events.SystemEventNames
-import ai.nuxie.sdk.events.TriggerBroker
-import ai.nuxie.sdk.events.TriggerService
 import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureService
 import ai.nuxie.sdk.features.FeatureUsageService
 import ai.nuxie.sdk.features.FeatureType
-import ai.nuxie.sdk.billing.AuthenticatedExperiencePurchasePreparer
-import ai.nuxie.sdk.billing.AuthenticatedExperienceOutcomeProgramExecutor
 import ai.nuxie.sdk.billing.BillingClientAdapterFactory
 import ai.nuxie.sdk.billing.FilePurchaseEvidenceStore
 import ai.nuxie.sdk.billing.GooglePlayBillingClientAdapter
+import ai.nuxie.sdk.billing.JourneyCommercePreparer
 import ai.nuxie.sdk.billing.NuxiePurchaseDelegate
 import ai.nuxie.sdk.billing.NuxieApiPurchaseSynchronizer
 import ai.nuxie.sdk.billing.PlayBillingConnection
-import ai.nuxie.sdk.billing.ProductResolver
 import ai.nuxie.sdk.billing.PurchaseEvidenceStore
 import ai.nuxie.sdk.billing.PurchaseHandlingMode
 import ai.nuxie.sdk.billing.PurchaseService
-import ai.nuxie.sdk.billing.PurchaseServiceExperiencePurchaseExecutor
 import ai.nuxie.sdk.billing.PurchaseSettings
+import ai.nuxie.sdk.billing.ProductResolver
+import ai.nuxie.sdk.billing.registerJourneyProductMappings
 import ai.nuxie.sdk.billing.purchaseEvidenceDirectory
 import ai.nuxie.sdk.billing.purchaseAuthorityScope
-import ai.nuxie.sdk.billing.registerAuthenticatedReleaseProductMappings
-import ai.nuxie.sdk.experiences.AuthenticatedRelease
-import ai.nuxie.sdk.experiences.DeviceLegProfileCatalog
-import ai.nuxie.sdk.experiences.ExperienceReleaseProfile
-import ai.nuxie.sdk.experiences.ExperienceTrustRoots
-import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
+import ai.nuxie.sdk.experiences.JourneyProfileCatalog
+import ai.nuxie.sdk.experiences.JourneyTrustRoots
+import ai.nuxie.sdk.experiences.JourneyReleaseHighWaterStore
 import ai.nuxie.sdk.identity.IdentityService
-import ai.nuxie.sdk.journey.JourneyLedger
-import ai.nuxie.sdk.journey.JourneyReleaseCatalog
 import ai.nuxie.sdk.journey.JourneyService
-import ai.nuxie.sdk.journey.JourneyStore
 import ai.nuxie.sdk.journey.SignedTimezoneBundle
-import ai.nuxie.sdk.journey.DeviceLegEffectDispatcher
-import ai.nuxie.sdk.journey.DeviceLegService
+import ai.nuxie.sdk.journey.JourneyEffectDispatcher
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.HttpUrlConnectionTransport
 import ai.nuxie.sdk.network.NuxieApi
@@ -59,19 +48,18 @@ import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.session.SessionService
 import ai.nuxie.sdk.runtime.NuxieEmbeddedRuntimeCompatibility
 import ai.nuxie.sdk.runtime.nuxieRuntimeSourceRevision
-import ai.nuxie.sdk.experiences.SupportedRuntime
-import ai.nuxie.sdk.experiences.ReleaseArtifactAcquirer
+import ai.nuxie.sdk.experiences.JourneyReleaseSupportedRuntime
+import ai.nuxie.sdk.experiences.JourneyReleaseArtifactAcquirer
 import ai.nuxie.sdk.presentation.ExperiencePresentationService
 import ai.nuxie.sdk.presentation.ExperiencePresentationException
 import ai.nuxie.sdk.presentation.AndroidRenderCapability
-import ai.nuxie.sdk.presentation.CloseReason
-import ai.nuxie.sdk.presentation.DeviceLegPresentationRequest
-import ai.nuxie.sdk.presentation.DeviceLegPresentationResult
-import ai.nuxie.sdk.presentation.DeviceLegPresenting
-import ai.nuxie.sdk.presentation.PresentationOutcome
+import ai.nuxie.sdk.presentation.JourneyPresentationRequest
+import ai.nuxie.sdk.presentation.JourneyPresentationActionResult
+import ai.nuxie.sdk.presentation.JourneyPresentationOwner
+import ai.nuxie.sdk.presentation.JourneyPresentationResult
+import ai.nuxie.sdk.presentation.JourneyPresenting
 import android.app.Application
 import android.content.Context
-import android.util.Log
 import java.io.File
 import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
@@ -84,9 +72,9 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 /** Native provenance proves the runtime is present; compatibility is a separate contract. */
-internal fun supportedRuntimeForEmbeddedRuntime(nativeSourceRevision: String?): SupportedRuntime? {
+internal fun supportedRuntimeForEmbeddedRuntime(nativeSourceRevision: String?): JourneyReleaseSupportedRuntime? {
     if (nativeSourceRevision.isNullOrBlank()) return null
-    return SupportedRuntime(
+    return JourneyReleaseSupportedRuntime(
         currentSdkVersion = ai.nuxie.sdk.SdkVersion.VALUE,
         supportedRuntimeRevisions = setOf(NuxieEmbeddedRuntimeCompatibility.SOURCE_REVISION),
         supportedLuauRevisions = mapOf(
@@ -128,10 +116,7 @@ internal class NuxieCore(
     private val requestInitialProfileRefresh = overrides.requestInitialProfileRefresh
 
     internal fun interface PresentationFactory {
-        fun create(
-            transitionOutcome: suspend (PresentationOutcome) -> Boolean,
-            reportOutcome: suspend (PresentationOutcome) -> Unit,
-        ): ExperiencePresentationService
+        fun create(): ExperiencePresentationService
     }
 
     internal class Overrides(
@@ -141,17 +126,11 @@ internal class NuxieCore(
         val appVersion: (() -> String)? = null,
         val registerLifecycle: Boolean = true,
         val transport: HttpTransport? = null,
-        val journeys: TriggerService.JourneyRouter? = null,
-        val features: TriggerService.FeatureGate? = null,
-        val presenter: TriggerService.ExperiencePresenter? = null,
         val presentationFactory: PresentationFactory? = null,
         val purchaseEvidenceStore: PurchaseEvidenceStore? = null,
         val eventDatabaseFile: File? = null,
         val profileCacheDirectory: File? = null,
-        val journeySupportedRuntime: (() -> SupportedRuntime?)? = null,
-        val authenticateRelease: (
-            (ExperienceReleaseProfile.Entry, SupportedRuntime) -> AuthenticatedRelease?
-        )? = null,
+        val journeySupportedRuntime: (() -> JourneyReleaseSupportedRuntime?)? = null,
         val deviceLocaleIdentifier: (() -> String)? = null,
         /** Unit suites that hydrate profiles explicitly opt out so the
          *  startup refresh cannot race their hydrations through the
@@ -217,51 +196,22 @@ internal class NuxieCore(
             purchaseEvidenceDirectory(appContext.filesDir, apiKey, environment),
         )
 
-    private val releaseTrustRoots = ExperienceTrustRoots.keys(environment)
-    private val releaseHighWater = ReleaseHighWaterStore(appContext)
+    private val releaseTrustRoots = JourneyTrustRoots.keys(environment)
+    private val releaseHighWater = JourneyReleaseHighWaterStore(appContext)
 
-    private val journeyCatalog = JourneyReleaseCatalog(
+    val journeyProfiles = JourneyProfileCatalog(
         trustedKeys = releaseTrustRoots,
         highWater = releaseHighWater,
         supportedRuntime = overrides.journeySupportedRuntime ?: ::journeySupportedRuntime,
-        authenticate = overrides.authenticateRelease,
-        onReleaseAdmitted = { release ->
-            purchaseEvidenceStore.registerAuthenticatedReleaseProductMappings(release)
-        },
+        onReleaseAdmitted = purchaseEvidenceStore::registerJourneyProductMappings,
     )
-
-    val deviceLegProfiles = DeviceLegProfileCatalog(
-        trustedKeys = releaseTrustRoots,
-        highWater = releaseHighWater,
-        supportedRuntime = overrides.journeySupportedRuntime ?: ::journeySupportedRuntime,
-    )
-
-    private val triggerBroker = TriggerBroker()
-
-    private lateinit var journeyResponseRouter: JourneyService
 
     val delivery = EventDeliveryWorker(
         store = store,
-        eventLog = eventLog,
         api = api,
         scope = scope,
-        onDecisionResponse = { event, response ->
-            journeyResponseRouter.applyDecisionResponse(event, response)
-        },
-        onDecisionRejected = { event, _ ->
-            journeyResponseRouter.rejectDecisionEvent(event)
-        },
         nowMillis = nowMillis,
     )
-
-    val journeys = JourneyService(
-        store = JourneyStore(appContext.filesDir),
-        ledger = JourneyLedger(eventLog, delivery),
-        releases = journeyCatalog,
-        nowMillis = nowMillis,
-        initialDistinctId = identity.distinctId(),
-        triggerBroker = triggerBroker,
-    ).also { journeyResponseRouter = it }
 
     val features = FeatureService(
         api = api,
@@ -299,37 +249,24 @@ internal class NuxieCore(
         capturePurchaseEvent = ::capturePurchaseEvent,
     ).also { purchaseService = it }
 
-    /** Durable purchase capture followed by best-effort routing for the current identity. */
+    private val journeyCommerce = JourneyCommercePreparer(
+        resolver = ProductResolver(billing, purchaseEvidenceStore),
+        purchases = purchases,
+    )
+
+    /** Durable purchase capture; committed events enter the Journey route once. */
     internal suspend fun capturePurchaseEvent(
         name: String,
         properties: Map<String, Any?>,
         eventId: String,
         distinctId: String,
     ): Boolean {
-        val result = eventLog.captureIdempotentlyWithResult(
+        return eventLog.captureIdempotentlyWithResult(
             name,
             properties,
             eventId,
             distinctId,
-        )
-        val stored = result.storedEvent
-        if (result.newlyCaptured && stored != null) {
-            runCatching {
-                // Both completion carriers route (iOS parity: restore
-                // declarations advance journeys too); local routing stays
-                // suppressed for initiating-identity carriers committed
-                // after an identity change.
-                if ((stored.name == SystemEventNames.PURCHASE_COMPLETED ||
-                        stored.name == SystemEventNames.RESTORE_COMPLETED) &&
-                    stored.distinctId == identity.distinctId()
-                ) {
-                    triggers.routeCommittedSystemEvent(stored)
-                }
-            }.onFailure { failure ->
-                Log.w(LOG_TAG, "Purchase Journey routing failed", failure)
-            }
-        }
-        return result.succeeded
+        ).succeeded
     }
 
     /**
@@ -344,19 +281,6 @@ internal class NuxieCore(
             }
         }
 
-    private val experiencePurchases = AuthenticatedExperiencePurchasePreparer(
-        resolver = ProductResolver(billing, purchaseEvidenceStore),
-        executor = PurchaseServiceExperiencePurchaseExecutor(purchases),
-        programExecutor = AuthenticatedExperienceOutcomeProgramExecutor(
-            journeys = journeys,
-            emit = { name, properties, ownerDistinctId ->
-                eventLog.capture(name, properties, ownerDistinctId)
-            },
-        ),
-        scope = scope,
-        distinctId = identity::distinctId,
-    )
-
     val featureUsage = FeatureUsageService(
         api = api,
         purchases = purchases,
@@ -366,56 +290,25 @@ internal class NuxieCore(
         scope = scope,
     )
 
-    private val transitionPresentationOutcome: suspend (PresentationOutcome) -> Boolean = { outcome ->
-        val journeyId = outcome.ref.journeyId
-        val ownerDistinctId = outcome.ownerDistinctId
-        if (journeyId == null || ownerDistinctId == null) {
-            false
-        } else {
-            journeys.transitionPresentationOutcome(
-                ownerDistinctId = ownerDistinctId,
-                journeyId = journeyId,
-                reason = outcome.reason,
-                initiatingDistinctId = outcome.initiatingDistinctId,
-            )
-        }
-    }
+    private val releaseArtifactAcquirer = JourneyReleaseArtifactAcquirer(appContext, transport)
 
-    private val reportPresentationOutcome: suspend (PresentationOutcome) -> Unit = { outcome ->
-        outcome.ref.journeyId?.let { journeyId ->
-            journeys.completePresentationOutcome(
-                outcome.ownerDistinctId ?: identity.distinctId(),
-                journeyId,
-            )
-        }
-    }
-
-    private val releaseArtifactAcquirer = ReleaseArtifactAcquirer(appContext, transport)
-
-    val presentations = overrides.presentationFactory?.create(
-        transitionPresentationOutcome,
-        reportPresentationOutcome,
-    )
+    val presentations = overrides.presentationFactory?.create()
         ?: ExperiencePresentationService(
             context = appContext,
-            releases = journeyCatalog,
-            acquirer = releaseArtifactAcquirer,
             emit = eventLog::capture,
             scope = scope,
             runtimeAvailable = AndroidRenderCapability::isAvailable,
-            commerce = experiencePurchases,
-            transitionOutcome = transitionPresentationOutcome,
-            reportOutcome = reportPresentationOutcome,
+            commerce = journeyCommerce,
         )
 
-    private val deviceLegPresenter = object : DeviceLegPresenting {
+    private val journeyPresenter = object : JourneyPresenting {
         override fun reserve(ownerDistinctId: String) =
-            presentations.reserveDeviceLeg(ownerDistinctId)
+            presentations.reserveJourney(ownerDistinctId)
 
         override suspend fun present(
-            request: DeviceLegPresentationRequest,
-        ): DeviceLegPresentationResult = try {
-            presentations.presentDeviceLeg(
+            request: JourneyPresentationRequest,
+        ): JourneyPresentationResult = try {
+            presentations.presentJourney(
                 release = request.release,
                 screenId = request.screenId,
                 journeyId = request.journeyId,
@@ -433,19 +326,45 @@ internal class NuxieCore(
                 onPresentationRevealed = request.onPresentationRevealed,
                 onOutcome = request.onOutcome,
             )
-            DeviceLegPresentationResult.Shown
+            JourneyPresentationResult.Shown
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: ExperiencePresentationException) {
             when (error.reason) {
                 ExperiencePresentationException.Reason.DECLINED ->
-                    DeviceLegPresentationResult.Declined
+                    JourneyPresentationResult.Declined
                 ExperiencePresentationException.Reason.JOURNEY_COMPLETED ->
-                    DeviceLegPresentationResult.Completed
-                else -> DeviceLegPresentationResult.Failed
+                    JourneyPresentationResult.Completed
+                ExperiencePresentationException.Reason.PRODUCTS_UNAVAILABLE ->
+                    JourneyPresentationResult.ProductsUnavailable
+                else -> JourneyPresentationResult.Failed
             }
         } catch (_: Exception) {
-            DeviceLegPresentationResult.Failed
+            JourneyPresentationResult.Failed
+        }
+
+        override fun owns(owner: JourneyPresentationOwner): Boolean =
+            presentations.ownsJourney(owner)
+
+        override fun screenId(owner: JourneyPresentationOwner): String? =
+            presentations.journeyScreenId(owner)
+
+        override fun resolveAction(
+            owner: JourneyPresentationOwner,
+            action: kotlinx.serialization.json.JsonObject,
+            source: ai.nuxie.sdk.presentation.JourneyScreenEmissionSource?,
+        ): kotlinx.serialization.json.JsonObject? =
+            presentations.resolveJourneyAction(owner, action, source)
+
+        override suspend fun dispatchAction(
+            owner: JourneyPresentationOwner,
+            action: kotlinx.serialization.json.JsonObject,
+            effectId: String,
+        ): JourneyPresentationActionResult =
+            presentations.dispatchJourneyAction(owner, action, effectId)
+
+        override fun cancelBackNavigation(owner: JourneyPresentationOwner) {
+            presentations.cancelBackNavigation(owner)
         }
 
         override suspend fun shutdownOwnedBy(ownerDistinctId: String) {
@@ -456,52 +375,20 @@ internal class NuxieCore(
             ownerDistinctId: String,
             journeyId: String,
         ) {
-            presentations.shutdownDeviceLeg(ownerDistinctId, journeyId)
+            presentations.shutdownJourney(ownerDistinctId, journeyId)
         }
     }
 
-    val triggers by lazy {
-        TriggerService(
-        decisionEvents = delivery,
-        broker = triggerBroker,
-        identityDistinctId = identity::distinctId,
-        journeys = overrides.journeys ?: journeys,
-        features = overrides.features ?: object : TriggerService.FeatureGate {
-            override suspend fun cachedAccess(
-                featureId: String,
-                requiredBalance: Double?,
-                entityId: String?,
-            ): Boolean? = features.getCached(featureId, requiredBalance, entityId)
-                // getCached already resolved requiredBalance semantics for
-                // every entry kind (forRequiredBalance for regular entries,
-                // exact-match serving for opaque snapshots whose balance is
-                // intentionally null); re-deriving from balance here would
-                // deny allowed opaque grants.
-                ?.allowed
-
-            override suspend fun checkAccess(
-                featureId: String,
-                requiredBalance: Double?,
-                entityId: String?,
-            ): Boolean = features.checkWithCache(featureId, requiredBalance, entityId).allowed
-        },
-            presenter = overrides.presenter ?: TriggerService.ExperiencePresenter { experienceVersionId, journeyId ->
-                presentations.present(experienceVersionId, journeyId, identity.distinctId())
-            },
-            nowMillis = nowMillis,
-        )
-    }
-
-    private val deviceLegDispatcher = DeviceLegEffectDispatcher(
+    private val journeyDispatcher = JourneyEffectDispatcher(
         identity = identity,
         capture = eventLog::captureIdempotentlyIfCurrent,
         deliverAppAction = Nuxie::deliverAppAction,
     )
 
-    val deviceLegRuntime = DeviceLegService(
+    val journeys = JourneyService(
         identity = identity,
         events = store,
-        catalog = deviceLegProfiles,
+        catalog = journeyProfiles,
         journalDirectory = File(appContext.filesDir, "nuxie"),
         scope = scope,
         capture = eventLog::captureIdempotently,
@@ -510,8 +397,8 @@ internal class NuxieCore(
         featureAccess = { featureId ->
             features.getCached(featureId, requiredBalance = null, entityId = null)
         },
-        dispatcher = deviceLegDispatcher,
-        presenter = deviceLegPresenter,
+        dispatcher = journeyDispatcher,
+        presenter = journeyPresenter,
         nowMillis = nowMillis,
         replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
         artifactManager = releaseArtifactAcquirer,
@@ -522,17 +409,9 @@ internal class NuxieCore(
         storageScope = ProfileStorageScope(apiKey, environment),
         api = api,
         identity = identity,
-        segments = segments,
-        applyUserProperties = { properties -> identity.setUserProperties(properties) },
-        applyJourneyProfile = { distinctId, body ->
-            journeyCatalog.applyProfile(distinctId, body)
-        },
-        deviceLegProfiles = deviceLegProfiles,
-        deviceLegRuntime = deviceLegRuntime,
-        deviceLegArtifacts = releaseArtifactAcquirer,
-        applyJourneyFacts = { distinctId, body ->
-            journeys.applyDownFacts(body, distinctId)
-        },
+        journeyProfiles = journeyProfiles,
+        journeys = journeys,
+        journeyArtifacts = releaseArtifactAcquirer,
         stageFeatureProfile = { distinctId, body, purchaseRevision, authoritativeRevision, isCurrent ->
             features.stageProfile(
                 distinctId,
@@ -563,7 +442,7 @@ internal class NuxieCore(
         sessions,
         scope,
         onBackground = {
-            deviceLegRuntime.onAppDidEnterBackground()
+            journeys.onAppDidEnterBackground()
         },
         afterBackground = {
             delivery.flushAll()
@@ -573,25 +452,20 @@ internal class NuxieCore(
             // revocation lane. A failed revalidation leaves the authenticated
             // cached authority in place for offline execution.
             profile.refreshAndWait()
-            deviceLegRuntime.onAppWillEnterForeground()
+            journeys.onAppWillEnterForeground()
             // Purchase recovery handles still-active Play evidence.
             purchases.recover()
-            journeys.recoverPendingEnrollments()
             delivery.flushAll()
-            journeys.recoverPendingHostDismissals()
         },
     )
 
     /** Called once from Nuxie.setup after construction. */
     fun start() {
-        val activityForwarder = ActivityForwarder(
-            resolveExperience = journeys::forwardingExperienceRef,
-            deliver = forwardActivity,
-        )
+        val activityForwarder = ActivityForwarder(deliver = forwardActivity)
         eventLog.subscribeCommittedWithAdmission(
-            sampleGeneration = deviceLegRuntime::eventAdmissionGeneration,
+            sampleGeneration = journeys::eventAdmissionGeneration,
         ) { event, admittedGeneration ->
-            deviceLegRuntime.handleEvent(event, admittedGeneration)
+            journeys.handleEvent(event, admittedGeneration)
         }
         eventLog.subscribeForwarding(
             isEnabled = forwardingEnabled,
@@ -603,7 +477,7 @@ internal class NuxieCore(
             presentations.shutdownOwnedBy(from)
         })
         userTransitions.addObserver(UserTransitionCoordinator.Observer { _, from, to ->
-            deviceLegRuntime.handleUserChange(from, to)
+            journeys.handleUserChange(from, to)
         })
         userTransitions.addObserver(UserTransitionCoordinator.Observer { _, _, _ ->
             // The retained-evidence projection already switched synchronously
@@ -614,14 +488,12 @@ internal class NuxieCore(
         userTransitions.addObserver(profile.transitionObserver)
         // Subscriber registration precedes recovery, while the synchronous
         // enqueue keeps every later capture behind initialization in its FIFO.
-        deviceLegRuntime.enqueueInitialization()
+        journeys.enqueueInitialization()
         if (requestInitialProfileRefresh) {
             profile.requestRefresh()
         }
         scope.launch {
-            journeys.recoverPendingEnrollments()
             delivery.flushAll()
-            journeys.recoverPendingHostDismissals()
         }
         lifecycleTracker.trackAppLaunchEvents()
         billing.connect()
@@ -639,7 +511,7 @@ internal class NuxieCore(
         billing.close()
         presentations.close()
         kotlinx.coroutines.runBlocking {
-            runCatching { deviceLegRuntime.profileDidClearAll() }
+            runCatching { journeys.profileDidClearAll() }
             runCatching { profile.close() }
             runCatching { delivery.close() }
             runCatching { eventLog.closeWorkers() }
@@ -665,7 +537,7 @@ internal class NuxieCore(
         }
 
     /** Runtime absence closes the Journey enrollment front door. */
-    private fun journeySupportedRuntime(): SupportedRuntime? {
+    private fun journeySupportedRuntime(): JourneyReleaseSupportedRuntime? {
         if (!AndroidRenderCapability.isAvailable()) return null
         return supportedRuntimeForEmbeddedRuntime(nuxieRuntimeSourceRevision())
     }

@@ -107,7 +107,7 @@ class HostRenderHarnessTest {
                 }],
                 "screens":[{"id":"main","artboardName":"Main","width":4,"height":2}]
               },
-              "journey":{"screens":[{"id":"main"$defaultDeclaration}]}
+              "leg":{"screens":[{"id":"main"$defaultDeclaration}]}
             }
             """.trimIndent(),
         )

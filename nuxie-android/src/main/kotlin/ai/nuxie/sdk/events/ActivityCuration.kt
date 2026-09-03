@@ -2,7 +2,6 @@ package ai.nuxie.sdk.events
 
 import ai.nuxie.sdk.DismissReason
 import ai.nuxie.sdk.ExperienceRef
-import ai.nuxie.sdk.JourneyExitReason
 import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.PermissionKind
 import ai.nuxie.sdk.PurchaseInfo
@@ -27,15 +26,10 @@ internal object ActivityCuration {
         SystemEventNames.EXPERIENCE_ERRORED,
         SystemEventNames.EXPERIENCE_SHOWN,
         JourneyEventNames.EXPERIMENT_EXPOSURE,
-        JourneyEventNames.EXPERIMENT_EXPOSURE_ERROR,
         SystemEventNames.FEATURE_USED,
-        JourneyEventNames.CONVERTED,
-        JourneyEventNames.ENROLLED,
         JourneyEventNames.LEG_STARTED,
         JourneyEventNames.LEG_COMPLETED,
-        JourneyEventNames.EXITED,
         JourneyEventNames.MILESTONE,
-        JourneyEventNames.SUPERSEDED,
         SystemEventNames.NOTIFICATIONS_DENIED,
         SystemEventNames.NOTIFICATIONS_ENABLED,
         SystemEventNames.PERMISSION_DENIED,
@@ -55,6 +49,15 @@ internal object ActivityCuration {
         SystemEventNames.TRACKING_DENIED,
     )
 
+    val hiddenNames: Set<String> = setOf(
+        JourneyEventNames.APP_ACTION_REQUESTED,
+        JourneyEventNames.CUSTOMER_UPDATED,
+        JourneyEventNames.EXPERIENCE_ARTIFACT_LOAD_SUCCEEDED,
+        SystemEventNames.IDENTIFY,
+    )
+
+    val classifiedNames: Set<String> = curatedNames + hiddenNames
+
     fun activity(internalName: String, properties: JsonObject): NuxieActivity? = when (internalName) {
         SystemEventNames.EXPERIENCE_SHOWN -> experienceRef(properties)
             ?.let(NuxieActivity::ExperienceShown) ?: missing(internalName)
@@ -67,8 +70,6 @@ internal object ActivityCuration {
         SystemEventNames.EXPERIENCE_ERRORED -> experienceRef(properties)?.let {
             NuxieActivity.ExperienceErrored(it, properties.string("error_message").orEmpty())
         } ?: missing(internalName)
-        JourneyEventNames.ENROLLED -> experienceRef(properties)
-            ?.let(NuxieActivity::JourneyStarted) ?: missing(internalName)
         JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED -> {
             val ref = experienceRef(properties, requireVersion = true)
             val legId = properties.nonemptyString("leg_id")
@@ -78,9 +79,9 @@ internal object ActivityCuration {
             val outcome = properties.nonemptyString("outcome")
             when {
                 ref?.journeyId == null || legId == null || generation == null -> missing(internalName)
-                internalName == JourneyEventNames.LEG_STARTED -> NuxieActivity.JourneyLegStarted(ref, legId, generation)
+                internalName == JourneyEventNames.LEG_STARTED -> NuxieActivity.JourneyStarted(ref, legId, generation)
                 outcome == null -> missing(internalName)
-                else -> NuxieActivity.JourneyLegCompleted(ref, legId, generation, outcome)
+                else -> NuxieActivity.JourneyCompleted(ref, legId, generation, outcome)
             }
         }
         JourneyEventNames.MILESTONE -> {
@@ -89,26 +90,6 @@ internal object ActivityCuration {
             if (ref == null || milestoneId == null) missing(internalName)
             else NuxieActivity.MilestoneReached(ref, milestoneId)
         }
-        JourneyEventNames.CONVERTED -> {
-            val ref = experienceRef(properties, requireVersion = true)
-            val journeyId = properties.string("journey_id")
-            if (ref == null || journeyId == null) missing(internalName)
-            else NuxieActivity.JourneyConverted(ref, journeyId)
-        }
-        JourneyEventNames.EXITED -> {
-            val ref = experienceRef(properties)
-            val rawReason = properties.string("reason")
-            val reason = when {
-                rawReason == "cancelled" && properties.string("dismissed_by") == "user" -> JourneyExitReason.DISMISSED
-                rawReason != null -> journeyExitReason(rawReason)
-                else -> null
-            }
-            if (ref == null || reason == null) missing(internalName)
-            else NuxieActivity.JourneyEnded(ref, reason)
-        }
-        JourneyEventNames.SUPERSEDED -> experienceRef(properties)?.let {
-            NuxieActivity.JourneyEnded(it, JourneyExitReason.SUPERSEDED)
-        } ?: missing(internalName)
         SystemEventNames.PURCHASE_COMPLETED -> purchaseInfo(properties)
             ?.let(NuxieActivity::PurchaseCompleted) ?: missing(internalName)
         SystemEventNames.PURCHASE_FAILED -> {
@@ -150,12 +131,6 @@ internal object ActivityCuration {
             if (ref == null || experimentKey == null || variantKey == null || isHoldout == null) {
                 missing(internalName)
             } else NuxieActivity.ExperimentExposure(ref, experimentKey, variantKey, isHoldout)
-        }
-        JourneyEventNames.EXPERIMENT_EXPOSURE_ERROR -> {
-            val ref = experienceRef(properties)
-            val experimentKey = properties.string("experiment_key")
-            if (ref == null || experimentKey == null) missing(internalName)
-            else NuxieActivity.ExperimentError(ref, experimentKey, properties.string("reason").orEmpty())
         }
         SystemEventNames.PRODUCTS_UNAVAILABLE -> {
             val ref = experienceRef(properties)
@@ -223,18 +198,6 @@ internal object ActivityCuration {
         "goal_met" -> DismissReason.GOAL_MET
         "error" -> DismissReason.ERROR
         "host", "host_dismissed" -> DismissReason.HOST
-        else -> null
-    }
-
-    private fun journeyExitReason(value: String): JourneyExitReason? = when (value) {
-        "completed" -> JourneyExitReason.COMPLETED
-        "dismissed" -> JourneyExitReason.DISMISSED
-        "goal_met", "converted_exit" -> JourneyExitReason.GOAL_MET
-        "trigger_unmatched", "stopped_matching" -> JourneyExitReason.TRIGGER_UNMATCHED
-        "expired", "time_limit" -> JourneyExitReason.EXPIRED
-        "cancelled" -> JourneyExitReason.CANCELLED
-        "error" -> JourneyExitReason.ERROR
-        "superseded" -> JourneyExitReason.SUPERSEDED
         else -> null
     }
 

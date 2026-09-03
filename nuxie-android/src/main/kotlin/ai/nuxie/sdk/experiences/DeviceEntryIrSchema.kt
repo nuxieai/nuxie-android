@@ -1,12 +1,12 @@
 package ai.nuxie.sdk.experiences
 
-import ai.nuxie.sdk.experiences.ReleaseJson.array
-import ai.nuxie.sdk.experiences.ReleaseJson.boolean
-import ai.nuxie.sdk.experiences.ReleaseJson.fail
-import ai.nuxie.sdk.experiences.ReleaseJson.number
-import ai.nuxie.sdk.experiences.ReleaseJson.oneOf
-import ai.nuxie.sdk.experiences.ReleaseJson.record
-import ai.nuxie.sdk.experiences.ReleaseJson.text
+import ai.nuxie.sdk.experiences.JourneyReleaseJson.array
+import ai.nuxie.sdk.experiences.JourneyReleaseJson.boolean
+import ai.nuxie.sdk.experiences.JourneyReleaseJson.fail
+import ai.nuxie.sdk.experiences.JourneyReleaseJson.number
+import ai.nuxie.sdk.experiences.JourneyReleaseJson.oneOf
+import ai.nuxie.sdk.experiences.JourneyReleaseJson.record
+import ai.nuxie.sdk.experiences.JourneyReleaseJson.text
 import kotlinx.serialization.json.JsonElement
 
 /** Mirrors the canonical IR node grammar. Availability and evaluation remain

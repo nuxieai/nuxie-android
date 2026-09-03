@@ -33,7 +33,7 @@ class ExperienceSurfaceHostCleanupTest {
         val descriptor = Json.parseToJsonElement(
             """{
               "render":{"assets":[],"screens":[{"id":"main","artboardName":"Main"}]},
-              "journey":{"screens":[{"id":"main","defaultViewModelName":"Root"}]}
+              "leg":{"screens":[{"id":"main","defaultViewModelName":"Root"}]}
             }""",
         ).jsonObject
         try {

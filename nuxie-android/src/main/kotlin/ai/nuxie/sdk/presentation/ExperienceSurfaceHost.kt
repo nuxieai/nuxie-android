@@ -48,7 +48,11 @@ internal class ExperienceSurfaceHost(
 ) : SurfaceView(context), SurfaceHolder.Callback, Choreographer.FrameCallback {
     interface Listener {
         fun onFirstFrame()
-        fun onRuntimeStep(outcome: NuxiePlayerStepOutcome, correlationId: ULong) {}
+        fun onRuntimeStep(
+            outcome: NuxiePlayerStepOutcome,
+            correlationId: ULong,
+            viewModelSnapshot: NuxieViewModelSnapshot?,
+        ) {}
         fun onFailure(error: ExperiencePresentationException)
         fun onRuntimeEvent(event: NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {}
     }
@@ -329,8 +333,24 @@ internal class ExperienceSurfaceHost(
                 )
                 return@enqueue
             }
+            val viewModelSnapshot = if (
+                outcome.events.isNotEmpty() || outcome.hasPublishableEffects()
+            ) {
+                try {
+                    viewModelState?.snapshot()
+                } catch (error: Throwable) {
+                    reportFailure(
+                        ExperiencePresentationException.Reason.HOST_FAILED,
+                        "Experience view-model snapshot failed",
+                        error,
+                    )
+                    return@enqueue
+                }
+            } else {
+                null
+            }
             if (outcome.hasPublishableEffects()) {
-                unpublishedSteps.addLast(PublishedStep(correlationId, outcome))
+                unpublishedSteps.addLast(PublishedStep(correlationId, outcome, viewModelSnapshot))
             }
             val disposition = renderer.renderAndPresent(player, window, clearColor, true)
             if (disposition < 0) {
@@ -346,20 +366,14 @@ internal class ExperienceSurfaceHost(
                 }
                 while (unpublishedSteps.isNotEmpty()) {
                     val step = unpublishedSteps.removeFirst()
-                    listener?.onRuntimeStep(step.outcome, step.correlationId)
+                    listener?.onRuntimeStep(
+                        step.outcome,
+                        step.correlationId,
+                        step.viewModelSnapshot,
+                    )
                 }
             }
             if (outcome.events.isNotEmpty()) {
-                val viewModelSnapshot = try {
-                    viewModelState?.snapshot()
-                } catch (error: Throwable) {
-                    reportFailure(
-                        ExperiencePresentationException.Reason.HOST_FAILED,
-                        "Experience view-model snapshot failed",
-                        error,
-                    )
-                    return@enqueue
-                }
                 post {
                     if (!released.get()) {
                         outcome.events.forEach {
@@ -426,6 +440,7 @@ internal class ExperienceSurfaceHost(
     private data class PublishedStep(
         val correlationId: ULong,
         val outcome: NuxiePlayerStepOutcome,
+        val viewModelSnapshot: NuxieViewModelSnapshot?,
     )
 
     /**
