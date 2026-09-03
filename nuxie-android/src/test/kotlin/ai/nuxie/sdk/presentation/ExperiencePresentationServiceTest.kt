@@ -386,6 +386,8 @@ class ExperiencePresentationServiceTest {
         val emitted = mutableListOf<Emitted>()
         val launched = mutableListOf<String>()
         val outcomes = mutableListOf<DeviceLegSurfaceOutcome>()
+        val changedScreens = mutableListOf<String>()
+        val dismissedScreens = mutableListOf<Triple<String, String?, String>>()
         val transitionAttempts = mutableListOf<CloseReason>()
         val reports = mutableListOf<CloseReason>()
         val lease = Lease()
@@ -417,6 +419,14 @@ class ExperiencePresentationServiceTest {
                         lease,
                     )
                 },
+                onScreenChanged = { screenId ->
+                    changedScreens += screenId
+                    true
+                },
+                onScreenDismissed = { screenId, revealingScreenId, method ->
+                    dismissedScreens += Triple(screenId, revealingScreenId, method)
+                    DeviceLegScreenDismissalResult.HANDLED
+                },
                 onOutcome = outcomes::add,
             )
         }
@@ -435,6 +445,8 @@ class ExperiencePresentationServiceTest {
         service.dismissFromHost("customer-1")
 
         assertEquals(listOf(DeviceLegSurfaceOutcome.DISMISSED), outcomes)
+        assertEquals(listOf("screen_welcome"), changedScreens)
+        assertTrue(dismissedScreens.isEmpty())
         assertTrue(transitionAttempts.isEmpty())
         assertTrue(reports.isEmpty())
         assertEquals(
@@ -505,6 +517,7 @@ class ExperiencePresentationServiceTest {
         val launched = mutableListOf<String>()
         val firstOutcomes = mutableListOf<DeviceLegSurfaceOutcome>()
         val secondOutcomes = mutableListOf<DeviceLegSurfaceOutcome>()
+        val lifecycle = mutableListOf<Triple<String, String?, String>>()
         val firstLease = Lease()
         val secondLease = Lease()
         val release = renderedDeviceLegRelease()
@@ -526,6 +539,10 @@ class ExperiencePresentationServiceTest {
                         release.identity.experienceVersionId,
                         firstLease,
                     )
+                },
+                onScreenDismissed = { screenId, revealingScreenId, method ->
+                    lifecycle += Triple(screenId, revealingScreenId, method)
+                    DeviceLegScreenDismissalResult.HANDLED
                 },
                 onOutcome = firstOutcomes::add,
             )
@@ -556,6 +573,10 @@ class ExperiencePresentationServiceTest {
         assertEquals(2, launched.size)
         assertTrue(firstLease.closed.get())
         assertTrue(firstOutcomes.isEmpty())
+        assertEquals(
+            listOf(Triple("screen_welcome", "screen_welcome", "navigate")),
+            lifecycle,
+        )
         assertEquals(0, emitted.count { it == "\$experience_dismissed" })
         PresentationRegistry.reportFirstFrame(launched.last())
         second.await()
@@ -567,6 +588,70 @@ class ExperiencePresentationServiceTest {
         assertTrue(secondLease.closed.get())
         assertEquals(2, emitted.count { it == "\$experience_shown" })
         assertEquals(1, emitted.count { it == "\$experience_dismissed" })
+    }
+
+    @Test
+    fun completedScreenDismissalStopsSameJourneyNavigationBeforeDestinationLaunch() = runTest {
+        val launched = mutableListOf<String>()
+        val firstLease = Lease()
+        val secondLease = Lease()
+        val release = renderedDeviceLegRelease()
+        val service = service(launch = launched::add)
+        val reservation = requireNotNull(service.reserveDeviceLeg("customer-1"))
+        val first = async {
+            service.presentDeviceLeg(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-1",
+                ownerDistinctId = "customer-1",
+                reservation = reservation,
+                acquire = {
+                    acquired(
+                        release.identity.experienceId,
+                        release.identity.experienceVersionId,
+                        firstLease,
+                    )
+                },
+                onScreenDismissed = { _, _, _ ->
+                    DeviceLegScreenDismissalResult.COMPLETED
+                },
+                onOutcome = {},
+            )
+        }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        first.await()
+
+        val second = async(SupervisorJob()) {
+            service.presentDeviceLeg(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-1",
+                ownerDistinctId = "customer-1",
+                reservation = null,
+                acquire = {
+                    acquired(
+                        release.identity.experienceId,
+                        release.identity.experienceVersionId,
+                        secondLease,
+                    )
+                },
+                onOutcome = {},
+            )
+        }
+        runCurrent()
+
+        val error = try {
+            second.await()
+            fail("completed Journey should stop destination presentation")
+            error("unreachable")
+        } catch (error: ExperiencePresentationException) {
+            error
+        }
+        assertEquals(ExperiencePresentationException.Reason.JOURNEY_COMPLETED, error.reason)
+        assertEquals(1, launched.size)
+        assertTrue(firstLease.closed.get())
+        assertFalse(secondLease.closed.get())
     }
 
     @Test

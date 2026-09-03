@@ -17,6 +17,7 @@ internal data class StableEventCaptureResult(
     val settled: Boolean,
     val event: StoredEvent?,
     val localRoutePending: Boolean = false,
+    val newlyCaptured: Boolean = false,
 )
 
 /** Persistence seam used by the future capture and delivery pipeline. */

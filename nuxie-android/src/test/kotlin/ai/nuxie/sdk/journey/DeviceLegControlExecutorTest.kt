@@ -39,6 +39,28 @@ class DeviceLegControlExecutorTest {
                     actual as DeviceLegControlExecutor.Result.Advance
                     assertEquals(id, expected.text("stepId"), actual.stepId)
                     expected["event"]?.let { assertEquals(id, it, actual.context["event"]) }
+                    when (id) {
+                        "experiment-uses-durable-assignment" -> {
+                            val selection = requireNotNull(actual.experimentSelection)
+                            assertEquals("experiment_assigned", selection.experimentId)
+                            assertEquals("variant_b", selection.variantId)
+                            assertEquals("variant_b", selection.assignedVariantId)
+                            assertEquals(
+                                DeviceLegControlExecutor.ExperimentSelection.Source.PROFILE,
+                                selection.source,
+                            )
+                        }
+                        "unassigned-experiment-uses-first-variant" -> {
+                            val selection = requireNotNull(actual.experimentSelection)
+                            assertEquals("experiment_new", selection.experimentId)
+                            assertEquals("default", selection.variantId)
+                            assertEquals(null, selection.assignedVariantId)
+                            assertEquals(
+                                DeviceLegControlExecutor.ExperimentSelection.Source.NO_ASSIGNMENT,
+                                selection.source,
+                            )
+                        }
+                    }
                 }
                 "park" -> {
                     actual as DeviceLegControlExecutor.Result.Park

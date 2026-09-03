@@ -5,6 +5,7 @@ import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.events.StableEventCaptureResult
 import ai.nuxie.sdk.events.StableEventCommitAdmission
 import ai.nuxie.sdk.events.StoredEvent
+import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.features.FeatureAccess
 import ai.nuxie.sdk.experiences.AuthenticatedDeviceLegRelease
 import ai.nuxie.sdk.experiences.DeviceLegArtifactManager
@@ -19,9 +20,12 @@ import ai.nuxie.sdk.presentation.DeviceLegPresentationReservation
 import ai.nuxie.sdk.presentation.DeviceLegPresentationResult
 import ai.nuxie.sdk.presentation.DeviceLegPresenting
 import ai.nuxie.sdk.presentation.DeviceLegScreenEmissionBatch
+import ai.nuxie.sdk.presentation.DeviceLegScreenDismissalResult
 import ai.nuxie.sdk.presentation.DeviceLegSurfaceOutcome
 import android.util.Log
 import java.io.File
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -31,6 +35,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.coroutineContext
@@ -154,6 +160,14 @@ internal class DeviceLegService(
             },
         )
     },
+    private val capturePresentationEvent: suspend (
+        String,
+        Map<String, Any?>,
+        String,
+        String,
+        Long,
+        StableEventCommitAdmission?,
+    ) -> StableEventCaptureResult = captureScreenEvent,
     private val featureAccess: suspend (String) -> FeatureAccess? = { null },
     private val dispatcher: DeviceLegDispatching = DeviceLegDispatching {
         DeviceLegDispatchResult.Unsupported
@@ -194,6 +208,12 @@ internal class DeviceLegService(
         val reentry: JourneyReentry,
     )
 
+    private enum class PresentationLifecycleResult {
+        ACCEPTED,
+        COMPLETED,
+        REJECTED,
+    }
+
     private sealed interface Command {
         val done: CompletableDeferred<Unit>?
 
@@ -222,12 +242,24 @@ internal class DeviceLegService(
         }
         data class PresentationBatch(
             val runId: String,
-            val expectedStepId: String,
             val expectedScreenId: String,
             val release: AuthenticatedDeviceLegRelease,
             val executionFenceToken: DeviceLegExecutionFenceToken,
             val batch: DeviceLegScreenEmissionBatch,
             val accepted: CompletableDeferred<Boolean>,
+        ) : Command {
+            override val done: CompletableDeferred<Unit>? = null
+        }
+        data class PresentationLifecycle(
+            val runId: String,
+            val eventName: String,
+            val payload: JsonObject,
+            val screenId: String,
+            val revealingScreenId: String?,
+            val method: String?,
+            val release: AuthenticatedDeviceLegRelease,
+            val executionFenceToken: DeviceLegExecutionFenceToken,
+            val result: CompletableDeferred<PresentationLifecycleResult>,
         ) : Command {
             override val done: CompletableDeferred<Unit>? = null
         }
@@ -237,6 +269,7 @@ internal class DeviceLegService(
             val executionFenceToken: DeviceLegExecutionFenceToken,
             val signal: DeviceLegControlExecutor.Signal,
             val checkpoint: DeviceLegControlExecutor.Checkpoint?,
+            val dismissPresentationOnCompletion: Boolean,
         ) : Command {
             override val done: CompletableDeferred<Unit>? = null
         }
@@ -260,7 +293,6 @@ internal class DeviceLegService(
         ) : Command
         data class PresentationEnded(
             val runId: String,
-            val stepId: String,
             val screenId: String,
             val release: AuthenticatedDeviceLegRelease,
             val executionFenceToken: DeviceLegExecutionFenceToken,
@@ -295,7 +327,10 @@ internal class DeviceLegService(
     private var retainedReleaseBytes = 0
     private val revokingCustomers = mutableSetOf<String>()
     private val foregroundReceiptResetCustomers = mutableSetOf<String>()
-    private val directlyRoutedRunByEventId = mutableMapOf<String, String>()
+    private val directlyRoutedRunByEventId = ConcurrentHashMap<String, String>()
+    private val presentingRunIds = ConcurrentHashMap<String, Unit>()
+    private val activePresentedRunIds = ConcurrentHashMap<String, Unit>()
+    private val presentationCallbackMutex = Mutex()
     private var wakeJob: Job? = null
     private var wakeGeneration = 0L
 
@@ -320,6 +355,8 @@ internal class DeviceLegService(
                         command.admittedGeneration,
                     )
                     is Command.PresentationBatch -> handlePresentationBatchNow(command)
+                    is Command.PresentationLifecycle ->
+                        handlePresentationLifecycleNow(command)
                     is Command.ContinueExecution -> continueExecutionNow(command)
                     is Command.FinalizePresentationAbandonment ->
                         finalizePresentationAbandonmentNow(command)
@@ -337,6 +374,12 @@ internal class DeviceLegService(
             }
             if (command is Command.PresentationBatch) {
                 command.accepted.complete(result.getOrNull() == true)
+            }
+            if (command is Command.PresentationLifecycle) {
+                command.result.complete(
+                    result.getOrNull() as? PresentationLifecycleResult
+                        ?: PresentationLifecycleResult.REJECTED,
+                )
             }
             command.done?.complete(Unit)
         }
@@ -422,7 +465,6 @@ internal class DeviceLegService(
 
     private suspend fun handlePresentationBatch(
         runId: String,
-        expectedStepId: String,
         expectedScreenId: String,
         release: AuthenticatedDeviceLegRelease,
         executionFenceToken: DeviceLegExecutionFenceToken,
@@ -431,7 +473,6 @@ internal class DeviceLegService(
         val accepted = CompletableDeferred<Boolean>()
         val command = Command.PresentationBatch(
             runId = runId,
-            expectedStepId = expectedStepId,
             expectedScreenId = expectedScreenId,
             release = release,
             executionFenceToken = executionFenceToken,
@@ -443,6 +484,89 @@ internal class DeviceLegService(
         }
         if (commands.trySend(command).isFailure) return false
         return accepted.await()
+    }
+
+    private suspend fun handlePresentationLifecycle(
+        runId: String,
+        eventName: String,
+        payload: JsonObject,
+        screenId: String,
+        revealingScreenId: String?,
+        method: String?,
+        release: AuthenticatedDeviceLegRelease,
+        executionFenceToken: DeviceLegExecutionFenceToken,
+    ): PresentationLifecycleResult {
+        val result = CompletableDeferred<PresentationLifecycleResult>()
+        val command = Command.PresentationLifecycle(
+            runId = runId,
+            eventName = eventName,
+            payload = payload,
+            screenId = screenId,
+            revealingScreenId = revealingScreenId,
+            method = method,
+            release = release,
+            executionFenceToken = executionFenceToken,
+            result = result,
+        )
+        if (coroutineContext[WorkerContext]?.owner === this) {
+            return handlePresentationLifecycleNow(command)
+        }
+        if (presentingRunIds.containsKey(runId)) {
+            return presentationCallbackMutex.withLock {
+                handlePresentationLifecycleNow(command, deferContinuation = true)
+            }
+        }
+        if (commands.trySend(command).isFailure) {
+            return PresentationLifecycleResult.REJECTED
+        }
+        return result.await()
+    }
+
+    private suspend fun handlePresentationScreenChanged(
+        runId: String,
+        screenId: String,
+        release: AuthenticatedDeviceLegRelease,
+        executionFenceToken: DeviceLegExecutionFenceToken,
+    ): Boolean = handlePresentationLifecycle(
+        runId = runId,
+        eventName = SystemEventNames.SCREEN_SHOWN,
+        payload = JsonObject(mapOf("screen_id" to JsonPrimitive(screenId))),
+        screenId = screenId,
+        revealingScreenId = null,
+        method = null,
+        release = release,
+        executionFenceToken = executionFenceToken,
+    ) != PresentationLifecycleResult.REJECTED
+
+    private suspend fun handlePresentationScreenDismissed(
+        runId: String,
+        screenId: String,
+        revealingScreenId: String?,
+        method: String,
+        release: AuthenticatedDeviceLegRelease,
+        executionFenceToken: DeviceLegExecutionFenceToken,
+    ): DeviceLegScreenDismissalResult {
+        val payload = buildJsonObject {
+            put("screen_id", JsonPrimitive(screenId))
+            put("method", JsonPrimitive(method))
+            revealingScreenId?.let {
+                put("revealing_screen_id", JsonPrimitive(it))
+            }
+        }
+        return when (handlePresentationLifecycle(
+            runId = runId,
+            eventName = SystemEventNames.SCREEN_DISMISSED,
+            payload = payload,
+            screenId = screenId,
+            revealingScreenId = revealingScreenId,
+            method = method,
+            release = release,
+            executionFenceToken = executionFenceToken,
+        )) {
+            PresentationLifecycleResult.ACCEPTED -> DeviceLegScreenDismissalResult.HANDLED
+            PresentationLifecycleResult.COMPLETED -> DeviceLegScreenDismissalResult.COMPLETED
+            PresentationLifecycleResult.REJECTED -> DeviceLegScreenDismissalResult.REJECTED
+        }
     }
 
     suspend fun onAppDidEnterBackground() {
@@ -564,6 +688,7 @@ internal class DeviceLegService(
         profileState = null
         currentProfilePublished = distinctId != null && identity.distinctId() == distinctId
         directlyRoutedRunByEventId.clear()
+        activePresentedRunIds.clear()
         clearRetainedReleaseCache()
         foregroundReceiptResetCustomers.clear()
         currentJournal?.takeIf { distinctId == null || it.distinctId == distinctId }
@@ -624,6 +749,7 @@ internal class DeviceLegService(
         }
         currentProfilePublished = false
         directlyRoutedRunByEventId.clear()
+        activePresentedRunIds.clear()
         clearRetainedReleaseCache()
         foregroundReceiptResetCustomers.clear()
         if (!departingRevoked) return
@@ -684,7 +810,7 @@ internal class DeviceLegService(
                 ) == run.artifactDigests
             }
             publishTerminalPresentationPublications(opened)
-            reporter(opened).flushPending()
+            flushPendingReports(opened)
             if (opened.finalizeRevocation()) revokingCustomers.remove(distinctId)
             else revokingCustomers += distinctId
         }.onFailure {
@@ -705,7 +831,7 @@ internal class DeviceLegService(
         }.getOrDefault(false)
         if (!revoked) return false
         runCatching {
-            reporter(target).flushPending()
+            flushPendingReports(target)
             if (target.finalizeRevocation()) revokingCustomers.remove(target.distinctId)
         }.onFailure {
             Log.w(LOG_TAG, "Device-leg revocation reporting remains pending", it)
@@ -725,6 +851,11 @@ internal class DeviceLegService(
                 }
             }
         }
+
+    private suspend fun flushPendingReports(target: DeviceLegRunJournal) {
+        DeviceLegExperimentExposureReporter(target, capture).flushPending()
+        reporter(target).flushPending()
+    }
 
     private suspend fun reconcileNow(generation: Long) {
         val state = currentState()?.takeIf { it.generation == generation } ?: return
@@ -875,6 +1006,11 @@ internal class DeviceLegService(
                             entryStepId,
                             nowMillis(),
                             releasePin,
+                            DeviceLegRun.ExecutionSnapshot(
+                                delivery = state.snapshot.profile.delivery,
+                                assignments = state.snapshot.profile.facts
+                                    .getValue("assignments").jsonObject,
+                            ),
                             stateReceipt,
                             artifactDigests,
                             retainArtifacts = { candidate ->
@@ -909,7 +1045,7 @@ internal class DeviceLegService(
                 finish(run, "abandoned", release.leg, currentJournal)
                 return
             }
-            reporter(currentJournal).flushPending()
+            flushPendingReports(currentJournal)
             val queued = currentJournal.runs().firstOrNull {
                 it.id == run.id && it.startedQueued
             } ?: return
@@ -917,7 +1053,6 @@ internal class DeviceLegService(
             execute(
                 queued,
                 release,
-                state,
                 executionToken,
                 executorSignal(event),
                 null,
@@ -1012,7 +1147,6 @@ internal class DeviceLegService(
                 execute(
                     resumed,
                     release,
-                    state,
                     executionToken,
                     executorSignal(event).copy(
                         responsesChanged = park.pendingResponsesChanged,
@@ -1027,11 +1161,141 @@ internal class DeviceLegService(
         }
     }
 
+    private suspend fun handlePresentationLifecycleNow(
+        command: Command.PresentationLifecycle,
+        deferContinuation: Boolean = false,
+    ): PresentationLifecycleResult {
+        val target = journal ?: return PresentationLifecycleResult.REJECTED
+        if (!isExecutionCurrent(command.executionFenceToken, target)) {
+            return PresentationLifecycleResult.REJECTED
+        }
+        val run = target.runs().firstOrNull { candidate ->
+            candidate.id == command.runId &&
+                candidate.completion == null &&
+                candidate.pendingPresentationPublication == null &&
+                matches(command.release, candidate.reference)
+        } ?: return PresentationLifecycleResult.REJECTED
+        if (command.release.leg.getValue("screens").jsonArray
+                .map(JsonElement::jsonObject)
+                .none { it.text("id") == command.screenId }
+        ) return PresentationLifecycleResult.REJECTED
+
+        val properties = attributedPresentationProperties(
+            command.payload,
+            command.screenId,
+            run,
+        ) ?: return PresentationLifecycleResult.REJECTED
+        val identityScope = identity.captureScope()
+        if (identityScope.distinctId != target.distinctId) {
+            return PresentationLifecycleResult.REJECTED
+        }
+        val eventId = UUID.randomUUID().toString().lowercase()
+        directlyRoutedRunByEventId[eventId] = run.id
+        val admission = StableEventCommitAdmission { commit ->
+            executionFence.performIfCurrent(command.executionFenceToken) {
+                identity.withCurrentScope(identityScope, commit)
+            }
+        }
+        val captureResult = runCatching {
+            capturePresentationEvent(
+                command.eventName,
+                JsonValueConverter.toNativeMap(properties),
+                eventId,
+                target.distinctId,
+                nowMillis(),
+                admission,
+            )
+        }.getOrElse {
+            directlyRoutedRunByEventId.remove(eventId, run.id)
+            return PresentationLifecycleResult.REJECTED
+        }
+        val event = captureResult.event
+        if (!captureResult.settled || event == null) {
+            directlyRoutedRunByEventId.remove(eventId, run.id)
+            return PresentationLifecycleResult.REJECTED
+        }
+        if (!captureResult.localRoutePending) {
+            directlyRoutedRunByEventId.remove(eventId, run.id)
+        }
+        if (command.eventName == SystemEventNames.SCREEN_DISMISSED &&
+            command.revealingScreenId == null
+        ) {
+            activePresentedRunIds.remove(run.id)
+        }
+
+        val routeStepId = DeviceLegPresentationRouteResolver.resolve(
+            command.release.leg,
+            event.name,
+            command.screenId,
+        )
+        if (routeStepId == null) {
+            if (command.eventName == SystemEventNames.SCREEN_DISMISSED &&
+                command.revealingScreenId == null
+            ) {
+                finish(
+                    run,
+                    if (command.method == "error") "abandoned" else HOST_DISMISSED_OUTCOME,
+                    command.release.leg,
+                    target,
+                )
+                return PresentationLifecycleResult.COMPLETED
+            }
+            return PresentationLifecycleResult.ACCEPTED
+        }
+
+        val context = JsonObject(
+            mapOf(
+                "event" to event.properties,
+                "responses" to run.context.getValue("responses").jsonObject,
+            ),
+        )
+        val transitioned = runCatching {
+            publishJournalIfCurrent(command.executionFenceToken, identityScope) {
+                val current = target.runs().firstOrNull {
+                    it.id == run.id &&
+                        it.completion == null &&
+                        it.stepId == run.stepId &&
+                        it.pendingPresentationPublication == null
+                } ?: return@publishJournalIfCurrent null
+                target.transition(current.id, routeStepId, context)
+                target.runs().firstOrNull { it.id == current.id }
+            }
+        }.getOrNull() ?: return PresentationLifecycleResult.REJECTED
+        val continuation = Command.ContinueExecution(
+            transitioned.id,
+            command.release,
+            command.executionFenceToken,
+            executorSignal(event),
+            null,
+            dismissPresentationOnCompletion = !(
+                command.eventName == SystemEventNames.SCREEN_DISMISSED &&
+                    command.revealingScreenId == null
+                ),
+        )
+        if (deferContinuation) {
+            return if (commands.trySend(continuation).isSuccess) {
+                PresentationLifecycleResult.ACCEPTED
+            } else {
+                PresentationLifecycleResult.REJECTED
+            }
+        }
+        continueExecutionNow(continuation)
+        val remainsLive = target.runs().any {
+            it.id == transitioned.id && it.completion == null
+        }
+        return if (remainsLive) {
+            PresentationLifecycleResult.ACCEPTED
+        } else {
+            PresentationLifecycleResult.COMPLETED
+        }
+    }
+
     private suspend fun presentationEndedNow(command: Command.PresentationEnded) {
+        activePresentedRunIds.remove(command.runId)
         val target = journal ?: return
         if (!isExecutionCurrent(command.executionFenceToken, target)) return
         val run = target.runs().firstOrNull { it.id == command.runId }
-            ?.takeIf { it.completion == null && it.stepId == command.stepId }
+            ?.takeIf { it.completion == null }
             ?: return
         if (!matches(command.release, run.reference)) {
             finish(run, "abandoned", command.release.leg, target)
@@ -1041,13 +1305,16 @@ internal class DeviceLegService(
             finish(run, "abandoned", command.release.leg, target)
             return
         }
-        val routeStepId = hostDismissRoute(command.release.leg, command.screenId)
+        val routeStepId = DeviceLegPresentationRouteResolver.resolve(
+            command.release.leg,
+            HOST_DISMISSED_EVENT,
+            command.screenId,
+        )
         if (routeStepId == null) {
             finish(run, HOST_DISMISSED_OUTCOME, command.release.leg, target)
             return
         }
-        val state = currentState()
-        if (state == null || !isExecutionCurrent(command.executionFenceToken, target)) {
+        if (!isExecutionCurrent(command.executionFenceToken, target)) {
             finish(run, "abandoned", command.release.leg, target)
             return
         }
@@ -1055,7 +1322,6 @@ internal class DeviceLegService(
         execute(
             initial = run.copy(stepId = routeStepId, park = null),
             release = command.release,
-            state = state,
             executionToken = command.executionFenceToken,
             signal = DeviceLegControlExecutor.Signal(
                 DeviceLegControlExecutor.Event(
@@ -1077,7 +1343,6 @@ internal class DeviceLegService(
         val run = target.runs().firstOrNull { it.id == command.runId }
             ?.takeIf {
                 it.completion == null &&
-                    it.stepId == command.expectedStepId &&
                     matches(command.release, it.reference)
             }
             ?: return false
@@ -1170,7 +1435,7 @@ internal class DeviceLegService(
         val staged = publishJournalIfCurrent(command.executionFenceToken, identityScope) {
             target.stagePresentationPublication(
                 run.id,
-                expectedStepId = command.expectedStepId,
+                expectedStepId = run.stepId,
                 context = context,
                 publication = publication,
             )
@@ -1239,7 +1504,7 @@ internal class DeviceLegService(
             }
             val event = captureResult.event
             if (routedEvent == null && event != null) {
-                screenEventRoute(
+                DeviceLegPresentationRouteResolver.resolve(
                     release.leg,
                     event.name,
                     publication.sourceScreenId,
@@ -1304,6 +1569,7 @@ internal class DeviceLegService(
                     executionToken,
                     executorSignal(event),
                     null,
+                    dismissPresentationOnCompletion = true,
                 ),
             )
             return true
@@ -1337,6 +1603,7 @@ internal class DeviceLegService(
                     executionToken,
                     DeviceLegControlExecutor.Signal(responsesChanged = true),
                     checkpoint,
+                    dismissPresentationOnCompletion = true,
                 ),
             )
         }
@@ -1381,7 +1648,7 @@ internal class DeviceLegService(
                 it.pendingPresentationPublication != null
         } ?: return
         if (!publishPresentationObservability(run, target)) return
-        reporter(target).flushPending()
+        flushPendingReports(target)
         scheduleNextWake()
     }
 
@@ -1395,18 +1662,14 @@ internal class DeviceLegService(
             finish(run, "abandoned", command.release.leg, target)
             return
         }
-        val state = currentState() ?: run {
-            finish(run, "abandoned", command.release.leg, target)
-            return
-        }
         execute(
             initial = run,
             release = command.release,
-            state = state,
             executionToken = command.executionFenceToken,
             signal = command.signal,
             initialCheckpoint = command.checkpoint,
             target = target,
+            dismissPresentationOnCompletion = command.dismissPresentationOnCompletion,
         )
     }
 
@@ -1438,23 +1701,6 @@ internal class DeviceLegService(
         )
     }
 
-    private fun screenEventRoute(
-        leg: JsonObject,
-        eventName: String,
-        screenId: String,
-    ): String? {
-        val routes = leg.getValue("routes").jsonArray.map(JsonElement::jsonObject)
-        fun route(kind: String, expectedScreenId: String? = null): String? = routes
-            .firstOrNull { candidate ->
-                if (candidate.text("eventName") != eventName) return@firstOrNull false
-                val host = candidate.getValue("host").jsonObject
-                host.text("kind") == kind &&
-                    (expectedScreenId == null || host.text("screenId") == expectedScreenId)
-            }
-            ?.text("entryStepId")
-        return route("screen", screenId) ?: route("journey")
-    }
-
     private fun stepAcceptsResponseChange(stepId: String, leg: JsonObject): Boolean {
         val step = leg.getValue("steps").jsonArray.map(JsonElement::jsonObject)
             .firstOrNull { it.text("id") == stepId }
@@ -1475,19 +1721,6 @@ internal class DeviceLegService(
             park.anchorAtMillis ?: wakeAt,
             wakeAt,
         )
-    }
-
-    private fun hostDismissRoute(leg: JsonObject, screenId: String): String? {
-        val routes = leg.getValue("routes").jsonArray.map(JsonElement::jsonObject)
-        fun routeFor(kind: String, expectedScreenId: String? = null): String? = routes
-            .firstOrNull { route ->
-                if (route.text("eventName") != HOST_DISMISSED_EVENT) return@firstOrNull false
-                val host = route.getValue("host").jsonObject
-                host.text("kind") == kind &&
-                    (expectedScreenId == null || host.text("screenId") == expectedScreenId)
-            }
-            ?.text("entryStepId")
-        return routeFor("screen", screenId) ?: routeFor("journey")
     }
 
     private suspend fun releaseFor(
@@ -1570,17 +1803,60 @@ internal class DeviceLegService(
     private fun AuthenticatedDeviceLegRelease.hasScreens(): Boolean =
         leg.getValue("screens").jsonArray.isNotEmpty()
 
+    private fun experimentExposure(
+        selection: DeviceLegControlExecutor.ExperimentSelection,
+    ): DeviceLegRun.ExperimentExposure = DeviceLegRun.ExperimentExposure(
+        experimentId = selection.experimentId,
+        variantId = selection.variantId,
+        assignedVariantId = selection.assignedVariantId,
+        isHoldout = selection.isHoldout,
+        kind = when (selection.source) {
+            DeviceLegControlExecutor.ExperimentSelection.Source.PROFILE ->
+                DeviceLegRun.ExperimentExposure.Kind.ASSIGNED
+            DeviceLegControlExecutor.ExperimentSelection.Source.NO_ASSIGNMENT ->
+                DeviceLegRun.ExperimentExposure.Kind.FALLBACK
+            DeviceLegControlExecutor.ExperimentSelection.Source.INVALID_ASSIGNMENT ->
+                DeviceLegRun.ExperimentExposure.Kind.INVALID_ASSIGNMENT
+        },
+        eventId = UUID.randomUUID().toString().lowercase(),
+        selectedAtMillis = nowMillis(),
+    )
+
+    private suspend fun markExperimentExposuresShown(
+        runId: String,
+        screenId: String,
+        executionFenceToken: DeviceLegExecutionFenceToken,
+    ) {
+        val target = checkNotNull(journal) { "Journey journal is unavailable" }
+        check(isExecutionCurrent(executionFenceToken, target)) {
+            "Journey execution authority changed before reveal"
+        }
+        val identityScope = identity.captureScope()
+        check(identityScope.distinctId == target.distinctId) {
+            "Journey identity changed before reveal"
+        }
+        val marked = publishJournalIfCurrent(executionFenceToken, identityScope) {
+            target.markExperimentExposuresShown(runId, screenId, nowMillis())
+        }
+        checkNotNull(marked) { "Journey exposure reveal was rejected" }
+        DeviceLegExperimentExposureReporter(target, capture).flushPending()
+    }
+
     private suspend fun execute(
         initial: DeviceLegRun,
         release: AuthenticatedDeviceLegRelease,
-        state: ProfileState,
         executionToken: DeviceLegExecutionFenceToken,
         signal: DeviceLegControlExecutor.Signal,
         initialCheckpoint: DeviceLegControlExecutor.Checkpoint?,
         target: DeviceLegRunJournal,
         initialPresentationReservation: DeviceLegPresentationReservation? = null,
+        dismissPresentationOnCompletion: Boolean = true,
     ) {
         val leg = release.leg
+        val executionSnapshot = initial.executionSnapshot ?: run {
+            finish(initial, "abandoned", leg, target)
+            return
+        }
         val steps = leg.getValue("steps").jsonArray.associate {
             val step = it.jsonObject
             step.getValue("id").jsonPrimitive.content to step
@@ -1592,33 +1868,57 @@ internal class DeviceLegService(
             currentDeviceTimezoneIdentifier(),
             appDefaultTimezone,
         )
+        suspend fun finishExecution(currentRun: DeviceLegRun, outcome: String) {
+            finish(currentRun, outcome, leg, target)
+            val hadPresentation = activePresentedRunIds.remove(currentRun.id) != null
+            if (dismissPresentationOnCompletion && hadPresentation) {
+                presenter?.shutdownPresentation(target.distinctId, currentRun.journeyId)
+            }
+        }
         var run = initial
         var checkpoint = initialCheckpoint
         var presentationReservation = initialPresentationReservation
         try {
             repeat(MAX_TRANSITIONS) {
                 if (!isExecutionCurrent(executionToken, target)) {
-                    finish(run, "abandoned", leg, target)
+                    finishExecution(run, "abandoned")
                     return
                 }
                 val step = steps[run.stepId] ?: run {
-                    finish(run, "abandoned", leg, target)
+                    finishExecution(run, "abandoned")
                     return
                 }
                 when (val result = executor.evaluate(
                     step,
                     run.context,
-                    state.snapshot.profile.facts.getValue("assignments").jsonObject,
+                    executionSnapshot.assignments,
                     nowMillis(),
                     checkpoint,
                     signal,
                 )) {
                     is DeviceLegControlExecutor.Result.Advance -> {
-                        target.transition(run.id, result.stepId, result.context)
+                        val exposure = result.experimentSelection
+                            ?.takeIf { selection ->
+                                run.experimentExposures.none {
+                                    it.experimentId == selection.experimentId
+                                }
+                            }
+                            ?.let(::experimentExposure)
+                        target.transition(
+                            run.id,
+                            result.stepId,
+                            result.context,
+                            experimentExposure = exposure,
+                        )
                         run = run.copy(
                             stepId = result.stepId,
                             context = result.context,
                             park = null,
+                            experimentExposures = if (exposure == null) {
+                                run.experimentExposures
+                            } else {
+                                run.experimentExposures + exposure
+                            },
                         )
                         checkpoint = null
                     }
@@ -1628,13 +1928,13 @@ internal class DeviceLegService(
                         return
                     }
                     is DeviceLegControlExecutor.Result.Complete -> {
-                        finish(run, result.outcome, leg, target)
+                        finishExecution(run, result.outcome)
                         return
                     }
                     is DeviceLegControlExecutor.Result.Dispatch -> {
                         val identityScope = identity.captureScope()
                         if (identityScope.distinctId != target.distinctId) {
-                            finish(run, "abandoned", leg, target)
+                            finishExecution(run, "abandoned")
                             return
                         }
                         val effectId = target.claimEffect(run.id, result.stepId)
@@ -1643,13 +1943,13 @@ internal class DeviceLegService(
                                 identity.isCurrentScope(identityScope)
                         }
                         if (!current()) {
-                            finish(run, "abandoned", leg, target)
+                            finishExecution(run, "abandoned")
                             return
                         }
                         val presentation = presenter
                         if (presentation != null && result.action.text("type") == "navigate") {
                             val screenId = result.action.text("screenId") ?: run {
-                                finish(run, "abandoned", leg, target)
+                                finishExecution(run, "abandoned")
                                 return
                             }
                             // A null fresh reservation may still be valid when
@@ -1658,12 +1958,18 @@ internal class DeviceLegService(
                             val reserved = presentationReservation
                                 ?: presentation.reserve(target.distinctId)
                             presentationReservation = null
+                            run = target.bindExperimentExposures(run.id, screenId) ?: run {
+                                reserved?.close()
+                                finishExecution(run, "abandoned")
+                                return
+                            }
                             val runId = run.id
+                            presentingRunIds[runId] = Unit
                             val presentationResult = try {
                                 presentation.present(
                                     DeviceLegPresentationRequest(
                                         release = release,
-                                        delivery = state.snapshot.profile.delivery,
+                                        delivery = executionSnapshot.delivery,
                                         screenId = screenId,
                                         journeyId = run.journeyId,
                                         ownerDistinctId = target.distinctId,
@@ -1673,10 +1979,38 @@ internal class DeviceLegService(
                                         },
                                         nextBatchSequence = run.nextPresentationBatchSequence,
                                         nextEmissionSequence = run.nextPresentationEmissionSequence,
+                                        onScreenChanged = { changedScreenId ->
+                                            handlePresentationScreenChanged(
+                                                runId = runId,
+                                                screenId = changedScreenId,
+                                                release = release,
+                                                executionFenceToken = executionToken,
+                                            )
+                                        },
+                                        onScreenDismissed = {
+                                                dismissedScreenId,
+                                                revealingScreenId,
+                                                method,
+                                            ->
+                                            handlePresentationScreenDismissed(
+                                                runId = runId,
+                                                screenId = dismissedScreenId,
+                                                revealingScreenId = revealingScreenId,
+                                                method = method,
+                                                release = release,
+                                                executionFenceToken = executionToken,
+                                            )
+                                        },
+                                        onPresentationRevealed = { revealedScreenId ->
+                                            markExperimentExposuresShown(
+                                                runId = runId,
+                                                screenId = revealedScreenId,
+                                                executionFenceToken = executionToken,
+                                            )
+                                        },
                                         onEmissionBatch = { batch ->
                                             handlePresentationBatch(
                                                 runId = runId,
-                                                expectedStepId = result.stepId,
                                                 expectedScreenId = screenId,
                                                 release = release,
                                                 executionFenceToken = executionToken,
@@ -1687,7 +2021,6 @@ internal class DeviceLegService(
                                             submit { done ->
                                                 Command.PresentationEnded(
                                                     runId = runId,
-                                                    stepId = result.stepId,
                                                     screenId = screenId,
                                                     release = release,
                                                     executionFenceToken = executionToken,
@@ -1703,17 +2036,25 @@ internal class DeviceLegService(
                             } catch (_: Exception) {
                                 DeviceLegPresentationResult.Failed
                             } finally {
+                                presentingRunIds.remove(runId)
                                 reserved?.close()
                             }
                             when (presentationResult) {
-                                DeviceLegPresentationResult.Shown -> return
+                                DeviceLegPresentationResult.Shown -> {
+                                    activePresentedRunIds[run.id] = Unit
+                                    return
+                                }
+                                DeviceLegPresentationResult.Completed -> {
+                                    activePresentedRunIds.remove(run.id)
+                                    return
+                                }
                                 DeviceLegPresentationResult.Declined -> {
                                     target.park(run.id, result.stepId, nowMillis())
                                     scheduleNextWake()
                                     return
                                 }
                                 DeviceLegPresentationResult.Failed -> {
-                                    finish(run, "abandoned", leg, target)
+                                    finishExecution(run, "abandoned")
                                     return
                                 }
                             }
@@ -1732,7 +2073,7 @@ internal class DeviceLegService(
                             ),
                         )
                         if (!current()) {
-                            finish(run, "abandoned", leg, target)
+                            finishExecution(run, "abandoned")
                             return
                         }
                         when (dispatched) {
@@ -1743,7 +2084,7 @@ internal class DeviceLegService(
                                     run.context,
                                 ) as? DeviceLegControlExecutor.Result.Advance
                                 if (advanced == null) {
-                                    finish(run, "abandoned", leg, target)
+                                    finishExecution(run, "abandoned")
                                     return
                                 }
                                 target.transition(run.id, advanced.stepId, advanced.context)
@@ -1755,26 +2096,26 @@ internal class DeviceLegService(
                                 checkpoint = null
                             }
                             is DeviceLegDispatchResult.Complete -> {
-                                finish(run, dispatched.outcome, leg, target)
+                                finishExecution(run, dispatched.outcome)
                                 return
                             }
                             DeviceLegDispatchResult.Unsupported -> {
-                                finish(run, "abandoned", leg, target)
+                                finishExecution(run, "abandoned")
                                 return
                             }
                             DeviceLegDispatchResult.Failed -> {
-                                finish(run, "abandoned", leg, target)
+                                finishExecution(run, "abandoned")
                                 return
                             }
                         }
                     }
                     DeviceLegControlExecutor.Result.Invalid -> {
-                        finish(run, "abandoned", leg, target)
+                        finishExecution(run, "abandoned")
                         return
                     }
                 }
             }
-            finish(run, "abandoned", leg, target)
+            finishExecution(run, "abandoned")
         } finally {
             presentationReservation?.close()
         }
@@ -1812,7 +2153,7 @@ internal class DeviceLegService(
             projected?.getValue("event")?.jsonObject ?: JsonObject(emptyMap()),
             responseOutputs,
         )
-        reporter(target).flushPending()
+        flushPendingReports(target)
         scheduleNextWake()
     }
 
@@ -1824,7 +2165,7 @@ internal class DeviceLegService(
                 nowMillis(),
                 responseOutputs = run.context.getValue("responses").jsonObject,
             )
-            reporter(target).flushPending()
+            flushPendingReports(target)
         }.onFailure { Log.w(LOG_TAG, "Device-leg abandonment failed", it) }
     }
 

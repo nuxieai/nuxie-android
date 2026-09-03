@@ -2,17 +2,21 @@ package ai.nuxie.sdk.journey
 
 import ai.nuxie.sdk.events.TimeBasedEpochGenerator
 import ai.nuxie.sdk.experiences.CacheFilesystemLock
+import ai.nuxie.sdk.experiences.Delivery
 import ai.nuxie.sdk.experiences.JourneyPlaneProfile
 import ai.nuxie.sdk.experiences.SignedReleaseEnvelope
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.net.URI
 import java.security.MessageDigest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -23,6 +27,7 @@ internal data class DeviceLegRun(
     val journeyId: String,
     val generation: Long,
     val reference: JsonObject,
+    val executionSnapshot: ExecutionSnapshot? = null,
     val startedAtMillis: Long,
     val isEnrollment: Boolean,
     val startedEventId: String,
@@ -34,6 +39,7 @@ internal data class DeviceLegRun(
     val outputs: JsonObject = emptyOutputs(),
     val completion: Completion? = null,
     val effectReceipts: Map<String, String> = emptyMap(),
+    val experimentExposures: List<ExperimentExposure> = emptyList(),
     val reentry: JourneyReentry? = null,
     val requiresReleasePin: Boolean = false,
     val artifactDigests: Set<String> = emptySet(),
@@ -41,12 +47,34 @@ internal data class DeviceLegRun(
     val nextPresentationEmissionSequence: Long = 0,
     val pendingPresentationPublication: PendingPresentationPublication? = null,
 ) {
+    data class ExecutionSnapshot(
+        val delivery: Delivery,
+        val assignments: JsonObject,
+    )
     data class Park(
         val wakeAtMillis: Long?,
         val anchorAtMillis: Long? = null,
         val pendingResponsesChanged: Boolean = false,
     )
     data class Completion(val outcome: String, val atMillis: Long)
+    data class ExperimentExposure(
+        val experimentId: String,
+        val variantId: String,
+        val assignedVariantId: String?,
+        val isHoldout: Boolean,
+        val kind: Kind,
+        val eventId: String,
+        val selectedAtMillis: Long,
+        val presentationScreenId: String? = null,
+        val shownAtMillis: Long? = null,
+        val queued: Boolean = false,
+    ) {
+        enum class Kind {
+            ASSIGNED,
+            FALLBACK,
+            INVALID_ASSIGNMENT,
+        }
+    }
     data class PendingPresentationPublication(
         val invocationId: String,
         val batchSequence: Long,
@@ -108,6 +136,7 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         entryStepId: String,
         atMillis: Long,
         release: JourneyPlaneProfile.Release? = null,
+        executionSnapshot: DeviceLegRun.ExecutionSnapshot? = null,
         stateArmReceipt: String? = null,
         artifactDigests: Set<String> = emptySet(),
         retainArtifacts: ((DeviceLegRun) -> Unit)? = null,
@@ -150,6 +179,7 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
             journeyId,
             generation,
             arm.reference,
+            executionSnapshot,
             atMillis,
             enrollment,
             ids.next(),
@@ -304,6 +334,7 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
     /** Persist one executor transition before another step or effect runs. */
     fun transition(id: String, stepId: String, context: JsonObject,
         checkpoint: DeviceLegControlExecutor.Checkpoint? = null,
+        experimentExposure: DeviceLegRun.ExperimentExposure? = null,
         clearingPresentationPublication: String? = null,
     ) = update { state ->
         val run = checkNotNull(state.runs[id])
@@ -313,9 +344,69 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
             check(pending.invocationId == invocationId)
             settlePresentationPublication(run, pending)
         } ?: run
+        val exposures = if (experimentExposure != null &&
+            settled.experimentExposures.none {
+                it.experimentId == experimentExposure.experimentId
+            }
+        ) {
+            settled.experimentExposures + experimentExposure
+        } else {
+            settled.experimentExposures
+        }
         state.runs[id] = settled.copy(stepId = stepId, context = context,
             park = checkpoint?.let { DeviceLegRun.Park(it.wakeAtMillis, it.anchorAtMillis) },
-            effectReceipts = settled.effectReceipts - settled.stepId)
+            effectReceipts = settled.effectReceipts - settled.stepId,
+            experimentExposures = exposures)
+    }
+
+    fun bindExperimentExposures(id: String, screenId: String): DeviceLegRun? = update { state ->
+        val run = state.runs[id]
+            ?.takeIf { it.startedQueued && it.completion == null }
+            ?: return@update null
+        run.copy(
+            experimentExposures = run.experimentExposures.map { exposure ->
+                if (!exposure.queued && exposure.shownAtMillis == null &&
+                    exposure.presentationScreenId == null
+                ) {
+                    exposure.copy(presentationScreenId = screenId)
+                } else {
+                    exposure
+                }
+            },
+        ).also { state.runs[id] = it }
+    }
+
+    fun markExperimentExposuresShown(
+        id: String,
+        screenId: String,
+        atMillis: Long,
+    ): DeviceLegRun? = update { state ->
+        val run = state.runs[id]
+            ?.takeIf { it.startedQueued && it.completion == null }
+            ?: return@update null
+        run.copy(
+            experimentExposures = run.experimentExposures.map { exposure ->
+                if (!exposure.queued && exposure.shownAtMillis == null &&
+                    exposure.presentationScreenId == screenId
+                ) {
+                    exposure.copy(shownAtMillis = atMillis)
+                } else {
+                    exposure
+                }
+            },
+        ).also { state.runs[id] = it }
+    }
+
+    fun markExperimentExposureQueued(id: String, eventId: String): Boolean = update { state ->
+        val run = state.runs[id] ?: return@update false
+        val index = run.experimentExposures.indexOfFirst {
+            it.eventId == eventId && it.shownAtMillis != null
+        }
+        if (index < 0) return@update false
+        val exposures = run.experimentExposures.toMutableList()
+        exposures[index] = exposures[index].copy(queued = true)
+        state.runs[id] = run.copy(experimentExposures = exposures)
+        true
     }
 
     fun park(id: String, stepId: String, untilMillis: Long?) = update { state ->
@@ -543,10 +634,19 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
     private fun encodeRun(run: DeviceLegRun) = buildJsonObject {
         put("journeyId", JsonPrimitive(run.journeyId)); put("generation", JsonPrimitive(run.generation))
         put("reference", run.reference); put("startedAtMillis", JsonPrimitive(run.startedAtMillis))
+        run.executionSnapshot?.let {
+            put("executionSnapshot", encodeExecutionSnapshot(it))
+        }
         put("isEnrollment", JsonPrimitive(run.isEnrollment)); put("startedEventId", JsonPrimitive(run.startedEventId))
         put("completedEventId", JsonPrimitive(run.completedEventId)); put("startedQueued", JsonPrimitive(run.startedQueued))
         put("stepId", JsonPrimitive(run.stepId)); put("context", run.context); put("outputs", run.outputs)
         put("effectReceipts", JsonObject(run.effectReceipts.mapValues { JsonPrimitive(it.value) }))
+        if (run.experimentExposures.isNotEmpty()) {
+            put(
+                "experimentExposures",
+                JsonArray(run.experimentExposures.map(::encodeExperimentExposure)),
+            )
+        }
         run.reentry?.let { put("reentry", encodeReentry(it)) }
         put("requiresReleasePin", JsonPrimitive(run.requiresReleasePin))
         put("artifactDigests", JsonArray(run.artifactDigests.sorted().map(::JsonPrimitive)))
@@ -571,6 +671,8 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         journeyId = value.text("journeyId"), generation = value.number("generation"), reference = value.getValue("reference").jsonObject,
         startedAtMillis = value.number("startedAtMillis"), isEnrollment = value.getValue("isEnrollment").jsonPrimitive.boolean,
         startedEventId = value.text("startedEventId"), completedEventId = value.text("completedEventId"),
+        executionSnapshot = value["executionSnapshot"]?.jsonObject
+            ?.let(::decodeExecutionSnapshot),
         startedQueued = value.getValue("startedQueued").jsonPrimitive.boolean, stepId = value.text("stepId"),
         context = value.getValue("context").jsonObject, outputs = value.getValue("outputs").jsonObject,
         park = value["park"]?.jsonObject?.let {
@@ -583,6 +685,9 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         completion = value["completion"]?.jsonObject?.let { DeviceLegRun.Completion(it.text("outcome"), it.number("atMillis")) },
         effectReceipts = (value["effectReceipts"] as? JsonObject).orEmpty().mapValues {
             it.value.jsonPrimitive.content
+        },
+        experimentExposures = (value["experimentExposures"] as? JsonArray).orEmpty().map {
+            decodeExperimentExposure(it.jsonObject)
         },
         reentry = value["reentry"]?.jsonObject?.let(::decodeReentry),
         requiresReleasePin = value["requiresReleasePin"]?.jsonPrimitive?.boolean ?: false,
@@ -598,6 +703,121 @@ internal class DeviceLegRunJournal(directory: File, val distinctId: String,
         pendingPresentationPublication = value["pendingPresentationPublication"]
             ?.jsonObject?.let(::decodePresentationPublication),
     )
+
+    private fun encodeExecutionSnapshot(
+        snapshot: DeviceLegRun.ExecutionSnapshot,
+    ): JsonObject = buildJsonObject {
+        put("delivery", buildJsonObject {
+            put("renderBaseUrl", JsonPrimitive(snapshot.delivery.renderBaseUrl))
+            put("assetBaseUrl", JsonPrimitive(snapshot.delivery.assetBaseUrl))
+        })
+        put("assignments", snapshot.assignments)
+    }
+
+    private fun decodeExecutionSnapshot(
+        value: JsonObject,
+    ): DeviceLegRun.ExecutionSnapshot {
+        if (value.keys != setOf("delivery", "assignments")) {
+            throw IOException("Invalid Journey execution snapshot")
+        }
+        val delivery = value["delivery"] as? JsonObject
+            ?: throw IOException("Invalid Journey execution delivery")
+        if (delivery.keys != setOf("renderBaseUrl", "assetBaseUrl")) {
+            throw IOException("Invalid Journey execution delivery")
+        }
+        val assignments = value["assignments"] as? JsonObject
+            ?: throw IOException("Invalid Journey execution assignments")
+        for ((experimentId, rawAssignment) in assignments) {
+            if (experimentId.isEmpty() || experimentId.length > 256) {
+                throw IOException("Invalid Journey experiment assignment")
+            }
+            if (rawAssignment == JsonNull) continue
+            val assignment = rawAssignment as? JsonObject
+                ?: throw IOException("Invalid Journey experiment assignment")
+            if (assignment.keys != setOf("variantId", "isHoldout")) {
+                throw IOException("Invalid Journey experiment assignment")
+            }
+            val variantId = (assignment["variantId"] as? JsonPrimitive)
+                ?.takeIf(JsonPrimitive::isString)?.content
+            val isHoldout = (assignment["isHoldout"] as? JsonPrimitive)
+                ?.takeUnless(JsonPrimitive::isString)?.booleanOrNull
+            if (variantId.isNullOrEmpty() || variantId.length > 256 || isHoldout == null) {
+                throw IOException("Invalid Journey experiment assignment")
+            }
+        }
+        return DeviceLegRun.ExecutionSnapshot(
+            delivery = Delivery(
+                renderBaseUrl = checkedDeliveryUrl(delivery.text("renderBaseUrl")),
+                assetBaseUrl = checkedDeliveryUrl(delivery.text("assetBaseUrl")),
+            ),
+            assignments = assignments,
+        )
+    }
+
+    private fun checkedDeliveryUrl(value: String): String {
+        val url = try {
+            URI(value)
+        } catch (_: Exception) {
+            throw IOException("Invalid Journey execution delivery URL")
+        }
+        if (!url.scheme.equals("https", ignoreCase = true) || url.host.isNullOrEmpty() ||
+            !url.rawUserInfo.isNullOrEmpty() || !url.rawQuery.isNullOrEmpty() ||
+            !url.rawFragment.isNullOrEmpty() ||
+            !(url.rawPath.isNullOrEmpty() || url.rawPath.endsWith('/'))
+        ) {
+            throw IOException("Invalid Journey execution delivery URL")
+        }
+        return value
+    }
+
+    private fun encodeExperimentExposure(
+        exposure: DeviceLegRun.ExperimentExposure,
+    ): JsonObject = buildJsonObject {
+        put("experimentId", JsonPrimitive(exposure.experimentId))
+        put("variantId", JsonPrimitive(exposure.variantId))
+        exposure.assignedVariantId?.let { put("assignedVariantId", JsonPrimitive(it)) }
+        put("isHoldout", JsonPrimitive(exposure.isHoldout))
+        put("kind", JsonPrimitive(when (exposure.kind) {
+            DeviceLegRun.ExperimentExposure.Kind.ASSIGNED -> "assigned"
+            DeviceLegRun.ExperimentExposure.Kind.FALLBACK -> "fallback"
+            DeviceLegRun.ExperimentExposure.Kind.INVALID_ASSIGNMENT -> "invalid_assignment"
+        }))
+        put("eventId", JsonPrimitive(exposure.eventId))
+        put("selectedAtMillis", JsonPrimitive(exposure.selectedAtMillis))
+        exposure.presentationScreenId?.let {
+            put("presentationScreenId", JsonPrimitive(it))
+        }
+        exposure.shownAtMillis?.let { put("shownAtMillis", JsonPrimitive(it)) }
+        if (exposure.queued) put("queued", JsonPrimitive(true))
+    }
+
+    private fun decodeExperimentExposure(
+        value: JsonObject,
+    ): DeviceLegRun.ExperimentExposure {
+        val kind = when (value.text("kind")) {
+            "assigned" -> DeviceLegRun.ExperimentExposure.Kind.ASSIGNED
+            "fallback" -> DeviceLegRun.ExperimentExposure.Kind.FALLBACK
+            "invalid_assignment" ->
+                DeviceLegRun.ExperimentExposure.Kind.INVALID_ASSIGNMENT
+            else -> throw IOException("Invalid experiment exposure kind")
+        }
+        return DeviceLegRun.ExperimentExposure(
+            experimentId = value.text("experimentId"),
+            variantId = value.text("variantId"),
+            assignedVariantId = value["assignedVariantId"]?.jsonPrimitive?.content,
+            isHoldout = value.getValue("isHoldout").jsonPrimitive.boolean,
+            kind = kind,
+            eventId = value.text("eventId"),
+            selectedAtMillis = value.number("selectedAtMillis"),
+            presentationScreenId = value["presentationScreenId"]?.jsonPrimitive?.content,
+            shownAtMillis = value["shownAtMillis"]?.jsonPrimitive?.long,
+            queued = value["queued"]?.jsonPrimitive?.boolean ?: false,
+        ).also {
+            if (it.experimentId.isEmpty() || it.variantId.isEmpty() || it.eventId.isEmpty() ||
+                it.selectedAtMillis < 0 || (it.shownAtMillis ?: 0) < 0
+            ) throw IOException("Invalid experiment exposure")
+        }
+    }
 
     private fun encodePresentationPublication(
         publication: DeviceLegRun.PendingPresentationPublication,

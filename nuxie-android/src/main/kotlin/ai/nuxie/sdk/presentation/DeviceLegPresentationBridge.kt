@@ -14,6 +14,12 @@ internal enum class DeviceLegSurfaceOutcome {
     ABANDONED,
 }
 
+internal enum class DeviceLegScreenDismissalResult {
+    HANDLED,
+    COMPLETED,
+    REJECTED,
+}
+
 internal data class DeviceLegScreenEmissionSource(
     val screenId: String,
     val actionId: String,
@@ -48,6 +54,14 @@ internal data class DeviceLegPresentationRequest(
     val canPresent: () -> Boolean,
     val nextBatchSequence: Long = 0,
     val nextEmissionSequence: Long = 0,
+    val onScreenChanged: suspend (String) -> Boolean = { true },
+    val onScreenDismissed: suspend (
+        screenId: String,
+        revealingScreenId: String?,
+        method: String,
+    ) -> DeviceLegScreenDismissalResult = { _, _, _ ->
+        DeviceLegScreenDismissalResult.HANDLED
+    },
     val onEmissionBatch: suspend (DeviceLegScreenEmissionBatch) -> Boolean = { true },
     val onPresentationRevealed: suspend (String) -> Unit = {},
     val onOutcome: suspend (DeviceLegSurfaceOutcome) -> Unit,
@@ -55,6 +69,7 @@ internal data class DeviceLegPresentationRequest(
 
 internal sealed interface DeviceLegPresentationResult {
     data object Shown : DeviceLegPresentationResult
+    data object Completed : DeviceLegPresentationResult
     data object Declined : DeviceLegPresentationResult
     data object Failed : DeviceLegPresentationResult
 }
@@ -64,6 +79,10 @@ internal interface DeviceLegPresenting {
     fun reserve(ownerDistinctId: String): DeviceLegPresentationReservation?
 
     suspend fun present(request: DeviceLegPresentationRequest): DeviceLegPresentationResult
+
+    suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) {
+        shutdownOwnedBy(ownerDistinctId)
+    }
 
     suspend fun shutdownOwnedBy(ownerDistinctId: String)
 }

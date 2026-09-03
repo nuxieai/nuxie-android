@@ -8,6 +8,7 @@ import ai.nuxie.sdk.events.ActivityForwarder
 import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.StoredEvent
+import ai.nuxie.sdk.experiences.Delivery
 import ai.nuxie.sdk.experiences.JourneyPlaneProfile
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.identity.IdentityProvider
@@ -84,6 +85,44 @@ class DeviceLegRunJournalTest {
         assertEquals("0", completion.getValue("leg_generation").jsonPrimitive.content)
         assertEquals("1970-01-01T00:01:40.000Z", completion.getValue("started_at").jsonPrimitive.content)
         assertEquals("1970-01-01T00:03:20.000Z", completion.getValue("completed_at").jsonPrimitive.content)
+    }
+
+    @Test fun `admission snapshot retains delivery and assignments across recovery`() {
+        val executionSnapshot = DeviceLegRun.ExecutionSnapshot(
+            delivery = Delivery(
+                renderBaseUrl = "https://admitted-renders.example.com/",
+                assetBaseUrl = "https://admitted-assets.example.com/",
+            ),
+            assignments = JsonObject(
+                mapOf(
+                    "checkout" to JsonObject(
+                        mapOf(
+                            "variantId" to JsonPrimitive("treatment"),
+                            "isHoldout" to JsonPrimitive(true),
+                        ),
+                    ),
+                    "unassigned" to JsonNull,
+                ),
+            ),
+        )
+        val journal = DeviceLegRunJournal(directory, "customer")
+        val run = requireNotNull(
+            journal.admit(
+                arm(),
+                JourneyReentry.EveryTime,
+                "step",
+                100_000,
+                executionSnapshot = executionSnapshot,
+            ),
+        )
+        journal.markStartedQueued(run)
+        journal.park(run.id, "step", 200_000)
+
+        val recovered = DeviceLegRunJournal(directory, "customer")
+            .recover(150_000)
+            .single()
+
+        assertEquals(executionSnapshot, recovered.executionSnapshot)
     }
 
     @Test fun `shared recovery vectors only resume park points`() {
@@ -383,6 +422,62 @@ class DeviceLegRunJournalTest {
         val advanced = DeviceLegRunJournal(directory, "customer").runs().single()
         assertEquals("present", advanced.stepId)
         assertNull(advanced.park)
+    }
+
+    @Test fun `experiment exposure stays latent until its bound screen is shown`() = runBlocking {
+        val journal = DeviceLegRunJournal(directory, "customer")
+        val run = requireNotNull(
+            journal.admit(arm(), JourneyReentry.EveryTime, "experiment", 1_000),
+        )
+        journal.markStartedQueued(run)
+        val exposure = DeviceLegRun.ExperimentExposure(
+            experimentId = "checkout",
+            variantId = "treatment",
+            assignedVariantId = "treatment",
+            isHoldout = true,
+            kind = DeviceLegRun.ExperimentExposure.Kind.ASSIGNED,
+            eventId = "exposure-1",
+            selectedAtMillis = 2_000,
+        )
+        journal.transition(
+            run.id,
+            "present",
+            run.context,
+            experimentExposure = exposure,
+        )
+        journal.bindExperimentExposures(run.id, "screen_checkout")
+        val captured = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val reporter = DeviceLegExperimentExposureReporter(
+            DeviceLegRunJournal(directory, "customer"),
+        ) { name, properties, _, _ ->
+            captured += name to properties
+            true
+        }
+
+        assertTrue(reporter.flushPending())
+        assertTrue(captured.isEmpty())
+        val bound = DeviceLegRunJournal(directory, "customer").runs().single()
+            .experimentExposures.single()
+        assertEquals("screen_checkout", bound.presentationScreenId)
+        assertNull(bound.shownAtMillis)
+
+        journal.markExperimentExposuresShown(run.id, "screen_checkout", 3_000)
+        assertTrue(reporter.flushPending())
+        assertTrue(reporter.flushPending())
+
+        assertEquals(listOf(JourneyEventNames.EXPERIMENT_EXPOSURE), captured.map { it.first })
+        val properties = captured.single().second
+        assertEquals(run.journeyId, properties["journey_id"])
+        assertEquals("experience", properties["experience_id"])
+        assertEquals("version", properties["experience_version"])
+        assertEquals("checkout", properties["experiment_key"])
+        assertEquals("treatment", properties["variant_key"])
+        assertEquals("profile", properties["assignment_source"])
+        assertEquals(true, properties["is_holdout"])
+        val queued = DeviceLegRunJournal(directory, "customer").runs().single()
+            .experimentExposures.single()
+        assertEquals(3_000L, queued.shownAtMillis)
+        assertTrue(queued.queued)
     }
 
     @Test fun `admission is atomic across instances and scoped by customer`() = runBlocking {

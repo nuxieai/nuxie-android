@@ -413,13 +413,15 @@ internal class EventLog(
         properties: Map<String, Any?>,
         eventId: String,
         distinctId: String,
-    ): Boolean = captureIdempotentlyWithResult(
+    ): Boolean = captureStable(
         name,
         properties,
         eventId,
         distinctId,
         applyBeforeSend = true,
-    ).succeeded
+        occurredAtMillis = null,
+        commitAdmission = null,
+    ).settled
 
     /**
      * Durably capture a stable-id event and report whether this call inserted
@@ -436,9 +438,30 @@ internal class EventLog(
         eventId,
         distinctId,
         applyBeforeSend = true,
-        occurredAtMillis = null,
-        commitAdmission = null,
-    ).settled
+    )
+
+    internal suspend fun captureIdempotentlyWithResult(
+        name: String,
+        properties: Map<String, Any?>,
+        eventId: String,
+        distinctId: String,
+        applyBeforeSend: Boolean,
+    ): IdempotentCaptureResult {
+        val result = captureStable(
+            name,
+            properties,
+            eventId,
+            distinctId,
+            applyBeforeSend = applyBeforeSend,
+            occurredAtMillis = null,
+            commitAdmission = null,
+        )
+        return IdempotentCaptureResult(
+            succeeded = result.settled,
+            storedEvent = result.event.takeIf { result.newlyCaptured },
+            newlyCaptured = result.newlyCaptured,
+        )
+    }
 
     /** Stable capture whose final SQLite mutation is execution-fenced. */
     suspend fun captureIdempotentlyIfCurrent(
@@ -447,7 +470,7 @@ internal class EventLog(
         eventId: String,
         distinctId: String,
         admission: StableEventCommitAdmission,
-    ): Boolean = captureIdempotently(
+    ): Boolean = captureStable(
         name,
         properties,
         eventId,
@@ -465,7 +488,7 @@ internal class EventLog(
         distinctId: String,
         occurredAtMillis: Long,
         admission: StableEventCommitAdmission?,
-    ): StableEventCaptureResult = captureIdempotently(
+    ): StableEventCaptureResult = captureStable(
         name,
         properties,
         eventId,
@@ -481,7 +504,7 @@ internal class EventLog(
         properties: Map<String, Any?>,
         eventId: String,
         distinctId: String,
-    ): Boolean = captureIdempotentlyWithResult(
+    ): Boolean = captureStable(
         name,
         properties,
         eventId,
@@ -491,7 +514,25 @@ internal class EventLog(
         commitAdmission = null,
     ).settled
 
-    internal suspend fun captureIdempotentlyWithResult(
+    /** Stable system event capture that preserves its local routing receipt. */
+    suspend fun captureRoutedSystemEvent(
+        name: String,
+        properties: Map<String, Any?>,
+        eventId: String,
+        distinctId: String,
+        occurredAtMillis: Long,
+        admission: StableEventCommitAdmission?,
+    ): StableEventCaptureResult = captureStable(
+        name,
+        properties,
+        eventId,
+        distinctId,
+        applyBeforeSend = false,
+        occurredAtMillis = occurredAtMillis,
+        commitAdmission = admission,
+    )
+
+    private suspend fun captureStable(
         name: String,
         properties: Map<String, Any?>,
         eventId: String,
@@ -670,7 +711,12 @@ internal class EventLog(
             resolveRoute(stored, admissionTickets, localRouteEventId = stored.id)
         }
         return if (commit.inserted) {
-            StableEventCaptureResult(true, stored, commit.localRoutePending)
+            StableEventCaptureResult(
+                settled = true,
+                event = stored,
+                localRoutePending = commit.localRoutePending,
+                newlyCaptured = true,
+            )
         } else {
             existingStableCapture(eventId) ?: StableEventCaptureResult(false, null)
         }
