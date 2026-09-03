@@ -8,6 +8,7 @@ import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.testsupport.FakeTransport
+import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponse
 import android.app.Activity
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.BillingResult
@@ -274,7 +275,7 @@ class PurchaseFeatureUseTest {
                             .encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
+                    canonicalJourneyProfileResponse()
                 }
             }
         }
@@ -323,7 +324,7 @@ class PurchaseFeatureUseTest {
                         .encodeToByteArray(),
                 )
             } else {
-                HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
+                canonicalJourneyProfileResponse()
             }
         }
         fixture.store.upsert(
@@ -349,7 +350,7 @@ class PurchaseFeatureUseTest {
                         """{"customerId":"customer-a","featureId":"credits","code":"entitled","allowed":false,"unlimited":false,"balance":0,"type":"creditSystem"}"""
                             .encodeToByteArray(),
                     )
-                    else -> HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
+                    else -> canonicalJourneyProfileResponse()
                 }
             }
         }
@@ -537,7 +538,7 @@ class PurchaseFeatureUseTest {
                             .encodeToByteArray(),
                     )
                 } else {
-                    HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
+                    canonicalJourneyProfileResponse()
                 }
             }
         }
@@ -652,7 +653,7 @@ class PurchaseFeatureUseTest {
 
         override fun execute(request: HttpTransport.Request): HttpTransport.Response {
             if (request.url.path != "/entitled") {
-                return HttpTransport.Response(200, """{"segments":[]}""".encodeToByteArray())
+                return canonicalJourneyProfileResponse()
             }
             val requestNumber = synchronized(requests) {
                 requests += request

@@ -43,7 +43,6 @@ import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.profile.ProfileService
 import ai.nuxie.sdk.profile.ProfileLocaleSettings
 import ai.nuxie.sdk.profile.ProfileStorageScope
-import ai.nuxie.sdk.segments.SegmentService
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.session.SessionService
 import ai.nuxie.sdk.runtime.NuxieEmbeddedRuntimeCompatibility
@@ -176,8 +175,6 @@ internal class NuxieCore(
         transport = transport,
         baseUrlOverride = apiEndpointOverride,
     )
-
-    val segments = SegmentService(appContext)
 
     val contextBuilder = NuxieContextBuilder(appContext, environment, logLevel, identity)
 

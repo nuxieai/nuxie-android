@@ -408,7 +408,7 @@ class ProfileServiceTest {
             respond = {
                 HttpTransport.Response(
                     200,
-                    """{"segments":[],"segments":[]}""".encodeToByteArray(),
+                    """{"schemaVersion":"nuxie.journey-plane-profile.v1","status":"ok","delivery":{"renderBaseUrl":"https://render.example/","assetBaseUrl":"https://assets.example/"},"features":[],"facts":{"properties":{},"memberships":{},"assignments":{}},"armedLegs":[],"armedLegs":[],"releases":[]}""".encodeToByteArray(),
                 )
             }
         }
