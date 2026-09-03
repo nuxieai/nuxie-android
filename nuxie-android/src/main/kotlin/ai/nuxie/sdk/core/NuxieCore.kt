@@ -4,6 +4,7 @@ import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.NuxieEvent
 import ai.nuxie.sdk.NuxieActivityInfo
+import ai.nuxie.sdk.Nuxie
 import ai.nuxie.sdk.events.ActivityForwarder
 import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.EventStore
@@ -45,11 +46,14 @@ import ai.nuxie.sdk.journey.JourneyReleaseCatalog
 import ai.nuxie.sdk.journey.JourneyService
 import ai.nuxie.sdk.journey.JourneyStore
 import ai.nuxie.sdk.journey.SignedTimezoneBundle
+import ai.nuxie.sdk.journey.DeviceLegEffectDispatcher
+import ai.nuxie.sdk.journey.DeviceLegService
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.HttpUrlConnectionTransport
 import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.profile.ProfileService
 import ai.nuxie.sdk.profile.ProfileLocaleSettings
+import ai.nuxie.sdk.profile.ProfileStorageScope
 import ai.nuxie.sdk.segments.SegmentService
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.session.SessionService
@@ -58,8 +62,12 @@ import ai.nuxie.sdk.runtime.nuxieRuntimeSourceRevision
 import ai.nuxie.sdk.experiences.SupportedRuntime
 import ai.nuxie.sdk.experiences.ReleaseArtifactAcquirer
 import ai.nuxie.sdk.presentation.ExperiencePresentationService
+import ai.nuxie.sdk.presentation.ExperiencePresentationException
 import ai.nuxie.sdk.presentation.AndroidRenderCapability
 import ai.nuxie.sdk.presentation.CloseReason
+import ai.nuxie.sdk.presentation.DeviceLegPresentationRequest
+import ai.nuxie.sdk.presentation.DeviceLegPresentationResult
+import ai.nuxie.sdk.presentation.DeviceLegPresenting
 import ai.nuxie.sdk.presentation.PresentationOutcome
 import android.app.Application
 import android.content.Context
@@ -68,11 +76,13 @@ import java.io.File
 import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.util.Locale
+import java.io.File
 
 /** Native provenance proves the runtime is present; compatibility is a separate contract. */
 internal fun supportedRuntimeForEmbeddedRuntime(nativeSourceRevision: String?): SupportedRuntime? {
@@ -381,6 +391,8 @@ internal class NuxieCore(
         }
     }
 
+    private val releaseArtifactAcquirer = ReleaseArtifactAcquirer(appContext, transport)
+
     val presentations = overrides.presentationFactory?.create(
         transitionPresentationOutcome,
         reportPresentationOutcome,
@@ -388,7 +400,7 @@ internal class NuxieCore(
         ?: ExperiencePresentationService(
             context = appContext,
             releases = journeyCatalog,
-            acquirer = ReleaseArtifactAcquirer(appContext, transport),
+            acquirer = releaseArtifactAcquirer,
             emit = eventLog::capture,
             scope = scope,
             runtimeAvailable = AndroidRenderCapability::isAvailable,
@@ -396,6 +408,43 @@ internal class NuxieCore(
             transitionOutcome = transitionPresentationOutcome,
             reportOutcome = reportPresentationOutcome,
         )
+
+    private val deviceLegPresenter = object : DeviceLegPresenting {
+        override fun reserve(ownerDistinctId: String) =
+            presentations.reserveDeviceLeg(ownerDistinctId)
+
+        override suspend fun present(
+            request: DeviceLegPresentationRequest,
+        ): DeviceLegPresentationResult = try {
+            presentations.presentDeviceLeg(
+                release = request.release,
+                screenId = request.screenId,
+                journeyId = request.journeyId,
+                ownerDistinctId = request.ownerDistinctId,
+                reservation = request.reservation,
+                canPresent = request.canPresent,
+                acquire = {
+                    releaseArtifactAcquirer.acquire(request.release, request.delivery)
+                },
+                onOutcome = request.onOutcome,
+            )
+            DeviceLegPresentationResult.Shown
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: ExperiencePresentationException) {
+            if (error.reason == ExperiencePresentationException.Reason.DECLINED) {
+                DeviceLegPresentationResult.Declined
+            } else {
+                DeviceLegPresentationResult.Failed
+            }
+        } catch (_: Exception) {
+            DeviceLegPresentationResult.Failed
+        }
+
+        override suspend fun shutdownOwnedBy(ownerDistinctId: String) {
+            presentations.shutdownOwnedBy(ownerDistinctId)
+        }
+    }
 
     val triggers by lazy {
         TriggerService(
@@ -429,8 +478,30 @@ internal class NuxieCore(
         )
     }
 
+    private val deviceLegDispatcher = DeviceLegEffectDispatcher(
+        identity = identity,
+        capture = eventLog::captureIdempotentlyIfCurrent,
+        deliverAppAction = Nuxie::deliverAppAction,
+    )
+
+    val deviceLegRuntime = DeviceLegService(
+        identity = identity,
+        events = store,
+        catalog = deviceLegProfiles,
+        journalDirectory = File(appContext.filesDir, "nuxie"),
+        scope = scope,
+        capture = eventLog::captureIdempotently,
+        featureAccess = { featureId ->
+            features.getCached(featureId, requiredBalance = null, entityId = null)
+        },
+        dispatcher = deviceLegDispatcher,
+        presenter = deviceLegPresenter,
+        nowMillis = nowMillis,
+    )
+
     val profile = ProfileService(
         context = appContext,
+        storageScope = ProfileStorageScope(apiKey, environment),
         api = api,
         identity = identity,
         segments = segments,
@@ -439,6 +510,7 @@ internal class NuxieCore(
             journeyCatalog.applyProfile(distinctId, body)
         },
         deviceLegProfiles = deviceLegProfiles,
+        deviceLegRuntime = deviceLegRuntime,
         applyJourneyFacts = { distinctId, body ->
             journeys.applyDownFacts(body, distinctId)
         },
@@ -471,11 +543,19 @@ internal class NuxieCore(
         lifecycleTracker,
         sessions,
         scope,
-        onBackground = { delivery.flushAll() },
+        onBackground = {
+            deviceLegRuntime.onAppDidEnterBackground()
+        },
+        afterBackground = {
+            delivery.flushAll()
+        },
         onForeground = {
             // Profile reconciliation is the server-authoritative refund and
-            // revocation lane; purchase recovery handles still-active Play evidence.
-            profile.requestRefresh()
+            // revocation lane. A failed revalidation leaves the authenticated
+            // cached authority in place for offline execution.
+            profile.refreshAndWait()
+            deviceLegRuntime.onAppWillEnterForeground()
+            // Purchase recovery handles still-active Play evidence.
             purchases.recover()
             journeys.recoverPendingEnrollments()
             delivery.flushAll()
@@ -489,6 +569,11 @@ internal class NuxieCore(
             resolveExperience = journeys::forwardingExperienceRef,
             deliver = forwardActivity,
         )
+        eventLog.subscribeCommittedWithAdmission(
+            sampleGeneration = deviceLegRuntime::eventAdmissionGeneration,
+        ) { event, admittedGeneration ->
+            deviceLegRuntime.enqueueEvent(event, admittedGeneration)
+        }
         eventLog.subscribeForwarding(
             isEnabled = forwardingEnabled,
             handler = activityForwarder::onCommitted,
@@ -498,6 +583,9 @@ internal class NuxieCore(
         userTransitions.addObserver(UserTransitionCoordinator.Observer { _, from, _ ->
             presentations.shutdownOwnedBy(from)
         })
+        userTransitions.addObserver(UserTransitionCoordinator.Observer { _, from, to ->
+            deviceLegRuntime.handleUserChange(from, to)
+        })
         userTransitions.addObserver(UserTransitionCoordinator.Observer { _, _, _ ->
             // The retained-evidence projection already switched synchronously
             // through stageFeatureUserChange. This queued lane reconciles Play
@@ -505,6 +593,9 @@ internal class NuxieCore(
             purchases.recover()
         })
         userTransitions.addObserver(profile.transitionObserver)
+        // Subscriber registration precedes recovery, while the synchronous
+        // enqueue keeps every later capture behind initialization in its FIFO.
+        deviceLegRuntime.enqueueInitialization()
         if (requestInitialProfileRefresh) {
             profile.requestRefresh()
         }

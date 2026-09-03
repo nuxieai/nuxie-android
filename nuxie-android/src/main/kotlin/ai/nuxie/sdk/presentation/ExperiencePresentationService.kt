@@ -4,6 +4,7 @@ import ai.nuxie.sdk.ExperienceRef
 import ai.nuxie.sdk.JourneyExitReason
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.experiences.AcquiredRelease
+import ai.nuxie.sdk.experiences.AuthenticatedDeviceLegRelease
 import ai.nuxie.sdk.experiences.AuthenticatedRelease
 import ai.nuxie.sdk.experiences.Delivery
 import ai.nuxie.sdk.experiences.ReleaseArtifactAcquirer
@@ -50,6 +51,8 @@ internal fun interface PresentationReleaseProvider {
 internal sealed interface CloseReason {
     data object UserDismissed : CloseReason
     data object HostDismissed : CloseReason
+    /** Physical replacement while the same Journey retains surface ownership. */
+    data object JourneyNavigation : CloseReason
     data object IdentityChanged : CloseReason
     data object GoalMet : CloseReason
     data object PurchaseCompleted : CloseReason
@@ -71,6 +74,7 @@ internal class ExperiencePresentationException(
         HOST_FAILED,
         FIRST_FRAME_TIMEOUT,
         SUPERSEDED,
+        DECLINED,
     }
 }
 
@@ -324,6 +328,7 @@ internal class ExperiencePresentationService(
         val acquired: AcquiredRelease,
         val commerce: ExperiencePurchaseSession?,
         val ownerDistinctId: String?,
+        val outcomeSink: OutcomeSink,
         val firstFrame: CompletableDeferred<ExperienceRef>,
         val closed: AtomicBoolean = AtomicBoolean(false),
         val shown: AtomicBoolean = AtomicBoolean(false),
@@ -332,11 +337,44 @@ internal class ExperiencePresentationService(
         val factLock: Any = Any(),
         // Every close path observes the same first-terminal run transition.
         val runTransitionFinished: CompletableDeferred<Unit> = CompletableDeferred(),
+        val outcomeStarted: AtomicBoolean = AtomicBoolean(false),
     )
+
+    private sealed interface OutcomeSink {
+        data object Legacy : OutcomeSink
+        class DeviceLeg(
+            val onOutcome: suspend (DeviceLegSurfaceOutcome) -> Unit,
+        ) : OutcomeSink
+    }
+
+    private data class PreparedSource(
+        val identity: ai.nuxie.sdk.experiences.ExperienceReleaseIdentity,
+        val descriptor: JsonObject,
+        val acquired: AcquiredRelease,
+        val artboardName: String?,
+    )
+
+    private data class PendingReservation(
+        val id: String,
+        val request: PresentationRequest,
+    )
+
+    private inner class DeviceLegReservation(
+        val id: String,
+        val request: PresentationRequest,
+    ) : DeviceLegPresentationReservation {
+        override fun close() {
+            synchronized(stateLock) {
+                if (pendingReservation?.id == id) pendingReservation = null
+            }
+        }
+    }
 
     private val presentationMutex = Mutex()
     private val stateLock = Any()
     private var current: ActivePresentation? = null
+    private var pendingReservation: PendingReservation? = null
+    private var transitionInProgress = false
     private val identityEpochByOwner = mutableMapOf<String, Long>()
 
     private data class PresentationRequest(
@@ -346,11 +384,14 @@ internal class ExperiencePresentationService(
 
     private fun captureRequest(ownerDistinctId: String?): PresentationRequest =
         synchronized(stateLock) {
-            PresentationRequest(
-                ownerDistinctId = ownerDistinctId,
-                identityEpoch = ownerDistinctId?.let { identityEpochByOwner[it] } ?: 0L,
-            )
+            captureRequestLocked(ownerDistinctId)
         }
+
+    private fun captureRequestLocked(ownerDistinctId: String?): PresentationRequest =
+        PresentationRequest(
+            ownerDistinctId = ownerDistinctId,
+            identityEpoch = ownerDistinctId?.let { identityEpochByOwner[it] } ?: 0L,
+        )
 
     private fun isCurrentIdentity(request: PresentationRequest): Boolean =
         request.ownerDistinctId == null ||
@@ -360,13 +401,115 @@ internal class ExperiencePresentationService(
         experienceVersionId: String,
         journeyId: String? = null,
         ownerDistinctId: String? = null,
-    ): ExperienceRef {
-        val request = captureRequest(ownerDistinctId)
-        val active = presentationMutex.withLock {
-            if (!synchronized(stateLock) { isCurrentIdentity(request) }) {
-                throw supersededByIdentityTransition()
+    ): ExperienceRef = presentPrepared(
+        request = captureRequest(ownerDistinctId),
+        journeyId = journeyId,
+        reservationId = null,
+        reservationRequired = false,
+        outcomeSink = OutcomeSink.Legacy,
+    ) {
+        val admitted = releases.releaseFor(experienceVersionId)
+            ?: throw ExperiencePresentationException(
+                ExperiencePresentationException.Reason.RELEASE_NOT_FOUND,
+                "Authenticated Experience release not found: $experienceVersionId",
+            )
+        val acquired = acquire(admitted)
+        PreparedSource(
+            identity = admitted.release.identity,
+            descriptor = admitted.release.descriptor,
+            acquired = acquired,
+            artboardName = admitted.release.defaultArtboardName(),
+        )
+    }
+
+    /**
+     * Claims the surface before durable device-leg admission. A failed claim
+     * leaves the signed arm untouched so the same trigger can fire later.
+     */
+    fun reserveDeviceLeg(ownerDistinctId: String): DeviceLegPresentationReservation? =
+        synchronized(stateLock) {
+            if (current != null || pendingReservation != null || transitionInProgress) {
+                return@synchronized null
             }
-            run {
+            val request = captureRequestLocked(ownerDistinctId)
+            if (!isCurrentIdentity(request)) return@synchronized null
+            val id = UUID.randomUUID().toString()
+            pendingReservation = PendingReservation(id, request)
+            DeviceLegReservation(id, request)
+        }
+
+    suspend fun presentDeviceLeg(
+        release: AuthenticatedDeviceLegRelease,
+        screenId: String,
+        journeyId: String,
+        ownerDistinctId: String,
+        reservation: DeviceLegPresentationReservation?,
+        canPresent: () -> Boolean = { true },
+        acquire: suspend () -> AcquiredRelease,
+        onOutcome: suspend (DeviceLegSurfaceOutcome) -> Unit,
+    ): ExperienceRef {
+        val reserved = reservation as? DeviceLegReservation
+        val request = reserved?.request ?: captureRequest(ownerDistinctId)
+        if (request.ownerDistinctId != ownerDistinctId) throw declinedPresentation()
+        return presentPrepared(
+            request = request,
+            journeyId = journeyId,
+            reservationId = reserved?.id,
+            reservationRequired = true,
+            outcomeSink = OutcomeSink.DeviceLeg(onOutcome),
+            canPresent = canPresent,
+        ) {
+            val artboardName = release.descriptor.artboardName(screenId)
+                ?: throw ExperiencePresentationException(
+                    ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                    "Authenticated device-leg screen is not renderable: $screenId",
+                )
+            PreparedSource(
+                identity = release.identity,
+                descriptor = release.descriptor,
+                acquired = acquire(),
+                artboardName = artboardName,
+            )
+        }
+    }
+
+    private suspend fun presentPrepared(
+        request: PresentationRequest,
+        journeyId: String?,
+        reservationId: String?,
+        reservationRequired: Boolean,
+        outcomeSink: OutcomeSink,
+        canPresent: () -> Boolean = { true },
+        prepare: suspend () -> PreparedSource,
+    ): ExperienceRef {
+        val active = presentationMutex.withLock {
+            var transitionClaimed = false
+            var published = false
+            try {
+                val existing = synchronized(stateLock) {
+                    if (!isCurrentIdentity(request) || !canPresent()) {
+                        throw supersededByIdentityTransition()
+                    }
+                    val active = current
+                    if (active != null &&
+                        !active.isOwnedBy(journeyId, request.ownerDistinctId)
+                    ) {
+                        throw declinedPresentation()
+                    }
+                    val reservationMatches = reservationId != null &&
+                        pendingReservation?.id == reservationId &&
+                        pendingReservation?.request == request
+                    if (active == null && reservationRequired && !reservationMatches) {
+                        throw declinedPresentation()
+                    }
+                    if (active == null && !reservationRequired && pendingReservation != null) {
+                        throw declinedPresentation()
+                    }
+                    if (transitionInProgress) throw declinedPresentation()
+                    transitionInProgress = true
+                    transitionClaimed = true
+                    active
+                }
                 if (!runtimeAvailable()) {
                     throw ExperiencePresentationException(
                         ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE,
@@ -374,115 +517,67 @@ internal class ExperiencePresentationService(
                     )
                 }
 
-                synchronized(stateLock) { current }?.let {
-                    PresentationRegistry.dismiss(it.id, CloseReason.UserDismissed)
+                existing?.let {
+                    PresentationRegistry.dismiss(it.id, CloseReason.JourneyNavigation)
                     attemptOutcome(
                         it,
                         PresentationOutcome(
                             ref = it.ref,
-                            reason = CloseReason.UserDismissed,
+                            reason = CloseReason.JourneyNavigation,
                             ownerDistinctId = it.ownerDistinctId,
                         ),
                     )
                     it.finished.await()
                 }
 
-                val admitted = releases.releaseFor(experienceVersionId)
-                    ?: throw ExperiencePresentationException(
-                        ExperiencePresentationException.Reason.RELEASE_NOT_FOUND,
-                        "Authenticated Experience release not found: $experienceVersionId",
-                    )
-                val acquired = try {
-                    acquire(admitted)
+                val source = try {
+                    prepare()
                 } catch (error: Throwable) {
                     if (error is CancellationException) throw error
+                    if (error is ExperiencePresentationException) throw error
                     throw ExperiencePresentationException(
                         ExperiencePresentationException.Reason.ACQUISITION_FAILED,
                         "Experience artifact acquisition failed: ${error.message ?: "unknown error"}",
                         error,
                     )
                 }
-                val identity = admitted.release.identity
-                var purchasePrepared = false
-                val purchaseSession = try {
-                    try {
-                        commerce.prepare(
-                            admitted.release,
-                            journeyId,
-                            request.ownerDistinctId,
-                        ).also { purchasePrepared = true }
-                    } catch (error: Throwable) {
-                        if (error is CancellationException) throw error
-                        throw ExperiencePresentationException(
-                            ExperiencePresentationException.Reason.PREPARATION_FAILED,
-                            "Experience commerce preparation failed: " +
-                                (error.message ?: "unknown error"),
-                            error,
-                        )
-                    }
-                } finally {
-                    // Commerce preparation is suspendable. Cancellation must
-                    // not strand the release lease acquired immediately
-                    // before it.
-                    if (!purchasePrepared) acquired.close()
-                }
-                val screenId = admitted.release.defaultScreenId()
-                val viewModelProjection = try {
-                    GooglePlayProductViewModelProjection.prepare(
-                        descriptor = admitted.release.descriptor,
-                        products = purchaseSession?.resolvedProducts().orEmpty(),
-                        screenId = screenId,
-                    )
-                } catch (error: Throwable) {
-                    purchaseSession?.retire()
-                    acquired.close()
-                    if (error is CancellationException) throw error
-                    throw ExperiencePresentationException(
-                        ExperiencePresentationException.Reason.PREPARATION_FAILED,
-                        "Experience commerce display preparation failed: " +
-                            (error.message ?: "unknown error"),
-                        error,
-                    )
-                }
                 val ref = ExperienceRef(
-                    identity.experienceId,
-                    identity.experienceVersionId,
+                    source.identity.experienceId,
+                    source.identity.experienceVersionId,
                     journeyId,
                 )
                 val id = UUID.randomUUID().toString()
                 val pending = ActivePresentation(
                     id,
                     ref,
-                    acquired,
-                    purchaseSession,
+                    source.acquired,
                     request.ownerDistinctId,
+                    outcomeSink,
                     CompletableDeferred(),
                 )
                 val launched = synchronized(stateLock) {
-                    if (!isCurrentIdentity(request)) {
+                    val reservationStillMatches = reservationId != null &&
+                        pendingReservation?.id == reservationId &&
+                        pendingReservation?.request == request
+                    if (!isCurrentIdentity(request) || !canPresent() ||
+                        (existing == null && reservationRequired && !reservationStillMatches)
+                    ) {
                         false
                     } else {
                         // Identity shutdown and late launch admission share this
                         // transition: teardown either invalidates the epoch first
                         // or observes a fully registered presentation afterward.
+                        if (reservationStillMatches) pendingReservation = null
                         current = pending
                         PresentationRegistry.register(
                             id = id,
                             content = PreparedPresentation(
-                                rivFile = acquired.rivFile,
-                                artboardName = admitted.release.defaultArtboardName(),
-                                screenId = if (purchaseSession == null) {
-                                    null
-                                } else {
-                                    screenId
-                                },
-                                clearColor = admitted.release.presentationClearColor(),
-                                shell = admitted.release.presentationShell(),
-                                descriptor = admitted.release.descriptor,
-                                artifactsByKey = acquired.artifactsByKey,
-                                artboardSize = admitted.release.defaultArtboardSize(),
-                                commerce = purchaseSession,
-                                viewModelProjection = viewModelProjection,
+                                rivFile = source.acquired.rivFile,
+                                artboardName = source.artboardName,
+                                clearColor = source.descriptor.presentationClearColor(),
+                                shell = source.descriptor.presentationShell(),
+                                descriptor = source.descriptor,
+                                artifactsByKey = source.acquired.artifactsByKey,
                             ),
                             onFirstFrame = { firstFrame(pending) },
                             onFailure = { error -> failed(pending, error) },
@@ -503,15 +598,26 @@ internal class ExperiencePresentationService(
                         } catch (error: Throwable) {
                             PresentationRegistry.reportFailure(id, error)
                         }
+                        published = true
                         true
                     }
                 }
                 if (!launched) {
-                    purchaseSession?.retire()
-                    acquired.close()
+                    source.acquired.close()
                     throw supersededByIdentityTransition()
                 }
                 pending
+            } finally {
+                if (transitionClaimed) {
+                    synchronized(stateLock) {
+                        transitionInProgress = false
+                        if (!published && reservationId != null &&
+                            pendingReservation?.id == reservationId
+                        ) {
+                            pendingReservation = null
+                        }
+                    }
+                }
             }
         }
         return try {
@@ -570,6 +676,9 @@ internal class ExperiencePresentationService(
         synchronized(stateLock) {
             identityEpochByOwner[ownerDistinctId] =
                 (identityEpochByOwner[ownerDistinctId] ?: 0L) + 1L
+            if (pendingReservation?.request?.ownerDistinctId == ownerDistinctId) {
+                pendingReservation = null
+            }
         }
         val active = synchronized(stateLock) {
             current?.takeIf { it.ownerDistinctId == ownerDistinctId }
@@ -593,6 +702,19 @@ internal class ExperiencePresentationService(
         ExperiencePresentationException.Reason.SUPERSEDED,
         "Experience presentation was superseded by an identity transition",
     )
+
+    private fun declinedPresentation() = ExperiencePresentationException(
+        ExperiencePresentationException.Reason.DECLINED,
+        "Another Journey owns the presentation surface",
+    )
+
+    private fun ActivePresentation.isOwnedBy(
+        journeyId: String?,
+        ownerDistinctId: String?,
+    ): Boolean =
+        journeyId != null &&
+            ref.journeyId == journeyId &&
+            this.ownerDistinctId == ownerDistinctId
 
     private fun firstFrame(active: ActivePresentation) {
         synchronized(active.factLock) {
@@ -654,6 +776,26 @@ internal class ExperiencePresentationService(
         active: ActivePresentation,
         outcome: PresentationOutcome,
     ) {
+        if (outcome.reason == CloseReason.JourneyNavigation) {
+            active.runTransitionFinished.complete(Unit)
+            return
+        }
+        val deviceLeg = active.outcomeSink as? OutcomeSink.DeviceLeg
+        if (deviceLeg != null) {
+            if (!active.outcomeStarted.compareAndSet(false, true)) return
+            scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    deviceLeg.onOutcome(outcome.reason.deviceLegOutcome())
+                } finally {
+                    val emitClose = synchronized(active.factLock) {
+                        active.runTransitionFinished.complete(Unit)
+                        active.shown.get() && outcome.reason != CloseReason.IdentityChanged
+                    }
+                    if (emitClose) emitCloseFact(active, outcome.reason)
+                }
+            }
+            return
+        }
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             val won = try {
                 transitionOutcome(outcome)
@@ -699,6 +841,7 @@ internal class ExperiencePresentationService(
         when (reason) {
             CloseReason.UserDismissed -> properties["reason"] = "user"
             CloseReason.HostDismissed -> properties["reason"] = "host"
+            CloseReason.JourneyNavigation -> return
             CloseReason.IdentityChanged -> return
             CloseReason.GoalMet -> properties["reason"] = "goal_met"
             is CloseReason.AuthenticatedExit -> return
@@ -707,6 +850,8 @@ internal class ExperiencePresentationService(
         val name = when (reason) {
             CloseReason.UserDismissed, CloseReason.HostDismissed, CloseReason.GoalMet ->
                 SystemEventNames.EXPERIENCE_DISMISSED
+            CloseReason.JourneyNavigation ->
+                error("same-Journey navigation has no close fact")
             CloseReason.IdentityChanged -> error("identity-change shutdown has no close fact")
             CloseReason.PurchaseCompleted -> {
                 properties["product_id"] = null
@@ -741,26 +886,19 @@ private fun AuthenticatedRelease.defaultArtboardName(): String? {
         ?.takeIf { it.isString }?.content
 }
 
-private fun AuthenticatedRelease.defaultScreenId(): String? {
-    val render = descriptor["render"] as? JsonObject ?: return null
-    val firstScreen = (render["screens"] as? JsonArray)?.firstOrNull() as? JsonObject ?: return null
-    return (firstScreen["id"] as? JsonPrimitive)
+private fun JsonObject.artboardName(screenId: String): String? {
+    val render = this["render"] as? JsonObject ?: return null
+    val screen = (render["screens"] as? JsonArray)
+        ?.filterIsInstance<JsonObject>()
+        ?.singleOrNull { it.string("id") == screenId }
+        ?: return null
+    return (screen["artboardName"] as? JsonPrimitive)
         ?.takeIf { it.isString }
         ?.content
-        ?.takeIf(String::isNotBlank)
 }
 
-private fun AuthenticatedRelease.defaultArtboardSize(): ExperienceArtboardSize? {
-    val render = descriptor["render"] as? JsonObject ?: return null
-    val firstScreen = (render["screens"] as? JsonArray)?.firstOrNull() as? JsonObject
-        ?: return null
-    val width = firstScreen.float("width") ?: return null
-    val height = firstScreen.float("height") ?: return null
-    return runCatching { ExperienceArtboardSize(width, height) }.getOrNull()
-}
-
-private fun AuthenticatedRelease.presentationClearColor(): Int {
-    val presentation = descriptor["presentation"] as? JsonObject ?: return OPAQUE_BLACK
+private fun JsonObject.presentationClearColor(): Int {
+    val presentation = this["presentation"] as? JsonObject ?: return OPAQUE_BLACK
     val value = (presentation["backgroundColor"] as? JsonPrimitive)
         ?.takeIf { it.isString }?.content ?: return OPAQUE_BLACK
     val hex = value.removePrefix("#")
@@ -776,8 +914,8 @@ private fun AuthenticatedRelease.presentationClearColor(): Int {
     }.getOrDefault(OPAQUE_BLACK)
 }
 
-private fun AuthenticatedRelease.presentationShell(): PresentationShell {
-    val presentation = descriptor["presentation"] as? JsonObject
+private fun JsonObject.presentationShell(): PresentationShell {
+    val presentation = this["presentation"] as? JsonObject
         ?: return PresentationShell.FullScreen
     return when (presentation.string("style")) {
         "sheet" -> {
@@ -808,6 +946,11 @@ private fun AuthenticatedRelease.presentationShell(): PresentationShell {
         }
         else -> PresentationShell.FullScreen
     }
+}
+
+private fun CloseReason.deviceLegOutcome(): DeviceLegSurfaceOutcome = when (this) {
+    CloseReason.UserDismissed, CloseReason.HostDismissed -> DeviceLegSurfaceOutcome.DISMISSED
+    else -> DeviceLegSurfaceOutcome.ABANDONED
 }
 
 private fun JsonObject.string(key: String): String? =

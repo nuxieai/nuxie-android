@@ -1,5 +1,11 @@
 package ai.nuxie.sdk.events
 
+/** Runs one synchronous store mutation only while its execution fences hold. */
+internal fun interface StableEventCommitAdmission {
+    /** Null means admission was revoked; false/true are the mutation result. */
+    fun commitIfCurrent(commit: () -> Boolean): Boolean?
+}
+
 /** Persistence seam used by the future capture and delivery pipeline. */
 internal interface EventStore {
     suspend fun insertPending(event: StoredEvent)
@@ -8,6 +14,15 @@ internal interface EventStore {
     suspend fun insertPendingIfAbsent(event: StoredEvent): Boolean {
         insertPending(event)
         return true
+    }
+
+    /** Production stores override this to run [admission] around the commit. */
+    suspend fun insertPendingIfAbsent(
+        event: StoredEvent,
+        admission: StableEventCommitAdmission,
+    ): Boolean? {
+        if (admission.commitIfCurrent { true } == null) return null
+        return insertPendingIfAbsent(event)
     }
 
     /** True when this stable id was already captured as an event or terminal drop. */
@@ -68,6 +83,16 @@ internal interface EventStore {
     ): List<StoredEvent>? = null
 
     suspend fun recordStableDrop(eventId: String, recordedAtMillis: Long = System.currentTimeMillis()): Boolean
+
+    /** Production stores override this to run [admission] around the commit. */
+    suspend fun recordStableDrop(
+        eventId: String,
+        recordedAtMillis: Long,
+        admission: StableEventCommitAdmission,
+    ): Boolean? {
+        if (admission.commitIfCurrent { true } == null) return null
+        return recordStableDrop(eventId, recordedAtMillis)
+    }
 
     suspend fun pendingBatch(limit: Int): List<StoredEvent>
 

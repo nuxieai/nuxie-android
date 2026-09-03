@@ -11,6 +11,7 @@ import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.experiences.JourneyPlaneProfile
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.identity.IdentityProvider
+import ai.nuxie.sdk.network.ProfileDeliveryAuthority
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -96,14 +97,26 @@ class DeviceLegRunJournalTest {
             journal.recordResponses(run.id, vector.getValue("responses").jsonObject)
             val state = vector.text("beforeDeath")
             if (state == "parked") journal.park(run.id, "wait", vector.number("wakeAtMillis"))
-            if (state == "completed") journal.complete(run.id, "done", 200_000)
+            if (state == "completed") {
+                journal.complete(
+                    run.id,
+                    "done",
+                    200_000,
+                    responseOutputs = vector.getValue("responses").jsonObject,
+                )
+            }
             val reopened = DeviceLegRunJournal(directory, "customer")
             val resumable = reopened.recover(suite.number("reopenedAtMillis"))
             val recovered = reopened.runs().single()
             assertEquals(vector.number("expectedGeneration"), recovered.generation)
             assertEquals(vector["expectedOutcome"]?.takeUnless { it == JsonNull }?.jsonPrimitive?.content, recovered.completion?.outcome)
             assertEquals(vector["expectedCompletedAtMillis"]?.takeUnless { it == JsonNull }?.jsonPrimitive?.long, recovered.completion?.atMillis)
-            assertEquals(vector.getValue("responses"), recovered.outputs["responses"])
+            val retainedResponses = if (recovered.completion == null) {
+                recovered.context.getValue("responses")
+            } else {
+                recovered.outputs.getValue("responses")
+            }
+            assertEquals(vector.getValue("responses"), retainedResponses)
             if (state == "parked") {
                 assertEquals(listOf(run.id), resumable.map { it.id })
                 assertEquals(300_000L, resumable.single().park?.wakeAtMillis)
@@ -113,6 +126,86 @@ class DeviceLegRunJournalTest {
                 assertEquals("abandoned", again.runs().single().completion?.outcome)
             } else assertTrue(resumable.isEmpty())
         }
+    }
+
+    @Test fun `abandonment moves response outputs and clears execution context`() {
+        val responses = JsonObject(mapOf("answer" to JsonPrimitive("retained")))
+        val armed = arm().copy(
+            context = JsonObject(
+                mapOf(
+                    "event" to JsonObject(mapOf("transient" to JsonPrimitive(true))),
+                    "responses" to responses,
+                ),
+            ),
+        )
+        val journal = DeviceLegRunJournal(directory, "customer")
+        val run = requireNotNull(
+            journal.admit(armed, JourneyReentry.EveryTime, "step", 100_000),
+        )
+        journal.markStartedQueued(run)
+
+        journal.recover(200_000)
+
+        val abandoned = DeviceLegRunJournal(directory, "customer").runs().single()
+        assertEquals("abandoned", abandoned.completion?.outcome)
+        assertEquals(responses, abandoned.outputs.getValue("responses"))
+        assertEquals(JsonObject(emptyMap()), abandoned.context.getValue("event"))
+        assertEquals(JsonObject(emptyMap()), abandoned.context.getValue("responses"))
+    }
+
+    @Test fun `journal admits canonical contexts larger than the legacy cap`() {
+        val payload = "x".repeat(17 * 1024 * 1024)
+        val armed = arm().copy(
+            context = JsonObject(
+                mapOf(
+                    "event" to JsonObject(mapOf("payload" to JsonPrimitive(payload))),
+                    "responses" to JsonObject(emptyMap()),
+                ),
+            ),
+        )
+        val journal = DeviceLegRunJournal(directory, "customer")
+        val run = requireNotNull(
+            journal.admit(armed, JourneyReentry.EveryTime, "step", 100_000),
+        )
+        assertEquals(
+            payload.length,
+            DeviceLegRunJournal(directory, "customer").runs().single().context
+                .getValue("event").jsonObject.getValue("payload").jsonPrimitive.content.length,
+        )
+
+        journal.complete(run.id, "done", 200_000)
+
+        val completed = DeviceLegRunJournal(directory, "customer").runs().single()
+        assertEquals(JsonObject(emptyMap()), completed.context.getValue("event"))
+        assertEquals("done", completed.completion?.outcome)
+    }
+
+    @Test fun `large collected responses are not duplicated before completion`() {
+        val journal = DeviceLegRunJournal(directory, "customer")
+        val run = requireNotNull(
+            journal.admit(arm(), JourneyReentry.EveryTime, "survey", 100_000),
+        )
+        val answer = "y".repeat(21 * 1024 * 1024)
+        val responses = JsonObject(mapOf("answer" to JsonPrimitive(answer)))
+
+        journal.recordResponses(run.id, responses)
+
+        val pending = DeviceLegRunJournal(directory, "customer").runs().single()
+        assertEquals(answer, pending.context.getValue("responses").jsonObject
+            .getValue("answer").jsonPrimitive.content)
+        assertEquals(JsonObject(emptyMap()), pending.outputs.getValue("responses"))
+
+        journal.complete(
+            run.id,
+            "done",
+            200_000,
+            responseOutputs = responses,
+        )
+
+        val completed = DeviceLegRunJournal(directory, "customer").runs().single()
+        assertEquals(JsonObject(emptyMap()), completed.context.getValue("responses"))
+        assertEquals(answer, completed.outputs.getValue("responses").jsonObject
+            .getValue("answer").jsonPrimitive.content)
     }
 
     @Test fun `continuations do not restart reentry windows or regress consumed chapters`() {
@@ -199,8 +292,267 @@ class DeviceLegRunJournalTest {
             journal.recordResponses(run.id, JsonObject(mapOf("answer" to JsonPrimitive(Double.NaN))))
             fail("Non-finite JSON must fail before publishing a journal snapshot")
         } catch (_: ai.nuxie.sdk.experiences.ReleaseAuthenticationException) { }
-        assertEquals(JsonPrimitive("yes"), DeviceLegRunJournal(directory, "customer").runs().single()
-            .outputs.getValue("responses").jsonObject["answer"])
+        val buffered = DeviceLegRunJournal(directory, "customer").runs().single()
+        assertEquals(
+            JsonPrimitive("yes"),
+            buffered.context.getValue("responses").jsonObject["answer"],
+        )
+        assertEquals(JsonObject(emptyMap()), buffered.outputs.getValue("responses"))
+    }
+
+    @Test fun `authenticated app scope survives key rotation and isolates another app`() {
+        val firstScope = DeviceLegStorageScope(ProfileDeliveryAuthority("app", "test"))
+        val rotatedKeyScope = DeviceLegStorageScope(ProfileDeliveryAuthority("app", "test"))
+        val otherAppScope = DeviceLegStorageScope(ProfileDeliveryAuthority("other", "test"))
+        val first = DeviceLegRunJournal(directory, "customer", firstScope)
+        val run = requireNotNull(first.admit(arm(), JourneyReentry.EveryTime, "step", 100_000))
+        first.markStartedQueued(run)
+        first.park(run.id, "step", 200_000)
+
+        assertEquals(run.id, DeviceLegRunJournal(directory, "customer", rotatedKeyScope).runs().single().id)
+        assertTrue(DeviceLegRunJournal(directory, "customer", otherAppScope).runs().isEmpty())
+    }
+
+    @Test fun `live run retains its exact release until completion is queued`() {
+        val (release, pinnedArm, entry) = retainedReleaseFixture()
+        val journal = DeviceLegRunJournal(directory, "customer")
+        val run = requireNotNull(
+            journal.admit(
+                pinnedArm,
+                JourneyReentry.EveryTime,
+                "step",
+                100_000,
+                release = release,
+            ),
+        )
+        journal.markStartedQueued(run)
+        journal.park(run.id, "step", 200_000)
+
+        assertEquals(entry, DeviceLegRunJournal(directory, "customer").releasePin(release.envelope
+            .getValue("descriptorSha256").jsonPrimitive.content))
+
+        journal.complete(run.id, "done", 110_000)
+        journal.markCompletionQueued(journal.runs().single())
+        assertNull(journal.releasePin(release.envelope.getValue("descriptorSha256").jsonPrimitive.content))
+    }
+
+    @Test fun `recovery abandons a parked run whose retained locator no longer matches`() {
+        val (release, pinnedArm, _) = retainedReleaseFixture()
+        val scope = DeviceLegStorageScope.testFixture
+        val journal = DeviceLegRunJournal(directory, "customer", scope)
+        val run = requireNotNull(
+            journal.admit(
+                pinnedArm,
+                JourneyReentry.EveryTime,
+                "step",
+                100_000,
+                release = release,
+            ),
+        )
+        journal.markStartedQueued(run)
+        journal.park(run.id, "step", 200_000)
+
+        val digest = release.envelope.getValue("descriptorSha256").jsonPrimitive.content
+        val pinFile = File(
+            directory,
+            "device-leg-state-v1/release-pins/${scope.customerDigest("customer")}/$digest.json",
+        )
+        val entry = Json.parseToJsonElement(pinFile.readText()).jsonObject
+        val locator = entry.getValue("locator").jsonObject
+        pinFile.writeText(
+            JsonObject(
+                entry + (
+                    "locator" to JsonObject(
+                        locator + ("experienceId" to JsonPrimitive("swapped-experience")),
+                    )
+                ),
+            ).toString(),
+        )
+
+        val reopened = DeviceLegRunJournal(directory, "customer", scope)
+        assertTrue(reopened.recover(150_000).isEmpty())
+        val abandoned = reopened.runs().single()
+        assertEquals("abandoned", abandoned.completion?.outcome)
+        assertEquals(150_000L, abandoned.completion?.atMillis)
+    }
+
+    @Test fun `failed journal publication removes its newly written release pin`() {
+        val (release, pinnedArm, _) = retainedReleaseFixture()
+        val invalidArm = pinnedArm.copy(
+            context = JsonObject(
+                mapOf(
+                    "event" to JsonObject(mapOf("invalid" to JsonPrimitive(Double.NaN))),
+                    "responses" to JsonObject(emptyMap()),
+                ),
+            ),
+        )
+        val journal = DeviceLegRunJournal(directory, "customer")
+
+        try {
+            journal.admit(
+                invalidArm,
+                JourneyReentry.EveryTime,
+                "step",
+                100_000,
+                release = release,
+            )
+            fail("Invalid journal JSON must reject admission")
+        } catch (_: ai.nuxie.sdk.experiences.ReleaseAuthenticationException) { }
+
+        val releaseRoot = File(directory, "device-leg-state-v1/release-pins")
+        assertTrue(
+            releaseRoot.walkTopDown().none { it.isFile && it.extension == "json" },
+        )
+    }
+
+    @Test fun `run limit rejection does not write a release pin`() {
+        val (release, pinnedArm, _) = retainedReleaseFixture()
+        val journal = DeviceLegRunJournal(
+            directory,
+            "customer",
+            maximumRunCount = 0,
+        )
+
+        try {
+            journal.admit(
+                pinnedArm,
+                JourneyReentry.EveryTime,
+                "step",
+                100_000,
+                release = release,
+            )
+            fail("Run limit must reject admission")
+        } catch (_: java.io.IOException) { }
+
+        val releaseRoot = File(directory, "device-leg-state-v1/release-pins")
+        assertTrue(
+            releaseRoot.walkTopDown().none { it.isFile && it.extension == "json" },
+        )
+    }
+
+    @Test fun `another admission removes release pins whose journal is gone`() {
+        val (release, pinnedArm, _) = retainedReleaseFixture()
+        val scope = DeviceLegStorageScope.testFixture
+        val orphanCustomer = "orphan-customer"
+        assertNotNull(
+            DeviceLegRunJournal(directory, orphanCustomer, scope).admit(
+                pinnedArm,
+                JourneyReentry.EveryTime,
+                "step",
+                100_000,
+                release = release,
+            ),
+        )
+        val root = File(directory, "device-leg-state-v1")
+        val orphanDigest = scope.customerDigest(orphanCustomer)
+        val orphanPins = File(root, "release-pins/$orphanDigest")
+        assertTrue(orphanPins.isDirectory)
+        assertTrue(File(root, "journals/$orphanDigest.json").delete())
+
+        assertNotNull(
+            DeviceLegRunJournal(directory, "active-customer", scope).admit(
+                pinnedArm,
+                JourneyReentry.EveryTime,
+                "step",
+                110_000,
+                release = release,
+            ),
+        )
+
+        assertFalse(orphanPins.exists())
+    }
+
+    @Test fun `effect identity is stable for one cursor visit and rotates after advance`() {
+        val journal = DeviceLegRunJournal(directory, "customer")
+        val run = requireNotNull(journal.admit(arm(), JourneyReentry.EveryTime, "effect", 100_000))
+        journal.markStartedQueued(run)
+
+        val first = journal.claimEffect(run.id, "effect")
+        assertEquals(first, journal.claimEffect(run.id, "effect"))
+        journal.transition(run.id, "effect", run.context)
+        assertNotEquals(first, journal.claimEffect(run.id, "effect"))
+    }
+
+    @Test fun `revocation blocks reopening until every abandonment is queued`() {
+        val journal = DeviceLegRunJournal(directory, "customer")
+        val run = requireNotNull(journal.admit(arm(), JourneyReentry.EveryTime, "wait", 100_000))
+        journal.markStartedQueued(run)
+        journal.park(run.id, "wait", 200_000)
+
+        journal.abandonAll(150_000)
+        assertNull(journal.admit(arm(), JourneyReentry.EveryTime, "step", 160_000))
+        assertEquals("abandoned", journal.runs().single().completion?.outcome)
+        assertFalse(journal.finalizeRevocation())
+
+        journal.markCompletionQueued(journal.runs().single())
+        assertTrue(journal.finalizeRevocation())
+        assertNotNull(journal.admit(arm(), JourneyReentry.EveryTime, "step", 170_000))
+    }
+
+    @Test fun `state arm receipt is durable and cleared by foreground kind`() {
+        val journal = DeviceLegRunJournal(directory, "customer")
+        val armed = arm()
+        val receipt = deviceLegStateArmReceipt(armed)
+        assertNotNull(journal.admit(armed, JourneyReentry.EveryTime, "step", 100_000,
+            stateArmReceipt = receipt))
+        assertNull(journal.admit(armed, JourneyReentry.EveryTime, "step", 100_001,
+            stateArmReceipt = receipt))
+
+        journal.clearStateArmReceipts("app_foregrounded")
+        assertNotNull(journal.admit(armed, JourneyReentry.EveryTime, "step", 100_002,
+            stateArmReceipt = receipt))
+    }
+
+    @Test fun `state arm receipt is independent of JSON object key order`() {
+        val armed = arm()
+        val reordered = armed.copy(
+            reference = JsonObject(
+                linkedMapOf(
+                    "descriptorSha256" to armed.reference.getValue("descriptorSha256"),
+                    "legId" to armed.reference.getValue("legId"),
+                    "versionId" to armed.reference.getValue("versionId"),
+                    "experienceId" to armed.reference.getValue("experienceId"),
+                ),
+            ),
+            entryCondition = JsonObject(
+                linkedMapOf(
+                    "condition" to JsonObject(
+                        linkedMapOf(
+                            "expr" to JsonObject(mapOf("value" to JsonPrimitive(true), "type" to JsonPrimitive("Bool"))),
+                            "ir_version" to JsonPrimitive(1),
+                        ),
+                    ),
+                    "type" to JsonPrimitive("app_foregrounded"),
+                ),
+            ),
+        )
+
+        assertEquals(deviceLegStateArmReceipt(armed), deviceLegStateArmReceipt(reordered))
+    }
+
+    @Test fun `checkmarks retire after delivery and the authored reentry window`() {
+        val journal = DeviceLegRunJournal(directory, "customer")
+        val window = JourneyReentry.OncePerWindow(100)
+        val run = requireNotNull(
+            journal.admit(arm(), window, "step", 100),
+        )
+        finish(journal, run, 110)
+        assertEquals(window, journal.checkmark("experience")?.reentry)
+        assertEquals(110L, journal.checkmark("experience")?.lastSeenLiveAtMillis)
+
+        journal.retainCheckmarks(emptyMap(), atMillis = 209)
+        assertNotNull(DeviceLegRunJournal(directory, "customer").checkmark("experience"))
+        journal.retainCheckmarks(emptyMap(), atMillis = 210)
+        assertNull(DeviceLegRunJournal(directory, "customer").checkmark("experience"))
+
+        val everyTime = requireNotNull(
+            journal.admit(arm(), JourneyReentry.EveryTime, "step", 300),
+        )
+        finish(journal, everyTime, 310)
+        assertEquals(JourneyReentry.EveryTime, journal.checkmark("experience")?.reentry)
+        assertEquals(310L, journal.checkmark("experience")?.lastSeenLiveAtMillis)
+        journal.retainCheckmarks(emptyMap(), atMillis = 311)
+        assertNull(journal.checkmark("experience"))
     }
 
     private fun finish(journal: DeviceLegRunJournal, run: DeviceLegRun, atMillis: Long) {
@@ -229,7 +581,13 @@ class DeviceLegRunJournalTest {
                 "step", vector.number("startedAtMillis")))
             val outputs = vector.getValue("outputs").jsonObject
             journal.recordResponses(run.id, outputs.getValue("responses").jsonObject)
-            journal.complete(run.id, vector.text("outcome"), vector.number("completedAtMillis"), outputs.getValue("event").jsonObject)
+            journal.complete(
+                run.id,
+                vector.text("outcome"),
+                vector.number("completedAtMillis"),
+                outputs.getValue("event").jsonObject,
+                outputs.getValue("responses").jsonObject,
+            )
             if (mode == "accept_then_lost_receipt") {
                 DeviceLegReporter(journal) { name, properties, id, customer ->
                     val captured = events.captureIdempotently(name, properties, id, customer)
@@ -271,6 +629,32 @@ class DeviceLegRunJournalTest {
         binding = binding, entryCondition = JsonObject(mapOf("type" to JsonPrimitive("app_foregrounded"))),
         context = JsonObject(mapOf("event" to JsonObject(emptyMap()), "responses" to JsonObject(emptyMap()))),
     )
+
+    private fun retainedReleaseFixture(): Triple<JourneyPlaneProfile.Release, JourneyPlaneProfile.Arm, JsonObject> {
+        val fixture = Json.parseToJsonElement(
+            FixtureRunner.fixturesRoot().resolve("journeys/planes/release.json").readText(),
+        ).jsonObject
+        val entry = fixture.getValue("entry").jsonObject
+        val locator = entry.getValue("locator").jsonObject
+        val envelope = entry.getValue("envelope").jsonObject
+        val identity = requireNotNull(ai.nuxie.sdk.experiences.ExperienceReleaseIdentity.fromJson(locator))
+        val legId = locator.getValue("legId").jsonPrimitive.content
+        val release = JourneyPlaneProfile.Release(identity, legId, envelope)
+        val arm = JourneyPlaneProfile.Arm(
+            reference = JsonObject(
+                mapOf(
+                    "experienceId" to locator.getValue("experienceId"),
+                    "versionId" to locator.getValue("experienceVersionId"),
+                    "legId" to locator.getValue("legId"),
+                    "descriptorSha256" to envelope.getValue("descriptorSha256"),
+                ),
+            ),
+            binding = JsonObject(mapOf("type" to JsonPrimitive("new"))),
+            entryCondition = JsonObject(mapOf("type" to JsonPrimitive("app_foregrounded"))),
+            context = JsonObject(mapOf("event" to JsonObject(emptyMap()), "responses" to JsonObject(emptyMap()))),
+        )
+        return Triple(release, arm, entry)
+    }
 
     private fun eventLog(store: SQLiteEventStore, dropEvents: Boolean = false): EventLog {
         val identity = object : IdentityProvider {

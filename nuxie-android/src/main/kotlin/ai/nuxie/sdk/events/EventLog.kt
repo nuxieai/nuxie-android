@@ -60,6 +60,10 @@ internal class EventLog(
         suspend fun onForwarding(event: StoredEvent)
     }
 
+    internal fun interface AdmissionCommittedSubscription {
+        suspend fun onCommitted(event: StoredEvent, admissionGeneration: Long)
+    }
+
     private data class Subscriber(
         val predicate: (StoredEvent) -> Boolean,
         val handler: CommittedSubscription,
@@ -70,16 +74,28 @@ internal class EventLog(
         val handler: ForwardingSubscription,
     )
 
+    private data class AdmissionSubscriber(
+        val predicate: (StoredEvent) -> Boolean,
+        val sampleGeneration: () -> Long,
+        val handler: AdmissionCommittedSubscription,
+    )
+
+    private data class AdmissionTicket(
+        val subscriber: AdmissionSubscriber,
+        val generation: Long,
+    )
+
     private sealed interface Command {
         data class Capture(
             val name: String,
             val properties: Map<String, Any?>?,
             val distinctIdOverride: String?,
+            val admissionTickets: List<AdmissionTicket>,
         ) : Command
         data class CaptureForTrigger(
             val name: String,
             val properties: Map<String, Any?>?,
-            val distinctIdOverride: String?,
+            val admissionTickets: List<AdmissionTicket>,
             val done: CompletableDeferred<StoredEvent?>,
         ) : Command
         data class CaptureIdempotently(
@@ -88,19 +104,23 @@ internal class EventLog(
             val eventId: String,
             val distinctId: String,
             val applyBeforeSend: Boolean,
-            val done: CompletableDeferred<IdempotentCaptureResult>,
+            val commitAdmission: StableEventCommitAdmission?,
+            val admissionTickets: List<AdmissionTicket>,
+            val done: CompletableDeferred<Boolean>,
         ) : Command
         data class CaptureDeliveredIdempotently(
             val name: String,
             val properties: Map<String, Any?>,
             val eventId: String,
             val distinctId: String,
+            val admissionTickets: List<AdmissionTicket>,
             val done: CompletableDeferred<Boolean>,
         ) : Command
         data class CommitServerFact(
             val event: StoredEvent,
             val receivedAtMillis: Long,
-            val done: CompletableDeferred<ServerFactCommitResult>,
+            val admissionTickets: List<AdmissionTicket>,
+            val done: CompletableDeferred<Boolean>,
         ) : Command
         data class Barrier(val done: CompletableDeferred<Unit>) : Command
     }
@@ -117,12 +137,19 @@ internal class EventLog(
     private val subscribers = java.util.concurrent.CopyOnWriteArrayList<Subscriber>()
     private val forwardingSubscribers =
         java.util.concurrent.CopyOnWriteArrayList<ForwardingSubscriber>()
+    private val admissionSubscribers =
+        java.util.concurrent.CopyOnWriteArrayList<AdmissionSubscriber>()
 
     private val worker = scope.launch {
         for (command in commands) {
             when (command) {
                 is Command.Capture -> runCatching {
-                    process(command.name, command.properties, command.distinctIdOverride)
+                    process(
+                        command.name,
+                        command.properties,
+                        command.distinctIdOverride,
+                        command.admissionTickets,
+                    )
                 }
                     .onFailure { Log.w(LOG_TAG, "Event capture failed", it) }
                 is Command.CaptureForTrigger -> {
@@ -130,7 +157,7 @@ internal class EventLog(
                         process(
                             command.name,
                             command.properties,
-                            command.distinctIdOverride,
+                            admissionTickets = command.admissionTickets,
                         )
                     }
                         .onFailure { Log.w(LOG_TAG, "Trigger capture failed", it) }
@@ -145,6 +172,8 @@ internal class EventLog(
                             command.eventId,
                             command.distinctId,
                             command.applyBeforeSend,
+                            command.commitAdmission,
+                            command.admissionTickets,
                         )
                     }.onFailure { Log.w(LOG_TAG, "Idempotent event capture failed", it) }
                         .getOrElse { IdempotentCaptureResult(false, null, false) }
@@ -157,14 +186,19 @@ internal class EventLog(
                             command.properties,
                             command.eventId,
                             command.distinctId,
+                            command.admissionTickets,
                         )
                     }.onFailure { Log.w(LOG_TAG, "Delivered event capture failed", it) }
                         .getOrDefault(false)
                     command.done.complete(captured)
                 }
-                is Command.CommitServerFact -> runCatching {
-                    commitServerFactNow(command.event, command.receivedAtMillis)
-                }.fold(command.done::complete, command.done::completeExceptionally)
+                is Command.CommitServerFact -> command.done.complete(
+                    commitServerFactNow(
+                        command.event,
+                        command.receivedAtMillis,
+                        command.admissionTickets,
+                    ),
+                )
                 is Command.Barrier -> command.done.complete(Unit)
             }
         }
@@ -200,7 +234,9 @@ internal class EventLog(
             Log.w(LOG_TAG, "Event name cannot be empty")
             return
         }
-        val result = commands.trySend(Command.Capture(name, properties, distinctIdOverride))
+        val result = commands.trySend(
+            Command.Capture(name, properties, distinctIdOverride, sampleAdmissionTickets()),
+        )
         if (result.isFailure) {
             Log.w(LOG_TAG, "Event '$name' dropped: capture pipeline is closed.")
         }
@@ -216,6 +252,20 @@ internal class EventLog(
         handler: CommittedSubscription,
     ) {
         subscribers.add(Subscriber(predicate, handler))
+    }
+
+    /**
+     * Registers a committed-event consumer whose generation is sampled at
+     * capture admission, before persistence can race a profile replacement.
+     */
+    fun subscribeCommittedWithAdmission(
+        predicate: (StoredEvent) -> Boolean = { true },
+        sampleGeneration: () -> Long,
+        handler: AdmissionCommittedSubscription,
+    ) {
+        admissionSubscribers.add(
+            AdmissionSubscriber(predicate, sampleGeneration, handler),
+        )
     }
 
     /**
@@ -279,9 +329,8 @@ internal class EventLog(
             return null
         }
         val done = CompletableDeferred<StoredEvent?>()
-        if (
-            commands.trySend(
-                Command.CaptureForTrigger(name, properties, distinctIdOverride, done),
+        if (commands.trySend(
+                Command.CaptureForTrigger(name, properties, sampleAdmissionTickets(), done),
             ).isFailure
         ) return null
         return done.await()
@@ -316,6 +365,23 @@ internal class EventLog(
         eventId,
         distinctId,
         applyBeforeSend = true,
+        commitAdmission = null,
+    )
+
+    /** Stable capture whose final SQLite mutation is execution-fenced. */
+    suspend fun captureIdempotentlyIfCurrent(
+        name: String,
+        properties: Map<String, Any?>,
+        eventId: String,
+        distinctId: String,
+        admission: StableEventCommitAdmission,
+    ): Boolean = captureIdempotently(
+        name,
+        properties,
+        eventId,
+        distinctId,
+        applyBeforeSend = true,
+        commitAdmission = admission,
     )
 
     /** Durably captures a required SDK-authored system event without host interception. */
@@ -330,7 +396,8 @@ internal class EventLog(
         eventId,
         distinctId,
         applyBeforeSend = false,
-    ).succeeded
+        commitAdmission = null,
+    )
 
     internal suspend fun captureIdempotentlyWithResult(
         name: String,
@@ -338,17 +405,18 @@ internal class EventLog(
         eventId: String,
         distinctId: String,
         applyBeforeSend: Boolean,
-    ): IdempotentCaptureResult {
-        if (name.isEmpty() || eventId.isEmpty() || distinctId.isEmpty()) {
-            return IdempotentCaptureResult(false, null, false)
-        }
-        val done = CompletableDeferred<IdempotentCaptureResult>()
+        commitAdmission: StableEventCommitAdmission?,
+    ): Boolean {
+        if (name.isEmpty() || eventId.isEmpty() || distinctId.isEmpty()) return false
+        val done = CompletableDeferred<Boolean>()
         val command = Command.CaptureIdempotently(
             name,
             properties,
             eventId,
             distinctId,
             applyBeforeSend,
+            commitAdmission,
+            sampleAdmissionTickets(),
             done,
         )
         if (commands.trySend(command).isFailure) {
@@ -366,7 +434,14 @@ internal class EventLog(
     ): Boolean {
         if (name.isEmpty() || eventId.isEmpty() || distinctId.isEmpty()) return false
         val done = CompletableDeferred<Boolean>()
-        val command = Command.CaptureDeliveredIdempotently(name, properties, eventId, distinctId, done)
+        val command = Command.CaptureDeliveredIdempotently(
+            name,
+            properties,
+            eventId,
+            distinctId,
+            sampleAdmissionTickets(),
+            done,
+        )
         if (commands.trySend(command).isFailure) return false
         return done.await()
     }
@@ -387,10 +462,15 @@ internal class EventLog(
     suspend fun commitServerFact(
         event: StoredEvent,
         receivedAtMillis: Long = nowMillis(),
-    ): ServerFactCommitResult {
-        val done = CompletableDeferred<ServerFactCommitResult>()
-        val command = Command.CommitServerFact(event, receivedAtMillis, done)
-        check(commands.trySend(command).isSuccess) { "Event capture pipeline is closed." }
+    ): Boolean {
+        val done = CompletableDeferred<Boolean>()
+        val command = Command.CommitServerFact(
+            event,
+            receivedAtMillis,
+            sampleAdmissionTickets(),
+            done,
+        )
+        if (commands.trySend(command).isFailure) return false
         return done.await()
     }
 
@@ -398,6 +478,7 @@ internal class EventLog(
         name: String,
         commandProperties: Map<String, Any?>?,
         distinctIdOverride: String? = null,
+        admissionTickets: List<AdmissionTicket> = emptyList(),
     ): StoredEvent? {
         var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties ?: emptyMap())
         if (!sanitized.containsKey(SESSION_ID_PROPERTY)) {
@@ -424,12 +505,7 @@ internal class EventLog(
         val stored = projectPostTransform(original, transformed)
         store.insertPending(stored)
         resolveForwarding(stored)
-        subscribers.forEach { subscriber ->
-            if (subscriber.predicate(stored)) {
-                runCatching { subscriber.handler.onCommitted(stored) }
-                    .onFailure { Log.w(LOG_TAG, "Committed-event subscriber failed", it) }
-            }
-        }
+        announce(stored, admissionTickets)
         return stored
     }
 
@@ -439,10 +515,10 @@ internal class EventLog(
         eventId: String,
         distinctId: String,
         applyBeforeSend: Boolean,
-    ): IdempotentCaptureResult {
-        if (store.hasStableOutcome(eventId)) {
-            return IdempotentCaptureResult(true, null, false)
-        }
+        commitAdmission: StableEventCommitAdmission?,
+        admissionTickets: List<AdmissionTicket>,
+    ): Boolean {
+        if (store.hasStableOutcome(eventId)) return true
         var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties)
         // Leg outputs are validated JSON. Keep their exact values through
         // analytics sanitization; beforeSend still governs the full event.
@@ -467,20 +543,29 @@ internal class EventLog(
             original
         }
         if (transformed == null) {
-            store.recordStableDrop(original.id, original.timestampMillis)
+            val recorded = if (commitAdmission == null) {
+                store.recordStableDrop(original.id, original.timestampMillis)
+                true
+            } else {
+                store.recordStableDrop(
+                    original.id,
+                    original.timestampMillis,
+                    commitAdmission,
+                ) != null
+            }
+            if (!recorded) return false
             Log.d(LOG_TAG, "Event '$name' terminally dropped by beforeSend hook")
             return IdempotentCaptureResult(true, null, false)
         }
         val stored = projectPostTransform(original, transformed)
-        val inserted = store.insertPendingIfAbsent(stored)
+        val inserted = if (commitAdmission == null) {
+            store.insertPendingIfAbsent(stored)
+        } else {
+            store.insertPendingIfAbsent(stored, commitAdmission) ?: return false
+        }
         if (inserted) {
             resolveForwarding(stored)
-            subscribers.forEach { subscriber ->
-                if (subscriber.predicate(stored)) {
-                    runCatching { subscriber.handler.onCommitted(stored) }
-                        .onFailure { Log.w(LOG_TAG, "Committed-event subscriber failed", it) }
-                }
-            }
+            announce(stored, admissionTickets)
         }
         return IdempotentCaptureResult(
             succeeded = true,
@@ -492,18 +577,14 @@ internal class EventLog(
     private suspend fun commitServerFactNow(
         event: StoredEvent,
         receivedAtMillis: Long,
-    ): ServerFactCommitResult {
+        admissionTickets: List<AdmissionTicket>,
+    ): Boolean {
         val admitted = event.withForwardingAdmission(forwardingAdmission(receivedAtMillis))
         val inserted = store.insertDeliveredIfAbsent(admitted)
         if (!inserted) return ServerFactCommitResult.DUPLICATE
         resolveForwarding(admitted)
-        subscribers.forEach { subscriber ->
-            if (subscriber.predicate(admitted)) {
-                runCatching { subscriber.handler.onCommitted(admitted) }
-                    .onFailure { Log.w(LOG_TAG, "Committed-event subscriber failed", it) }
-            }
-        }
-        return ServerFactCommitResult.INSERTED
+        announce(admitted, admissionTickets)
+        return true
     }
 
     private suspend fun processDeliveredIdempotently(
@@ -511,6 +592,7 @@ internal class EventLog(
         commandProperties: Map<String, Any?>,
         eventId: String,
         distinctId: String,
+        admissionTickets: List<AdmissionTicket>,
     ): Boolean {
         if (store.hasStableOutcome(eventId)) return true
         var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties)
@@ -535,7 +617,7 @@ internal class EventLog(
         val inserted = store.insertDeliveredIfAbsent(stored)
         if (inserted) {
             resolveForwarding(stored)
-            announce(stored)
+            announce(stored, admissionTickets)
         }
         return true
     }
@@ -551,14 +633,33 @@ internal class EventLog(
         }
     }
 
-    private suspend fun announce(event: StoredEvent) {
+    private suspend fun announce(
+        event: StoredEvent,
+        admissionTickets: List<AdmissionTicket>,
+    ) {
         subscribers.forEach { subscriber ->
             if (subscriber.predicate(event)) {
                 runCatching { subscriber.handler.onCommitted(event) }
                     .onFailure { Log.w(LOG_TAG, "Committed-event subscriber failed", it) }
             }
         }
+        admissionTickets.forEach { ticket ->
+            if (ticket.subscriber.predicate(event)) {
+                runCatching {
+                    ticket.subscriber.handler.onCommitted(event, ticket.generation)
+                }.onFailure {
+                    Log.w(LOG_TAG, "Admission committed-event subscriber failed", it)
+                }
+            }
+        }
     }
+
+    private fun sampleAdmissionTickets(): List<AdmissionTicket> =
+        admissionSubscribers.mapNotNull { subscriber ->
+            runCatching { AdmissionTicket(subscriber, subscriber.sampleGeneration()) }
+                .onFailure { Log.w(LOG_TAG, "Event admission generation failed", it) }
+                .getOrNull()
+        }
 
     private fun applyBeforeSendForOrdinaryCapture(original: NuxieEvent): NuxieEvent? {
         val transformed = applyBeforeSendTransform(original) ?: return null

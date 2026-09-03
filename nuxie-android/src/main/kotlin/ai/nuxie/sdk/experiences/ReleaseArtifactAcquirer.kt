@@ -33,8 +33,19 @@ internal class ReleaseArtifactAcquirer(
     suspend fun acquire(
         release: AuthenticatedRelease,
         delivery: Delivery,
+    ): AcquiredRelease = acquire(release.identity, release.descriptor, delivery)
+
+    suspend fun acquire(
+        release: AuthenticatedDeviceLegRelease,
+        delivery: Delivery,
+    ): AcquiredRelease = acquire(release.identity, release.descriptor, delivery)
+
+    private suspend fun acquire(
+        identity: ExperienceReleaseIdentity,
+        descriptor: JsonObject,
+        delivery: Delivery,
     ): AcquiredRelease = withContext(Dispatchers.IO) {
-        val render = release.descriptor["render"] as? JsonObject
+        val render = descriptor["render"] as? JsonObject
             ?: invalidDescriptor("<render>", "release render is missing")
         val riv = artifact(render["riv"] as? JsonObject, "<riv>", ArtifactRole.RIV)
         if (render.string("renderer") != "rive") {
@@ -55,7 +66,7 @@ internal class ReleaseArtifactAcquirer(
                 )
             }
             ?: invalidDescriptor(riv.key, "release assets are missing")
-        val scripts = (release.descriptor["screenBehaviors"] as? JsonArray)
+        val scripts = (descriptor["screenBehaviors"] as? JsonArray)
             ?.mapIndexedNotNull { index, value ->
                 val behavior = value as? JsonObject
                     ?: invalidDescriptor("<screen-behavior:$index>", "invalid screen behavior")
@@ -149,7 +160,7 @@ internal class ReleaseArtifactAcquirer(
                 }
             }
             AcquiredRelease(
-                identity = release.identity,
+                identity = identity,
                 artifactsByKey = files.toMap(),
                 rivFile = files.getValue(riv.key),
                 protection = protection,

@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.experiences
 
 import ai.nuxie.sdk.fixtures.FixtureRunner
+import ai.nuxie.sdk.network.ProfileDeliveryAuthority
 import android.util.Base64
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -36,6 +37,11 @@ class DeviceLegProfileCatalogTest {
         fixture.getValue("publicKeyBase64").jsonPrimitive.content,
         Base64.NO_WRAP,
     ))
+    private val authority get() = ProfileDeliveryAuthority(
+        appId = entry.getValue("locator").jsonObject.getValue("appId").jsonPrimitive.content,
+        environment = entry.getValue("locator").jsonObject
+            .getValue("environment").jsonPrimitive.content,
+    )
 
     @Before fun clearReplayStore() {
         context.getSharedPreferences("nuxie_release_high_water", 0).edit().clear().commit()
@@ -44,7 +50,7 @@ class DeviceLegProfileCatalogTest {
     @Test fun `publishes a complete authenticated plane profile only at commit`() {
         val highWater = ReleaseHighWaterStore(context)
         val catalog = DeviceLegProfileCatalog(keys, highWater) { runtime() }
-        val prepared = catalog.prepare(profile())
+        val prepared = catalog.prepare(profile(), authority)
         assertNull(catalog.snapshot("customer"))
 
         catalog.commit("customer", prepared)
@@ -59,7 +65,7 @@ class DeviceLegProfileCatalogTest {
     @Test fun `a rejected replacement cannot mutate current authority or replay floors`() {
         val highWater = ReleaseHighWaterStore(context)
         val catalog = DeviceLegProfileCatalog(keys, highWater) { runtime() }
-        catalog.commit("customer", catalog.prepare(profile()))
+        catalog.commit("customer", catalog.prepare(profile(), authority))
         val current = requireNotNull(catalog.snapshot("customer"))
         val release = current.releasesByDigest.values.single()
         val floor = highWater.floor(release.identity.streamKey)
@@ -72,7 +78,7 @@ class DeviceLegProfileCatalogTest {
         val badEntry = JsonObject(entry + ("envelope" to badEnvelope))
 
         assertThrows(ReleaseAuthenticationException::class.java) {
-            catalog.prepare(profile(badEntry))
+            catalog.prepare(profile(badEntry), authority)
         }
         assertEquals(current, catalog.snapshot("customer"))
         assertEquals(floor, highWater.floor(release.identity.streamKey))
@@ -81,7 +87,7 @@ class DeviceLegProfileCatalogTest {
     @Test fun `a prepared profile cannot replace a newer replay floor`() {
         val highWater = ReleaseHighWaterStore(context)
         val catalog = DeviceLegProfileCatalog(keys, highWater) { runtime() }
-        val prepared = catalog.prepare(profile())
+        val prepared = catalog.prepare(profile(), authority)
         val identity = ExperienceReleaseIdentity.fromJson(
             entry.getValue("locator").jsonObject,
             setOf("legId"),
@@ -109,16 +115,90 @@ class DeviceLegProfileCatalogTest {
             put("generation", 4)
         }
 
-        catalog.commit("customer", catalog.prepare(profile(binding = continuation)))
+        catalog.commit("customer", catalog.prepare(profile(binding = continuation), authority))
 
         assertEquals("continue", requireNotNull(catalog.snapshot("customer"))
             .profile.armedLegs.single().binding.getValue("type").jsonPrimitive.content)
         assertEquals(identity.releaseSequence + 1, highWater.floor(identity.streamKey))
     }
 
+    @Test fun `transport authority must match every signed release locator`() {
+        val catalog = DeviceLegProfileCatalog(keys, ReleaseHighWaterStore(context)) { runtime() }
+
+        assertThrows(ReleaseAuthenticationException::class.java) {
+            catalog.prepare(profile(), authority.copy(appId = "another-app"))
+        }
+        assertNull(catalog.snapshot("customer"))
+    }
+
+    @Test fun `delivery cannot rewrite the trigger authenticated inside a leg`() {
+        val catalog = DeviceLegProfileCatalog(keys, ReleaseHighWaterStore(context)) { runtime() }
+        val changedEntry = buildJsonObject {
+            put("type", "event")
+            put("eventName", "rewritten")
+        }
+
+        assertThrows(ReleaseAuthenticationException::class.java) {
+            catalog.prepare(profile(entryCondition = changedEntry), authority)
+        }
+        assertNull(catalog.snapshot("customer"))
+    }
+
+    @Test fun `a retained release reauthenticates by exact pinned identity after delivery clears`() {
+        val highWater = ReleaseHighWaterStore(context)
+        val catalog = DeviceLegProfileCatalog(keys, highWater) { runtime() }
+        catalog.commit("customer", catalog.prepare(profile(), authority))
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val reference = snapshot.profile.armedLegs.single().reference
+        val identity = snapshot.releasesByDigest.values.single().identity
+        catalog.clear("customer")
+        highWater.promote(identity.streamKey, identity.publishedAtSeq + 10)
+
+        val pinned = catalog.authenticatePinnedRelease(entry, reference)
+
+        assertEquals(reference.getValue("descriptorSha256").jsonPrimitive.content, pinned.descriptorSha256)
+        assertEquals(identity, pinned.identity)
+        assertNull(pinned.publishedAtSeqToPromote)
+    }
+
+    @Test fun `a retained release cannot change shape or bound authority`() {
+        val catalog = DeviceLegProfileCatalog(keys, ReleaseHighWaterStore(context)) { runtime() }
+        catalog.commit("customer", catalog.prepare(profile(), authority))
+        val reference = requireNotNull(catalog.snapshot("customer")).profile.armedLegs.single().reference
+        val malformed = JsonObject(entry + ("unexpected" to JsonPrimitive(true)))
+        val otherAuthorityLocator = JsonObject(
+            entry.getValue("locator").jsonObject + ("appId" to JsonPrimitive("another-app")),
+        )
+        val otherAuthority = JsonObject(entry + ("locator" to otherAuthorityLocator))
+
+        assertThrows(ReleaseAuthenticationException::class.java) {
+            catalog.authenticatePinnedRelease(malformed, reference)
+        }
+        assertThrows(ReleaseAuthenticationException::class.java) {
+            catalog.authenticatePinnedRelease(otherAuthority, reference)
+        }
+    }
+
+    @Test fun `an empty canonical delivery still binds configured app authority`() {
+        val catalog = DeviceLegProfileCatalog(keys, ReleaseHighWaterStore(context)) { runtime() }
+        val empty = JsonObject(
+            profile() + mapOf(
+                "releases" to JsonArray(emptyList()),
+                "armedLegs" to JsonArray(emptyList()),
+            ),
+        )
+
+        catalog.commit("customer", catalog.prepare(empty, authority))
+
+        assertThrows(ReleaseAuthenticationException::class.java) {
+            catalog.prepare(empty, authority.copy(appId = "another-app"))
+        }
+    }
+
     private fun profile(
         releaseEntry: JsonObject = entry,
         binding: JsonObject = buildJsonObject { put("type", "new") },
+        entryCondition: JsonObject = buildJsonObject { put("type", "app_foregrounded") },
     ): JsonObject {
         val locator = releaseEntry.getValue("locator").jsonObject
         val envelope = releaseEntry.getValue("envelope").jsonObject
@@ -145,7 +225,7 @@ class DeviceLegProfileCatalogTest {
                         put("descriptorSha256", envelope.getValue("descriptorSha256"))
                     }
                     put("binding", binding)
-                    putJsonObject("entryCondition") { put("type", "app_foregrounded") }
+                    put("entryCondition", entryCondition)
                     putJsonObject("context") { putJsonObject("event") {}; putJsonObject("responses") {} }
                 }
             }

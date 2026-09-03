@@ -108,6 +108,34 @@ internal class JourneyPlaneProfile private constructor(
             return JourneyPlaneProfile(Delivery(origins[0], origins[1]), features, facts, arms, releases)
         }
 
+        /** Applies the same exact release-entry validation to a retained pin. */
+        internal fun decodeRelease(value: JsonElement): Release {
+            val release = exact(value, setOf("locator", "envelope"))
+            val locator = exact(
+                release["locator"],
+                setOf(
+                    "appId", "environment", "experienceId", "experienceVersionId",
+                    "versionNumber", "buildId", "publishedAt", "publishedAtSeq", "legId",
+                ),
+            )
+            val legId = hash(locator["legId"])
+            for (key in listOf("appId", "experienceId", "experienceVersionId", "buildId")) {
+                val identifier = id(locator[key])
+                if (identifier.length > 128 || '\u0000' in identifier) fail("identity")
+            }
+            if (text(locator["environment"]) !in setOf("test", "live")) fail("environment")
+            integer(locator["versionNumber"], minimum = 1)
+            integer(locator["publishedAtSeq"])
+            ReleaseJson.timestamp(locator["publishedAt"])
+            val identity = ExperienceReleaseIdentity.fromJson(locator) ?: fail("identity")
+            val envelope = record(release["envelope"])
+            SignedReleaseEnvelope.validateShape(
+                envelope.toString().encodeToByteArray(),
+                SignedReleaseEnvelope.Format.DEVICE_LEG,
+            )
+            return Release(identity, legId, envelope)
+        }
+
         internal fun validateEntry(value: JsonElement?): JsonObject {
             val entry = record(value)
             val required = when (text(entry["type"])) {

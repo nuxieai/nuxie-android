@@ -141,6 +141,30 @@ class EventLogTest {
     }
 
     @Test
+    fun admissionSubscribersKeepTheGenerationSampledBeforePersistence() = runBlocking {
+        val store = RecordingStore()
+        val eventLog = log(store)
+        var generation = 1L
+        val observed = mutableListOf<Pair<String, Long>>()
+        eventLog.subscribeCommittedWithAdmission(
+            sampleGeneration = { generation },
+        ) { event, admittedGeneration ->
+            assertTrue(store.pending.any { it.id == event.id })
+            observed += event.name to admittedGeneration
+        }
+
+        eventLog.capture("before-replacement")
+        generation = 2L
+        eventLog.capture("after-replacement")
+        eventLog.awaitBarrier()
+
+        assertEquals(
+            listOf("before-replacement" to 1L, "after-replacement" to 2L),
+            observed,
+        )
+    }
+
+    @Test
     fun slowForwardingDoesNotDelayLaterPersistenceAndCallbacksStayFifo() = runBlocking {
         val store = RecordingStore()
         val secondPersisted = CompletableDeferred<Unit>()
@@ -216,6 +240,59 @@ class EventLogTest {
     }
 
     @Test
+    fun stableIdCaptureCommitsExactlyOnceThroughItsAdmissionFence() = runBlocking {
+        val store = RecordingStore()
+        val eventLog = log(store)
+        var admissionCalls = 0
+        val admission = StableEventCommitAdmission { commit ->
+            admissionCalls += 1
+            commit()
+        }
+
+        assertTrue(
+            eventLog.captureIdempotentlyIfCurrent(
+                "\$device_effect",
+                emptyMap(),
+                "stable-id",
+                "owner-1",
+                admission,
+            ),
+        )
+
+        assertEquals(1, admissionCalls)
+        assertEquals(listOf("stable-id"), store.pending.map { it.id })
+        assertTrue(store.stableDrops.isEmpty())
+    }
+
+    @Test
+    fun revokedStableIdCaptureLeavesNoTerminalOutcome() = runBlocking {
+        val store = RecordingStore()
+        val eventLog = log(store)
+        var announcements = 0
+        var admissionCalls = 0
+        eventLog.subscribeCommitted { announcements += 1 }
+        val admission = StableEventCommitAdmission {
+            admissionCalls += 1
+            null
+        }
+
+        assertFalse(
+            eventLog.captureIdempotentlyIfCurrent(
+                "\$device_effect",
+                emptyMap(),
+                "stable-id",
+                "owner-1",
+                admission,
+            ),
+        )
+
+        assertEquals(1, admissionCalls)
+        assertTrue(store.pending.isEmpty())
+        assertTrue(store.stableDrops.isEmpty())
+        assertEquals(0, announcements)
+    }
+
+    @Test
     fun stableIdBeforeSendDropIsTerminalAndIdempotent() = runBlocking {
         val store = RecordingStore()
         var hookCalls = 0
@@ -230,6 +307,31 @@ class EventLogTest {
         assertEquals(listOf("stable-id"), store.stableDrops)
         assertTrue(store.pending.isEmpty())
         assertEquals(1, hookCalls)
+    }
+
+    @Test
+    fun revokedStableIdDropLeavesNoTombstone() = runBlocking {
+        val store = RecordingStore()
+        val eventLog = log(store) { null }
+        var admissionCalls = 0
+        val admission = StableEventCommitAdmission {
+            admissionCalls += 1
+            null
+        }
+
+        assertFalse(
+            eventLog.captureIdempotentlyIfCurrent(
+                "\$device_effect",
+                emptyMap(),
+                "stable-id",
+                "owner-1",
+                admission,
+            ),
+        )
+
+        assertEquals(1, admissionCalls)
+        assertTrue(store.pending.isEmpty())
+        assertTrue(store.stableDrops.isEmpty())
     }
 
     @Test

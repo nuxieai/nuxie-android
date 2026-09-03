@@ -356,6 +356,14 @@ object Nuxie {
         deliverOnMain("App Action") { it.onAppActionRequested(this, action) }
     }
 
+    /** Device-leg publication admitted under its execution and identity fences. */
+    internal suspend fun deliverAppAction(
+        action: AppAction,
+        publishIfCurrent: ((() -> Unit) -> Boolean),
+    ): Boolean = deliverOnMainIfAdmitted("App Action", publishIfCurrent) {
+        it.onAppActionRequested(this, action)
+    }
+
     /** Last-mile typed activity delivery through the weak listener seam. */
     internal suspend fun deliverActivity(info: NuxieActivityInfo) {
         deliverOnMain("activity") { it.onActivityEmitted(this, info) }
@@ -403,7 +411,32 @@ object Nuxie {
         }
     }
 
-    // MARK: Purchases
+    private suspend fun deliverOnMainIfAdmitted(
+        label: String,
+        publishIfCurrent: ((() -> Unit) -> Boolean),
+        callback: (NuxieListener) -> Unit,
+    ): Boolean {
+        val publication = {
+            publishIfCurrent {
+                listener?.let(callback)
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) return publication()
+        return suspendCancellableCoroutine { continuation ->
+            val posted = mainHandler.post {
+                runCatching(publication)
+                    .onSuccess { continuation.resume(it) }
+                    .onFailure(continuation::resumeWithException)
+            }
+            if (!posted) {
+                continuation.resumeWithException(
+                    IllegalStateException("Could not dispatch $label to the main thread."),
+                )
+            }
+        }
+    }
+
+    // MARK: Commerce
 
     /** Launch checkout for the exact StoreProduct that was shown. */
     suspend fun purchase(

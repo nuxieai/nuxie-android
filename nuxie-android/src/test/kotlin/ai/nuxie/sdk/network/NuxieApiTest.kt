@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.network
 
 import ai.nuxie.sdk.NuxieEnvironment
+import java.io.IOException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -15,6 +16,99 @@ class NuxieApiTest {
         override fun execute(request: HttpTransport.Request): HttpTransport.Response {
             requests.add(request)
             return HttpTransport.Response(statusCode, ByteArray(0))
+        }
+    }
+
+    @Test
+    fun canonicalProfileCarriesTransportAuthenticatedAuthorityInItsValidator() {
+        val transport = object : HttpTransport {
+            override fun execute(request: HttpTransport.Request) = HttpTransport.Response(
+                statusCode = 200,
+                body = """{"schemaVersion":"nuxie.journey-plane-profile.v1"}"""
+                    .encodeToByteArray(),
+                headers = mapOf(
+                    "ETag" to "\"plane-v1\"",
+                    "Nuxie-App-Id" to "app-1",
+                    "Nuxie-App-Environment" to "test",
+                ),
+            )
+        }
+
+        val result = NuxieApi("pk", NuxieEnvironment.DEVELOPMENT, transport)
+            .fetchProfile("customer", "en_US") as NuxieApi.ProfileFetchResult.Modified
+
+        assertEquals("\"plane-v1\"", result.validator?.rawValue)
+        assertEquals("app-1", result.validator?.authority?.appId)
+        assertEquals("test", result.validator?.authority?.environment)
+    }
+
+    @Test
+    fun canonicalProfileRejectsMissingOrPartialTransportAuthority() {
+        fun fetch(headers: Map<String, String>) {
+            val transport = HttpTransport {
+                HttpTransport.Response(
+                    statusCode = 200,
+                    body = """{"schemaVersion":"nuxie.journey-plane-profile.v1"}"""
+                        .encodeToByteArray(),
+                    headers = headers,
+                )
+            }
+            NuxieApi("pk", NuxieEnvironment.DEVELOPMENT, transport)
+                .fetchProfile("customer", null)
+        }
+
+        assertThrows(IOException::class.java) {
+            fetch(mapOf("ETag" to "\"plane-v1\""))
+        }
+        assertThrows(IOException::class.java) {
+            fetch(
+                mapOf(
+                    "ETag" to "\"plane-v1\"",
+                    "Nuxie-App-Id" to "app-1",
+                ),
+            )
+        }
+        assertThrows(IOException::class.java) {
+            fetch(
+                mapOf(
+                    "Nuxie-App-Id" to "app-1",
+                    "Nuxie-App-Environment" to "test",
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun canonical304RequiresTheExactAuthorityAndValidator() {
+        val responses = ArrayDeque(
+            listOf(
+                HttpTransport.Response(
+                    statusCode = 200,
+                    body = """{"schemaVersion":"nuxie.journey-plane-profile.v1"}"""
+                        .encodeToByteArray(),
+                    headers = mapOf(
+                        "ETag" to "\"plane-v1\"",
+                        "Nuxie-App-Id" to "app-1",
+                        "Nuxie-App-Environment" to "test",
+                    ),
+                ),
+                HttpTransport.Response(
+                    statusCode = 304,
+                    body = ByteArray(0),
+                    headers = mapOf(
+                        "ETag" to "\"plane-v1\"",
+                        "Nuxie-App-Id" to "app-2",
+                        "Nuxie-App-Environment" to "test",
+                    ),
+                ),
+            ),
+        )
+        val transport = HttpTransport { responses.removeFirst() }
+        val api = NuxieApi("pk", NuxieEnvironment.DEVELOPMENT, transport)
+        val initial = api.fetchProfile("customer", null) as NuxieApi.ProfileFetchResult.Modified
+
+        assertThrows(IOException::class.java) {
+            api.fetchProfile("customer", null, revalidating = initial.validator)
         }
     }
 

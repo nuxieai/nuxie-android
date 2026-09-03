@@ -6,10 +6,14 @@ import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.network.NuxieApi
+import ai.nuxie.sdk.network.ProfileDeliveryAuthority
+import ai.nuxie.sdk.journey.DeviceLegProfileConsumer
 import ai.nuxie.sdk.segments.SegmentService
 import android.content.Context
 import android.util.Log
 import java.io.File
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
@@ -24,8 +28,8 @@ import kotlinx.serialization.json.jsonObject
 /**
  * Profile fetch + cache, porting the iOS `ProfileService` data-plane policy:
  *
- * - 24-hour validity window: an expired cached profile is EVICTED, never
- *   served (evict-don't-serve-stale).
+ * - Legacy profiles expire after 24 hours. Canonical plane profiles remain
+ *   usable offline after that refresh age and revalidate on every foreground.
  * - Conditional refetch via the scoped ETag validator (locale-keyed).
  * - Atomic admission by identity decision, effective locale, and monotonic
  *   profile generation before every locale-scoped mutation.
@@ -42,12 +46,14 @@ import kotlinx.serialization.json.jsonObject
  */
 internal class ProfileService(
     context: Context,
+    storageScope: ProfileStorageScope,
     private val api: NuxieApi,
     private val identity: IdentityProvider,
     private val segments: SegmentService,
     private val applyUserProperties: (Map<String, Any?>) -> Unit,
     private val applyJourneyProfile: (distinctId: String, body: JsonObject) -> Unit = { _, _ -> },
     private val deviceLegProfiles: DeviceLegProfileCatalog? = null,
+    private val deviceLegRuntime: DeviceLegProfileConsumer? = null,
     private val applyJourneyFacts: suspend (
         distinctId: String,
         body: JsonObject,
@@ -72,14 +78,15 @@ internal class ProfileService(
         val distinctId: String,
         val locale: String?,
         val cachedAtMillis: Long,
-        val validator: String?,
+        val validator: NuxieApi.ProfileCacheValidator?,
         val body: JsonObject,
     )
 
     // Lock order for nested admission work: identity -> locale -> profile.
     private val lock = Any()
-    private val baseDir = cacheDirectory
-        ?: File((context.applicationContext ?: context).cacheDir, "nuxie/profiles")
+    private val appContext = context.applicationContext ?: context
+    private val baseDir = cacheDirectory ?: storageScope.cacheDirectory(appContext.cacheDir)
+    private val authorityStore = ProfileAuthorityBindingStore(appContext, storageScope)
     private var resident: CachedProfile? = null
     @Volatile
     private var nextProfileGeneration = 0L
@@ -103,15 +110,23 @@ internal class ProfileService(
         val featureAuthoritativeRevision: Long,
     )
 
+    private enum class AuthoritySource { NETWORK, CACHE }
+
     private sealed interface Signal {
-        data class Refresh(val done: kotlinx.coroutines.CompletableDeferred<Boolean>?) : Signal
+        data class Refresh(val done: CompletableDeferred<Boolean>?) : Signal
     }
 
     private val signals = Channel<Signal>(capacity = Channel.UNLIMITED)
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val worker = scope.launch {
-        loadFromDisk()
+        try {
+            loadFromDisk()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            Log.w(LOG_TAG, "Profile startup hydration failed; continuing without cache", failure)
+        }
         while (true) {
             val signal = select<Signal?> {
                 signals.onReceiveCatching { it.getOrNull() }
@@ -121,18 +136,36 @@ internal class ProfileService(
             } ?: break
             when (signal) {
                 is Signal.Refresh -> {
-                    val refreshed = refreshNow()
-                    signal.done?.complete(refreshed)
+                    var refreshed = false
+                    try {
+                        refreshed = refreshSafely()
+                    } finally {
+                        // Every accepted waiter completes even when refresh
+                        // processing is cancelled or a consumer throws.
+                        signal.done?.complete(refreshed)
+                    }
                 }
             }
         }
     }
 
     init {
+        worker.invokeOnCompletion {
+            signals.close()
+            while (true) {
+                val pending = signals.tryReceive().getOrNull() ?: break
+                when (pending) {
+                    is Signal.Refresh -> pending.done?.complete(false)
+                }
+            }
+        }
+        // The unscoped v1 cache could contain another configured app's
+        // profile and therefore has no trustworthy delivery authority.
+        File(appContext.cacheDir, "nuxie/profiles").deleteRecursively()
         baseDir.mkdirs()
     }
 
-    /** The current, non-expired profile for the current user (or null). */
+    /** The current usable profile for the current user (or null). */
     fun currentProfile(): CachedProfile? {
         val identityScope = identity.captureScope()
         val localeScope = localeSettings.captureScope()
@@ -141,7 +174,7 @@ internal class ProfileService(
                 resident?.takeIf {
                     it.distinctId == identityScope.distinctId &&
                         it.locale == localeScope.identifier &&
-                        isFresh(it)
+                        isUsable(it)
                 }
             }
         }
@@ -154,7 +187,7 @@ internal class ProfileService(
 
     /** Refresh and await the outcome (testing + transitions). */
     suspend fun refreshAndWait(): Boolean {
-        val done = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val done = CompletableDeferred<Boolean>()
         if (signals.trySend(Signal.Refresh(done)).isFailure) return false
         return done.await()
     }
@@ -193,8 +226,12 @@ internal class ProfileService(
 
     private suspend fun handleUserChange(newDistinctId: String, admission: Admission) {
         val cached = synchronized(lock) { loadCached(newDistinctId) }
-        if (cached != null && cached.locale == admission.localeScope.identifier && isFresh(cached)) {
-            if (!applyProfile(cached, admission)) return
+        if (cached != null && cached.locale == admission.localeScope.identifier && isUsable(cached)) {
+            if (!applyProfile(cached, admission, AuthoritySource.CACHE)) {
+                evictCache(newDistinctId, admission)
+                refreshNow()
+                return
+            }
             // Fresh enough to skip an immediate network hit?
             if (nowMillis() - cached.cachedAtMillis < BACKGROUND_REFRESH_AGE_MILLIS) return
         } else if (cached != null) {
@@ -209,8 +246,10 @@ internal class ProfileService(
         val admission = beginAdmission() ?: return
         val distinctId = admission.identityScope.distinctId
         val cached = synchronized(lock) { loadCached(distinctId) }
-        if (cached != null && cached.locale == admission.localeScope.identifier && isFresh(cached)) {
-            applyProfile(cached, admission)
+        if (cached != null && cached.locale == admission.localeScope.identifier && isUsable(cached)) {
+            if (!applyProfile(cached, admission, AuthoritySource.CACHE)) {
+                evictCache(distinctId, admission)
+            }
         } else if (cached != null) {
             // Expired OR from another locale: evict before any use so a cold
             // start cannot rehydrate old-locale state (segments included).
@@ -227,13 +266,11 @@ internal class ProfileService(
                 it.distinctId == distinctId && it.locale == locale
             }
         }
-        val previous = scopedResident?.takeIf(::isFresh)
+        val previous = scopedResident?.takeIf(::isUsable)
         if (scopedResident != null && previous == null) {
             evictCache(distinctId, admission)
         }
-        val validator = previous
-            ?.validator
-            ?.let { NuxieApi.ProfileCacheValidator(it) }
+        val validator = previous?.validator
 
         val result = runCatching {
             api.fetchProfile(distinctId, locale, revalidating = validator)
@@ -247,47 +284,93 @@ internal class ProfileService(
             return false
         }
 
-        val cached = when (result) {
-            is NuxieApi.ProfileFetchResult.NotModified -> {
-                val refreshedPrevious = previous ?: return false
+        if (result is NuxieApi.ProfileFetchResult.NotModified) {
+            val refreshedPrevious = previous ?: return false
+            return refreshCacheFreshness(
                 CachedProfile(
-                    distinctId = distinctId,
-                    locale = locale,
+                    distinctId = refreshedPrevious.distinctId,
+                    locale = refreshedPrevious.locale,
                     cachedAtMillis = nowMillis(),
                     validator = refreshedPrevious.validator,
                     body = refreshedPrevious.body,
-                )
-            }
-            is NuxieApi.ProfileFetchResult.Modified -> {
-                val body = runCatching {
-                    Json.parseToJsonElement(result.bodyText).jsonObject
-                }.getOrElse {
-                    Log.w(LOG_TAG, "Profile response was not a JSON object", it)
-                    return false
-                }
-                CachedProfile(
-                    distinctId = distinctId,
-                    locale = locale,
-                    cachedAtMillis = nowMillis(),
-                    validator = result.validator?.rawValue,
-                    body = body,
-                )
-            }
+                ),
+                admission,
+            )
         }
+        val modified = result as NuxieApi.ProfileFetchResult.Modified
 
-        return applyProfile(cached, admission)
+        val body = runCatching {
+            Json.parseToJsonElement(modified.bodyText).jsonObject
+        }.getOrElse {
+            Log.w(LOG_TAG, "Profile response was not a JSON object", it)
+            return false
+        }
+        val cached = CachedProfile(
+            distinctId = distinctId,
+            locale = locale,
+            cachedAtMillis = nowMillis(),
+            validator = modified.validator,
+            body = body,
+        )
+        return applyProfile(cached, admission, AuthoritySource.NETWORK)
     }
+
+    private suspend fun refreshSafely(): Boolean = try {
+        refreshNow()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (failure: Throwable) {
+        Log.w(LOG_TAG, "Profile refresh processing failed; authority stays as-is", failure)
+        false
+    }
+
+    /** A 304 refreshes storage lifetime without replacing runtime authority. */
+    private fun refreshCacheFreshness(cached: CachedProfile, admission: Admission): Boolean =
+        withCurrentScope(admission.identityScope, admission.localeScope) {
+            synchronized(lock) {
+                if (admission.generation != nextProfileGeneration ||
+                    admission.generation < latestAppliedGeneration
+                ) {
+                    return@synchronized false
+                }
+                latestAppliedGeneration = admission.generation
+                resident = cached
+                persist(cached)
+                true
+            }
+        } == true
 
     private suspend fun applyProfile(
         cached: CachedProfile,
         admission: Admission,
+        authoritySource: AuthoritySource,
     ): Boolean {
         val schemaVersion = (cached.body["schemaVersion"] as? JsonPrimitive)
             ?.takeIf { it.isString }
             ?.content
         val planePrepared = if (schemaVersion == "nuxie.journey-plane-profile.v1") {
             val catalog = deviceLegProfiles ?: return false
-            runCatching { catalog.prepare(cached.body) }.getOrElse {
+            val deliveryAuthority = cached.validator?.authority ?: return false
+            val authorityAccepted = runCatching {
+                withCurrentScope(admission.identityScope, admission.localeScope) {
+                    synchronized(lock) {
+                        if (admission.generation != nextProfileGeneration ||
+                            admission.generation < latestAppliedGeneration
+                        ) {
+                            return@synchronized false
+                        }
+                        when (authoritySource) {
+                            AuthoritySource.NETWORK -> authorityStore.bind(deliveryAuthority)
+                            AuthoritySource.CACHE -> authorityStore.authority() == deliveryAuthority
+                        }
+                    }
+                } == true
+            }.getOrElse {
+                Log.w(LOG_TAG, "Profile authority binding failed", it)
+                return false
+            }
+            if (!authorityAccepted) return false
+            runCatching { catalog.prepare(cached.body, deliveryAuthority) }.getOrElse {
                 Log.w(LOG_TAG, "Device leg plane profile rejected", it)
                 return false
             }
@@ -335,6 +418,23 @@ internal class ProfileService(
             Log.w(LOG_TAG, "Discarding stale profile admission")
         } else {
             publishFeatureProfile(featurePublication)
+            runCatching {
+                if (planePrepared != null) {
+                    deviceLegRuntime?.profileDidCommit(
+                        planePrepared.snapshot,
+                        planePrepared.authority,
+                        cached.distinctId,
+                        admission.generation,
+                    )
+                } else {
+                    deviceLegRuntime?.profileDidClear(
+                        cached.distinctId,
+                        admission.generation,
+                    )
+                }
+            }.onFailure {
+                Log.w(LOG_TAG, "Device-leg runtime profile publication failed", it)
+            }
         }
 
         // Customer-scoped payloads (properties, server facts) are locale-
@@ -409,22 +509,26 @@ internal class ProfileService(
         localeSettings.withCurrentScope(localeScope, block)
     }
 
-    private fun clearCache(distinctId: String) {
-        synchronized(lock) {
+    private suspend fun clearCache(distinctId: String) {
+        val admissionGeneration = synchronized(lock) {
+            nextProfileGeneration += 1
+            latestAppliedGeneration = nextProfileGeneration
             if (resident?.distinctId == distinctId) resident = null
             fileFor(distinctId).delete()
+            nextProfileGeneration
         }
         segments.clearSegments(distinctId)
         deviceLegProfiles?.clear(distinctId)
+        deviceLegRuntime?.profileDidClear(distinctId, admissionGeneration)
     }
 
-    private fun evictCache(distinctId: String, admission: Admission) {
-        withCurrentScope(admission.identityScope, admission.localeScope) {
+    private suspend fun evictCache(distinctId: String, admission: Admission) {
+        val evicted = withCurrentScope(admission.identityScope, admission.localeScope) {
             synchronized(lock) {
                 if (admission.generation != nextProfileGeneration ||
                     admission.generation < latestAppliedGeneration
                 ) {
-                    return@synchronized
+                    return@synchronized false
                 }
                 latestAppliedGeneration = admission.generation
                 if (resident?.distinctId == distinctId) resident = null
@@ -433,12 +537,22 @@ internal class ProfileService(
                 // with the profile; it must not survive the profile's eviction.
                 segments.clearSegments(distinctId)
                 deviceLegProfiles?.clear(distinctId)
+                true
             }
+        } == true
+        if (evicted) {
+            deviceLegRuntime?.profileDidClear(distinctId, admission.generation)
         }
     }
 
     private fun isFresh(cached: CachedProfile): Boolean =
         nowMillis() - cached.cachedAtMillis < CACHE_TTL_MILLIS
+
+    private fun isUsable(cached: CachedProfile): Boolean =
+        isFresh(cached) || isCanonical(cached.body)
+
+    private fun isCanonical(body: JsonObject): Boolean =
+        body["schemaVersion"] == JsonPrimitive("nuxie.journey-plane-profile.v1")
 
     private fun loadCached(distinctId: String): CachedProfile? {
         if (resident?.distinctId == distinctId) return resident
@@ -446,12 +560,27 @@ internal class ProfileService(
         if (!file.exists()) return null
         return runCatching {
             val root = Json.parseToJsonElement(file.readText()).jsonObject
+            val validator = (root["validator"] as? JsonObject)?.let { stored ->
+                val authority = (stored["authority"] as? JsonObject)?.let { value ->
+                    ProfileDeliveryAuthority(
+                        appId = value.requiredString("appId"),
+                        environment = value.requiredString("environment"),
+                    ).also {
+                        if (!it.isValid) throw IllegalArgumentException("Invalid profile authority")
+                    }
+                }
+                NuxieApi.ProfileCacheValidator(
+                    rawValue = stored.requiredString("rawValue"),
+                    resourceScope = stored.optionalString("resourceScope"),
+                    authority = authority,
+                )
+            }
             CachedProfile(
                 distinctId = distinctId,
                 locale = (root["locale"] as? JsonPrimitive)?.takeIf { it.isString }?.content,
                 cachedAtMillis = (root["cachedAtMillis"] as? JsonPrimitive)
                     ?.content?.toLongOrNull() ?: 0L,
-                validator = (root["validator"] as? JsonPrimitive)?.takeIf { it.isString }?.content,
+                validator = validator,
                 body = root.getValue("body").jsonObject,
             )
         }.getOrElse {
@@ -466,7 +595,20 @@ internal class ProfileService(
             val root = buildJsonObject {
                 cached.locale?.let { put("locale", JsonPrimitive(it)) }
                 put("cachedAtMillis", JsonPrimitive(cached.cachedAtMillis))
-                cached.validator?.let { put("validator", JsonPrimitive(it)) }
+                cached.validator?.let { validator ->
+                    put("validator", buildJsonObject {
+                        put("rawValue", JsonPrimitive(validator.rawValue))
+                        validator.resourceScope?.let {
+                            put("resourceScope", JsonPrimitive(it))
+                        }
+                        validator.authority?.let { authority ->
+                            put("authority", buildJsonObject {
+                                put("appId", JsonPrimitive(authority.appId))
+                                put("environment", JsonPrimitive(authority.environment))
+                            })
+                        }
+                    })
+                }
                 put("body", cached.body)
             }
             fileFor(cached.distinctId).writeText(root.toString())
@@ -477,6 +619,13 @@ internal class ProfileService(
         File(baseDir, distinctId.map {
             if (it.isLetterOrDigit() || it == '-' || it == '_') it else '_'
         }.joinToString("") + ".json")
+
+    private fun JsonObject.requiredString(key: String): String =
+        (getValue(key) as? JsonPrimitive)?.takeIf { it.isString }?.content
+            ?: throw IllegalArgumentException("Missing $key")
+
+    private fun JsonObject.optionalString(key: String): String? =
+        (get(key) as? JsonPrimitive)?.takeIf { it.isString }?.content
 
     private companion object {
         const val LOG_TAG = "Nuxie"

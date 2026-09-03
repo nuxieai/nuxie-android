@@ -7,15 +7,19 @@ import ai.nuxie.sdk.experiences.DeviceLegProfileCatalog
 import ai.nuxie.sdk.experiences.ExperienceTrustRoots
 import ai.nuxie.sdk.experiences.ReleaseHighWaterStore
 import ai.nuxie.sdk.experiences.SupportedRuntime
+import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.identity.IdentityService
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
+import ai.nuxie.sdk.journey.DeviceLegProfileConsumer
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.NuxieApi
+import ai.nuxie.sdk.network.ProfileDeliveryAuthority
 import ai.nuxie.sdk.segments.SegmentService
 import ai.nuxie.sdk.testsupport.FakeTransport
+import android.content.Context
 import android.util.Base64
 import java.io.File
 import java.io.IOException
@@ -213,12 +217,41 @@ class ProfileServiceTest {
         fun all(): List<List<String>> = listOf(properties, releases, features, facts)
     }
 
+    private class RuntimePublicationRecorder : DeviceLegProfileConsumer {
+        data class Publication(val kind: String, val generation: Long?)
+
+        val publications = CopyOnWriteArrayList<Publication>()
+
+        override suspend fun profileDidCommit(
+            snapshot: DeviceLegProfileCatalog.Snapshot,
+            authority: ProfileDeliveryAuthority,
+            distinctId: String,
+            admissionGeneration: Long,
+        ) {
+            publications += Publication("commit", admissionGeneration)
+        }
+
+        override suspend fun profileDidClear(
+            distinctId: String,
+            admissionGeneration: Long,
+        ) {
+            publications += Publication("clear", admissionGeneration)
+        }
+
+        override suspend fun profileDidClearAll() {
+            publications += Publication("clear-all", null)
+        }
+    }
+
     private inner class ProfileFixture(
         transport: HttpTransport,
         val distinctId: String,
         localeIdentifier: String,
+        apiKey: String = "pk_test_profile_fixture",
         clearDisk: Boolean = true,
         deviceLegProfiles: DeviceLegProfileCatalog? = null,
+        deviceLegRuntime: DeviceLegProfileConsumer? = null,
+        publishFeatureProfile: suspend (FeatureInfo.Mutation?) -> Unit = {},
         refreshIntervalMillis: Long = 30L * 60L * 1000L,
     ) {
         private val context = RuntimeEnvironment.getApplication()
@@ -228,7 +261,11 @@ class ProfileServiceTest {
         val fanout = FanoutRecorder()
         private val featureRevision = AtomicLong()
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        private val profileFile = File(context.cacheDir, "nuxie/profiles/$distinctId.json")
+        private val storageScope = ProfileStorageScope(
+            apiKey,
+            NuxieEnvironment.DEVELOPMENT,
+        )
+        private val profileFile = profileFile(context, storageScope, distinctId)
 
         init {
             if (clearDisk) {
@@ -239,7 +276,8 @@ class ProfileServiceTest {
 
         val service = ProfileService(
             context = context,
-            api = NuxieApi("pk_test_profile_fixture", NuxieEnvironment.DEVELOPMENT, transport),
+            storageScope = storageScope,
+            api = NuxieApi(apiKey, NuxieEnvironment.DEVELOPMENT, transport),
             identity = identity,
             segments = segments,
             applyUserProperties = { properties ->
@@ -250,6 +288,7 @@ class ProfileServiceTest {
                 fanout.facts += body.snapshotLabel()
             },
             deviceLegProfiles = deviceLegProfiles,
+            deviceLegRuntime = deviceLegRuntime,
             stageFeatureProfile = { _, body, _, _, isCurrent ->
                 if (isCurrent()) {
                     (body["snapshot"] as? JsonPrimitive)?.content?.let {
@@ -258,6 +297,7 @@ class ProfileServiceTest {
                 }
                 null
             },
+            publishFeatureProfile = publishFeatureProfile,
             captureFeaturePurchaseRevision = { 0L },
             reserveFeatureAuthoritativeRevision = featureRevision::incrementAndGet,
             scope = scope,
@@ -284,15 +324,16 @@ class ProfileServiceTest {
             """{"segmentId":"seg-1","enteredAt":"2026-07-19T12:00:00Z"}]}}""",
         etag: String? = "\"v1\"",
     ): FakeTransport = FakeTransport().apply {
+        val responseHeaders = profileHeaders(body, etag)
         respond = { request ->
             if (request.url.path == "/profile") {
                 if (request.headers["If-None-Match"] == etag && etag != null) {
-                    HttpTransport.Response(304, ByteArray(0))
+                    HttpTransport.Response(304, ByteArray(0), responseHeaders)
                 } else {
                     HttpTransport.Response(
                         200,
                         body.encodeToByteArray(),
-                        headers = etag?.let { mapOf("ETag" to it) } ?: emptyMap(),
+                        headers = responseHeaders,
                     )
                 }
             } else {
@@ -300,6 +341,41 @@ class ProfileServiceTest {
             }
         }
     }
+
+    private fun profileHeaders(body: String, etag: String?): Map<String, String> {
+        val headers = linkedMapOf<String, String>()
+        etag?.let { headers["ETag"] = it }
+        val root = runCatching { Json.parseToJsonElement(body).jsonObject }.getOrNull()
+            ?: return headers
+        if (root["schemaVersion"] != JsonPrimitive("nuxie.journey-plane-profile.v1")) {
+            return headers
+        }
+        val locator = root["releases"]?.jsonArray?.firstOrNull()?.jsonObject
+            ?.get("locator")?.jsonObject
+            ?: error("Canonical profile test response needs a release locator")
+        headers["Nuxie-App-Id"] = locator.getValue("appId").jsonPrimitive.content
+        headers["Nuxie-App-Environment"] =
+            locator.getValue("environment").jsonPrimitive.content
+        return headers
+    }
+
+    private fun canonicalProfileResponse(body: String, etag: String): HttpTransport.Response =
+        HttpTransport.Response(
+            200,
+            body.encodeToByteArray(),
+            profileHeaders(body, etag),
+        )
+
+    private fun profileFile(
+        context: Context,
+        storageScope: ProfileStorageScope,
+        distinctId: String,
+    ): File = File(
+        storageScope.cacheDirectory(context.cacheDir),
+        distinctId.map {
+            if (it.isLetterOrDigit() || it == '-' || it == '_') it else '_'
+        }.joinToString("") + ".json",
+    )
 
     @Test
     fun matchesTheCrossSdkLocaleAdmissionFixture() = runBlocking {
@@ -544,6 +620,36 @@ class ProfileServiceTest {
     }
 
     @Test
+    fun canonical304RefreshesFreshnessWithoutRepublishingTheRuntime() = runBlocking {
+        val plane = planeProfileFixture()
+        val transport = profileTransport(body = plane.first, etag = "\"plane-v1\"")
+        val runtime = RuntimePublicationRecorder()
+        val context = RuntimeEnvironment.getApplication()
+        val fixture = ProfileFixture(
+            transport = transport,
+            distinctId = "canonical-304-runtime",
+            localeIdentifier = "en_US",
+            apiKey = "pk_canonical_304_runtime",
+            deviceLegProfiles = DeviceLegProfileCatalog(
+                trustedKeys = ExperienceTrustRoots.keys(NuxieEnvironment.DEVELOPMENT),
+                highWater = ReleaseHighWaterStore(context),
+                supportedRuntime = { plane.second },
+            ),
+            deviceLegRuntime = runtime,
+        )
+
+        try {
+            assertTrue(fixture.service.refreshAndWait())
+            assertTrue(fixture.service.refreshAndWait())
+
+            assertEquals(listOf("commit"), runtime.publications.map { it.kind })
+            assertEquals(2, transport.requests.count { it.url.path == "/profile" })
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun expiredCacheIsEvictedNotServed() = runBlocking {
         val transport = profileTransport()
         val core1 = core(transport)
@@ -655,6 +761,98 @@ class ProfileServiceTest {
     }
 
     @Test
+    fun failedRefreshCompletesItsWaiterAndTheWorkerProcessesTheNextSignal() = runBlocking {
+        val publications = AtomicInteger()
+        val fixture = ProfileFixture(
+            transport = profileTransport(
+                body = profileBody("refresh-processing-failure"),
+                etag = null,
+            ),
+            distinctId = "refresh-processing-failure",
+            localeIdentifier = "en_US",
+            publishFeatureProfile = {
+                if (publications.incrementAndGet() == 1) {
+                    throw IOException("publication failed")
+                }
+            },
+        )
+
+        try {
+            assertFalse(withTimeout(5_000L) { fixture.service.refreshAndWait() })
+            assertTrue(withTimeout(5_000L) { fixture.service.refreshAndWait() })
+            assertEquals(2, publications.get())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun overlappingCanonicalPublicationsCarryTheirRuntimeAdmissionGeneration() = runBlocking {
+        val plane = planeProfileFixture()
+        val transport = GatedProfileTransport(
+            listOf(
+                canonicalProfileResponse(plane.first, "\"plane-old\""),
+                canonicalProfileResponse(plane.first, "\"plane-new\""),
+            ),
+        )
+        val firstFeaturePublishStarted = CompletableDeferred<Unit>()
+        val releaseFirstFeaturePublish = CompletableDeferred<Unit>()
+        val featurePublishIndex = AtomicInteger()
+        val runtime = RuntimePublicationRecorder()
+        val context = RuntimeEnvironment.getApplication()
+        val fixture = ProfileFixture(
+            transport = transport,
+            distinctId = "canonical-runtime-publication-race",
+            localeIdentifier = "en_US",
+            apiKey = "pk_canonical_runtime_publication_race",
+            deviceLegProfiles = DeviceLegProfileCatalog(
+                trustedKeys = ExperienceTrustRoots.keys(NuxieEnvironment.DEVELOPMENT),
+                highWater = ReleaseHighWaterStore(context),
+                supportedRuntime = { plane.second },
+            ),
+            deviceLegRuntime = runtime,
+            publishFeatureProfile = {
+                if (featurePublishIndex.getAndIncrement() == 0) {
+                    firstFeaturePublishStarted.complete(Unit)
+                    releaseFirstFeaturePublish.await()
+                }
+            },
+        )
+
+        try {
+            val older = async(Dispatchers.Default) { fixture.service.refreshAndWait() }
+            transport.awaitStarted(0)
+            transport.release(0)
+            withTimeout(5_000L) { firstFeaturePublishStarted.await() }
+
+            fixture.service.setLocaleIdentifier("fr_FR")
+            val newer = async(Dispatchers.Default) {
+                fixture.service.transitionObserver.handleUserChange(
+                    UserTransitionCoordinator.Kind.IDENTIFY,
+                    fixture.distinctId,
+                    fixture.distinctId,
+                )
+            }
+            transport.awaitStarted(1)
+            transport.release(1)
+            withTimeout(5_000L) { newer.await() }
+
+            releaseFirstFeaturePublish.complete(Unit)
+            assertTrue(withTimeout(5_000L) { older.await() })
+            assertEquals(listOf("clear", "commit", "commit"), runtime.publications.map { it.kind })
+            val clearGeneration = requireNotNull(runtime.publications[0].generation)
+            val newerCommitGeneration = requireNotNull(runtime.publications[1].generation)
+            val delayedCommitGeneration = requireNotNull(runtime.publications[2].generation)
+            assertTrue(clearGeneration < newerCommitGeneration)
+            assertTrue(delayedCommitGeneration < clearGeneration)
+        } finally {
+            transport.releaseAll()
+            releaseFirstFeaturePublish.complete(Unit)
+            fixture.close()
+        }
+    }
+
+    @Test
     fun legacyProfileRetainsPeriodicRefreshDuringTransition() = runBlocking {
         val transport = profileTransport(body = profileBody("legacy-periodic-refresh"))
         val fixture = ProfileFixture(
@@ -680,11 +878,10 @@ class ProfileServiceTest {
         val fixture = planeProfileFixture()
         val context = RuntimeEnvironment.getApplication()
         val distinctId = IdentityService(context).distinctId()
-        val profileFile = File(
-            context.cacheDir,
-            "nuxie/profiles/" + distinctId.map {
-                if (it.isLetterOrDigit() || it == '-' || it == '_') it else '_'
-            }.joinToString("") + ".json",
+        val profileFile = profileFile(
+            context,
+            ProfileStorageScope("pk_test_profile", NuxieEnvironment.DEVELOPMENT),
+            distinctId,
         )
         profileFile.delete()
 
@@ -695,6 +892,7 @@ class ProfileServiceTest {
         assertTrue(writer.profile.refreshAndWait())
         writer.stop()
 
+        now += 25L * 60L * 60L * 1000L
         val offline = FakeTransport().apply {
             respond = { throw IOException("offline") }
         }
@@ -706,6 +904,120 @@ class ProfileServiceTest {
         reader.stop()
         profileFile.delete()
         Unit
+    }
+
+    @Test
+    fun configuredCredentialsCannotReadEachOthersProfileBootstrapCache() = runBlocking {
+        val distinctId = "profile_credential_scope"
+        val writer = ProfileFixture(
+            transport = profileTransport(body = profileBody("writer"), etag = null),
+            distinctId = distinctId,
+            localeIdentifier = "en_US",
+            apiKey = "pk_profile_writer",
+        )
+        assertTrue(writer.service.refreshAndWait())
+        writer.close(deleteDisk = false)
+
+        val reader = ProfileFixture(
+            transport = FakeTransport().apply { respond = { throw IOException("offline") } },
+            distinctId = distinctId,
+            localeIdentifier = "en_US",
+            apiKey = "pk_profile_reader",
+        )
+        try {
+            assertFalse(reader.service.refreshAndWait())
+            assertNull(reader.service.currentProfile())
+        } finally {
+            reader.close()
+            profileFile(
+                RuntimeEnvironment.getApplication(),
+                ProfileStorageScope("pk_profile_writer", NuxieEnvironment.DEVELOPMENT),
+                distinctId,
+            ).delete()
+        }
+    }
+
+    @Test
+    fun rejectedFreshCacheOnUserChangeIsEvictedAndRefetched() = runBlocking {
+        val plane = planeProfileFixture()
+        val context = RuntimeEnvironment.getApplication()
+        val apiKey = "pk_rejected_user_change_cache"
+        val destinationDistinctId = "rejected_user_change_destination"
+        val storageScope = ProfileStorageScope(apiKey, NuxieEnvironment.DEVELOPMENT)
+        val destinationProfileFile = profileFile(context, storageScope, destinationDistinctId)
+        val catalog = {
+            DeviceLegProfileCatalog(
+                trustedKeys = ExperienceTrustRoots.keys(NuxieEnvironment.DEVELOPMENT),
+                highWater = ReleaseHighWaterStore(context),
+                supportedRuntime = { plane.second },
+            )
+        }
+        val writer = ProfileFixture(
+            transport = profileTransport(body = plane.first, etag = "\"plane-v1\""),
+            distinctId = destinationDistinctId,
+            localeIdentifier = "en_US",
+            apiKey = apiKey,
+            deviceLegProfiles = catalog(),
+        )
+        assertTrue(writer.service.refreshAndWait())
+        writer.close(deleteDisk = false)
+
+        val cachedRoot = Json.parseToJsonElement(destinationProfileFile.readText()).jsonObject
+        val cachedBody = cachedRoot.getValue("body").jsonObject
+        val entry = cachedBody.getValue("releases").jsonArray.single().jsonObject
+        val envelope = entry.getValue("envelope").jsonObject
+        val signature = envelope.getValue("signature").jsonObject
+        val encoded = signature.getValue("signatureBase64").jsonPrimitive.content
+        val changed = (if (encoded.first() == 'A') "B" else "A") + encoded.drop(1)
+        val badSignature = JsonObject(signature + ("signatureBase64" to JsonPrimitive(changed)))
+        val badEnvelope = JsonObject(envelope + ("signature" to badSignature))
+        val badEntry = JsonObject(entry + ("envelope" to badEnvelope))
+        val badBody = JsonObject(cachedBody + ("releases" to JsonArray(listOf(badEntry))))
+        destinationProfileFile.writeText(
+            JsonObject(cachedRoot + ("body" to badBody)).toString(),
+        )
+
+        val request = AtomicInteger()
+        val transport = FakeTransport().apply {
+            respond = { httpRequest ->
+                if (httpRequest.url.path == "/profile") {
+                    val body = if (request.getAndIncrement() == 0) {
+                        profileBody("source")
+                    } else {
+                        profileBody("replacement")
+                    }
+                    HttpTransport.Response(200, body.encodeToByteArray())
+                } else {
+                    HttpTransport.Response(200, ByteArray(0))
+                }
+            }
+        }
+        val reader = ProfileFixture(
+            transport = transport,
+            distinctId = "rejected_user_change_source",
+            localeIdentifier = "en_US",
+            apiKey = apiKey,
+            deviceLegProfiles = catalog(),
+        )
+        try {
+            assertTrue(reader.service.refreshAndWait())
+            reader.identity.setDistinctId(destinationDistinctId)
+
+            reader.service.transitionObserver.handleUserChange(
+                UserTransitionCoordinator.Kind.IDENTIFY,
+                "rejected_user_change_source",
+                destinationDistinctId,
+            )
+
+            assertEquals(2, request.get())
+            assertEquals(
+                "replacement",
+                reader.service.currentProfile()?.body?.snapshotLabel(),
+            )
+        } finally {
+            reader.close()
+            destinationProfileFile.delete()
+        }
     }
 
     @Test
@@ -730,7 +1042,11 @@ class ProfileServiceTest {
                         1 -> badBody
                         else -> profileBody("legacy")
                     }
-                    HttpTransport.Response(200, body.encodeToByteArray())
+                    if (body.startsWith("{\"schemaVersion\"")) {
+                        canonicalProfileResponse(body, "\"plane-${request.get()}\"")
+                    } else {
+                        HttpTransport.Response(200, body.encodeToByteArray())
+                    }
                 } else {
                     HttpTransport.Response(200, ByteArray(0))
                 }
@@ -758,7 +1074,7 @@ class ProfileServiceTest {
     }
 
     @Test
-    fun expiredPlaneProfileDropsDeviceLegAuthorityBeforeOfflineRefresh() = runBlocking {
+    fun expiredPlaneProfileRemainsUsableWhenForegroundRevalidationIsOffline() = runBlocking {
         val fixture = planeProfileFixture()
         val request = AtomicInteger()
         val transport = FakeTransport().apply {
@@ -766,7 +1082,7 @@ class ProfileServiceTest {
                 if (httpRequest.url.path != "/profile") {
                     HttpTransport.Response(200, ByteArray(0))
                 } else if (request.getAndIncrement() == 0) {
-                    HttpTransport.Response(200, fixture.first.encodeToByteArray())
+                    canonicalProfileResponse(fixture.first, "\"plane-v1\"")
                 } else {
                     throw IOException("offline")
                 }
@@ -779,8 +1095,8 @@ class ProfileServiceTest {
 
         now += 25L * 60L * 60L * 1000L
         assertFalse(core.profile.refreshAndWait())
-        assertNull(core.profile.currentProfile())
-        assertNull(core.deviceLegProfiles.snapshot(distinctId))
+        assertNotNull(core.profile.currentProfile())
+        assertNotNull(core.deviceLegProfiles.snapshot(distinctId))
         core.stop()
     }
 
@@ -854,6 +1170,79 @@ class ProfileServiceTest {
     }
 
     @Test
+    fun supersededCanonicalResponseCannotBindProfileAuthority() = runBlocking {
+        val plane = planeProfileFixture()
+        val apiKey = "pk_superseded_profile_authority"
+        val context = RuntimeEnvironment.getApplication()
+        val storageScope = ProfileStorageScope(apiKey, NuxieEnvironment.DEVELOPMENT)
+        val bindingFile = context.filesDir.resolve(
+            "nuxie/profile-authorities-v1/${storageScope.authorityBindingFilename}",
+        )
+        bindingFile.delete()
+        val goodAuthority = plane.first.let {
+            val locator = Json.parseToJsonElement(it).jsonObject
+                .getValue("releases").jsonArray.single().jsonObject
+                .getValue("locator").jsonObject
+            ProfileDeliveryAuthority(
+                locator.getValue("appId").jsonPrimitive.content,
+                locator.getValue("environment").jsonPrimitive.content,
+            )
+        }
+        val staleHeaders = profileHeaders(plane.first, "\"stale\"").toMutableMap().apply {
+            this["Nuxie-App-Id"] = "superseded-app"
+        }
+        val transport = GatedProfileTransport(
+            listOf(
+                HttpTransport.Response(
+                    200,
+                    plane.first.encodeToByteArray(),
+                    staleHeaders,
+                ),
+                canonicalProfileResponse(plane.first, "\"current\""),
+            ),
+        )
+        val fixture = ProfileFixture(
+            transport = transport,
+            distinctId = "profile_authority_race",
+            localeIdentifier = "en_US",
+            apiKey = apiKey,
+            deviceLegProfiles = DeviceLegProfileCatalog(
+                trustedKeys = ExperienceTrustRoots.keys(NuxieEnvironment.DEVELOPMENT),
+                highWater = ReleaseHighWaterStore(context),
+                supportedRuntime = { plane.second },
+            ),
+        )
+
+        try {
+            val older = async(Dispatchers.Default) { fixture.service.refreshAndWait() }
+            transport.awaitStarted(0)
+            val newer = async(Dispatchers.Default) {
+                fixture.service.transitionObserver.handleUserChange(
+                    UserTransitionCoordinator.Kind.IDENTIFY,
+                    fixture.distinctId,
+                    fixture.distinctId,
+                )
+            }
+            transport.awaitStarted(1)
+
+            transport.release(0)
+            assertFalse(withTimeout(5_000L) { older.await() })
+            transport.release(1)
+            withTimeout(5_000L) { newer.await() }
+
+            assertNotNull(fixture.service.currentProfile())
+            assertEquals(
+                goodAuthority,
+                ProfileAuthorityBindingStore(context, storageScope).authority(),
+            )
+        } finally {
+            transport.releaseAll()
+            fixture.close()
+            bindingFile.delete()
+        }
+    }
+
+    @Test
     fun workerRefreshAndTransitionHydrationUseIdentityLocaleProfileLockOrder() = runBlocking {
         val distinctId = "profile_lock_order"
         val transport = GatedProfileTransport(
@@ -865,11 +1254,16 @@ class ProfileServiceTest {
         val featureRevision = AtomicLong()
         val armTransitionApply = AtomicBoolean(false)
         val transitionGateReady = CompletableDeferred<LockOrderIdentity.ScopeGate>()
-        File(context.cacheDir, "nuxie/profiles/$distinctId.json").delete()
+        val storageScope = ProfileStorageScope(
+            "pk_test_profile_lock_order",
+            NuxieEnvironment.DEVELOPMENT,
+        )
+        profileFile(context, storageScope, distinctId).delete()
         segments.clearSegments(distinctId)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val service = ProfileService(
             context = context,
+            storageScope = storageScope,
             api = NuxieApi("pk_test_profile_lock_order", NuxieEnvironment.DEVELOPMENT, transport),
             identity = identity,
             segments = segments,
@@ -940,7 +1334,7 @@ class ProfileServiceTest {
             transport.releaseAll()
             service.close()
             scope.coroutineContext[Job]?.cancelAndJoin()
-            File(context.cacheDir, "nuxie/profiles/$distinctId.json").delete()
+            profileFile(context, storageScope, distinctId).delete()
             segments.clearSegments(distinctId)
         }
     }
@@ -1073,10 +1467,10 @@ class ProfileServiceTest {
 
             assertFalse(withTimeout(5_000L) { revalidation.await() })
             assertNull(fixture.service.currentProfile())
-            assertEquals(listOf("english", "english"), fixture.fanout.properties)
+            assertEquals(listOf("english"), fixture.fanout.properties)
             assertEquals(listOf("english"), fixture.fanout.releases)
             assertEquals(listOf("english"), fixture.fanout.features)
-            assertEquals(listOf("english", "english"), fixture.fanout.facts)
+            assertEquals(listOf("english"), fixture.fanout.facts)
 
             val replacement = async(Dispatchers.Default) { fixture.service.refreshAndWait() }
             transport.awaitStarted(2)
@@ -1085,10 +1479,10 @@ class ProfileServiceTest {
             assertTrue(withTimeout(5_000L) { replacement.await() })
 
             assertEquals("french", fixture.service.currentProfile()!!.body.snapshotLabel())
-            assertEquals(listOf("english", "english", "french"), fixture.fanout.properties)
+            assertEquals(listOf("english", "french"), fixture.fanout.properties)
             assertEquals(listOf("english", "french"), fixture.fanout.releases)
             assertEquals(listOf("english", "french"), fixture.fanout.features)
-            assertEquals(listOf("english", "english", "french"), fixture.fanout.facts)
+            assertEquals(listOf("english", "french"), fixture.fanout.facts)
         } finally {
             transport.releaseAll()
             fixture.close()

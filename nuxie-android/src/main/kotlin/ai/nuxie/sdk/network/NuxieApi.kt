@@ -15,6 +15,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 
+private const val PROFILE_APP_ID_HEADER = "Nuxie-App-Id"
+private const val PROFILE_APP_ENVIRONMENT_HEADER = "Nuxie-App-Environment"
+
 /**
  * The API client, ported from the iOS `NuxieApi`: all POST, gzip request
  * bodies, `Nuxie-Android-SDK/<version>` user agent. Only `/batch` exists in
@@ -104,8 +107,12 @@ internal class NuxieApi(
         val catalogProduct: VerifiedCatalogProduct?,
     )
 
-    /** Opaque conditional-fetch validator (the response ETag, scoped to /profile). */
-    class ProfileCacheValidator(val rawValue: String)
+    /** Opaque conditional validator bound to one profile resource and authority. */
+    class ProfileCacheValidator(
+        val rawValue: String,
+        val resourceScope: String? = null,
+        val authority: ProfileDeliveryAuthority? = null,
+    )
 
     sealed interface ProfileFetchResult {
         /** Fresh profile JSON text plus the next conditional validator, if any. */
@@ -148,17 +155,33 @@ internal class NuxieApi(
             append(",\"version\":1}")
         }.encodeToByteArray()
 
+        val resourceScope = "$baseUrl/profile"
+        val scopedValidator = revalidating?.takeIf { it.resourceScope == resourceScope }
         val headers = buildMap {
             put("Content-Type", "application/json")
             put("Accept-Encoding", "gzip")
             put("User-Agent", "Nuxie-Android-SDK/${SdkVersion.VALUE}")
-            revalidating?.let { put("If-None-Match", it.rawValue) }
+            scopedValidator?.let { put("If-None-Match", it.rawValue) }
         }
         val response = transport.execute(
             HttpTransport.Request(url = URL("$baseUrl/profile"), headers = headers, body = body),
         )
         if (response.statusCode == 304) {
-            if (revalidating == null) throw IOException("304 without a validator")
+            val expected = scopedValidator ?: throw IOException("304 without a scoped validator")
+            if (expected.authority != null) {
+                val returnedAuthority = profileAuthority(response)
+                    ?: throw IOException("Canonical 304 omitted profile authority")
+                val returnedValidator = profileValidator(
+                    response = response,
+                    resourceScope = resourceScope,
+                    authority = returnedAuthority,
+                )
+                if (returnedAuthority != expected.authority ||
+                    returnedValidator?.rawValue != expected.rawValue
+                ) {
+                    throw IOException("Canonical 304 changed profile authority")
+                }
+            }
             return ProfileFetchResult.NotModified
         }
         if (response.statusCode !in 200..299) {
@@ -166,10 +189,44 @@ internal class NuxieApi(
         }
         val text = response.body.decodeToString()
         StrictJsonValidator.requireNoDuplicateKeys(text)
+        val authority = profileAuthority(response)
+        val validator = profileValidator(response, resourceScope, authority)
+        val canonical = runCatching {
+            (Json.parseToJsonElement(text) as? kotlinx.serialization.json.JsonObject)
+                ?.get("schemaVersion") == JsonPrimitive("nuxie.journey-plane-profile.v1")
+        }.getOrDefault(false)
+        if (canonical && (authority == null || validator == null)) {
+            throw IOException("Canonical profile omitted authenticated authority or validator")
+        }
         return ProfileFetchResult.Modified(
             bodyText = text,
-            validator = response.header("ETag")?.let(::ProfileCacheValidator),
+            validator = validator,
         )
+    }
+
+    private fun profileAuthority(response: HttpTransport.Response): ProfileDeliveryAuthority? {
+        val appId = response.header(PROFILE_APP_ID_HEADER)
+        val environment = response.header(PROFILE_APP_ENVIRONMENT_HEADER)
+        if (appId == null && environment == null) return null
+        if (appId == null || environment == null) {
+            throw IOException("Incomplete profile authority")
+        }
+        return ProfileDeliveryAuthority(appId, environment).also {
+            if (!it.isValid) throw IOException("Invalid profile authority")
+        }
+    }
+
+    private fun profileValidator(
+        response: HttpTransport.Response,
+        resourceScope: String,
+        authority: ProfileDeliveryAuthority?,
+    ): ProfileCacheValidator? {
+        val raw = response.header("ETag")?.trim()?.takeIf {
+            it.isNotEmpty() && it.encodeToByteArray().size <= 256 && it.none(Char::isISOControl)
+        } ?: return null
+        val opaque = raw.removePrefix("W/")
+        if (opaque.length < 2 || opaque.first() != '"' || opaque.last() != '"') return null
+        return ProfileCacheValidator(raw, resourceScope, authority)
     }
 
     /**
