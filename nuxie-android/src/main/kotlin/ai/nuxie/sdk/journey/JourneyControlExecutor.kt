@@ -69,13 +69,13 @@ internal class JourneyControlExecutor(
             "action" -> {
                 val action = step["action"] as? JsonObject ?: return Result.Invalid
                 val outlets = step["outlets"] as? JsonObject ?: return Result.Invalid
-                when (action.text("type")) {
-                    "condition" -> condition(action, outlets, context)
-                    "experiment" -> experiment(action, outlets, context, assignments)
-                    "time_window" -> timeWindow(step, action, outlets, context, nowMillis, checkpoint)
-                    "delay" -> delay(step, action, outlets, context, nowMillis, checkpoint)
-                    "wait_until" -> waitUntil(step, action, outlets, context, nowMillis, checkpoint, signal)
-                    null -> Result.Invalid
+                when (JourneyActionType.from(action) ?: return Result.Invalid) {
+                    JourneyActionType.CONDITION -> condition(action, outlets, context)
+                    JourneyActionType.EXPERIMENT -> experiment(action, outlets, context, assignments)
+                    JourneyActionType.TIME_WINDOW -> timeWindow(step, action, outlets, context, nowMillis, checkpoint)
+                    JourneyActionType.DELAY -> delay(step, action, outlets, context, nowMillis, checkpoint)
+                    JourneyActionType.WAIT_UNTIL -> waitUntil(step, action, outlets, context, nowMillis, checkpoint, signal)
+                    JourneyActionType.CONNECTOR_ACTION -> Result.Invalid
                     else -> Result.Dispatch(step.text("id") ?: return Result.Invalid, action)
                 }
             }
