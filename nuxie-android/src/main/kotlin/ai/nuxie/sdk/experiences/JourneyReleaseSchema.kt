@@ -20,6 +20,12 @@ import kotlinx.serialization.json.JsonPrimitive
 
 /** Non-topological release fields retain the publisher's existing contracts. */
 internal object JourneyReleaseSchema {
+    private data class ProductIdentity(
+        val id: String,
+        val platform: String,
+        val storeKey: String,
+    )
+
     private val intervals = arrayOf("lifetime", "minute", "hour", "day", "week", "month", "quarter", "semiAnnual", "year")
     private val productTypes = arrayOf("subscription", "consumable", "nonConsumable")
 
@@ -37,24 +43,34 @@ internal object JourneyReleaseSchema {
         val provenance = exact(root["provenance"], setOf("compilerCommit", "compilerVersion"))
         id(provenance["compilerCommit"], 128); id(provenance["compilerVersion"], 64)
         presentation(root["presentation"])
-        for (product in array(root["products"], 256)) product(product)
-        for (value in array(root["placements"], 256)) {
+        val products = array(root["products"], 256).map(::product)
+        sortedUnique(products.map { it.id })
+        if (products.map { it.storeKey }.toSet().size != products.size) {
+            fail("duplicate store product")
+        }
+        val productsById = products.associateBy { it.id }
+        val placementIds = array(root["placements"], 256).map { value ->
             val placement = exact(
                 value,
                 setOf("id", "productId"),
                 setOf("appStore", "googlePlay"),
             )
-            releaseId(placement["id"]); releaseId(placement["productId"])
+            val placementId = releaseId(placement["id"])
+            val productId = releaseId(placement["productId"])
+            val product = productsById[productId] ?: fail("unknown placement product")
             placement["appStore"]?.let {
                 val store = exact(it, setOf("introEligibility", "billingPlan"))
                 oneOf(store["introEligibility"], "automatic", "alwaysEligible", "alwaysIneligible")
                 oneOf(store["billingPlan"], "default", "upFront", "monthly")
             }
             placement["googlePlay"]?.let {
+                if (product.platform != "google_play") fail("Google Play offer platform")
                 val store = exact(it, setOf("offerId"))
-                releaseId(store["offerId"])
+                utf8(store["offerId"], 256)
             }
+            placementId
         }
+        sortedUnique(placementIds)
         val scripts = mutableMapOf<String, Long>()
         for (value in array(root["screenBehaviors"])) behavior(value)?.let { (sha, bytes) ->
             if (scripts.put(sha, bytes)?.let { it != bytes } == true) fail("conflicting script size")
@@ -89,20 +105,17 @@ internal object JourneyReleaseSchema {
         }
     }
 
-    private fun product(input: JsonElement) {
-        val product = exact(input, setOf("id", "type", "providerFeatureAccess", "store", "preview", "entitlements"))
-        releaseId(product["id"])
+    private fun product(input: JsonElement): ProductIdentity {
+        val product = exact(input, setOf("id", "type", "store", "preview", "entitlements"))
+        val productId = releaseId(product["id"])
         val type = oneOf(product["type"], *productTypes)
-        if (product["providerFeatureAccess"] != JsonNull) {
-            oneOf(exact(product["providerFeatureAccess"], setOf("provider"))["provider"], "revenuecat", "superwall")
-        }
         val rawStore = record(product["store"])
         val platform = oneOf(rawStore["platform"], "apple_app_store", "google_play")
         val store = if (platform == "google_play") {
             exact(
                 rawStore,
                 setOf("platform", "productId", "productType"),
-                setOf("basePlanId", "purchaseOptionId", "offerIds"),
+                setOf("basePlanId", "purchaseOptionId"),
             )
         } else {
             exact(rawStore, setOf("platform", "productId", "productType"))
@@ -112,20 +125,20 @@ internal object JourneyReleaseSchema {
         if (platform == "apple_app_store" && type == "subscription") {
             oneOf(store["productType"], "autoRenewable", "nonRenewing")
         } else if (storeType != type) fail("store product type")
+        var basePlanId: String? = null
+        var purchaseOptionId: String? = null
         if (platform == "google_play") {
-            val basePlanId = store["basePlanId"]?.let { releaseId(it) }
-            val purchaseOptionId = store["purchaseOptionId"]?.let { releaseId(it) }
-            val offerIds = store["offerIds"]?.let { values ->
-                ids(values, 256).also(::sortedUnique)
-            }.orEmpty()
+            basePlanId = store["basePlanId"]
+                ?.takeUnless { it == JsonNull }
+                ?.let { utf8(it, 256) }
+            purchaseOptionId = store["purchaseOptionId"]
+                ?.takeUnless { it == JsonNull }
+                ?.let { utf8(it, 256) }
             if (type == "subscription" && (basePlanId == null || purchaseOptionId != null)) {
                 fail("Google Play subscription identity")
             }
             if (type != "subscription" && basePlanId != null) {
                 fail("Google Play one-time identity")
-            }
-            if (offerIds.isNotEmpty() && basePlanId == null && purchaseOptionId == null) {
-                fail("Google Play offer parent")
             }
         }
         val previewKeys = mapOf("name" to 512, "description" to 2048, "price" to 128, "period" to 64,
@@ -146,6 +159,13 @@ internal object JourneyReleaseSchema {
             releaseId(entitlement["id"])
         }
         sortedUnique(entitlements)
+        val storeKey = if (platform == "google_play") {
+            listOf(platform, text(store["productId"]), basePlanId.orEmpty(), purchaseOptionId.orEmpty())
+                .joinToString("\u0000")
+        } else {
+            listOf(platform, text(store["productId"])).joinToString("\u0000")
+        }
+        return ProductIdentity(productId, platform, storeKey)
     }
 
     private fun requirements(input: JsonElement?) {
