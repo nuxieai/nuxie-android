@@ -108,12 +108,45 @@ class JourneyControlExecutorTest {
             assertEquals("a", result.stepId)
             val selection = requireNotNull(result.experimentSelection)
             assertEquals("default", selection.variantId)
-            assertEquals(false, selection.isHoldout)
+            assertEquals(true, selection.isHoldout)
             assertEquals(
                 JourneyControlExecutor.ExperimentSelection.Source.FALLBACK,
                 selection.source,
             )
         }
+    }
+
+    @Test fun `authenticated variant holdout metadata overrides the profile hint`() {
+        val fixture = Json.parseToJsonElement(
+            File("../fixtures/journeys/planes/executor-controls.json").readText(),
+        ).jsonObject
+        val vector = fixture.getValue("cases").jsonArray
+            .map { it.jsonObject }
+            .single { it.text("id") == "experiment-uses-durable-assignment" }
+        val assignments = Json.parseToJsonElement(
+            """{"experiment_assigned":{"variantId":"variant_b","isHoldout":true}}""",
+        ).jsonObject
+        val executor = JourneyControlExecutor(
+            SignedTimezoneBundle.load(),
+            "Etc/UTC",
+            "Etc/UTC",
+        )
+
+        val result = executor.evaluate(
+            vector.getValue("step").jsonObject,
+            fixture.getValue("context").jsonObject,
+            assignments,
+            vector.number("nowMillis"),
+        ) as JourneyControlExecutor.Result.Advance
+
+        assertEquals("b", result.stepId)
+        val selection = requireNotNull(result.experimentSelection)
+        assertEquals("variant_b", selection.variantId)
+        assertEquals(false, selection.isHoldout)
+        assertEquals(
+            JourneyControlExecutor.ExperimentSelection.Source.PROFILE,
+            selection.source,
+        )
     }
 
     @Test fun missingOutletsAndOverflowingDeadlinesFailClosed() {

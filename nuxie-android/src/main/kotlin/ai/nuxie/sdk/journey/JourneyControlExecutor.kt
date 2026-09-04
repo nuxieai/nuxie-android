@@ -100,14 +100,21 @@ internal class JourneyControlExecutor(
     ): Result {
         val experimentId = action.text("experimentId") ?: return Result.Invalid
         val variants = action["variants"] as? JsonArray ?: return Result.Invalid
-        val available = variants.mapNotNull { (it as? JsonObject)?.text("id") }
+        val available = linkedMapOf<String, Boolean>()
+        for (value in variants) {
+            val variant = value as? JsonObject ?: return Result.Invalid
+            val id = variant.text("id") ?: return Result.Invalid
+            val isHoldout = variant["isHoldout"]?.jsonPrimitive?.booleanOrNull
+                ?: return Result.Invalid
+            if (available.put(id, isHoldout) != null) return Result.Invalid
+        }
         if (available.isEmpty()) return Result.Invalid
         val fallback = action.text("fallbackVariantId")
-            ?.takeIf(available::contains)
+            ?.takeIf(available::containsKey)
             ?: return Result.Invalid
         val assignment = assignments[experimentId] as? JsonObject
         val assigned = assignment?.text("variantId")
-        val matchedAssignment = assigned?.takeIf(available::contains)
+        val matchedAssignment = assigned?.takeIf(available::containsKey)
         val selected = matchedAssignment ?: fallback
         val source = if (matchedAssignment != null) {
             ExperimentSelection.Source.PROFILE
@@ -120,9 +127,7 @@ internal class JourneyControlExecutor(
             experimentSelection = ExperimentSelection(
                 experimentId = experimentId,
                 variantId = selected,
-                isHoldout = if (source == ExperimentSelection.Source.PROFILE) {
-                    assignment?.get("isHoldout")?.jsonPrimitive?.booleanOrNull ?: false
-                } else false,
+                isHoldout = available.getValue(selected),
                 source = source,
             ),
         )
