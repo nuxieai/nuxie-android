@@ -49,7 +49,7 @@ class JourneyControlExecutorTest {
                                 selection.source,
                             )
                         }
-                        "unassigned-experiment-uses-first-variant" -> {
+                        "unassigned-experiment-uses-authored-fallback" -> {
                             val selection = requireNotNull(actual.experimentSelection)
                             assertEquals("experiment_new", selection.experimentId)
                             assertEquals("default", selection.variantId)
@@ -86,7 +86,7 @@ class JourneyControlExecutorTest {
         ).jsonObject
         val vector = fixture.getValue("cases").jsonArray
             .map { it.jsonObject }
-            .single { it.text("id") == "unassigned-experiment-uses-first-variant" }
+            .single { it.text("id") == "unassigned-experiment-uses-authored-fallback" }
         val executor = JourneyControlExecutor(
             SignedTimezoneBundle.load(),
             "Etc/UTC",
@@ -127,6 +127,12 @@ class JourneyControlExecutorTest {
         val condition = step("condition", "\"branches\":[]")
         assertEquals(JourneyControlExecutor.Result.Invalid,
             executor.evaluate(condition, context, JsonObject(emptyMap()), 0))
+        for (type in listOf("future_action", "connector_action")) {
+            assertEquals(
+                JourneyControlExecutor.Result.Invalid,
+                executor.evaluate(step(type, "\"payload\":{}"), context, JsonObject(emptyMap()), 0),
+            )
+        }
         val purchase = Json.parseToJsonElement(
             """{"kind":"action","id":"purchase","action":{"type":"purchase","placementId":"offer"},"outlets":{"completed":"done"}}"""
         ).jsonObject

@@ -27,7 +27,6 @@ internal enum class JourneyActionType(val wireValue: String) {
     APP_ACTION("app_action"),
     EXIT("exit"),
     CONNECTOR_ACTION("connector_action"),
-    GRANT_ENTITLEMENT("grant_entitlement"),
     ;
 
     val isPresentationOwned: Boolean
