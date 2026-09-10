@@ -50,8 +50,9 @@ internal class JourneyControlExecutor(
         nowMillis: Long,
         checkpoint: Checkpoint? = null,
         signal: Signal = Signal(),
+        customer: JsonObject = JsonObject(emptyMap()),
     ): Result = try {
-        evaluateChecked(step, context, assignments, nowMillis, checkpoint, signal)
+        evaluateChecked(step, context, assignments, nowMillis, checkpoint, signal, customer)
     } catch (_: Exception) {
         Result.Invalid
     }
@@ -63,6 +64,7 @@ internal class JourneyControlExecutor(
         nowMillis: Long,
         checkpoint: Checkpoint?,
         signal: Signal,
+        customer: JsonObject,
     ): Result {
         return when (step.text("kind")) {
             "complete" -> step.text("outcome")?.let(Result::Complete) ?: Result.Invalid
@@ -70,11 +72,11 @@ internal class JourneyControlExecutor(
                 val action = step["action"] as? JsonObject ?: return Result.Invalid
                 val outlets = step["outlets"] as? JsonObject ?: return Result.Invalid
                 when (JourneyActionType.from(action) ?: return Result.Invalid) {
-                    JourneyActionType.CONDITION -> condition(action, outlets, context)
+                    JourneyActionType.CONDITION -> condition(action, outlets, context, customer)
                     JourneyActionType.EXPERIMENT -> experiment(action, outlets, context, assignments)
                     JourneyActionType.TIME_WINDOW -> timeWindow(step, action, outlets, context, nowMillis, checkpoint)
                     JourneyActionType.DELAY -> delay(step, action, outlets, context, nowMillis, checkpoint)
-                    JourneyActionType.WAIT_UNTIL -> waitUntil(step, action, outlets, context, nowMillis, checkpoint, signal)
+                    JourneyActionType.WAIT_UNTIL -> waitUntil(step, action, outlets, context, nowMillis, checkpoint, signal, customer)
                     JourneyActionType.CONNECTOR_ACTION -> Result.Invalid
                     else -> Result.Dispatch(step.text("id") ?: return Result.Invalid, action)
                 }
@@ -83,11 +85,11 @@ internal class JourneyControlExecutor(
         }
     }
 
-    private fun condition(action: JsonObject, outlets: JsonObject, context: JsonObject): Result {
+    private fun condition(action: JsonObject, outlets: JsonObject, context: JsonObject, customer: JsonObject): Result {
         val branches = action["branches"] as? JsonArray ?: return Result.Invalid
         val selected = branches.mapNotNull { it as? JsonObject }.firstOrNull {
             val expression = it["condition"] as? JsonObject ?: return@firstOrNull false
-            JourneyValues.evaluate(expression, context) == true
+            JourneyValues.evaluate(expression, context, customer) == true
         }?.text("id") ?: "default"
         return advance(outlets, selected, context)
     }
@@ -183,6 +185,7 @@ internal class JourneyControlExecutor(
         nowMillis: Long,
         checkpoint: Checkpoint?,
         signal: Signal,
+        customer: JsonObject,
     ): Result {
         val current = checkpoint ?: Checkpoint(nowMillis,
             Math.addExact(nowMillis, action.getValue("maxTimeMs").jsonPrimitive.long))
@@ -194,7 +197,7 @@ internal class JourneyControlExecutor(
         val responseMatches = kind != "event" && signal.responsesChanged
         val evaluatedContext = if (eventMatches) JsonObject(context + ("event" to event!!.properties)) else context
         if ((eventMatches || responseMatches) &&
-            JourneyValues.evaluate(action.getValue("condition").jsonObject, evaluatedContext) == true
+            JourneyValues.evaluate(action.getValue("condition").jsonObject, evaluatedContext, customer) == true
         ) return advance(outlets, "satisfied", evaluatedContext)
         if (nowMillis >= current.wakeAtMillis) return advance(outlets, "timeout", context)
         return Result.Park(step.text("id") ?: return Result.Invalid, current)

@@ -88,12 +88,13 @@ class JourneyRunJournalTest {
         assertEquals("1970-01-01T00:03:20.000Z", completion.getValue("completed_at").jsonPrimitive.content)
     }
 
-    @Test fun `admission snapshot retains delivery and assignments across recovery`() {
+    @Test fun `admission snapshot retains delivery assignments and customer properties across recovery`() {
         val executionSnapshot = JourneyRun.ExecutionSnapshot(
             delivery = JourneyReleaseDelivery(
                 renderBaseUrl = "https://admitted-renders.example.com/",
                 assetBaseUrl = "https://admitted-assets.example.com/",
             ),
+            customer = JsonObject(mapOf("plan" to JsonPrimitive("pro"), "nullable" to JsonNull)),
             assignments = JsonObject(
                 mapOf(
                     "checkout" to JsonObject(

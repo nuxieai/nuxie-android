@@ -118,7 +118,7 @@ internal object JourneySchemaValidator {
                 is JsonArray -> value.forEach { walk(it) }
                 is JsonObject -> {
                     when ((value["type"] as? kotlinx.serialization.json.JsonPrimitive)?.content) {
-                        "User" -> properties.add(id(value["key"]))
+                        "User", "Customer.Field" -> properties.add(id(value["key"]))
                         "Segment" -> {
                             if ((value["op"] as? kotlinx.serialization.json.JsonPrimitive)?.content == "entered_within") fail("segment transition")
                             segments.add(id(value["id"]))

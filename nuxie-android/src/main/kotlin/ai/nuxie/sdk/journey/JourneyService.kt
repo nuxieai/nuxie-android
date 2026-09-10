@@ -1179,6 +1179,11 @@ internal class JourneyService(
                                 delivery = state.snapshot.profile.delivery,
                                 assignments = state.snapshot.profile.facts
                                     .getValue("assignments").jsonObject,
+                                customer = JsonObject(state.snapshot.profile.facts.getValue("properties").jsonObject
+                                    .mapNotNull { (key, raw) ->
+                                        val fact = raw.jsonObject
+                                        if (fact["present"] == JsonPrimitive(true)) key to fact.getValue("value") else null
+                                    }.toMap()),
                             ),
                             stateReceipt,
                             artifactDigests,
@@ -2213,6 +2218,7 @@ internal class JourneyService(
                     nowMillis(),
                     checkpoint,
                     executionSignal,
+                    executionSnapshot.customer,
                 )) {
                     is JourneyControlExecutor.Result.Advance -> {
                         val exposure = result.experimentSelection

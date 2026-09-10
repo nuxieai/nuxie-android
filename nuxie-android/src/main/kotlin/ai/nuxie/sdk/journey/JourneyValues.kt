@@ -14,20 +14,21 @@ import kotlinx.serialization.json.jsonPrimitive
 /** Null is the unknown sentinel; JsonNull is an explicitly known value. These
  * operations see only the current event and locally buffered response context. */
 internal object JourneyValues {
-    fun resolve(value: JsonObject, context: JsonObject): JsonElement? {
+    fun resolve(value: JsonObject, context: JsonObject, customer: JsonObject = JsonObject(emptyMap())): JsonElement? {
         return when (value.text("type")) {
             "Null" -> JsonNull
             "Boolean", "Number", "String" -> value["value"]
             "Event.Field" -> (context["event"] as? JsonObject)?.get(value.text("key"))
+            "Customer.Field" -> customer[value.text("key")]
             "Response.Field" -> (context["responses"] as? JsonObject)?.get(value.text("key"))
             "Array" -> {
                 val items = mutableListOf<JsonElement>()
-                for (item in value.getValue("items").jsonArray) items += resolve(item.jsonObject, context) ?: return null
+                for (item in value.getValue("items").jsonArray) items += resolve(item.jsonObject, context, customer) ?: return null
                 JsonArray(items)
             }
             "Object" -> {
                 val fields = linkedMapOf<String, JsonElement>()
-                for ((key, item) in value.getValue("fields").jsonObject) fields[key] = resolve(item.jsonObject, context) ?: return null
+                for ((key, item) in value.getValue("fields").jsonObject) fields[key] = resolve(item.jsonObject, context, customer) ?: return null
                 JsonObject(fields)
             }
             else -> null
@@ -35,12 +36,12 @@ internal object JourneyValues {
 
     }
 
-    fun evaluate(condition: JsonObject, context: JsonObject): Boolean? {
+    fun evaluate(condition: JsonObject, context: JsonObject, customer: JsonObject = JsonObject(emptyMap())): Boolean? {
         return when (condition.text("type")) {
-            "Truthy" -> resolve(condition.getValue("value").jsonObject, context)?.let(::truthy)
-            "Not" -> evaluate(condition.getValue("condition").jsonObject, context)?.not()
+            "Truthy" -> resolve(condition.getValue("value").jsonObject, context, customer)?.let(::truthy)
+            "Not" -> evaluate(condition.getValue("condition").jsonObject, context, customer)?.not()
             "All", "Any" -> {
-                val results = condition.getValue("conditions").jsonArray.map { evaluate(it.jsonObject, context) }
+                val results = condition.getValue("conditions").jsonArray.map { evaluate(it.jsonObject, context, customer) }
                 if (condition.text("type") == "All") when {
                     false in results -> false
                     null in results -> null
@@ -52,8 +53,8 @@ internal object JourneyValues {
                 }
             }
             "Contains" -> {
-                val collection = resolve(condition.getValue("collection").jsonObject, context) ?: return null
-                val value = resolve(condition.getValue("value").jsonObject, context) ?: return null
+                val collection = resolve(condition.getValue("collection").jsonObject, context, customer) ?: return null
+                val value = resolve(condition.getValue("value").jsonObject, context, customer) ?: return null
                 when {
                     collection is JsonArray -> collection.any { equal(it, value) }
                     collection is JsonPrimitive && collection.isString && value is JsonPrimitive && value.isString ->
@@ -62,8 +63,8 @@ internal object JourneyValues {
                 }
             }
             "Compare" -> {
-                val left = resolve(condition.getValue("left").jsonObject, context) ?: return null
-                val right = resolve(condition.getValue("right").jsonObject, context) ?: return null
+                val left = resolve(condition.getValue("left").jsonObject, context, customer) ?: return null
+                val right = resolve(condition.getValue("right").jsonObject, context, customer) ?: return null
                 when (condition.text("op")) {
                     "==" -> equal(left, right)
                     "!=" -> !equal(left, right)

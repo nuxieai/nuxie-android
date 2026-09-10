@@ -16,6 +16,7 @@ class JourneyControlExecutorTest {
         val fixture = Json.parseToJsonElement(File("../fixtures/journeys/planes/executor-controls.json").readText()).jsonObject
         val context = fixture.getValue("context").jsonObject
         val assignments = fixture.getValue("assignments").jsonObject
+        val customer = fixture.getValue("customer").jsonObject
         val executor = JourneyControlExecutor(SignedTimezoneBundle.load(), "Etc/UTC", "Etc/UTC")
         for (item in fixture.getValue("cases").jsonArray) {
             val vector = item.jsonObject
@@ -31,7 +32,7 @@ class JourneyControlExecutorTest {
                 )
             } ?: JourneyControlExecutor.Signal()
             val actual = executor.evaluate(vector.getValue("step").jsonObject, context, assignments,
-                vector.number("nowMillis"), checkpoint, signal)
+                vector.number("nowMillis"), checkpoint, signal, customer)
             val expected = vector.getValue("expected").jsonObject
             val id = vector.text("id")
             when (expected.text("kind")) {
