@@ -15,9 +15,10 @@ class JourneyValuesTest {
     @Test fun sharedValueAndThreeValuedConditionVectors() {
         val vectors = Json.parseToJsonElement(File("../fixtures/journeys/planes/values.json").readText()).jsonObject
         val context = vectors.getValue("context").jsonObject
+        val customer = vectors.getValue("customer").jsonObject
         for (vector in vectors.getValue("values").jsonArray.map { it.jsonObject }) {
             val id = vector.getValue("id").jsonPrimitive.content
-            val actual = JourneyValues.resolve(vector.getValue("expression").jsonObject, context)
+            val actual = JourneyValues.resolve(vector.getValue("expression").jsonObject, context, customer)
             val known = vector.getValue("known").jsonPrimitive.boolean
             assertEquals(id, known, actual != null)
             if (known) assertEquals(id, vector.getValue("expected"), actual)
@@ -25,7 +26,7 @@ class JourneyValuesTest {
         for (vector in vectors.getValue("conditions").jsonArray.map { it.jsonObject }) {
             val expected = vector.getValue("expected").takeUnless { it == JsonNull }?.jsonPrimitive?.booleanOrNull
             assertEquals(vector.getValue("id").jsonPrimitive.content, expected,
-                JourneyValues.evaluate(vector.getValue("expression").jsonObject, context))
+                JourneyValues.evaluate(vector.getValue("expression").jsonObject, context, customer))
         }
     }
 }

@@ -50,6 +50,7 @@ internal data class JourneyRun(
     data class ExecutionSnapshot(
         val delivery: JourneyReleaseDelivery,
         val assignments: JsonObject,
+        val customer: JsonObject = JsonObject(emptyMap()),
     )
     data class Park(
         val wakeAtMillis: Long?,
@@ -710,12 +711,13 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             put("assetBaseUrl", JsonPrimitive(snapshot.delivery.assetBaseUrl))
         })
         put("assignments", snapshot.assignments)
+        put("customer", snapshot.customer)
     }
 
     private fun decodeExecutionSnapshot(
         value: JsonObject,
     ): JourneyRun.ExecutionSnapshot {
-        if (value.keys != setOf("delivery", "assignments")) {
+        if (value.keys != setOf("delivery", "assignments") && value.keys != setOf("delivery", "assignments", "customer")) {
             throw IOException("Invalid Journey execution snapshot")
         }
         val delivery = value["delivery"] as? JsonObject
@@ -749,6 +751,8 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
                 assetBaseUrl = checkedJourneyReleaseDeliveryUrl(delivery.text("assetBaseUrl")),
             ),
             assignments = assignments,
+            customer = if (value.containsKey("customer")) value["customer"] as? JsonObject
+                ?: throw IOException("Invalid Journey execution customer properties") else JsonObject(emptyMap()),
         )
     }
 

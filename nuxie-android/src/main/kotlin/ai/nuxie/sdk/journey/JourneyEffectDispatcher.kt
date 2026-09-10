@@ -45,7 +45,7 @@ internal class JourneyEffectDispatcher(
     private suspend fun sendEvent(request: JourneyDispatchRequest): JourneyDispatchResult {
         val name = request.action.text("eventName") ?: return JourneyDispatchResult.Failed
         val payload = (request.action["payload"] as? JsonObject)?.let {
-            resolve(it, request.run.context)
+            resolve(it, request.run.context, request.run.executionSnapshot?.customer ?: JsonObject(emptyMap()))
         } ?: if (request.action.containsKey("payload")) return JourneyDispatchResult.Failed
         else JsonObject(emptyMap())
         val properties = JsonValueConverter.toNativeMap(payload).toMutableMap()
@@ -56,7 +56,7 @@ internal class JourneyEffectDispatcher(
     private suspend fun updateCustomer(request: JourneyDispatchRequest): JourneyDispatchResult {
         val authored = request.action["attributes"] as? JsonObject
             ?: return JourneyDispatchResult.Failed
-        val attributes = resolve(authored, request.run.context)
+        val attributes = resolve(authored, request.run.context, request.run.executionSnapshot?.customer ?: JsonObject(emptyMap()))
             ?: return JourneyDispatchResult.Failed
         val native = JsonValueConverter.toNativeMap(attributes)
         if (!publishIfCurrent(request) { identity.setUserProperties(native) }) {
@@ -78,7 +78,7 @@ internal class JourneyEffectDispatcher(
     private suspend fun appAction(request: JourneyDispatchRequest): JourneyDispatchResult {
         val name = request.action.text("name") ?: return JourneyDispatchResult.Failed
         val authored = request.action["payload"] as? JsonObject
-        val payload = authored?.let { resolve(it, request.run.context) }
+        val payload = authored?.let { resolve(it, request.run.context, request.run.executionSnapshot?.customer ?: JsonObject(emptyMap())) }
         if (authored != null && payload == null) return JourneyDispatchResult.Failed
         val nativePayload = payload?.let(JsonValueConverter::toNativeMap)
         val action = AppAction(
@@ -143,11 +143,11 @@ internal class JourneyEffectDispatcher(
         }
     }
 
-    private fun resolve(values: JsonObject, context: JsonObject): JsonObject? {
+    private fun resolve(values: JsonObject, context: JsonObject, customer: JsonObject): JsonObject? {
         val result = linkedMapOf<String, JsonElement>()
         for ((key, value) in values) {
             val expression = value as? JsonObject ?: return null
-            result[key] = JourneyValues.resolve(expression, context) ?: return null
+            result[key] = JourneyValues.resolve(expression, context, customer) ?: return null
         }
         return JsonObject(result)
     }
