@@ -93,6 +93,21 @@ internal class JourneyRuntimeEmissionCoordinator(
                 Log.w(LOG_TAG, "Rejected invalid renderer emission transaction for $screenId")
                 return@withLock true
             }
+            // A control may only emit what its signed binding declares: a
+            // declarative program's own emit steps or a script control's
+            // emits list. Anything else fails the whole transaction closed.
+            val undeclared = projected.control?.let { control ->
+                val declared = declaredEmits(control.invocation.actionId)
+                drafts.filterIsInstance<Draft.Event>().firstOrNull { it.name !in declared }
+            }
+            if (undeclared != null) {
+                Log.w(
+                    LOG_TAG,
+                    "Rejected undeclared emission ${undeclared.name} from control " +
+                        "${projected.control?.invocation?.actionId} on $screenId",
+                )
+                return@withLock true
+            }
             if (nextBatch == Long.MAX_VALUE ||
                 drafts.size.toLong() > Long.MAX_VALUE - nextEmission
             ) {
@@ -264,6 +279,23 @@ internal class JourneyRuntimeEmissionCoordinator(
             if ("instanceId" in properties) listOf("instanceId") else emptyList()
         if (required.any { properties.string(it)?.isNotBlank() != true }) return null
         return actionId.takeIf(controls::containsKey)
+    }
+
+    /** The customer events one signed control binding may emit. */
+    private fun declaredEmits(actionId: String): Set<String> {
+        val behavior = controls[actionId] ?: return emptySet()
+        return when (behavior.string("kind")) {
+            "script" -> (behavior["emits"] as? JsonArray).orEmpty()
+                .mapNotNull { (it as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content }
+                .toSet()
+            "declarative" -> (behavior["program"] as? JsonArray).orEmpty()
+                .mapNotNull { element ->
+                    val action = element as? JsonObject ?: return@mapNotNull null
+                    action.string("eventName").takeIf { action.string("type") == "emit" }
+                }
+                .toSet()
+            else -> emptySet()
+        }
     }
 
     private fun materializeControl(control: Control): List<Draft>? {

@@ -118,7 +118,7 @@ class JourneyReleaseTest {
         val renderScreen = render.getValue("screens").jsonArray.single().jsonObject
         val names = listOf("screen_welcome", "screen_2", "screen_3", "screen_4", "screen_5")
         val scripts = names.map { name -> Json.parseToJsonElement("""{
-            "screenId":"$name", "controls":[{"actionId":"continue", "behavior":{"kind":"script"}}],
+            "screenId":"$name", "controls":[{"actionId":"continue", "behavior":{"kind":"script", "emits":["continue"]}}],
             "script":{"protocol":"screen-actions", "exportedActionIds":["continue"],
               "artifact":{"key":"screen-behavior/sha256/${"b".repeat(64)}.bin", "sha256":"${"b".repeat(64)}",
                           "sizeBytes":4194304, "contentType":"application/octet-stream"}}

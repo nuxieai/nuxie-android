@@ -193,7 +193,13 @@ internal object JourneyReleaseSchema {
             val name = id(control["actionId"])
             val binding = record(control["behavior"])
             when (text(binding["kind"])) {
-                "script" -> { exact(binding, setOf("kind")); scripted.add(name) }
+                "script" -> {
+                    exact(binding, setOf("kind", "emits"))
+                    val emits = ids(binding["emits"], 64)
+                    sortedUnique(emits)
+                    if (emits.any { it.startsWith('$') }) fail("reserved emission")
+                    scripted.add(name)
+                }
                 "declarative" -> {
                     exact(binding, setOf("kind", "program"))
                     val program = array(binding["program"], 64)

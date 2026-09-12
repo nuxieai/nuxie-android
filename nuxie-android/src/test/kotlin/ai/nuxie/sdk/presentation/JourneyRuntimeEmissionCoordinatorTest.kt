@@ -186,6 +186,52 @@ class JourneyRuntimeEmissionCoordinatorTest {
     }
 
     @Test
+    fun `a control transaction emitting an undeclared event is rejected whole`() = runTest {
+        val fixture = generatedControlFixture
+        val actionId = fixture.getValue("signedActionId").jsonPrimitive.content
+        val batches = mutableListOf<JourneyScreenEmissionBatch>()
+        val coordinator = JourneyRuntimeEmissionCoordinator(
+            journeyId = "journey-1",
+            screenId = "survey",
+            descriptor = buildJsonObject {
+                put("screenBehaviors", JsonArray(listOf(buildJsonObject {
+                    put("screenId", JsonPrimitive("survey"))
+                    put("controls", JsonArray(listOf(buildJsonObject {
+                        put("actionId", JsonPrimitive(actionId))
+                        put("behavior", buildJsonObject {
+                            put("kind", JsonPrimitive("declarative"))
+                            put("program", JsonArray(listOf(buildJsonObject {
+                                put("type", JsonPrimitive("emit"))
+                                put("eventName", JsonPrimitive("control_routed"))
+                            })))
+                        })
+                    })))
+                })))
+            },
+            nextBatchSequence = 0,
+            nextEmissionSequence = 0,
+            onEmissionBatch = { batches += it; true },
+            onPresentationRevealed = {},
+        )
+        coordinator.reveal()
+
+        val control = exactGeneratedControlOutcome()
+        assertTrue(
+            coordinator.publish(
+                outcome(
+                    events = control.events,
+                    hostCommands = listOf(
+                        NuxieHostCommand(name = "sneaky", value = hostObject()),
+                    ),
+                ),
+                7uL,
+            ),
+        )
+
+        assertTrue("an undeclared emission publishes nothing from the transaction", batches.isEmpty())
+    }
+
+    @Test
     fun `ordinary event carrying the signed action id remains ordinary`() = runTest {
         val fixture = generatedControlFixture
         val actionId = fixture.getValue("signedActionId").jsonPrimitive.content
