@@ -115,6 +115,8 @@ internal class NuxieCore(
     private val registerLifecycle = overrides.registerLifecycle
     private val stopped = AtomicBoolean(false)
     private val shutdownCompletion = CompletableDeferred<Unit>()
+    private val preparationStarted = AtomicBoolean(false)
+    private val preparationCompletion = CompletableDeferred<Result<Unit>>()
     private val requestInitialProfileRefresh = overrides.requestInitialProfileRefresh
 
     internal fun interface PresentationFactory {
@@ -532,39 +534,58 @@ internal class NuxieCore(
     /** Blocking compatibility for internal callers until the facade adopts suspending teardown. */
     fun stop() = kotlinx.coroutines.runBlocking { stopAndAwait() }
 
-    private suspend fun stopGraph() {
+    /** Stop intake/producers; retain preparation failures for the final shutdown completion. */
+    suspend fun prepareForShutdown() {
+        if (preparationStarted.compareAndSet(false, true)) {
+            CoroutineScope(Dispatchers.Default).launch {
+                val result = runCatching {
+                    cleanup(
+                        {
+                            if (registerLifecycle) {
+                                (appContext as? Application)?.unregisterActivityLifecycleCallbacks(lifecycleCoordinator)
+                            }
+                        },
+                        { presentations.close() },
+                        { purchaseService.stopCheckoutIntake() },
+                        { billing.close() },
+                        { lifecycleCoordinator.close() },
+                        { featureUsage.stopRecovery() },
+                        {
+                            producerScope.cancel()
+                            producerScope.coroutineContext[Job]?.join()
+                        },
+                    )
+                }
+                preparationCompletion.complete(result)
+            }
+        }
+        preparationCompletion.await()
+    }
+
+    private suspend fun stopGraph() = cleanup(
+        { prepareForShutdown(); preparationCompletion.await().getOrThrow() },
+        { userTransitions.close() },
+        { profile.close() },
+        { featureUsage.close() },
+        { journeys.profileDidClearAll() },
+        { delivery.close() },
+        { eventLog.closeWorkers() },
+        {
+            scope.cancel()
+            scope.coroutineContext[Job]?.join()
+        },
+        { store.close() },
+    )
+
+    /** Attempt every resource in order; disposal failures must not strand later resources. */
+    private suspend fun cleanup(vararg actions: suspend () -> Unit) {
         var failure: Throwable? = null
-        suspend fun attempt(action: suspend () -> Unit) {
+        for (action in actions) {
             try { action() } catch (next: Throwable) {
                 val first = failure
                 if (first == null) failure = next else if (first !== next) first.addSuppressed(next)
             }
         }
-        attempt {
-            if (registerLifecycle) {
-                (appContext as? Application)?.unregisterActivityLifecycleCallbacks(lifecycleCoordinator)
-            }
-        }
-        attempt { presentations.close() }
-        attempt { purchaseService.stopCheckoutIntake() }
-        attempt { billing.close() }
-        attempt { lifecycleCoordinator.close() }
-        attempt { featureUsage.stopRecovery() }
-        attempt { userTransitions.close() }
-        attempt { profile.close() }
-        attempt {
-            producerScope.cancel()
-            producerScope.coroutineContext[Job]?.join()
-        }
-        attempt { featureUsage.close() }
-        attempt { journeys.profileDidClearAll() }
-        attempt { delivery.close() }
-        attempt { eventLog.closeWorkers() }
-        attempt {
-            scope.cancel()
-            scope.coroutineContext[Job]?.join()
-        }
-        attempt { store.close() }
         failure?.let { throw it }
     }
 

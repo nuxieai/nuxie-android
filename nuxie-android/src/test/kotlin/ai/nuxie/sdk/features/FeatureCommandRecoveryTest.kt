@@ -10,6 +10,7 @@ import org.robolectric.annotation.Config
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.billing.InMemoryPurchaseEvidenceStore
+import ai.nuxie.sdk.core.SdkLifecycle
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.testsupport.FakeTransport
@@ -549,6 +550,47 @@ class FeatureCommandRecoveryTest {
                 core.stop()
             }
         }
+    }
+
+    @Test
+    fun lifecyclePreparationLeavesConsumersOpenForAnAlreadyAdmittedCommand() = runBlocking {
+        val transport = FakeTransport().apply {
+            respond = { request -> receipt(Json.parseToJsonElement(request.body.decodeToString()).jsonObject, 8.0) }
+        }
+        val core = testCore(transport)
+        val prepared = CompletableDeferred<Unit>()
+        val admitted = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val lifecycle = SdkLifecycle<NuxieCore>(
+            prepareStop = { it.prepareForShutdown(); prepared.complete(Unit) },
+            stop = { it.stopAndAwait() },
+        )
+        lifecycle.install({ core })
+        try {
+            core.purchases.awaitInitialProjection()
+            withTimeout(5_000) {
+                val operation = async(Dispatchers.Default) {
+                    lifecycle.withOperation {
+                        admitted.complete(Unit)
+                        release.await()
+                        val result = it.featureUsage.consumeFeature("credits", 1.0, "admitted-while-running", null)
+                        assertTrue(it.store.hasStableOutcome(it.featureUsage.localEventId(it.identity.distinctId(), "admitted-while-running")))
+                        result
+                    }
+                }
+                try {
+                    admitted.await()
+                    val shutdown = lifecycle.requestShutdown()
+                    prepared.await()
+                    assertFalse(shutdown.isCompleted)
+                    assertNull(lifecycle.admit())
+                    release.complete(Unit)
+                    assertEquals(8.0, operation.await().balance!!, 0.0)
+                    shutdown.await()
+                    assertTrue(core.scope.coroutineContext[kotlinx.coroutines.Job]!!.isCompleted)
+                } finally { release.complete(Unit) }
+            }
+        } finally { release.complete(Unit); core.stop() }
     }
 
     @Test
