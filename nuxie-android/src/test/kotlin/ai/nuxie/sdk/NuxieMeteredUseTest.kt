@@ -275,7 +275,7 @@ class NuxieMeteredUseTest {
     }
 
     @Test
-    fun setUsageOnlyAppliesAcceptedServerBalanceWithoutConsumingProjectedEvidence() = runBlocking {
+    fun setUsageAppliesReceiptBalanceWithoutConsumingProjectedEvidence() = runBlocking {
         val application = RuntimeEnvironment.getApplication()
         val identity = IdentityService(application).also { it.setDistinctId("customer-a") }
         val store = InMemoryPurchaseEvidenceStore().also {
@@ -354,7 +354,7 @@ class NuxieMeteredUseTest {
             metadata = null,
         )
         assertFalse(rejected.success)
-        assertEquals(10.0, core.featureInfo.balance("credits")!!, 0.0)
+        assertEquals(17.0, core.featureInfo.balance("credits")!!, 0.0)
 
         val result = core.featureUsage.useFeatureAndWait(
             featureId = "credits",
