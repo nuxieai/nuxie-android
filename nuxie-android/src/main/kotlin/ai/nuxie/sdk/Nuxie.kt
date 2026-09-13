@@ -94,7 +94,7 @@ object Nuxie {
             forwardActivity = ::deliverActivity,
         )
         setupState = SetupState(logLevel = configuration.logLevel, core = core)
-        core.start()
+        core.start(context as? android.app.Activity)
     }
 
     /** Stop the active SDK graph and return the singleton to its pre-setup state. */

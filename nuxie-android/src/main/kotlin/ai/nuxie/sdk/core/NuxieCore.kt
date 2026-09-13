@@ -457,7 +457,7 @@ internal class NuxieCore(
     )
 
     /** Called once from Nuxie.setup after construction. */
-    fun start() {
+    fun start(initialActivity: android.app.Activity? = null) {
         val activityForwarder = ActivityForwarder(deliver = forwardActivity)
         eventLog.subscribeCommittedWithAdmission(
             sampleGeneration = journeys::eventAdmissionGeneration,
@@ -496,6 +496,7 @@ internal class NuxieCore(
         billing.connect()
         if (registerLifecycle) {
             (appContext as? Application)?.registerActivityLifecycleCallbacks(lifecycleCoordinator)
+            initialActivity?.let(lifecycleCoordinator::admitVisibleActivity)
         }
     }
 

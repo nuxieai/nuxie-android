@@ -24,7 +24,7 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 class NuxieLifecycleCoordinatorTest {
     @Test
-    fun foregroundAuthorityRefreshCompletesBeforeTheForegroundEvent() = runBlocking {
+    fun lateSetupAdmitsVisibleHostOnceAndPreservesForegroundOrdering() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val order = CopyOnWriteArrayList<String>()
         val foregroundEvent = CompletableDeferred<Unit>()
@@ -52,9 +52,10 @@ class NuxieLifecycleCoordinatorTest {
                 order += "journeys-activated"
             },
         )
-        val activity: Activity = Robolectric.buildActivity(Activity::class.java).get()
+        val activity: Activity = Robolectric.buildActivity(Activity::class.java).setup().visible().get()
 
         try {
+            coordinator.admitVisibleActivity(activity)
             coordinator.onActivityStarted(activity)
             coordinator.onActivityStopped(activity)
             coordinator.onActivityStarted(activity)
