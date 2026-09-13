@@ -209,6 +209,34 @@ class FeatureCommandRecoveryTest {
         } finally { core.stop() }
     }
 
+    @Test
+    fun usageInvalidatesOtherScopesAndRejectsOlderProfileAuthority() = runBlocking {
+        val core = testCore(FakeTransport())
+        try {
+            core.purchases.awaitInitialProjection()
+            val profile = Json.parseToJsonElement(
+                """{"features":[{"id":"credits","type":"metered","allowed":true,"unlimited":false,"balance":20,"entities":{"a":{"balance":10},"b":{"balance":10}}}]}"""
+            ).jsonObject
+            core.features.hydrateProfile(core.identity.distinctId(), profile)
+            val staleRevision = core.features.reserveAuthoritativeRevision()
+            core.features.applyAuthoritativeUsageBalance("credits", 8.0, "a")
+            assertEquals(8.0, core.features.getCached("credits", "a")!!.balance!!, 0.0)
+            assertNull(core.features.getCached("credits", null))
+            assertNull(core.features.getCached("credits", "b"))
+            core.features.hydrateProfile(core.identity.distinctId(), profile, core.features.capturePurchaseRevision(), staleRevision)
+            assertNull(core.features.getCached("credits", null))
+            assertNull(core.features.getCached("credits", "b"))
+            assertEquals(8.0, core.features.getCached("credits", "a")!!.balance!!, 0.0)
+            // A new profile can refill invalidated scopes, but an aggregate
+            // consumption then makes all entity allocations unknown again.
+            core.features.hydrateProfile(core.identity.distinctId(), profile)
+            core.features.applyAuthoritativeUsageBalance("credits", 5.0, null)
+            assertEquals(5.0, core.features.getCached("credits", null)!!.balance!!, 0.0)
+            assertNull(core.features.getCached("credits", "a"))
+            assertNull(core.features.getCached("credits", "b"))
+        } finally { core.stop() }
+    }
+
     private fun receipt(command: JsonObject, balance: Double) = HttpTransport.Response(200,
         JsonObject(command - "apiKey" + mapOf(
             "accepted" to JsonPrimitive(true), "code" to JsonPrimitive("consumed"),
