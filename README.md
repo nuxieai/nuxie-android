@@ -114,3 +114,26 @@ check(Nuxie.isSetup)
 ```
 
 The legacy SDK is archived on branch `legacy/webview-sdk`.
+
+## Shutdown and repeated setup
+
+`Nuxie.shutdown()` closes public operation admission and starts teardown without
+blocking the calling thread. Use `Nuxie.shutdownAndAwait()` from a coroutine when
+you need completion, especially before calling `setup` again. Setup calls during
+construction or teardown are ignored. Cancelling a coroutine waiting for shutdown
+does not cancel teardown.
+
+```kotlin
+Nuxie.shutdownAndAwait()
+Nuxie.setup(applicationContext, configuration)
+```
+
+Shutdown stops external intake and background producers, drains accepted operations,
+and then closes consumers and storage. A pending Play checkout may be cancelled as
+an SDK lifetime operation; this does not report a store cancellation or erase retained
+purchase evidence. SDK callbacks may call `shutdown()` and return. They must await
+completion independently after returning, since awaiting their own teardown would
+prevent the operation being drained from finishing.
+
+Compatibility note: `shutdown()` previously blocked until cleanup returned. Code
+that immediately sets up another graph must now await `shutdownAndAwait()` first.

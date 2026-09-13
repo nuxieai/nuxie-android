@@ -1,6 +1,21 @@
 package ai.nuxie.sdk
 
 import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.events.SQLiteEventStore
+import ai.nuxie.sdk.network.HttpTransport
+import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 import ai.nuxie.sdk.testsupport.FakeTransport
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -15,6 +30,8 @@ import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 class NuxieTest {
+    @get:Rule val temporary = TemporaryFolder()
+
     @org.junit.Before
     fun installFakeTransport() {
         Nuxie.overridesForTesting = NuxieCore.Overrides(transport = FakeTransport())
@@ -54,13 +71,81 @@ class NuxieTest {
         Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_first"))
         val firstCore = requireNotNull(Nuxie.core)
 
-        Nuxie.shutdown()
+        runBlocking { Nuxie.shutdownAndAwait() }
 
         assertFalse(Nuxie.isSetup)
         assertTrue(Nuxie.listener == null)
         Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_second"))
         assertTrue(Nuxie.isSetup)
         assertTrue(firstCore !== Nuxie.core)
+    }
+
+    @Test
+    fun shutdownClosesAdmissionImmediatelyAndDrainsAnAcceptedConsumption() = runBlocking {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val database = temporary.newFile("facade-shutdown.db")
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path != "/feature/consume") HttpTransport.Response(503, ByteArray(0))
+                else {
+                    val command = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                    entered.countDown()
+                    check(release.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(200, JsonObject(command - "apiKey" + mapOf(
+                        "accepted" to JsonPrimitive(true), "code" to JsonPrimitive("consumed"),
+                        "active" to JsonPrimitive(true), "balance" to JsonPrimitive(8.0),
+                        "unlimited" to JsonPrimitive(false), "type" to JsonPrimitive("metered"),
+                        "occurredAtMs" to JsonPrimitive(1789285000000L), "idempotentReplay" to JsonPrimitive(false),
+                    )).toString().encodeToByteArray())
+                }
+            }
+        }
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = transport, registerLifecycle = false, requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory, eventDatabaseFile = database,
+        )
+        Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_facade_shutdown"))
+        val original = requireNotNull(Nuxie.core)
+        original.purchases.awaitInitialProjection()
+        val eventId = original.featureUsage.localEventId(original.identity.distinctId(), "held-command")
+        try {
+            val command = async(Dispatchers.Default) { Nuxie.consumeFeature("credits", 1.0, "held-command") }
+            assertTrue(entered.await(3, TimeUnit.SECONDS))
+            Nuxie.shutdown()
+            assertFalse(Nuxie.isSetup)
+            Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_overlapping"))
+            assertFalse(Nuxie.isSetup)
+            val completion = async(Dispatchers.Default) { Nuxie.shutdownAndAwait() }
+            delay(50)
+            assertFalse(completion.isCompleted)
+            release.countDown()
+            assertEquals(8.0, command.await().balance!!, 0.0)
+            completion.await()
+            val reopened = SQLiteEventStore(RuntimeEnvironment.getApplication(), databaseFile = database)
+            try { assertTrue(reopened.hasStableOutcome(eventId)) } finally { reopened.close() }
+            Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_after_completion"))
+            assertTrue(Nuxie.isSetup)
+        } finally { release.countDown() }
+    }
+
+    @Test
+    fun beforeSendCanInitiateShutdownAndSelfAwaitFailsWithoutDeadlocking() = runBlocking {
+        val callbackResult = CompletableDeferred<Boolean>()
+        val config = NuxieConfiguration("pk_test_callback_shutdown").apply {
+            beforeSend = { event ->
+                if (event.name == "callback-stop") {
+                    val failure = runCatching { runBlocking { Nuxie.shutdownAndAwait() } }.exceptionOrNull()
+                    Nuxie.shutdown()
+                    callbackResult.complete(failure is IllegalStateException)
+                }
+                event
+            }
+        }
+        Nuxie.setup(RuntimeEnvironment.getApplication(), config)
+        Nuxie.trigger("callback-stop")
+        kotlinx.coroutines.withTimeout(5_000) { assertTrue(callbackResult.await()); Nuxie.shutdownAndAwait() }
+        assertFalse(Nuxie.isSetup)
     }
 
     @Test
