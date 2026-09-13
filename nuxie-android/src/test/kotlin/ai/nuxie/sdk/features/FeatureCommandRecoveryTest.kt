@@ -366,6 +366,36 @@ class FeatureCommandRecoveryTest {
         } finally { core.stop() }
     }
 
+    @Test
+    fun terminalConflictDoesNotPoisonCorrectRetryButMergeConflictStaysPending() = runBlocking {
+        var conflict = "operation_conflict"
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                val command = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                if (conflict.isNotEmpty()) HttpTransport.Response(409, """{"code":"$conflict"}""".encodeToByteArray())
+                else receipt(command, 8.0)
+            }
+        }
+        val core = testCore(transport)
+        try {
+            core.purchases.awaitInitialProjection()
+            val file = File(temporary.root, "conflict.json")
+            fun service() = FeatureUsageService(core.api, core.purchases, core.identity, core.features, core.eventLog, core.scope, file)
+            try { service().consumeFeature("credits", 2.0, "completed", null); fail("Expected conflict") }
+            catch (_: ai.nuxie.sdk.network.NuxieApi.RequestRejectedException) { }
+            assertEquals("[]", file.readText())
+            conflict = ""
+            assertTrue(service().consumeFeature("credits", 1.0, "completed", null).accepted)
+            conflict = "merge_in_progress"
+            try { service().consumeFeature("credits", 1.0, "merging", null); fail("Expected retryable conflict") }
+            catch (_: ai.nuxie.sdk.network.NuxieApi.RequestRejectedException) { }
+            assertTrue(file.readText().contains("merging"))
+            conflict = ""
+            service().recover()
+            assertEquals("[]", file.readText())
+        } finally { core.stop() }
+    }
+
     private fun receipt(command: JsonObject, balance: Double) = HttpTransport.Response(200,
         JsonObject(command - "apiKey" + mapOf(
             "accepted" to JsonPrimitive(true), "code" to JsonPrimitive("consumed"),
