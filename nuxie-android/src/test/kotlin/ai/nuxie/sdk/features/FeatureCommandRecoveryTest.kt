@@ -15,6 +15,11 @@ import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
 import java.io.File
 import java.io.IOException
 import java.util.UUID
+import kotlinx.coroutines.async
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.CompletableDeferred
@@ -184,7 +189,8 @@ class FeatureCommandRecoveryTest {
             core.features.applyAuthoritativeUsageBalance("credits", 3.0, null)
             failCapture = false
             service().recover()
-            assertEquals(3.0, core.featureInfo.balance("credits")!!, 0.0)
+            assertNull(core.featureInfo.balance("credits"))
+            assertNull(core.features.getCached("credits", null))
             assertTrue(store.hasStableOutcome("stored-receipt"))
             assertEquals("[]", file.readText())
             assertEquals(1, transport.requests.size)
@@ -259,6 +265,38 @@ class FeatureCommandRecoveryTest {
             assertTrue(cached.unlimited)
             assertNull(cached.balance)
         } finally { core.stop() }
+    }
+
+    @Test
+    fun identityRoundTripDoesNotAdmitAnOldReceiptIntoTheNewGeneration() = runBlocking {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                started.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+                receipt(Json.parseToJsonElement(request.body.decodeToString()).jsonObject, 8.0)
+            }
+        }
+        val core = testCore(transport)
+        try {
+            core.purchases.awaitInitialProjection()
+            val service = FeatureUsageService(core.api, core.purchases, core.identity, core.features, core.eventLog, core.scope, File(temporary.root, "identity.json"))
+            val request = async(Dispatchers.IO) {
+                try { service.consumeFeature("credits", 2.0, "old-generation", null); false }
+                catch (_: CancellationException) { true }
+            }
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            val customer = core.identity.distinctId()
+            core.identity.setDistinctId("other")
+            core.identity.setDistinctId(customer)
+            core.features.hydrateProfile(customer, Json.parseToJsonElement(
+                """{"features":[{"id":"credits","type":"metered","unlimited":false,"balance":3}]}"""
+            ).jsonObject)
+            release.countDown()
+            assertTrue(request.await())
+            assertEquals(3.0, core.featureInfo.balance("credits")!!, 0.0)
+        } finally { release.countDown(); core.stop() }
     }
 
     private fun receipt(command: JsonObject, balance: Double) = HttpTransport.Response(200,

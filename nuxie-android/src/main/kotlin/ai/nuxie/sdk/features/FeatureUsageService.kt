@@ -100,7 +100,11 @@ internal class FeatureUsageService(
         }
     }
 
-    private suspend fun deliver(record: JsonObject, publications: MutableList<FeatureInfo.Mutation>): FeatureUsageResult {
+    private suspend fun deliver(
+        record: JsonObject,
+        publications: MutableList<FeatureInfo.Mutation>,
+        expectedScope: IdentityScope = identity.captureScope(),
+    ): FeatureUsageResult {
         val command = record.getValue("command").jsonObject
         val operationId = command.getValue("operationId")
         val response = (record["response"] as? JsonObject) ?: try { api.consumeFeature(command) } catch (error: NuxieApi.RequestRejectedException) {
@@ -124,9 +128,16 @@ internal class FeatureUsageService(
             else -> null
         }?.let { FeatureAccess(response["active"] == JsonPrimitive(true), response["unlimited"] == JsonPrimitive(true), response.double("balance"), it) }
         if (accepted) {
-            val current = identity.captureScope()
-            if (record["response"] == null && current.distinctId == distinctId && response["idempotentReplay"] != JsonPrimitive(true)) access?.let {
-                features.stageAuthoritativeUsageAccess(featureId, it.balance, entityId, current, it)?.let(publications::add)
+            val current = expectedScope
+            if (current.distinctId == distinctId && identity.isCurrentScope(current)) {
+                val publication = if (record["response"] == null && response["idempotentReplay"] != JsonPrimitive(true) && access != null) {
+                    features.stageAuthoritativeUsageAccess(featureId, access.balance, entityId, current, access)
+                } else {
+                    // Historical receipts cannot establish current balances, but
+                    // cached pre-spend authority must not survive reconciliation.
+                    features.stageUsageInvalidation(featureId, current)
+                }
+                publication?.let(publications::add)
             }
             captureAcceptedUse(featureId, amount, entityId, record["metadata"] as? JsonObject,
                 command.string("operationId")!!, distinctId)
@@ -246,7 +257,7 @@ internal class FeatureUsageService(
                     metadata?.let { put("metadata", it) }
                 }).also { saveCommands(loadCommands() + it) }
             } ?: throw CancellationException()
-            val result = deliver(record, publications)
+            val result = deliver(record, publications, identityScope)
             ensureIdentity(identityScope)
             result
         }
