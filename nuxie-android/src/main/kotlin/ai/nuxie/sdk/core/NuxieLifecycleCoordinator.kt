@@ -33,7 +33,9 @@ internal class NuxieLifecycleCoordinator(
     private enum class Transition { INITIAL_FOREGROUND, FOREGROUND, BACKGROUND }
 
     private val transitions = Channel<Transition>(capacity = Channel.UNLIMITED)
-    private var startedActivities = 0
+    private val startedActivities = java.util.Collections.newSetFromMap(
+        java.util.WeakHashMap<Activity, Boolean>(),
+    )
     private var sawInitialForeground = false
 
     init {
@@ -69,9 +71,16 @@ internal class NuxieLifecycleCoordinator(
         }
     }
 
+    /** Admit a host that was already visible when a late SDK setup registered callbacks. */
+    fun admitVisibleActivity(activity: Activity) {
+        if (!activity.isFinishing && !activity.isDestroyed && activity.window.decorView.isShown) {
+            onActivityStarted(activity)
+        }
+    }
+
     override fun onActivityStarted(activity: Activity) {
-        startedActivities += 1
-        if (startedActivities == 1) {
+        if (!startedActivities.add(activity)) return
+        if (startedActivities.size == 1) {
             if (!sawInitialForeground) {
                 sawInitialForeground = true
                 transitions.trySend(Transition.INITIAL_FOREGROUND)
@@ -82,8 +91,8 @@ internal class NuxieLifecycleCoordinator(
     }
 
     override fun onActivityStopped(activity: Activity) {
-        startedActivities = (startedActivities - 1).coerceAtLeast(0)
-        if (startedActivities == 0) {
+        if (!startedActivities.remove(activity)) return
+        if (startedActivities.isEmpty()) {
             transitions.trySend(Transition.BACKGROUND)
         }
     }
