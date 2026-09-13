@@ -11,6 +11,7 @@ import ai.nuxie.sdk.network.NuxieApi
 import android.util.Log
 import java.io.IOException
 import java.io.FileNotFoundException
+import java.security.MessageDigest
 import java.io.File
 import android.util.AtomicFile
 import kotlinx.coroutines.sync.Mutex
@@ -140,7 +141,7 @@ internal class FeatureUsageService(
                 publication?.let(publications::add)
             }
             captureAcceptedUse(featureId, amount, entityId, record["metadata"] as? JsonObject,
-                command.string("operationId")!!, distinctId)
+                command.string("operationId")!!, distinctId, response.double("occurredAtMs")?.toLong())
         }
         saveCommands(loadCommands().filterNot { it["command"]?.jsonObject?.get("operationId") == operationId })
         return FeatureUsageResult(success = accepted, featureId = featureId, amountUsed = amount,
@@ -270,6 +271,7 @@ internal class FeatureUsageService(
         metadata: JsonObject?,
         eventId: String,
         distinctId: String,
+        occurredAtMillis: Long? = null,
     ) {
         val properties = linkedMapOf<String, Any?>(
             "feature_id" to featureId,
@@ -280,9 +282,16 @@ internal class FeatureUsageService(
         if (!eventLog.captureDeliveredIdempotently(
             SystemEventNames.FEATURE_USED,
             properties,
-            eventId,
+            localEventId(distinctId, eventId),
             distinctId,
+            occurredAtMillis,
         )) throw IOException("Accepted Feature use could not be persisted locally")
+    }
+
+    internal fun localEventId(distinctId: String, operationId: String): String {
+        val scope = JsonArray(listOf(journal.baseFile.parentFile!!.name, distinctId, operationId).map(::JsonPrimitive))
+        return "feature-use-" + MessageDigest.getInstance("SHA-256")
+            .digest(scope.toString().encodeToByteArray()).joinToString("") { "%02x".format(it) }
     }
 
     private fun ensureIdentity(expected: IdentityScope) {

@@ -130,6 +130,7 @@ internal class NuxieApi(
         val unlimited: Boolean,
         val balance: Double?,
         val type: FeatureType,
+        val idempotentReplay: Boolean = false,
     )
 
     /**
@@ -413,7 +414,8 @@ internal class NuxieApi(
         return FeatureCheckResult(customerId = report.customerId, featureId = report.featureId,
             requiredBalance = report.requiredBalance, code = result.requiredString("code", "Feature command receipt"),
             allowed = result["active"] == JsonPrimitive(true), unlimited = result["unlimited"] == JsonPrimitive(true),
-            balance = (result["balance"] as? JsonPrimitive)?.content?.toDoubleOrNull(), type = type)
+            balance = (result["balance"] as? JsonPrimitive)?.content?.toDoubleOrNull(), type = type,
+            idempotentReplay = result["idempotentReplay"] == JsonPrimitive(true))
     }
 
     /**

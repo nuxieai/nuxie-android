@@ -111,6 +111,7 @@ internal class EventLog(
             val properties: Map<String, Any?>,
             val eventId: String,
             val distinctId: String,
+            val occurredAtMillis: Long?,
             val admissionTickets: List<AdmissionTicket>,
             val done: CompletableDeferred<Boolean>,
         ) : Command
@@ -191,6 +192,7 @@ internal class EventLog(
                             command.properties,
                             command.eventId,
                             command.distinctId,
+                            command.occurredAtMillis,
                             command.admissionTickets,
                         )
                     }.onFailure { Log.w(LOG_TAG, "Delivered event capture failed", it) }
@@ -526,6 +528,7 @@ internal class EventLog(
         properties: Map<String, Any?>,
         eventId: String,
         distinctId: String,
+        occurredAtMillis: Long? = null,
     ): Boolean {
         if (name.isEmpty() || eventId.isEmpty() || distinctId.isEmpty()) return false
         val done = CompletableDeferred<Boolean>()
@@ -534,6 +537,7 @@ internal class EventLog(
             properties,
             eventId,
             distinctId,
+            occurredAtMillis,
             sampleAdmissionTickets(),
             done,
         )
@@ -706,6 +710,7 @@ internal class EventLog(
         commandProperties: Map<String, Any?>,
         eventId: String,
         distinctId: String,
+        occurredAtMillis: Long?,
         admissionTickets: List<AdmissionTicket>,
     ): Boolean {
         if (store.hasStableOutcome(eventId)) return true
@@ -720,7 +725,7 @@ internal class EventLog(
             name = name,
             distinctId = distinctId,
             properties = contextBuilder.buildEnrichedProperties(sanitized),
-            timestampMillis = nowMillis(),
+            timestampMillis = occurredAtMillis ?: nowMillis(),
         )
         val transformed = applyBeforeSendTransform(original)
         if (transformed == null) {
