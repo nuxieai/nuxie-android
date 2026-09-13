@@ -191,7 +191,7 @@ class FeatureCommandRecoveryTest {
             service().recover()
             assertNull(core.featureInfo.balance("credits"))
             assertNull(core.features.getCached("credits", null))
-            assertTrue(store.hasStableOutcome("stored-receipt"))
+            assertTrue(store.hasStableOutcome(service().localEventId(core.identity.distinctId(), "stored-receipt")))
             assertEquals("[]", file.readText())
             assertEquals(1, transport.requests.size)
         } finally { core.stop() }
@@ -297,6 +297,43 @@ class FeatureCommandRecoveryTest {
             assertTrue(request.await())
             assertEquals(3.0, core.featureInfo.balance("credits")!!, 0.0)
         } finally { release.countDown(); core.stop() }
+    }
+
+    @Test
+    fun acceptedHistoryIsCustomerScopedAndUsesReceiptTime() = runBlocking {
+        val transport = FakeTransport().apply {
+            respond = { request -> receipt(Json.parseToJsonElement(request.body.decodeToString()).jsonObject, 8.0) }
+        }
+        val core = testCore(transport)
+        try {
+            core.purchases.awaitInitialProjection()
+            val service = FeatureUsageService(core.api, core.purchases, core.identity, core.features, core.eventLog, core.scope, File(temporary.root, "history.json"))
+            core.identity.setDistinctId("customer-a")
+            service.consumeFeature("credits", 2.0, "same-id", null)
+            core.identity.setDistinctId("customer-b")
+            service.consumeFeature("credits", 2.0, "same-id", null)
+            assertTrue(core.store.hasStableOutcome(service.localEventId("customer-a", "same-id")))
+            assertTrue(core.store.hasStableOutcome(service.localEventId("customer-b", "same-id")))
+            assertEquals(1789285000000L, core.store.getLastEventTime("$" + "feature_used", "customer-a", null))
+            assertEquals(1789285000000L, core.store.getLastEventTime("$" + "feature_used", "customer-b", null))
+        } finally { core.stop() }
+    }
+
+    @Test
+    fun purchaseReplayInvalidatesAuthorityInsteadOfPublishingHistoricalBalance() = runBlocking {
+        val core = testCore(FakeTransport())
+        try {
+            core.purchases.awaitInitialProjection()
+            val customer = core.identity.distinctId()
+            core.features.hydrateProfile(customer, Json.parseToJsonElement(
+                """{"features":[{"id":"credits","type":"metered","unlimited":false,"balance":3}]}"""
+            ).jsonObject)
+            core.features.applyAuthoritativeUse(
+                ai.nuxie.sdk.network.NuxieApi.FeatureCheckResult(customer, "credits", 2.0, "consumed", true, false, 8.0, FeatureType.METERED, idempotentReplay = true),
+                "credits", customer, null, core.features.captureAuthoritativeUseScope(customer))
+            assertNull(core.features.getCached("credits", null))
+            assertNull(core.featureInfo.balance("credits"))
+        } finally { core.stop() }
     }
 
     private fun receipt(command: JsonObject, balance: Double) = HttpTransport.Response(200,

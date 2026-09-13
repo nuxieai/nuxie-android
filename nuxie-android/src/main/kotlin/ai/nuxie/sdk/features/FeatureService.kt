@@ -156,9 +156,12 @@ internal class FeatureService(
 
             val affectedFeatureIds = linkedSetOf(requestedFeatureId, result.featureId)
             val mutationRevisions = affectedFeatureIds.associateWith { featureId ->
-                advanceFeatureMutationRevision(featureId)
+                invalidateUsageAuthorityLocked(featureId)
             }
             val requestedAccess = authoritativeAccess(result, requestedFeatureId)
+            if (result.idempotentReplay) {
+                return@synchronized StagedAuthoritativeUse(requestedAccess, checkNotNull(stageCurrentLocked()))
+            }
             val balanceSourceAccess = resultAccess(result)
             val publishedAccess = affectedFeatureIds.associateWith { featureId ->
                 if (featureId == requestedFeatureId) requestedAccess else balanceSourceAccess
@@ -211,13 +214,16 @@ internal class FeatureService(
         var publication: FeatureInfo.Mutation? = null
         val admitted = identity.withCurrentScope(expectedScope) admitted@ {
             synchronized(lock) {
-                if (synchronizeCustomerScopeLocked()) publication = stageCurrentLocked()
+                val scopeChanged = synchronizeCustomerScopeLocked()
                 if (cacheDistinctId != expectedScope.distinctId) return@admitted false
                 val authoritative = realTimeCache[CacheKey(featureId, entityId)]?.access
                     ?: entityAccess(featureId, entityId)
                 val visible = receiptAccess ?: visibleAccess(featureId, authoritative)
                     ?: durableGlobalAccess()[featureId]
-                    ?: return@admitted true
+                    ?: run {
+                        if (scopeChanged) publication = stageCurrentLocked()
+                        return@admitted true
+                    }
                 val updated = receiptAccess ?: FeatureAccess(
                     allowed = authoritative?.unlimited == true || (balance ?: 0.0) >= DEFAULT_REQUIRED_BALANCE,
                     unlimited = authoritative?.unlimited ?: false,
@@ -259,8 +265,8 @@ internal class FeatureService(
         realTimeCache.keys.removeAll { it.featureId == featureId }
         durableAccess = durableAccess - featureId
         durableEntities = durableEntities - featureId
-        purchaseUpdates.replaceAll { _, projection ->
-            projection.copy(access = projection.access - featureId)
+        purchaseUpdates.entries.forEach { entry ->
+            entry.setValue(entry.value.copy(access = entry.value.access - featureId))
         }
         return revision
     }

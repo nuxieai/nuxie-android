@@ -800,6 +800,7 @@ private object PurchaseWireResponses {
         assertEquals(body.requiredString("featureId"), result.featureId)
         assertEquals(body.requiredString("code"), result.code)
         assertEquals(body.getValue("active").jsonPrimitive.boolean, result.allowed)
+        assertEquals(body["idempotentReplay"] == JsonPrimitive(true), result.idempotentReplay)
         assertEquals(body.getValue("unlimited").jsonPrimitive.boolean, result.unlimited)
         val balance = body["balance"]
             ?.takeUnless { it is JsonNull }
