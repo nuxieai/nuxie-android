@@ -4,6 +4,8 @@ import ai.nuxie.sdk.billing.PurchaseService
 import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.events.EventLog
+import ai.nuxie.sdk.events.EventDeliveryPolicy
+import ai.nuxie.sdk.events.EventDeliveryDisposition
 import ai.nuxie.sdk.events.TimeBasedEpochGenerator
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.identity.IdentityScope
@@ -43,11 +45,34 @@ internal class FeatureUsageService(
     private val eventLog: EventLog,
     private val scope: CoroutineScope,
     journalFile: File,
+    private val nowMillis: () -> Long = System::currentTimeMillis,
 ) {
     private val journal = AtomicFile(journalFile)
     private val journalMutex = Mutex()
+    @Volatile private var closed = false
+    private val recovery = FeatureRecoveryWorker(scope, nowMillis, ::nextRecoveryDueAt, ::recoverPending)
 
     init { journalFile.parentFile?.mkdirs() }
+
+    fun startRecovery() {
+        recovery.start()
+        recovery.request()
+    }
+
+    suspend fun close() {
+        closed = true
+        recovery.close()
+    }
+
+    private suspend fun nextRecoveryDueAt(): Long? = journalMutex.withLock {
+        if (closed) return@withLock null
+        try {
+            loadCommands().minOfOrNull { if (it["response"] != null) 0L else it.long("nextRetryAtMillis") ?: 0L }
+        } catch (error: Exception) {
+            Log.w(LOG_TAG, "Feature command journal remains unavailable", error)
+            0L
+        }
+    }
 
     private fun loadCommands(): List<JsonObject> = try {
         (Json.parseToJsonElement(journal.openRead().use { it.readBytes().decodeToString() }) as JsonArray).map { it.jsonObject }
@@ -70,29 +95,55 @@ internal class FeatureUsageService(
         companion object Key : CoroutineContext.Key<PublicationDrain>
     }
 
-    private suspend fun <T> withJournalDecision(decide: suspend (MutableList<FeatureInfo.Mutation>) -> T): T {
+    private suspend fun <T> withJournalDecision(
+        scheduleRetry: Boolean = true,
+        decide: suspend (MutableList<FeatureInfo.Mutation>) -> T,
+    ): T {
         val reentrant = currentCoroutineContext()[PublicationDrain] != null
-        return withContext(NonCancellable) {
-            val publications = mutableListOf<FeatureInfo.Mutation>()
-            val result = runCatching { journalMutex.withLock { decide(publications) } }
-            val drain: suspend () -> Unit = {
-                withContext(PublicationDrain()) {
-                    publications.forEach { features.publishStaged(it) }
+        return try {
+            withContext(NonCancellable) {
+                val publications = mutableListOf<FeatureInfo.Mutation>()
+                val result = runCatching {
+                    journalMutex.withLock {
+                        if (closed) throw CancellationException("Feature commands are closed")
+                        decide(publications)
+                    }
                 }
+                val drain: suspend () -> Unit = {
+                    withContext(PublicationDrain()) {
+                        publications.forEach { features.publishStaged(it) }
+                    }
+                }
+                // A listener may await another command. Its publication follows the
+                // current FIFO slot, so that nested command must return before draining.
+                if (reentrant) scope.launch(NonCancellable) { drain() } else drain()
+                result.getOrThrow()
             }
-            // A listener may await another command. Its publication follows the
-            // current FIFO slot, so that nested command must return before draining.
-            if (reentrant) scope.launch(NonCancellable) { drain() } else drain()
-            result.getOrThrow()
+        } finally {
+            if (scheduleRetry) recovery.request()
         }
     }
 
-    suspend fun recover() = withContext(Dispatchers.IO) {
-        val pendingCommands = journalMutex.withLock { loadCommands().map { it.getValue("command").jsonObject } }
+    suspend fun recover() {
+        try { recoverPending() } finally { recovery.request() }
+    }
+
+    private suspend fun recoverPending() = withContext(Dispatchers.IO) {
+        if (closed) return@withContext
+        val pendingCommands = try {
+            journalMutex.withLock { loadCommands().map { it.getValue("command").jsonObject } }
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            Log.w(LOG_TAG, "Feature command journal remains unavailable", error)
+            return@withContext
+        }
         for (pendingCommand in pendingCommands) {
+            if (closed) break
             try {
-                withJournalDecision { publications ->
+                withJournalDecision(scheduleRetry = false) { publications ->
+                    if (closed) return@withJournalDecision
                     loadCommands().firstOrNull { it.getValue("command").jsonObject.sameOperation(pendingCommand) }
+                        ?.takeIf { it["response"] != null || (it.long("nextRetryAtMillis") ?: 0L) <= nowMillis() }
                         ?.let { deliver(it, publications) }
                 }
             } catch (error: Exception) {
@@ -108,10 +159,24 @@ internal class FeatureUsageService(
         expectedScope: IdentityScope = identity.captureScope(),
     ): FeatureUsageResult {
         val command = record.getValue("command").jsonObject
+        val deadline = record.long("nextRetryAtMillis") ?: 0L
+        if (record["response"] == null && deadline > nowMillis()) {
+            throw NuxieApi.RequestRejectedException(429, "/feature/consume", retryAfter = ((deadline - nowMillis()) / 1000.0).toString())
+        }
         val response = (record["response"] as? JsonObject) ?: try { api.consumeFeature(command) } catch (error: NuxieApi.RequestRejectedException) {
-            if (error.statusCode in listOf(400, 401, 403, 404, 410, 413) ||
+            val disposition = EventDeliveryPolicy.disposition(NuxieApi.BatchRejectedException(error.statusCode), nowMillis())
+            if (disposition == EventDeliveryDisposition.Split || error.statusCode == 404 ||
                 (error.statusCode == 409 && error.code == "operation_conflict")) {
                 saveCommands(loadCommands().filterNot { it["command"]?.jsonObject?.sameOperation(command) == true })
+            } else {
+                EventDeliveryPolicy.parseRetryAfter(error.retryAfter, nowMillis())?.let { delay ->
+                    val now = nowMillis()
+                    val dueAt = if (now > Long.MAX_VALUE - delay) Long.MAX_VALUE else now + delay
+                    saveCommands(loadCommands().map {
+                        if (it.getValue("command").jsonObject.sameOperation(command))
+                            JsonObject(it + ("nextRetryAtMillis" to JsonPrimitive(dueAt))) else it
+                    })
+                }
             }
             throw error
         }.also { result ->

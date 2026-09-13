@@ -286,6 +286,7 @@ internal class NuxieCore(
         eventLog = eventLog,
         scope = scope,
         journalFile = File(purchaseEvidenceDirectory(appContext.filesDir, apiKey, environment), "feature-commands.json"),
+        nowMillis = nowMillis,
     )
 
     private val releaseArtifactAcquirer = JourneyReleaseArtifactAcquirer(appContext, transport)
@@ -460,6 +461,7 @@ internal class NuxieCore(
 
     /** Called once from Nuxie.setup after construction. */
     fun start(initialActivity: android.app.Activity? = null) {
+        featureUsage.startRecovery()
         val activityForwarder = ActivityForwarder(deliver = forwardActivity)
         eventLog.subscribeCommittedWithAdmission(
             sampleGeneration = journeys::eventAdmissionGeneration,
@@ -518,6 +520,7 @@ internal class NuxieCore(
         billing.close()
         presentations.close()
         kotlinx.coroutines.runBlocking {
+            runCatching { featureUsage.close() }
             runCatching { journeys.profileDidClearAll() }
             runCatching { profile.close() }
             runCatching { delivery.close() }
