@@ -31,6 +31,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonObject
 
 /** Immediate-confirmation metered Feature use with the purchase first-spend gate hidden inside. */
@@ -128,20 +129,20 @@ internal class FeatureUsageService(
             "creditSystem" -> FeatureType.CREDIT_SYSTEM
             else -> null
         }?.let { FeatureAccess(response["active"] == JsonPrimitive(true), response["unlimited"] == JsonPrimitive(true), response.double("balance"), it) }
-        if (accepted) {
-            val current = expectedScope
-            if (current.distinctId == distinctId && identity.isCurrentScope(current)) {
-                val publication = if (record["response"] == null && response["idempotentReplay"] != JsonPrimitive(true) && access != null) {
-                    features.stageAuthoritativeUsageAccess(featureId, access.balance, entityId, current, access)
-                } else {
-                    // Historical receipts cannot establish current balances, but
-                    // cached pre-spend authority must not survive reconciliation.
-                    features.stageUsageInvalidation(featureId, current)
-                }
-                publication?.let(publications::add)
+        val current = expectedScope
+        if (current.distinctId == distinctId && identity.isCurrentScope(current)) {
+            val publication = if (record["response"] == null && response["idempotentReplay"] != JsonPrimitive(true) && access != null) {
+                features.stageAuthoritativeUsageAccess(featureId, access.balance, entityId, current, access)
+            } else {
+                // Historical receipts cannot establish current balances, but
+                // cached pre-spend authority must not survive reconciliation.
+                features.stageUsageInvalidation(featureId, current)
             }
+            publication?.let(publications::add)
+        }
+        if (accepted) {
             captureAcceptedUse(featureId, amount, entityId, record["metadata"] as? JsonObject,
-                command.string("operationId")!!, distinctId, response.double("occurredAtMs")?.toLong())
+                command.string("operationId")!!, distinctId, response.long("occurredAtMs"))
         }
         saveCommands(loadCommands().filterNot { it["command"]?.jsonObject?.sameOperation(command) == true })
         return FeatureUsageResult(success = accepted, featureId = featureId, amountUsed = amount,
@@ -151,7 +152,7 @@ internal class FeatureUsageService(
                 it.consumptionReceipt = FeatureConsumptionResult(command.string("operationId")!!, accepted,
                     response.string("code")!!, amount, response.double("balance"), response["unlimited"] == JsonPrimitive(true),
                     response["active"] == JsonPrimitive(true), response["idempotentReplay"] == JsonPrimitive(true),
-                    response.string("customerId") ?: distinctId, response.string("featureId") ?: featureId, response.double("occurredAtMs"))
+                    response.string("customerId") ?: distinctId, response.string("featureId") ?: featureId, response.long("occurredAtMs"))
             }
     }
 
@@ -304,6 +305,8 @@ internal class FeatureUsageService(
     private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)
         ?.takeIf { it.isString }
         ?.contentOrNull
+
+    private fun JsonObject.long(key: String): Long? = (this[key] as? JsonPrimitive)?.longOrNull
 
     private fun JsonObject.double(key: String): Double? = (this[key] as? JsonPrimitive)?.doubleOrNull
 

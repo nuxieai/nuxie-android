@@ -78,5 +78,5 @@ data class FeatureConsumptionResult(
     val idempotentReplay: Boolean,
     val customerId: String,
     val featureId: String,
-    val occurredAtMs: Double? = null,
+    val occurredAtMs: Long? = null,
 )
