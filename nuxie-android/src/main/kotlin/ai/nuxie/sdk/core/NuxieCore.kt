@@ -62,6 +62,7 @@ import android.content.Context
 import java.io.File
 import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -113,6 +114,7 @@ internal class NuxieCore(
 ) {
     private val registerLifecycle = overrides.registerLifecycle
     private val stopped = AtomicBoolean(false)
+    private val shutdownCompletion = CompletableDeferred<Unit>()
     private val requestInitialProfileRefresh = overrides.requestInitialProfileRefresh
 
     internal fun interface PresentationFactory {
@@ -514,29 +516,55 @@ internal class NuxieCore(
         }
     }
 
-    /** Stop every owned coroutine before releasing the shared event store. */
-    fun stop() {
-        if (!stopped.compareAndSet(false, true)) return
-        if (registerLifecycle) {
-            (appContext as? Application)?.unregisterActivityLifecycleCallbacks(lifecycleCoordinator)
+    /** Every caller awaits one independently owned teardown; cancelling a waiter cannot cancel it. */
+    suspend fun stopAndAwait() {
+        if (stopped.compareAndSet(false, true)) {
+            CoroutineScope(Dispatchers.Default).launch {
+                runCatching { stopGraph() }.fold(
+                    onSuccess = { shutdownCompletion.complete(Unit) },
+                    onFailure = { shutdownCompletion.completeExceptionally(it) },
+                )
+            }
         }
-        presentations.close()
-        kotlinx.coroutines.runBlocking {
-            runCatching { purchaseService.stopCheckoutIntake() }
-            runCatching { billing.close() }
-            runCatching { lifecycleCoordinator.close() }
-            runCatching { userTransitions.close() }
-            runCatching { profile.close() }
+        shutdownCompletion.await()
+    }
+
+    /** Blocking compatibility for internal callers until the facade adopts suspending teardown. */
+    fun stop() = kotlinx.coroutines.runBlocking { stopAndAwait() }
+
+    private suspend fun stopGraph() {
+        var failure: Throwable? = null
+        suspend fun attempt(action: suspend () -> Unit) {
+            try { action() } catch (next: Throwable) {
+                val first = failure
+                if (first == null) failure = next else if (first !== next) first.addSuppressed(next)
+            }
+        }
+        attempt {
+            if (registerLifecycle) {
+                (appContext as? Application)?.unregisterActivityLifecycleCallbacks(lifecycleCoordinator)
+            }
+        }
+        attempt { presentations.close() }
+        attempt { purchaseService.stopCheckoutIntake() }
+        attempt { billing.close() }
+        attempt { lifecycleCoordinator.close() }
+        attempt { userTransitions.close() }
+        attempt { profile.close() }
+        attempt {
             producerScope.cancel()
             producerScope.coroutineContext[Job]?.join()
-            runCatching { featureUsage.close() }
-            runCatching { journeys.profileDidClearAll() }
-            runCatching { delivery.close() }
-            runCatching { eventLog.closeWorkers() }
-            scope.cancel()
-            scope.coroutineContext[kotlinx.coroutines.Job]?.join()
-            runCatching { store.close() }
         }
+        attempt { featureUsage.close() }
+        attempt { journeys.profileDidClearAll() }
+        attempt { delivery.close() }
+        attempt { eventLog.closeWorkers() }
+        attempt {
+            scope.cancel()
+            scope.coroutineContext[Job]?.join()
+        }
+        attempt { store.close() }
+        failure?.let { throw it }
     }
 
     private fun defaultAppVersion(): String = runCatching {
