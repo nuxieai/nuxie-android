@@ -13,6 +13,10 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.withTimeout
 
 @RunWith(RobolectricTestRunner::class)
 class AppActionJourneyReleaseDeliveryTest {
@@ -49,6 +53,74 @@ class AppActionJourneyReleaseDeliveryTest {
 
         assertEquals(listOf("first", "second"), deliveries.map { it.first })
         assertTrue(deliveries.all { (_, thread) -> thread === Looper.getMainLooper().thread })
+    }
+
+    @Test
+    fun cancelledConditionalDeliveryCannotPublishIntoAReplacementListener() = runBlocking {
+        val deliveries = mutableListOf<String>()
+        val first = NuxieListener { _, action -> deliveries += action.name }
+        Nuxie.listener = first
+        var publications = 0
+        val delivery = async(Dispatchers.Default) {
+            Nuxie.deliverAppAction(action("cancelled")) { publish ->
+                publications++; publish(); true
+            }
+        }
+        awaitQueuedCallback()
+        delivery.cancelAndJoin()
+        val replacement = NuxieListener { _, action -> deliveries += action.name }
+        Nuxie.listener = replacement
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(0, publications)
+        assertTrue(deliveries.isEmpty())
+    }
+
+    @Test
+    fun clearingListenerSettlesConditionalDeliveryWithoutWaitingForTheMainLooper() = runBlocking {
+        val deliveries = mutableListOf<String>()
+        val listener = NuxieListener { _, action -> deliveries += action.name }
+        Nuxie.listener = listener
+        var publications = 0
+        val delivery = async(Dispatchers.Default) {
+            Nuxie.deliverAppAction(action("withdrawn")) { publish ->
+                publications++; publish(); true
+            }
+        }
+        try {
+            awaitQueuedCallback()
+            Nuxie.listener = null
+            withTimeout(2_000) { assertTrue(delivery.await()) }
+            Nuxie.listener = listener
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(1, publications)
+            assertTrue(deliveries.isEmpty())
+        } finally { delivery.cancelAndJoin() }
+    }
+
+    private fun awaitQueuedCallback() {
+        val looper = shadowOf(Looper.getMainLooper())
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        while (looper.isIdle && System.nanoTime() < deadline) Thread.yield()
+        assertFalse("conditional callback was not queued", looper.isIdle)
+    }
+
+    @Test
+    fun withdrawingAConditionalCallbackStillRejectsARevokedJourney() = runBlocking {
+        val listener = NuxieListener { _, _ -> error("Revoked action reached the listener") }
+        Nuxie.listener = listener
+        val current = java.util.concurrent.atomic.AtomicBoolean(true)
+        val delivery = async(Dispatchers.Default) {
+            Nuxie.deliverAppAction(action("revoked")) { publish ->
+                if (current.get()) { publish(); true } else false
+            }
+        }
+        try {
+            awaitQueuedCallback()
+            current.set(false)
+            Nuxie.listener = null
+            withTimeout(2_000) { assertFalse(delivery.await()) }
+            shadowOf(Looper.getMainLooper()).idle()
+        } finally { delivery.cancelAndJoin() }
     }
 
     @Test

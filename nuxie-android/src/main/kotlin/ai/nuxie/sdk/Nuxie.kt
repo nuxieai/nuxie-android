@@ -441,6 +441,7 @@ object Nuxie {
         publishIfCurrent: ((() -> Unit) -> Boolean),
         callback: (NuxieListener) -> Unit,
     ): Boolean {
+        if (listener == null) return publishIfCurrent {}
         val publication = {
             publishIfCurrent {
                 listener?.let { resolved -> inCallback { callback(resolved) } }
@@ -448,12 +449,38 @@ object Nuxie {
         }
         if (Looper.myLooper() == Looper.getMainLooper()) return publication()
         return suspendCancellableCoroutine { continuation ->
-            val posted = mainHandler.post {
+            val finishWithoutListener = {
+                if (continuation.isActive) {
+                    runCatching { publishIfCurrent {} }
+                        .onSuccess { continuation.resume(it) }
+                        .onFailure(continuation::resumeWithException)
+                }
+                Unit
+            }
+            lateinit var task: Runnable
+            task = Runnable {
+                val claimed = synchronized(callbackLock) { pendingCallbacks.remove(task) != null }
+                if (!claimed || !continuation.isActive) return@Runnable
                 runCatching(publication)
                     .onSuccess { continuation.resume(it) }
                     .onFailure(continuation::resumeWithException)
             }
-            if (!posted) {
+            var withdrawn = false
+            val posted = synchronized(callbackLock) {
+                if (listener == null) {
+                    withdrawn = true
+                    true
+                } else {
+                    pendingCallbacks[task] = finishWithoutListener
+                    mainHandler.post(task).also { if (!it) pendingCallbacks.remove(task) }
+                }
+            }
+            continuation.invokeOnCancellation {
+                synchronized(callbackLock) { pendingCallbacks.remove(task) }
+                mainHandler.removeCallbacks(task)
+            }
+            if (withdrawn) finishWithoutListener()
+            else if (!posted) {
                 continuation.resumeWithException(
                     IllegalStateException("Could not dispatch $label to the main thread."),
                 )
