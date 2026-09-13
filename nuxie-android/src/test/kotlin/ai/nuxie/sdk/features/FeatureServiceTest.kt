@@ -124,6 +124,30 @@ class FeatureServiceTest {
         )
     }
 
+    @Test
+    fun aggregateProfileCannotDecideEntityAccess() = runBlocking {
+        for (aggregateUnlimited in listOf(false, true)) {
+            lateinit var core: NuxieCore
+            val transport = FakeTransport().apply {
+                respond = { request ->
+                    if (request.url.path == "/profile") {
+                        val entities = if (aggregateUnlimited) """, "entities":{"project-a":{"balance":0}}""" else ""
+                        profileResponse("""[{"id":"credits","type":"metered","balance":100,"unlimited":$aggregateUnlimited$entities}]""")
+                    } else {
+                        HttpTransport.Response(200, featureResponse(core.identity.distinctId(), "credits", 1.0,
+                            balance = "2").encodeToByteArray())
+                    }
+                }
+            }
+            core = core(transport)
+            assertTrue(core.profile.refreshAndWait())
+            val access = core.features.checkWithCache("credits", requiredBalance = 1.0, entityId = "project-a")
+            assertEquals(2.0, access.balance)
+            assertFalse(access.unlimited)
+            assertEquals(1, transport.requests.count { it.url.path == "/entitled" })
+        }
+    }
+
     private fun featureResponse(
         customerId: String,
         featureId: String,
@@ -1674,7 +1698,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun entityScopedLookupDeniesWhenProfileHasNoEntitiesMap() = runBlocking {
+    fun entityScopedLookupMissesWhenProfileHasNoEntitiesMap() = runBlocking {
         val core = core(FakeTransport())
         core.features.hydrateProfile(
             core.identity.distinctId(),
@@ -1683,12 +1707,12 @@ class FeatureServiceTest {
             ).jsonObject,
         )
 
-        assertFalse(core.features.getCached("pro", "project-1")!!.allowed)
+        assertEquals(null, core.features.getCached("pro", "project-1"))
         core.stop()
     }
 
     @Test
-    fun entityScopedLookupIsDeniedWhenProfileEntitiesMapLacksTheEntity() = runBlocking {
+    fun entityScopedLookupMissesWhenProfileEntitiesMapLacksTheEntity() = runBlocking {
         val core = core(FakeTransport())
         core.features.hydrateProfile(
             core.identity.distinctId(),
@@ -1699,12 +1723,12 @@ class FeatureServiceTest {
             ).jsonObject,
         )
 
-        assertFalse(core.features.getCached("pro", "project-1")!!.allowed)
+        assertEquals(null, core.features.getCached("pro", "project-1"))
         core.stop()
     }
 
     @Test
-    fun missingEntityOnCachedMeteredFeatureReturnsBooleanNotFoundWithoutRemoteCheck() = runBlocking {
+    fun missingEntityOnCachedMeteredFeatureUsesScopedRemoteCheck() = runBlocking {
         lateinit var core: NuxieCore
         val transport = FakeTransport().apply {
             respond = { request ->
@@ -1731,11 +1755,11 @@ class FeatureServiceTest {
 
         val access = core.features.checkWithCache("exports", entityId = "missing-project")
 
-        assertFalse(access.allowed)
+        assertTrue(access.allowed)
         assertFalse(access.unlimited)
-        assertEquals(null, access.balance)
-        assertEquals(FeatureType.BOOLEAN, access.type)
-        assertTrue(transport.requests.none { it.url.path == "/entitled" })
+        assertEquals(5.0, access.balance)
+        assertEquals(FeatureType.METERED, access.type)
+        assertEquals(1, transport.requests.count { it.url.path == "/entitled" })
         core.stop()
     }
 

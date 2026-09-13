@@ -857,7 +857,6 @@ internal class FeatureService(
     private fun entityAccess(featureId: String, entityId: String?): FeatureAccess? = when (entityId) {
         null -> durableGlobalAccess()[featureId]
         else -> durableEntities[featureId]?.get(entityId)
-            ?: durableGlobalAccess()[featureId]?.let { FeatureAccess(false, false, null, FeatureType.BOOLEAN) }
     }
 
     private fun authoritativeAccess(
@@ -901,7 +900,7 @@ internal class FeatureService(
             val balance = feature.double("balance")
             val access = profileAccess(type, unlimited, balance)
             all[id] = access
-            (feature["entities"] as? JsonObject)?.let { rawEntities ->
+            (feature["entities"] as? JsonObject)?.takeUnless { unlimited }?.let { rawEntities ->
                 entities[id] = rawEntities.mapNotNull { (entityId, rawValue) ->
                     val entity = rawValue as? JsonObject ?: return@mapNotNull null
                     val entityBalance = entity.double("balance") ?: return@mapNotNull null
