@@ -24,8 +24,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlin.coroutines.resume
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 internal interface BillingClientAdapter {
     val isReady: Boolean
@@ -107,6 +107,7 @@ internal class PlayBillingConnection(
     private var reconnectJob: Job? = null
     private var ready = CompletableDeferred<Unit>()
     private var terminalFailure = false
+    private val pendingResponses = mutableSetOf<CompletableDeferred<*>>()
 
     @Volatile
     var lastUpdate: PurchaseUpdate? = null
@@ -173,15 +174,40 @@ internal class PlayBillingConnection(
     }
 
     fun close() {
-        synchronized(lock) {
+        val closing = synchronized(lock) {
             if (closed) return
             closed = true
             reconnectJob?.cancel()
             reconnectJob = null
-            client?.endConnection()
-            if (!ready.isCompleted) {
-                ready.completeExceptionally(IllegalStateException("Play Billing connection closed."))
+            val responses = pendingResponses.toList()
+            pendingResponses.clear()
+            Triple(client, ready, responses)
+        }
+        // Settle SDK waiters even if the provider throws during disconnection.
+        // Removing them under the lock makes late callbacks ineligible to win.
+        val failure = IllegalStateException("Play Billing connection closed.")
+        closing.second.completeExceptionally(failure)
+        closing.third.forEach { it.completeExceptionally(failure) }
+        closing.first?.endConnection()
+    }
+
+    private suspend fun <T> awaitResponse(register: ((T) -> Unit) -> Unit): T {
+        val response = CompletableDeferred<T>()
+        val caller = currentCoroutineContext()
+        try {
+            synchronized(lock) {
+                caller.ensureActive()
+                check(!closed) { "Play Billing connection closed." }
+                pendingResponses += response
+                register { value ->
+                    synchronized(lock) {
+                        if (pendingResponses.remove(response)) response.complete(value)
+                    }
+                }
             }
+            return response.await()
+        } finally {
+            synchronized(lock) { pendingResponses.remove(response) }
         }
     }
 
@@ -198,15 +224,14 @@ internal class PlayBillingConnection(
                 },
             )
             .build()
-        return suspendCancellableCoroutine { continuation ->
+        return awaitResponse<ProductDetailsQueryResult> { complete ->
             billingClient.queryProductDetailsAsync(params) { result, queryResult ->
-                if (!continuation.isActive) return@queryProductDetailsAsync
                 if (result.responseCode != BillingClient.BillingResponseCode.OK) {
-                    continuation.resume(
+                    complete(
                         ProductDetailsQueryResult.Failed(result.responseCode, result.debugMessage),
                     )
                 } else {
-                    continuation.resume(
+                    complete(
                         ProductDetailsQueryResult.Success(
                             queryResult.productDetailsList.map(::projectProductDetails),
                             queryResult.unfetchedProductList.map { unfetched ->
@@ -254,10 +279,9 @@ internal class PlayBillingConnection(
     override suspend fun queryActive(productType: String): ActivePurchasesResult {
         val params = QueryPurchasesParams.newBuilder().setProductType(productType).build()
         val billingClient = awaitClient()
-        return suspendCancellableCoroutine { continuation ->
+        return awaitResponse<ActivePurchasesResult> { complete ->
             billingClient.queryPurchasesAsync(params) { result, purchases ->
-                if (!continuation.isActive) return@queryPurchasesAsync
-                continuation.resume(
+                complete(
                     if (result.responseCode == BillingClient.BillingResponseCode.OK) {
                         ActivePurchasesResult.Success(purchases.map(::projectPurchase))
                     } else {
@@ -271,9 +295,9 @@ internal class PlayBillingConnection(
     override suspend fun acknowledge(purchaseToken: String): BillingResult {
         val params = AcknowledgePurchaseParams.newBuilder().setPurchaseToken(purchaseToken).build()
         val billingClient = awaitClient()
-        return suspendCancellableCoroutine { continuation ->
+        return awaitResponse<BillingResult> { complete ->
             billingClient.acknowledgePurchase(params) { result ->
-                if (continuation.isActive) continuation.resume(result)
+                complete(result)
             }
         }
     }
@@ -281,9 +305,9 @@ internal class PlayBillingConnection(
     override suspend fun consume(purchaseToken: String): BillingResult {
         val params = ConsumeParams.newBuilder().setPurchaseToken(purchaseToken).build()
         val billingClient = awaitClient()
-        return suspendCancellableCoroutine { continuation ->
+        return awaitResponse<BillingResult> { complete ->
             billingClient.consumeAsync(params) { result, _ ->
-                if (continuation.isActive) continuation.resume(result)
+                complete(result)
             }
         }
     }

@@ -32,6 +32,118 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class PlayBillingConnectionTest {
     @Test
+    fun closingAReadyConnectionSettlesEveryOutstandingRequest() = runTest {
+        val factory = FakeBillingClientFactory()
+        val connection = PlayBillingConnection(factory, this)
+        connection.connect()
+        factory.client.isReady = true
+        factory.client.finishSetup(BillingClient.BillingResponseCode.OK)
+        val requests = listOf(
+            async { runCatching { connection.query(listOf(ProductQuery("product", BillingClient.ProductType.INAPP))) } },
+            async { runCatching { connection.queryActive(BillingClient.ProductType.INAPP) } },
+            async { runCatching { connection.acknowledge("ack-token") } },
+            async { runCatching { connection.consume("consume-token") } },
+        )
+        try {
+            runCurrent()
+            assertEquals(4, factory.client.pendingRequestCount)
+            connection.close()
+            runCurrent()
+            assertTrue("close must settle requests already awaiting a Play callback", requests.all { it.isCompleted })
+            requests.forEach { assertTrue(it.await().exceptionOrNull() is IllegalStateException) }
+            val ok = BillingResult.newBuilder().setResponseCode(BillingClient.BillingResponseCode.OK).build()
+            repeat(2) {
+                factory.client.purchasesListener!!.onQueryPurchasesResponse(ok, emptyList())
+                factory.client.acknowledgeListener!!.onAcknowledgePurchaseResponse(ok)
+                factory.client.consumeListener!!.onConsumeResponse(ok, "consume-token")
+            }
+            connection.close()
+            assertEquals(1, factory.client.endCount)
+        } finally {
+            requests.forEach { it.cancel() }
+            connection.close()
+        }
+    }
+
+    @Test
+    fun callerCancellationDoesNotCloseOtherRequestsAndLateCallbacksAreHarmless() = runTest {
+        val factory = FakeBillingClientFactory()
+        val connection = PlayBillingConnection(factory, this)
+        connection.connect()
+        factory.client.isReady = true
+        factory.client.finishSetup(BillingClient.BillingResponseCode.OK)
+        val cancelled = async { connection.acknowledge("cancelled") }
+        val surviving = async { connection.consume("surviving") }
+        runCurrent()
+        cancelled.cancel()
+        runCurrent()
+        val ok = BillingResult.newBuilder().setResponseCode(BillingClient.BillingResponseCode.OK).build()
+        repeat(2) { factory.client.acknowledgeListener!!.onAcknowledgePurchaseResponse(ok) }
+        assertTrue(cancelled.isCancelled)
+        assertEquals(0, factory.client.endCount)
+        factory.client.consumeListener!!.onConsumeResponse(ok, "surviving")
+        runCurrent()
+        assertSame(ok, surviving.await())
+        connection.close()
+    }
+
+    @Test
+    fun completedCallbackWinsOverCloseAndDuplicateCallbacks() = runTest {
+        val factory = FakeBillingClientFactory()
+        val connection = PlayBillingConnection(factory, this)
+        connection.connect()
+        factory.client.isReady = true
+        factory.client.finishSetup(BillingClient.BillingResponseCode.OK)
+        val request = async { connection.consume("token") }
+        runCurrent()
+        val ok = BillingResult.newBuilder().setResponseCode(BillingClient.BillingResponseCode.OK).build()
+        factory.client.consumeListener!!.onConsumeResponse(ok, "token")
+        // The caller has not resumed yet; a completed provider response must survive closure.
+        connection.close()
+        factory.client.consumeListener!!.onConsumeResponse(
+            BillingResult.newBuilder().setResponseCode(BillingClient.BillingResponseCode.ERROR).build(),
+            "token",
+        )
+        runCurrent()
+        assertSame(ok, request.await())
+    }
+
+    @Test
+    fun disconnectFailureStillSettlesRequestsAndCloseIsIdempotent() = runTest {
+        val factory = FakeBillingClientFactory()
+        val connection = PlayBillingConnection(factory, this)
+        connection.connect()
+        factory.client.isReady = true
+        factory.client.finishSetup(BillingClient.BillingResponseCode.OK)
+        val request = async { runCatching { connection.acknowledge("token") } }
+        runCurrent()
+        val disconnectFailure = IllegalStateException("provider disconnect failed")
+        factory.client.endFailure = disconnectFailure
+        assertSame(disconnectFailure, runCatching { connection.close() }.exceptionOrNull())
+        runCurrent()
+        assertTrue(request.isCompleted)
+        assertEquals("Play Billing connection closed.", request.await().exceptionOrNull()?.message)
+        connection.close()
+        assertEquals(1, factory.client.endCount)
+    }
+
+    @Test
+    fun closeSettlesConnectionSetupWaitersAndRejectsLaterRequests() = runTest {
+        val factory = FakeBillingClientFactory()
+        val connection = PlayBillingConnection(factory, this)
+        val request = async { runCatching { connection.acknowledge("token") } }
+        runCurrent()
+        connection.close()
+        factory.client.finishSetup(BillingClient.BillingResponseCode.OK)
+        runCurrent()
+        assertTrue(request.isCompleted)
+        assertTrue(request.await().exceptionOrNull() is IllegalStateException)
+        assertTrue(runCatching { connection.consume("later") }.exceptionOrNull() is IllegalStateException)
+        assertEquals(0, factory.client.pendingRequestCount)
+        assertEquals(1, factory.client.startCount)
+    }
+
+    @Test
     fun clientIsLazyAndRegistersOneGlobalPurchaseListener() {
         val factory = FakeBillingClientFactory()
         val connection = PlayBillingConnection(
@@ -175,6 +287,12 @@ class PlayBillingConnectionTest {
     private class FakeBillingClientAdapter : BillingClientAdapter {
         override var isReady: Boolean = false
         var startCount = 0
+        var endCount = 0
+        var endFailure: Throwable? = null
+        var pendingRequestCount = 0
+        var purchasesListener: PurchasesResponseListener? = null
+        var acknowledgeListener: AcknowledgePurchaseResponseListener? = null
+        var consumeListener: ConsumeResponseListener? = null
         var connectionListener: BillingClientStateListener? = null
 
         override fun startConnection(listener: BillingClientStateListener) {
@@ -194,12 +312,15 @@ class PlayBillingConnectionTest {
             )
         }
 
-        override fun endConnection() = Unit
+        override fun endConnection() {
+            endCount++
+            endFailure?.let { throw it }
+        }
 
         override fun queryProductDetailsAsync(
             params: QueryProductDetailsParams,
             listener: ProductDetailsResponseListener,
-        ) = Unit
+        ) { pendingRequestCount++ }
 
         override fun launchBillingFlow(activity: Activity, params: BillingFlowParams): BillingResult =
             error("Not used by connection lifecycle tests")
@@ -207,13 +328,22 @@ class PlayBillingConnectionTest {
         override fun queryPurchasesAsync(
             params: QueryPurchasesParams,
             listener: PurchasesResponseListener,
-        ) = Unit
+        ) {
+            pendingRequestCount++
+            purchasesListener = listener
+        }
 
         override fun acknowledgePurchase(
             params: AcknowledgePurchaseParams,
             listener: AcknowledgePurchaseResponseListener,
-        ) = Unit
+        ) {
+            pendingRequestCount++
+            acknowledgeListener = listener
+        }
 
-        override fun consumeAsync(params: ConsumeParams, listener: ConsumeResponseListener) = Unit
+        override fun consumeAsync(params: ConsumeParams, listener: ConsumeResponseListener) {
+            pendingRequestCount++
+            consumeListener = listener
+        }
     }
 }
