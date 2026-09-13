@@ -199,6 +199,14 @@ internal class FeatureService(
         balance: Double,
         entityId: String?,
         expectedScope: IdentityScope,
+    ): FeatureInfo.Mutation? = stageAuthoritativeUsageAccess(featureId, balance, entityId, expectedScope)
+
+    internal fun stageAuthoritativeUsageAccess(
+        featureId: String,
+        balance: Double?,
+        entityId: String?,
+        expectedScope: IdentityScope,
+        receiptAccess: FeatureAccess? = null,
     ): FeatureInfo.Mutation? {
         var publication: FeatureInfo.Mutation? = null
         val admitted = identity.withCurrentScope(expectedScope) admitted@ {
@@ -207,11 +215,11 @@ internal class FeatureService(
                 if (cacheDistinctId != expectedScope.distinctId) return@admitted false
                 val authoritative = realTimeCache[CacheKey(featureId, entityId)]?.access
                     ?: entityAccess(featureId, entityId)
-                val visible = visibleAccess(featureId, authoritative)
+                val visible = receiptAccess ?: visibleAccess(featureId, authoritative)
                     ?: durableGlobalAccess()[featureId]
                     ?: return@admitted true
-                val updated = FeatureAccess(
-                    allowed = authoritative?.unlimited == true || balance >= DEFAULT_REQUIRED_BALANCE,
+                val updated = receiptAccess ?: FeatureAccess(
+                    allowed = authoritative?.unlimited == true || (balance ?: 0.0) >= DEFAULT_REQUIRED_BALANCE,
                     unlimited = authoritative?.unlimited ?: false,
                     balance = balance,
                     type = authoritative?.type ?: visible.type,
