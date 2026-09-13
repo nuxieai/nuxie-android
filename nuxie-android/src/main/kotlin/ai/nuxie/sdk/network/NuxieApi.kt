@@ -314,7 +314,7 @@ internal class NuxieApi(
             append(jsonString(customerId))
             append(",\"featureId\":")
             append(jsonString(featureId))
-            requiredBalance?.let { append(",\"requiredBalance\":").append(it) }
+            requiredBalance?.let { append(",\"requiredBalance\":").append(jsonNumber(it)) }
             entityId?.let { append(",\"entityId\":").append(jsonString(it)) }
             append('}')
         }.encodeToByteArray()
@@ -364,7 +364,7 @@ internal class NuxieApi(
             append("{\"apiKey\":").append(jsonString(apiKey))
             append(",\"customerId\":").append(jsonString(report.customerId))
             append(",\"featureId\":").append(jsonString(report.featureId))
-            append(",\"requiredBalance\":").append(report.requiredBalance)
+            append(",\"requiredBalance\":").append(jsonNumber(report.requiredBalance))
             append(",\"eventData\":{\"value\":").append(report.eventData.value)
             report.eventData.properties?.let { properties ->
                 append(",\"properties\":")
@@ -529,6 +529,11 @@ internal class NuxieApi(
         "creditSystem" -> FeatureType.CREDIT_SYSTEM
         else -> null
     }
+
+    // Whole quantities must use integer JSON spelling for the ingest contract.
+    // BigDecimal preserves the Double's decimal value without truncating fractions.
+    private fun jsonNumber(value: Double): String =
+        java.math.BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()
 
     private fun jsonString(value: String): String = buildString {
         append('"')

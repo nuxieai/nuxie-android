@@ -228,7 +228,7 @@ class NuxieApiTest {
         assertEquals(3.0, checked.balance!!, 0.0)
         assertEquals("https://dev-i.nuxie.ai/entitled", responding.request!!.url.toString())
         assertEquals(
-            """{"apiKey":"pk_test_key","customerId":"customer-1","featureId":"exports","requiredBalance":2.0,"entityId":"project-1"}""",
+            """{"apiKey":"pk_test_key","customerId":"customer-1","featureId":"exports","requiredBalance":2,"entityId":"project-1"}""",
             responding.request!!.body.decodeToString(),
         )
     }
