@@ -31,6 +31,14 @@ class FeatureInfo {
         object Ready : State
     }
 
+    /** Access, readiness and identity from one committed publication. */
+    data class Snapshot(
+        val all: Map<String, FeatureAccess>,
+        val state: State,
+        val identityGeneration: Long,
+        val revision: Long,
+    )
+
     private val published = MutableStateFlow(
         PublishedSnapshot(
             features = emptyMap(),
@@ -38,6 +46,7 @@ class FeatureInfo {
             state = State.Unknown,
             featuresRevision = 0L,
             generationSeq = 0L,
+            revision = 0L,
         )
     )
     private val stagingLock = Any()
@@ -82,6 +91,7 @@ class FeatureInfo {
          *  a stale writer's CAS against the pre-swap object can never
          *  succeed over a field-identical replacement (the ABA case). */
         val generationSeq: Long,
+        val revision: Long,
     )
 
     /** Fence shared by readiness, values, and every last-mile callback. */
@@ -168,6 +178,7 @@ class FeatureInfo {
                     featuresRevision = current.featuresRevision +
                         (if (featuresChanged) 1L else 0L),
                     generationSeq = generation.seq,
+                    revision = current.revision + 1,
                 )
                 if (published.compareAndSet(current, next)) return next
             }
@@ -185,6 +196,13 @@ class FeatureInfo {
         internal val previous: Deferred<Unit>,
         internal val completed: CompletableDeferred<Unit>,
         internal val apply: suspend () -> Unit,
+    )
+
+    /** Observers receive an initial coherent snapshot and every newer revision. */
+    val snapshot: StateFlow<Snapshot> = ProjectedStateFlow(
+        source = published,
+        project = { Snapshot(it.features, it.state, it.generationSeq, it.revision) },
+        distinctBy = { it.revision },
     )
 
     val state: StateFlow<State> = ProjectedStateFlow(
