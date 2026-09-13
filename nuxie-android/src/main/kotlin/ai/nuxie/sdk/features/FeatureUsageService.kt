@@ -15,6 +15,10 @@ import android.util.AtomicFile
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -56,18 +60,43 @@ internal class FeatureUsageService(
         }
     }
 
-    suspend fun recover() = withContext(Dispatchers.IO) {
-        journalMutex.withLock {
-            for (record in loadCommands()) {
-                try { deliver(record) } catch (error: Exception) {
-                    if (error is CancellationException) throw error
-                    Log.w(LOG_TAG, "Feature command remains pending", error)
+    private class PublicationDrain : AbstractCoroutineContextElement(Key) {
+        companion object Key : CoroutineContext.Key<PublicationDrain>
+    }
+
+    private suspend fun <T> withJournalDecision(decide: suspend (MutableList<FeatureInfo.Mutation>) -> T): T {
+        val reentrant = currentCoroutineContext()[PublicationDrain] != null
+        return withContext(NonCancellable) {
+            val publications = mutableListOf<FeatureInfo.Mutation>()
+            val result = runCatching { journalMutex.withLock { decide(publications) } }
+            val drain: suspend () -> Unit = {
+                withContext(PublicationDrain()) {
+                    publications.forEach { features.publishStaged(it) }
                 }
+            }
+            // A listener may await another command. Its publication follows the
+            // current FIFO slot, so that nested command must return before draining.
+            if (reentrant) scope.launch(NonCancellable) { drain() } else drain()
+            result.getOrThrow()
+        }
+    }
+
+    suspend fun recover() = withContext(Dispatchers.IO) {
+        val operationIds = journalMutex.withLock { loadCommands().map { it.getValue("command").jsonObject.getValue("operationId") } }
+        for (operationId in operationIds) {
+            try {
+                withJournalDecision { publications ->
+                    loadCommands().firstOrNull { it.getValue("command").jsonObject["operationId"] == operationId }
+                        ?.let { deliver(it, publications) }
+                }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                Log.w(LOG_TAG, "Feature command remains pending", error)
             }
         }
     }
 
-    private suspend fun deliver(record: JsonObject): FeatureUsageResult {
+    private suspend fun deliver(record: JsonObject, publications: MutableList<FeatureInfo.Mutation>): FeatureUsageResult {
         val command = record.getValue("command").jsonObject
         val operationId = command.getValue("operationId")
         val response = (record["response"] as? JsonObject) ?: try { api.consumeFeature(command) } catch (error: NuxieApi.RequestRejectedException) {
@@ -87,15 +116,14 @@ internal class FeatureUsageService(
         if (accepted) {
             val current = identity.captureScope()
             if (current.distinctId == distinctId && response["idempotentReplay"] != JsonPrimitive(true)) response.double("balance")?.let {
-                features.applyAuthoritativeUsageBalance(featureId, it, entityId, current)
+                features.stageAuthoritativeUsageBalance(featureId, it, entityId, current)?.let(publications::add)
             }
             captureAcceptedUse(featureId, amount, entityId, record["metadata"] as? JsonObject,
                 command.string("operationId")!!, distinctId)
         }
         saveCommands(loadCommands().filterNot { it["command"]?.jsonObject?.get("operationId") == operationId })
         return FeatureUsageResult(success = accepted, featureId = featureId, amountUsed = amount,
-            message = response.string("code"), usage = FeatureUsageResult.UsageInfo(
-                current = amount, limit = null, remaining = response.double("balance")),
+            message = response.string("code"), usage = null,
             authoritativeAccess = when (response.string("type")) {
                 "boolean" -> FeatureType.BOOLEAN
                 "metered" -> FeatureType.METERED
@@ -105,7 +133,8 @@ internal class FeatureUsageService(
         ).also {
                 it.consumptionReceipt = FeatureConsumptionResult(command.string("operationId")!!, accepted,
                     response.string("code")!!, amount, response.double("balance"), response["unlimited"] == JsonPrimitive(true),
-                    response["active"] == JsonPrimitive(true), response["idempotentReplay"] == JsonPrimitive(true))
+                    response["active"] == JsonPrimitive(true), response["idempotentReplay"] == JsonPrimitive(true),
+                    response.string("customerId") ?: distinctId, response.string("featureId") ?: featureId, response.double("occurredAtMs"))
             }
     }
 
@@ -187,7 +216,8 @@ internal class FeatureUsageService(
         }
         ensureIdentity(identityScope)
 
-        journalMutex.withLock {
+        val commandId = operationId ?: TimeBasedEpochGenerator.shared.next()
+        withJournalDecision { publications ->
             val record = identity.withCurrentScope(identityScope) {
                 val fields = linkedMapOf("customerId" to JsonPrimitive(distinctId),
                     "featureId" to JsonPrimitive(featureId), "quantity" to JsonPrimitive(amount.toLong()))
@@ -203,15 +233,15 @@ internal class FeatureUsageService(
                 }
                 val existing = loadCommands().firstOrNull { record ->
                     val command = record.getValue("command").jsonObject
-                    (operationId == null || command.string("operationId") == operationId) && fields.all { (key, value) -> command[key] == value } &&
+                    (command.string("operationId") == commandId) && fields.all { (key, value) -> command[key] == value } &&
                         command["entityId"] == fields["entityId"] && command["mode"] == fields["mode"] && record["metadata"] == metadata
                 }
                 existing ?: JsonObject(buildMap {
-                    put("command", JsonObject(fields + ("operationId" to JsonPrimitive(operationId ?: TimeBasedEpochGenerator.shared.next()))))
+                    put("command", JsonObject(fields + ("operationId" to JsonPrimitive(commandId))))
                     metadata?.let { put("metadata", it) }
                 }).also { saveCommands(loadCommands() + it) }
             } ?: throw CancellationException()
-            val result = deliver(record)
+            val result = deliver(record, publications)
             ensureIdentity(identityScope)
             result
         }

@@ -30,6 +30,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -118,7 +119,7 @@ class NuxieMeteredUseTest {
         )
 
         assertTrue(result.success)
-        assertEquals(8.0, result.usage!!.remaining!!, 0.0)
+        assertNull(result.usage)
         assertEquals(8.0, result.authoritativeAccess!!.balance!!, 0.0)
         val body = Json.parseToJsonElement(
             transport.requests.single { it.url.path == "/feature/consume" }.body.decodeToString(),
@@ -210,7 +211,8 @@ class NuxieMeteredUseTest {
         )
 
         assertTrue(result.success)
-        assertEquals(0.0, result.usage!!.remaining!!, 0.0)
+        assertNull(result.usage)
+        assertEquals(0.0, result.authoritativeAccess!!.balance!!, 0.0)
         assertTrue(core.featureInfo.isAllowed("exports"))
         assertEquals(5.0, core.featureInfo.balance("exports")!!, 0.0)
         core.stop()
