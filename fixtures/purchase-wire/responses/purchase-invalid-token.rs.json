@@ -3,12 +3,11 @@
   "lane": "rs",
   "request": "purchase-invalid-token",
   "endpoint": "/purchase",
-  "statusCode": 404,
+  "statusCode": 503,
   "body": {
-    "code": "purchase_token_invalid",
-    "error": "Purchase token not found: fixture-invalid-token",
-    "providerResponse": "{\"error\":{\"code\":404,\"message\":\"Purchase token not found: fixture-invalid-token\",\"status\":\"NOT_FOUND\",\"errors\":[{\"reason\":\"purchaseTokenNotFound\"}]}}",
-    "success": false
+    "success": false,
+    "error": "Google Play purchase processing is unavailable",
+    "code": "google_play_purchase_unavailable"
   },
-  "bodyText": "{\"code\":\"purchase_token_invalid\",\"error\":\"Purchase token not found: fixture-invalid-token\",\"providerResponse\":\"{\\\"error\\\":{\\\"code\\\":404,\\\"message\\\":\\\"Purchase token not found: fixture-invalid-token\\\",\\\"status\\\":\\\"NOT_FOUND\\\",\\\"errors\\\":[{\\\"reason\\\":\\\"purchaseTokenNotFound\\\"}]}}\",\"success\":false}"
+  "bodyText": "{\"success\":false,\"error\":\"Google Play purchase processing is unavailable\",\"code\":\"google_play_purchase_unavailable\"}"
 }

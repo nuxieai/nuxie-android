@@ -15,18 +15,18 @@ NUXIE_GENERATE_PURCHASE_WIRE_FIXTURES=1 ./gradlew \
 ```
 
 Normal unit tests regenerate the same deterministic cases in memory and fail
-if a committed file differs. `entitled-atomic-use-full` and
-`entitled-atomic-replay` come from a failed call followed by a retry through
+if a committed file differs. `consume-atomic-use-full` and
+`consume-atomic-replay` come from a failed call followed by a retry through
 `PurchaseService.useFeatureWithPendingPurchase`. The test captures both real
-`/entitled` requests and requires byte-identical `bodyText`, including the
-stable `event_id` owned by `PurchaseService`.
+`/feature/consume` requests and requires byte-identical `bodyText`, including the
+stable `operationId` owned by `PurchaseService`.
 
 The remaining Play request cases call `NuxieApi.postPurchase` or
 `NuxieApi.useFeatureWithPurchase` with fixed report values and a capturing
 transport.
 
-`entitled-appstore-untouched` is different: it is a server-contract vector
-pinning the `/entitled` App Store arm shape defined by the iOS `CodingKeys`
+`consume-appstore-untouched` is different: it is a server-contract vector
+pinning the `/feature/consume` App Store arm shape defined by the iOS `CodingKeys`
 canon for the parent repository's worker replay. Android cannot emit App Store
 evidence, so this vector is deliberately not an Android encoder product or
 Android encoder coverage. It is maintained locally; generating these fixtures

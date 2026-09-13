@@ -3,28 +3,11 @@
   "lane": "ts",
   "request": "purchase-one-time",
   "endpoint": "/purchase",
-  "statusCode": 200,
+  "statusCode": 503,
   "body": {
-    "success": true,
-    "customer_id": "b0982940-81ec-579f-a6d1-85006ed216e6",
-    "features": [
-      {
-        "id": "feature-commerce-one-time",
-        "ext_id": "fixture-credits-one-time",
-        "type": "metered",
-        "allowed": true,
-        "balance": 10,
-        "unlimited": false
-      }
-    ],
-    "catalog_product": {
-      "id": "product-commerce-one-time",
-      "store_product_id": "fixture-credit-pack",
-      "base_plan_id": null,
-      "purchase_option_id": "buy",
-      "offer_id": "default",
-      "store_product_type": "nonConsumable"
-    }
+    "success": false,
+    "error": "Google Play purchase processing is unavailable",
+    "code": "google_play_purchase_unavailable"
   },
-  "bodyText": "{\"success\":true,\"customer_id\":\"b0982940-81ec-579f-a6d1-85006ed216e6\",\"features\":[{\"id\":\"feature-commerce-one-time\",\"ext_id\":\"fixture-credits-one-time\",\"type\":\"metered\",\"allowed\":true,\"balance\":10,\"unlimited\":false}],\"catalog_product\":{\"id\":\"product-commerce-one-time\",\"store_product_id\":\"fixture-credit-pack\",\"base_plan_id\":null,\"purchase_option_id\":\"buy\",\"offer_id\":\"default\",\"store_product_type\":\"nonConsumable\"}}"
+  "bodyText": "{\"success\":false,\"error\":\"Google Play purchase processing is unavailable\",\"code\":\"google_play_purchase_unavailable\"}"
 }

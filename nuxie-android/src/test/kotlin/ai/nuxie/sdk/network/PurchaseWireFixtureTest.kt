@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.network
 
+import ai.nuxie.sdk.testsupport.featureCommandResponse
 import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponse
 
 import ai.nuxie.sdk.LogLevel
@@ -92,12 +93,11 @@ class PurchaseWireFixtureTest {
         val fixture = PurchaseWireFixtures.requests()
             .single { it.name == APP_STORE_SERVER_CONTRACT_CASE }
 
-        assertEquals("/entitled", fixture.endpoint)
+        assertEquals("/feature/consume", fixture.endpoint)
         val body = Json.parseToJsonElement(fixture.bodyText).jsonObject
         assertEquals("fixture.header.payload.signature", body.getValue("purchase").jsonObject
-            .getValue("transaction_jwt").jsonPrimitive.content)
-        assertEquals("fixture-entitled-appstore-event", body.getValue("purchase").jsonObject
-            .getValue("event_id").jsonPrimitive.content)
+            .getValue("signedTransaction").jsonPrimitive.content)
+        assertEquals("fixture-consume-appstore-event", body.getValue("operationId").jsonPrimitive.content)
         assertCommittedRequest(fixture)
     }
 
@@ -139,12 +139,12 @@ class PurchaseWireFixtureTest {
         )
         PurchaseWireResponses.assertParses(
             response(
-                name = "scaffold-entitled-success",
-                request = "entitled-atomic-use-full",
-                endpoint = "/entitled",
+                name = "scaffold-consume-success",
+                request = "consume-atomic-use-full",
+                endpoint = "/feature/consume",
                 statusCode = 200,
                 bodyText =
-                    """{"customerId":"fixture-response-customer","featureId":"fixture-response-feature","code":"allowed","allowed":true,"unlimited":false,"balance":6.5,"type":"creditSystem"}""",
+                    """{"customerId":"fixture-response-customer","featureId":"fixture-response-feature","operationId":"fixture-response-event","quantity":2,"code":"consumed","accepted":true,"active":true,"idempotentReplay":false,"unlimited":false,"balance":6.5,"type":"creditSystem"}""",
             ),
         )
         PurchaseWireResponses.assertParses(
@@ -158,9 +158,9 @@ class PurchaseWireFixtureTest {
         )
         PurchaseWireResponses.assertParses(
             response(
-                name = "scaffold-entitled-error",
-                request = "entitled-atomic-use-minimal",
-                endpoint = "/entitled",
+                name = "scaffold-consume-error",
+                request = "consume-atomic-use-minimal",
+                endpoint = "/feature/consume",
                 statusCode = 503,
                 bodyText = """{"error":"temporarily unavailable"}""",
             ),
@@ -338,7 +338,7 @@ class PurchaseWireFixtureTest {
     }
 
     private companion object {
-        const val APP_STORE_SERVER_CONTRACT_CASE = "entitled-appstore-untouched"
+        const val APP_STORE_SERVER_CONTRACT_CASE = "consume-appstore-untouched"
     }
 }
 
@@ -404,7 +404,7 @@ private object PurchaseWireFixtures {
                 ),
             ),
             captureEntitled(
-                name = "entitled-atomic-use-minimal",
+                name = "consume-atomic-use-minimal",
                 report = NuxieApi.PurchaseBackedFeatureUseReport(
                     customerId = "fixture-customer-minimal",
                     featureId = "fixture-credits-minimal",
@@ -414,11 +414,11 @@ private object PurchaseWireFixtures {
                     purchase = NuxieApi.PlayPurchaseUseReport(
                         packageName = "ai.nuxie.fixture",
                         productId = "fixture-credit-pack-minimal",
-                        purchaseToken = "fixture-entitled-minimal-token",
+                        purchaseToken = "fixture-consume-minimal-token",
                         basePlanId = null,
                         offerId = null,
                         obfuscatedAccountId = null,
-                        eventId = "fixture-entitled-minimal-event",
+                        eventId = "fixture-consume-minimal-event",
                     ),
                 ),
             ),
@@ -464,7 +464,7 @@ private object PurchaseWireFixtures {
         val transport = CapturingTransport(ENTITLED_RESPONSE)
         NuxieApi(API_KEY, NuxieEnvironment.DEVELOPMENT, transport)
             .useFeatureWithPurchase(report)
-        return transport.fixture(name, "/entitled")
+        return transport.fixture(name, "/feature/consume")
     }
 
     private fun captureTokenFirstPurchase(): RequestFixture {
@@ -494,21 +494,15 @@ private object PurchaseWireFixtures {
             put("apiKey", API_KEY)
             put("customerId", "fixture-customer-appstore")
             put("featureId", "fixture-credits-appstore")
-            put("requiredBalance", 2.5)
-            put("eventData", buildJsonObject {
-                put("value", 2.5)
-                put("properties", buildJsonObject {
-                    put("source", "commerce-wire-fixture")
-                })
-            })
-            put("idempotencyKey", "fixture-entitled-appstore-event")
+            put("quantity", 2)
+            put("operationId", "fixture-consume-appstore-event")
             put("entityId", "fixture-workspace")
             put("purchase", buildJsonObject {
-                put("transaction_jwt", "fixture.header.payload.signature")
-                put("event_id", "fixture-entitled-appstore-event")
+                put("signedTransaction", "fixture.header.payload.signature")
+                put("type", "appstore")
             })
         }.toString()
-        return RequestFixture("entitled-appstore-untouched", "/entitled", body)
+        return RequestFixture("consume-appstore-untouched", "/feature/consume", body)
     }
 
     private fun captureAtomicReplay(): List<RequestFixture> {
@@ -524,7 +518,7 @@ private object PurchaseWireFixtures {
         val store = InMemoryPurchaseEvidenceStore().also { evidenceStore ->
             evidenceStore.upsert(
                 PurchaseEvidence(
-                    purchaseToken = "fixture-entitled-full-token",
+                    purchaseToken = "fixture-consume-full-token",
                     authorityScope = FULL_PURCHASE_SCOPE,
                     packageName = "ai.nuxie.fixture",
                     storeProductIds = listOf("fixture-credit-pack-full"),
@@ -584,7 +578,7 @@ private object PurchaseWireFixtures {
                     service.useFeatureWithPendingPurchase(
                         distinctId = FULL_CUSTOMER_ID,
                         featureId = FULL_FEATURE_ID,
-                        amount = 2.5,
+                        amount = 2.0,
                         entityId = "fixture-workspace",
                         metadata = FULL_METADATA,
                     )
@@ -594,7 +588,7 @@ private object PurchaseWireFixtures {
                     service.useFeatureWithPendingPurchase(
                         distinctId = FULL_CUSTOMER_ID,
                         featureId = FULL_FEATURE_ID,
-                        amount = 2.5,
+                        amount = 2.0,
                         entityId = "fixture-workspace",
                         metadata = FULL_METADATA,
                     ),
@@ -612,8 +606,8 @@ private object PurchaseWireFixtures {
             requests[1],
         )
         return listOf(
-            RequestFixture("entitled-atomic-use-full", "/entitled", requests[0].decodeToString()),
-            RequestFixture("entitled-atomic-replay", "/entitled", requests[1].decodeToString()),
+            RequestFixture("consume-atomic-use-full", "/feature/consume", requests[0].decodeToString()),
+            RequestFixture("consume-atomic-replay", "/feature/consume", requests[1].decodeToString()),
         )
     }
 
@@ -622,7 +616,8 @@ private object PurchaseWireFixtures {
 
         override fun execute(request: HttpTransport.Request): HttpTransport.Response {
             requests += request
-            return HttpTransport.Response(200, responseBody.encodeToByteArray())
+            return if (request.url.path == "/feature/consume") featureCommandResponse(request, balance = 8.0)
+                else HttpTransport.Response(200, responseBody.encodeToByteArray())
         }
 
         fun fixture(name: String, endpoint: String): RequestFixture {
@@ -638,12 +633,12 @@ private object PurchaseWireFixtures {
         private val requestBodies = mutableListOf<ByteArray>()
 
         override fun execute(request: HttpTransport.Request): HttpTransport.Response {
-            if (request.url.path != "/entitled") {
+            if (request.url.path != "/feature/consume") {
                 return canonicalJourneyProfileResponse()
             }
             requestBodies += request.body.copyOf()
             if (requestBodies.size == 1) return HttpTransport.Response(503, ByteArray(0))
-            return HttpTransport.Response(200, FULL_ENTITLED_RESPONSE.encodeToByteArray())
+            return featureCommandResponse(request, balance = 8.0)
         }
 
         fun entitledRequests(): List<ByteArray> = requestBodies.toList()
@@ -773,7 +768,7 @@ private object PurchaseWireResponses {
         if (fixture.statusCode in 200..299) {
             when (fixture.endpoint) {
                 "/purchase" -> assertPurchaseResponse(fixture, api)
-                "/entitled" -> assertFeatureCheckResponse(fixture, api)
+                "/feature/consume" -> assertFeatureCheckResponse(fixture, api)
                 else -> throw AssertionError("Unsupported purchase response endpoint ${fixture.endpoint}")
             }
         } else {
@@ -794,12 +789,17 @@ private object PurchaseWireResponses {
     }
 
     private fun assertFeatureCheckResponse(fixture: ResponseFixture, api: NuxieApi) {
-        val result = api.useFeatureWithPurchase(responsePathFeatureUseReport())
         val body = fixture.successBody()
+        val report = responsePathFeatureUseReport()
+        val result = api.useFeatureWithPurchase(report.copy(
+            customerId = body.requiredString("customerId"), featureId = body.requiredString("featureId"),
+            eventData = report.eventData.copy(value = body.getValue("quantity").jsonPrimitive.double),
+            purchase = report.purchase.copy(eventId = body.requiredString("operationId")),
+        ))
         assertEquals(body.requiredString("customerId"), result.customerId)
         assertEquals(body.requiredString("featureId"), result.featureId)
         assertEquals(body.requiredString("code"), result.code)
-        assertEquals(body.getValue("allowed").jsonPrimitive.boolean, result.allowed)
+        assertEquals(body.getValue("active").jsonPrimitive.boolean, result.allowed)
         assertEquals(body.getValue("unlimited").jsonPrimitive.boolean, result.unlimited)
         val balance = body["balance"]
             ?.takeUnless { it is JsonNull }
@@ -822,7 +822,7 @@ private object PurchaseWireResponses {
                 )
             }
 
-            "/entitled" -> {
+            "/feature/consume" -> {
                 val error = assertThrows(NuxieApi.RequestRejectedException::class.java) {
                     api.useFeatureWithPurchase(responsePathFeatureUseReport())
                 }
@@ -855,8 +855,8 @@ private object PurchaseWireResponses {
     private fun responsePathFeatureUseReport() = NuxieApi.PurchaseBackedFeatureUseReport(
         customerId = "fixture-response-customer",
         featureId = "fixture-response-feature",
-        requiredBalance = 2.5,
-        eventData = NuxieApi.FeatureUseEventData(value = 2.5, properties = null),
+        requiredBalance = 2.0,
+        eventData = NuxieApi.FeatureUseEventData(value = 2.0, properties = null),
         entityId = null,
         purchase = NuxieApi.PlayPurchaseUseReport(
             packageName = "ai.nuxie.fixture",

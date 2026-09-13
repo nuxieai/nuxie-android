@@ -3,28 +3,11 @@
   "lane": "ts",
   "request": "purchase-token-first",
   "endpoint": "/purchase",
-  "statusCode": 200,
+  "statusCode": 503,
   "body": {
-    "success": true,
-    "customer_id": "21b7ebc6-64af-5041-aa04-7062caefacf3",
-    "features": [
-      {
-        "id": "feature-commerce-token-first",
-        "ext_id": "fixture-credits-token-first",
-        "type": "metered",
-        "allowed": true,
-        "balance": 1,
-        "unlimited": false
-      }
-    ],
-    "catalog_product": {
-      "id": "product-commerce-token-first",
-      "store_product_id": "fixture-credit-pack-token-first",
-      "base_plan_id": null,
-      "purchase_option_id": "buy",
-      "offer_id": "default",
-      "store_product_type": "nonConsumable"
-    }
+    "success": false,
+    "error": "Google Play purchase processing is unavailable",
+    "code": "google_play_purchase_unavailable"
   },
-  "bodyText": "{\"success\":true,\"customer_id\":\"21b7ebc6-64af-5041-aa04-7062caefacf3\",\"features\":[{\"id\":\"feature-commerce-token-first\",\"ext_id\":\"fixture-credits-token-first\",\"type\":\"metered\",\"allowed\":true,\"balance\":1,\"unlimited\":false}],\"catalog_product\":{\"id\":\"product-commerce-token-first\",\"store_product_id\":\"fixture-credit-pack-token-first\",\"base_plan_id\":null,\"purchase_option_id\":\"buy\",\"offer_id\":\"default\",\"store_product_type\":\"nonConsumable\"}}"
+  "bodyText": "{\"success\":false,\"error\":\"Google Play purchase processing is unavailable\",\"code\":\"google_play_purchase_unavailable\"}"
 }
