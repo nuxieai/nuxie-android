@@ -1,8 +1,8 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "d03413d66eba826fb91d45a1b80e8f2bf097b1c0",
+  "sourceCommit": "0adda94e5649f21a6c723a4ec51fea0254581e04",
   "files": {
-    "README.md": "84c053fedd75ccc7bed9dfcd114d759290f1bd568f33ed31de78a3014faad0db",
+    "README.md": "4363d6a79ac9828364a6a02bf400d98c0852b771062258c409a744dd1a5016e7",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
     "encodings/feature-consumption.json": "8b34dd248e9f28a0bead3b07f146b3579cb47f1f486489c46afefaf21f914b72",
     "encodings/feature-usage.json": "2606a5062e041237fb7245dd919e921c383d94735d537e509aab429855b17c69",
@@ -12,6 +12,7 @@
     "events/catalog.json": "9aaca640d32ec64168b83516f139f95493751dc51a5e26598e3adeb9bbd3e87b",
     "events/delivery-disposition.json": "bf2e48165a90e6bf568f00ba804cfa8c2f1efcdc9a5867533a24bbf99a31575d",
     "events/generated-control-routing.json": "f461826c8a2e79d2f08178a1b3a27b03cbcda52ed208f572b995fa7165fef77a",
+    "features/command-recovery.json": "cf79db0033a62cb5dd30703f82599e001177b4f2ef0aad1f3cf177e03913c214",
     "features/optimistic-entitlement-projection.json": "8c9a89b1273a873cf913804897a63ec0704ad092af8bec71de16a3b85aaef59b",
     "ir/eval-vectors.json": "f1a5a7a0f0cfaea29d62999cddf5082dade701ae07a9d3e523dc671e999e3d7d",
     "ir/response-field-conformance.json": "9871fd7126131f34c4e3ef91a89eddb50612152a9e0fbe987fed77e2b69e4001",

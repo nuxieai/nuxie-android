@@ -37,7 +37,7 @@ internal class NuxieApi(
     class BatchRejectedException(val statusCode: Int, val retryAfter: String? = null) :
         IOException("Batch rejected with status $statusCode")
 
-    class RequestRejectedException(val statusCode: Int, endpoint: String, val code: String? = null) :
+    class RequestRejectedException(val statusCode: Int, endpoint: String, val code: String? = null, val retryAfter: String? = null) :
         IOException("$endpoint rejected with status $statusCode")
 
     class PurchaseRejectedException(
@@ -313,7 +313,7 @@ internal class NuxieApi(
             val code = runCatching {
                 (Json.parseToJsonElement(response.body.decodeToString()).jsonObject["code"] as? JsonPrimitive)?.content
             }.getOrNull()
-            throw RequestRejectedException(response.statusCode, "/feature/consume", code)
+            throw RequestRejectedException(response.statusCode, "/feature/consume", code, response.header("Retry-After"))
         }
         val text = response.body.decodeToString()
         StrictJsonValidator.requireNoDuplicateKeys(text)

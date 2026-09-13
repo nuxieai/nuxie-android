@@ -4,6 +4,8 @@ import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.EventRouteCommit
+import ai.nuxie.sdk.fixtures.FixtureRunner
+import ai.nuxie.sdk.network.NuxieApi
 import org.robolectric.annotation.Config
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
@@ -23,10 +25,16 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.long
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -188,7 +196,10 @@ class FeatureCommandRecoveryTest {
             // A newer remote decision may arrive before journal reconciliation.
             core.features.applyAuthoritativeUsageBalance("credits", 3.0, null)
             failCapture = false
-            service().recover()
+            val reopened = service()
+            reopened.startRecovery()
+            withTimeout(5_000) { while (file.readText() != "[]") delay(10) }
+            reopened.close()
             assertNull(core.featureInfo.balance("credits"))
             assertNull(core.features.getCached("credits", null))
             assertTrue(store.hasStableOutcome(service().localEventId(core.identity.distinctId(), "stored-receipt")))
@@ -339,13 +350,13 @@ class FeatureCommandRecoveryTest {
     @Test
     fun pendingOperationsAreScopedToCustomer() = runBlocking {
         var failFirst = true
-        val requests = mutableListOf<JsonObject>()
+        val requests = CopyOnWriteArrayList<JsonObject>()
         val transport = FakeTransport().apply {
             respond = { request ->
                 val command = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
                 requests += command
                 if (failFirst) { failFirst = false; throw IOException("network offline") }
-                receipt(command, 8.0)
+                receipt(command, if (command["customerId"] == JsonPrimitive("customer-a")) 1.0 else 8.0)
             }
         }
         val core = testCore(transport)
@@ -360,7 +371,10 @@ class FeatureCommandRecoveryTest {
             assertTrue(service.consumeFeature("credits", 2.0, "same-id", null).accepted)
             assertTrue(file.readText().contains("customer-a"))
             assertFalse(file.readText().contains("customer-b"))
-            service.recover()
+            service.startRecovery()
+            withTimeout(5_000) { while (file.readText() != "[]") delay(10) }
+            assertEquals(8.0, core.featureInfo.balance("credits")!!, 0.0)
+            service.close()
             assertEquals(requests[0], requests[2])
             assertEquals("[]", file.readText())
         } finally { core.stop() }
@@ -418,6 +432,139 @@ class FeatureCommandRecoveryTest {
             assertEquals(0.0, core.features.getCached("credits", null)!!.balance!!, 0.0)
             assertFalse(core.store.hasStableOutcome(service.localEventId(customer, "denied")))
         } finally { core.stop() }
+    }
+
+    @Test
+    fun activeRecoveryRetriesFailedConsumptionWithoutAnotherLifecycleTransition() = runBlocking {
+        val commands = CopyOnWriteArrayList<JsonObject>()
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path != "/feature/consume") HttpTransport.Response(503, ByteArray(0))
+                else {
+                    val command = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                    commands += command
+                    if (commands.size == 1) throw IOException("offline")
+                    receipt(command, 8.0)
+                }
+            }
+        }
+        val core = testCore(transport)
+        try {
+            core.featureUsage.startRecovery()
+            core.purchases.awaitInitialProjection()
+            try { core.featureUsage.consumeFeature("credits", 1.0, "active-retry", null); fail("Expected offline") }
+            catch (_: IOException) { }
+            val eventId = core.featureUsage.localEventId(core.identity.distinctId(), "active-retry")
+            withTimeout(5_000) {
+                while (!core.store.hasStableOutcome(eventId)) delay(10)
+            }
+            assertEquals(2, commands.size)
+            assertEquals(commands[0], commands[1])
+        } finally { core.stop() }
+    }
+
+    @Test
+    fun closingRecoveryWaitsForItsAdmittedReceiptBeforeReturning() = runBlocking {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val commands = CopyOnWriteArrayList<JsonObject>()
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                val command = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                commands += command
+                if (commands.size == 1) throw IOException("offline")
+                entered.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+                receipt(command, 8.0)
+            }
+        }
+        val core = testCore(transport)
+        val file = File(temporary.root, "close-recovery.json")
+        val service = FeatureUsageService(core.api, core.purchases, core.identity, core.features,
+            core.eventLog, core.scope, file)
+        try {
+            core.purchases.awaitInitialProjection()
+            service.startRecovery()
+            try { service.consumeFeature("credits", 1.0, "drain-retry", null); fail("Expected offline") }
+            catch (_: IOException) { }
+            assertTrue(entered.await(3, TimeUnit.SECONDS))
+            val closing = async(Dispatchers.Default) { service.close() }
+            delay(50)
+            assertFalse("close must join the admitted recovery", closing.isCompleted)
+            release.countDown()
+            withTimeout(3_000) { closing.await() }
+            assertEquals("[]", file.readText())
+            assertTrue(core.store.hasStableOutcome(service.localEventId(core.identity.distinctId(), "drain-retry")))
+            try { service.consumeFeature("credits", 1.0, "after-close", null); fail("Closed commands must reject new admission") }
+            catch (_: CancellationException) { }
+            assertEquals(2, commands.size)
+        } finally {
+            release.countDown()
+            service.close()
+            core.stop()
+        }
+    }
+
+    @Test
+    fun sharedCooldownsSurviveReopeningAndApplyToExplicitReplay() {
+        FixtureRunner.run("features/command-recovery.json", "features/command-recovery") { vector -> runBlocking {
+            val status = vector.body.getValue("statusCode").jsonPrimitive.int
+            val header = vector.body.getValue("retryAfter").jsonPrimitive.content
+            val deadline = vector.body.getValue("retryAfterMillis").jsonPrimitive.long
+            var now = 0L
+            val commands = mutableListOf<JsonObject>()
+            val transport = FakeTransport().apply {
+                respond = { request ->
+                    val command = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                    commands += command
+                    if (commands.size == 1) HttpTransport.Response(status, ByteArray(0), mapOf("rEtRy-AfTeR" to header))
+                    else receipt(command, 8.0)
+                }
+            }
+            val core = testCore(transport)
+            val file = File(temporary.newFolder(), "commands.json")
+            fun service() = FeatureUsageService(core.api, core.purchases, core.identity, core.features,
+                core.eventLog, core.scope, file, nowMillis = { now })
+            val original = service()
+            val reopened = service()
+            try {
+                core.purchases.awaitInitialProjection()
+                try { original.consumeFeature("credits", 1.0, "cooldown", null); fail("Expected server cooldown") }
+                catch (error: NuxieApi.RequestRejectedException) { assertEquals(header, error.retryAfter) }
+                assertEquals(deadline, Json.parseToJsonElement(file.readText()).jsonArray.single()
+                    .jsonObject.getValue("nextRetryAtMillis").jsonPrimitive.long)
+                original.close()
+                now = deadline - 1
+                reopened.recover()
+                try { reopened.consumeFeature("credits", 1.0, "cooldown", null); fail("Explicit replay must respect cooldown") }
+                catch (error: NuxieApi.RequestRejectedException) { assertEquals(429, error.statusCode) }
+                assertEquals(1, commands.size)
+                now = deadline
+                reopened.recover()
+                assertEquals(commands[0], commands[1])
+                assertEquals(2, commands.size)
+                assertEquals("[]", file.readText())
+                assertTrue(core.store.hasStableOutcome(reopened.localEventId(core.identity.distinctId(), "cooldown")))
+            } finally { original.close(); reopened.close(); core.stop() }
+        } }
+    }
+
+    @Test
+    fun authenticationAndUnavailableFailuresStayDurableWhilePoisonRetires() = runBlocking {
+        for (status in listOf(400, 401, 403, 404, 408, 410, 413, 422, 425, 429, 500, 503)) {
+            val transport = FakeTransport().apply { respond = { HttpTransport.Response(status, ByteArray(0)) } }
+            val core = testCore(transport)
+            val file = File(temporary.newFolder(), "commands.json")
+            val service = FeatureUsageService(core.api, core.purchases, core.identity, core.features,
+                core.eventLog, core.scope, file)
+            try {
+                core.purchases.awaitInitialProjection()
+                try { service.consumeFeature("credits", 1.0, "retained", null); fail("Expected rejection") }
+                catch (_: NuxieApi.RequestRejectedException) { }
+                val retained = status !in listOf(400, 404, 413, 422)
+                assertEquals("HTTP $status", retained, file.readText() != "[]")
+            } finally { service.close(); core.stop() }
+        }
     }
 
     private fun receipt(command: JsonObject, balance: Double) = HttpTransport.Response(200,
