@@ -150,6 +150,8 @@ class FeatureCommandRecoveryTest {
             val nestedPublished = CompletableDeferred<Unit>()
             core.featureInfo.onFeatureChange = { _, _, access, _ ->
                 if (access.balance == 2.0) {
+                    assertTrue("self-await must fail before closing admission",
+                        runCatching { service.close() }.exceptionOrNull() is IllegalStateException)
                     val nested = service.consumeFeature("credits", 1.0, "nested", null)
                     assertEquals(1.0, nested.balance!!, 0.0)
                     nestedReturned.complete(Unit)
@@ -167,6 +169,52 @@ class FeatureCommandRecoveryTest {
         } finally { core.stop() }
     }
 
+
+    @Test
+    fun closeJoinsAReentrantPublicationAfterItsCommandHasReturned() = runBlocking {
+        var balance = 3.0
+        val transport = FakeTransport().apply {
+            respond = { request -> receipt(Json.parseToJsonElement(request.body.decodeToString()).jsonObject, --balance) }
+        }
+        val core = testCore(transport)
+        val releasePublication = CompletableDeferred<Unit>()
+        try {
+            core.purchases.awaitInitialProjection()
+            core.features.hydrateProfile(core.identity.distinctId(), Json.parseToJsonElement(
+                """{"features":[{"id":"credits","ext_id":"credits","type":"metered","allowed":true,"unlimited":false,"balance":3}]}"""
+            ).jsonObject)
+            val service = FeatureUsageService(core.api, core.purchases, core.identity, core.features, core.eventLog,
+                core.scope, File(temporary.root, "closing-publication.json"))
+            val publicationStarted = CompletableDeferred<Unit>()
+            val publicationFinished = CompletableDeferred<Unit>()
+            core.featureInfo.onFeatureChange = { _, _, access, _ ->
+                if (access.balance == 2.0) service.consumeFeature("credits", 1.0, "nested", null)
+                else if (access.balance == 1.0) {
+                    publicationStarted.complete(Unit)
+                    releasePublication.await()
+                    publicationFinished.complete(Unit)
+                }
+            }
+            withTimeout(5_000) {
+                service.consumeFeature("credits", 1.0, "outer", null)
+                publicationStarted.await()
+                val closing = async(Dispatchers.Default) { service.close() }
+                try {
+                    delay(100)
+                    assertFalse("close must join the deferred nested publication", closing.isCompleted)
+                    releasePublication.complete(Unit)
+                    closing.await()
+                    assertTrue(publicationFinished.isCompleted)
+                } finally {
+                    releasePublication.complete(Unit)
+                    closing.await()
+                }
+            }
+        } finally {
+            releasePublication.complete(Unit)
+            core.stop()
+        }
+    }
 
     @Test
     fun failedLocalCaptureRetainsReceiptWithoutRewindingNewerAuthority() = runBlocking {
@@ -461,6 +509,46 @@ class FeatureCommandRecoveryTest {
             assertEquals(2, commands.size)
             assertEquals(commands[0], commands[1])
         } finally { core.stop() }
+    }
+
+    @Test
+    fun concurrentCloseCallersJoinAnExplicitCommandEvenAfterItsCallerCancels() = runBlocking {
+        for (cancelCaller in listOf(false, true)) {
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val transport = FakeTransport().apply {
+                respond = { request ->
+                    val command = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                    entered.countDown()
+                    check(release.await(5, TimeUnit.SECONDS))
+                    receipt(command, 8.0)
+                }
+            }
+            val core = testCore(transport)
+            val file = File(temporary.root, "explicit-drain-$cancelCaller.json")
+            val service = FeatureUsageService(core.api, core.purchases, core.identity, core.features,
+                core.eventLog, core.scope, file)
+            try {
+                core.purchases.awaitInitialProjection()
+                val command = async(Dispatchers.Default) { service.consumeFeature("credits", 1.0, "explicit-drain", null) }
+                assertTrue(entered.await(3, TimeUnit.SECONDS))
+                if (cancelCaller) command.cancel()
+                val firstClose = async(Dispatchers.Default) { service.close() }
+                val secondClose = async(Dispatchers.Default) { service.close() }
+                delay(50)
+                assertFalse(firstClose.isCompleted)
+                assertFalse(secondClose.isCompleted)
+                release.countDown()
+                withTimeout(3_000) { firstClose.await(); secondClose.await(); command.join() }
+                assertEquals("[]", file.readText())
+                assertTrue(core.store.hasStableOutcome(service.localEventId(core.identity.distinctId(), "explicit-drain")))
+                if (!cancelCaller) assertEquals(8.0, command.await().balance!!, 0.0)
+            } finally {
+                release.countDown()
+                service.close()
+                core.stop()
+            }
+        }
     }
 
     @Test
