@@ -11,10 +11,13 @@ import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.identity.IdentityService
+import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponse
 import ai.nuxie.sdk.testsupport.FakeTransport
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -56,6 +59,34 @@ class NuxieIdentityFacadeTest {
         core.eventLog.awaitBarrier()
         core.userTransitions.drain()
         core.store.pendingBatch(limit = 50).map { it.name }
+    }
+
+    @Test
+    fun resetAndReidentifyRefreshesTheCurrentCustomerProfile() = runBlocking {
+        Nuxie.resetForTesting()
+        val transport = FakeTransport().apply {
+            respond = { canonicalJourneyProfileResponse() }
+        }
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = transport,
+            requestInitialProfileRefresh = false,
+            registerLifecycle = false,
+        )
+        Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_identity_readiness"))
+        val core = requireNotNull(Nuxie.core)
+        Nuxie.identify("customer")
+        core.userTransitions.drain()
+        assertTrue(core.profile.refreshAndWait())
+        assertEquals(FeatureInfo.State.Ready, core.featureInfo.state.value)
+
+        Nuxie.reset(keepAnonymousId = true)
+        core.userTransitions.drain()
+        Nuxie.identify("customer")
+        core.userTransitions.drain()
+        withTimeout(2_000L) {
+            core.featureInfo.state.first { it == FeatureInfo.State.Ready }
+        }
+        assertEquals("customer", Nuxie.distinctId)
     }
 
     @Test

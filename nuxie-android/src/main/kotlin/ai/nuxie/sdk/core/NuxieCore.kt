@@ -484,7 +484,13 @@ internal class NuxieCore(
             // and backend state without becoming the source of local readiness.
             purchases.recover()
         })
-        userTransitions.addObserver(profile.transitionObserver)
+        userTransitions.addObserver(UserTransitionCoordinator.Observer { kind, from, to ->
+            profile.transitionObserver.handleUserChange(kind, from, to)
+            // A reset can remove the returning customer's cache. Revalidate
+            // through the ordinary profile worker instead of leaving Feature
+            // readiness unknown until the next foreground transition.
+            profile.requestRefresh()
+        })
         // Subscriber registration precedes recovery, while the synchronous
         // enqueue keeps every later capture behind initialization in its FIFO.
         journeys.enqueueInitialization()
