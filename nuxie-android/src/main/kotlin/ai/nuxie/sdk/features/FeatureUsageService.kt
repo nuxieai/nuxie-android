@@ -117,10 +117,16 @@ internal class FeatureUsageService(
         val amount = command.double("quantity")!!
         val entityId = command.string("entityId")
         val distinctId = command.string("customerId")!!
+        val access = when (response.string("type")) {
+            "boolean" -> FeatureType.BOOLEAN
+            "metered" -> FeatureType.METERED
+            "creditSystem" -> FeatureType.CREDIT_SYSTEM
+            else -> null
+        }?.let { FeatureAccess(response["active"] == JsonPrimitive(true), response["unlimited"] == JsonPrimitive(true), response.double("balance"), it) }
         if (accepted) {
             val current = identity.captureScope()
-            if (record["response"] == null && current.distinctId == distinctId && response["idempotentReplay"] != JsonPrimitive(true)) response.double("balance")?.let {
-                features.stageAuthoritativeUsageBalance(featureId, it, entityId, current)?.let(publications::add)
+            if (record["response"] == null && current.distinctId == distinctId && response["idempotentReplay"] != JsonPrimitive(true)) access?.let {
+                features.stageAuthoritativeUsageAccess(featureId, it.balance, entityId, current, it)?.let(publications::add)
             }
             captureAcceptedUse(featureId, amount, entityId, record["metadata"] as? JsonObject,
                 command.string("operationId")!!, distinctId)
@@ -128,12 +134,7 @@ internal class FeatureUsageService(
         saveCommands(loadCommands().filterNot { it["command"]?.jsonObject?.get("operationId") == operationId })
         return FeatureUsageResult(success = accepted, featureId = featureId, amountUsed = amount,
             message = response.string("code"), usage = null,
-            authoritativeAccess = when (response.string("type")) {
-                "boolean" -> FeatureType.BOOLEAN
-                "metered" -> FeatureType.METERED
-                "creditSystem" -> FeatureType.CREDIT_SYSTEM
-                else -> null
-            }?.let { FeatureAccess(response["active"] == JsonPrimitive(true), response["unlimited"] == JsonPrimitive(true), response.double("balance"), it) }
+            authoritativeAccess = access,
         ).also {
                 it.consumptionReceipt = FeatureConsumptionResult(command.string("operationId")!!, accepted,
                     response.string("code")!!, amount, response.double("balance"), response["unlimited"] == JsonPrimitive(true),

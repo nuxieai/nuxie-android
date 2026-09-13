@@ -237,6 +237,30 @@ class FeatureCommandRecoveryTest {
         } finally { core.stop() }
     }
 
+    @Test
+    fun unlimitedReceiptReplacesFiniteCachedAuthority() = runBlocking {
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                val command = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                val body = Json.parseToJsonElement(receipt(command, 1.0).body.decodeToString()).jsonObject
+                HttpTransport.Response(200, JsonObject(body + mapOf("unlimited" to JsonPrimitive(true), "balance" to kotlinx.serialization.json.JsonNull)).toString().encodeToByteArray())
+            }
+        }
+        val core = testCore(transport)
+        try {
+            core.purchases.awaitInitialProjection()
+            core.features.hydrateProfile(core.identity.distinctId(), Json.parseToJsonElement(
+                """{"features":[{"id":"credits","type":"metered","unlimited":false,"balance":2}]}"""
+            ).jsonObject)
+            val service = FeatureUsageService(core.api, core.purchases, core.identity, core.features, core.eventLog, core.scope, File(temporary.root, "unlimited.json"))
+            val result = service.consumeFeature("credits", 1.0, "unlimited", null)
+            assertTrue(result.unlimited)
+            val cached = core.features.getCached("credits", null)!!
+            assertTrue(cached.unlimited)
+            assertNull(cached.balance)
+        } finally { core.stop() }
+    }
+
     private fun receipt(command: JsonObject, balance: Double) = HttpTransport.Response(200,
         JsonObject(command - "apiKey" + mapOf(
             "accepted" to JsonPrimitive(true), "code" to JsonPrimitive("consumed"),
