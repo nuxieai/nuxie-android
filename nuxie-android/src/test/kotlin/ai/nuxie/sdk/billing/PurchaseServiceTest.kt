@@ -66,6 +66,163 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun stoppingCheckoutIntakeReleasesPlayWaiterWithoutInventingAPurchaseOutcome() = runTest {
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, emissions = emissions)
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        try {
+            runCurrent()
+            val bindings = fixture.store.loadBindings()
+            val purchase = playPurchase("after-shutdown").forCheckout(fixture)
+            fixture.service.stopCheckoutIntake()
+            runCurrent()
+            assertTrue("shutdown must release a checkout waiting for Play UI", checkout.isCompleted)
+            assertTrue(checkout.isCancelled)
+            assertTrue(emissions.isEmpty())
+            assertEquals(bindings, fixture.store.loadBindings())
+            // A late observation still has durable ownership and product context.
+            fixture.service.onPurchasesUpdated(okUpdate(purchase))
+            assertTrue(fixture.store.load().getValue("after-shutdown").completionEmitted)
+            assertTrue(runCatching {
+                fixture.service.purchase(activity(), product(), null)
+            }.exceptionOrNull() is kotlinx.coroutines.CancellationException)
+            fixture.service.stopCheckoutIntake()
+        } finally {
+            checkout.cancel()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun stoppingCheckoutIntakeDoesNotReplaceAnAdmittedDurableCompletion() = runTest {
+        val captureStarted = CompletableDeferred<Unit>()
+        val releaseCapture = CompletableDeferred<Unit>()
+        val fixture = fixture(this, capturePurchaseEventOverride = { _, _, _, _ ->
+            captureStarted.complete(Unit)
+            releaseCapture.await()
+            true
+        })
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+        val update = async { fixture.service.onPurchasesUpdated(okUpdate(playPurchase("committing").forCheckout(fixture))) }
+        try {
+            captureStarted.await()
+            fixture.service.stopCheckoutIntake()
+            runCurrent()
+            assertFalse(checkout.isCompleted)
+            releaseCapture.complete(Unit)
+            update.await()
+            assertEquals(PurchaseResult.Purchased, checkout.await())
+            assertTrue(fixture.store.load().getValue("committing").completionEmitted)
+        } finally {
+            releaseCapture.complete(Unit)
+            update.join()
+            checkout.cancel()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun failedCaptureDuringCheckoutClosureReleasesWaiterAndRetainsEvidenceForRecovery() = runTest {
+        for (cancelCapture in listOf(false, true)) {
+            val captureStarted = CompletableDeferred<Unit>()
+            val releaseCapture = CompletableDeferred<Unit>()
+            var captureSucceeds = false
+            val fixture = fixture(this, capturePurchaseEventOverride = { _, _, _, _ ->
+                captureStarted.complete(Unit)
+                releaseCapture.await()
+                if (!captureSucceeds && cancelCapture) throw kotlinx.coroutines.CancellationException("capture cancelled")
+                captureSucceeds
+            })
+            val checkout = async { fixture.service.purchase(activity(), product(), null) }
+            runCurrent()
+            val purchase = playPurchase("shutdown-capture-retry").forCheckout(fixture)
+            val update = async { runCatching { fixture.service.onPurchasesUpdated(okUpdate(purchase)) } }
+            try {
+                captureStarted.await()
+                fixture.service.stopCheckoutIntake()
+                releaseCapture.complete(Unit)
+                assertTrue(update.await().isFailure)
+                runCurrent()
+                assertTrue(checkout.isCompleted)
+                assertTrue(checkout.isCancelled)
+                assertFalse(fixture.store.load().getValue("shutdown-capture-retry").completionEmitted)
+                assertTrue(fixture.store.loadBindings().isNotEmpty())
+                captureSucceeds = true
+                fixture.service.onPurchasesUpdated(okUpdate(purchase))
+                assertTrue(fixture.store.load().getValue("shutdown-capture-retry").completionEmitted)
+                assertEquals(1, fixture.purchaseCompletionEventIds.size)
+            } finally {
+                releaseCapture.complete(Unit)
+                update.join()
+                checkout.cancel()
+                fixture.close()
+            }
+        }
+    }
+
+    @Test
+    fun checkoutRemovedForOutcomeDeliveryStillSettlesWhenCaptureFailsDuringClosure() = runTest {
+        val captureStarted = CompletableDeferred<Unit>()
+        val releaseCapture = CompletableDeferred<Unit>()
+        val fixture = fixture(this, capturePurchaseEventOverride = { _, _, _, _ ->
+            captureStarted.complete(Unit)
+            releaseCapture.await()
+            false
+        })
+        val checkout = async {
+            runCatching {
+                fixture.service.purchase(
+                    activity(), product(), null,
+                    outcomeCorrelation = CommerceOutcomeCorrelation("closing-outcome", fixture.core.identity.distinctId()),
+                )
+            }
+        }
+        runCurrent()
+        val update = async {
+            runCatching {
+                fixture.service.onPurchasesUpdated(PurchaseUpdate(result(BillingClient.BillingResponseCode.USER_CANCELED), null))
+            }
+        }
+        try {
+            captureStarted.await()
+            fixture.service.stopCheckoutIntake()
+            assertFalse(checkout.isCompleted)
+            releaseCapture.complete(Unit)
+            assertTrue(update.await().isFailure)
+            runCurrent()
+            assertTrue("a removed checkout still needs its delivery owner to settle it", checkout.isCompleted)
+            assertTrue(checkout.await().exceptionOrNull() is IllegalStateException)
+        } finally {
+            releaseCapture.complete(Unit)
+            update.join()
+            checkout.cancel()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun ownershipQueryCrossingCheckoutClosureCannotLaunchPlayUi() = runTest {
+        val fixture = fixture(this)
+        val releaseQuery = CompletableDeferred<Unit>()
+        fixture.billing.releaseQueries = releaseQuery
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        try {
+            runCurrent()
+            fixture.service.stopCheckoutIntake()
+            releaseQuery.complete(Unit)
+            runCurrent()
+            assertNull(fixture.billing.launched)
+            assertTrue(checkout.isCompleted)
+            assertTrue(checkout.isCancelled)
+        } finally {
+            releaseQuery.complete(Unit)
+            checkout.cancel()
+            fixture.close()
+        }
+    }
+
+    @Test
     fun billingClientJourneyReleaseDeliveryIsTheTrustBoundaryWhenNoLicensingKeyIsConfigured() = runTest {
         val fixture = fixture(this)
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }

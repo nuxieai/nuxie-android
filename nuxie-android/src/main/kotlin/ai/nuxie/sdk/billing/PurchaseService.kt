@@ -325,7 +325,7 @@ internal class PurchaseService(
                 try {
                     complete(completion.checkout, completion.outcome)
                 } finally {
-                    claimedCheckoutCompletions.remove(completion.checkout)
+                    releaseCheckoutCompletion(completion.checkout)
                 }
             }
                 .onFailure { completionFailure ->
@@ -342,6 +342,7 @@ internal class PurchaseService(
                 )
                 completion.checkout.result.complete(completion.outcome.toPurchaseResult())
             }.onFailure { completionFailure ->
+                completion.checkout.result.completeExceptionally(completionFailure)
                 failure = aggregateFailure(failure, completionFailure)
             }
         }
@@ -414,6 +415,10 @@ internal class PurchaseService(
             drainCallbackEffects(postCaptureEffects)?.let { throw it }
             null
         } catch (cancelled: CancellationException) {
+            commit.onFailure()
+            processing.withLock {
+                purchaseCommitOperations.remove(commit.identity, commit.operation)
+            }
             throw cancelled
         } catch (failure: Throwable) {
             failure
@@ -492,6 +497,7 @@ internal class PurchaseService(
 
     private val products = ConcurrentHashMap<StoredProductIdentity, StoreProduct>()
     private val inFlight = ConcurrentHashMap<String, InFlightPurchase>()
+    @Volatile private var checkoutIntakeClosed = false
     private val processing = Mutex()
     private val projectionRefresh = Mutex()
     private val syncRetryJobs = ConcurrentHashMap<String, Job>()
@@ -753,6 +759,42 @@ internal class PurchaseService(
         components.joinToString("\u001f"),
     )
 
+    /**
+     * Stop new checkouts and release callers waiting for Play UI. A completion
+     * already reserved by a purchase decision keeps its result through durable
+     * capture and publication. The core must still drain those producer jobs.
+     * Cancellation here is SDK lifetime cancellation, not a store outcome.
+     */
+    suspend fun stopCheckoutIntake() {
+        processing.withLock {
+            synchronized(inFlight) {
+                checkoutIntakeClosed = true
+                inFlight.values.toList().forEach(::cancelUnclaimedCheckoutIfClosed)
+            }
+        }
+    }
+
+    private fun ensureCheckoutIntakeOpen() {
+        if (checkoutIntakeClosed) throw CancellationException("SDK checkout intake closed.")
+    }
+
+    private fun cancelUnclaimedCheckoutIfClosed(checkout: InFlightPurchase) {
+        synchronized(inFlight) {
+            if (checkoutIntakeClosed && checkout !in claimedCheckoutCompletions &&
+                inFlight.remove(checkout.product.storeProductId, checkout)
+            ) {
+                checkout.result.cancel(CancellationException("SDK checkout intake closed."))
+            }
+        }
+    }
+
+    private fun releaseCheckoutCompletion(checkout: InFlightPurchase) {
+        synchronized(inFlight) {
+            claimedCheckoutCompletions.remove(checkout)
+            cancelUnclaimedCheckoutIfClosed(checkout)
+        }
+    }
+
     suspend fun purchase(
         activity: Activity,
         product: StoreProduct,
@@ -760,6 +802,7 @@ internal class PurchaseService(
         expectedOwnerDistinctId: String? = null,
         outcomeCorrelation: CommerceOutcomeCorrelation? = null,
     ): PurchaseResult {
+        ensureCheckoutIntakeOpen()
         val initiatingOwner = distinctId()
         if (expectedOwnerDistinctId != null && initiatingOwner != expectedOwnerDistinctId) {
             return PurchaseResult.Failed(
@@ -803,7 +846,14 @@ internal class PurchaseService(
                 outcomeCorrelation?.eventId,
             )
         }
-        val active = when (val queried = billing.queryActive(product.productType)) {
+        val queried = try {
+            billing.queryActive(product.productType)
+        } catch (failure: Throwable) {
+            ensureCheckoutIntakeOpen()
+            throw failure
+        }
+        ensureCheckoutIntakeOpen()
+        val active = when (queried) {
             is ActivePurchasesResult.Failed -> return failed(
                 product,
                 BillingUnavailableException(queried.responseCode, queried.debugMessage),
@@ -835,6 +885,7 @@ internal class PurchaseService(
             outcomeCorrelation?.eventId,
         )
         val registered = synchronized(inFlight) {
+            ensureCheckoutIntakeOpen()
             if (inFlight.isNotEmpty()) false else {
                 inFlight[product.storeProductId] = pending
                 true
@@ -850,12 +901,15 @@ internal class PurchaseService(
             )
         }
         val launch = runCatching {
+            ensureCheckoutIntakeOpen()
             billing.launch(
                 activity,
                 CheckoutRequest(product, accountId, replacement),
             )
         }.getOrElse {
             inFlight.remove(product.storeProductId, pending)
+            ensureCheckoutIntakeOpen()
+            if (it is CancellationException) throw it
             return failed(
                 product,
                 it,
@@ -1612,7 +1666,7 @@ internal class PurchaseService(
                     ?: purchaseCommitEventId(identity),
                 afterCapture = ::finalizeVerifiedOutcome,
                 onFailure = {
-                    reservedCheckout?.let(claimedCheckoutCompletions::remove)
+                    reservedCheckout?.let(::releaseCheckoutCompletion)
                 },
             )
         } else {
@@ -2074,13 +2128,18 @@ internal class PurchaseService(
 
     private suspend fun complete(checkout: InFlightPurchase, outcome: PurchaseOutcome) {
         if (!inFlight.remove(checkout.product.storeProductId, checkout)) return
-        emitPurchaseOutcome(
-            checkout.product,
-            outcome,
-            checkout.owner,
-            checkout.outcomeEventId,
-        )
-        checkout.result.complete(outcome.toPurchaseResult())
+        try {
+            emitPurchaseOutcome(
+                checkout.product,
+                outcome,
+                checkout.owner,
+                checkout.outcomeEventId,
+            )
+            checkout.result.complete(outcome.toPurchaseResult())
+        } catch (failure: Throwable) {
+            checkout.result.completeExceptionally(failure)
+            throw failure
+        }
     }
 
     private fun InFlightPurchase.matches(purchase: PlayPurchase): Boolean =

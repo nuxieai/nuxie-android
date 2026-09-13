@@ -517,9 +517,10 @@ internal class NuxieCore(
         if (registerLifecycle) {
             (appContext as? Application)?.unregisterActivityLifecycleCallbacks(lifecycleCoordinator)
         }
-        billing.close()
         presentations.close()
         kotlinx.coroutines.runBlocking {
+            runCatching { purchaseService.stopCheckoutIntake() }
+            runCatching { billing.close() }
             runCatching { lifecycleCoordinator.close() }
             runCatching { featureUsage.close() }
             runCatching { journeys.profileDidClearAll() }
