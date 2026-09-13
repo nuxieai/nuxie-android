@@ -180,7 +180,7 @@ class NuxieMeteredUseTest {
     }
 
     @Test
-    fun confirmedEntityScopedUsePreservesGlobalPublicFeature() = runBlocking {
+    fun confirmedEntityScopedUseInvalidatesGlobalPublicFeature() = runBlocking {
         val transport = usageTransport(remaining = 0.0)
         val core = NuxieCore(
             context = RuntimeEnvironment.getApplication(),
@@ -213,8 +213,8 @@ class NuxieMeteredUseTest {
         assertTrue(result.success)
         assertNull(result.usage)
         assertEquals(0.0, result.authoritativeAccess!!.balance!!, 0.0)
-        assertTrue(core.featureInfo.isAllowed("exports"))
-        assertEquals(5.0, core.featureInfo.balance("exports")!!, 0.0)
+        assertFalse(core.featureInfo.isAllowed("exports"))
+        assertNull(core.featureInfo.balance("exports"))
         core.stop()
     }
 

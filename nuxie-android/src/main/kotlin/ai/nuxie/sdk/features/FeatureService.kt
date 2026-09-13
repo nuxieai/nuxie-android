@@ -74,6 +74,7 @@ internal class FeatureService(
     private var lastProfileAuthoritativeRevision = Long.MIN_VALUE
     private val featureMutationRevisions = mutableMapOf<String, Long>()
     private val committedMutationRevisions = mutableMapOf<CacheKey, Long>()
+    private val usageInvalidationRevisions = mutableMapOf<String, Long>()
 
     suspend fun getCached(featureId: String, entityId: String?): FeatureAccess? =
         getCached(featureId, requiredBalance = null, entityId = entityId)
@@ -206,18 +207,30 @@ internal class FeatureService(
                 if (cacheDistinctId != expectedScope.distinctId) return@admitted false
                 val authoritative = realTimeCache[CacheKey(featureId, entityId)]?.access
                     ?: entityAccess(featureId, entityId)
-                val visible = visibleAccess(featureId, authoritative) ?: return@admitted true
+                val visible = visibleAccess(featureId, authoritative)
+                    ?: durableGlobalAccess()[featureId]
+                    ?: return@admitted true
                 val updated = FeatureAccess(
                     allowed = authoritative?.unlimited == true || balance >= DEFAULT_REQUIRED_BALANCE,
                     unlimited = authoritative?.unlimited ?: false,
                     balance = balance,
                     type = authoritative?.type ?: visible.type,
                 )
+                val revision = advanceFeatureMutationRevision(featureId)
+                // Any spend can change the aggregate and allocation among entity
+                // grants. Only the receipt's exact scope has a known balance.
+                usageInvalidationRevisions[featureId] = revision
+                realTimeCache.keys.removeAll { it.featureId == featureId }
+                durableAccess = durableAccess - featureId
+                durableEntities = durableEntities - featureId
+                purchaseUpdates.replaceAll { _, projection ->
+                    projection.copy(access = projection.access - featureId)
+                }
                 publication = commitAuthoritativeAccessLocked(
                     mapOf(
                         featureId to AuthoritativeAccessUpdate(
                             access = updated,
-                            mutationRevision = advanceFeatureMutationRevision(featureId),
+                            mutationRevision = revision,
                         ),
                     ),
                     entityId,
@@ -279,6 +292,7 @@ internal class FeatureService(
         profileAdmitted = false
         featureMutationRevisions.clear()
         committedMutationRevisions.clear()
+        usageInvalidationRevisions.clear()
         scopeGeneration += 1
         featureInfo.stageIdentityChange(
             features = mergeOptimisticOverlay(emptyMap()),
@@ -349,8 +363,9 @@ internal class FeatureService(
             lastProfileAuthoritativeRevision = snapshotAuthoritativeRevision
             val replacedFeatureIds = durableAccess.keys + durableEntities.keys
             cacheDistinctId = distinctId
-            durableAccess = parsed.first
-            durableEntities = parsed.second
+            usageInvalidationRevisions.entries.removeAll { it.value <= snapshotAuthoritativeRevision }
+            durableAccess = parsed.first - usageInvalidationRevisions.keys
+            durableEntities = parsed.second - usageInvalidationRevisions.keys
             profileAdmitted = true
             val affectedFeatureIds = linkedSetOf<String>().apply {
                 addAll(replacedFeatureIds)
@@ -687,6 +702,7 @@ internal class FeatureService(
         val committedRevision = maxOf(
             committedMutationRevisions[key] ?: Long.MIN_VALUE,
             committedMutationRevisions[CacheKey(featureId, null)] ?: Long.MIN_VALUE,
+            usageInvalidationRevisions[featureId] ?: Long.MIN_VALUE,
         )
         val supersededByMutation =
             (purchaseRevisionChanged && entityId == null) ||
@@ -737,6 +753,7 @@ internal class FeatureService(
         profileAdmitted = false
         featureMutationRevisions.clear()
         committedMutationRevisions.clear()
+        usageInvalidationRevisions.clear()
         scopeGeneration += 1
         return true
     }
