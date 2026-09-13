@@ -1,5 +1,9 @@
 package ai.nuxie.sdk.core
 
+import ai.nuxie.sdk.identity.UserTransitionCoordinator
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.runCurrent
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieEnvironment
@@ -88,6 +92,36 @@ class NuxieCoreForwardingTest {
         override suspend fun close() {
             closed.set(true)
         }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun identityClosureDrainsAcceptedTransitionsAndRejectsLaterAdmission() = runTest {
+        val coordinator = UserTransitionCoordinator(RecordingStore(), this)
+        val releaseFirst = CompletableDeferred<Unit>()
+        val observed = mutableListOf<String>()
+        coordinator.addObserver { _, _, to ->
+            if (to == "first") releaseFirst.await()
+            observed += to
+        }
+        fun transition(to: String) = UserTransitionCoordinator.Transition(
+            UserTransitionCoordinator.Kind.IDENTIFY,
+            "anonymous", to, false,
+        )
+        coordinator.enqueue(transition("first"))
+        coordinator.enqueue(transition("second"))
+        runCurrent()
+        val closing = launch { coordinator.close() }
+        runCurrent()
+        assertFalse(closing.isCompleted)
+        coordinator.enqueue(transition("too-late"))
+        releaseFirst.complete(Unit)
+        closing.join()
+        assertEquals(listOf("first", "second"), observed)
+        coordinator.close()
+        coordinator.enqueue(transition("still-too-late"))
+        runCurrent()
+        assertEquals(listOf("first", "second"), observed)
     }
 
     @Test
