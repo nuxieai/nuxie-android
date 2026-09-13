@@ -23,6 +23,7 @@ import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +51,8 @@ internal class FeatureUsageService(
     private val journal = AtomicFile(journalFile)
     private val journalMutex = Mutex()
     @Volatile private var closed = false
+    private val operationLock = Any()
+    private val operations = mutableSetOf<CompletableDeferred<Unit>>()
     private val recovery = FeatureRecoveryWorker(scope, nowMillis, ::nextRecoveryDueAt, ::recoverPending)
 
     init { journalFile.parentFile?.mkdirs() }
@@ -60,8 +63,22 @@ internal class FeatureUsageService(
     }
 
     suspend fun close() {
-        closed = true
+        check(currentCoroutineContext()[PublicationDrain] == null) {
+            "A Feature publication cannot await its own shutdown. Initiate shutdown from an independent coroutine."
+        }
+        val admitted = synchronized(operationLock) {
+            closed = true
+            operations.toList()
+        }
         recovery.close()
+        admitted.forEach { it.await() }
+    }
+
+    private fun finishOperation(completion: CompletableDeferred<Unit>) {
+        synchronized(operationLock) {
+            operations.remove(completion)
+            completion.complete(Unit)
+        }
     }
 
     private suspend fun nextRecoveryDueAt(): Long? = journalMutex.withLock {
@@ -100,12 +117,17 @@ internal class FeatureUsageService(
         decide: suspend (MutableList<FeatureInfo.Mutation>) -> T,
     ): T {
         val reentrant = currentCoroutineContext()[PublicationDrain] != null
+        val completion = CompletableDeferred<Unit>()
+        synchronized(operationLock) {
+            if (closed) throw CancellationException("Feature commands are closed")
+            operations += completion
+        }
+        var deferredPublication = false
         return try {
             withContext(NonCancellable) {
                 val publications = mutableListOf<FeatureInfo.Mutation>()
                 val result = runCatching {
                     journalMutex.withLock {
-                        if (closed) throw CancellationException("Feature commands are closed")
                         decide(publications)
                     }
                 }
@@ -116,10 +138,18 @@ internal class FeatureUsageService(
                 }
                 // A listener may await another command. Its publication follows the
                 // current FIFO slot, so that nested command must return before draining.
-                if (reentrant) scope.launch(NonCancellable) { drain() } else drain()
+                if (reentrant) {
+                    // This publication must outlive the nested caller to avoid a
+                    // FIFO cycle. Its operation remains owned until drain finishes.
+                    deferredPublication = true
+                    scope.launch(NonCancellable) {
+                        try { drain() } finally { finishOperation(completion) }
+                    }
+                } else drain()
                 result.getOrThrow()
             }
         } finally {
+            if (!deferredPublication) finishOperation(completion)
             if (scheduleRetry) recovery.request()
         }
     }
