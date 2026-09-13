@@ -1546,7 +1546,7 @@ class FeatureServiceTest {
         assertTrue(core.features.checkWithCache("exports", requiredBalance = 2.0).allowed)
         val request = transport.requests.single { it.url.path == "/entitled" }
         assertEquals(
-            """{"apiKey":"pk_test_features_${now}","customerId":"${core.identity.distinctId()}","featureId":"exports","requiredBalance":2.0}""",
+            """{"apiKey":"pk_test_features_${now}","customerId":"${core.identity.distinctId()}","featureId":"exports","requiredBalance":2}""",
             request.body.decodeToString(),
         )
         core.stop()
@@ -1898,7 +1898,7 @@ class FeatureServiceTest {
         val transport = FakeTransport().apply {
             respond = { request ->
                 val body = request.body.decodeToString()
-                if (body.contains("\"requiredBalance\":2.0")) {
+                if (body.contains("\"requiredBalance\":2")) {
                     olderCheckStarted.countDown()
                     assertTrue(releaseOlderCheck.await(5, TimeUnit.SECONDS))
                     HttpTransport.Response(
