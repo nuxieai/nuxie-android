@@ -24,6 +24,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -42,6 +44,7 @@ class NuxieCoreForwardingTest {
     private class RecordingApplication : Application() {
         val registrations = AtomicInteger()
         val unregistrations = AtomicInteger()
+        var unregisterFailure: Throwable? = null
 
         fun attach(base: Context) {
             attachBaseContext(base)
@@ -55,6 +58,7 @@ class NuxieCoreForwardingTest {
 
         override fun unregisterActivityLifecycleCallbacks(callback: ActivityLifecycleCallbacks) {
             unregistrations.incrementAndGet()
+            unregisterFailure?.let { throw it }
         }
     }
 
@@ -62,6 +66,8 @@ class NuxieCoreForwardingTest {
         val pending = CopyOnWriteArrayList<StoredEvent>()
         val accessedAfterClose = AtomicBoolean(false)
         private val closed = AtomicBoolean(false)
+        val closeCount = AtomicInteger()
+        var closeFailure: Throwable? = null
         var onPendingInserted: (StoredEvent) -> Unit = {}
 
         override suspend fun insertPending(event: StoredEvent) {
@@ -99,8 +105,98 @@ class NuxieCoreForwardingTest {
             return pending.take(limit)
         }
         override suspend fun close() {
+            closeCount.incrementAndGet()
             closed.set(true)
+            closeFailure?.let { throw it }
         }
+    }
+
+    @Test
+    fun concurrentShutdownCallersJoinOneTeardownAndWaiterCancellationDoesNotStopCleanup() = runBlocking {
+        val store = RecordingStore()
+        val core = NuxieCore(
+            context = RuntimeEnvironment.getApplication(),
+            apiKey = "pk_test_shutdown_completion",
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(
+                store = store,
+                transport = FakeTransport(),
+                registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+                billingClientFactory = InertBillingClientAdapter.factory,
+            ),
+        )
+        val producerStarted = CompletableDeferred<Unit>()
+        val cleanupStarted = CompletableDeferred<Unit>()
+        val releaseCleanup = CompletableDeferred<Unit>()
+        try {
+            core.purchases.awaitInitialProjection()
+            core.producerScope.launch {
+                try { producerStarted.complete(Unit); awaitCancellation() }
+                finally {
+                    withContext(NonCancellable) {
+                        cleanupStarted.complete(Unit)
+                        releaseCleanup.await()
+                    }
+                }
+            }
+            withTimeout(5_000) {
+                producerStarted.await()
+                val first = async(Dispatchers.Default) { core.stopAndAwait() }
+                cleanupStarted.await()
+                val second = async(Dispatchers.Default) { core.stopAndAwait() }
+                try {
+                    delay(50)
+                    assertFalse("every shutdown caller must await the same cleanup", second.isCompleted)
+                    first.cancel()
+                    first.join()
+                    assertFalse(second.isCompleted)
+                    assertEquals(0, store.closeCount.get())
+                    releaseCleanup.complete(Unit)
+                    second.await()
+                    core.stopAndAwait()
+                    assertEquals(1, store.closeCount.get())
+                } finally { releaseCleanup.complete(Unit) }
+            }
+        } finally {
+            releaseCleanup.complete(Unit)
+            core.stop()
+        }
+    }
+
+    @Test
+    fun shutdownAttemptsEveryResourceAndSharesItsFailureWithLaterWaiters() = runBlocking {
+        val application = RecordingApplication().apply { attach(RuntimeEnvironment.getApplication()) }
+        val firstFailure = IllegalStateException("unregister failed")
+        val finalFailure = IllegalStateException("store close failed")
+        application.unregisterFailure = firstFailure
+        val store = RecordingStore().apply { closeFailure = finalFailure }
+        val core = NuxieCore(
+            context = application,
+            apiKey = "pk_test_shutdown_failure",
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(
+                store = store,
+                transport = FakeTransport(),
+                requestInitialProfileRefresh = false,
+                billingClientFactory = InertBillingClientAdapter.factory,
+            ),
+        )
+        core.start()
+        repeat(2) {
+            val observed = runCatching { core.stopAndAwait() }.exceptionOrNull()
+            // Coroutine stack-trace recovery may copy the exception, retaining its cause.
+            assertTrue(generateSequence(observed) { it.cause }.lastOrNull() === firstFailure)
+        }
+        assertEquals(listOf(finalFailure), firstFailure.suppressed.toList())
+        assertEquals(1, application.unregistrations.get())
+        assertEquals(1, store.closeCount.get())
+        assertTrue(core.scope.coroutineContext[kotlinx.coroutines.Job]!!.isCompleted)
+        assertTrue(core.producerScope.coroutineContext[kotlinx.coroutines.Job]!!.isCompleted)
     }
 
     @Test
