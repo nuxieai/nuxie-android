@@ -6,6 +6,8 @@ import android.os.Bundle
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancelAndJoin
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 
@@ -38,37 +40,44 @@ internal class NuxieLifecycleCoordinator(
     )
     private var sawInitialForeground = false
 
-    init {
-        scope.launch {
-            for (transition in transitions) {
-                when (transition) {
-                    Transition.INITIAL_FOREGROUND -> {
-                        // App-opened was already captured during setup, but
-                        // screen-bearing work must remain closed until an
-                        // Activity actually becomes visible.
-                        runBestEffort("Initial foreground recovery", onForeground)
-                    }
-                    Transition.FOREGROUND -> {
-                        sessions.onAppBecameActive()
-                        // Canonical profile revalidation and journey
-                        // activation finish before the foreground edge enters
-                        // event routing, so stale authority cannot consume it.
-                        runBestEffort("Foreground recovery", onForeground)
-                        tracker.trackAppForegrounded()
-                    }
-                    Transition.BACKGROUND -> {
-                        sessions.onAppDidEnterBackground()
-                        // Close screen admission before the background event
-                        // can enter journey routing.
-                        runBestEffort("Background transition", onBackground)
-                        tracker.trackAppBackgrounded()
-                        // Android-specific best effort: push pending events out
-                        // before the process is likely frozen or killed.
-                        runBestEffort("Background recovery", afterBackground)
-                    }
+    private val closed = AtomicBoolean(false)
+
+    private val worker = scope.launch {
+        for (transition in transitions) {
+            when (transition) {
+                Transition.INITIAL_FOREGROUND -> {
+                    // App-opened was already captured during setup, but
+                    // screen-bearing work must remain closed until an
+                    // Activity actually becomes visible.
+                    runBestEffort("Initial foreground recovery", onForeground)
+                }
+                Transition.FOREGROUND -> {
+                    sessions.onAppBecameActive()
+                    // Canonical profile revalidation and journey
+                    // activation finish before the foreground edge enters
+                    // event routing, so stale authority cannot consume it.
+                    runBestEffort("Foreground recovery", onForeground)
+                    tracker.trackAppForegrounded()
+                }
+                Transition.BACKGROUND -> {
+                    sessions.onAppDidEnterBackground()
+                    // Close screen admission before the background event
+                    // can enter journey routing.
+                    runBestEffort("Background transition", onBackground)
+                    tracker.trackAppBackgrounded()
+                    // Android-specific best effort: push pending events out
+                    // before the process is likely frozen or killed.
+                    runBestEffort("Background recovery", afterBackground)
                 }
             }
         }
+    }
+
+    /** Stop intake, cancel unfinished transition work, and join its cleanup. */
+    suspend fun close() {
+        closed.set(true)
+        transitions.close()
+        worker.cancelAndJoin()
     }
 
     /** Admit a host that was already visible when a late SDK setup registered callbacks. */
@@ -79,6 +88,7 @@ internal class NuxieLifecycleCoordinator(
     }
 
     override fun onActivityStarted(activity: Activity) {
+        if (closed.get()) return
         if (!startedActivities.add(activity)) return
         if (startedActivities.size == 1) {
             if (!sawInitialForeground) {
@@ -91,6 +101,7 @@ internal class NuxieLifecycleCoordinator(
     }
 
     override fun onActivityStopped(activity: Activity) {
+        if (closed.get()) return
         if (!startedActivities.remove(activity)) return
         if (startedActivities.isEmpty()) {
             transitions.trySend(Transition.BACKGROUND)
