@@ -5,6 +5,18 @@ import ai.nuxie.sdk.billing.NuxiePurchaseDelegate
 import ai.nuxie.sdk.billing.PurchaseResult
 import ai.nuxie.sdk.billing.RestoreResult
 import ai.nuxie.sdk.billing.StoreProduct
+import ai.nuxie.sdk.billing.BillingClientAdapter
+import ai.nuxie.sdk.billing.BillingClientAdapterFactory
+import ai.nuxie.sdk.billing.InMemoryPurchaseEvidenceStore
+import ai.nuxie.sdk.events.SystemEventNames
+import android.app.Activity
+import com.android.billingclient.api.BillingClient
+import com.android.billingclient.api.BillingClientStateListener
+import com.android.billingclient.api.BillingFlowParams
+import com.android.billingclient.api.BillingResult
+import com.android.billingclient.api.ProductDetails
+import com.android.billingclient.api.PurchasesResponseListener
+import com.android.billingclient.api.QueryPurchasesParams
 import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.network.HttpTransport
@@ -89,6 +101,51 @@ class NuxieTest {
             Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_recovered_construction"))
             assertTrue(Nuxie.isSetup)
         } finally { if (closeCount == 0) actualStore.close() }
+    }
+
+    @Test
+    fun shutdownDuringSetupPreventsPublicationAndWaitsForTheStartingGraph() = runBlocking {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val closed = java.util.concurrent.atomic.AtomicInteger()
+        val actualStore = SQLiteEventStore(RuntimeEnvironment.getApplication(),
+            databaseFile = temporary.newFile("starting-shutdown.db"))
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = FakeTransport(), registerLifecycle = false, requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
+            store = object : EventStore by actualStore {
+                override suspend fun close() { actualStore.close(); closed.incrementAndGet() }
+            },
+            appVersion = {
+                entered.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+                "1.0"
+            },
+        )
+        withTimeout(10_000) {
+            val setup = async(Dispatchers.Default) {
+                Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_starting_shutdown"))
+            }
+            try {
+                assertTrue(entered.await(3, TimeUnit.SECONDS))
+                Nuxie.shutdown()
+                Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_overlapping_start"))
+                assertFalse(Nuxie.isSetup)
+                val completion = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                    Nuxie.shutdownAndAwait()
+                }
+                assertFalse(completion.isCompleted)
+                assertEquals(0, closed.get())
+                release.countDown()
+                setup.await()
+                completion.await()
+                assertFalse(Nuxie.isSetup)
+                assertEquals(1, closed.get())
+                Nuxie.overridesForTesting = NuxieCore.Overrides(transport = FakeTransport())
+                Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_after_starting_shutdown"))
+                assertTrue(Nuxie.isSetup)
+            } finally { release.countDown() }
+        }
     }
 
     @Test
@@ -185,6 +242,61 @@ class NuxieTest {
             Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_after_completion"))
             assertTrue(Nuxie.isSetup)
         } finally { release.countDown() }
+    }
+
+    @Test
+    fun shutdownCancelsPendingPlayCheckoutAndRetainsItsRecoveryBinding() = runBlocking {
+        val launched = CompletableDeferred<Unit>()
+        val endCount = java.util.concurrent.atomic.AtomicInteger()
+        val events = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val evidence = InMemoryPurchaseEvidenceStore()
+        val ok = BillingResult.newBuilder().setResponseCode(BillingClient.BillingResponseCode.OK).build()
+        val adapter = object : BillingClientAdapter by InertBillingClientAdapter {
+            override val isReady = true
+            override fun startConnection(listener: BillingClientStateListener) { listener.onBillingSetupFinished(ok) }
+            override fun endConnection() { endCount.incrementAndGet() }
+            override fun queryPurchasesAsync(params: QueryPurchasesParams, listener: PurchasesResponseListener) {
+                listener.onQueryPurchasesResponse(ok, emptyList())
+            }
+            override fun launchBillingFlow(activity: Activity, params: BillingFlowParams): BillingResult {
+                launched.complete(Unit)
+                return ok
+            }
+        }
+        val details = ProductDetails::class.java.getDeclaredConstructor(String::class.java)
+            .apply { isAccessible = true }.newInstance(
+                """{"productId":"play-pro","type":"inapp","title":"Pro","name":"Pro","description":"Pro","oneTimePurchaseOfferDetails":{"formattedPrice":"1.00","priceAmountMicros":1000000,"priceCurrencyCode":"USD"}}""",
+            )
+        val product = StoreProduct(
+            productId = "pro", storeProductId = "play-pro", basePlanId = null, offerId = null,
+            placementId = "primary", rawProduct = details, offerToken = null,
+            isOfferPersonalized = false, productType = BillingClient.ProductType.INAPP,
+        )
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = FakeTransport(), registerLifecycle = false, requestInitialProfileRefresh = false,
+            billingClientFactory = BillingClientAdapterFactory { adapter }, purchaseEvidenceStore = evidence,
+        )
+        val configuration = NuxieConfiguration("pk_test_play_shutdown").apply {
+            beforeSend = { event -> events += event.name; event }
+        }
+        Nuxie.setup(RuntimeEnvironment.getApplication(), configuration)
+        val activity = org.robolectric.Robolectric.buildActivity(Activity::class.java).setup()
+        try {
+            withTimeout(5_000) {
+                val purchase = async { runCatching { Nuxie.purchase(activity.get(), product) } }
+                launched.await()
+                val bindings = evidence.loadBindings()
+                assertTrue(bindings.isNotEmpty())
+                Nuxie.shutdown()
+                Nuxie.shutdownAndAwait()
+                val failure = runCatching { purchase.await().getOrThrow() }.exceptionOrNull()
+                assertTrue(failure is kotlinx.coroutines.CancellationException)
+                assertEquals(bindings, evidence.loadBindings())
+                assertEquals(1, endCount.get())
+                assertFalse(events.contains(SystemEventNames.PURCHASE_CANCELLED))
+                assertFalse(events.contains(SystemEventNames.PURCHASE_FAILED))
+            }
+        } finally { activity.pause().stop().destroy() }
     }
 
     @Test
