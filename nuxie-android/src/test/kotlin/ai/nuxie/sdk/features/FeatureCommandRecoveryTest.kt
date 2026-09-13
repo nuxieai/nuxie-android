@@ -336,6 +336,36 @@ class FeatureCommandRecoveryTest {
         } finally { core.stop() }
     }
 
+    @Test
+    fun pendingOperationsAreScopedToCustomer() = runBlocking {
+        var failFirst = true
+        val requests = mutableListOf<JsonObject>()
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                val command = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                requests += command
+                if (failFirst) { failFirst = false; throw IOException("network offline") }
+                receipt(command, 8.0)
+            }
+        }
+        val core = testCore(transport)
+        try {
+            core.purchases.awaitInitialProjection()
+            val file = File(temporary.root, "customers.json")
+            val service = FeatureUsageService(core.api, core.purchases, core.identity, core.features, core.eventLog, core.scope, file)
+            core.identity.setDistinctId("customer-a")
+            try { service.consumeFeature("credits", 1.0, "same-id", null); fail("Expected offline") }
+            catch (_: IOException) { }
+            core.identity.setDistinctId("customer-b")
+            assertTrue(service.consumeFeature("credits", 2.0, "same-id", null).accepted)
+            assertTrue(file.readText().contains("customer-a"))
+            assertFalse(file.readText().contains("customer-b"))
+            service.recover()
+            assertEquals(requests[0], requests[2])
+            assertEquals("[]", file.readText())
+        } finally { core.stop() }
+    }
+
     private fun receipt(command: JsonObject, balance: Double) = HttpTransport.Response(200,
         JsonObject(command - "apiKey" + mapOf(
             "accepted" to JsonPrimitive(true), "code" to JsonPrimitive("consumed"),
