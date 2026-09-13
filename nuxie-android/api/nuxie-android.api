@@ -98,6 +98,8 @@ public final class ai/nuxie/sdk/LogLevel : java/lang/Enum {
 
 public final class ai/nuxie/sdk/Nuxie {
 	public static final field INSTANCE Lai/nuxie/sdk/Nuxie;
+	public final fun consumeFeature (Ljava/lang/String;DLjava/lang/String;Ljava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public static synthetic fun consumeFeature$default (Lai/nuxie/sdk/Nuxie;Ljava/lang/String;DLjava/lang/String;Ljava/lang/String;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 	public final fun dismiss (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun getAnonymousId ()Ljava/lang/String;
 	public final fun getDistinctId ()Ljava/lang/String;
@@ -713,6 +715,31 @@ public final class ai/nuxie/sdk/features/FeatureCheckPolicy : java/lang/Enum {
 	public static fun getEntries ()Lkotlin/enums/EnumEntries;
 	public static fun valueOf (Ljava/lang/String;)Lai/nuxie/sdk/features/FeatureCheckPolicy;
 	public static fun values ()[Lai/nuxie/sdk/features/FeatureCheckPolicy;
+}
+
+public final class ai/nuxie/sdk/features/FeatureConsumptionResult {
+	public fun <init> (Ljava/lang/String;ZLjava/lang/String;DLjava/lang/Double;ZZZ)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Z
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()D
+	public final fun component5 ()Ljava/lang/Double;
+	public final fun component6 ()Z
+	public final fun component7 ()Z
+	public final fun component8 ()Z
+	public final fun copy (Ljava/lang/String;ZLjava/lang/String;DLjava/lang/Double;ZZZ)Lai/nuxie/sdk/features/FeatureConsumptionResult;
+	public static synthetic fun copy$default (Lai/nuxie/sdk/features/FeatureConsumptionResult;Ljava/lang/String;ZLjava/lang/String;DLjava/lang/Double;ZZZILjava/lang/Object;)Lai/nuxie/sdk/features/FeatureConsumptionResult;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAccepted ()Z
+	public final fun getActive ()Z
+	public final fun getBalance ()Ljava/lang/Double;
+	public final fun getCode ()Ljava/lang/String;
+	public final fun getIdempotentReplay ()Z
+	public final fun getOperationId ()Ljava/lang/String;
+	public final fun getQuantity ()D
+	public final fun getUnlimited ()Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
 }
 
 public final class ai/nuxie/sdk/features/FeatureInfo {

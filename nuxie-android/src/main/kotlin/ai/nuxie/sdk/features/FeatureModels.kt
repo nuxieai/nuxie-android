@@ -17,6 +17,8 @@ data class FeatureUsageResult(
     val usage: UsageInfo?,
     val authoritativeAccess: FeatureAccess? = null,
 ) {
+    internal var consumptionReceipt: FeatureConsumptionResult? = null
+
     data class UsageInfo(
         val current: Double,
         val limit: Double?,
@@ -62,3 +64,16 @@ internal data class FeatureAllowance(
         }
     }
 }
+
+
+/** The committed decision for one stable consumption operation. */
+data class FeatureConsumptionResult(
+    val operationId: String,
+    val accepted: Boolean,
+    val code: String,
+    val quantity: Double,
+    val balance: Double?,
+    val unlimited: Boolean,
+    val active: Boolean,
+    val idempotentReplay: Boolean,
+)

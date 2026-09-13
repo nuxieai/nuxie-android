@@ -337,11 +337,7 @@ class NuxieApiTest {
             lateinit var request: HttpTransport.Request
             override fun execute(request: HttpTransport.Request): HttpTransport.Response {
                 this.request = request
-                return HttpTransport.Response(
-                    200,
-                    """{"customerId":"customer-1","featureId":"credits","code":"entitled","allowed":true,"unlimited":false,"balance":3.5,"type":"creditSystem"}"""
-                        .encodeToByteArray(),
-                )
+                return ai.nuxie.sdk.testsupport.featureCommandResponse(request, balance = 3.0)
             }
         }
         val api = NuxieApi("pk_test_key", NuxieEnvironment.DEVELOPMENT, transport)
@@ -350,9 +346,9 @@ class NuxieApiTest {
             NuxieApi.PurchaseBackedFeatureUseReport(
                 customerId = "customer-1",
                 featureId = "credits",
-                requiredBalance = 2.5,
+                requiredBalance = 2.0,
                 eventData = NuxieApi.FeatureUseEventData(
-                    value = 2.5,
+                    value = 2.0,
                     properties = mapOf("source" to "export"),
                 ),
                 entityId = "workspace-1",
@@ -370,14 +366,14 @@ class NuxieApiTest {
             ),
         )
 
-        assertEquals("https://dev-i.nuxie.ai/entitled", transport.request.url.toString())
+        assertEquals("https://dev-i.nuxie.ai/feature/consume", transport.request.url.toString())
         assertEquals("customer-1", response.customerId)
         assertEquals("credits", response.featureId)
-        assertEquals(2.5, response.requiredBalance, 0.0)
-        assertEquals(3.5, response.balance!!, 0.0)
+        assertEquals(2.0, response.requiredBalance, 0.0)
+        assertEquals(3.0, response.balance!!, 0.0)
         assertEquals(
-            """{"apiKey":"pk_test_key","customerId":"customer-1","featureId":"credits","requiredBalance":2.5,"eventData":{"value":2.5,"properties":{"source":"export"}},"idempotencyKey":"purchase-use:stable","entityId":"workspace-1","purchase":{"type":"playstore","purchase_token":"token-1","package_name":"com.example.app","product_id":"credit-pack","purchase_option_id":"standard","product_type":"one_time","obfuscated_account_id":"account-hash","event_id":"purchase-use:stable"}}""",
-            transport.request.body.decodeToString(),
+            kotlinx.serialization.json.Json.parseToJsonElement("""{"apiKey":"pk_test_key","customerId":"customer-1","featureId":"credits","quantity":2,"operationId":"purchase-use:stable","entityId":"workspace-1","purchase":{"type":"playstore","purchaseToken":"token-1","productId":"credit-pack","purchaseOptionId":"standard","productType":"one_time"}}"""),
+            kotlinx.serialization.json.Json.parseToJsonElement(transport.request.body.decodeToString()),
         )
     }
 }

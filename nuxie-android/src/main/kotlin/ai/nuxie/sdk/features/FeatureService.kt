@@ -769,25 +769,11 @@ internal class FeatureService(
         )
     }
 
-    /**
-     * FeatureInfo exposes one latest authoritative value per Feature. Entity
-     * scope controls cache reuse, not whether an accepted result remains the
-     * visible authority. Pick the freshest committed authority across global
-     * and entity keys so later overlay/profile recompositions cannot fall
-     * back to an older global value.
-     */
-    private fun freshPublishedAuthority(): Map<String, FeatureAccess> {
-        val selected = mutableMapOf<String, Pair<Long, FeatureAccess>>()
-        realTimeCache.forEach { (key, timed) ->
-            if (!isFresh(timed)) return@forEach
-            val revision = committedMutationRevisions[key] ?: Long.MIN_VALUE
-            val current = selected[key.featureId]
-            if (current == null || revision > current.first) {
-                selected[key.featureId] = revision to timed.access
-            }
-        }
-        return selected.mapValues { it.value.second }
-    }
+    /** The public Feature projection contains only customer-wide authority. */
+    private fun freshPublishedAuthority(): Map<String, FeatureAccess> = realTimeCache
+        .filter { (key, timed) -> key.entityId == null && isFresh(timed) }
+        .mapKeys { it.key.featureId }
+        .mapValues { it.value.access }
 
     private fun authoritativeGlobalAccess(): Map<String, FeatureAccess> {
         val fresh = realTimeCache
@@ -870,10 +856,8 @@ internal class FeatureService(
 
     private fun entityAccess(featureId: String, entityId: String?): FeatureAccess? = when (entityId) {
         null -> durableGlobalAccess()[featureId]
-        else -> durableEntities[featureId]?.let { entities ->
-            entities[entityId] ?: durableGlobalAccess()[featureId]
-                ?.let { FeatureAccess(false, false, null, FeatureType.BOOLEAN) }
-        } ?: durableGlobalAccess()[featureId]
+        else -> durableEntities[featureId]?.get(entityId)
+            ?: durableGlobalAccess()[featureId]?.let { FeatureAccess(false, false, null, FeatureType.BOOLEAN) }
     }
 
     private fun authoritativeAccess(

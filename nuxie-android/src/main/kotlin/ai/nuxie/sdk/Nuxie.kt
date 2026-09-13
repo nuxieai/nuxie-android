@@ -178,6 +178,17 @@ object Nuxie {
         return core.featureUsage.useFeatureAndWait(featureId, amount, entityId, setUsage, metadata)
     }
 
+    /** Consume an exact quantity with an operation ID retained across caller retries. */
+    suspend fun consumeFeature(
+        featureId: String,
+        quantity: Double = 1.0,
+        operationId: String,
+        entityId: String? = null,
+    ): ai.nuxie.sdk.features.FeatureConsumptionResult {
+        val core = core ?: throw IllegalStateException("Call Nuxie.setup first.")
+        return core.featureUsage.consumeFeature(featureId, quantity, operationId, entityId)
+    }
+
     // MARK: Identity
 
     /**

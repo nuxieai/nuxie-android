@@ -7,6 +7,7 @@ import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.NuxieApi
+import ai.nuxie.sdk.testsupport.featureCommandResponse
 import ai.nuxie.sdk.testsupport.FakeTransport
 import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponse
 import android.app.Activity
@@ -142,8 +143,7 @@ class PurchaseFeatureUseTest {
         assertNotNull(second.await())
         assertEquals(2, fixture.transport.requestCount())
         val eventIds = fixture.transport.requestBodies().map { body ->
-            Json.parseToJsonElement(body).jsonObject.getValue("purchase").jsonObject
-                .getValue("event_id").toString().trim('"')
+            Json.parseToJsonElement(body).jsonObject.getValue("operationId").toString().trim('"')
         }
         assertEquals(1, eventIds.distinct().size)
         fixture.core.stop()
@@ -182,7 +182,7 @@ class PurchaseFeatureUseTest {
 
         recovery.await()
         assertEquals(null, use.await())
-        assertTrue(fixture.transport.requests.none { it.url.path == "/entitled" })
+        assertTrue(fixture.transport.requests.none { it.url.path == "/feature/consume" })
         fixture.core.stop()
     }
 
@@ -199,7 +199,7 @@ class PurchaseFeatureUseTest {
 
         recovery.await()
         assertNotNull(use.await())
-        assertEquals(1, fixture.transport.requests.count { it.url.path == "/entitled" })
+        assertEquals(1, fixture.transport.requests.count { it.url.path == "/feature/consume" })
         fixture.core.stop()
     }
 
@@ -210,7 +210,7 @@ class PurchaseFeatureUseTest {
         fixture.store.upsert(evidence(token = "token-2"))
 
         assertEquals(null, fixture.use())
-        assertTrue(fixture.transport.requests.none { it.url.path == "/entitled" })
+        assertTrue(fixture.transport.requests.none { it.url.path == "/feature/consume" })
         fixture.core.stop()
     }
 
@@ -268,12 +268,8 @@ class PurchaseFeatureUseTest {
     fun appManagedEvidenceIsEligibleForAtomicGateWithoutManagedCompletion() = runTest {
         val transport = FakeTransport().apply {
             respond = { request ->
-                if (request.url.path == "/entitled") {
-                    HttpTransport.Response(
-                        200,
-                        """{"customerId":"customer-a","featureId":"credits","code":"entitled","allowed":true,"unlimited":false,"balance":1,"type":"creditSystem"}"""
-                            .encodeToByteArray(),
-                    )
+                if (request.url.path == "/feature/consume") {
+                    featureCommandResponse(request, balance = 1.0)
                 } else {
                     canonicalJourneyProfileResponse()
                 }
@@ -296,7 +292,7 @@ class PurchaseFeatureUseTest {
             ),
         )
 
-        assertEquals(1, transport.requests.count { it.url.path == "/entitled" })
+        assertEquals(1, transport.requests.count { it.url.path == "/feature/consume" })
         assertTrue(store.load().getValue("token-1").synced)
         assertEquals(0, billing.acknowledgeCalls)
         assertEquals(0, billing.consumeCalls)
@@ -317,12 +313,8 @@ class PurchaseFeatureUseTest {
     fun noLicensingKeyEvidenceUsesThePendingPurchaseSpendPathWhenUnverified() = runTest {
         val fixture = fallbackFixture()
         fixture.transport.respond = { request ->
-            if (request.url.path == "/entitled") {
-                HttpTransport.Response(
-                    200,
-                    """{"customerId":"customer-a","featureId":"credits","code":"entitled","allowed":true,"unlimited":false,"balance":1,"type":"creditSystem"}"""
-                        .encodeToByteArray(),
-                )
+            if (request.url.path == "/feature/consume") {
+                featureCommandResponse(request, balance = 1.0)
             } else {
                 canonicalJourneyProfileResponse()
             }
@@ -332,7 +324,7 @@ class PurchaseFeatureUseTest {
         )
 
         assertNotNull(fixture.use())
-        assertEquals(1, fixture.transport.requests.count { it.url.path == "/entitled" })
+        assertEquals(1, fixture.transport.requests.count { it.url.path == "/feature/consume" })
         fixture.core.stop()
     }
 
@@ -345,11 +337,7 @@ class PurchaseFeatureUseTest {
         val transport = FakeTransport().apply {
             respond = { request ->
                 when (request.url.path) {
-                    "/entitled" -> HttpTransport.Response(
-                        200,
-                        """{"customerId":"customer-a","featureId":"credits","code":"entitled","allowed":false,"unlimited":false,"balance":0,"type":"creditSystem"}"""
-                            .encodeToByteArray(),
-                    )
+                    "/feature/consume" -> featureCommandResponse(request, balance = 0.0)
                     else -> canonicalJourneyProfileResponse()
                 }
             }
@@ -403,15 +391,10 @@ class PurchaseFeatureUseTest {
         assertEquals("\$purchase_synced", captured.single().name)
         assertEquals("customer-a", captured.single().distinctId)
         assertTrue(captured.single().eventId.startsWith("purchase-synced:"))
-        val request = transport.requests.single { it.url.path == "/entitled" }
+        val request = transport.requests.single { it.url.path == "/feature/consume" }
         val body = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
-        assertEquals(
-            "purchase-use:" + body.getValue("purchase").jsonObject
-                .getValue("event_id").toString().trim('"').substringAfter("purchase-use:"),
-            body.getValue("purchase").jsonObject.getValue("event_id").toString().trim('"'),
-        )
-        assertEquals("export", body.getValue("eventData").jsonObject
-            .getValue("properties").jsonObject.getValue("source").toString().trim('"'))
+        assertTrue(body.getValue("operationId").jsonPrimitive.content.startsWith("purchase-use:"))
+        assertEquals("token-1", body.getValue("purchase").jsonObject.getValue("purchaseToken").jsonPrimitive.content)
         core.stop()
     }
 
@@ -517,7 +500,7 @@ class PurchaseFeatureUseTest {
         fixture.store.upsert(disqualified)
 
         assertEquals(null, fixture.use())
-        assertTrue(fixture.transport.requests.none { it.url.path == "/entitled" })
+        assertTrue(fixture.transport.requests.none { it.url.path == "/feature/consume" })
         fixture.core.stop()
     }
 
@@ -531,12 +514,8 @@ class PurchaseFeatureUseTest {
     private fun syncFixture(outcome: PurchaseSyncOutcome): SyncFixture {
         val transport = FakeTransport().apply {
             respond = { request ->
-                if (request.url.path == "/entitled") {
-                    HttpTransport.Response(
-                        200,
-                        """{"customerId":"customer-a","featureId":"credits","code":"entitled","allowed":true,"unlimited":false,"balance":1,"type":"creditSystem"}"""
-                            .encodeToByteArray(),
-                    )
+                if (request.url.path == "/feature/consume") {
+                    featureCommandResponse(request, balance = 1.0)
                 } else {
                     canonicalJourneyProfileResponse()
                 }
@@ -652,7 +631,7 @@ class PurchaseFeatureUseTest {
         private val requests = mutableListOf<HttpTransport.Request>()
 
         override fun execute(request: HttpTransport.Request): HttpTransport.Response {
-            if (request.url.path != "/entitled") {
+            if (request.url.path != "/feature/consume") {
                 return canonicalJourneyProfileResponse()
             }
             val requestNumber = synchronized(requests) {
@@ -666,11 +645,7 @@ class PurchaseFeatureUseTest {
                     return HttpTransport.Response(firstStatus, ByteArray(0))
                 }
             }
-            return HttpTransport.Response(
-                200,
-                """{"customerId":"customer-a","featureId":"credits","code":"entitled","allowed":true,"unlimited":false,"balance":1,"type":"creditSystem"}"""
-                    .encodeToByteArray(),
-            )
+            return featureCommandResponse(request, balance = 1.0)
         }
 
         fun requestCount(): Int = synchronized(requests) { requests.size }

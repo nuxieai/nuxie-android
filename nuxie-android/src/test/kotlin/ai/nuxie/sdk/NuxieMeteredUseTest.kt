@@ -14,6 +14,7 @@ import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.identity.IdentityService
 import ai.nuxie.sdk.network.HttpTransport
+import ai.nuxie.sdk.testsupport.featureCommandResponse
 import ai.nuxie.sdk.testsupport.FakeTransport
 import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponse
 import java.util.concurrent.CopyOnWriteArrayList
@@ -118,17 +119,15 @@ class NuxieMeteredUseTest {
 
         assertTrue(result.success)
         assertEquals(8.0, result.usage!!.remaining!!, 0.0)
-        assertEquals(null, result.authoritativeAccess)
+        assertEquals(8.0, result.authoritativeAccess!!.balance!!, 0.0)
         val body = Json.parseToJsonElement(
-            transport.requests.single { it.url.path == "/event" }.body.decodeToString(),
+            transport.requests.single { it.url.path == "/feature/consume" }.body.decodeToString(),
         ).jsonObject
-        assertEquals("\$feature_used", body.getValue("event").jsonPrimitive.content)
-        assertEquals(2.0, body.getValue("value").jsonPrimitive.double, 0.0)
+        assertEquals(2.0, body.getValue("quantity").jsonPrimitive.double, 0.0)
         assertEquals("workspace-1", body.getValue("entityId").jsonPrimitive.content)
-        val properties = body.getValue("properties").jsonObject
-        assertEquals("exports", properties.getValue("feature_extId").jsonPrimitive.content)
-        assertEquals("pdf", properties.getValue("metadata").jsonObject
-            .getValue("source").jsonPrimitive.content)
+        assertEquals("exports", body.getValue("featureId").jsonPrimitive.content)
+        assertFalse(body.containsKey("metadata"))
+
     }
 
     @Test
@@ -180,7 +179,7 @@ class NuxieMeteredUseTest {
     }
 
     @Test
-    fun confirmedEntityScopedUseUpdatesGlobalPublicFeatureWithoutEntityCache() = runBlocking {
+    fun confirmedEntityScopedUsePreservesGlobalPublicFeature() = runBlocking {
         val transport = usageTransport(remaining = 0.0)
         val core = NuxieCore(
             context = RuntimeEnvironment.getApplication(),
@@ -211,10 +210,9 @@ class NuxieMeteredUseTest {
         )
 
         assertTrue(result.success)
-        assertEquals(0.0, core.featureInfo.all.value.getValue("exports").balance!!, 0.0)
-        assertFalse(core.featureInfo.all.value.getValue("exports").allowed)
-        assertFalse(core.featureInfo.isAllowed("exports"))
-        assertEquals(0.0, core.featureInfo.balance("exports")!!, 0.0)
+        assertEquals(0.0, result.usage!!.remaining!!, 0.0)
+        assertTrue(core.featureInfo.isAllowed("exports"))
+        assertEquals(5.0, core.featureInfo.balance("exports")!!, 0.0)
         core.stop()
     }
 
@@ -244,7 +242,7 @@ class NuxieMeteredUseTest {
         val transport = usageTransport().apply {
             val baseRespond = respond
             respond = { request ->
-                if (request.url.path == "/event") networkThread.set(Thread.currentThread())
+                if (request.url.path == "/feature/consume") networkThread.set(Thread.currentThread())
                 baseRespond(request)
             }
         }
@@ -319,14 +317,9 @@ class NuxieMeteredUseTest {
         var eventRequests = 0
         val transport = FakeTransport().apply {
             respond = { request ->
-                if (request.url.path == "/event") {
+                if (request.url.path == "/feature/consume") {
                     eventRequests += 1
-                    val body = if (eventRequests == 1) {
-                        """{"status":"rejected","message":"denied","usage":{"current":3,"limit":10,"remaining":7}}"""
-                    } else {
-                        """{"status":"ok","message":"recorded","usage":{"current":2,"limit":10,"remaining":8}}"""
-                    }
-                    HttpTransport.Response(200, body.encodeToByteArray())
+                    featureCommandResponse(request, balance = if (eventRequests == 1) 7.0 else 8.0, accepted = eventRequests != 1)
                 } else {
                     canonicalJourneyProfileResponse()
                 }
@@ -371,12 +364,12 @@ class NuxieMeteredUseTest {
 
         assertTrue(result.success)
         assertEquals(18.0, core.featureInfo.balance("credits")!!, 0.0)
-        assertEquals(2, transport.requests.count { it.url.path == "/event" })
+        assertEquals(2, transport.requests.count { it.url.path == "/feature/consume" })
         assertEquals(0, transport.requests.count { it.url.path == "/entitled" })
         val body = Json.parseToJsonElement(
-            transport.requests.last { it.url.path == "/event" }.body.decodeToString(),
+            transport.requests.last { it.url.path == "/feature/consume" }.body.decodeToString(),
         ).jsonObject
-        assertTrue(body.getValue("properties").jsonObject.getValue("setUsage").jsonPrimitive.boolean)
+        assertEquals("set_usage", body.getValue("mode").jsonPrimitive.content)
         assertFalse(store.load().getValue("token-1").synced)
         core.features.applyOptimisticPurchaseProjection("customer-a", null)
         assertEquals(8.0, core.featureInfo.balance("credits")!!, 0.0)
@@ -386,11 +379,7 @@ class NuxieMeteredUseTest {
     private fun usageTransport(remaining: Double = 8.0) = FakeTransport().apply {
         respond = { request ->
             when (request.url.path) {
-                "/event" -> HttpTransport.Response(
-                    200,
-                    """{"status":"ok","message":"recorded","usage":{"current":2,"limit":10,"remaining":$remaining}}"""
-                        .encodeToByteArray(),
-                )
+                "/feature/consume" -> featureCommandResponse(request, balance = remaining)
                 else -> canonicalJourneyProfileResponse()
             }
         }

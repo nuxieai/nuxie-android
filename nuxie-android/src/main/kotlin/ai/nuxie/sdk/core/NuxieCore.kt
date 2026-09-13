@@ -285,6 +285,7 @@ internal class NuxieCore(
         features = features,
         eventLog = eventLog,
         scope = scope,
+        journalFile = File(purchaseEvidenceDirectory(appContext.filesDir, apiKey, environment), "feature-commands.json"),
     )
 
     private val releaseArtifactAcquirer = JourneyReleaseArtifactAcquirer(appContext, transport)
@@ -452,6 +453,7 @@ internal class NuxieCore(
             journeys.onAppWillEnterForeground()
             // Purchase recovery handles still-active Play evidence.
             purchases.recover()
+            featureUsage.recover()
             delivery.flushAll()
         },
     )
@@ -490,6 +492,7 @@ internal class NuxieCore(
             profile.requestRefresh()
         }
         scope.launch {
+            featureUsage.recover()
             delivery.flushAll()
         }
         lifecycleTracker.trackAppLaunchEvents()

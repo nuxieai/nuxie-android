@@ -20,7 +20,7 @@ private const val PROFILE_APP_ENVIRONMENT_HEADER = "Nuxie-App-Environment"
 
 /**
  * The API client, ported from the iOS `NuxieApi`. Ordinary captured events
- * use `/batch`; `/event` remains the synchronous Feature-usage command lane.
+ * use `/batch`; Feature consumption uses `/feature/consume`.
  * Requests carry the `Nuxie-Android-SDK/<version>` user agent.
  */
 internal class NuxieApi(
@@ -300,6 +300,31 @@ internal class NuxieApi(
         return text
     }
 
+    fun consumeFeature(command: JsonObject): JsonObject {
+        val body = JsonObject(command + ("apiKey" to JsonPrimitive(apiKey))).toString().encodeToByteArray()
+        val response = transport.execute(HttpTransport.Request(
+            url = URL("$baseUrl/feature/consume"),
+            headers = mapOf("Content-Type" to "application/json", "Accept-Encoding" to "gzip",
+                "User-Agent" to "Nuxie-Android-SDK/${SdkVersion.VALUE}"), body = body,
+        ))
+        if (response.statusCode !in 200..299) throw RequestRejectedException(response.statusCode, "/feature/consume")
+        val text = response.body.decodeToString()
+        StrictJsonValidator.requireNoDuplicateKeys(text)
+        val result = Json.parseToJsonElement(text).jsonObject
+        for (key in listOf("operationId", "customerId", "featureId")) {
+            if (result[key] != command[key]) throw IOException("Feature command receipt does not match $key")
+        }
+        if ((result["quantity"] as? JsonPrimitive)?.content?.toDoubleOrNull() !=
+            (command["quantity"] as? JsonPrimitive)?.content?.toDoubleOrNull()) throw IOException("Feature command receipt quantity mismatch")
+        for (key in listOf("accepted", "unlimited", "active", "idempotentReplay")) {
+            if ((result[key] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() == null) {
+                throw IOException("Feature command receipt is missing $key")
+            }
+        }
+        result.requiredString("code", "Feature command receipt")
+        return result
+    }
+
     /** POST /entitled using the iOS FeatureCheckRequest body shape. */
     fun checkFeature(
         customerId: String,
@@ -358,74 +383,37 @@ internal class NuxieApi(
         )
     }
 
-    /** POST /entitled with an unreconciled Play purchase and its first spend. */
+    /** Verify a pending Play purchase and commit its first spend atomically. */
     fun useFeatureWithPurchase(report: PurchaseBackedFeatureUseReport): FeatureCheckResult {
-        val body = buildString {
-            append("{\"apiKey\":").append(jsonString(apiKey))
-            append(",\"customerId\":").append(jsonString(report.customerId))
-            append(",\"featureId\":").append(jsonString(report.featureId))
-            append(",\"requiredBalance\":").append(report.requiredBalance)
-            append(",\"eventData\":{\"value\":").append(report.eventData.value)
-            report.eventData.properties?.let { properties ->
-                append(",\"properties\":")
-                append(CanonicalJson.encode(JsonValueConverter.fromMap(properties)))
-            }
-            append('}')
-            append(",\"idempotencyKey\":").append(jsonString(report.purchase.eventId))
-            report.entityId?.let { append(",\"entityId\":").append(jsonString(it)) }
-            append(",\"purchase\":{\"type\":\"playstore\"")
-            append(",\"purchase_token\":").append(jsonString(report.purchase.purchaseToken))
-            append(",\"package_name\":").append(jsonString(report.purchase.packageName))
-            append(",\"product_id\":").append(jsonString(report.purchase.productId))
-            report.purchase.basePlanId?.let { append(",\"base_plan_id\":").append(jsonString(it)) }
-            report.purchase.purchaseOptionId?.let {
-                append(",\"purchase_option_id\":").append(jsonString(it))
-            }
-            report.purchase.offerId?.let { append(",\"offer_id\":").append(jsonString(it)) }
-            report.purchase.productType?.let { append(",\"product_type\":").append(jsonString(it)) }
-            report.purchase.obfuscatedAccountId?.let {
-                append(",\"obfuscated_account_id\":").append(jsonString(it))
-            }
-            append(",\"event_id\":").append(jsonString(report.purchase.eventId))
-            append("}}")
-        }.encodeToByteArray()
-        val response = transport.execute(
-            HttpTransport.Request(
-                url = URL("$baseUrl/entitled"),
-                headers = mapOf(
-                    "Content-Type" to "application/json",
-                    "Accept-Encoding" to "gzip",
-                    "User-Agent" to "Nuxie-Android-SDK/${SdkVersion.VALUE}",
-                ),
-                body = body,
-            ),
-        )
-        if (response.statusCode !in 200..299) {
-            throw RequestRejectedException(response.statusCode, "/entitled")
+        require(report.eventData.value.isFinite() && report.eventData.value > 0 &&
+            report.eventData.value % 1.0 == 0.0 && report.eventData.value <= 9_007_199_254_740_991.0) {
+            "Feature quantity must be a positive exact integer"
         }
-        val text = response.body.decodeToString()
-        StrictJsonValidator.requireNoDuplicateKeys(text)
-        val parsed = Json.parseToJsonElement(text).jsonObject
-        val customerId = parsed.requiredString("customerId", "/entitled response")
-        val featureId = parsed.requiredString("featureId", "/entitled response")
-        val code = parsed.requiredString("code", "/entitled response")
-        val type = (parsed["type"] as? JsonPrimitive)?.content?.toFeatureType()
-            ?: throw IOException("/entitled response has an invalid feature type")
-        val allowed = (parsed["allowed"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull()
-            ?: throw IOException("/entitled response is missing allowed")
-        val unlimited = (parsed["unlimited"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull()
-            ?: throw IOException("/entitled response is missing unlimited")
-        val balance = (parsed["balance"] as? JsonPrimitive)?.content?.toDoubleOrNull()
-        return FeatureCheckResult(
-            customerId = customerId,
-            featureId = featureId,
-            requiredBalance = report.requiredBalance,
-            code = code,
-            allowed = allowed,
-            unlimited = unlimited,
-            balance = balance,
-            type = type,
-        )
+        val evidence = JsonObject(buildMap {
+            put("type", JsonPrimitive("playstore"))
+            put("purchaseToken", JsonPrimitive(report.purchase.purchaseToken))
+            put("productId", JsonPrimitive(report.purchase.productId))
+            report.purchase.basePlanId?.let { put("basePlanId", JsonPrimitive(it)) }
+            report.purchase.purchaseOptionId?.let { put("purchaseOptionId", JsonPrimitive(it)) }
+            report.purchase.offerId?.let { put("offerId", JsonPrimitive(it)) }
+            report.purchase.productType?.let { put("productType", JsonPrimitive(it)) }
+        })
+        val command = JsonObject(buildMap {
+            put("customerId", JsonPrimitive(report.customerId))
+            put("featureId", JsonPrimitive(report.featureId))
+            put("operationId", JsonPrimitive(report.purchase.eventId))
+            put("quantity", JsonPrimitive(report.eventData.value.toLong()))
+            report.entityId?.let { put("entityId", JsonPrimitive(it)) }
+            put("purchase", evidence)
+        })
+        val result = consumeFeature(command)
+        if (result["accepted"] != JsonPrimitive(true)) throw IOException("Feature purchase consumption denied")
+        val type = (result["type"] as? JsonPrimitive)?.content?.toFeatureType()
+            ?: throw IOException("Feature command receipt has an invalid type")
+        return FeatureCheckResult(customerId = report.customerId, featureId = report.featureId,
+            requiredBalance = report.requiredBalance, code = result.requiredString("code", "Feature command receipt"),
+            allowed = result["active"] == JsonPrimitive(true), unlimited = result["unlimited"] == JsonPrimitive(true),
+            balance = (result["balance"] as? JsonPrimitive)?.content?.toDoubleOrNull(), type = type)
     }
 
     /**
