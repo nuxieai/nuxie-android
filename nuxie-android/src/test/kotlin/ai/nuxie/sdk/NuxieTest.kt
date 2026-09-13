@@ -47,7 +47,7 @@ class NuxieTest {
         assertTrue(core === Nuxie.core)
     }
 
-    @Test
+    @Test(timeout = 5_000)
     fun shutdownReleasesTheActiveGraphAndAllowsFreshSetup() {
         val listener = NuxieListener { _, _ -> }
         Nuxie.listener = listener
