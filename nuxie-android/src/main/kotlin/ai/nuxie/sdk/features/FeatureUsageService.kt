@@ -87,11 +87,11 @@ internal class FeatureUsageService(
     }
 
     suspend fun recover() = withContext(Dispatchers.IO) {
-        val operationIds = journalMutex.withLock { loadCommands().map { it.getValue("command").jsonObject.getValue("operationId") } }
-        for (operationId in operationIds) {
+        val pendingCommands = journalMutex.withLock { loadCommands().map { it.getValue("command").jsonObject } }
+        for (pendingCommand in pendingCommands) {
             try {
                 withJournalDecision { publications ->
-                    loadCommands().firstOrNull { it.getValue("command").jsonObject["operationId"] == operationId }
+                    loadCommands().firstOrNull { it.getValue("command").jsonObject.sameOperation(pendingCommand) }
                         ?.let { deliver(it, publications) }
                 }
             } catch (error: Exception) {
@@ -107,14 +107,13 @@ internal class FeatureUsageService(
         expectedScope: IdentityScope = identity.captureScope(),
     ): FeatureUsageResult {
         val command = record.getValue("command").jsonObject
-        val operationId = command.getValue("operationId")
         val response = (record["response"] as? JsonObject) ?: try { api.consumeFeature(command) } catch (error: NuxieApi.RequestRejectedException) {
             if (error.statusCode in listOf(400, 401, 403, 404, 410, 413)) {
-                saveCommands(loadCommands().filterNot { it["command"]?.jsonObject?.get("operationId") == operationId })
+                saveCommands(loadCommands().filterNot { it["command"]?.jsonObject?.sameOperation(command) == true })
             }
             throw error
         }.also { result ->
-            saveCommands(loadCommands().map { if (it["command"]?.jsonObject?.get("operationId") == operationId)
+            saveCommands(loadCommands().map { if (it["command"]?.jsonObject?.sameOperation(command) == true)
                 JsonObject(it + ("response" to result)) else it })
         }
         val accepted = response["accepted"] == JsonPrimitive(true)
@@ -143,7 +142,7 @@ internal class FeatureUsageService(
             captureAcceptedUse(featureId, amount, entityId, record["metadata"] as? JsonObject,
                 command.string("operationId")!!, distinctId, response.double("occurredAtMs")?.toLong())
         }
-        saveCommands(loadCommands().filterNot { it["command"]?.jsonObject?.get("operationId") == operationId })
+        saveCommands(loadCommands().filterNot { it["command"]?.jsonObject?.sameOperation(command) == true })
         return FeatureUsageResult(success = accepted, featureId = featureId, amountUsed = amount,
             message = response.string("code"), usage = null,
             authoritativeAccess = access,
@@ -241,7 +240,7 @@ internal class FeatureUsageService(
                 entityId?.let { fields["entityId"] = JsonPrimitive(it) }
                 if (setUsage) fields["mode"] = JsonPrimitive("set_usage")
                 if (operationId != null) {
-                    loadCommands().firstOrNull { it["command"]?.jsonObject?.string("operationId") == operationId }?.let {
+                    loadCommands().firstOrNull { it["command"]?.jsonObject?.let { pending -> pending.string("operationId") == operationId && pending.string("customerId") == distinctId } == true }?.let {
                         val pending = it.getValue("command").jsonObject
                         require(fields.all { (key, value) -> pending[key] == value } && pending["entityId"] == fields["entityId"] && pending["mode"] == fields["mode"]) {
                             "Operation ID conflicts with a pending command"
@@ -297,6 +296,9 @@ internal class FeatureUsageService(
     private fun ensureIdentity(expected: IdentityScope) {
         if (!identity.isCurrentScope(expected)) throw CancellationException()
     }
+
+    private fun JsonObject.sameOperation(other: JsonObject): Boolean =
+        this["customerId"] == other["customerId"] && this["operationId"] == other["operationId"]
 
     private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)
         ?.takeIf { it.isString }
