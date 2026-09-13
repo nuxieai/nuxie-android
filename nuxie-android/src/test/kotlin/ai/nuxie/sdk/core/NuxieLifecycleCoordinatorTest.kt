@@ -14,6 +14,11 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -23,6 +28,58 @@ import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 class NuxieLifecycleCoordinatorTest {
+    @Test
+    fun closeWaitsForCancelledTransitionCleanupAndRejectsLaterCallbacks() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val entered = CompletableDeferred<Unit>()
+        val cleaningUp = CompletableDeferred<Unit>()
+        val releaseCleanup = CompletableDeferred<Unit>()
+        val calls = AtomicInteger()
+        val emitted = CopyOnWriteArrayList<String>()
+        val context = RuntimeEnvironment.getApplication()
+        val coordinator = NuxieLifecycleCoordinator(
+            tracker = AppLifecycleTracker(
+                preferences = context.getSharedPreferences("lifecycle-close", Context.MODE_PRIVATE),
+                appVersionProvider = { "1" },
+                nowMillis = { 100_000L },
+                emit = { name, _ -> emitted += name },
+            ),
+            sessions = SessionService { 100_000L },
+            scope = scope,
+            onForeground = {
+                calls.incrementAndGet()
+                entered.complete(Unit)
+                try { awaitCancellation() } finally {
+                    withContext(NonCancellable) {
+                        cleaningUp.complete(Unit)
+                        releaseCleanup.await()
+                    }
+                }
+            },
+        )
+        val activity = Robolectric.buildActivity(Activity::class.java).get()
+        try {
+            coordinator.onActivityStarted(activity)
+            withTimeout(3_000) { entered.await() }
+            coordinator.onActivityStopped(activity)
+            coordinator.onActivityStarted(activity)
+            val closing = async { coordinator.close() }
+            withTimeout(3_000) { cleaningUp.await() }
+            assertFalse(closing.isCompleted)
+            releaseCleanup.complete(Unit)
+            withTimeout(3_000) { closing.await() }
+            coordinator.onActivityStopped(activity)
+            coordinator.onActivityStarted(activity)
+            coordinator.close()
+            assertEquals(1, calls.get())
+            assertEquals(emptyList<String>(), emitted)
+        } finally {
+            releaseCleanup.complete(Unit)
+            coordinator.close()
+            scope.cancel()
+        }
+    }
+
     @Test
     fun lateSetupAdmitsVisibleHostOnceAndPreservesForegroundOrdering() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

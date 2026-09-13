@@ -520,6 +520,7 @@ internal class NuxieCore(
         billing.close()
         presentations.close()
         kotlinx.coroutines.runBlocking {
+            runCatching { lifecycleCoordinator.close() }
             runCatching { featureUsage.close() }
             runCatching { journeys.profileDidClearAll() }
             runCatching { profile.close() }
