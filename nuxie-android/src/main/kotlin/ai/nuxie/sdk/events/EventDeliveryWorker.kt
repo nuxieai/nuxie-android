@@ -3,6 +3,7 @@ package ai.nuxie.sdk.events
 import ai.nuxie.sdk.network.NuxieApi
 import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
@@ -34,6 +35,7 @@ internal class EventDeliveryWorker(
     private val signals = Channel<Signal>(capacity = Channel.UNLIMITED)
     private var consecutiveFailures = 0
     private var nextRetryAtMillis = 0L
+    private var adaptiveBatchSize = batchSize
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val worker = scope.launch {
@@ -77,21 +79,56 @@ internal class EventDeliveryWorker(
     private suspend fun flushUntilDrained(force: Boolean): Boolean {
         if (!force && nowMillis() < nextRetryAtMillis) return false
         while (true) {
-            val batch = store.pendingBatch(batchSize)
+            val batch = store.pendingBatch(adaptiveBatchSize)
             if (batch.isEmpty()) {
                 consecutiveFailures = 0
                 nextRetryAtMillis = 0
+                adaptiveBatchSize = batchSize
                 cleanupDelivered()
                 return true
             }
             val delivered = runCatching {
-                api.postBatch(batch.map(BatchItemWireEncoder::encode))
-                store.markDelivered(batch.map { it.id })
+                val acknowledgment = api.postBatch(batch.map(BatchItemWireEncoder::encode))
+                if (acknowledgment.acceptedIndexes.isEmpty()) {
+                    throw java.io.IOException("Batch acknowledgment made no progress")
+                }
+                store.markDelivered(acknowledgment.acceptedIndexes.map { batch[it].id })
             }
             if (delivered.isFailure) {
+                var error = delivered.exceptionOrNull()!!
+                if (error is CancellationException) throw error
+                var disposition = EventDeliveryPolicy.disposition(error, nowMillis())
+                if (disposition == EventDeliveryDisposition.Split) {
+                    if (batch.size > 1) {
+                        adaptiveBatchSize = (batch.size / 2).coerceAtLeast(1)
+                    } else {
+                        // Match the retained-history contract: terminal transport
+                        // poison leaves the pending queue but remains local history.
+                        val retirement = runCatching { store.markDelivered(listOf(batch.single().id)) }
+                        if (retirement.isSuccess) {
+                            Log.e(LOG_TAG, "Terminal batch event retired after isolation", error)
+                        } else {
+                            error = retirement.exceptionOrNull()!!
+                            if (error is CancellationException) throw error
+                            disposition = EventDeliveryDisposition.Retry()
+                        }
+                    }
+                    if (disposition == EventDeliveryDisposition.Split) {
+                        consecutiveFailures = 0
+                        nextRetryAtMillis = 0
+                        continue
+                    }
+                }
                 consecutiveFailures = (consecutiveFailures + 1).coerceAtMost(retryCount)
-                nextRetryAtMillis = nowMillis() +
-                    retryDelayMillis * (1L shl (consecutiveFailures - 1))
+                val ordinaryDelay = retryDelayMillis * (1L shl (consecutiveFailures - 1))
+                val maximumDelay = retryDelayMillis * (1L shl (retryCount - 1))
+                val delay = when (disposition) {
+                    EventDeliveryDisposition.UnhealthyAuthentication -> flushIntervalMillis
+                    is EventDeliveryDisposition.Retry ->
+                        (disposition.retryAfterMillis ?: ordinaryDelay).coerceIn(ordinaryDelay, maximumDelay)
+                    EventDeliveryDisposition.Split -> error("Handled above")
+                }
+                nextRetryAtMillis = nowMillis() + delay
                 Log.w(
                     LOG_TAG,
                     "Batch delivery failed (attempt $consecutiveFailures); " +

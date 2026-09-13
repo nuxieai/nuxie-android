@@ -34,7 +34,7 @@ internal class NuxieApi(
         NuxieEnvironment.DEVELOPMENT -> "https://dev-i.nuxie.ai"
     }
 
-    class BatchRejectedException(val statusCode: Int) :
+    class BatchRejectedException(val statusCode: Int, val retryAfter: String? = null) :
         IOException("Batch rejected with status $statusCode")
 
     class RequestRejectedException(val statusCode: Int, endpoint: String, val code: String? = null) :
@@ -233,12 +233,12 @@ internal class NuxieApi(
     /**
      * Post pre-encoded batch items (canonical JSON text from the
      * conformance-tested encoder; assembled by concatenation so item bytes
-     * reach the wire exactly as encoded). Returns normally on 2xx ack.
+     * reach the wire exactly as encoded). Validates per-item acceptance on 2xx.
      *
      * @throws IOException on transport failure (retryable)
      * @throws BatchRejectedException on a non-2xx response
      */
-    fun postBatch(encodedItems: List<String>) {
+    fun postBatch(encodedItems: List<String>): BatchAcknowledgment {
         require(encodedItems.isNotEmpty()) { "postBatch requires at least one item." }
         val body = buildString {
             // iOS parity: every POST body carries camel-cased "apiKey".
@@ -265,8 +265,9 @@ internal class NuxieApi(
             ),
         )
         if (response.statusCode !in 200..299) {
-            throw BatchRejectedException(response.statusCode)
+            throw BatchRejectedException(response.statusCode, response.header("Retry-After"))
         }
+        return BatchAcknowledgment.decode(response.body, encodedItems.size)
     }
 
     /**

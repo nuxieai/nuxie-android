@@ -57,7 +57,9 @@ class EventDeliveryWorkerTest {
                 },
             )
             return when (val next = if (script.isEmpty()) 200 else script.removeAt(0)) {
-                is Int -> HttpTransport.Response(next, ByteArray(0))
+                is Int -> HttpTransport.Response(next,
+                    """{"status":"success","processed":${batches.last().size},"failed":0,"total":${batches.last().size}}""".encodeToByteArray())
+                is String -> HttpTransport.Response(200, next.encodeToByteArray())
                 is IOException -> throw next
                 else -> error("Unsupported script entry: $next")
             }
@@ -155,6 +157,101 @@ class EventDeliveryWorkerTest {
         assertEquals(2, store.pendingBatch(limit = 10).size)
         delivery.close()
         store.close()
+    }
+
+    @Test
+    fun oversizedBatchesSplitAndTerminalPoisonCannotBlockNeighbors() = runBlocking {
+        val store = store()
+        val transport = ScriptedTransport(413, 200, 422, 200)
+        val delivery = worker(store, transport)
+        seed(store, 3)
+        assertTrue(delivery.flushAll())
+        assertEquals(listOf(listOf("event-0", "event-1", "event-2"),
+            listOf("event-0"), listOf("event-1"), listOf("event-2")), transport.batches)
+        assertTrue(store.pendingBatch(10).isEmpty())
+        assertEquals(3, countAllRows(store))
+        delivery.close()
+    }
+
+    @Test
+    fun failedPoisonRetirementKeepsWorkerAliveAndEventPending() = runBlocking {
+        val store = store()
+        var failRetirement = true
+        val faultyStore = object : EventStore by store {
+            override suspend fun markDelivered(ids: List<String>) {
+                if (failRetirement) {
+                    failRetirement = false
+                    throw IOException("disk unavailable")
+                }
+                store.markDelivered(ids)
+            }
+        }
+        val delivery = worker(faultyStore, ScriptedTransport(422, 422))
+        seed(store, 1)
+        assertFalse(delivery.flushAll())
+        assertEquals(1, store.pendingBatch(10).size)
+        assertTrue(delivery.flushAll())
+        assertTrue(store.pendingBatch(10).isEmpty())
+        delivery.close()
+    }
+
+    @Test
+    fun authenticationFailureRetainsTheEntireBatch() = runBlocking {
+        val store = store()
+        val transport = ScriptedTransport(401)
+        val delivery = worker(store, transport)
+        seed(store, 3)
+        assertFalse(delivery.flushAll())
+        assertEquals(3, store.pendingBatch(10).size)
+        assertEquals(1, transport.batches.size)
+        delivery.close()
+    }
+
+    @Test
+    fun partialAcceptanceRetiresOnlySuccessfulRowsAndRetriesFailures() = runBlocking {
+        val store = store()
+        val transport = ScriptedTransport(
+            """{"status":"partial","processed":2,"failed":1,"total":3,"errors":[{"index":1,"event":"seeded","error":"retry"}]}""",
+            IOException("offline"),
+        )
+        val delivery = worker(store, transport)
+        seed(store, 3)
+
+        assertFalse(delivery.flushAll())
+        assertEquals(listOf("event-1"), store.pendingBatch(10).map { it.id })
+        assertEquals(listOf("event-1"), transport.batches.last())
+        assertTrue(delivery.flushAll())
+        assertTrue(store.pendingBatch(10).isEmpty())
+        delivery.close()
+    }
+
+    @Test
+    fun invalidAcknowledgmentRetainsEveryRow() = runBlocking {
+        val store = store()
+        val transport = ScriptedTransport(
+            """{"status":"partial","processed":2,"failed":1,"total":4,"errors":[{"index":7,"event":"seeded","error":"retry"}]}""",
+        )
+        val delivery = worker(store, transport)
+        seed(store, 3)
+        assertFalse(delivery.flushAll())
+        assertEquals(3, store.pendingBatch(10).size)
+        assertTrue(delivery.flushAll())
+        assertEquals(transport.batches.first(), transport.batches.last())
+        delivery.close()
+    }
+
+    @Test
+    fun validNoProgressAcknowledgmentStopsInsteadOfSpinning() = runBlocking {
+        val store = store()
+        val transport = ScriptedTransport(
+            """{"status":"partial","processed":0,"failed":1,"total":1,"errors":[{"index":0,"event":"seeded","error":"retry"}]}""",
+        )
+        val delivery = worker(store, transport)
+        seed(store, 1)
+        assertFalse(delivery.flushAll())
+        assertEquals(1, transport.batches.size)
+        assertEquals(1, store.pendingBatch(10).size)
+        delivery.close()
     }
 
     @Test
