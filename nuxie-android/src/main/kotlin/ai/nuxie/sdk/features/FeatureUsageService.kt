@@ -10,6 +10,7 @@ import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.network.NuxieApi
 import android.util.Log
 import java.io.IOException
+import java.io.FileNotFoundException
 import java.io.File
 import android.util.AtomicFile
 import kotlinx.coroutines.sync.Mutex
@@ -46,8 +47,11 @@ internal class FeatureUsageService(
 
     init { journalFile.parentFile?.mkdirs() }
 
-    private fun loadCommands(): List<JsonObject> = if (!journal.baseFile.exists()) emptyList() else
+    private fun loadCommands(): List<JsonObject> = try {
         (Json.parseToJsonElement(journal.openRead().use { it.readBytes().decodeToString() }) as JsonArray).map { it.jsonObject }
+    } catch (_: FileNotFoundException) {
+        emptyList()
+    }
 
     private fun saveCommands(commands: List<JsonObject>) {
         val stream = journal.startWrite()
@@ -115,7 +119,7 @@ internal class FeatureUsageService(
         val distinctId = command.string("customerId")!!
         if (accepted) {
             val current = identity.captureScope()
-            if (current.distinctId == distinctId && response["idempotentReplay"] != JsonPrimitive(true)) response.double("balance")?.let {
+            if (record["response"] == null && current.distinctId == distinctId && response["idempotentReplay"] != JsonPrimitive(true)) response.double("balance")?.let {
                 features.stageAuthoritativeUsageBalance(featureId, it, entityId, current)?.let(publications::add)
             }
             captureAcceptedUse(featureId, amount, entityId, record["metadata"] as? JsonObject,
@@ -261,12 +265,12 @@ internal class FeatureUsageService(
         )
         entityId?.let { properties["entity_id"] = it }
         metadata?.let { properties["metadata"] = JsonValueConverter.toNativeMap(it) }
-        eventLog.captureDeliveredIdempotently(
+        if (!eventLog.captureDeliveredIdempotently(
             SystemEventNames.FEATURE_USED,
             properties,
             eventId,
             distinctId,
-        )
+        )) throw IOException("Accepted Feature use could not be persisted locally")
     }
 
     private fun ensureIdentity(expected: IdentityScope) {

@@ -1,5 +1,10 @@
 package ai.nuxie.sdk.features
 
+import ai.nuxie.sdk.events.EventStore
+import ai.nuxie.sdk.events.SQLiteEventStore
+import ai.nuxie.sdk.events.StoredEvent
+import ai.nuxie.sdk.events.EventRouteCommit
+import org.robolectric.annotation.Config
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.billing.InMemoryPurchaseEvidenceStore
@@ -149,6 +154,61 @@ class FeatureCommandRecoveryTest {
         } finally { core.stop() }
     }
 
+
+    @Test
+    fun failedLocalCaptureRetainsReceiptWithoutRewindingNewerAuthority() = runBlocking {
+        val database = SQLiteEventStore(RuntimeEnvironment.getApplication(), databaseFile = File(temporary.root, "failing-events.db"))
+        var failCapture = true
+        val store = object : EventStore by database {
+            override suspend fun insertDeliveredIfAbsentAndStageRoute(event: StoredEvent): EventRouteCommit {
+                if (failCapture) throw IOException("disk unavailable")
+                return database.insertDeliveredIfAbsentAndStageRoute(event)
+            }
+        }
+        val transport = FakeTransport().apply {
+            respond = { request -> receipt(Json.parseToJsonElement(request.body.decodeToString()).jsonObject, 8.0) }
+        }
+        val core = testCore(transport, store)
+        try {
+            core.purchases.awaitInitialProjection()
+            suspend fun hydrate(balance: Int) = core.features.hydrateProfile(core.identity.distinctId(), Json.parseToJsonElement(
+                """{"features":[{"id":"credits","type":"metered","allowed":true,"unlimited":false,"balance":$balance}]}"""
+            ).jsonObject)
+            hydrate(10)
+            val file = File(temporary.root, "capture.json")
+            fun service() = FeatureUsageService(core.api, core.purchases, core.identity, core.features, core.eventLog, core.scope, file)
+            try { service().consumeFeature("credits", 2.0, "stored-receipt", null); fail("Capture failure must remain pending") }
+            catch (_: IOException) { }
+            assertTrue(file.readText().contains("response"))
+            // A newer remote decision may arrive before journal reconciliation.
+            core.features.applyAuthoritativeUsageBalance("credits", 3.0, null)
+            failCapture = false
+            service().recover()
+            assertEquals(3.0, core.featureInfo.balance("credits")!!, 0.0)
+            assertTrue(store.hasStableOutcome("stored-receipt"))
+            assertEquals("[]", file.readText())
+            assertEquals(1, transport.requests.size)
+        } finally { core.stop() }
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun recoveryRestoresAnAtomicFileBackupWithoutABaseFile() = runBlocking {
+        val transport = FakeTransport().apply {
+            respond = { request -> receipt(Json.parseToJsonElement(request.body.decodeToString()).jsonObject, 8.0) }
+        }
+        val core = testCore(transport)
+        try {
+            core.purchases.awaitInitialProjection()
+            val file = File(temporary.root, "backup.json")
+            File(file.path + ".bak").writeText("""[{"command":{"customerId":"${core.identity.distinctId()}","featureId":"credits","quantity":2,"operationId":"backup-operation"}}]""")
+            assertFalse(file.exists())
+            FeatureUsageService(core.api, core.purchases, core.identity, core.features, core.eventLog, core.scope, file).recover()
+            assertEquals(1, transport.requests.size)
+            assertEquals("[]", file.readText())
+        } finally { core.stop() }
+    }
+
     private fun receipt(command: JsonObject, balance: Double) = HttpTransport.Response(200,
         JsonObject(command - "apiKey" + mapOf(
             "accepted" to JsonPrimitive(true), "code" to JsonPrimitive("consumed"),
@@ -157,9 +217,9 @@ class FeatureCommandRecoveryTest {
             "occurredAtMs" to JsonPrimitive(1789285000000L), "idempotentReplay" to JsonPrimitive(false),
         )).toString().encodeToByteArray())
 
-    private fun testCore(transport: FakeTransport) = NuxieCore(RuntimeEnvironment.getApplication(),
+    private fun testCore(transport: FakeTransport, store: EventStore? = null) = NuxieCore(RuntimeEnvironment.getApplication(),
         "pk_${UUID.randomUUID()}", NuxieEnvironment.DEVELOPMENT, LogLevel.NONE, beforeSend = null,
-        overrides = NuxieCore.Overrides(transport = transport, registerLifecycle = false,
+        overrides = NuxieCore.Overrides(transport = transport, store = store, registerLifecycle = false,
             requestInitialProfileRefresh = false, billingClientFactory = InertBillingClientAdapter.factory,
             purchaseEvidenceStore = InMemoryPurchaseEvidenceStore(),
             eventDatabaseFile = File(temporary.root, "events.db"), profileCacheDirectory = File(temporary.root, "profile")))
