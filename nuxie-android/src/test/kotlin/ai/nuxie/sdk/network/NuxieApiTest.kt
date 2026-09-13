@@ -9,13 +9,21 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.URL
 import java.util.zip.GZIPInputStream
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
 
 class NuxieApiTest {
     private class RecordingTransport(private val statusCode: Int = 200) : HttpTransport {
         val requests = mutableListOf<HttpTransport.Request>()
         override fun execute(request: HttpTransport.Request): HttpTransport.Response {
             requests.add(request)
-            return HttpTransport.Response(statusCode, ByteArray(0))
+            val count = if (request.url.path.endsWith("/batch")) {
+                val body = GZIPInputStream(request.body.inputStream()).bufferedReader().use { it.readText() }
+                Json.parseToJsonElement(body).jsonObject.getValue("batch").jsonArray.size
+            } else 0
+            return HttpTransport.Response(statusCode,
+                """{"status":"success","processed":$count,"failed":0,"total":$count}""".encodeToByteArray())
         }
     }
 
