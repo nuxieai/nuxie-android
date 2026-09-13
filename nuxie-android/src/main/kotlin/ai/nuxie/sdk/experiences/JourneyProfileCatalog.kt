@@ -2,6 +2,8 @@ package ai.nuxie.sdk.experiences
 
 import ai.nuxie.sdk.network.ProfileDeliveryAuthority
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
@@ -22,7 +24,7 @@ internal class JourneyProfileCatalog(
 
     class Prepared internal constructor(
         internal val snapshot: Snapshot,
-        internal val promotions: Map<String, Long>,
+        internal val promotions: Map<String, JourneyReleaseIdentity>,
         internal val authority: ProfileDeliveryAuthority,
     )
 
@@ -46,7 +48,7 @@ internal class JourneyProfileCatalog(
                 ?: throw JourneyReleaseAuthenticationException("Journey runtime unavailable")
         }
         val authenticated = LinkedHashMap<String, AuthenticatedJourneyRelease>(profile.releases.size)
-        val promotions = mutableMapOf<String, Long>()
+        val promotions = mutableMapOf<String, JourneyReleaseIdentity>()
         val activeDigests = profile.armedLegs.asSequence()
             .filter { it.binding.getValue("type").jsonPrimitive.content == "new" }
             .map { it.reference.getValue("descriptorSha256").jsonPrimitive.content }
@@ -78,10 +80,10 @@ internal class JourneyProfileCatalog(
             if (authenticated.put(release.descriptorSha256, release) != null) {
                 throw JourneyReleaseAuthenticationException("duplicate authenticated Journey")
             }
-            if (isActive) release.publishedAtSeqToPromote?.let { sequence ->
-                val previous = promotions.put(entry.locator.streamKey, sequence)
-                if (previous != null && previous != sequence) {
-                    throw JourneyReleaseAuthenticationException("conflicting release sequence")
+            if (isActive) {
+                val previous = promotions.put(entry.locator.streamKey, release.identity)
+                if (previous != null && previous != release.identity) {
+                    throw JourneyReleaseAuthenticationException("conflicting release publication")
                 }
             }
         }
@@ -93,6 +95,19 @@ internal class JourneyProfileCatalog(
                 ?: throw JourneyReleaseAuthenticationException("missing authenticated Journey")
             if (arm.entryCondition != release.leg.getValue("entryCondition")) {
                 throw JourneyReleaseAuthenticationException("Journey entry condition changed")
+            }
+        }
+        for ((delivered, referenced) in listOf(
+            "properties" to "propertyKeys",
+            "memberships" to "segmentIds",
+            "assignments" to "experimentIds",
+        )) {
+            val expectedKeys = authenticated.values.flatMap { release ->
+                release.leg.getValue("facts").jsonObject.getValue(referenced)
+                    .jsonArray.map { it.jsonPrimitive.content }
+            }.toSet()
+            if (profile.facts.getValue(delivered).jsonObject.keys != expectedKeys) {
+                throw JourneyReleaseAuthenticationException("Journey fact projection changed")
             }
         }
         return Prepared(Snapshot(profile, authenticated), promotions, deliveryAuthority)
@@ -112,8 +127,8 @@ internal class JourneyProfileCatalog(
                 "authenticated Journey product mappings could not be retained",
             )
         }
-        this@JourneyProfileCatalog.authority = prepared.authority
         highWater.admitBatch(prepared.promotions)
+        this@JourneyProfileCatalog.authority = prepared.authority
         current = distinctId to prepared.snapshot
     }
 

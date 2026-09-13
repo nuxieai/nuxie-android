@@ -62,6 +62,40 @@ class JourneyProfileCatalogTest {
         assertEquals(release.identity.publishedAtSeq, highWater.floor(release.identity.streamKey))
     }
 
+    @Test fun `shared profiles enforce the signed fact union across multiple legs`() {
+        FixtureRunner.run("journeys/planes/profile-fact-admission.json", "journeys/planes/profile-fact-admission") { vector ->
+            val catalog = JourneyProfileCatalog(keys, JourneyReleaseHighWaterStore(context)) { runtime() }
+            val body = vector.body.getValue("profile").jsonObject
+            if (vector.body.getValue("valid").jsonPrimitive.content == "true") {
+                catalog.commit("customer", catalog.prepare(body, authority))
+                assertEquals(2, catalog.snapshot("customer")?.releasesByDigest?.size)
+            } else {
+                catalog.commit("customer", catalog.prepare(profile(), authority))
+                val previous = catalog.snapshot("customer")
+                assertThrows(JourneyReleaseAuthenticationException::class.java) {
+                    catalog.prepare(body, authority)
+                }
+                assertEquals(previous, catalog.snapshot("customer"))
+            }
+        }
+    }
+
+    @Test fun `equal sequence conflicting publication cannot replace admitted profile`() {
+        val highWater = JourneyReleaseHighWaterStore(context)
+        val catalog = JourneyProfileCatalog(keys, highWater) { runtime() }
+        val prepared = catalog.prepare(profile(), authority)
+        val identity = prepared.snapshot.releasesByDigest.values.single().identity
+        highWater.admitBatch(mapOf(identity.streamKey to identity.copy(buildId = "another-build")))
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            catalog.commit("customer", prepared)
+        }
+        assertNull(catalog.snapshot("customer"))
+        val empty = JsonObject(profile() + mapOf(
+            "releases" to JsonArray(emptyList()), "armedLegs" to JsonArray(emptyList()),
+        ))
+        catalog.commit("customer", catalog.prepare(empty, authority.copy(appId = "different-app")))
+    }
+
     @Test fun `a rejected replacement cannot mutate current authority or replay floors`() {
         val highWater = JourneyReleaseHighWaterStore(context)
         val catalog = JourneyProfileCatalog(keys, highWater) { runtime() }
@@ -92,7 +126,7 @@ class JourneyProfileCatalogTest {
             entry.getValue("locator").jsonObject,
             setOf("legId"),
         )!!
-        highWater.promote(identity.streamKey, identity.publishedAtSeq + 1)
+        highWater.admitBatch(mapOf(identity.streamKey to identity.copy(publishedAtSeq = identity.publishedAtSeq + 1)))
 
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
             catalog.commit("customer", prepared)
@@ -108,7 +142,7 @@ class JourneyProfileCatalogTest {
             entry.getValue("locator").jsonObject,
             setOf("legId"),
         )!!
-        highWater.promote(identity.streamKey, identity.publishedAtSeq + 1)
+        highWater.admitBatch(mapOf(identity.streamKey to identity.copy(publishedAtSeq = identity.publishedAtSeq + 1)))
         val continuation = buildJsonObject {
             put("type", "continue")
             put("journeyId", "00000000-0000-7000-8000-000000000001")
@@ -152,7 +186,7 @@ class JourneyProfileCatalogTest {
         val reference = snapshot.profile.armedLegs.single().reference
         val identity = snapshot.releasesByDigest.values.single().identity
         catalog.clear("customer")
-        highWater.promote(identity.streamKey, identity.publishedAtSeq + 10)
+        highWater.admitBatch(mapOf(identity.streamKey to identity.copy(publishedAtSeq = identity.publishedAtSeq + 10)))
 
         val pinned = catalog.authenticatePinnedRelease(entry, reference)
 
@@ -211,7 +245,7 @@ class JourneyProfileCatalogTest {
             }
             putJsonArray("features") {}
             putJsonObject("facts") {
-                putJsonObject("properties") { putJsonObject("ready") { put("present", true); put("value", true) } }
+                putJsonObject("properties") {}
                 putJsonObject("memberships") {}
                 putJsonObject("assignments") {}
             }

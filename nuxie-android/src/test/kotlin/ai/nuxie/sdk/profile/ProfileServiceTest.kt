@@ -338,12 +338,7 @@ class ProfileServiceTest {
             }
             putJsonArray("features") {}
             putJsonObject("facts") {
-                putJsonObject("properties") {
-                    putJsonObject("ready") {
-                        put("present", true)
-                        put("value", true)
-                    }
-                }
+                putJsonObject("properties") {}
                 putJsonObject("memberships") {}
                 putJsonObject("assignments") {}
             }
