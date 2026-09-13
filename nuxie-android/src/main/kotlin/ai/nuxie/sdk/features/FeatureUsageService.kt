@@ -62,10 +62,20 @@ internal class FeatureUsageService(
         recovery.request()
     }
 
-    suspend fun close() {
+    /** Stop retry production while admitted public operations can still enter the command journal. */
+    suspend fun stopRecovery() {
+        ensureOutsidePublication()
+        recovery.close()
+    }
+
+    private suspend fun ensureOutsidePublication() {
         check(currentCoroutineContext()[PublicationDrain] == null) {
             "A Feature publication cannot await its own shutdown. Initiate shutdown from an independent coroutine."
         }
+    }
+
+    suspend fun close() {
+        ensureOutsidePublication()
         val admitted = synchronized(operationLock) {
             closed = true
             operations.toList()
