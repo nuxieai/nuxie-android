@@ -224,16 +224,7 @@ internal class FeatureService(
                     balance = balance,
                     type = authoritative?.type ?: visible.type,
                 )
-                val revision = advanceFeatureMutationRevision(featureId)
-                // Any spend can change the aggregate and allocation among entity
-                // grants. Only the receipt's exact scope has a known balance.
-                usageInvalidationRevisions[featureId] = revision
-                realTimeCache.keys.removeAll { it.featureId == featureId }
-                durableAccess = durableAccess - featureId
-                durableEntities = durableEntities - featureId
-                purchaseUpdates.replaceAll { _, projection ->
-                    projection.copy(access = projection.access - featureId)
-                }
+                val revision = invalidateUsageAuthorityLocked(featureId)
                 publication = commitAuthoritativeAccessLocked(
                     mapOf(
                         featureId to AuthoritativeAccessUpdate(
@@ -249,6 +240,29 @@ internal class FeatureService(
         } == true
         if (!admitted) throw kotlinx.coroutines.CancellationException()
         return publication
+    }
+
+    internal fun stageUsageInvalidation(featureId: String, expectedScope: IdentityScope): FeatureInfo.Mutation? =
+        identity.withCurrentScope(expectedScope) {
+            synchronized(lock) {
+                synchronizeCustomerScopeLocked()
+                invalidateUsageAuthorityLocked(featureId)
+                stageCurrentLocked(publicationGuard = { identity.isCurrentScope(expectedScope) })
+            }
+        }
+
+    private fun invalidateUsageAuthorityLocked(featureId: String): Long {
+        val revision = advanceFeatureMutationRevision(featureId)
+        // Any spend can change the aggregate and allocation among entity
+        // grants. Only a fresh receipt's exact scope has a known balance.
+        usageInvalidationRevisions[featureId] = revision
+        realTimeCache.keys.removeAll { it.featureId == featureId }
+        durableAccess = durableAccess - featureId
+        durableEntities = durableEntities - featureId
+        purchaseUpdates.replaceAll { _, projection ->
+            projection.copy(access = projection.access - featureId)
+        }
+        return revision
     }
 
     suspend fun checkWithCache(
