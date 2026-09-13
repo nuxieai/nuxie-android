@@ -41,6 +41,8 @@ object Nuxie {
     private val identityDecisionLock = Any()
 
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+    private val callbackLock = Any()
+    private val pendingCallbacks = mutableMapOf<Runnable, () -> Unit>()
 
     @Volatile
     private var listenerReference = WeakReference<NuxieListener>(null)
@@ -49,7 +51,17 @@ object Nuxie {
     var listener: NuxieListener?
         get() = listenerReference.get()
         set(value) {
-            listenerReference = WeakReference(value)
+            val withdrawn = synchronized(callbackLock) {
+                listenerReference = WeakReference(value)
+                if (value == null) pendingCallbacks.toMap().also { pendingCallbacks.clear() }
+                else emptyMap()
+            }
+            // Clearing the listener withdraws queued deliveries. In particular,
+            // shutdown must not wait for a main-thread callback after detaching it.
+            withdrawn.forEach { (task, finish) ->
+                mainHandler.removeCallbacks(task)
+                finish()
+            }
         }
 
     val isSetup: Boolean
@@ -363,7 +375,10 @@ object Nuxie {
             return
         }
         suspendCancellableCoroutine { continuation ->
-            val posted = mainHandler.post {
+            lateinit var task: Runnable
+            task = Runnable {
+                val claimed = synchronized(callbackLock) { pendingCallbacks.remove(task) != null }
+                if (!claimed) return@Runnable
                 runCatching {
                     listener?.let { resolved ->
                         if (isCurrent()) callback(resolved)
@@ -372,7 +387,22 @@ object Nuxie {
                     .onSuccess { continuation.resume(Unit) }
                     .onFailure(continuation::resumeWithException)
             }
-            if (!posted) {
+            var withdrawn = false
+            val posted = synchronized(callbackLock) {
+                if (listener == null || !isCurrent()) {
+                    withdrawn = true
+                    true
+                } else {
+                    pendingCallbacks[task] = { continuation.resume(Unit) }
+                    mainHandler.post(task).also { if (!it) pendingCallbacks.remove(task) }
+                }
+            }
+            continuation.invokeOnCancellation {
+                synchronized(callbackLock) { pendingCallbacks.remove(task) }
+                mainHandler.removeCallbacks(task)
+            }
+            if (withdrawn) continuation.resume(Unit)
+            else if (!posted) {
                 continuation.resumeWithException(
                     IllegalStateException("Could not dispatch $label to the main thread."),
                 )

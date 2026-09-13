@@ -56,4 +56,43 @@ class ForwardedActivityJourneyReleaseDeliveryTest {
     }
 
     private fun info(id: String) = NuxieActivityInfo(id, 1L, 2L, NuxieActivity.AppOpened)
+
+    @Test(timeout = 5_000)
+    fun removingListenerReleasesQueuedDeliveryWithoutRunningTheMainLooper() {
+        val deliveries = mutableListOf<String>()
+        val listener = object : NuxieListener {
+            override fun onAppActionRequested(sdk: Nuxie, action: AppAction) = Unit
+            override fun onActivityEmitted(sdk: Nuxie, info: NuxieActivityInfo) {
+                deliveries += info.id
+            }
+        }
+        Nuxie.listener = listener
+        val finished = CountDownLatch(1)
+        val worker = Thread {
+            try {
+                runBlocking { Nuxie.deliverActivity(info("withdrawn")) }
+            } finally {
+                finished.countDown()
+            }
+        }
+        worker.start()
+        try {
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (shadowOf(Looper.getMainLooper()).isIdle && System.nanoTime() < deadline) {
+                Thread.yield()
+            }
+            assertFalse("callback was not queued", shadowOf(Looper.getMainLooper()).isIdle)
+            assertEquals(1L, finished.count)
+
+            Nuxie.listener = null
+
+            assertTrue("withdrawn callback still blocks its worker", finished.await(1, TimeUnit.SECONDS))
+            Nuxie.listener = listener
+            shadowOf(Looper.getMainLooper()).idle()
+            assertTrue("withdrawn callback reached a later listener", deliveries.isEmpty())
+        } finally {
+            worker.interrupt()
+            worker.join(1_000)
+        }
+    }
 }
