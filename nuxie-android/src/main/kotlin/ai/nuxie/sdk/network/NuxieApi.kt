@@ -364,7 +364,7 @@ internal class NuxieApi(
             append("{\"apiKey\":").append(jsonString(apiKey))
             append(",\"customerId\":").append(jsonString(report.customerId))
             append(",\"featureId\":").append(jsonString(report.featureId))
-            append(",\"requiredBalance\":").append(jsonNumber(report.requiredBalance))
+            append(",\"requiredBalance\":").append(report.requiredBalance)
             append(",\"eventData\":{\"value\":").append(report.eventData.value)
             report.eventData.properties?.let { properties ->
                 append(",\"properties\":")
