@@ -108,7 +108,8 @@ internal class FeatureUsageService(
     ): FeatureUsageResult {
         val command = record.getValue("command").jsonObject
         val response = (record["response"] as? JsonObject) ?: try { api.consumeFeature(command) } catch (error: NuxieApi.RequestRejectedException) {
-            if (error.statusCode in listOf(400, 401, 403, 404, 410, 413)) {
+            if (error.statusCode in listOf(400, 401, 403, 404, 410, 413) ||
+                (error.statusCode == 409 && error.code == "operation_conflict")) {
                 saveCommands(loadCommands().filterNot { it["command"]?.jsonObject?.sameOperation(command) == true })
             }
             throw error
