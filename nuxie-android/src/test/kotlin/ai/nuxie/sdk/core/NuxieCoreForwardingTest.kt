@@ -4,6 +4,13 @@ import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.runCurrent
+import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieEnvironment
@@ -30,6 +37,8 @@ import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 class NuxieCoreForwardingTest {
+    @get:Rule val temporary = TemporaryFolder()
+
     private class RecordingApplication : Application() {
         val registrations = AtomicInteger()
         val unregistrations = AtomicInteger()
@@ -92,6 +101,56 @@ class NuxieCoreForwardingTest {
         override suspend fun close() {
             closed.set(true)
         }
+    }
+
+    @Test
+    fun producerCancellationCleanupCanCommitBeforeEventWorkersAndSqliteClose() = runBlocking {
+        val core = NuxieCore(
+            context = RuntimeEnvironment.getApplication(),
+            apiKey = "pk_test_producer_drain",
+            environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE,
+            beforeSend = null,
+            overrides = NuxieCore.Overrides(
+                transport = FakeTransport(),
+                registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+                billingClientFactory = InertBillingClientAdapter.factory,
+                eventDatabaseFile = temporary.newFile("producer-events.db"),
+            ),
+        )
+        val entered = CompletableDeferred<Unit>()
+        val captured = CompletableDeferred<Result<Boolean>>()
+        try {
+            core.purchases.awaitInitialProjection()
+            val producer = core.producerScope.launch {
+                try {
+                    entered.complete(Unit)
+                    awaitCancellation()
+                } finally {
+                    withContext(NonCancellable) {
+                        captured.complete(runCatching {
+                            core.eventLog.captureDeliveredIdempotently(
+                                SystemEventNames.FEATURE_USED,
+                                mapOf("feature_id" to "credits", "amount" to 1),
+                                "producer-cleanup-event", core.identity.distinctId(),
+                            ) && core.store.hasStableOutcome("producer-cleanup-event")
+                        })
+                    }
+                }
+            }
+            withTimeout(5_000) {
+                entered.await()
+                withContext(Dispatchers.Default) { core.stop() }
+                assertTrue("producer cleanup must finish while event capture and SQLite are open", captured.await().getOrThrow())
+                assertTrue(producer.isCompleted)
+                var lateProducerRan = false
+                val lateProducer = core.producerScope.launch { lateProducerRan = true }
+                lateProducer.join()
+                assertFalse(lateProducerRan)
+                assertTrue(lateProducer.isCancelled)
+            }
+        } finally { core.stop() }
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)

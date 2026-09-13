@@ -64,6 +64,7 @@ import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -145,6 +146,8 @@ internal class NuxieCore(
     private val appContext = context.applicationContext ?: context
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    // Purchase/startup producers drain while the parent-owned consumers remain live.
+    val producerScope = CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
 
     val identity: IdentityService = overrides.identity ?: IdentityService(appContext)
 
@@ -225,8 +228,8 @@ internal class NuxieCore(
     private val billing = PlayBillingConnection(
         factory = overrides.billingClientFactory
             ?: GooglePlayBillingClientAdapter.factory(appContext),
-        scope = scope,
-        onPurchasesUpdated = { update -> scope.launch { purchaseService.onPurchasesUpdated(update) } },
+        scope = producerScope,
+        onPurchasesUpdated = { update -> producerScope.launch { purchaseService.onPurchasesUpdated(update) } },
         onConnected = { purchaseService.recover() },
     )
 
@@ -238,7 +241,7 @@ internal class NuxieCore(
         distinctId = identity::distinctId,
         emit = eventLog::capture,
         settings = purchaseSettings,
-        scope = scope,
+        scope = producerScope,
         nowMillis = nowMillis,
         api = api,
         purchaseStorageScope = purchaseAuthorityScope(apiKey, environment),
@@ -499,7 +502,7 @@ internal class NuxieCore(
         if (requestInitialProfileRefresh) {
             profile.requestRefresh()
         }
-        scope.launch {
+        producerScope.launch {
             featureUsage.recover()
             delivery.flushAll()
         }
@@ -523,9 +526,11 @@ internal class NuxieCore(
             runCatching { billing.close() }
             runCatching { lifecycleCoordinator.close() }
             runCatching { userTransitions.close() }
+            runCatching { profile.close() }
+            producerScope.cancel()
+            producerScope.coroutineContext[Job]?.join()
             runCatching { featureUsage.close() }
             runCatching { journeys.profileDidClearAll() }
-            runCatching { profile.close() }
             runCatching { delivery.close() }
             runCatching { eventLog.closeWorkers() }
             scope.cancel()
