@@ -151,7 +151,7 @@ class FeatureCommandRecoveryTest {
                 val result = service.consumeFeature("credits", 1.0, "outer", null)
                 assertEquals(core.identity.distinctId(), result.customerId)
                 assertEquals("credits", result.featureId)
-                assertEquals(1789285000000.0, result.occurredAtMs!!, 0.0)
+                assertEquals(1789285000000L, result.occurredAtMs)
                 nestedReturned.await()
                 nestedPublished.await()
             }
@@ -393,6 +393,30 @@ class FeatureCommandRecoveryTest {
             conflict = ""
             service().recover()
             assertEquals("[]", file.readText())
+        } finally { core.stop() }
+    }
+
+    @Test
+    fun deniedReceiptClearsStaleAccessWithoutRecordingUsage() = runBlocking {
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                val command = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                val body = Json.parseToJsonElement(receipt(command, 0.0).body.decodeToString()).jsonObject
+                HttpTransport.Response(200, JsonObject(body + mapOf("accepted" to JsonPrimitive(false), "code" to JsonPrimitive("insufficient"))).toString().encodeToByteArray())
+            }
+        }
+        val core = testCore(transport)
+        try {
+            core.purchases.awaitInitialProjection()
+            val customer = core.identity.distinctId()
+            core.features.hydrateProfile(customer, Json.parseToJsonElement(
+                """{"features":[{"id":"credits","type":"metered","unlimited":false,"balance":3}]}"""
+            ).jsonObject)
+            val service = FeatureUsageService(core.api, core.purchases, core.identity, core.features, core.eventLog, core.scope, File(temporary.root, "denied.json"))
+            assertFalse(service.consumeFeature("credits", 1.0, "denied", null).accepted)
+            assertFalse(core.featureInfo.isAllowed("credits"))
+            assertEquals(0.0, core.features.getCached("credits", null)!!.balance!!, 0.0)
+            assertFalse(core.store.hasStableOutcome(service.localEventId(customer, "denied")))
         } finally { core.stop() }
     }
 
