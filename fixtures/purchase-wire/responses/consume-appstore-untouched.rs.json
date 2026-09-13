@@ -1,0 +1,11 @@
+{
+  "name": "consume-appstore-untouched.rs",
+  "lane": "rs",
+  "request": "consume-appstore-untouched",
+  "endpoint": "/feature/consume",
+  "statusCode": 503,
+  "body": {
+    "code": "commerce_unavailable"
+  },
+  "bodyText": "{\"code\":\"commerce_unavailable\"}"
+}

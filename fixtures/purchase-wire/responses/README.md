@@ -38,7 +38,7 @@ Every response fixture has this shape:
   set it to `null`; status-based error mapping does not parse the real response
   body either.
 - Successful `/purchase` fixtures are parsed through `PurchaseResponse`.
-- Successful `/entitled` fixtures are parsed through `FeatureCheckResult`.
+- Successful `/feature/consume` receipts are parsed through `FeatureConsumptionResult`.
 - Non-2xx fixtures are checked through the endpoint's real rejection mapping,
   including permanent-versus-retryable `/purchase` errors.
 
@@ -46,3 +46,9 @@ Every response fixture has this shape:
 checks the complete request × lane matrix before parsing every response. A
 separate in-memory test keeps the success and error scaffolding executable
 while `PENDING` exists.
+
+The current worker replay catalog publishes Features without provider product
+connections. Purchase evidence therefore receives retryable 503 responses in
+this corpus. Verified Google purchase attachment, rollback, final-credit
+consumption, and replay are exercised separately by the parent worker
+integration suite. In-memory SDK fixtures cover successful receipt decoding.

@@ -1,0 +1,11 @@
+{
+  "name": "consume-atomic-replay.ts",
+  "lane": "ts",
+  "request": "consume-atomic-replay",
+  "endpoint": "/feature/consume",
+  "statusCode": 503,
+  "body": {
+    "code": "commerce_unavailable"
+  },
+  "bodyText": "{\"code\":\"commerce_unavailable\"}"
+}

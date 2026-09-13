@@ -1,0 +1,11 @@
+{
+  "name": "consume-atomic-use-full.ts",
+  "lane": "ts",
+  "request": "consume-atomic-use-full",
+  "endpoint": "/feature/consume",
+  "statusCode": 503,
+  "body": {
+    "code": "commerce_unavailable"
+  },
+  "bodyText": "{\"code\":\"commerce_unavailable\"}"
+}
