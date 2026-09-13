@@ -1,10 +1,7 @@
 package ai.nuxie.sdk.features
 
-import ai.nuxie.sdk.NuxieEvent
 import ai.nuxie.sdk.billing.PurchaseService
-import ai.nuxie.sdk.events.BatchItemWireEncoder
 import ai.nuxie.sdk.events.JsonValueConverter
-import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.TimeBasedEpochGenerator
@@ -13,6 +10,11 @@ import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.network.NuxieApi
 import android.util.Log
 import java.io.IOException
+import java.io.File
+import android.util.AtomicFile
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonArray
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -33,7 +35,88 @@ internal class FeatureUsageService(
     private val features: FeatureService,
     private val eventLog: EventLog,
     private val scope: CoroutineScope,
+    journalFile: File,
 ) {
+    private val journal = AtomicFile(journalFile)
+    private val journalMutex = Mutex()
+
+    init { journalFile.parentFile?.mkdirs() }
+
+    private fun loadCommands(): List<JsonObject> = if (!journal.baseFile.exists()) emptyList() else
+        (Json.parseToJsonElement(journal.openRead().use { it.readBytes().decodeToString() }) as JsonArray).map { it.jsonObject }
+
+    private fun saveCommands(commands: List<JsonObject>) {
+        val stream = journal.startWrite()
+        try {
+            stream.write(JsonArray(commands).toString().encodeToByteArray())
+            journal.finishWrite(stream)
+        } catch (error: Throwable) {
+            journal.failWrite(stream)
+            throw error
+        }
+    }
+
+    suspend fun recover() = withContext(Dispatchers.IO) {
+        journalMutex.withLock {
+            for (record in loadCommands()) {
+                try { deliver(record) } catch (error: Exception) {
+                    if (error is CancellationException) throw error
+                    Log.w(LOG_TAG, "Feature command remains pending", error)
+                }
+            }
+        }
+    }
+
+    private suspend fun deliver(record: JsonObject): FeatureUsageResult {
+        val command = record.getValue("command").jsonObject
+        val operationId = command.getValue("operationId")
+        val response = (record["response"] as? JsonObject) ?: try { api.consumeFeature(command) } catch (error: NuxieApi.RequestRejectedException) {
+            if (error.statusCode in listOf(400, 401, 403, 404, 410, 413)) {
+                saveCommands(loadCommands().filterNot { it["command"]?.jsonObject?.get("operationId") == operationId })
+            }
+            throw error
+        }.also { result ->
+            saveCommands(loadCommands().map { if (it["command"]?.jsonObject?.get("operationId") == operationId)
+                JsonObject(it + ("response" to result)) else it })
+        }
+        val accepted = response["accepted"] == JsonPrimitive(true)
+        val featureId = command.string("featureId")!!
+        val amount = command.double("quantity")!!
+        val entityId = command.string("entityId")
+        val distinctId = command.string("customerId")!!
+        if (accepted) {
+            val current = identity.captureScope()
+            if (current.distinctId == distinctId && response["idempotentReplay"] != JsonPrimitive(true)) response.double("balance")?.let {
+                features.applyAuthoritativeUsageBalance(featureId, it, entityId, current)
+            }
+            captureAcceptedUse(featureId, amount, entityId, record["metadata"] as? JsonObject,
+                command.string("operationId")!!, distinctId)
+        }
+        saveCommands(loadCommands().filterNot { it["command"]?.jsonObject?.get("operationId") == operationId })
+        return FeatureUsageResult(success = accepted, featureId = featureId, amountUsed = amount,
+            message = response.string("code"), usage = FeatureUsageResult.UsageInfo(
+                current = amount, limit = null, remaining = response.double("balance")),
+            authoritativeAccess = when (response.string("type")) {
+                "boolean" -> FeatureType.BOOLEAN
+                "metered" -> FeatureType.METERED
+                "creditSystem" -> FeatureType.CREDIT_SYSTEM
+                else -> null
+            }?.let { FeatureAccess(response["active"] == JsonPrimitive(true), response["unlimited"] == JsonPrimitive(true), response.double("balance"), it) }
+        ).also {
+                it.consumptionReceipt = FeatureConsumptionResult(command.string("operationId")!!, accepted,
+                    response.string("code")!!, amount, response.double("balance"), response["unlimited"] == JsonPrimitive(true),
+                    response["active"] == JsonPrimitive(true), response["idempotentReplay"] == JsonPrimitive(true))
+            }
+    }
+
+    suspend fun consumeFeature(featureId: String, quantity: Double, operationId: String, entityId: String?): FeatureConsumptionResult {
+        require(operationId.isNotEmpty() && operationId == operationId.trim() && operationId.length <= 256) {
+            "A stable operation ID is required"
+        }
+        return useFeatureAndWait(featureId, quantity, entityId, false, null, operationId).consumptionReceipt
+            ?: throw IOException("Feature command receipt is missing")
+    }
+
     fun useFeature(
         featureId: String,
         amount: Double,
@@ -74,10 +157,14 @@ internal class FeatureUsageService(
         entityId: String?,
         setUsage: Boolean,
         metadata: JsonObject?,
+        operationId: String? = null,
     ): FeatureUsageResult = withContext(Dispatchers.IO) {
+        require(amount.isFinite() && amount > 0 && amount % 1.0 == 0.0 && amount <= 9_007_199_254_740_991.0) {
+            "Feature quantity must be a positive exact integer"
+        }
         val identityScope = identity.captureScope()
         val distinctId = identityScope.distinctId
-        if (!setUsage) {
+        if (!setUsage && operationId == null) {
             purchases.useFeatureWithPendingPurchase(
                 distinctId = distinctId,
                 featureId = featureId,
@@ -100,54 +187,34 @@ internal class FeatureUsageService(
         }
         ensureIdentity(identityScope)
 
-        val properties = linkedMapOf<String, Any?>("feature_extId" to featureId)
-        if (setUsage) properties["setUsage"] = true
-        metadata?.let { properties["metadata"] = it }
-        properties["value"] = amount
-        entityId?.let { properties["entityId"] = it }
-        val stored = StoredEvent.from(
-            NuxieEvent(
-                name = SystemEventNames.FEATURE_USED,
-                distinctId = distinctId,
-                properties = properties,
-            ),
-        )
-        val response = Json.parseToJsonElement(
-            api.postEvent(BatchItemWireEncoder.encode(stored)),
-        ).jsonObject
-        ensureIdentity(identityScope)
-
-        val status = response.string("status")
-            ?: throw IOException("/event response is missing status")
-        val usage = (response["usage"] as? JsonObject)?.let { raw ->
-            FeatureUsageResult.UsageInfo(
-                current = raw.double("current")
-                    ?: throw IOException("/event response usage is missing current"),
-                limit = raw.double("limit"),
-                remaining = raw.double("remaining"),
-            )
+        journalMutex.withLock {
+            val record = identity.withCurrentScope(identityScope) {
+                val fields = linkedMapOf("customerId" to JsonPrimitive(distinctId),
+                    "featureId" to JsonPrimitive(featureId), "quantity" to JsonPrimitive(amount.toLong()))
+                entityId?.let { fields["entityId"] = JsonPrimitive(it) }
+                if (setUsage) fields["mode"] = JsonPrimitive("set_usage")
+                if (operationId != null) {
+                    loadCommands().firstOrNull { it["command"]?.jsonObject?.string("operationId") == operationId }?.let {
+                        val pending = it.getValue("command").jsonObject
+                        require(fields.all { (key, value) -> pending[key] == value } && pending["entityId"] == fields["entityId"] && pending["mode"] == fields["mode"]) {
+                            "Operation ID conflicts with a pending command"
+                        }
+                    }
+                }
+                val existing = loadCommands().firstOrNull { record ->
+                    val command = record.getValue("command").jsonObject
+                    (operationId == null || command.string("operationId") == operationId) && fields.all { (key, value) -> command[key] == value } &&
+                        command["entityId"] == fields["entityId"] && command["mode"] == fields["mode"] && record["metadata"] == metadata
+                }
+                existing ?: JsonObject(buildMap {
+                    put("command", JsonObject(fields + ("operationId" to JsonPrimitive(operationId ?: TimeBasedEpochGenerator.shared.next()))))
+                    metadata?.let { put("metadata", it) }
+                }).also { saveCommands(loadCommands() + it) }
+            } ?: throw CancellationException()
+            val result = deliver(record)
+            ensureIdentity(identityScope)
+            result
         }
-        val accepted = status == "ok" || status == "success"
-        if (accepted) {
-            usage?.remaining?.let {
-                features.applyAuthoritativeUsageBalance(featureId, it, entityId, identityScope)
-            }
-            captureAcceptedUse(
-                featureId,
-                amount,
-                entityId,
-                metadata,
-                response.string("eventId") ?: response.string("event_id") ?: stored.id,
-                distinctId,
-            )
-        }
-        FeatureUsageResult(
-            success = accepted,
-            featureId = featureId,
-            amountUsed = amount,
-            message = response.string("message"),
-            usage = usage,
-        )
     }
 
     private suspend fun captureAcceptedUse(

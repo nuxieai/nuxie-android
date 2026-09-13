@@ -1167,7 +1167,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun entityScopedCheckUpdatesPublicReactiveFeatureState() = runBlocking {
+    fun entityScopedCheckPreservesGlobalReactiveFeatureState() = runBlocking {
         lateinit var core: NuxieCore
         val transport = FakeTransport().apply {
             respond = { request ->
@@ -1200,13 +1200,13 @@ class FeatureServiceTest {
         val entityAccess = core.features.check("pro", entityId = "workspace-1")
 
         assertFalse(entityAccess.allowed)
-        assertFalse(core.featureInfo.all.value.getValue("pro").allowed)
-        assertFalse(core.featureInfo.isAllowed("pro"))
+        assertTrue(core.featureInfo.all.value.getValue("pro").allowed)
+        assertTrue(core.featureInfo.isAllowed("pro"))
         core.stop()
     }
 
     @Test
-    fun overlayRecompositionRetainsTheLatestEntityScopedAuthority() = runBlocking {
+    fun overlayRecompositionKeepsEntityAuthoritySeparate() = runBlocking {
         val checks = AtomicInteger()
         lateinit var core: NuxieCore
         val transport = FakeTransport().apply {
@@ -1239,9 +1239,9 @@ class FeatureServiceTest {
         )
 
         core.features.check("credits", entityId = "workspace-1")
-        assertEquals(2.0, core.featureInfo.balance("credits")!!, 0.0)
+        assertEquals(5.0, core.featureInfo.balance("credits")!!, 0.0)
         core.features.check("credits", entityId = "workspace-2")
-        assertEquals(3.0, core.featureInfo.balance("credits")!!, 0.0)
+        assertEquals(5.0, core.featureInfo.balance("credits")!!, 0.0)
 
         core.features.applyOptimisticPurchaseProjection(
             customer,
@@ -1253,10 +1253,10 @@ class FeatureServiceTest {
                 ),
             ),
         )
-        assertEquals(13.0, core.featureInfo.balance("credits")!!, 0.0)
+        assertEquals(15.0, core.featureInfo.balance("credits")!!, 0.0)
 
         core.features.applyOptimisticPurchaseProjection(customer, null)
-        assertEquals(3.0, core.featureInfo.balance("credits")!!, 0.0)
+        assertEquals(5.0, core.featureInfo.balance("credits")!!, 0.0)
         core.stop()
     }
 
@@ -1674,7 +1674,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun entityScopedLookupFallsBackToGlobalAccessWhenProfileHasNoEntitiesMap() = runBlocking {
+    fun entityScopedLookupDeniesWhenProfileHasNoEntitiesMap() = runBlocking {
         val core = core(FakeTransport())
         core.features.hydrateProfile(
             core.identity.distinctId(),
@@ -1683,7 +1683,7 @@ class FeatureServiceTest {
             ).jsonObject,
         )
 
-        assertTrue(core.features.getCached("pro", "project-1")!!.allowed)
+        assertFalse(core.features.getCached("pro", "project-1")!!.allowed)
         core.stop()
     }
 

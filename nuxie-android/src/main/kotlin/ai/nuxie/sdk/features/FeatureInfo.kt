@@ -279,7 +279,7 @@ class FeatureInfo {
         }
         // iOS has one reactive Feature map: an entity check publishes its
         // result there even though its reusable cache entry stays scoped.
-        fence.publishSnapshot(snapshot.features + (featureId to access), entities, state = null)
+        fence.publishSnapshot(if (entityId == null) snapshot.features + (featureId to access) else snapshot.features, entities, state = null)
     }
 
     internal suspend fun clear() = publish(stageClear())
