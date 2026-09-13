@@ -1,6 +1,7 @@
 package ai.nuxie.sdk
 
 import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.core.CoreConstruction
 import ai.nuxie.sdk.core.SdkLifecycle
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.features.FeatureAccess
@@ -79,22 +80,26 @@ object Nuxie {
             featureInfoInstance.onFeatureChange = { featureId, oldAccess, newAccess, isCurrent ->
                 deliverFeatureAccessChange(featureId, oldAccess, newAccess, isCurrent)
             }
-            val core = NuxieCore(
-                context = context,
-                apiKey = configuration.apiKey,
-                environment = configuration.environment,
-                logLevel = configuration.logLevel,
-                beforeSend = configuration.beforeSend?.let { hook -> { event -> inCallback { hook(event) } } },
-                featureInfo = featureInfoInstance,
-                featureCacheTtlMillis = configuration.featureCacheTTL,
-                localeIdentifier = configuration.localeIdentifier,
-                purchaseDelegate = configuration.purchaseDelegate,
-                purchaseHandlingMode = configuration.purchaseHandlingMode,
-                apiEndpointOverride = configuration.testingOverrides.apiEndpoint,
-                overrides = overridesForTesting ?: NuxieCore.Overrides(),
-                forwardingEnabled = { listener != null },
-                forwardActivity = ::deliverActivity,
-            )
+            val core = CoreConstruction().build(beforeRollback = { listener = null }) { construction ->
+                construction.onFailure { featureInfoInstance.reset() }
+                NuxieCore(
+                    context = context,
+                    apiKey = configuration.apiKey,
+                    environment = configuration.environment,
+                    logLevel = configuration.logLevel,
+                    beforeSend = configuration.beforeSend?.let { hook -> { event -> inCallback { hook(event) } } },
+                    featureInfo = featureInfoInstance,
+                    featureCacheTtlMillis = configuration.featureCacheTTL,
+                    localeIdentifier = configuration.localeIdentifier,
+                    purchaseDelegate = configuration.purchaseDelegate,
+                    purchaseHandlingMode = configuration.purchaseHandlingMode,
+                    apiEndpointOverride = configuration.testingOverrides.apiEndpoint,
+                    overrides = overridesForTesting ?: NuxieCore.Overrides(),
+                    forwardingEnabled = { listener != null },
+                    forwardActivity = ::deliverActivity,
+                    construction = construction,
+                )
+            }
             core
         }, start = { it.start(context as? Activity) })
         if (!installed && configuration.logLevel >= LogLevel.WARN) {

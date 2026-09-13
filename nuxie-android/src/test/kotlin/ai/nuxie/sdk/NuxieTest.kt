@@ -6,6 +6,7 @@ import ai.nuxie.sdk.billing.PurchaseResult
 import ai.nuxie.sdk.billing.RestoreResult
 import ai.nuxie.sdk.billing.StoreProduct
 import ai.nuxie.sdk.events.SQLiteEventStore
+import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
 import java.util.concurrent.CountDownLatch
@@ -59,6 +60,35 @@ class NuxieTest {
             Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("   "))
         }
         assertFalse(Nuxie.isSetup)
+    }
+
+    @Test
+    fun failedCoreConstructionClosesAlreadyAllocatedStorageBeforeAllowingSetupAgain() = runBlocking {
+        val actualStore = SQLiteEventStore(RuntimeEnvironment.getApplication(),
+            databaseFile = temporary.newFile("failed-construction.db"))
+        var closeCount = 0
+        val store = object : EventStore by actualStore {
+            override suspend fun close() { closeCount++; actualStore.close() }
+        }
+        val failure = IllegalStateException("Presentation construction failed")
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = FakeTransport(), store = store, registerLifecycle = false,
+            requestInitialProfileRefresh = false, billingClientFactory = InertBillingClientAdapter.factory,
+            presentationFactory = NuxieCore.PresentationFactory { throw failure },
+        )
+        try {
+            val thrown = runCatching {
+                Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_failed_construction"))
+            }.exceptionOrNull()
+            assertTrue(thrown === failure)
+            assertFalse(Nuxie.isSetup)
+            assertEquals(1, closeCount)
+            Nuxie.shutdownAndAwait()
+            assertEquals(1, closeCount)
+            Nuxie.overridesForTesting = NuxieCore.Overrides(transport = FakeTransport())
+            Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_recovered_construction"))
+            assertTrue(Nuxie.isSetup)
+        } finally { if (closeCount == 0) actualStore.close() }
     }
 
     @Test

@@ -111,6 +111,7 @@ internal class NuxieCore(
     overrides: Overrides = Overrides(),
     private val forwardingEnabled: () -> Boolean = { false },
     private val forwardActivity: suspend (NuxieActivityInfo) -> Unit = {},
+    construction: CoreConstruction? = null,
 ) {
     private val registerLifecycle = overrides.registerLifecycle
     private val stopped = AtomicBoolean(false)
@@ -149,7 +150,7 @@ internal class NuxieCore(
 
     private val appContext = context.applicationContext ?: context
 
-    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default).also { construction?.scope = it }
     // Purchase/startup producers drain while the parent-owned consumers remain live.
     val producerScope = CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
 
@@ -164,11 +165,11 @@ internal class NuxieCore(
 
     val sessions = SessionService(nowMillis)
 
-    val store: EventStore = overrides.store ?: SQLiteEventStore(
+    val store: EventStore = (overrides.store ?: SQLiteEventStore(
         appContext,
         nowMillis = nowMillis,
         databaseFile = overrides.eventDatabaseFile ?: File(appContext.filesDir, "nuxie/events.db"),
-    )
+    )).also { store -> construction?.onFailure { store.close() } }
 
     val userTransitions: UserTransitionCoordinator by lazy {
         UserTransitionCoordinator(store, scope)
@@ -235,7 +236,7 @@ internal class NuxieCore(
         scope = producerScope,
         onPurchasesUpdated = { update -> producerScope.launch { purchaseService.onPurchasesUpdated(update) } },
         onConnected = { purchaseService.recover() },
-    )
+    ).also { billing -> construction?.onFailure { billing.close() } }
 
     val purchases: PurchaseService = PurchaseService(
         billing = billing,
@@ -298,14 +299,14 @@ internal class NuxieCore(
 
     private val releaseArtifactAcquirer = JourneyReleaseArtifactAcquirer(appContext, transport)
 
-    val presentations = overrides.presentationFactory?.create()
+    val presentations = (overrides.presentationFactory?.create()
         ?: ExperiencePresentationService(
             context = appContext,
             emit = eventLog::capture,
             scope = scope,
             runtimeAvailable = AndroidRenderCapability::isAvailable,
             commerce = journeyCommerce,
-        )
+        )).also { presentations -> construction?.onFailure { presentations.close() } }
 
     private val journeyPresenter = object : JourneyPresenting {
         override fun reserve(ownerDistinctId: String) =
