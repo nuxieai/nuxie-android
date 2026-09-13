@@ -1,5 +1,17 @@
 package ai.nuxie.sdk.core
 
+import ai.nuxie.sdk.fixtures.FixtureRunner
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.boolean
+import java.util.concurrent.Executors
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.withContext
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +29,35 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class SdkLifecycleTest {
+    @Test
+    fun sharedShutdownVectorsDrainEveryAcceptedOperationBeforeDisposal() {
+        val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot().resolve("sdk/shutdown.json").readText()).jsonObject
+        val expected = fixture.getValue("expected").jsonObject
+        FixtureRunner.run("sdk/shutdown.json", "sdk/shutdown") { vector ->
+            runTest {
+                var disposals = 0
+                val lifecycle = SdkLifecycle<String>({}, { disposals++ }, backgroundScope)
+                lifecycle.install({ "graph" })
+                val operations = List(vector.body.getValue("admittedOperations").jsonPrimitive.int) { lifecycle.admit()!! }
+                val closing = lifecycle.requestShutdown()
+                assertEquals(expected.getValue("admitAfterShutdown").jsonPrimitive.boolean, lifecycle.admit() != null)
+                assertEquals(expected.getValue("setupWhileStopping").jsonPrimitive.boolean, lifecycle.install({ "overlap" }))
+                operations.dropLast(1).forEach { it.finish() }
+                runCurrent()
+                if (operations.isNotEmpty()) {
+                    assertEquals(expected.getValue("disposeBeforeDrain").jsonPrimitive.boolean, disposals != 0)
+                    operations.last().finish()
+                }
+                runCurrent()
+                closing.await()
+                assertEquals(expected.getValue("teardownCount").jsonPrimitive.int, disposals)
+                assertEquals(expected.getValue("setupAfterCompletion").jsonPrimitive.boolean, lifecycle.install({ "fresh" }))
+                lifecycle.requestShutdown()
+                runCurrent()
+            }
+        }
+    }
+
     @Test
     fun admissionClosesImmediatelyAndAcceptedOperationsDrainBeforeOneTeardown() = runTest {
         val actions = mutableListOf<String>()
@@ -127,6 +168,23 @@ class SdkLifecycleTest {
         assertTrue(lifecycle.install({ "good" }))
         lifecycle.requestShutdown()
         runCurrent()
+    }
+
+    @Test
+    fun ownedOperationsKeepTheCallerDispatcher() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val lifecycle = SdkLifecycle<String>({ scope.cancel() }, {})
+        val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        try {
+            lifecycle.install({ "graph" })
+            withContext(dispatcher) {
+                val callerThread = Thread.currentThread()
+                lifecycle.executeOwned(lifecycle.admit()!!, { scope }) {
+                    assertSame(callerThread, Thread.currentThread())
+                }
+            }
+            lifecycle.shutdownAndAwait()
+        } finally { scope.cancel(); dispatcher.close() }
     }
 
     @Test

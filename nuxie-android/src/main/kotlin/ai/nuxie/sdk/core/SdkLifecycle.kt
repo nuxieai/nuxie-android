@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 
 /** Owns graph publication, operation admission and exactly-once asynchronous teardown. */
@@ -105,11 +106,29 @@ internal class SdkLifecycle<G : Any>(
 
     suspend fun <T> withOperation(block: suspend (G) -> T): T {
         val operation = admit() ?: throw IllegalStateException("Call Nuxie.setup first; shutdown closes operation admission.")
-        return try {
-            withContext(OperationContext(this, operation, currentCoroutineContext()[OperationContext])) {
-                block(operation.graph)
-            }
-        } finally { operation.finish() }
+        return execute(operation, block)
+    }
+
+    suspend fun <T> execute(operation: Operation<G>, block: suspend (G) -> T): T = try {
+        withContext(OperationContext(this, operation, currentCoroutineContext()[OperationContext])) {
+            runCatching { block(operation.graph) }
+        }.getOrThrow()
+    } finally { operation.finish() }
+
+    suspend fun <T> executeOwned(
+        operation: Operation<G>,
+        scopeForGraph: (G) -> CoroutineScope,
+        block: suspend (G) -> T,
+    ): T {
+        val callerContext = currentCoroutineContext()
+        val task = try {
+            scopeForGraph(operation.graph).async(
+                callerContext.minusKey(Job) + OperationContext(this, operation, callerContext[OperationContext]),
+            ) {
+                runCatching { block(operation.graph) }
+            }.also { it.invokeOnCompletion { operation.finish() } }
+        } catch (failure: Throwable) { operation.finish(); throw failure }
+        return try { task.await().getOrThrow() } finally { task.cancel() }
     }
 
     /** Admission precedes scheduling; completion releases it even if the body never starts. */
