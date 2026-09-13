@@ -37,6 +37,7 @@ internal class UserTransitionCoordinator(
 
     private val lock = Any()
     private var tail: Job? = null
+    private var closed = false
     private val observers = java.util.concurrent.CopyOnWriteArrayList<Observer>()
 
     fun addObserver(observer: Observer) {
@@ -46,12 +47,22 @@ internal class UserTransitionCoordinator(
     /** Synchronous, fire-and-forget; execution order is the enqueue order. */
     fun enqueue(transition: Transition) {
         synchronized(lock) {
+            if (closed) return
             val previous = tail
             tail = scope.launch {
                 previous?.join()
                 run(transition)
             }
         }
+    }
+
+    /** Close admission and drain the accepted FIFO before its consumers stop. */
+    suspend fun close() {
+        val last = synchronized(lock) {
+            closed = true
+            tail
+        }
+        last?.join()
     }
 
     /** Await all currently queued transitions (test determinism). */

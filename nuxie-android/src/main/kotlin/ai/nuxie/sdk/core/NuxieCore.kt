@@ -522,6 +522,7 @@ internal class NuxieCore(
             runCatching { purchaseService.stopCheckoutIntake() }
             runCatching { billing.close() }
             runCatching { lifecycleCoordinator.close() }
+            runCatching { userTransitions.close() }
             runCatching { featureUsage.close() }
             runCatching { journeys.profileDidClearAll() }
             runCatching { profile.close() }
