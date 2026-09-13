@@ -190,10 +190,19 @@ internal class FeatureService(
         entityId: String?,
         expectedScope: IdentityScope,
     ) {
-        synchronizeCustomerScopeIfNeeded()
+        publishStaged(stageAuthoritativeUsageBalance(featureId, balance, entityId, expectedScope))
+    }
+
+    internal fun stageAuthoritativeUsageBalance(
+        featureId: String,
+        balance: Double,
+        entityId: String?,
+        expectedScope: IdentityScope,
+    ): FeatureInfo.Mutation? {
         var publication: FeatureInfo.Mutation? = null
         val admitted = identity.withCurrentScope(expectedScope) admitted@ {
             synchronized(lock) {
+                if (synchronizeCustomerScopeLocked()) publication = stageCurrentLocked()
                 if (cacheDistinctId != expectedScope.distinctId) return@admitted false
                 val authoritative = realTimeCache[CacheKey(featureId, entityId)]?.access
                     ?: entityAccess(featureId, entityId)
@@ -218,7 +227,7 @@ internal class FeatureService(
             true
         } == true
         if (!admitted) throw kotlinx.coroutines.CancellationException()
-        publication?.let { featureInfo.publish(it) }
+        return publication
     }
 
     suspend fun checkWithCache(

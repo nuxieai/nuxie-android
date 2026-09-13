@@ -76,4 +76,7 @@ data class FeatureConsumptionResult(
     val unlimited: Boolean,
     val active: Boolean,
     val idempotentReplay: Boolean,
+    val customerId: String,
+    val featureId: String,
+    val occurredAtMs: Double? = null,
 )
