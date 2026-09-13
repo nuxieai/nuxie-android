@@ -552,6 +552,28 @@ class FeatureCommandRecoveryTest {
     }
 
     @Test
+    fun stoppingRetriesKeepsCommandAdmissionOpenUntilFinalClose() = runBlocking {
+        val transport = FakeTransport().apply {
+            respond = { request -> receipt(Json.parseToJsonElement(request.body.decodeToString()).jsonObject, 8.0) }
+        }
+        val core = testCore(transport)
+        val service = FeatureUsageService(core.api, core.purchases, core.identity, core.features,
+            core.eventLog, core.scope, File(temporary.root, "stopped-retries.json"))
+        try {
+            core.purchases.awaitInitialProjection()
+            service.startRecovery()
+            service.stopRecovery()
+            val result = service.consumeFeature("credits", 1.0, "admitted-before-shutdown", null)
+            assertEquals(8.0, result.balance!!, 0.0)
+            assertTrue(core.store.hasStableOutcome(service.localEventId(core.identity.distinctId(), "admitted-before-shutdown")))
+            service.close()
+            assertTrue(runCatching {
+                service.consumeFeature("credits", 1.0, "after-final-close", null)
+            }.exceptionOrNull() is CancellationException)
+        } finally { service.close(); core.stop() }
+    }
+
+    @Test
     fun closingRecoveryWaitsForItsAdmittedReceiptBeforeReturning() = runBlocking {
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)

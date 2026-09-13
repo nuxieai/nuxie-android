@@ -549,6 +549,7 @@ internal class NuxieCore(
         attempt { purchaseService.stopCheckoutIntake() }
         attempt { billing.close() }
         attempt { lifecycleCoordinator.close() }
+        attempt { featureUsage.stopRecovery() }
         attempt { userTransitions.close() }
         attempt { profile.close() }
         attempt {
