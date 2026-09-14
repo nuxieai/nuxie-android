@@ -32,6 +32,7 @@ internal sealed interface PurchaseCommitObservation {
  */
 internal sealed interface PurchaseOutcome {
     val source: PurchaseOutcomeSource
+    val testStore: Boolean get() = false
 
     data class Verified(
         val evidence: PlayPurchase,
@@ -41,39 +42,49 @@ internal sealed interface PurchaseOutcome {
     data class External(
         val declaration: ExternalPurchaseDeclaration,
     ) : PurchaseOutcome {
-        override val source: PurchaseOutcomeSource = PurchaseOutcomeSource.EXTERNAL_DELEGATE
+        override val source: PurchaseOutcomeSource get() = declaration.source
+        override val testStore: Boolean get() = declaration.testStore
     }
 
     data class Cancelled(
         override val source: PurchaseOutcomeSource,
+        override val testStore: Boolean = false,
     ) : PurchaseOutcome
 
     data class Pending(
         override val source: PurchaseOutcomeSource,
         internal val evidence: PlayPurchase? = null,
+        override val testStore: Boolean = false,
     ) : PurchaseOutcome
 
     data class Failed(
         val reason: Throwable,
         override val source: PurchaseOutcomeSource,
+        override val testStore: Boolean = false,
     ) : PurchaseOutcome
 }
 
-/** One host callback, identified independently from any native transaction. */
+/** One external declaration (delegate or Test Store), independent of native evidence. */
 internal sealed interface ExternalPurchaseDeclaration {
     val operationId: String
     val ownerDistinctId: String
+    val testStore: Boolean
+    val source: PurchaseOutcomeSource
+        get() = if (testStore) PurchaseOutcomeSource.CHECKOUT else PurchaseOutcomeSource.EXTERNAL_DELEGATE
 
     data class Purchase(
         override val operationId: String,
         override val ownerDistinctId: String,
         val product: StoreProduct,
         val outcomeEventId: String? = null,
+        override val testStore: Boolean = false,
+        val transactionId: String? = null,
     ) : ExternalPurchaseDeclaration
 
     data class Restore(
         override val operationId: String,
         override val ownerDistinctId: String,
         val outcomeEventId: String? = null,
+        override val testStore: Boolean = false,
     ) : ExternalPurchaseDeclaration
 }

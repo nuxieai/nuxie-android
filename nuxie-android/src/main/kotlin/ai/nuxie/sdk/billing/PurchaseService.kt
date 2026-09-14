@@ -139,6 +139,7 @@ internal class PurchaseService(
     },
     /** Internal test observation only; null in production and never controls behavior. */
     private val purchaseCommitObserver: ((PurchaseCommitObservation) -> Unit)? = null,
+    private val testStore: NuxieTestStore? = null,
 ) {
     private data class InFlightPurchase(
         val result: CompletableDeferred<PurchaseResult>,
@@ -809,6 +810,22 @@ internal class PurchaseService(
                 IllegalStateException("The customer changed before checkout could start."),
             )
         }
+        testStore?.let { store ->
+            val response = store.purchase(product, initiatingOwner)
+            val outcome = if (response.result == PurchaseResult.Purchased) {
+                PurchaseOutcome.External(ExternalPurchaseDeclaration.Purchase(
+                    operationId = checkNotNull(response.transactionId),
+                    ownerDistinctId = initiatingOwner,
+                    product = product,
+                    outcomeEventId = outcomeCorrelation?.eventId,
+                    testStore = true,
+                    transactionId = response.transactionId,
+                ))
+            } else {
+                response.result.toPurchaseOutcome(PurchaseOutcomeSource.CHECKOUT, testStore = true)
+            }
+            return commitStandaloneOutcome(product, initiatingOwner, outcome, outcomeCorrelation?.eventId)
+        }
         settings.delegate?.let { delegate ->
             val result = delegate.purchase(product)
             val outcome = if (result == PurchaseResult.Purchased) {
@@ -949,6 +966,11 @@ internal class PurchaseService(
             return RestoreResult.Failed(
                 IllegalStateException("The customer changed before restore could start."),
             )
+        }
+        testStore?.let { store ->
+            val response = store.restorePurchases(initiatingOwner)
+            emitRestoreOutcome(response.result, initiatingOwner, outcomeCorrelation?.eventId, testStore = true)
+            return response.result
         }
         settings.delegate?.let { delegate ->
             val result = delegate.restorePurchases()
@@ -1337,7 +1359,9 @@ internal class PurchaseService(
                 ownerDistinctId = declaration.ownerDistinctId,
                 properties = purchaseCompletionProperties(
                     declaration.product,
-                    source = PurchaseOutcomeSource.EXTERNAL_DELEGATE,
+                    source = declaration.source,
+                    testStore = declaration.testStore,
+                    transactionId = declaration.transactionId,
                 ),
                 eventId = declaration.outcomeEventId
                     ?: purchaseCommitEventId(identity),
@@ -1351,8 +1375,8 @@ internal class PurchaseService(
                     ?: purchaseCommitEventId(identity),
                 ownerDistinctId = declaration.ownerDistinctId,
                 properties = mapOf(
-                    "source" to PurchaseOutcomeSource.EXTERNAL_DELEGATE.wireValue,
-                    "test_store" to false,
+                    "source" to declaration.source.wireValue,
+                    "test_store" to declaration.testStore,
                 ),
                 bestEffort = true,
             )
@@ -2074,6 +2098,8 @@ internal class PurchaseService(
     private fun purchaseCompletionProperties(
         product: StoreProduct,
         source: PurchaseOutcomeSource,
+        testStore: Boolean = false,
+        transactionId: String? = null,
     ): Map<String, Any?> {
         val price = product.storePrice()
         return linkedMapOf<String, Any?>(
@@ -2082,7 +2108,8 @@ internal class PurchaseService(
             "store_product_id" to product.storeProductId,
             "experience_id" to product.purchaseContext?.experienceId,
             "source" to source.wireValue,
-            "test_store" to false,
+            "test_store" to testStore,
+            "transaction_id" to transactionId,
             "price" to price?.amount?.toDouble(),
             "display_price" to price?.display,
         ).filterValues { it != null }
@@ -2178,14 +2205,14 @@ internal class PurchaseService(
         initiatingOwner: String,
         outcomeEventId: String? = null,
     ) {
-        if (distinctId() != initiatingOwner) return
+        if (outcomeEventId == null && distinctId() != initiatingOwner) return
         val price = product.storePrice()
         val properties = linkedMapOf<String, Any?>(
             "product_id" to product.productId,
             "store_product_id" to product.storeProductId,
             "placement_id" to product.placementId,
             "experience_id" to product.purchaseContext?.experienceId,
-            "test_store" to false,
+            "test_store" to outcome.testStore,
             "price" to price?.amount?.toDouble(),
             "display_price" to price?.display,
         ).filterValues { it != null }.toMutableMap()
@@ -2199,7 +2226,11 @@ internal class PurchaseService(
                 outcomeEventId,
                 initiatingOwner,
             )
-            is PurchaseOutcome.Pending -> emit(SystemEventNames.PURCHASE_PENDING, properties)
+            is PurchaseOutcome.Pending -> {
+                // Pending is telemetry, not the correlated terminal Journey outcome.
+                // The uncorrelated emitter belongs to the current customer only.
+                if (distinctId() == initiatingOwner) emit(SystemEventNames.PURCHASE_PENDING, properties)
+            }
             is PurchaseOutcome.Failed -> {
                 properties["error"] = outcome.reason.message ?: outcome.reason.javaClass.simpleName
                 captureOrEmitPurchaseOutcome(
@@ -2241,19 +2272,23 @@ internal class PurchaseService(
         is PurchaseOutcome.Failed -> PurchaseResult.Failed(reason)
     }
 
-    private fun PurchaseResult.toPurchaseOutcome(source: PurchaseOutcomeSource): PurchaseOutcome = when (this) {
+    private fun PurchaseResult.toPurchaseOutcome(
+        source: PurchaseOutcomeSource,
+        testStore: Boolean = false,
+    ): PurchaseOutcome = when (this) {
         PurchaseResult.Purchased -> error("A purchased delegate result requires an external declaration.")
-        PurchaseResult.Cancelled -> PurchaseOutcome.Cancelled(source)
-        PurchaseResult.Pending -> PurchaseOutcome.Pending(source)
-        is PurchaseResult.Failed -> PurchaseOutcome.Failed(cause, source)
+        PurchaseResult.Cancelled -> PurchaseOutcome.Cancelled(source, testStore)
+        PurchaseResult.Pending -> PurchaseOutcome.Pending(source, testStore = testStore)
+        is PurchaseResult.Failed -> PurchaseOutcome.Failed(cause, source, testStore)
     }
 
     private suspend fun emitRestoreOutcome(
         result: RestoreResult,
         initiatingOwner: String,
         outcomeEventId: String? = null,
+        testStore: Boolean = false,
     ) {
-        if (distinctId() != initiatingOwner) return
+        if (outcomeEventId == null && distinctId() != initiatingOwner) return
         val (name, properties) = when (result) {
             RestoreResult.Restored -> SystemEventNames.RESTORE_COMPLETED to emptyMap()
             RestoreResult.NoPurchases -> SystemEventNames.RESTORE_NO_PURCHASES to emptyMap()
@@ -2261,10 +2296,11 @@ internal class PurchaseService(
                 "error" to (result.cause.message ?: result.cause.javaClass.simpleName),
             )
         }
+        val taggedProperties = if (testStore) properties + ("test_store" to true) else properties
         if (outcomeEventId == null) {
-            emit(name, properties)
+            emit(name, taggedProperties)
         } else {
-            check(capturePurchaseEvent(name, properties, outcomeEventId, initiatingOwner)) {
+            check(capturePurchaseEvent(name, taggedProperties, outcomeEventId, initiatingOwner)) {
                 "Could not durably capture the Journey restore outcome event."
             }
         }
