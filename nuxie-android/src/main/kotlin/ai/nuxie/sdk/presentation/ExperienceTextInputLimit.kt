@@ -2,8 +2,14 @@ package ai.nuxie.sdk.presentation
 
 /** Unicode 16 extended graphemes (UAX #29 rev. 45), independent of Android's ICU version. */
 internal object ExperienceTextInputLimit {
+    fun fits(text: String, maximum: Int?): Boolean = apply(text, maximum).length == text.length
+
     fun apply(text: String, maximum: Int?): String {
         if (maximum == null) return text
+        return text.substring(0, scan(text, maximum).first)
+    }
+
+    private fun scan(text: String, maximum: Int): Pair<Int, Int> {
         require(maximum >= 0)
         var offset = 0
         var clusters = 0
@@ -34,7 +40,7 @@ internal object ExperienceTextInputLimit {
                 else -> true // GB999
             }
             if (boundary) {
-                if (clusters == maximum) return text.substring(0, offset)
+                if (clusters == maximum) return offset to clusters
                 clusters += 1
             }
             emojiBeforeZwj = kind == ZWJ && emojiPrefix
@@ -49,7 +55,24 @@ internal object ExperienceTextInputLimit {
             previous = kind
             offset += Character.charCount(codepoint)
         }
-        return text
+        return text.length to clusters
+    }
+
+    /** Limits only the composing replacement, never the untouched prefix or suffix. */
+    fun composingReplacement(current: String, start: Int, end: Int, replacement: String, maximum: Int?): String {
+        if (maximum == null) return replacement
+        val prefix = current.substring(0, start)
+        val suffix = current.substring(end)
+        if (fits(prefix + replacement + suffix, maximum)) return replacement
+        val reserved = scan(prefix, Int.MAX_VALUE).second + scan(suffix, Int.MAX_VALUE).second
+        // Concatenation can merge a boundary at either end of the replacement.
+        // Start two clusters above the independent budget, then check the exact candidate.
+        var budget = (maximum - reserved + 2).coerceAtLeast(0)
+        while (true) {
+            val candidate = apply(replacement, budget)
+            if (fits(prefix + candidate + suffix, maximum) || budget == 0) return candidate
+            budget--
+        }
     }
 
     private fun Int.isControl() = this == CONTROL || this == CR || this == LF
