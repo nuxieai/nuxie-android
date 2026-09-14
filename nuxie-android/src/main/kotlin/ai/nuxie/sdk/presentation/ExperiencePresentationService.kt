@@ -22,6 +22,8 @@ import java.util.IdentityHashMap
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
@@ -106,7 +108,14 @@ internal sealed interface PresentationShell {
 }
 
 /** Screen-scoped close operations and access to its hosting Activity. */
+internal interface PreparedScreenNavigation {
+    fun activate()
+    suspend fun abort()
+}
+
 internal interface PresentationScreenHandle {
+    suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation? = null
+
     fun requestCloseFromService(reason: CloseReason): Boolean
 
     fun screenCloseReason(): CloseReason?
@@ -549,6 +558,7 @@ internal class ExperiencePresentationService(
             var transitionClaimed = false
             var published = false
             var unownedAcquisition: AcquiredJourneyRelease? = null
+            var navigation: PreparedScreenNavigation? = null
             try {
                 val existing = synchronized(stateLock) {
                     if (!isCurrentIdentity(request) || !canPresent()) {
@@ -600,6 +610,56 @@ internal class ExperiencePresentationService(
                     }
                 }
 
+                existing?.takeIf {
+                    val previous = it.acquired.identity
+                    previous.streamKey == source.identity.streamKey &&
+                        previous.experienceVersionId == source.identity.experienceVersionId &&
+                        previous.buildId == source.identity.buildId
+                }?.let {
+                    journey.textInputsByScreen = it.journey.textInputsByScreen
+                    journey.lifecycleByScreen = it.journey.lifecycleByScreen
+                }
+                val textInputState = journey.textInputsByScreen.getOrPut(journey.screenId) {
+                    ExperienceTextInputState()
+                }
+                val ref = ExperienceRef(
+                    source.identity.experienceId,
+                    source.identity.experienceVersionId,
+                    journeyId,
+                )
+                val id = UUID.randomUUID().toString()
+                val pending = ActivePresentation(
+                    id = id,
+                    ref = ref,
+                    acquired = source.acquired,
+                    ownerDistinctId = request.ownerDistinctId,
+                    journey = journey,
+                    firstFrame = CompletableDeferred(),
+                )
+                val preparedContent = PreparedPresentation(
+                    rivFile = source.acquired.rivFile,
+                    artboardName = source.artboardName,
+                    screenId = source.screenId,
+                    clearColor = source.descriptor.presentationClearColor(),
+                    shell = source.descriptor.presentationShell(),
+                    descriptor = source.descriptor,
+                    artifactsByKey = source.acquired.artifactsByKey,
+                    artboardSize = source.artboardSize,
+                    viewModelProjection = source.viewModelProjection,
+                    textInputState = textInputState,
+                    screenLifecycle = journey.lifecycleByScreen.getOrPut(journey.screenId) { ExperienceScreenLifecycle() },
+                )
+                navigation = existing?.let { previous ->
+                    withTimeout(firstFrameTimeoutMillis) {
+                        PresentationRegistry.currentScreen(previous.id)?.prepareNavigation(id, preparedContent)
+                    }
+                }
+                synchronized(stateLock) {
+                    if (!isCurrentIdentity(request) || !canPresent() || current !== existing) {
+                        throw supersededByIdentityTransition()
+                    }
+                }
+
                 existing?.let {
                     val outgoing = it.journey
                     val incoming = journey
@@ -628,10 +688,15 @@ internal class ExperiencePresentationService(
                             JourneyScreenDismissalResult.REJECTED
                         }
                     } else null
+                    if (dismissal == JourneyScreenDismissalResult.COMPLETED ||
+                        dismissal == JourneyScreenDismissalResult.REJECTED) {
+                        navigation?.abort()
+                        navigation = null
+                    }
                     outgoing.textInputsByScreen[outgoing.screenId]?.detach()
                     PresentationRegistry.dismiss(it.id, CloseReason.JourneyNavigation)
                     attemptOutcome(it, CloseReason.JourneyNavigation)
-                    it.finished.await()
+                    if (navigation == null) it.finished.await()
                     when (dismissal) {
                         JourneyScreenDismissalResult.COMPLETED ->
                             throw ExperiencePresentationException(
@@ -647,38 +712,13 @@ internal class ExperiencePresentationService(
                     }
                 }
 
-                existing?.takeIf {
-                    val previous = it.acquired.identity
-                    previous.streamKey == source.identity.streamKey &&
-                        previous.experienceVersionId == source.identity.experienceVersionId &&
-                        previous.buildId == source.identity.buildId
-                }?.let {
-                    journey.textInputsByScreen = it.journey.textInputsByScreen
-                    journey.lifecycleByScreen = it.journey.lifecycleByScreen
-                }
-                val textInputState = journey.textInputsByScreen.getOrPut(journey.screenId) {
-                    ExperienceTextInputState()
-                }
-                val ref = ExperienceRef(
-                    source.identity.experienceId,
-                    source.identity.experienceVersionId,
-                    journeyId,
-                )
-                val id = UUID.randomUUID().toString()
-                val pending = ActivePresentation(
-                    id = id,
-                    ref = ref,
-                    acquired = source.acquired,
-                    ownerDistinctId = request.ownerDistinctId,
-                    journey = journey,
-                    firstFrame = CompletableDeferred(),
-                )
                 val launched = synchronized(stateLock) {
                     val reservationStillMatches = reservationId != null &&
                         pendingReservation?.id == reservationId &&
                         pendingReservation?.request == request
                     if (!isCurrentIdentity(request) || !canPresent() ||
-                        (existing == null && reservationRequired && !reservationStillMatches)
+                        (existing == null && reservationRequired && !reservationStillMatches) ||
+                        (navigation != null && current !== existing)
                     ) {
                         false
                     } else {
@@ -689,19 +729,7 @@ internal class ExperiencePresentationService(
                         current = pending
                         PresentationRegistry.register(
                             id = id,
-                            content = PreparedPresentation(
-                                rivFile = source.acquired.rivFile,
-                                artboardName = source.artboardName,
-                                screenId = source.screenId,
-                                clearColor = source.descriptor.presentationClearColor(),
-                                shell = source.descriptor.presentationShell(),
-                                descriptor = source.descriptor,
-                                artifactsByKey = source.acquired.artifactsByKey,
-                                artboardSize = source.artboardSize,
-                                viewModelProjection = source.viewModelProjection,
-                                textInputState = textInputState,
-                                screenLifecycle = journey.lifecycleByScreen.getOrPut(journey.screenId) { ExperienceScreenLifecycle() },
-                            ),
+                            content = preparedContent,
                             onFirstFrame = { firstFrame(pending) },
                             onFailure = { error -> failed(pending, error) },
                             onDismissed = { reason -> ended(pending, reason) },
@@ -718,7 +746,7 @@ internal class ExperiencePresentationService(
                         )
                         unownedAcquisition = null // The registered presentation now owns cleanup.
                         try {
-                            launch(id)
+                            navigation?.activate() ?: launch(id)
                         } catch (error: Throwable) {
                             PresentationRegistry.reportFailure(id, error)
                         }
@@ -732,6 +760,9 @@ internal class ExperiencePresentationService(
                 if (!launched) throw supersededByIdentityTransition()
                 pending
             } catch (error: Throwable) {
+                withContext(NonCancellable) {
+                    runCatching { navigation?.abort() }.exceptionOrNull()?.let(error::addSuppressed)
+                }
                 runCatching { unownedAcquisition?.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 throw error
             } finally {

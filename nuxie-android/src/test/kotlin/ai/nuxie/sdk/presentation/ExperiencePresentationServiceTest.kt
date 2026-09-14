@@ -13,6 +13,9 @@ import android.util.Base64
 import java.io.Closeable
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -159,6 +162,71 @@ class ExperiencePresentationServiceTest {
                 next.cancelAndJoin()
                 service.dismissFromHost("customer-1")
             }
+        }
+    }
+
+    @Test
+    fun `cancelled native preparation drains before releasing the destination lease`() = runTest {
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val outgoingLease = Lease()
+        val destinationLease = Lease()
+        var checkpoints = 0
+        val first = async {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, outgoingLease) },
+                onScreenDismissed = { _, _, _ -> checkpoints++; JourneyScreenDismissalResult.HANDLED }, onOutcome = {})
+        }
+        runCurrent()
+        val outgoingId = launched.single()
+        PresentationRegistry.reportFirstFrame(outgoingId)
+        first.await()
+        val preparationStarted = CompletableDeferred<Unit>()
+        val cleanupStarted = CompletableDeferred<Unit>()
+        val cleanupFinished = CompletableDeferred<Unit>()
+        val host = object : PresentationScreenHandle {
+            var reason: CloseReason? = null
+            override fun requestCloseFromService(reason: CloseReason): Boolean {
+                this.reason = reason
+                return true
+            }
+            override fun screenCloseReason(): CloseReason? = reason
+            override fun finishAfterServiceClose() = PresentationRegistry.detach(outgoingId, this)
+            override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation? {
+                preparationStarted.complete(Unit)
+                try {
+                    awaitCancellation()
+                } finally {
+                    withContext(NonCancellable) {
+                        cleanupStarted.complete(Unit)
+                        cleanupFinished.await()
+                    }
+                }
+            }
+        }
+        assertTrue(PresentationRegistry.attach(outgoingId, host))
+        val next = async {
+            service.presentJourney(release, "screen_details", "journey-1", "customer-1", null,
+                acquire = { acquired(release.identity, destinationLease) }, onOutcome = {})
+        }
+        try {
+            preparationStarted.await()
+            next.cancel()
+            cleanupStarted.await()
+            assertFalse("Lease must outlive native cleanup", destinationLease.closed.get())
+            assertFalse(outgoingLease.closed.get())
+            assertNotNull(PresentationRegistry.resolve(outgoingId))
+            assertEquals(0, checkpoints)
+            cleanupFinished.complete(Unit)
+            next.join()
+            assertTrue(destinationLease.closed.get())
+            assertFalse(outgoingLease.closed.get())
+            assertEquals(1, launched.size)
+        } finally {
+            cleanupFinished.complete(Unit)
+            next.cancelAndJoin()
+            service.dismissFromHost("customer-1")
         }
     }
 

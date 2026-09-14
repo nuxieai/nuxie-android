@@ -18,6 +18,7 @@ import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -55,14 +56,25 @@ internal class ScreenCloseState(
  */
 internal class NuxieExperienceActivity : Activity() {
     private var currentScreen: Screen? = null
+    private val screens = mutableSetOf<Screen>()
+    private var navigation: Navigation? = null
+    private lateinit var contentRoot: FrameLayout
+    private var visible = false
     private var dismissible = true
     private var predictiveBackCallback: android.window.OnBackInvokedCallback? = null
     private var pendingPermission: Pair<Int, CompletableDeferred<Boolean>>? = null
     private var nextPermissionRequestCode = PERMISSION_REQUEST_CODE_START
 
     /** Registry ownership belongs to this screen, even when the Activity hosts another one. */
-    private inner class Screen(val id: String, val prepared: PreparedPresentation) :
+    private inner class Screen(val id: String, val prepared: PreparedPresentation, @Volatile var provisional: Boolean = false) :
         PresentationScreenHandle, ExperienceSurfaceHost.Listener {
+        var registered = false
+        var view: View? = null
+        val ready = CompletableDeferred<Unit>()
+        val closed = CompletableDeferred<Unit>()
+        private var closing = false
+        private val effectsLock = Any()
+        private val pendingEffects = mutableListOf<() -> Unit>()
         var mounted: ExperienceMountedScreen? = null
             private set
         private val closeState = ScreenCloseState { reason ->
@@ -77,14 +89,20 @@ internal class NuxieExperienceActivity : Activity() {
                 this@NuxieExperienceActivity, prepared, this, ::fail,
             )
             mounted = resources
-            return resources.mount()
+            return shellView(resources.mount(), prepared.shell, resources.surface).also { view = it }
         }
 
         fun close(changingConfigurations: Boolean) {
+            if (closing) return
+            closing = true
+            ready.completeExceptionally(IllegalStateException("Screen closed during preparation"))
             closeState.prepareForTeardown(changingConfigurations)
-            val complete = {
-                closeState.reportAtTeardown(changingConfigurations)
-                PresentationRegistry.detach(id, this)
+            val complete: () -> Unit = {
+                if (registered) {
+                    closeState.reportAtTeardown(changingConfigurations)
+                    PresentationRegistry.detach(id, this)
+                }
+                closed.complete(Unit)
             }
             mounted?.close(changingConfigurations, complete) ?: complete()
             mounted = null
@@ -95,9 +113,12 @@ internal class NuxieExperienceActivity : Activity() {
         override fun finishAfterServiceClose() {
             runOnUiThread {
                 mounted?.exit()
-                finish()
+                if (closeState.reason != CloseReason.JourneyNavigation || navigation?.source !== this) finish()
             }
         }
+        override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation =
+            prepareScreenNavigation(this, id, content)
+
         override fun purchaseActivity(): Activity = this@NuxieExperienceActivity
         override suspend fun resolveJourneyPermission(request: JourneyPermissionRequest): Boolean =
             this@NuxieExperienceActivity.resolveJourneyPermission(request)
@@ -105,26 +126,110 @@ internal class NuxieExperienceActivity : Activity() {
         override fun onFirstFrame() {
             runOnUiThread {
                 if (isDestroyed || isFinishing) return@runOnUiThread
-                if (closeState.reason == null) mounted?.activate()
-                PresentationRegistry.reportFirstFrame(id)
+                if (provisional) {
+                    mounted?.setVisible(false)
+                    ready.complete(Unit)
+                } else {
+                    if (closeState.reason == null) mounted?.activate()
+                    PresentationRegistry.reportFirstFrame(id)
+                }
             }
         }
         override fun onRuntimeStep(
             outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
             correlationId: ULong,
             viewModelSnapshot: NuxieViewModelSnapshot?,
-        ) = PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot)
+        ) {
+            synchronized(effectsLock) {
+                if (provisional) pendingEffects += {
+                    PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot)
+                } else if (closeState.reason == null) {
+                    PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot)
+                }
+            }
+        }
+
+        fun publishPreparedFrame() {
+            synchronized(effectsLock) {
+                provisional = false
+                mounted?.activate()
+                PresentationRegistry.reportFirstFrame(id)
+                pendingEffects.forEach { it() }
+                pendingEffects.clear()
+            }
+        }
         override fun onRuntimeEvent(event: NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) = Unit
         override fun onTextCommitted(inputId: String, text: String) =
             PresentationRegistry.reportTextCommitted(id, this, inputId, text)
         override fun onFailure(error: ExperiencePresentationException) = fail(error)
 
-        fun fail(error: Throwable) = finishTerminal(CloseReason.Error(error))
+        fun fail(error: Throwable) {
+            if (provisional) ready.completeExceptionally(error)
+            else finishTerminal(CloseReason.Error(error))
+        }
         fun finishTerminal(reason: CloseReason) {
             if (closeState.select(reason)) finishAfterServiceClose()
             PresentationRegistry.reportOutcome(id, reason)
         }
     }
+
+    private inner class Navigation(val source: Screen, val target: Screen) : PreparedScreenNavigation {
+        override fun activate() {
+            runOnUiThread {
+                if (isDestroyed || isFinishing || navigation !== this ||
+                    !PresentationRegistry.attach(target.id, target)) {
+                    target.close(false)
+                    target.closed.invokeOnCompletion {
+                        PresentationRegistry.reportFailure(target.id, IllegalStateException("Navigation host was withdrawn"))
+                    }
+                    finish()
+                    return@runOnUiThread
+                }
+                target.registered = true
+                currentScreen = target
+                dismissible = target.prepared.shell.dismissible
+                intent.putExtra(EXTRA_PRESENTATION_ID, target.id)
+                target.view?.bringToFront()
+                source.view?.let(contentRoot::removeView)
+                source.close(false)
+                screens.remove(source)
+                navigation = null
+                target.publishPreparedFrame()
+                target.mounted?.setVisible(visible)
+            }
+        }
+
+        override suspend fun abort() = withContext(NonCancellable + Dispatchers.Main.immediate) {
+            if (navigation === this@Navigation) navigation = null
+            target.view?.let(contentRoot::removeView)
+            target.close(false)
+            screens.remove(target)
+            if (currentScreen === source && source.screenCloseReason() != null) finish()
+            target.closed.await()
+        }
+    }
+
+    private suspend fun prepareScreenNavigation(source: Screen, id: String, prepared: PreparedPresentation): PreparedScreenNavigation =
+        withContext(Dispatchers.Main.immediate) {
+            check(currentScreen === source && navigation == null && !isFinishing && !isDestroyed) {
+                "Navigation source is no longer active"
+            }
+            val target = Screen(id, prepared, provisional = true)
+            val pending = Navigation(source, target)
+            navigation = pending
+            screens += target
+            try {
+                // Render the destination behind the outgoing content, retaining both until activation.
+                contentRoot.addView(target.mount(), 0, FrameLayout.LayoutParams(-1, -1))
+                target.mounted?.observeWindow()
+                target.mounted?.setVisible(visible)
+                target.ready.await()
+                pending
+            } catch (error: Throwable) {
+                pending.abort()
+                throw error
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -152,10 +257,14 @@ internal class NuxieExperienceActivity : Activity() {
             finish()
             return
         }
+        screen.registered = true
+        screens += screen
         currentScreen = screen
         dismissible = prepared.shell.dismissible
         try {
-            setContentView(shellView(screen.mount(), prepared.shell))
+            contentRoot = FrameLayout(this)
+            contentRoot.addView(screen.mount(), FrameLayout.LayoutParams(-1, -1))
+            setContentView(contentRoot)
             screen.mounted?.observeWindow()
         } catch (error: Throwable) {
             screen.fail(error)
@@ -166,11 +275,13 @@ internal class NuxieExperienceActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
-        currentScreen?.mounted?.setVisible(true)
+        visible = true
+        screens.forEach { if (!it.provisional || !it.ready.isCompleted) it.mounted?.setVisible(true) }
     }
 
     override fun onStop() {
-        currentScreen?.mounted?.setVisible(false)
+        visible = false
+        screens.forEach { it.mounted?.setVisible(false) }
         super.onStop()
     }
 
@@ -182,7 +293,8 @@ internal class NuxieExperienceActivity : Activity() {
     override fun onDestroy() {
         unregisterPredictiveBack()
         super.onDestroy()
-        currentScreen?.close(isChangingConfigurations)
+        screens.forEach { it.close(isChangingConfigurations && !it.provisional) }
+        screens.clear()
         currentScreen = null
         pendingPermission?.second?.complete(false)
         pendingPermission = null
@@ -266,7 +378,7 @@ internal class NuxieExperienceActivity : Activity() {
         currentScreen?.finishTerminal(reason)
     }
 
-    private fun shellView(host: View, shell: PresentationShell): View {
+    private fun shellView(host: View, shell: PresentationShell, surface: View? = null): View {
         if (shell is PresentationShell.FullScreen) return host
 
         val root = FrameLayout(this)
@@ -288,7 +400,7 @@ internal class NuxieExperienceActivity : Activity() {
             // The SurfaceView has its own composition layer. Clip it and the
             // common content parent so native editable controls share the shell.
             applyRoundedOutline(host, shell.cornerRadiusDp)
-            currentScreen?.mounted?.surface?.takeIf { it !== host }?.let { applyRoundedOutline(it, shell.cornerRadiusDp) }
+            surface?.takeIf { it !== host }?.let { applyRoundedOutline(it, shell.cornerRadiusDp) }
         }
         root.addView(host, shellLayoutParams(shell))
         return root

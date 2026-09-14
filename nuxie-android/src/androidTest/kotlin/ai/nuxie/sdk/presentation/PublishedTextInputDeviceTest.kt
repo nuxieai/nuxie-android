@@ -70,6 +70,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -525,6 +526,11 @@ class PublishedTextInputDeviceTest {
             { NuxieRuntime.shared.isAvailable })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
+        val navigationContract = instrumentation.context.assets.open("journeys/planes/persistent-navigation-android.json")
+            .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject }
+        val navigationScreens = navigationContract.getValue("screens").jsonArray.map { it.jsonPrimitive.content }
+        var hostActivity: Activity? = null
+        var dismissalCheckpoints = 0
         var nextBatch = 0L
         var nextEmission = 0L
         fun present(screenId: String): Activity {
@@ -537,10 +543,15 @@ class PublishedTextInputDeviceTest {
                     onEmissionBatch = { batch ->
                         batches.add(batch)
                         true
+                    }, onScreenDismissed = { _, _, _ ->
+                        dismissalCheckpoints++
+                        JourneyScreenDismissalResult.HANDLED
                     }, onOutcome = {})
             }
             assertEquals(screenId, screens.poll(5, TimeUnit.SECONDS))
-            return checkNotNull(monitor.waitForActivityWithTimeout(10_000))
+            val host = hostActivity ?: checkNotNull(monitor.waitForActivityWithTimeout(10_000)).also { hostActivity = it }
+            assertHostedScreen(instrumentation, host, screenId)
+            return host
         }
         fun response(value: String) {
             val batch = checkNotNull(batches.poll(10, TimeUnit.SECONDS)) { "Native commit must reach the response coordinator" }
@@ -554,14 +565,38 @@ class PublishedTextInputDeviceTest {
             assertEquals(value, emission.payload.getValue("value").jsonPrimitive.content)
         }
         try {
-            val first = present("screen_1")
+            val first = present(navigationScreens[0])
             val field = awaitEditor(instrumentation, first, inputId)
             edit(instrumentation, field, "saved@example.com")
             response("saved@example.com")
             instrumentation.runOnMainSync { field.setSelection(2, 7) }
-            val second = present("screen_2")
-            assertTrue("Navigation must replace the previous activity", first !== second)
-            val returned = present("screen_1")
+            val outgoingSurface = checkNotNull(findSurface(first.window.decorView))
+            val beforeFailure = stableSurface(outgoingSurface)
+            val invalidRiv = File.createTempFile("invalid-navigation", ".riv", instrumentation.targetContext.cacheDir)
+            invalidRiv.writeText("invalid native content")
+            val unusedLeaseClosed = java.util.concurrent.atomic.AtomicBoolean(false)
+            val preparationFailure = runBlocking {
+                runCatching {
+                    service.presentJourney(fixture.release, navigationScreens[1], journey, owner, null,
+                        acquire = { AcquiredJourneyRelease(fixture.release.identity, fixture.assets, invalidRiv,
+                            protection = Closeable { unusedLeaseClosed.set(true) }) }, onOutcome = {})
+                }.exceptionOrNull()
+            }
+            invalidRiv.delete()
+            assertTrue("Invalid native content must fail preparation", preparationFailure is ExperiencePresentationException)
+            assertHostedScreen(instrumentation, first, navigationScreens[0])
+            val failedContract = navigationContract.getValue("failedPreparation").jsonObject
+            assertEquals(failedContract.getValue("dismissalCheckpoints").jsonPrimitive.content.toInt(), dismissalCheckpoints)
+            assertEquals(failedContract.getValue("destinationLeaseReleased").jsonPrimitive.content.toBoolean(), unusedLeaseClosed.get())
+            val afterFailure = copySurface(outgoingSurface)
+            assertEquals(failedContract.getValue("outgoingPixelsChanged").jsonPrimitive.content.toInt(),
+                changedPixels(beforeFailure, afterFailure, Rect(0, 0, beforeFailure.width, beforeFailure.height)))
+            beforeFailure.recycle()
+            afterFailure.recycle()
+            val second = present(navigationScreens[1])
+            assertTrue("Navigation must retain the Activity", first === second)
+            val returned = present(navigationScreens[2])
+            assertEquals(navigationContract.getValue("activityLaunches").jsonPrimitive.content.toInt(), monitor.hits)
             val retained = awaitEditor(instrumentation, returned, inputId)
             instrumentation.runOnMainSync {
                 assertEquals("saved@example.com", retained.text.toString())
@@ -667,8 +702,8 @@ class PublishedTextInputDeviceTest {
                         System.currentTimeMillis(), "corpus_next_0", JsonObject(emptyMap()))),
                 )))
             }
-            val second = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
-            assertTrue(first !== second)
+            assertHostedScreen(instrumentation, first, "screen_2")
+            assertEquals(1, monitor.hits)
             assertEquals("screen_2", presentations.journeyScreenId(JourneyPresentationOwner(reopened.journeyId, owner)))
             assertEquals("durable@example.com", journalRun().context.getValue("responses").jsonObject.getValue("email").jsonPrimitive.content)
         } finally {
@@ -679,6 +714,40 @@ class PublishedTextInputDeviceTest {
             }
             instrumentation.removeMonitor(monitor)
             PresentationRegistry.clearForTesting()
+        }
+    }
+
+    private fun stableSurface(surface: SurfaceView): Bitmap {
+        var previous = copySurface(surface)
+        var unchanged = 0
+        val deadline = SystemClock.elapsedRealtime() + 5_000
+        while (unchanged < 3 && SystemClock.elapsedRealtime() < deadline) {
+            SystemClock.sleep(50)
+            val next = copySurface(surface)
+            unchanged = if (changedPixels(previous, next, Rect(0, 0, previous.width, previous.height)) == 0) unchanged + 1 else 0
+            previous.recycle()
+            previous = next
+        }
+        assertEquals("Text edit must settle in the rendered surface before testing preservation", 3, unchanged)
+        return previous
+    }
+
+    private fun assertHostedScreen(instrumentation: Instrumentation, host: Activity, screenId: String) {
+        val deadline = SystemClock.elapsedRealtime() + 10_000
+        var observed: String? = null
+        while (observed != screenId && SystemClock.elapsedRealtime() < deadline) {
+            instrumentation.runOnMainSync {
+                observed = host.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID)
+                    ?.let(PresentationRegistry::resolve)?.screenId
+            }
+            if (observed != screenId) SystemClock.sleep(20)
+        }
+        instrumentation.runOnMainSync {
+            assertFalse(host.isDestroyed)
+            assertFalse(host.isFinishing)
+            val id = checkNotNull(host.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
+            assertEquals(screenId, checkNotNull(PresentationRegistry.resolve(id)).screenId)
+            assertTrue(PresentationRegistry.currentScreen(id)?.purchaseActivity() === host)
         }
     }
 
