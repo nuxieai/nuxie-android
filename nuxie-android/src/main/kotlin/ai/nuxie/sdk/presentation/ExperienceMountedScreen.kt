@@ -34,12 +34,18 @@ internal class ExperienceMountedScreen(
     private var textOverlay: ExperienceTextInputOverlay? = null
     private var windowInsets: ExperienceWindowInsets? = null
     private val lifecycle = prepared.screenLifecycle
+    private val exitHandshake = ExperienceScreenExitHandshake()
+    private var reduceMotionEnabled = false
     val surface = ExperienceSurfaceHost(
         context = activity,
         lane = lane,
         clearColor = prepared.clearColor,
         artboardSize = prepared.artboardSize,
         listener = object : ExperienceSurfaceHost.Listener by listener {
+            override fun onRuntimeEvent(event: ai.nuxie.sdk.runtime.NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {
+                exitHandshake.receive(event.name)
+                listener.onRuntimeEvent(event, viewModelSnapshot)
+            }
             override fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot) {
                 textOverlay?.update(snapshot)
             }
@@ -51,6 +57,7 @@ internal class ExperienceMountedScreen(
         surface.updateRuntimeValues(if (lifecycle.phase == ExperienceScreenLifecycle.Phase.HIDDEN)
             lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING) else lifecycle.snapshot())
         reducedMotion = ExperienceReducedMotion(activity) { reduced ->
+            reduceMotionEnabled = reduced
             surface.updateRuntimeValues(lifecycle.updateReduceMotion(reduced))
         }
         surface.loadArtboard(
@@ -89,9 +96,19 @@ internal class ExperienceMountedScreen(
     }
 
     fun activate() {
-        if (lifecycle.phase == ExperienceScreenLifecycle.Phase.ENTERING) {
+        if (lifecycle.phase == ExperienceScreenLifecycle.Phase.ENTERING ||
+            lifecycle.phase == ExperienceScreenLifecycle.Phase.EXITING) {
             surface.updateRuntimeValues(lifecycle.move(ExperienceScreenLifecycle.Phase.ACTIVE))
         }
+    }
+
+    suspend fun awaitExit() {
+        val render = prepared.descriptor?.get("render") as? JsonObject
+        val screens = render?.get("screens") as? JsonArray
+        val screen = screens?.filterIsInstance<JsonObject>()?.firstOrNull {
+            (it["id"] as? JsonPrimitive)?.content == prepared.screenId
+        }
+        exitHandshake.perform(screen?.get("exit") as? JsonObject, reduceMotionEnabled, ::exit)
     }
 
     fun exit() {
@@ -100,6 +117,7 @@ internal class ExperienceMountedScreen(
 
     /** Completion follows native handle release, so the owner can release its artifact lease. */
     fun close(changingConfigurations: Boolean, completion: () -> Unit) {
+        exitHandshake.close()
         reducedMotion?.close()
         windowInsets?.close()
         windowInsets = null

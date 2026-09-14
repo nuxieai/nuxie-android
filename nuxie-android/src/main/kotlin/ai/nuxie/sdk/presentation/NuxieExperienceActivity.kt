@@ -174,6 +174,14 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private inner class Navigation(val source: Screen, val target: Screen) : PreparedScreenNavigation {
+        override suspend fun awaitExit() = withContext(Dispatchers.Main.immediate) {
+            check(navigation === this@Navigation && currentScreen === source && !isFinishing && !isDestroyed) {
+                "Navigation source is no longer active"
+            }
+            source.mounted?.awaitExit()
+            Unit
+        }
+
         override fun activate() {
             runOnUiThread {
                 if (isDestroyed || isFinishing || navigation !== this ||
@@ -209,7 +217,10 @@ internal class NuxieExperienceActivity : Activity() {
             target.view?.let(contentRoot::removeView)
             target.close(false)
             screens.remove(target)
-            if (currentScreen === source && source.screenCloseReason() != null) finish()
+            if (currentScreen === source) {
+                if (source.screenCloseReason() != null) finish()
+                else source.mounted?.activate()
+            }
             target.closed.await()
         }
     }

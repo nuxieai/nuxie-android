@@ -112,6 +112,7 @@ internal sealed interface PresentationShell {
 
 /** Screen-scoped close operations and access to its hosting Activity. */
 internal interface PreparedScreenNavigation {
+    suspend fun awaitExit() = Unit
     fun activate()
     suspend fun abort()
 }
@@ -695,6 +696,9 @@ internal class ExperiencePresentationService(
                         PresentationRegistry.currentScreen(previous.id)?.prepareNavigation(id, preparedContent)
                     }
                 }
+                // Authored exits have their own duration/watchdog, independent
+                // of the destination's first-frame timeout.
+                navigation?.awaitExit()
                 synchronized(stateLock) {
                     if (!isCurrentIdentity(request) || !canPresent() || current !== existing) {
                         throw supersededByIdentityTransition()
