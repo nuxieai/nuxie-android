@@ -64,6 +64,7 @@ internal class ScreenCloseState(
 internal class NuxieExperienceActivity : Activity() {
     private val registryScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var acquiringScreen: AcquiringScreen? = null
+    private var loadingView: ExperienceLoadingView? = null
     private var currentScreen: Screen? = null
     private val screens = mutableSetOf<Screen>()
     private var navigation: Navigation? = null
@@ -157,6 +158,7 @@ internal class NuxieExperienceActivity : Activity() {
                     mounted?.setVisible(false)
                     ready.complete(Unit)
                 } else {
+                    if (currentScreen === this) removeLoadingView()
                     if (closeState.reason == null) mounted?.activate()
                     PresentationRegistry.reportFirstFrame(id)
                 }
@@ -372,6 +374,10 @@ internal class NuxieExperienceActivity : Activity() {
                             contentRoot = FrameLayout(this@NuxieExperienceActivity).apply { setBackgroundColor(content.screen.clearColor) }
                             setContentView(shellView(contentRoot, content.screen.shell))
                             contentRoot.setBackgroundColor(content.screen.clearColor)
+                            loadingView = ExperienceLoadingView(this@NuxieExperienceActivity, content.screen.clearColor).also {
+                                contentRoot.addView(it, FrameLayout.LayoutParams(-1, -1))
+                                it.setActive(visible)
+                            }
                         }
                     }
                     is PresentationContentState.Ready -> if (currentScreen == null) {
@@ -403,7 +409,7 @@ internal class NuxieExperienceActivity : Activity() {
             val newRoot = !::contentRoot.isInitialized
             if (newRoot) contentRoot = FrameLayout(this)
             contentRoot.background = null
-            contentRoot.addView(screen.mount(), FrameLayout.LayoutParams(-1, -1))
+            contentRoot.addView(screen.mount(), 0, FrameLayout.LayoutParams(-1, -1))
             if (newRoot) setContentView(shellView(contentRoot, prepared.shell))
             screen.mounted?.observeWindow()
         } catch (error: Throwable) {
@@ -415,12 +421,14 @@ internal class NuxieExperienceActivity : Activity() {
     override fun onStart() {
         super.onStart()
         visible = true
+        loadingView?.setActive(true)
         navigation?.setVisible(true)
         screens.forEach { if (!it.provisional || !it.ready.isCompleted) it.mounted?.setVisible(true) }
     }
 
     override fun onStop() {
         visible = false
+        loadingView?.setActive(false)
         navigation?.setVisible(false)
         screens.forEach { it.mounted?.setVisible(false) }
         super.onStop()
@@ -440,6 +448,7 @@ internal class NuxieExperienceActivity : Activity() {
 
     override fun onDestroy() {
         registryScope.cancel()
+        removeLoadingView()
         acquiringScreen?.close(isChangingConfigurations)
         acquiringScreen = null
         navigation?.cancel()
@@ -450,6 +459,16 @@ internal class NuxieExperienceActivity : Activity() {
         currentScreen = null
         pendingPermission?.second?.complete(false)
         pendingPermission = null
+    }
+
+    private fun removeLoadingView() {
+        loadingView?.let {
+            it.close()
+            // First frame can arrive inside display-list traversal. Stop drawing now,
+            // but defer child-list mutation until traversal has finished.
+            contentRoot.post { contentRoot.removeView(it) }
+        }
+        loadingView = null
     }
 
     private suspend fun resolveJourneyPermission(request: JourneyPermissionRequest): Boolean =
