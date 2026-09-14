@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "854a43a4a4a1c9e9a438345cd768214e762aa0e9",
+  "sourceCommit": "7d82df46e9023338a2e5f1b33004a60a42e48f99",
   "files": {
     "README.md": "4363d6a79ac9828364a6a02bf400d98c0852b771062258c409a744dd1a5016e7",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
@@ -28,7 +28,7 @@
     "journeys/planes/persistent-navigation-android.json": "f44bcffb184fab3cfafd4f676f18c2d57183b3bff6f4a85b60a415bbc6f668df",
     "journeys/planes/presentation-acquisition-recovery-android.json": "5e7a31c2d49e552b18deec0b2f360a3caa6ae3f36972715060d58e6f9f1b1891",
     "journeys/planes/presentation-preparation-android.json": "fb8e4189bb39eecc5dafaa715aa29cf83c384dff1901028c39701013f95933e2",
-    "journeys/planes/presentation-reveal-android.json": "e1101b9dff9d2dc52f3c98e92e564acf944a83b1597144bea91deb92329e73c9",
+    "journeys/planes/presentation-reveal-android.json": "2fd456a1a19feb20bbe8fe941c66153899c97f3edff2d51a427a5cfda9d37a34",
     "journeys/planes/profile-fact-admission.json": "0ba16cfc6fd46b5604a38d8b5b22a197a9df01669852746468f5dc40664bb6a3",
     "journeys/planes/publication-admission.json": "d9f145e80d78ba68bb3197f4597947da31b837d509610b41b8134cf48aaf78d2",
     "journeys/planes/release.json": "1514ec568c2ff0e5e4d1caf3f5f826f6bfe88ab9de3d660f5b0a7a60135ab0bd",

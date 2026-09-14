@@ -62,6 +62,7 @@ class ExperiencePresentationServiceTest {
     }
 
     private class AttachedHost : PresentationScreenHandle {
+        override val rendererEffects = RendererEffectLifetime()
         var requestedReason: CloseReason? = null
         var finished = false
 
@@ -447,7 +448,7 @@ class ExperiencePresentationServiceTest {
         val received = mutableListOf<String>()
         PresentationRegistry.register("edit-owner",
             PreparedPresentation(File("unused.riv"), null, 0, PresentationShell.FullScreen),
-            {}, {}, {}, {}, onTextCommitted = { _, text -> received += text })
+            {}, {}, {}, {}, onTextCommitted = { _, text, _ -> received += text })
         val old = AttachedHost()
         val current = AttachedHost()
         assertTrue(PresentationRegistry.attach("edit-owner", old))
@@ -458,6 +459,34 @@ class ExperiencePresentationServiceTest {
         PresentationRegistry.dismiss("edit-owner", CloseReason.UserDismissed)
         PresentationRegistry.reportTextCommitted("edit-owner", current, "name", "closed")
         assertEquals(listOf("first", "current"), received)
+    }
+
+    @Test
+    fun `replacement attachment retires old native effects before teardown finishes`() {
+        val received = mutableListOf<ULong>()
+        val lifetimes = mutableListOf<RendererEffectLifetime?>()
+        PresentationRegistry.register("effect-owner",
+            PreparedPresentation(File("unused.riv"), null, 0, PresentationShell.FullScreen),
+            {}, {}, {}, {}, onRuntimeStep = { _, correlation, _, lifetime ->
+                received += correlation; lifetimes += lifetime
+            })
+        val old = AttachedHost()
+        val replacement = AttachedHost()
+        val outcome = ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome(true, emptyList(), emptyList(), emptyList(), emptyList())
+        assertTrue(PresentationRegistry.attach("effect-owner", old))
+        PresentationRegistry.reportRuntimeStep("effect-owner", outcome, 1uL, null, old)
+        assertTrue(PresentationRegistry.attach("effect-owner", replacement))
+        assertTrue(old.rendererEffects.isRetired)
+        assertFalse(replacement.rendererEffects.isRetired)
+        PresentationRegistry.reportRuntimeStep("effect-owner", outcome, 2uL, null, old)
+        PresentationRegistry.reportRuntimeStep("effect-owner", outcome, 3uL, null, replacement)
+        PresentationRegistry.detach("effect-owner", old)
+        assertFalse(replacement.rendererEffects.isRetired)
+        PresentationRegistry.detach("effect-owner", replacement)
+        assertTrue(replacement.rendererEffects.isRetired)
+        PresentationRegistry.reportRuntimeStep("effect-owner", outcome, 4uL, null, replacement)
+        assertEquals(listOf(1uL, 3uL), received)
+        assertEquals(listOf(old.rendererEffects, replacement.rendererEffects), lifetimes)
     }
 
     @Test
