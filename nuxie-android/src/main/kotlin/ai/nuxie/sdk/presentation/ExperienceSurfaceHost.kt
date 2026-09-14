@@ -75,6 +75,10 @@ internal class ExperienceSurfaceHost(
     @Volatile private var firstFrameComposed = false
     private var androidSurface: Surface? = null
     private val unpublishedSteps = ArrayDeque<PublishedStep>()
+    // SUBMITTED retains the exact frame until native completion. Polling must
+    // neither step the player nor publish effects from its unfinished frame.
+    private var pendingPresentation = false
+    private var submittedSnapshot: NuxieViewModelSnapshot? = null
     private var textInputs: Map<String, ExperienceTextInput> = emptyMap()
     private val runtimeValues = linkedMapOf<String, NuxieViewModelScalarValue>()
     private val reportedStatePaths = mutableSetOf<String>()
@@ -122,6 +126,7 @@ internal class ExperienceSurfaceHost(
     private var surfaceAvailable = false
     private var presentationVisible = true
     private var lastFrameNanos = 0L
+    private var lastSteppedGeneration = -1L
     private val pointerInput = ExperienceRuntimePointerInput(artboardSize)
 
     init {
@@ -293,7 +298,6 @@ internal class ExperienceSurfaceHost(
         if (running == shouldRun) return
         running = shouldRun
         frameGeneration.incrementAndGet()
-        lastFrameNanos = 0L
         if (shouldRun) {
             Choreographer.getInstance().postFrameCallback(this)
         } else {
@@ -345,6 +349,8 @@ internal class ExperienceSurfaceHost(
     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
         lane.enqueue {
             if (attached) {
+                pendingPresentation = false
+                submittedSnapshot = null
                 val status = renderer?.resize(
                     width.coerceAtLeast(1),
                     height.coerceAtLeast(1),
@@ -371,6 +377,8 @@ internal class ExperienceSurfaceHost(
         val accepted = lane.enqueue {
             try {
                 attached = false
+                pendingPresentation = false
+                submittedSnapshot = null
                 try {
                     renderer?.detachSurface()
                 } finally {
@@ -431,12 +439,6 @@ internal class ExperienceSurfaceHost(
             return
         }
         val generation = frameGeneration.get()
-        val elapsedSeconds = if (lastFrameNanos == 0L) {
-            0.0
-        } else {
-            (frameTimeNanos - lastFrameNanos) / 1_000_000_000.0
-        }
-        lastFrameNanos = frameTimeNanos
         val accepted = lane.enqueue {
             try {
                 if (!attached || !running || generation != frameGeneration.get()) return@enqueue
@@ -447,54 +449,70 @@ internal class ExperienceSurfaceHost(
                 // window, so attached implies a live window; this null-check is
                 // a type-level guard, never a reachable behavior change.
                 val window = window ?: return@enqueue
-                val correlationId = nextCorrelationId
-                nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) {
-                    1uL
-                } else {
-                    nextCorrelationId + 1uL
-                }
-                val outcome = try {
-                    player.stepTyped(
-                        elapsedSeconds = elapsedSeconds,
-                        pointers = pointerInput.takeBatch(),
-                        correlationId = correlationId,
-                    )
-                } catch (error: Throwable) {
-                    reportFailure(
-                        ExperiencePresentationException.Reason.HOST_FAILED,
-                        "Experience runtime step failed",
-                        error,
-                    )
-                    return@enqueue
-                }
-                val viewModelSnapshot = if (
-                    textInputs.isNotEmpty() || outcome.events.isNotEmpty() || outcome.hasPublishableEffects()
-                ) {
-                    try {
-                        viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
+                if (!pendingPresentation) {
+                    // Keep the clock on the lane: a resize queued ahead of this
+                    // tick may have retired its pending submission. Polling does
+                    // not consume time, and visibility generations reset it.
+                    val elapsedSeconds = if (lastSteppedGeneration != generation) {
+                        0.0
+                    } else {
+                        (frameTimeNanos - lastFrameNanos) / 1_000_000_000.0
+                    }
+                    lastFrameNanos = frameTimeNanos
+                    lastSteppedGeneration = generation
+                    val correlationId = nextCorrelationId
+                    nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) {
+                        1uL
+                    } else {
+                        nextCorrelationId + 1uL
+                    }
+                    val outcome = try {
+                        player.stepTyped(
+                            elapsedSeconds = elapsedSeconds,
+                            pointers = pointerInput.takeBatch(),
+                            correlationId = correlationId,
+                        )
                     } catch (error: Throwable) {
                         reportFailure(
                             ExperiencePresentationException.Reason.HOST_FAILED,
-                            "Experience view-model snapshot failed",
+                            "Experience runtime step failed",
                             error,
                         )
                         return@enqueue
                     }
-                } else {
-                    null
+                    val viewModelSnapshot = if (
+                        textInputs.isNotEmpty() || outcome.events.isNotEmpty() || outcome.hasPublishableEffects()
+                    ) {
+                        try {
+                            viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
+                        } catch (error: Throwable) {
+                            reportFailure(
+                                ExperiencePresentationException.Reason.HOST_FAILED,
+                                "Experience view-model snapshot failed",
+                                error,
+                            )
+                            return@enqueue
+                        }
+                    } else {
+                        null
+                    }
+                    if (outcome.hasPublishableEffects()) {
+                        unpublishedSteps.addLast(PublishedStep(correlationId, outcome, viewModelSnapshot))
+                    }
+                    submittedSnapshot = viewModelSnapshot
+                    if (!firstFramePresented) firstFrameUpdateBaseline = surfaceUpdates.get()
                 }
-                if (outcome.hasPublishableEffects()) {
-                    unpublishedSteps.addLast(PublishedStep(correlationId, outcome, viewModelSnapshot))
-                }
-                if (!firstFramePresented) firstFrameUpdateBaseline = surfaceUpdates.get()
                 val disposition = renderer.renderAndPresent(player, window, clearColor, true)
+                pendingPresentation = disposition == 4
                 if (disposition < 0) {
                     Log.w(LOG_TAG, "render_player failed with status ${-disposition}")
                     reportFailure(
                         ExperiencePresentationException.Reason.HOST_FAILED,
                         "Experience rendering failed with status ${-disposition}",
                     )
-                } else if (disposition > 0) {
+                } else if (disposition == 1 || disposition == 2) {
+                    val viewModelSnapshot = submittedSnapshot
+                    submittedSnapshot = null
                     if (textInputs.isNotEmpty() && viewModelSnapshot != null) {
                         post {
                             if (!released.get()) listener?.onTextInputSnapshot(viewModelSnapshot)
@@ -559,6 +577,8 @@ internal class ExperienceSurfaceHost(
             file = null
             renderer = null
             unpublishedSteps.clear()
+            pendingPresentation = false
+            submittedSnapshot = null
             var firstFailure: Throwable? = null
             closeHandles.forEach { close ->
                 try {

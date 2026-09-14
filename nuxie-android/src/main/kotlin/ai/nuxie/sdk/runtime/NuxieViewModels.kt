@@ -305,6 +305,15 @@ internal interface NuxieTypedRuntimeNative {
     fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int =
         error("resizeRenderer is not implemented")
 
+    /**
+     * 0: unavailable, 1: completed, 2: completed and surface retired,
+     * 3: surface retired without delivery, 4: submitted but still pending.
+     * After 4, repeat this call with the same player to poll that submission;
+     * do not step the player until completion or surface retirement. A poll
+     * returning completion must not also record another frame. Detach/resize
+     * drain and discard the pending completion so the next call renders anew.
+     * Negative values are negated runtime status codes.
+     */
     fun renderAndPresent(
         rendererHandle: Long,
         playerHandle: Long,
