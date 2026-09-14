@@ -151,7 +151,7 @@ internal enum class JourneyPermissionRequest {
  * is never reconstructed from Intent extras.
  */
 internal sealed interface PresentationContentState {
-    data class Acquiring(val screen: AuthenticatedPresentationScreen) : PresentationContentState
+    data class Acquiring(val screen: AuthenticatedPresentationScreen, val progress: AcquisitionProgress? = null) : PresentationContentState
     data class Ready(val content: PreparedPresentation) : PresentationContentState
     data class Closed(val reason: CloseReason) : PresentationContentState
 }
@@ -177,6 +177,7 @@ internal object PresentationRegistry {
         val attachedScreens: MutableSet<PresentationScreenHandle> =
             Collections.newSetFromMap(IdentityHashMap())
         var dismissalReason: CloseReason? = null
+        var retry: ((Long) -> Boolean)? = null
     }
 
     private val lock = Any()
@@ -208,17 +209,34 @@ internal object PresentationRegistry {
                     "Prepared content differs from authenticated shell"
                 }
                 existing.callbacks = callbacks
+                existing.retry = null
                 existing.state.value = PresentationContentState.Ready(content)
             }
         }
     }
 
-    fun registerAcquiring(id: String, screen: AuthenticatedPresentationScreen, onClosed: (CloseReason) -> Unit): Deferred<Unit> =
+    fun registerAcquiring(id: String, screen: AuthenticatedPresentationScreen,
+        onRetry: (Long) -> Boolean = { false }, onClosed: (CloseReason) -> Unit): Deferred<Unit> =
         synchronized(lock) {
             check(id !in entries) { "duplicate presentation id" }
             Entry(PresentationContentState.Acquiring(screen), Callbacks({}, { onClosed(CloseReason.Error(it)) }, onClosed,
-                onClosed, { _, _, _ -> }, { _, _ -> })).also { entries[id] = it }.detached
+                onClosed, { _, _, _ -> }, { _, _ -> })).also { it.retry = onRetry; entries[id] = it }.detached
         }
+
+    fun updateAcquisition(id: String, progress: AcquisitionProgress) = synchronized(lock) {
+        val entry = entries[id] ?: return@synchronized
+        val state = entry.state.value as? PresentationContentState.Acquiring ?: return@synchronized
+        if (entry.dismissalReason == null && !entry.terminal.get()) entry.state.value = state.copy(progress = progress)
+    }
+
+    fun retryAcquisition(id: String, generation: Long): Boolean {
+        val retry = synchronized(lock) {
+            val entry = entries[id] ?: return false
+            if (entry.dismissalReason != null || entry.state.value !is PresentationContentState.Acquiring) return false
+            entry.retry
+        }
+        return retry?.invoke(generation) == true
+    }
 
     fun observe(id: String): StateFlow<PresentationContentState>? = synchronized(lock) { entries[id]?.state?.asStateFlow() }
 
@@ -662,6 +680,7 @@ internal class ExperiencePresentationService(
             var published = false
             var acquiringId: String? = null
             var acquiringDetached: Deferred<Unit>? = null
+            var recovery: ExperienceAcquisitionRecovery<PreparedSource>? = null
             val acquiringFailure = AtomicReference<Throwable?>()
             var unownedAcquisition: AcquiredJourneyRelease? = null
             var navigation: PreparedScreenNavigation? = null
@@ -706,7 +725,11 @@ internal class ExperiencePresentationService(
                         }
                         val id = UUID.randomUUID().toString()
                         acquiringId = id
-                        acquiringDetached = PresentationRegistry.registerAcquiring(id, selectedScreen) { reason ->
+                        val controller = ExperienceAcquisitionRecovery<PreparedSource>(
+                            publish = { PresentationRegistry.updateAcquisition(id, it) },
+                        )
+                        recovery = controller
+                        acquiringDetached = PresentationRegistry.registerAcquiring(id, selectedScreen, controller::retry) { reason ->
                             if (reason is CloseReason.Error) acquiringFailure.compareAndSet(null, reason.cause)
                             attempt.job.cancel()
                         }
@@ -717,7 +740,24 @@ internal class ExperiencePresentationService(
                 val source = try {
                     withContext(attempt.job) {
                         // Capture ownership before withContext can discard a late result on cancellation.
-                        prepare().also { unownedAcquisition = it.acquired }
+                        val source = recovery?.acquire(
+                            prepare = {
+                                synchronized(stateLock) {
+                                    if (!isCurrentIdentity(request) || !canPresent() ||
+                                        (reservationRequired && pendingReservation?.id != reservationId)) {
+                                        throw supersededByIdentityTransition()
+                                    }
+                                }
+                                prepare()
+                            },
+                            release = { it.acquired.close() },
+                            recoverable = { error -> error !is ExperiencePresentationException ||
+                                error.reason in setOf(ExperiencePresentationException.Reason.ACQUISITION_FAILED,
+                                    ExperiencePresentationException.Reason.PRODUCTS_UNAVAILABLE) },
+                            onFailure = { error -> ai.nuxie.sdk.logging.NuxieLog.w(
+                                "ExperiencePresentation", "Experience acquisition requires recovery", error) },
+                        ) ?: prepare()
+                        source.also { unownedAcquisition = it.acquired }
                     }
                 } catch (error: Throwable) {
                     if (error is CancellationException) throw error

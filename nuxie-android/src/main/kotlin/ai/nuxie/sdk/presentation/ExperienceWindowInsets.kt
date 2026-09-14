@@ -12,9 +12,12 @@ import kotlin.math.min
 internal class ExperienceWindowInsets(
     private val activity: Activity,
     private val view: View,
-    private val artboardSize: ExperienceArtboardSize,
+    private val artboardSize: ExperienceArtboardSize?,
     private val publish: (ExperienceSafeAreaInsets) -> Unit,
 ) : AutoCloseable {
+    /** Native shell controls consume local pixel insets without artboard projection. */
+    constructor(activity: Activity, view: View, publish: (ExperienceSafeAreaInsets) -> Unit) :
+        this(activity, view, null, publish)
     private var closed = false
     private var previous: ExperienceSafeAreaInsets? = null
     private val update = Runnable { update() }
@@ -65,9 +68,10 @@ internal class ExperienceWindowInsets(
         }
         val local = relativeInsets(systemInsets(windowInsets), windowWidth, windowHeight,
             position[0], position[1], view.width, view.height)
-        val projected = ExperienceSafeAreaInsetMapper.artboardInsets(local,
-            view.width.toDouble(), view.height.toDouble(),
-            artboardSize.width.toDouble(), artboardSize.height.toDouble())
+        val projected = artboardSize?.let {
+            ExperienceSafeAreaInsetMapper.artboardInsets(local,
+                view.width.toDouble(), view.height.toDouble(), it.width.toDouble(), it.height.toDouble())
+        } ?: local
         if (projected != previous) {
             previous = projected
             publish(projected)

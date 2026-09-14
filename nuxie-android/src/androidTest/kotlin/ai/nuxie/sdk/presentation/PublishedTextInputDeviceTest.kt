@@ -1161,6 +1161,94 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
+    fun failedAcquisitionRetriesAndRevealsInsideTheSameActivity() = verifyAcquisitionRecovery(false)
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun slowAcquisitionShowsRecoveryAndCloseDrainsWithoutReveal() = verifyAcquisitionRecovery(true)
+
+    private fun verifyAcquisitionRecovery(closeWhileSlow: Boolean) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val fixture = loadPublishedFixture(instrumentation)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val release = CompletableDeferred<Unit>()
+        val attempts = java.util.concurrent.atomic.AtomicInteger()
+        val closed = java.util.concurrent.atomic.AtomicInteger()
+        val shown = java.util.concurrent.atomic.AtomicInteger()
+        val service = ExperiencePresentationService(instrumentation.targetContext, { name, _, _ ->
+            if (name == ai.nuxie.sdk.events.SystemEventNames.EXPERIENCE_SHOWN) shown.incrementAndGet()
+        }, scope, { NuxieRuntime.shared.isAvailable })
+        val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+        instrumentation.addMonitor(monitor)
+        val pending = scope.async {
+            runCatching {
+                service.presentJourney(fixture.release, "screen_1", "recovery-device", "recovery-owner",
+                    service.reserveJourney("recovery-owner"), acquire = {
+                        if (attempts.incrementAndGet() == 1 && !closeWhileSlow) throw java.io.IOException("Fixture transport failure")
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { release.await() }
+                        AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv,
+                            protection = Closeable { closed.incrementAndGet() })
+                    }, onOutcome = {})
+            }
+        }
+        try {
+            val activity = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
+            var originalRoot: View? = null
+            instrumentation.runOnMainSync {
+                originalRoot = activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0)
+            }
+            fun descendants(view: View): List<View> = listOf(view) + if (view is ViewGroup)
+                (0 until view.childCount).flatMap { descendants(view.getChildAt(it)) } else emptyList()
+            var button: android.widget.Button? = null
+            val label = if (closeWhileSlow) "Close" else "Retry"
+            val deadline = SystemClock.elapsedRealtime() + 10_000
+            while (button == null && SystemClock.elapsedRealtime() < deadline) {
+                instrumentation.runOnMainSync {
+                    button = descendants(checkNotNull(originalRoot)).filterIsInstance<android.widget.Button>()
+                        .singleOrNull { it.text == label }
+                }
+                if (button == null) SystemClock.sleep(25)
+            }
+            assertTrue("Recovery must expose $label", button != null)
+            assertEquals(0, shown.get())
+            assertFalse(pending.isCompleted)
+            instrumentation.runOnMainSync { assertTrue(checkNotNull(button).performClick()) }
+            if (closeWhileSlow) {
+                instrumentation.waitForIdleSync()
+                assertFalse("Close must still drain cancellation-resistant acquisition", pending.isCompleted)
+            } else {
+                val retryDeadline = SystemClock.elapsedRealtime() + 5_000
+                while (attempts.get() < 2 && SystemClock.elapsedRealtime() < retryDeadline) SystemClock.sleep(20)
+                assertEquals(2, attempts.get())
+                instrumentation.runOnMainSync {
+                    assertSame(originalRoot, activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0))
+                }
+            }
+            release.complete(Unit)
+            val result = runBlocking { kotlinx.coroutines.withTimeout(30_000) { pending.await() } }
+            assertEquals(1, monitor.hits)
+            if (closeWhileSlow) {
+                assertTrue(result.isFailure)
+                assertEquals(1, closed.get())
+                assertEquals(0, shown.get())
+            } else {
+                result.getOrThrow()
+                assertHostedScreen(instrumentation, activity, "screen_1")
+                assertEquals(1, shown.get())
+                assertEquals(0, closed.get())
+            }
+        } finally {
+            release.complete(Unit)
+            runBlocking { service.shutdownOwnedBy("recovery-owner"); scope.coroutineContext[Job]?.cancelAndJoin() }
+            instrumentation.removeMonitor(monitor)
+            PresentationRegistry.clearForTesting()
+        }
+        assertEquals(1, closed.get())
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
     fun publishedResponseSurvivesPresentationNavigationWithoutDuplicateCommits() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         assertTrue(NuxieRuntime.shared.isAvailable)
