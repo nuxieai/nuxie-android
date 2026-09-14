@@ -1540,7 +1540,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelInstanceSnapshot(
     goto view_model_snapshot_cleanup;
   }
   jmethodID value_constructor = (*env)->GetMethodID(
-      env, value_class, "<init>", "(JJLjava/lang/String;I[BJ)V");
+      env, value_class, "<init>", "(JJLjava/lang/String;I[BJF)V");
   if (clear_jni_exception(env) || value_constructor == NULL) {
     status = NUX_STATUS_RUNTIME_ERROR;
     goto view_model_snapshot_cleanup;
@@ -1615,7 +1615,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelInstanceSnapshot(
     jobject value = (*env)->NewObject(
         env, value_class, value_constructor, (jlong)view.owner_instance_id,
         (jlong)view.property_index, name, (jint)view.kind, bytes,
-        (jlong)view.referenced_instance_id);
+        (jlong)view.referenced_instance_id, (jfloat)view.number_value);
     if (clear_jni_exception(env) || value == NULL) {
       if (value != NULL) (*env)->DeleteLocalRef(env, value);
       (*env)->DeleteLocalRef(env, bytes);

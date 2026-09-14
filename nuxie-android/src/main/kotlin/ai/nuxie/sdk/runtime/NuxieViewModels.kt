@@ -145,6 +145,25 @@ internal class NuxieViewModelSnapshot private constructor(
 ) {
     private val instancesById = instances.associateBy(Instance::id)
 
+    /** Authored geometry paths may include the root view-model label. */
+    fun resolveGeometryNumber(path: String): Float? {
+        val segments = path.split('/').filter(String::isNotEmpty)
+        if (segments.isEmpty()) return null
+        val root = instancesById[rootInstanceId] ?: return null
+        val resolvedSegments = if (segments.size > 1 && segments.first() !in root.values) {
+            segments.drop(1)
+        } else {
+            segments
+        }
+        var instance = root
+        resolvedSegments.dropLast(1).forEach { segment ->
+            val reference = instance.values[segment] as? Value.Reference ?: return null
+            instance = instancesById[reference.instanceId] ?: return null
+        }
+        return (instance.values[resolvedSegments.last()] as? Value.NumberValue)?.value
+            ?.takeIf(Float::isFinite)
+    }
+
     /** Resolve a `/`- or `.`-separated path through nested view-model references. */
     fun resolveString(path: String): String? {
         val segments = path.split('/', '.')
@@ -164,6 +183,7 @@ internal class NuxieViewModelSnapshot private constructor(
 
     private sealed interface Value {
         data class StringValue(val value: String) : Value
+        data class NumberValue(val value: Float) : Value
         data class Reference(val instanceId: Long) : Value
         data object Unsupported : Value
     }
@@ -189,6 +209,7 @@ internal class NuxieViewModelSnapshot private constructor(
                 }
                 val kind = NuxieViewModelPropertyKind.fromNativeValue(native.kind)
                 val value = when (kind) {
+                    NuxieViewModelPropertyKind.NUMBER -> Value.NumberValue(native.numberValue)
                     NuxieViewModelPropertyKind.STRING -> Value.StringValue(
                         native.bytesValue.decodeToString(throwOnInvalidSequence = true),
                     )
@@ -813,6 +834,7 @@ internal data class NativeViewModelSnapshotValue(
     val kind: Int,
     val bytesValue: ByteArray,
     val referencedInstanceId: Long,
+    val numberValue: Float = 0f,
 )
 
 internal fun NativeViewModelCatalog.toViewModelCatalog(): NuxieViewModelCatalog {
