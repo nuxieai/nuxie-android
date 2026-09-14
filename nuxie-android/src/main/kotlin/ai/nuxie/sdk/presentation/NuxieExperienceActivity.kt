@@ -53,99 +53,112 @@ internal class ScreenCloseState(
  * Process-death policy (decision 10): a cold-recreated instance (no live
  * SDK state behind it) finishes immediately and never re-presents.
  */
-internal class NuxieExperienceActivity :
-    Activity(),
-    PresentationActivityHandle {
-    private var mountedScreen: ExperienceMountedScreen? = null
-    private var presentationId: String? = null
-    private val screenClose = ScreenCloseState(::reportSelectedClose)
+internal class NuxieExperienceActivity : Activity() {
+    private var currentScreen: Screen? = null
     private var dismissible = true
     private var predictiveBackCallback: android.window.OnBackInvokedCallback? = null
     private var pendingPermission: Pair<Int, CompletableDeferred<Boolean>>? = null
     private var nextPermissionRequestCode = PERMISSION_REQUEST_CODE_START
 
+    /** Registry ownership belongs to this screen, even when the Activity hosts another one. */
+    private inner class Screen(val id: String, val prepared: PreparedPresentation) :
+        PresentationScreenHandle, ExperienceSurfaceHost.Listener {
+        var mounted: ExperienceMountedScreen? = null
+            private set
+        private val closeState = ScreenCloseState { reason ->
+            when (reason) {
+                is CloseReason.Error -> PresentationRegistry.reportFailure(id, reason.cause)
+                else -> PresentationRegistry.reportDismissed(id, reason)
+            }
+        }
+
+        fun mount(): View {
+            val resources = ExperienceMountedScreen(
+                this@NuxieExperienceActivity, prepared, this, ::fail,
+            )
+            mounted = resources
+            return resources.mount()
+        }
+
+        fun close(changingConfigurations: Boolean) {
+            closeState.prepareForTeardown(changingConfigurations)
+            val complete = {
+                closeState.reportAtTeardown(changingConfigurations)
+                PresentationRegistry.detach(id, this)
+            }
+            mounted?.close(changingConfigurations, complete) ?: complete()
+            mounted = null
+        }
+
+        override fun requestCloseFromService(reason: CloseReason): Boolean = closeState.select(reason)
+        override fun screenCloseReason(): CloseReason? = closeState.reason
+        override fun finishAfterServiceClose() {
+            runOnUiThread {
+                mounted?.exit()
+                finish()
+            }
+        }
+        override fun purchaseActivity(): Activity = this@NuxieExperienceActivity
+        override suspend fun resolveJourneyPermission(request: JourneyPermissionRequest): Boolean =
+            this@NuxieExperienceActivity.resolveJourneyPermission(request)
+
+        override fun onFirstFrame() {
+            runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                if (closeState.reason == null) mounted?.activate()
+                PresentationRegistry.reportFirstFrame(id)
+            }
+        }
+        override fun onRuntimeStep(
+            outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
+            correlationId: ULong,
+            viewModelSnapshot: NuxieViewModelSnapshot?,
+        ) = PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot)
+        override fun onRuntimeEvent(event: NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) = Unit
+        override fun onTextCommitted(inputId: String, text: String) =
+            PresentationRegistry.reportTextCommitted(id, this, inputId, text)
+        override fun onFailure(error: ExperiencePresentationException) = fail(error)
+
+        fun fail(error: Throwable) = finishTerminal(CloseReason.Error(error))
+        fun finishTerminal(reason: CloseReason) {
+            if (closeState.select(reason)) finishAfterServiceClose()
+            PresentationRegistry.reportOutcome(id, reason)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        val presentationId = intent.getStringExtra(EXTRA_PRESENTATION_ID)
-        this.presentationId = presentationId
-
-        if (isColdRecreation(savedInstanceState, presentationId)) {
-            finish()
-            return
-        }
-        if (presentationId == null) {
-            Log.w(LOG_TAG, "No presentation id supplied.")
+        val id = intent.getStringExtra(EXTRA_PRESENTATION_ID)
+        if (isColdRecreation(savedInstanceState, id) || id == null) {
             finish()
             return
         }
         if (!AndroidRenderCapability.isAvailable()) {
-            fail(ExperiencePresentationException(
+            PresentationRegistry.reportFailure(id, ExperiencePresentationException(
                 ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE,
                 "Experience renderer is unavailable on this device",
             ))
+            finish()
             return
         }
-        val prepared = PresentationRegistry.resolve(presentationId)
-        if (prepared == null || !PresentationRegistry.attach(presentationId, this)) {
-            // Missing process-local state is the process-death fail-closed
-            // path. Never recover content from persisted Intent data.
+        val prepared = PresentationRegistry.resolve(id)
+        if (prepared == null) {
             Log.i(LOG_TAG, "Presentation state unavailable; finishing.")
             finish()
             return
         }
-        val screen = try {
-            ExperienceMountedScreen(
-                activity = this,
-                prepared = prepared,
-                listener = object : ExperienceSurfaceHost.Listener {
-                    override fun onFirstFrame() {
-                        runOnUiThread {
-                            if (isDestroyed || isFinishing) return@runOnUiThread
-                            if (screenClose.reason == null) mountedScreen?.activate()
-                            PresentationRegistry.reportFirstFrame(presentationId)
-                        }
-                    }
-
-                    override fun onRuntimeStep(
-                        outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
-                        correlationId: ULong,
-                        viewModelSnapshot: NuxieViewModelSnapshot?,
-                    ) {
-                        PresentationRegistry.reportRuntimeStep(
-                            presentationId,
-                            outcome,
-                            correlationId,
-                            viewModelSnapshot,
-                        )
-                    }
-
-                    override fun onFailure(error: ExperiencePresentationException) {
-                        fail(error)
-                    }
-
-                    override fun onRuntimeEvent(
-                        event: NuxieRuntimeEvent,
-                        viewModelSnapshot: NuxieViewModelSnapshot?,
-                    ) = Unit
-
-                    override fun onTextCommitted(inputId: String, text: String) {
-                        PresentationRegistry.reportTextCommitted(presentationId, this@NuxieExperienceActivity, inputId, text)
-                    }
-                },
-                onFailure = ::fail,
-            )
-        } catch (error: Throwable) {
-            fail(error)
+        val screen = Screen(id, prepared)
+        if (!PresentationRegistry.attach(id, screen)) {
+            finish()
             return
         }
-        mountedScreen = screen
+        currentScreen = screen
         dismissible = prepared.shell.dismissible
         try {
             setContentView(shellView(screen.mount(), prepared.shell))
-            screen.observeWindow()
+            screen.mounted?.observeWindow()
         } catch (error: Throwable) {
-            fail(error)
+            screen.fail(error)
             return
         }
         registerPredictiveBack()
@@ -153,11 +166,11 @@ internal class NuxieExperienceActivity :
 
     override fun onStart() {
         super.onStart()
-        mountedScreen?.setVisible(true)
+        currentScreen?.mounted?.setVisible(true)
     }
 
     override fun onStop() {
-        mountedScreen?.setVisible(false)
+        currentScreen?.mounted?.setVisible(false)
         super.onStop()
     }
 
@@ -167,39 +180,15 @@ internal class NuxieExperienceActivity :
     }
 
     override fun onDestroy() {
-        val changingConfigurations = isChangingConfigurations
-        screenClose.prepareForTeardown(changingConfigurations)
         unregisterPredictiveBack()
         super.onDestroy()
-
-        // Like iOS's presentationCleanupTask, lifecycle teardown only hands
-        // off ordered cleanup. Suspend dismissal joins the registry completion
-        // published after the lane has released every native handle.
-        val completeTeardown = {
-            screenClose.reportAtTeardown(changingConfigurations)
-            presentationId?.let { PresentationRegistry.detach(it, this) }
-            Unit
-        }
-        mountedScreen?.close(changingConfigurations, completeTeardown) ?: completeTeardown()
-        mountedScreen = null
+        currentScreen?.close(isChangingConfigurations)
+        currentScreen = null
         pendingPermission?.second?.complete(false)
         pendingPermission = null
     }
 
-    override fun requestCloseFromService(reason: CloseReason): Boolean = screenClose.select(reason)
-
-    override fun screenCloseReason(): CloseReason? = screenClose.reason
-
-    override fun finishAfterServiceClose() {
-        runOnUiThread {
-            mountedScreen?.exit()
-            finish()
-        }
-    }
-
-    override fun purchaseActivity(): Activity = this
-
-    override suspend fun resolveJourneyPermission(request: JourneyPermissionRequest): Boolean =
+    private suspend fun resolveJourneyPermission(request: JourneyPermissionRequest): Boolean =
         withContext(Dispatchers.Main.immediate) {
             when (request) {
                 JourneyPermissionRequest.TRACKING,
@@ -273,24 +262,8 @@ internal class NuxieExperienceActivity :
         else -> error("Permission request has no Android runtime permission")
     }
 
-    private fun fail(error: Throwable) {
-        val reason = CloseReason.Error(error)
-        if (screenClose.select(reason)) finishAfterServiceClose()
-        presentationId?.let { PresentationRegistry.reportOutcome(it, reason) }
-    }
-
     private fun finishTerminal(reason: CloseReason) {
-        if (screenClose.select(reason)) finishAfterServiceClose()
-        presentationId?.let { PresentationRegistry.reportOutcome(it, reason) }
-    }
-
-    private fun reportSelectedClose(reason: CloseReason) {
-        presentationId?.let { id ->
-            when (reason) {
-                is CloseReason.Error -> PresentationRegistry.reportFailure(id, reason.cause)
-                else -> PresentationRegistry.reportDismissed(id, reason)
-            }
-        }
+        currentScreen?.finishTerminal(reason)
     }
 
     private fun shellView(host: View, shell: PresentationShell): View {
@@ -315,7 +288,7 @@ internal class NuxieExperienceActivity :
             // The SurfaceView has its own composition layer. Clip it and the
             // common content parent so native editable controls share the shell.
             applyRoundedOutline(host, shell.cornerRadiusDp)
-            mountedScreen?.surface?.takeIf { it !== host }?.let { applyRoundedOutline(it, shell.cornerRadiusDp) }
+            currentScreen?.mounted?.surface?.takeIf { it !== host }?.let { applyRoundedOutline(it, shell.cornerRadiusDp) }
         }
         root.addView(host, shellLayoutParams(shell))
         return root
