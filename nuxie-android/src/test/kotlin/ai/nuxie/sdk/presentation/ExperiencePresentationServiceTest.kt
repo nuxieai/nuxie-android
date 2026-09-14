@@ -81,6 +81,26 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `authored transition survives native presentation preparation`() = runTest {
+        val contract = Json.parseToJsonElement(
+            FixtureRunner.fixturesRoot().resolve("journeys/planes/text-input-navigation.json").readText(),
+        ).jsonObject
+        val release = renderedJourneyRelease("text-input-navigation.json", "transitionEntry")
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val presentation = async {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
+                transition = contract.getValue("transition").jsonObject, onOutcome = {})
+        }
+        runCurrent()
+        assertEquals(contract.getValue("transition"), PresentationRegistry.resolve(launched.single())?.transition)
+        PresentationRegistry.reportFirstFrame(launched.single())
+        presentation.await()
+        service.dismissFromHost("customer-1")
+    }
+
+    @Test
     fun `navigation acquisition obeys outgoing ownership contract`() = runTest {
         val fixture = Json.parseToJsonElement(
             FixtureRunner.fixturesRoot().resolve("journeys/planes/navigation-acquisition-android.json").readText(),

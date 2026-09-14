@@ -158,6 +158,24 @@ class JourneyServiceTest {
         assertEquals(2, captures.size)
     }
 
+    @Test fun `signed navigation transition reaches the presentation request`() = runBlocking {
+        val contract = Json.parseToJsonElement(
+            FixtureRunner.fixturesRoot().resolve("journeys/planes/text-input-navigation.json").readText(),
+        ).jsonObject
+        val entry = contract.getValue("transitionEntry").jsonObject
+        val catalog = catalog(entry)
+        val authority = authority(entry)
+        catalog.commit("customer", catalog.prepare(profile(releaseEntry = entry), authority))
+        val presenter = RecordingJourneyPresenter()
+        val service = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
+            journalDirectory = directory, scope = scope, capture = { _, _, _, _ -> true },
+            presenter = presenter, nowMillis = { 100_000L })
+        service.initialize()
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(requireNotNull(catalog.snapshot("customer")), authority, "customer", 1)
+        assertEquals(contract.getValue("transition"), requireNotNull(presenter.request).transition)
+    }
+
     @Test fun `busy presentation leaves the rendered arm unconsumed for a later evaluation`() = runBlocking {
         val identity = identity("customer")
         val renderedEntry = fixture.getValue("renderedEntry").jsonObject
