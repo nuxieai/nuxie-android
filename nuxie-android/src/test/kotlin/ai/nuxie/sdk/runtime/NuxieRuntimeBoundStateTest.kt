@@ -18,8 +18,9 @@ class NuxieRuntimeBoundStateTest {
     fun `shared scalar updates use the already bound root in both presentation paths`() {
         val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/runtime-bound-state.json").readText()).jsonObject
-        for (commerce in listOf(false, true)) {
-            val native = RecordingNative()
+        val phaseLabels = fixture.getValue("phaseEnumLabels").jsonArray.map { it.jsonPrimitive.content }
+        for (commerce in listOf(false, true)) for (enumPhase in listOf(false, true)) {
+            val native = RecordingNative(if (enumPhase) phaseLabels else emptyList())
             val file = NuxieRuntimeFile(10, native)
             val artboard = checkNotNull(file.newArtboard())
             val projected = if (commerce) NuxieRuntime(native).bindViewModelList(
@@ -46,8 +47,13 @@ class NuxieRuntimeBoundStateTest {
                 assertEquals(path, mutation.path)
                 when (kind) {
                     "string" -> {
-                        assertEquals(NuxieViewModelMutationKind.SET_STRING, mutation.kind)
-                        assertEquals(value.content, mutation.bytesValue.decodeToString())
+                        if (enumPhase && path == "screen/phase") {
+                            assertEquals(NuxieViewModelMutationKind.SET_ENUM, mutation.kind)
+                            assertEquals(phaseLabels.indexOf(value.content).toLong(), mutation.integerValue)
+                        } else {
+                            assertEquals(NuxieViewModelMutationKind.SET_STRING, mutation.kind)
+                            assertEquals(value.content, mutation.bytesValue.decodeToString())
+                        }
                     }
                     "number" -> {
                         assertEquals(NuxieViewModelMutationKind.SET_NUMBER, mutation.kind)
@@ -60,6 +66,9 @@ class NuxieRuntimeBoundStateTest {
                 }
             }
             val count = native.writes.size
+            if (enumPhase) assertThrows(IllegalArgumentException::class.java) {
+                write("screen/phase", NuxieViewModelScalarValue.StringValue("unknown"))
+            }
             assertThrows(IllegalArgumentException::class.java) { write("missing", NuxieViewModelScalarValue.StringValue("x")) }
             assertThrows(IllegalArgumentException::class.java) { write("screen/phase", NuxieViewModelScalarValue.BooleanValue(true)) }
             for (invalid in listOf(Double.NaN, Double.POSITIVE_INFINITY, Double.MAX_VALUE)) {
@@ -90,7 +99,7 @@ class NuxieRuntimeBoundStateTest {
         artboard.close()
     }
 
-    private class RecordingNative : NuxieTypedRuntimeNative {
+    private class RecordingNative(private val phaseLabels: List<String> = emptyList()) : NuxieTypedRuntimeNative {
         var defaultsCreated = 0
         var binds = 0
         var playersCreated = 0
@@ -112,7 +121,7 @@ class NuxieRuntimeBoundStateTest {
                 NativeViewModelProperty(0, 1, "env/reduceMotion", 3, -1, emptyArray()),
                 NativeViewModelProperty(0, 2, "safeArea/top", 2, -1, emptyArray()),
                 NativeViewModelProperty(0, 3, "products", 8, 2, emptyArray()),
-                NativeViewModelProperty(1, 4, "phase", 1, -1, emptyArray()),
+                NativeViewModelProperty(1, 4, "phase", if (phaseLabels.isEmpty()) 1 else 5, -1, phaseLabels.toTypedArray()),
                 NativeViewModelProperty(1, 5, "appearances", 2, -1, emptyArray())), emptyArray(),
         ))
         override fun bindViewModel(artboardHandle: Long, viewModelHandle: Long): Int {

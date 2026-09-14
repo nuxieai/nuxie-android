@@ -1540,7 +1540,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelInstanceSnapshot(
     goto view_model_snapshot_cleanup;
   }
   jmethodID value_constructor = (*env)->GetMethodID(
-      env, value_class, "<init>", "(JJLjava/lang/String;I[BJF)V");
+      env, value_class, "<init>", "(JJLjava/lang/String;I[BJFZJ)V");
   if (clear_jni_exception(env) || value_constructor == NULL) {
     status = NUX_STATUS_RUNTIME_ERROR;
     goto view_model_snapshot_cleanup;
@@ -1597,7 +1597,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelInstanceSnapshot(
     memset(&view, 0, sizeof(view));
     view.struct_size = (uint32_t)sizeof(view);
     status = nux_view_model_snapshot_value(snapshot, index, &view);
-    if (status != NUX_STATUS_OK || view.property_index > INT64_MAX) {
+    if (status != NUX_STATUS_OK || view.property_index > INT64_MAX ||
+        (view.kind == NUX_VIEW_MODEL_VALUE_KIND_BOOL && view.bool_value > 1u)) {
       if (status == NUX_STATUS_OK) status = NUX_STATUS_RUNTIME_ERROR;
       goto view_model_snapshot_cleanup;
     }
@@ -1615,7 +1616,9 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelInstanceSnapshot(
     jobject value = (*env)->NewObject(
         env, value_class, value_constructor, (jlong)view.owner_instance_id,
         (jlong)view.property_index, name, (jint)view.kind, bytes,
-        (jlong)view.referenced_instance_id, (jfloat)view.number_value);
+        (jlong)view.referenced_instance_id, (jfloat)view.number_value,
+        (jboolean)(view.bool_value == 1u ? JNI_TRUE : JNI_FALSE),
+        (jlong)view.integer_value);
     if (clear_jni_exception(env) || value == NULL) {
       if (value != NULL) (*env)->DeleteLocalRef(env, value);
       (*env)->DeleteLocalRef(env, bytes);

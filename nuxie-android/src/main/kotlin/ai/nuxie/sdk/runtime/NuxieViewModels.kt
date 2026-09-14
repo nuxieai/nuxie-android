@@ -165,7 +165,13 @@ internal class NuxieViewModelSnapshot private constructor(
     }
 
     /** Resolve a `/`- or `.`-separated path through nested view-model references. */
-    fun resolveString(path: String): String? {
+    fun resolveString(path: String): String? = (resolveValue(path) as? Value.StringValue)?.value
+
+    fun resolveBoolean(path: String): Boolean? = (resolveValue(path) as? Value.BooleanValue)?.value
+
+    fun resolveEnumOrdinal(path: String): Long? = (resolveValue(path) as? Value.EnumValue)?.ordinal
+
+    private fun resolveValue(path: String): Value? {
         val segments = path.split('/', '.')
         if (segments.isEmpty() || segments.any(String::isEmpty)) return null
         var instance = instancesById[rootInstanceId] ?: return null
@@ -173,7 +179,7 @@ internal class NuxieViewModelSnapshot private constructor(
             val reference = instance.values[segment] as? Value.Reference ?: return null
             instance = instancesById[reference.instanceId] ?: return null
         }
-        return (instance.values[segments.last()] as? Value.StringValue)?.value
+        return instance.values[segments.last()]
     }
 
     private data class Instance(
@@ -184,6 +190,8 @@ internal class NuxieViewModelSnapshot private constructor(
     private sealed interface Value {
         data class StringValue(val value: String) : Value
         data class NumberValue(val value: Float) : Value
+        data class BooleanValue(val value: Boolean) : Value
+        data class EnumValue(val ordinal: Long) : Value
         data class Reference(val instanceId: Long) : Value
         data object Unsupported : Value
     }
@@ -210,6 +218,8 @@ internal class NuxieViewModelSnapshot private constructor(
                 val kind = NuxieViewModelPropertyKind.fromNativeValue(native.kind)
                 val value = when (kind) {
                     NuxieViewModelPropertyKind.NUMBER -> Value.NumberValue(native.numberValue)
+                    NuxieViewModelPropertyKind.BOOLEAN -> Value.BooleanValue(native.boolValue)
+                    NuxieViewModelPropertyKind.ENUM -> Value.EnumValue(native.integerValue)
                     NuxieViewModelPropertyKind.STRING -> Value.StringValue(
                         native.bytesValue.decodeToString(throwOnInvalidSequence = true),
                     )
@@ -835,6 +845,8 @@ internal data class NativeViewModelSnapshotValue(
     val bytesValue: ByteArray,
     val referencedInstanceId: Long,
     val numberValue: Float = 0f,
+    val boolValue: Boolean = false,
+    val integerValue: Long = 0,
 )
 
 internal fun NativeViewModelCatalog.toViewModelCatalog(): NuxieViewModelCatalog {
