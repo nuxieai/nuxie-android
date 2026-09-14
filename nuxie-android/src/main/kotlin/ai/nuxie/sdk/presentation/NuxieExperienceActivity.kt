@@ -195,6 +195,7 @@ internal class NuxieExperienceActivity : Activity() {
                     } else {
                         if (!revealed) {
                             revealed = true
+                            dismissible = prepared.shell.dismissible
                             contentRoot.background = null
                             view?.alpha = 1f
                             removeLoadingView()
@@ -302,7 +303,7 @@ internal class NuxieExperienceActivity : Activity() {
                 restoreInput()
                 target.registered = true
                 currentScreen = target
-                dismissible = target.prepared.shell.dismissible
+                dismissible = true
                 if (target.prepared.shell != source.prepared.shell) {
                     (contentRoot.parent as? android.view.ViewGroup)?.removeView(contentRoot)
                     setContentView(shellView(contentRoot, target.prepared.shell))
@@ -422,7 +423,8 @@ internal class NuxieExperienceActivity : Activity() {
         screen.registered = true
         screens += screen
         currentScreen = screen
-        dismissible = prepared.shell.dismissible
+        // Authored dismissal restrictions apply only once content is revealed.
+        dismissible = true
         try {
             val newRoot = !::contentRoot.isInitialized
             if (newRoot) contentRoot = FrameLayout(this)
