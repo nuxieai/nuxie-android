@@ -81,6 +81,66 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `authored exit wait is outside first frame timeout and precedes dismissal checkpoint`() = runTest {
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        var checkpoints = 0
+        val first = async {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
+                onScreenDismissed = { _, _, _ -> checkpoints++; JourneyScreenDismissalResult.HANDLED }, onOutcome = {})
+        }
+        runCurrent()
+        val sourceId = launched.single()
+        PresentationRegistry.reportFirstFrame(sourceId)
+        first.await()
+        val exit = CompletableDeferred<Unit>()
+        var activated = false
+        val host = object : PresentationScreenHandle {
+            var reason: CloseReason? = null
+            override fun requestCloseFromService(reason: CloseReason): Boolean { this.reason = reason; return true }
+            override fun screenCloseReason() = reason
+            override fun finishAfterServiceClose() {
+                if (reason != CloseReason.JourneyNavigation) PresentationRegistry.detach(sourceId, this)
+            }
+            override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation {
+                val source = this
+                return object : PreparedScreenNavigation {
+                    override suspend fun awaitExit() { exit.await() }
+                    override fun activate() {
+                        activated = true
+                        PresentationRegistry.detach(sourceId, source)
+                        PresentationRegistry.reportFirstFrame(id)
+                    }
+                    override suspend fun abort() = Unit
+                }
+            }
+        }
+        PresentationRegistry.attach(sourceId, host)
+        val next = async {
+            service.presentJourney(release, "screen_details", "journey-1", "customer-1", null,
+                acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+        }
+        try {
+            runCurrent()
+            advanceTimeBy(35_000)
+            runCurrent()
+            assertFalse(next.isCompleted)
+            assertFalse(activated)
+            assertEquals(0, checkpoints)
+            exit.complete(Unit)
+            next.await()
+            assertTrue(activated)
+            assertEquals(1, checkpoints)
+        } finally {
+            exit.complete(Unit)
+            next.cancelAndJoin()
+            service.dismissFromHost("customer-1")
+        }
+    }
+
+    @Test
     fun `authored transition survives native presentation preparation`() = runTest {
         val contract = Json.parseToJsonElement(
             FixtureRunner.fixturesRoot().resolve("journeys/planes/text-input-navigation.json").readText(),

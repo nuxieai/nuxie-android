@@ -322,7 +322,13 @@ class PublishedTextInputDeviceTest {
             }
             assertEquals(before.width, after.width)
             assertEquals(before.height, after.height)
-            assertEquals("Recreated renderer must preserve the published surface", 0,
+            File(instrumentation.targetContext.filesDir, "recreation-before.png").outputStream().use {
+                before.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            File(instrumentation.targetContext.filesDir, "recreation-after.png").outputStream().use {
+                after.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            assertEquals("Recreated renderer must preserve the published surface; failure=${failure.get()}", 0,
                 changedPixels(before, after, Rect(0, 0, before.width, before.height)))
             instrumentation.runOnMainSync {
                 assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, prepared.screenLifecycle.phase)
