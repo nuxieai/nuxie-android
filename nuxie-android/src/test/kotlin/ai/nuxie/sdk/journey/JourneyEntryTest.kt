@@ -163,9 +163,17 @@ class JourneyEntryTest {
     }
 
     @Test fun `occurrence evaluation matches the pinned iOS vectors`() = runBlocking {
-        val fixture = FixtureRunner.fixturesRoot().resolve("journeys/planes/occurrence-evaluation.json")
+        assertHistoryVectors("occurrence-evaluation", "journey-occurrence-v1")
+    }
+
+    @Test fun `history targeting matches the pinned iOS vectors`() = runBlocking {
+        assertHistoryVectors("history-targeting", "journey-history-targeting-v1")
+    }
+
+    private suspend fun assertHistoryVectors(file: String, suiteName: String) {
+        val fixture = FixtureRunner.fixturesRoot().resolve("journeys/planes/$file.json")
         val suite = Json.parseToJsonElement(fixture.readText()).jsonObject
-        assertEquals("journey-occurrence-v1", suite.getValue("suite").jsonPrimitive.content)
+        assertEquals(suiteName, suite.getValue("suite").jsonPrimitive.content)
         val context = RuntimeEnvironment.getApplication()
         val directory = File(context.filesDir, "nuxie")
         for (element in suite.getValue("cases").jsonArray) {
