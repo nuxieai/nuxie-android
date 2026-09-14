@@ -39,6 +39,82 @@ import kotlinx.serialization.json.long
 @RunWith(RobolectricTestRunner::class)
 class ExperienceSurfaceHostPointerTest {
     @Test
+    fun `pending surface submission polls without stepping or publishing effects`() {
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        val published = mutableListOf<ULong>()
+        var composed = 0
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
+            runtime = NuxieRuntime(native), listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() { composed++ }
+                override fun onFailure(error: ExperiencePresentationException) { throw error }
+                override fun onRuntimeStep(
+                    outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
+                    correlationId: ULong,
+                    viewModelSnapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?,
+                ) { published += correlationId }
+            })
+        val texture = SurfaceTexture(0)
+        try {
+            host.loadArtboard(byteArrayOf(1), null)
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            native.events = arrayOf(ai.nuxie.sdk.runtime.NativeRuntimeEvent(
+                0, 0, "nx_exit_done:test", "", "", 0f, emptyArray()))
+            native.presentation = 4
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+            assertEquals("Submission is not completion", 0, composed)
+            repeat(2) { index ->
+                host.doFrame(1_016_000_000L + index * 16_000_000L)
+                drain(lane)
+            }
+            assertEquals("Polls must retain the submitted player state", listOf(0f), native.elapsedSteps)
+            assertTrue("Pending effects must remain unpublished", published.isEmpty())
+            native.presentation = 1
+            host.doFrame(1_048_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+            assertEquals(1, composed)
+            assertEquals(listOf(1uL), published)
+            host.doFrame(1_064_000_000L)
+            drain(lane)
+            assertEquals("Busy time must reach the next actual step", listOf(0f, 0.064f), native.elapsedSteps)
+            assertEquals("Completed effects publish once", listOf(1uL), published)
+            native.presentation = 4
+            native.events = arrayOf(ai.nuxie.sdk.runtime.NativeRuntimeEvent(
+                0, 0, "nx_exit_done:resized", "", "", 0f, emptyArray()))
+            host.doFrame(1_080_000_000L)
+            drain(lane)
+            val resizeQueued = CountDownLatch(1)
+            val allowResize = CountDownLatch(1)
+            lane.enqueue { resizeQueued.countDown(); allowResize.await(2, TimeUnit.SECONDS) }
+            assertTrue(resizeQueued.await(2, TimeUnit.SECONDS))
+            try {
+                host.onSurfaceTextureSizeChanged(texture, 200, 100)
+                native.presentation = 1
+                host.doFrame(1_096_000_000L)
+            } finally {
+                allowResize.countDown()
+            }
+            drain(lane)
+            assertEquals("Resize retires the pending frame and requires a fresh step", 4, native.elapsedSteps.size)
+            assertEquals("Retired frame effects await the replacement delivery", listOf(1uL, 3uL), published)
+            host.doFrame(1_112_000_000L)
+            drain(lane)
+            assertEquals("A queued resize must not count the same elapsed time twice", 0.016f, native.elapsedSteps.last(), 0.000001f)
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
+    @Test
     fun `transition events wait for a delivered frame after surface unavailability`() {
         val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
         val native = RecordingNative()
