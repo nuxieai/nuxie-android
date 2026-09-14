@@ -1,7 +1,7 @@
 package ai.nuxie.sdk.identity
 
 import ai.nuxie.sdk.events.EventStore
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -76,7 +76,7 @@ internal class UserTransitionCoordinator(
             runCatching {
                 val migrated = eventStore.reassignEvents(transition.from, transition.to)
                 if (migrated > 0) {
-                    Log.i(LOG_TAG, "Migrated $migrated anonymous events to the identified user")
+                    Log.i(LOG_TAG, "Migrated anonymous events to the identified user", null, Log.status("count", migrated))
                 }
             }.onFailure { Log.w(LOG_TAG, "Failed to reassign anonymous events", it) }
         }

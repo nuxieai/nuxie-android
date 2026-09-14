@@ -19,7 +19,7 @@ import android.app.Activity
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.lang.ref.WeakReference
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
@@ -77,6 +77,7 @@ object Nuxie {
     fun setup(context: Context, configuration: NuxieConfiguration) {
         val installed = lifecycle.install(create = {
             require(configuration.apiKey.isNotBlank()) { "apiKey must not be blank." }
+            Log.configure(configuration.logLevel)
             featureInfoInstance.onFeatureChange = { featureId, oldAccess, newAccess, isCurrent ->
                 deliverFeatureAccessChange(featureId, oldAccess, newAccess, isCurrent)
             }
@@ -103,7 +104,7 @@ object Nuxie {
             }
             core
         }, start = { it.start(context as? Activity) })
-        if (!installed && configuration.logLevel >= LogLevel.WARN) {
+        if (!installed) {
             Log.w(LOG_TAG, "SDK setup ignored while a graph is active or changing.")
         }
     }

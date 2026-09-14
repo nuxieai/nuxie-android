@@ -1,7 +1,7 @@
 package ai.nuxie.sdk.events
 
 import ai.nuxie.sdk.network.NuxieApi
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -131,9 +131,10 @@ internal class EventDeliveryWorker(
                 nextRetryAtMillis = nowMillis() + delay
                 Log.w(
                     LOG_TAG,
-                    "Batch delivery failed (attempt $consecutiveFailures); " +
-                        "${batch.size} events retained pending",
+                    "Batch delivery failed; events retained pending",
                     delivered.exceptionOrNull(),
+                    Log.status("attempt", consecutiveFailures),
+                    Log.status("count", batch.size),
                 )
                 return false
             }

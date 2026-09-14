@@ -3,7 +3,7 @@ package ai.nuxie.sdk.identity
 import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.events.TimeBasedEpochGenerator
 import android.content.Context
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.io.File
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement

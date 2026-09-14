@@ -24,7 +24,7 @@ import ai.nuxie.sdk.presentation.JourneyPresenting
 import ai.nuxie.sdk.presentation.JourneyScreenEmissionBatch
 import ai.nuxie.sdk.presentation.JourneyScreenDismissalResult
 import ai.nuxie.sdk.presentation.JourneySurfaceOutcome
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap

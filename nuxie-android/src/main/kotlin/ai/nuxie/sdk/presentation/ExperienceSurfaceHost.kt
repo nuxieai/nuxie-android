@@ -17,7 +17,7 @@ import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
 import android.content.Context
 import android.graphics.SurfaceTexture
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.Surface
@@ -104,7 +104,7 @@ internal class ExperienceSurfaceHost(
             } catch (error: Exception) {
                 // Reserved environment fields are optional in older releases. One
                 // rejected field must not prevent valid siblings or close the screen.
-                if (reportedStatePaths.add(path)) Log.w(LOG_TAG, "Experience state path rejected: $path", error)
+                if (reportedStatePaths.add(path)) Log.w(LOG_TAG, "Experience state path rejected", error, Log.sensitive("path", path))
             }
         }
     }
@@ -505,7 +505,7 @@ internal class ExperienceSurfaceHost(
                 val disposition = renderer.renderAndPresent(player, window, clearColor, true)
                 pendingPresentation = disposition == 4
                 if (disposition < 0) {
-                    Log.w(LOG_TAG, "render_player failed with status ${-disposition}")
+                    Log.w(LOG_TAG, "render_player failed", null, Log.status("status", -disposition))
                     reportFailure(
                         ExperiencePresentationException.Reason.HOST_FAILED,
                         "Experience rendering failed with status ${-disposition}",

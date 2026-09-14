@@ -25,6 +25,7 @@ import org.robolectric.shadows.ShadowLog
 class ExperienceSurfaceHostCleanupTest {
     @Test
     fun `view model cleanup failure still frees all other owners once and preserves first error`() {
+        ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.WARN, redactSensitiveData = false)
         val native = RecordingNative()
         val lane = NuxieRuntimeLane()
         val host = ExperienceSurfaceHost(
@@ -48,12 +49,14 @@ class ExperienceSurfaceHostCleanupTest {
 
             assertEquals(listOf("player", "view-model", "artboard", "file", "renderer"), native.freed)
             val logged = ShadowLog.getLogsForTag("Nuxie")
-                .last { it.msg == "Runtime lane task failed" }.throwable
-            assertTrue(logged is NuxieRuntimeCallException)
-            assertEquals("file cleanup failure", logged.suppressed.single().message)
+                .last { it.msg.startsWith("Runtime lane task failed") }
+            org.junit.Assert.assertNull(logged.throwable)
+            assertTrue(logged.msg.contains("error=" + NuxieRuntimeCallException::class.java.name))
+            assertTrue(logged.msg.contains("Suppressed: java.lang.IllegalStateException: file cleanup failure"))
         } finally {
             lane.shutdown()
             assertTrue(lane.awaitQuiescence(5_000))
+            ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.WARN)
         }
     }
 

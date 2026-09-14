@@ -11,7 +11,7 @@ import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.network.ProfileDeliveryAuthority
 import ai.nuxie.sdk.journey.JourneyProfileConsumer
 import android.content.Context
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred

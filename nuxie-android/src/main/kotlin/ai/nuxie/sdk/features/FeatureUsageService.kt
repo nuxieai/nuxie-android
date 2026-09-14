@@ -10,7 +10,7 @@ import ai.nuxie.sdk.events.TimeBasedEpochGenerator
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.network.NuxieApi
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.io.IOException
 import java.io.FileNotFoundException
 import java.security.MessageDigest

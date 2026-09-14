@@ -9,7 +9,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import android.graphics.Outline
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity

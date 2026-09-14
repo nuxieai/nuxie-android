@@ -2,7 +2,7 @@ package ai.nuxie.sdk.billing
 
 import android.app.Activity
 import android.content.Context
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import com.android.billingclient.api.AcknowledgePurchaseParams
 import com.android.billingclient.api.AcknowledgePurchaseResponseListener
 import com.android.billingclient.api.BillingClient
@@ -116,7 +116,7 @@ internal class PlayBillingConnection(
     private val purchaseListener = PurchasesUpdatedListener { result, purchases ->
         val update = PurchaseUpdate(result, purchases?.map(::projectPurchase))
         lastUpdate = update
-        Log.d(LOG_TAG, "Received Play purchase update (${result.responseCode}).")
+        Log.d(LOG_TAG, "Received Play purchase update", null, Log.status("responseCode", result.responseCode))
         onPurchasesUpdated(update)
     }
 

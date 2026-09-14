@@ -1,6 +1,6 @@
 package ai.nuxie.sdk.runtime
 
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor

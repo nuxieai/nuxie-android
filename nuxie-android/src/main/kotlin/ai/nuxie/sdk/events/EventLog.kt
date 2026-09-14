@@ -3,7 +3,7 @@ package ai.nuxie.sdk.events
 import ai.nuxie.sdk.NuxieEvent
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.journey.JourneyEventNames
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
@@ -272,7 +272,7 @@ internal class EventLog(
             Command.Capture(name, properties, distinctIdOverride, sampleAdmissionTickets()),
         )
         if (result.isFailure) {
-            Log.w(LOG_TAG, "Event '$name' dropped: capture pipeline is closed.")
+            Log.w(LOG_TAG, "Event dropped: capture pipeline is closed", null, Log.sensitive("event", name))
         }
     }
 
@@ -330,7 +330,7 @@ internal class EventLog(
             if (current == previous) return
             previous = current
         }
-        Log.w(LOG_TAG, "Event pipeline did not quiesce after $MAX_BARRIER_PASSES passes")
+        Log.w(LOG_TAG, "Event pipeline did not quiesce", null, Log.status("passes", MAX_BARRIER_PASSES))
     }
 
     private suspend fun awaitCommitBarrier() {
@@ -588,7 +588,7 @@ internal class EventLog(
             // Terminal beforeSend drop: record it so recovery never resurrects
             // the id (iOS commits a stable capture with a nil event).
             store.recordStableDrop(original.id, original.timestampMillis)
-            Log.d(LOG_TAG, "Event '$name' terminally dropped by beforeSend hook")
+            Log.d(LOG_TAG, "Event terminally dropped by beforeSend hook", null, Log.sensitive("event", name))
             return null
         }
 
@@ -647,7 +647,7 @@ internal class EventLog(
                 ) != null
             }
             if (!recorded) return StableEventCaptureResult(false, null)
-            Log.d(LOG_TAG, "Event '$name' terminally dropped by beforeSend hook")
+            Log.d(LOG_TAG, "Event terminally dropped by beforeSend hook", null, Log.sensitive("event", name))
             return StableEventCaptureResult(true, null)
         }
         val stored = projectPostTransform(original, transformed)
@@ -750,7 +750,7 @@ internal class EventLog(
         if (event.forwardingReceivedAtMillis == null) return
         val result = forwardingCommands.trySend(ForwardingCommand.Event(event))
         if (result.isFailure) {
-            Log.w(LOG_TAG, "Committed event '${event.name}' dropped: forwarding pipeline is closed.")
+            Log.w(LOG_TAG, "Committed event dropped: forwarding pipeline is closed", null, Log.sensitive("event", event.name))
         }
     }
 
@@ -764,7 +764,7 @@ internal class EventLog(
         )
         if (result.isFailure) {
             localRouteEventId?.let(activeLocalRouteIds::remove)
-            Log.w(LOG_TAG, "Committed event '${event.name}' dropped: route pipeline is closed.")
+            Log.w(LOG_TAG, "Committed event dropped: route pipeline is closed", null, Log.sensitive("event", event.name))
         }
     }
 
@@ -798,7 +798,7 @@ internal class EventLog(
             }
             .onFailure {
                 failedLocalRouteAcknowledgementIds.add(eventId)
-                Log.w(LOG_TAG, "Failed to acknowledge local route '$eventId'", it)
+                Log.w(LOG_TAG, "Failed to acknowledge local route", it, Log.sensitive("eventId", eventId))
             }
     }
 

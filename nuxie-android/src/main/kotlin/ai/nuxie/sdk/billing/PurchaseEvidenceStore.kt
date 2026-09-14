@@ -1,7 +1,7 @@
 package ai.nuxie.sdk.billing
 
 import ai.nuxie.sdk.NuxieEnvironment
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.io.File
 import java.math.BigDecimal
 import java.security.MessageDigest
@@ -279,7 +279,7 @@ internal class FilePurchaseEvidenceStore(
         temporary.writeText(json.encodeToString(JsonArray.serializer(), JsonArray(values)))
         if (!temporary.renameTo(target)) error("Could not publish purchase $description")
         true
-    }.onFailure { Log.w("NuxieBilling", "Could not persist purchase $description.", it) }
+    }.onFailure { Log.w("NuxieBilling", "Could not persist purchase evidence", it, Log.sensitive("description", description)) }
         .getOrDefault(false)
 
     private fun loadUnlocked(): Map<String, PurchaseEvidence> = runCatching {
