@@ -548,6 +548,7 @@ internal class ExperiencePresentationService(
         val active = presentationMutex.withLock {
             var transitionClaimed = false
             var published = false
+            var unownedAcquisition: AcquiredJourneyRelease? = null
             try {
                 val existing = synchronized(stateLock) {
                     if (!isCurrentIdentity(request) || !canPresent()) {
@@ -578,6 +579,25 @@ internal class ExperiencePresentationService(
                         ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE,
                         "Experience renderer is unavailable on this device",
                     )
+                }
+
+                val source = try {
+                    prepare().also { unownedAcquisition = it.acquired }
+                } catch (error: Throwable) {
+                    if (error is CancellationException) throw error
+                    if (error is ExperiencePresentationException) throw error
+                    throw ExperiencePresentationException(
+                        ExperiencePresentationException.Reason.ACQUISITION_FAILED,
+                        "Experience artifact acquisition failed: ${error.message ?: "unknown error"}",
+                        error,
+                    )
+                }
+                // Acquisition is reversible; keep the outgoing presentation alive
+                // until artifacts exist and its ownership is still current.
+                synchronized(stateLock) {
+                    if (!isCurrentIdentity(request) || !canPresent() || current !== existing) {
+                        throw supersededByIdentityTransition()
+                    }
                 }
 
                 existing?.let {
@@ -627,17 +647,6 @@ internal class ExperiencePresentationService(
                     }
                 }
 
-                val source = try {
-                    prepare()
-                } catch (error: Throwable) {
-                    if (error is CancellationException) throw error
-                    if (error is ExperiencePresentationException) throw error
-                    throw ExperiencePresentationException(
-                        ExperiencePresentationException.Reason.ACQUISITION_FAILED,
-                        "Experience artifact acquisition failed: ${error.message ?: "unknown error"}",
-                        error,
-                    )
-                }
                 existing?.takeIf {
                     val previous = it.acquired.identity
                     previous.streamKey == source.identity.streamKey &&
@@ -707,6 +716,7 @@ internal class ExperiencePresentationService(
                                 }
                             },
                         )
+                        unownedAcquisition = null // The registered presentation now owns cleanup.
                         try {
                             launch(id)
                         } catch (error: Throwable) {
@@ -719,11 +729,11 @@ internal class ExperiencePresentationService(
                         true
                     }
                 }
-                if (!launched) {
-                    source.acquired.close()
-                    throw supersededByIdentityTransition()
-                }
+                if (!launched) throw supersededByIdentityTransition()
                 pending
+            } catch (error: Throwable) {
+                runCatching { unownedAcquisition?.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                throw error
             } finally {
                 if (transitionClaimed) {
                     synchronized(stateLock) {
