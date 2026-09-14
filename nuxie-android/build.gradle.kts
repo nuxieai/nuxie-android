@@ -48,6 +48,7 @@ android {
     // by compiling it with JVM tests; it is never part of an Android variant/AAR.
     java.srcDir("src/hostRenderHarness/kotlin")
   }
+  sourceSets.getByName("androidTest").assets.srcDir(rootProject.file("fixtures"))
   defaultConfig {
     ndk {
       abiFilters += listOf("arm64-v8a", "x86_64")
