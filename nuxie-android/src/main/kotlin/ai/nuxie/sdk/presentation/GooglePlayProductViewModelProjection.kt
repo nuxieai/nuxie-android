@@ -93,6 +93,7 @@ internal object GooglePlayProductViewModelProjection {
     private fun StoreProduct.liveFacts(
         locale: Locale,
     ): Map<String, NuxieViewModelScalarValue> {
+        testStorePreview?.let { return testStoreFacts(it) }
         val details = rawProduct ?: invalid(
             "Play returned no ProductDetails for Placement '${placementId.orEmpty()}'",
         )
@@ -104,6 +105,53 @@ internal object GooglePlayProductViewModelProjection {
         facts["name"] = string(details.name)
         facts["description"] = string(details.description)
         return facts
+    }
+
+    /** Signed preview copy is admitted only by the isolated Test Store resolver. */
+    private fun testStoreFacts(preview: JsonObject): Map<String, NuxieViewModelScalarValue> {
+        fun text(key: String) = preview.string(key)
+            ?: invalid("Test Store preview has no string '$key'")
+        val period = text("period")
+        val count = (preview["periodCount"] as? JsonPrimitive)
+            ?.takeUnless(JsonPrimitive::isString)?.doubleOrNull
+            ?.toIntExact("periodCount") ?: invalid("Test Store preview has no periodCount")
+        val hasTrial = (preview["hasTrial"] as? JsonPrimitive)
+            ?.takeUnless(JsonPrimitive::isString)?.booleanOrNull
+            ?: invalid("Test Store preview has no boolean hasTrial")
+        val trialLabel = text("trialLabel")
+        // Preserve the reference's display-only trial fallback. These parsed terms
+        // never enter native checkout, pricing or purchase verification.
+        val parts = trialLabel.lowercase(Locale.ROOT).split(Regex("[ -]+")).filter(String::isNotEmpty)
+        val trialCount = parts.firstOrNull()?.toIntOrNull()
+        val trialUnit = parts.getOrNull(1)?.removeSuffix("s")
+            ?.takeIf { it in setOf("day", "week", "month", "year") }
+        val resolvedTrialUnit = if (trialCount != null && trialUnit != null) trialUnit
+            else period.takeIf { it in setOf("day", "week", "month", "year", "lifetime") } ?: "day"
+        val resolvedTrialCount = if (trialCount != null && trialUnit != null) trialCount.coerceAtLeast(1) else 1
+        val renewal = text("renewalLabel")
+        val introLabel = text("introOfferLabel").ifEmpty { if (hasTrial) trialLabel else "" }
+        return linkedMapOf(
+            "name" to string("TEST · ${text("name")}"),
+            "description" to string("TEST STORE — no charge. ${text("description")}"),
+            "price" to string("TEST · ${text("price")}"),
+            "period" to string(period),
+            "periodCount" to number(count),
+            "periodLabel" to string(text("periodLabel")),
+            "hasTrial" to boolean(hasTrial),
+            "trialLabel" to string(if (hasTrial) trialLabel else ""),
+            "introOfferLabel" to string(introLabel),
+            "renewalLabel" to string(renewal),
+            "renewalPrice" to string(renewal),
+            "renewalPeriod" to string(""),
+            "hasIntroductoryOffer" to boolean(hasTrial),
+            "hasFreeTrial" to boolean(hasTrial),
+            "introductoryPrice" to string(if (hasTrial) "TEST · FREE" else ""),
+            "introductoryPeriod" to string(if (hasTrial) resolvedTrialUnit else ""),
+            "introductoryPeriodCount" to number(if (hasTrial) resolvedTrialCount else 0),
+            "introductoryCycles" to number(if (hasTrial) 1 else 0),
+            "introductoryPaymentMode" to string(if (hasTrial) "freeTrial" else ""),
+            "trialPeriodText" to string(if (hasTrial) trialLabel else ""),
+        )
     }
 
     private fun StoreProduct.oneTimeFacts(

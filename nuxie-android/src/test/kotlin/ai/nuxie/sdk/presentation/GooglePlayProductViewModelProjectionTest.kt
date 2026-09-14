@@ -1,6 +1,19 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.billing.StoreProduct
+import ai.nuxie.sdk.billing.CatalogProductRequest
+import ai.nuxie.sdk.billing.ProductResolver
+import ai.nuxie.sdk.billing.ProductDetailsQuery
+import ai.nuxie.sdk.billing.InMemoryPurchaseEvidenceStore
+import kotlinx.coroutines.runBlocking
+import java.io.File
+import ai.nuxie.sdk.fixtures.FixtureRunner
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.double
 import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.ProductDetails
@@ -18,6 +31,79 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class GooglePlayProductViewModelProjectionTest {
+    @Test
+    fun `Test Store projection matches shared reference vectors`() = runBlocking {
+        val fixture = Json.parseToJsonElement(
+            File(FixtureRunner.fixturesRoot(), "purchases/test-store-preview.json").readText(),
+        ).jsonObject
+        for (element in fixture.getValue("cases").jsonArray) {
+            val scenario = element.jsonObject
+            val expected = scenario.getValue("expected").jsonObject
+            val products = ProductResolver(
+                ProductDetailsQuery { error("Test Store queried Play") }, InMemoryPurchaseEvidenceStore(), true,
+            ).resolve(listOf(CatalogProductRequest(
+                productId = "pro", storeProductId = "play-pro", productType = BillingClient.ProductType.SUBS,
+                basePlanId = "annual", placementId = "primary", preview = scenario.getValue("preview").jsonObject,
+            )))
+            val result = GooglePlayProductViewModelProjection.prepare(
+                descriptor(*expected.keys.map { it to JsonPrimitive("stale") }.toTypedArray()),
+                products, "paywall",
+            )!!.items.single().values
+            for ((key, raw) in expected) {
+                val value = raw.jsonPrimitive
+                val scalar = when {
+                    value.isString -> string(value.content)
+                    value.booleanOrNull != null -> boolean(value.booleanOrNull!!)
+                    else -> NuxieViewModelScalarValue.NumberValue(value.double)
+                }
+                assertEquals("${scenario.getValue("name")}: $key", scalar, result[key])
+            }
+        }
+    }
+
+    @Test
+    fun `Test Store projects signed previews with explicit test labels and no Play details`() = runBlocking {
+        for (hasTrial in listOf(true, false)) {
+            val preview = JsonObject(mapOf(
+                "name" to JsonPrimitive("Preview Pro"), "description" to JsonPrimitive("Preview description"),
+                "price" to JsonPrimitive("$19.99"), "period" to JsonPrimitive("year"),
+                "periodCount" to JsonPrimitive(1), "periodLabel" to JsonPrimitive("year"),
+                "hasTrial" to JsonPrimitive(hasTrial), "trialLabel" to JsonPrimitive("7-day free trial"),
+                "introOfferLabel" to JsonPrimitive(""), "renewalLabel" to JsonPrimitive("then $19.99/year"),
+            ))
+            val products = ProductResolver(
+                ProductDetailsQuery { error("Test Store queried Play") },
+                InMemoryPurchaseEvidenceStore(), testStore = true,
+            ).resolve(listOf(CatalogProductRequest(
+                productId = "pro", storeProductId = "play-pro", productType = BillingClient.ProductType.SUBS,
+                basePlanId = "annual", placementId = "primary", preview = preview,
+            )))
+            val projected = GooglePlayProductViewModelProjection.prepare(
+                descriptor = descriptor(
+                    *preview.map { it.key to (it.value as JsonPrimitive) }.toTypedArray(),
+                    "hasFreeTrial" to JsonPrimitive(true), "hasIntroductoryOffer" to JsonPrimitive(true),
+                    "introductoryPrice" to JsonPrimitive("old"), "introductoryPeriod" to JsonPrimitive("old"),
+                    "introductoryPeriodCount" to JsonPrimitive(99), "introductoryCycles" to JsonPrimitive(99),
+                    "introductoryPaymentMode" to JsonPrimitive("old"), "trialPeriodText" to JsonPrimitive("old"),
+                    "renewalPrice" to JsonPrimitive("old"), "renewalPeriod" to JsonPrimitive("old"),
+                ), products = products, screenId = "paywall",
+            )!!.items.single().values
+            assertEquals(string("TEST · Preview Pro"), projected["name"])
+            assertEquals(string("TEST STORE — no charge. Preview description"), projected["description"])
+            assertEquals(string("TEST · $19.99"), projected["price"])
+            assertEquals(boolean(hasTrial), projected["hasFreeTrial"])
+            assertEquals(boolean(hasTrial), projected["hasIntroductoryOffer"])
+            assertEquals(string(if (hasTrial) "TEST · FREE" else ""), projected["introductoryPrice"])
+            assertEquals(string(if (hasTrial) "day" else ""), projected["introductoryPeriod"])
+            assertEquals(number(if (hasTrial) 7 else 0), projected["introductoryPeriodCount"])
+            assertEquals(string(if (hasTrial) "7-day free trial" else ""), projected["introOfferLabel"])
+            assertEquals(string(if (hasTrial) "7-day free trial" else ""), projected["trialPeriodText"])
+            assertEquals(string("then $19.99/year"), projected["renewalPrice"])
+            assertEquals(string(""), projected["renewalPeriod"])
+            assertNull(products.single().rawProduct)
+        }
+    }
+
     @Test
     fun `exact live offer replaces signed previews before presentation`() {
         val projection = GooglePlayProductViewModelProjection.prepare(
