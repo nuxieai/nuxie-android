@@ -1244,6 +1244,42 @@ class JourneyServiceTest {
             replacement.await()
         }
 
+    @Test fun `warm journal reports finish before a queued startup event reaches admission`() = runBlocking {
+        val identity = identity("customer")
+        val catalog = catalog()
+        val authenticated = authenticatedSnapshot(catalog)
+        val snapshot = JourneyProfileCatalog.Snapshot(
+            JourneyPlaneProfile.decode(profile(buildJsonObject {
+                put("type", "event"); put("eventName", "inventory_opened")
+            }).toString().encodeToByteArray()), authenticated.releasesByDigest)
+        val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(authority))
+        val retained = requireNotNull(journal.admit(snapshot.profile.armedLegs.single(), JourneyReentry.EveryTime,
+            authenticated.releasesByDigest.values.single().leg.getValue("entryStepId").jsonPrimitive.content,
+            1_000L, release = snapshot.profile.releases.single(), executionSnapshot = executionSnapshot(snapshot)))
+        val recovering = CompletableDeferred<Unit>()
+        val releaseRecovery = CompletableDeferred<Unit>()
+        val order = CopyOnWriteArrayList<String>()
+        val service = JourneyService(identity, store, catalog, directory, scope,
+            capture = { _, _, eventId, _ ->
+                if (eventId == retained.startedEventId) { recovering.complete(Unit); releaseRecovery.await() }
+                order += eventId
+                true
+            }, nowMillis = { 100_000L }, beforeAdmission = { order += "fresh-admission" })
+        service.profileDidCommit(snapshot, authority, "customer", 1)
+        service.enqueueInitialization()
+        try {
+            withTimeout(5_000) { recovering.await() }
+            val pending = async { service.handleEvent(StoredEvent("startup-event", "inventory_opened",
+                timestampMillis = 100_000L, distinctId = "customer"), service.eventAdmissionGeneration()) }
+            kotlinx.coroutines.yield()
+            assertTrue(order.isEmpty())
+            assertTrue(!pending.isCompleted)
+            releaseRecovery.complete(Unit)
+            withTimeout(5_000) { pending.await() }
+            assertEquals(listOf(retained.startedEventId, retained.completedEventId, "fresh-admission"), order)
+        } finally { releaseRecovery.complete(Unit) }
+    }
+
     @Test fun `queued initialization preserves an admitted startup event`() = runBlocking {
         val identity = identity("customer")
         val catalog = catalog()
