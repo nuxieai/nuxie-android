@@ -3,6 +3,7 @@ package ai.nuxie.sdk.presentation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.awaitAll
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -31,6 +32,31 @@ internal class ExperienceScreenExitHandshake {
             withTimeoutOrNull(duration.coerceIn(0, Long.MAX_VALUE - 250) + 250) { completion.await() }
         } finally {
             synchronized(lock) { waiters.remove(completion) }
+        }
+    }
+
+    /** Register both endpoints before either native phase write can emit completion. */
+    suspend fun performWith(
+        incoming: ExperienceScreenExitHandshake,
+        plan: ExperienceScreenTransitionPlan.Custom,
+        requestTransition: () -> Unit,
+    ) {
+        val outgoingCompletion = CompletableDeferred<Unit>()
+        val incomingCompletion = CompletableDeferred<Unit>()
+        try {
+            synchronized(lock) {
+                check(!closed) { "Outgoing screen is closed" }
+                waiters[outgoingCompletion] = plan.outgoingCompletionEvent
+            }
+            synchronized(incoming.lock) {
+                check(!incoming.closed) { "Incoming screen is closed" }
+                incoming.waiters[incomingCompletion] = plan.incomingCompletionEvent
+            }
+            requestTransition()
+            withTimeoutOrNull(plan.watchdogMs) { awaitAll(outgoingCompletion, incomingCompletion) }
+        } finally {
+            synchronized(lock) { waiters.remove(outgoingCompletion) }
+            synchronized(incoming.lock) { incoming.waiters.remove(incomingCompletion) }
         }
     }
 

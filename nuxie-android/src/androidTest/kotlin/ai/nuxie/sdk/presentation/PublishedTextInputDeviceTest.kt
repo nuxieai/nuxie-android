@@ -570,6 +570,10 @@ class PublishedTextInputDeviceTest {
         for (kind in listOf("fade", "push", "modal")) exerciseTransparentPreparation(kind)
     }
 
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun customTransitionWatchdogPreservesPreparedAppearanceAndRollback() = exerciseTransparentPreparation("custom")
+
     private fun exerciseTransparentPreparation(transitionKind: String? = null) {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -589,8 +593,23 @@ class PublishedTextInputDeviceTest {
         }
         val id = UUID.randomUUID().toString()
         val destinationId = UUID.randomUUID().toString()
+        val transitionContract = instrumentation.context.assets.open("journeys/planes/screen-transition-plan-android.json")
+            .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject }
+        val custom = transitionContract.getValue("customExecution").jsonObject
+        val descriptor = if (transitionKind == "custom") {
+            val declaration = JsonObject(transitionContract.getValue("declaration").jsonObject + mapOf(
+                "sourceScreenId" to screens[0].getValue("id"), "destinationScreenId" to screens[1].getValue("id"),
+            ))
+            JsonObject(fixture.release.descriptor + ("render" to JsonObject(
+                fixture.release.descriptor.getValue("render").jsonObject +
+                    ("transitions" to kotlinx.serialization.json.JsonArray(listOf(declaration))))))
+        } else fixture.release.descriptor
         val destination = content(1, contract.getValue("destinationBackgroundArgb").jsonPrimitive.long.toInt()).copy(
-            transition = transitionKind?.let { JsonObject(mapOf("type" to kotlinx.serialization.json.JsonPrimitive(it))) },
+            descriptor = descriptor,
+            transition = transitionKind?.let { JsonObject(mapOf(
+                "type" to kotlinx.serialization.json.JsonPrimitive(it),
+                "transitionId" to custom.getValue("transitionId"),
+            )) },
         )
         val firstFrame = CountDownLatch(1)
         val failure = AtomicReference<Throwable?>()
@@ -626,7 +645,15 @@ class PublishedTextInputDeviceTest {
                     contract.getValue("composedPixelsChanged").jsonPrimitive.long.toInt(),
                     changedPixels(before, during, Rect(0, 0, before.width, before.height)))
                 if (transitionKind != null) {
+                    val started = SystemClock.uptimeMillis()
                     runBlocking { kotlinx.coroutines.withTimeout(10_000) { checkNotNull(pending).awaitExit() } }
+                    if (transitionKind == "custom") {
+                        assertTrue("Missing native completion events must wait for the authored watchdog",
+                            SystemClock.uptimeMillis() - started >= custom.getValue("watchdogMs").jsonPrimitive.long)
+                        assertEquals(custom.getValue("preparedAppearances").jsonPrimitive.long.toULong(),
+                            destination.screenLifecycle.appearances)
+                        assertEquals(ExperienceScreenLifecycle.Phase.ENTERING, destination.screenLifecycle.phase)
+                    }
                     val transitioned = composedSurface(instrumentation, surface, captureBounds)
                     try {
                         assertTrue("$transitionKind must reveal the destination before activation",

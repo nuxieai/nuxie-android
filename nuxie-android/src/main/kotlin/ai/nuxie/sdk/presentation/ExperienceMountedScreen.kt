@@ -34,7 +34,7 @@ internal class ExperienceMountedScreen(
     private var textOverlay: ExperienceTextInputOverlay? = null
     private var windowInsets: ExperienceWindowInsets? = null
     private val lifecycle = prepared.screenLifecycle
-    private val exitHandshake = ExperienceScreenExitHandshake()
+    val transitionEvents = ExperienceScreenExitHandshake()
     private var reduceMotionEnabled = false
     val surface = ExperienceSurfaceHost(
         context = activity,
@@ -43,7 +43,7 @@ internal class ExperienceMountedScreen(
         artboardSize = prepared.artboardSize,
         listener = object : ExperienceSurfaceHost.Listener by listener {
             override fun onRuntimeEvent(event: ai.nuxie.sdk.runtime.NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {
-                exitHandshake.receive(event.name)
+                transitionEvents.receive(event.name)
                 listener.onRuntimeEvent(event, viewModelSnapshot)
             }
             override fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot) {
@@ -110,7 +110,13 @@ internal class ExperienceMountedScreen(
         val screen = screens?.filterIsInstance<JsonObject>()?.firstOrNull {
             (it["id"] as? JsonPrimitive)?.content == prepared.screenId
         }
-        exitHandshake.perform(screen?.get("exit") as? JsonObject, reduceMotionEnabled, ::exit)
+        transitionEvents.perform(screen?.get("exit") as? JsonObject, reduceMotionEnabled, ::exit)
+    }
+
+    fun beginCustomTransition(id: String, outgoing: Boolean) {
+        surface.updateRuntimeValues(if (outgoing)
+            lifecycle.move(ExperienceScreenLifecycle.Phase.EXITING, id)
+        else lifecycle.beginPreparedTransition(id))
     }
 
     fun exit() {
@@ -119,7 +125,7 @@ internal class ExperienceMountedScreen(
 
     /** Completion follows native handle release, so the owner can release its artifact lease. */
     fun close(changingConfigurations: Boolean, completion: () -> Unit) {
-        exitHandshake.close()
+        transitionEvents.close()
         reducedMotion?.close()
         windowInsets?.close()
         windowInsets = null

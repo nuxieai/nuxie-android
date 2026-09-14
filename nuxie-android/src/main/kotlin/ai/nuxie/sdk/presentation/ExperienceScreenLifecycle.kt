@@ -19,6 +19,13 @@ internal class ExperienceScreenLifecycle {
         return snapshot()
     }
 
+    /** Preparation already counted this appearance; custom entry only adds its transition identifier. */
+    fun beginPreparedTransition(id: String): Map<String, NuxieViewModelScalarValue> {
+        check(phase == Phase.ENTERING) { "Custom entry requires a prepared screen" }
+        transition = id
+        return snapshot()
+    }
+
     fun updateReduceMotion(value: Boolean): Map<String, NuxieViewModelScalarValue> {
         reduceMotion = value
         return snapshot()
