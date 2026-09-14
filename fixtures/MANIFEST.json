@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "274cb77f2827911d2a4e3d7eed21b531c8a346d5",
+  "sourceCommit": "c086a990754b3c51d9ceba580fcdd24307f15c07",
   "files": {
     "README.md": "4363d6a79ac9828364a6a02bf400d98c0852b771062258c409a744dd1a5016e7",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
@@ -36,7 +36,7 @@
     "journeys/rendered-text-input/LICENSE-Inter.txt": "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a",
     "journeys/rendered-text-input/assets/sha256/3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d.png": "3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d",
     "journeys/rendered-text-input/assets/sha256/4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf.ttf": "4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf",
-    "journeys/rendered-text-input/provenance.json": "77a1f6912c2634a52610d88c221e51377411f41e9e371e09c0359b0aa4a86fed",
+    "journeys/rendered-text-input/provenance.json": "bb376707ac44154e4390f1bf3571e6d320018c331ba0c7a2c63ee90b6ba845bf",
     "journeys/rendered-text-input/release-entry.json": "a152ef49c768a08bff01bfb8a0277f270774dfaf00583f157ab6efcd3b0f2e97",
     "journeys/rendered-text-input/renders/sha256/cb9967546c3f5b17af64c3244f82a4bb49d7300149a7770a97bc0b264fd79633.riv": "cb9967546c3f5b17af64c3244f82a4bb49d7300149a7770a97bc0b264fd79633",
     "purchases/outcome-commit.json": "9ba6554f5660d3b5689865d1922818bd4f31483162a02be0054282ccfd521171",
