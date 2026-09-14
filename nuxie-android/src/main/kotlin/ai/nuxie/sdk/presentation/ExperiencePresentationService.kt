@@ -123,6 +123,9 @@ internal interface PreparedScreenNavigation {
 
 internal interface PresentationScreenHandle {
     val rendererEffects: RendererEffectLifetime? get() = null
+    val nativeAttemptGeneration: Long? get() = null
+
+    suspend fun retireForRetry() = Unit
 
     suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation? = null
 
@@ -154,7 +157,7 @@ internal enum class JourneyPermissionRequest {
  */
 internal sealed interface PresentationContentState {
     data class Acquiring(val screen: AuthenticatedPresentationScreen, val progress: AcquisitionProgress? = null) : PresentationContentState
-    data class Ready(val content: PreparedPresentation) : PresentationContentState
+    data class Ready(val content: PreparedPresentation, val progress: AcquisitionProgress? = null) : PresentationContentState
     data class Closed(val reason: CloseReason) : PresentationContentState
 }
 
@@ -173,6 +176,7 @@ internal object PresentationRegistry {
         val terminal = AtomicBoolean(false)
         val firstFrame = AtomicBoolean(false)
         var revealAdmitted = false
+        var visible = false
         val revealFrames = IdentityHashMap<PresentationScreenHandle?, suspend () -> Boolean>()
         val detached = CompletableDeferred<Unit>()
         var latestScreen = WeakReference<PresentationScreenHandle>(null)
@@ -212,7 +216,8 @@ internal object PresentationRegistry {
                 }
                 existing.callbacks = callbacks
                 existing.retry = null
-                existing.state.value = PresentationContentState.Ready(content)
+                existing.state.value = PresentationContentState.Ready(content,
+                    AcquisitionProgress(1, android.os.SystemClock.elapsedRealtime(), AcquisitionProgress.Phase.LOADING))
             }
         }
     }
@@ -240,6 +245,60 @@ internal object PresentationRegistry {
         return retry?.invoke(generation) == true
     }
 
+    fun nativeProgress(id: String): AcquisitionProgress? = synchronized(lock) {
+        (entries[id]?.state?.value as? PresentationContentState.Ready)?.progress
+    }
+
+    /** Failure retains the lease and logical outcome owner until Retry or Close. */
+    fun recoverNative(id: String, source: PresentationScreenHandle?, generation: Long?, error: Throwable): Boolean = synchronized(lock) {
+        val entry = entries[id] ?: return@synchronized false
+        val ready = entry.state.value as? PresentationContentState.Ready ?: return@synchronized false
+        val progress = ready.progress ?: return@synchronized false
+        if (entry.visible || entry.dismissalReason != null || entry.terminal.get() ||
+            (generation != null && generation != progress.generation) ||
+            (source != null && entry.latestScreen.get() !== source)) return@synchronized false
+        if (progress.phase == AcquisitionProgress.Phase.RETRYING) return@synchronized true
+        // A timeout may still receive its late frame. A failed native host cannot.
+        if (source != null) source.rendererEffects?.retire()
+        entry.state.value = ready.copy(progress = progress.copy(phase = AcquisitionProgress.Phase.FAILED))
+        ai.nuxie.sdk.logging.NuxieLog.w("ExperiencePresentation", "Native presentation requires recovery", error)
+        true
+    }
+
+    fun retryNative(id: String, generation: Long): Boolean = synchronized(lock) {
+        val entry = entries[id] ?: return@synchronized false
+        val ready = entry.state.value as? PresentationContentState.Ready ?: return@synchronized false
+        val progress = ready.progress ?: return@synchronized false
+        if (entry.visible || entry.dismissalReason != null || entry.terminal.get() ||
+            progress.generation != generation || progress.phase == AcquisitionProgress.Phase.RETRYING) return@synchronized false
+        entry.latestScreen.get()?.rendererEffects?.retire()
+        entry.revealFrames.clear()
+        entry.firstFrame.set(false)
+        entry.state.value = ready.copy(progress = AcquisitionProgress(generation + 1,
+            android.os.SystemClock.elapsedRealtime(), AcquisitionProgress.Phase.RETRYING))
+        true
+    }
+
+    suspend fun drainNativeAttempts(id: String, generation: Long) {
+        val old = synchronized(lock) { entries[id]?.attachedScreens?.filter {
+            it.nativeAttemptGeneration != null && it.nativeAttemptGeneration != generation
+        }.orEmpty() }
+        old.forEach { it.retireForRetry() }
+    }
+
+    fun nativeRetired(id: String, generation: Long): Boolean = synchronized(lock) {
+        val entry = entries[id] ?: return@synchronized false
+        val ready = entry.state.value as? PresentationContentState.Ready ?: return@synchronized false
+        val progress = ready.progress ?: return@synchronized false
+        if (entry.dismissalReason != null || entry.terminal.get() || progress.generation != generation ||
+            progress.phase != AcquisitionProgress.Phase.RETRYING || entry.attachedScreens.any {
+                it.nativeAttemptGeneration != null && it.nativeAttemptGeneration != generation
+            }) return@synchronized false
+        entry.state.value = ready.copy(progress = progress.copy(startedAtMillis = android.os.SystemClock.elapsedRealtime(),
+            phase = AcquisitionProgress.Phase.LOADING))
+        true
+    }
+
     fun observe(id: String): StateFlow<PresentationContentState>? = synchronized(lock) { entries[id]?.state?.asStateFlow() }
 
     fun resolve(id: String): PreparedPresentation? = synchronized(lock) {
@@ -249,6 +308,8 @@ internal object PresentationRegistry {
     fun attach(id: String, screen: PresentationScreenHandle): Boolean = synchronized(lock) {
         val entry = entries[id] ?: return@synchronized false
         if (entry.dismissalReason != null) return@synchronized false
+        val generation = (entry.state.value as? PresentationContentState.Ready)?.progress?.generation
+        if (screen.nativeAttemptGeneration != null && screen.nativeAttemptGeneration != generation) return@synchronized false
         entry.latestScreen.get()?.takeUnless { it === screen }?.rendererEffects?.retire()
         entry.attachedScreens += screen
         entry.latestScreen = WeakReference(screen)
@@ -280,7 +341,9 @@ internal object PresentationRegistry {
         val callback = synchronized(lock) {
             val entry = entries[id] ?: return
             if (entry.state.value !is PresentationContentState.Ready || entry.dismissalReason != null || entry.terminal.get()) return
-            if (source != null && source !in entry.attachedScreens) return
+            if (source != null && (source !in entry.attachedScreens || entry.latestScreen.get() !== source ||
+                source.rendererEffects?.isRetired == true || (source.nativeAttemptGeneration != null &&
+                source.nativeAttemptGeneration != (entry.state.value as? PresentationContentState.Ready)?.progress?.generation))) return
             val first = entry.firstFrame.compareAndSet(false, true)
             if (!first && source == null) return
             entry.revealFrames[source] = present
@@ -293,7 +356,9 @@ internal object PresentationRegistry {
     fun canReveal(id: String, source: PresentationScreenHandle): Boolean = synchronized(lock) {
         val entry = entries[id] ?: return@synchronized false
         entry.revealAdmitted && entry.dismissalReason == null && !entry.terminal.get() &&
-            entry.latestScreen.get() === source && source in entry.attachedScreens
+            entry.latestScreen.get() === source && source in entry.attachedScreens && source.rendererEffects?.isRetired != true &&
+            (source.nativeAttemptGeneration == null || source.nativeAttemptGeneration ==
+                (entry.state.value as? PresentationContentState.Ready)?.progress?.generation)
     }
 
     suspend fun reveal(id: String): Boolean {
@@ -305,6 +370,15 @@ internal object PresentationRegistry {
         }
         var visible = false
         for (present in frames) visible = present() || visible
+        if (visible) synchronized(lock) {
+            entries[id]?.let { entry ->
+                entry.visible = true
+                val ready = entry.state.value as? PresentationContentState.Ready
+                ready?.progress?.let { progress ->
+                    entry.state.value = ready.copy(progress = progress.copy(phase = AcquisitionProgress.Phase.LOADING))
+                }
+            }
+        }
         return visible
     }
 
@@ -441,6 +515,7 @@ internal class ExperiencePresentationService(
         val acquired: AcquiredJourneyRelease,
         val ownerDistinctId: String?,
         val journey: JourneyOutcome,
+        val nativeRecovery: Boolean,
         val firstFrame: CompletableDeferred<ExperienceRef>,
         val closed: AtomicBoolean = AtomicBoolean(false),
         val shown: AtomicBoolean = AtomicBoolean(false),
@@ -813,6 +888,7 @@ internal class ExperiencePresentationService(
                     acquired = source.acquired,
                     ownerDistinctId = request.ownerDistinctId,
                     journey = journey,
+                    nativeRecovery = acquiringId != null,
                     firstFrame = CompletableDeferred(),
                 )
                 val preparedContent = PreparedPresentation(
@@ -981,6 +1057,7 @@ internal class ExperiencePresentationService(
                 attempt.finished.complete(Unit)
             }
         }
+        val nativeGeneration = PresentationRegistry.nativeProgress(active.id)?.generation
         return try {
             withTimeout(firstFrameTimeoutMillis) { active.firstFrame.await() }
         } catch (_: TimeoutCancellationException) {
@@ -988,8 +1065,13 @@ internal class ExperiencePresentationService(
                 ExperiencePresentationException.Reason.FIRST_FRAME_TIMEOUT,
                 "Experience presentation did not attach and render its first frame in time",
             )
-            PresentationRegistry.reportFailure(active.id, timeout)
-            throw timeout
+            if (active.nativeRecovery) {
+                PresentationRegistry.recoverNative(active.id, null, nativeGeneration, timeout)
+                active.firstFrame.await()
+            } else {
+                PresentationRegistry.reportFailure(active.id, timeout)
+                throw timeout
+            }
         }
     }
 

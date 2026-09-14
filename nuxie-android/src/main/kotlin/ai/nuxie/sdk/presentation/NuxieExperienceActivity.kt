@@ -98,6 +98,7 @@ internal class NuxieExperienceActivity : Activity() {
     private inner class Screen(val id: String, val prepared: PreparedPresentation, @Volatile var provisional: Boolean = false) :
         PresentationScreenHandle, ExperienceSurfaceHost.Listener {
         override val rendererEffects = RendererEffectLifetime()
+        override val nativeAttemptGeneration = PresentationRegistry.nativeProgress(id)?.generation
         var registered = false
         var failure: Throwable? = null
             private set
@@ -150,6 +151,10 @@ internal class NuxieExperienceActivity : Activity() {
                 mounted?.exit()
                 if (closeState.reason != CloseReason.JourneyNavigation || navigation?.source !== this) finish()
             }
+        }
+        override suspend fun retireForRetry() = withContext(Dispatchers.Main.immediate) {
+            close(true)
+            closed.await()
         }
         override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation =
             prepareScreenNavigation(this, id, content)
@@ -204,6 +209,7 @@ internal class NuxieExperienceActivity : Activity() {
                             dismissible = prepared.shell.dismissible
                             contentRoot.background = null
                             view?.alpha = 1f
+                            clearAcquisitionRecovery()
                             removeLoadingView()
                             mounted?.activate()
                         }
@@ -217,12 +223,19 @@ internal class NuxieExperienceActivity : Activity() {
             PresentationRegistry.reportTextCommitted(id, this, inputId, text)
         override fun onFailure(error: ExperiencePresentationException) = fail(error)
 
+        fun hasRevealed(): Boolean = revealed
+
         fun fail(error: Throwable) {
             failure = error
             if (provisional) {
                 ready.completeExceptionally(error)
                 mounted?.transitionEvents?.close()
-            } else finishTerminal(CloseReason.Error(error))
+            } else if (!closing && !revealed && currentScreen === this &&
+                PresentationRegistry.recoverNative(id, this, nativeAttemptGeneration, error)) {
+                mounted?.setVisible(false)
+            } else if (!closing && currentScreen === this && rendererEffects.isRetired.not()) {
+                finishTerminal(CloseReason.Error(error))
+            }
         }
         fun finishTerminal(reason: CloseReason) {
             if (closeState.select(reason)) finishAfterServiceClose()
@@ -406,20 +419,110 @@ internal class NuxieExperienceActivity : Activity() {
                         }
                         content.progress?.let { updateAcquisitionRecovery(id, content.screen, it) }
                     }
-                    is PresentationContentState.Ready -> if (currentScreen == null) {
-                        clearAcquisitionRecovery()
-                        mountReadyScreen(id, content.content)
-                        acquiringScreen?.let { PresentationRegistry.detach(id, it) }
-                        acquiringScreen = null
-                        currentScreen?.mounted?.setVisible(visible)
-                        // Mounted screens now own lifecycle. Retiring this initial id during
-                        // navigation must not finish the persistent Activity via its old flow.
-                        registryScope.cancel()
+                    is PresentationContentState.Ready -> {
+                        // An old screen's flow stays observed through initial recovery, but
+                        // may not take ownership back after Journey navigation.
+                        if (currentScreen != null && currentScreen?.id != id) return@collect
+                        val progress = content.progress
+                        if (progress?.phase == AcquisitionProgress.Phase.RETRYING) {
+                            retireNativeAttempt(id, content)
+                            return@collect
+                        }
+                        if (currentScreen == null && progress != null) {
+                            ensureNativeRecoveryShell(id, content.content)
+                            if (progress.phase == AcquisitionProgress.Phase.FAILED) {
+                                updateNativeRecovery(id, content.content, progress)
+                                return@collect
+                            }
+                        }
+                        if (currentScreen == null) {
+                            clearAcquisitionRecovery()
+                            mountReadyScreen(id, content.content)
+                            acquiringScreen?.let { PresentationRegistry.detach(id, it) }
+                            acquiringScreen = null
+                            currentScreen?.takeUnless { it.rendererEffects.isRetired }?.mounted?.setVisible(visible)
+                        }
+                        if (progress != null && currentScreen?.hasRevealed() == false) {
+                            updateNativeRecovery(id, content.content, progress)
+                        }
                     }
-                    is PresentationContentState.Closed -> finish()
+                    is PresentationContentState.Closed -> {
+                        if (currentScreen?.id == id || acquiringScreen?.id == id) finish()
+                    }
                 }
             }
         }
+    }
+
+    private fun ensureNativeRecoveryShell(id: String, prepared: PreparedPresentation) {
+        if (!::contentRoot.isInitialized) {
+            contentRoot = FrameLayout(this).apply { setBackgroundColor(prepared.clearColor) }
+            setContentView(shellView(contentRoot, prepared.shell))
+            loadingView = ExperienceLoadingView(this, prepared.clearColor).also {
+                contentRoot.addView(it, FrameLayout.LayoutParams(-1, -1))
+                it.setActive(visible)
+            }
+        }
+        if (acquiringScreen == null && currentScreen == null) {
+            val pending = AcquiringScreen(id)
+            if (PresentationRegistry.attach(id, pending)) acquiringScreen = pending
+        }
+        dismissible = true
+    }
+
+    private suspend fun retireNativeAttempt(id: String, content: PresentationContentState.Ready) {
+        val progress = checkNotNull(content.progress)
+        ensureNativeRecoveryShell(id, content.content)
+        val old = currentScreen
+        val pending = AcquiringScreen(id)
+        if (!PresentationRegistry.attach(id, pending)) return
+        acquiringScreen?.let { PresentationRegistry.detach(id, it) }
+        acquiringScreen = pending
+        dismissible = true
+        showNativeRecovery(id, content.content, progress)
+        PresentationRegistry.drainNativeAttempts(id, progress.generation)
+        old?.let {
+            // Retire without selecting a terminal reason; the lease stays service-owned.
+            it.close(true)
+            it.closed.await()
+            it.view?.let(contentRoot::removeView)
+            screens.remove(it)
+            if (currentScreen === it) currentScreen = null
+        }
+        if (isFinishing || isDestroyed) return
+        content.content.screenLifecycle.resetUnrevealedAttempt()
+        content.content.textInputState.resetUnrevealedAttempt()
+        PresentationRegistry.nativeRetired(id, progress.generation)
+    }
+
+    private fun updateNativeRecovery(id: String, prepared: PreparedPresentation, progress: AcquisitionProgress) {
+        if (acquisitionProgress == progress) return
+        acquisitionProgress = progress
+        recoveryTimer?.cancel()
+        if (progress.phase != AcquisitionProgress.Phase.LOADING) {
+            showNativeRecovery(id, prepared, progress)
+        } else {
+            removeRecoveryView()
+            loadingView?.visibility = View.VISIBLE
+            loadingView?.setActive(visible)
+            recoveryTimer = registryScope.launch {
+                kotlinx.coroutines.delay((progress.startedAtMillis + 5_000 - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                if (acquisitionProgress == progress && currentScreen?.id == id &&
+                    currentScreen?.hasRevealed() == false && !isFinishing && !isDestroyed) {
+                    showNativeRecovery(id, prepared, progress)
+                }
+            }
+        }
+    }
+
+    private fun showNativeRecovery(id: String, prepared: PreparedPresentation, progress: AcquisitionProgress) {
+        removeRecoveryView()
+        loadingView?.setActive(false)
+        loadingView?.visibility = View.INVISIBLE
+        recoveryView = ExperienceRecoveryView(this, prepared.clearColor, progress.phase,
+            retry = { PresentationRegistry.retryNative(id, progress.generation) },
+            onClose = { finishTerminal(CloseReason.UserDismissed) },
+        ).also { contentRoot.addView(it, FrameLayout.LayoutParams(-1, -1)) }
     }
 
     private fun mountReadyScreen(id: String, prepared: PreparedPresentation) {
@@ -451,7 +554,7 @@ internal class NuxieExperienceActivity : Activity() {
         visible = true
         loadingView?.setActive(recoveryView == null)
         navigation?.setVisible(true)
-        screens.forEach { if (!it.provisional || !it.ready.isCompleted) it.mounted?.setVisible(true) }
+        screens.forEach { if (!it.rendererEffects.isRetired && (!it.provisional || !it.ready.isCompleted)) it.mounted?.setVisible(true) }
     }
 
     override fun onStop() {

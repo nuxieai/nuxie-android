@@ -1,6 +1,6 @@
 {
   "platform": "android",
-  "contract": "An initial authenticated presentation retains one shell and exact release while acquisition fails or waits. Retry is generation-scoped and single-flight. It cancels and drains prior work, closing cancellation-resistant late leases before starting another attempt. Owner cancellation rejects further retries and drains resources. Successful acquisition transfers exactly one live lease; retired attempts never mount. Native mounting and first-frame failure recovery remain to be implemented and qualified.",
+  "contract": "An initial authenticated presentation retains one shell and exact release while acquisition fails or waits. Retry is generation-scoped and single-flight. It cancels and drains prior work, closing cancellation-resistant late leases before starting another attempt. Owner cancellation rejects further retries and drains resources. Successful acquisition transfers exactly one live lease; retired attempts never mount. Native mounting and first-frame recovery follow the separate nativeRecovery contract below.",
   "recoveryDelayMillis": 5000,
   "failurePhases": [
     "LOADING",
@@ -15,5 +15,11 @@
   ],
   "lateLeaseCloseCount": 1,
   "shellLaunchCount": 1,
-  "attemptCount": 2
+  "attemptCount": 2,
+  "nativeRecovery": {
+    "contract": "Initial native mount failure and sustained first-frame wait retain the same logical presentation and artifact lease. Retry retires and drains the previous native host before resetting unseen lifecycle/input state and mounting a new generation. Stale frames/failures cannot affect its replacement; durable admission and shown occur once. Close remains terminal and drains all attached owners. Outgoing navigation recovery is separate.",
+    "retryGeneration": 2,
+    "shownCount": 1,
+    "leaseCloseCount": 1
+  }
 }

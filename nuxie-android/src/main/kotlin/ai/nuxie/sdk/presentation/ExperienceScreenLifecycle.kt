@@ -31,6 +31,13 @@ internal class ExperienceScreenLifecycle {
         return snapshot()
     }
 
+    /** Called only after an unrevealed native attempt has fully drained. */
+    fun resetUnrevealedAttempt() {
+        phase = Phase.HIDDEN
+        appearances = 0uL
+        transition = ""
+    }
+
     fun snapshot(): Map<String, NuxieViewModelScalarValue> = linkedMapOf(
         "screen/phase" to NuxieViewModelScalarValue.StringValue(phase.wireValue),
         "screen/appearances" to NuxieViewModelScalarValue.NumberValue(appearances.toDouble()),
