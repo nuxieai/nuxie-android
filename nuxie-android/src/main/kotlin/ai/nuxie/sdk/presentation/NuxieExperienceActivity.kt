@@ -61,6 +61,7 @@ internal class NuxieExperienceActivity :
     Activity(),
     PresentationActivityHandle {
     private var host: ExperienceSurfaceHost? = null
+    private var reducedMotion: ExperienceReducedMotion? = null
     private var windowInsets: ExperienceWindowInsets? = null
     private var textOverlay: ExperienceTextInputOverlay? = null
     private var lane: NuxieRuntimeLane? = null
@@ -151,6 +152,10 @@ internal class NuxieExperienceActivity :
             },
         )
         this.host = host
+        reducedMotion = ExperienceReducedMotion(this) { reduced ->
+            host.updateRuntimeValues(mapOf("env/reduceMotion" to
+                ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.BooleanValue(reduced)))
+        }
         loadPreparedRelease(host, rivBytes, prepared)
         dismissible = prepared.shell.dismissible
         val inputs = ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId)
@@ -187,6 +192,7 @@ internal class NuxieExperienceActivity :
 
     override fun onStart() {
         super.onStart()
+        reducedMotion?.refresh()
         host?.setPresentationVisible(true)
     }
 
@@ -203,6 +209,8 @@ internal class NuxieExperienceActivity :
     override fun onDestroy() {
         val changingConfigurations = isChangingConfigurations
         screenClose.prepareForTeardown(changingConfigurations)
+        reducedMotion?.close()
+        reducedMotion = null
         windowInsets?.close()
         windowInsets = null
         textOverlay?.close()
