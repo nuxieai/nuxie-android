@@ -27,6 +27,43 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 class ExperienceSurfaceHostPointerTest {
     @Test
+    fun `queued older frame cannot consume a tap ahead of its focus-loss text commit`() {
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
+            artboardSize = ExperienceArtboardSize(400f, 200f), runtime = NuxieRuntime(native))
+        host.layout(0, 0, 1_000, 1_000)
+        val surfaceTexture = SurfaceTexture(0)
+        val surface = Surface(surfaceTexture)
+        val blocked = CountDownLatch(1)
+        val resume = CountDownLatch(1)
+        try {
+            host.loadArtboard(byteArrayOf(1), null,
+                textInputs = ExperienceTextInput.forScreen(textInputDescriptor(), "survey"))
+            host.surfaceCreated(holder(surface))
+            drain(lane)
+            lane.enqueue { blocked.countDown(); check(resume.await(2, TimeUnit.SECONDS)) }
+            assertTrue(blocked.await(2, TimeUnit.SECONDS))
+            host.doFrame(1_000_000_000L)
+            host.writeText("name", "okay", true) {}
+            val tap = motion(MotionEvent.ACTION_DOWN, 1_000, 500f, 500f)
+            try { assertTrue(host.onTouchEvent(tap)) } finally { tap.recycle() }
+            resume.countDown()
+            drain(lane)
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            assertEquals(listOf("frame:0", "write:headline:ok", "frame:1"), native.order)
+        } finally {
+            resume.countDown()
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            surface.release()
+            surfaceTexture.release()
+        }
+    }
+
+    @Test
     fun `surface tap reaches the configured player and release closes the input seam`() {
         val native = RecordingNative()
         val lane = NuxieRuntimeLane()
@@ -108,6 +145,12 @@ class ExperienceSurfaceHostPointerTest {
 
     private class RecordingNative : NuxieTypedRuntimeNative {
         val pointerSteps = mutableListOf<List<NativePlayerPointer>>()
+        val order = mutableListOf<String>()
+
+        override fun setTextRun(handle: Long, name: String, text: String): NativeCallResult<Boolean> {
+            order += "write:$name:$text"
+            return NativeCallResult(0, true)
+        }
 
         override fun newFile(
             rendererHandle: Long,
@@ -135,6 +178,7 @@ class ExperienceSurfaceHostPointerTest {
             correlationId: Long,
         ): NativeCallResult<NativePlayerStepOutcome> {
             pointerSteps += pointers
+            order += "frame:${pointers.size}"
             return NativeCallResult(
                 0,
                 NativePlayerStepOutcome(

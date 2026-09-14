@@ -220,6 +220,16 @@ internal class NuxieRuntimeArtboard internal constructor(
         return checkNotNull(result.value) { "Native runtime returned no text mutation result" }
     }
 
+    /** Snapshot only the signed default bound to this artboard, on its owning lane. */
+    fun defaultViewModelSnapshot(): NuxieViewModelSnapshot? {
+        owned.require()
+        val model = defaultViewModel ?: return null
+        return NuxieViewModelSnapshot.fromNative(requireNativeValue(
+            native.snapshotViewModel(model.require()),
+            "snapshot default view model",
+        ))
+    }
+
     /**
      * Bind this artboard's exact authored default before creating its player,
      * only when the selected signed Journey screen declares [expectedSchemaName].

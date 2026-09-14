@@ -77,6 +77,7 @@ internal data class PreparedPresentation(
     val artifactsByKey: Map<String, File> = emptyMap(),
     val artboardSize: ExperienceArtboardSize? = null,
     val viewModelProjection: NuxieViewModelListProjection? = null,
+    val textInputState: ExperienceTextInputState = ExperienceTextInputState(),
 )
 
 internal sealed interface PresentationShell {
@@ -139,6 +140,7 @@ internal object PresentationRegistry {
         val onDismissed: (CloseReason) -> Unit,
         val onOutcome: (CloseReason) -> Unit,
         val onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?) -> Unit,
+        val onTextCommitted: (String, String) -> Unit,
     ) {
         val terminal = AtomicBoolean(false)
         val firstFrame = AtomicBoolean(false)
@@ -162,6 +164,7 @@ internal object PresentationRegistry {
         onOutcome: (CloseReason) -> Unit,
         onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?) -> Unit =
             { _, _, _ -> },
+        onTextCommitted: (String, String) -> Unit = { _, _ -> },
     ) {
         synchronized(lock) {
             check(id !in entries) { "duplicate presentation id" }
@@ -172,6 +175,7 @@ internal object PresentationRegistry {
                 onDismissed,
                 onOutcome,
                 onRuntimeStep,
+                onTextCommitted,
             )
         }
     }
@@ -247,6 +251,15 @@ internal object PresentationRegistry {
 
     fun currentActivity(id: String): PresentationActivityHandle? = synchronized(lock) {
         entries[id]?.latestActivity?.get()
+    }
+
+    fun reportTextCommitted(id: String, activity: PresentationActivityHandle, inputId: String, text: String) {
+        val callback = synchronized(lock) {
+            entries[id]?.takeUnless {
+                it.terminal.get() || it.dismissalReason != null || it.latestActivity.get() !== activity
+            }?.onTextCommitted
+        } ?: return
+        callback(inputId, text)
     }
 
     fun dismiss(id: String, reason: CloseReason) {
@@ -351,6 +364,7 @@ internal class ExperiencePresentationService(
         val emissions: JourneyRuntimeEmissionCoordinator,
         val screenDismissed: AtomicBoolean = AtomicBoolean(false),
         var navigationHistory: List<String> = emptyList(),
+        var textInputsByScreen: MutableMap<String, ExperienceTextInputState> = mutableMapOf(),
         val commerce: JourneyCommerceSession? = null,
     )
 
@@ -592,6 +606,7 @@ internal class ExperiencePresentationService(
                             JourneyScreenDismissalResult.REJECTED
                         }
                     } else null
+                    outgoing.textInputsByScreen[outgoing.screenId]?.detach()
                     PresentationRegistry.dismiss(it.id, CloseReason.JourneyNavigation)
                     attemptOutcome(it, CloseReason.JourneyNavigation)
                     it.finished.await()
@@ -620,6 +635,17 @@ internal class ExperiencePresentationService(
                         "Experience artifact acquisition failed: ${error.message ?: "unknown error"}",
                         error,
                     )
+                }
+                existing?.takeIf {
+                    val previous = it.acquired.identity
+                    previous.streamKey == source.identity.streamKey &&
+                        previous.experienceVersionId == source.identity.experienceVersionId &&
+                        previous.buildId == source.identity.buildId
+                }?.let {
+                    journey.textInputsByScreen = it.journey.textInputsByScreen
+                }
+                val textInputState = journey.textInputsByScreen.getOrPut(journey.screenId) {
+                    ExperienceTextInputState()
                 }
                 val ref = ExperienceRef(
                     source.identity.experienceId,
@@ -661,6 +687,7 @@ internal class ExperiencePresentationService(
                                 artifactsByKey = source.acquired.artifactsByKey,
                                 artboardSize = source.artboardSize,
                                 viewModelProjection = source.viewModelProjection,
+                                textInputState = textInputState,
                             ),
                             onFirstFrame = { firstFrame(pending) },
                             onFailure = { error -> failed(pending, error) },
@@ -669,6 +696,11 @@ internal class ExperiencePresentationService(
                             onRuntimeStep = { outcome, correlationId, snapshot ->
                                 pending.latestViewModelSnapshot.set(snapshot)
                                 runtimeStep(pending, outcome, correlationId)
+                            },
+                            onTextCommitted = { inputId, text ->
+                                publishScreenEffects(pending) {
+                                    pending.journey.emissions.publishTextCommit(inputId, text, textInputState)
+                                }
                             },
                         )
                         try {
@@ -1027,11 +1059,12 @@ internal class ExperiencePresentationService(
         outcome: NuxiePlayerStepOutcome,
         correlationId: ULong,
     ) {
-        val journey = active.journey
+        publishScreenEffects(active) { active.journey.emissions.publish(outcome, correlationId) }
+    }
+
+    private fun publishScreenEffects(active: ActivePresentation, publish: suspend () -> Boolean) {
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            val accepted = runCatching {
-                journey.emissions.publish(outcome, correlationId)
-            }.getOrDefault(false)
+            val accepted = runCatching { publish() }.getOrDefault(false)
             if (!accepted && !active.closed.get()) {
                 PresentationRegistry.reportFailure(
                     active.id,

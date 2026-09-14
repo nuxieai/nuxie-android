@@ -77,6 +77,24 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `text commits require the current attached Activity and an open presentation`() {
+        val received = mutableListOf<String>()
+        PresentationRegistry.register("edit-owner",
+            PreparedPresentation(File("unused.riv"), null, 0, PresentationShell.FullScreen),
+            {}, {}, {}, {}, onTextCommitted = { _, text -> received += text })
+        val old = AttachedHost()
+        val current = AttachedHost()
+        assertTrue(PresentationRegistry.attach("edit-owner", old))
+        PresentationRegistry.reportTextCommitted("edit-owner", old, "name", "first")
+        assertTrue(PresentationRegistry.attach("edit-owner", current))
+        PresentationRegistry.reportTextCommitted("edit-owner", old, "name", "stale")
+        PresentationRegistry.reportTextCommitted("edit-owner", current, "name", "current")
+        PresentationRegistry.dismiss("edit-owner", CloseReason.UserDismissed)
+        PresentationRegistry.reportTextCommitted("edit-owner", current, "name", "closed")
+        assertEquals(listOf("first", "current"), received)
+    }
+
+    @Test
     fun `authenticated Journey shows its signed screen and closes through Journey lifecycle`() = runTest {
         val release = renderedJourneyRelease()
         val emitted = mutableListOf<Emitted>()
@@ -346,6 +364,10 @@ class ExperiencePresentationServiceTest {
         runCurrent()
         PresentationRegistry.reportFirstFrame(launched.single())
         first.await()
+        val originalDraft = requireNotNull(PresentationRegistry.resolve(launched.single()))
+            .textInputState.bind()
+        val draft = ExperienceTextInputState.Value("iris@example.com", 2, 5)
+        assertTrue(originalDraft.write("input_email", draft))
 
         val second = async {
             service.presentJourney(
@@ -361,6 +383,11 @@ class ExperiencePresentationServiceTest {
         runCurrent()
 
         assertEquals(2, launched.size)
+        assertFalse(originalDraft.isCurrent())
+        assertFalse(originalDraft.write("input_email", draft.copy(text = "late")))
+        val restoredDraft = requireNotNull(PresentationRegistry.resolve(launched.last()))
+            .textInputState.bind()
+        assertEquals(draft, restoredDraft.read("input_email"))
         assertTrue(firstLease.closed.get())
         assertTrue(firstOutcomes.isEmpty())
         assertEquals(
@@ -377,6 +404,94 @@ class ExperiencePresentationServiceTest {
         assertTrue(secondLease.closed.get())
         assertEquals(2, emitted.count { it == SystemEventNames.EXPERIENCE_SHOWN })
         assertEquals(1, emitted.count { it == SystemEventNames.EXPERIENCE_DISMISSED })
+
+        val nextReservation = requireNotNull(service.reserveJourney("customer-1"))
+        val nextJourney = async {
+            service.presentJourney(
+                release = release,
+                screenId = "screen_welcome",
+                journeyId = "journey-2",
+                ownerDistinctId = "customer-1",
+                reservation = nextReservation,
+                acquire = { acquired(release.identity, Lease()) },
+                onOutcome = {},
+            )
+        }
+        runCurrent()
+        val freshDraft = requireNotNull(PresentationRegistry.resolve(launched.last()))
+            .textInputState.bind()
+        assertNull(freshDraft.read("input_email"))
+        PresentationRegistry.reportFirstFrame(launched.last())
+        nextJourney.await()
+        service.dismissFromHost("customer-1")
+    }
+
+    @Test
+    fun `navigation restores independent screen drafts and discards them for a new build`() = runTest {
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        val nextBuild = renderedJourneyRelease("text-input-navigation.json", "nextBuildEntry")
+        val launched = mutableListOf<String>()
+        val batches = mutableListOf<JourneyScreenEmissionBatch>()
+        val service = service(this, launch = launched::add)
+        var first = true
+        suspend fun show(
+            screenId: String,
+            selectedRelease: AuthenticatedJourneyRelease = release,
+        ): ExperienceTextInputState.Session {
+            val reservation = if (first) service.reserveJourney("customer-1") else null
+            first = false
+            val pending = async {
+                service.presentJourney(
+                    release = selectedRelease,
+                    screenId = screenId,
+                    journeyId = "journey-1",
+                    ownerDistinctId = "customer-1",
+                    reservation = reservation,
+                    acquire = { acquired(selectedRelease.identity, Lease()) },
+                    onEmissionBatch = { batches += it; true },
+                    onOutcome = {},
+                )
+            }
+            runCurrent()
+            val presentation = requireNotNull(PresentationRegistry.resolve(launched.last()))
+            assertEquals(screenId, presentation.screenId)
+            PresentationRegistry.reportFirstFrame(launched.last())
+            pending.await()
+            return presentation.textInputState.bind()
+        }
+        fun commit(text: String) {
+            val host = AttachedHost()
+            val id = launched.last()
+            assertTrue(PresentationRegistry.attach(id, host))
+            PresentationRegistry.reportTextCommitted(id, host, "input_email", text)
+            runCurrent()
+            PresentationRegistry.detach(id, host)
+        }
+        val welcome = show("screen_welcome")
+        val welcomeValue = ExperienceTextInputState.Value("Iris", 1, 3)
+        assertTrue(welcome.write("input_email", welcomeValue))
+        commit("Iris")
+        assertEquals(1, batches.size)
+        val details = show("screen_details")
+        assertNull(details.read("input_email"))
+        assertFalse(welcome.write("input_email", welcomeValue.copy(text = "stale")))
+        val detailsValue = ExperienceTextInputState.Value("Separate", 2, 2)
+        assertTrue(details.write("input_email", detailsValue))
+        commit("Separate")
+        assertEquals(2, batches.size)
+        assertEquals(welcomeValue, show("screen_welcome").read("input_email"))
+        commit("Iris")
+        assertEquals(2, batches.size)
+        assertEquals(detailsValue, show("screen_details").read("input_email"))
+        commit("Separate")
+        assertEquals(2, batches.size)
+        assertNull(show("screen_welcome", nextBuild).read("input_email"))
+        commit("Iris")
+        assertEquals(3, batches.size)
+        assertNull(show("screen_details", nextBuild).read("input_email"))
+        // Returning to an earlier build must not resurrect its old drafts either.
+        assertNull(show("screen_welcome", release).read("input_email"))
+        service.dismissFromHost("customer-1")
     }
 
     @Test
@@ -607,11 +722,14 @@ class ExperiencePresentationServiceTest {
         )
     }
 
-    private fun renderedJourneyRelease(): AuthenticatedJourneyRelease {
+    private fun renderedJourneyRelease(
+        file: String = "release.json",
+        entryKey: String = "renderedEntry",
+    ): AuthenticatedJourneyRelease {
         val fixture = Json.parseToJsonElement(
-            FixtureRunner.fixturesRoot().resolve("journeys/planes/release.json").readText(),
+            FixtureRunner.fixturesRoot().resolve("journeys/planes/$file").readText(),
         ).jsonObject
-        val entry = fixture.getValue("renderedEntry").jsonObject
+        val entry = fixture.getValue(entryKey).jsonObject
         val envelope = entry.getValue("envelope").jsonObject
         val descriptor = Json.parseToJsonElement(
             Base64.decode(
