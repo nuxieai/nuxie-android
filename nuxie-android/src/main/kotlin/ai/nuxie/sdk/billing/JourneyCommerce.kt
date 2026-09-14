@@ -69,6 +69,7 @@ internal data class JourneyProductCatalog(
                         featureAllowances = product.featureAllowances,
                         experienceId = release.identity.experienceId,
                         experienceVersion = release.identity.experienceVersionId,
+                        preview = product.preview,
                     )
                 }
             if (requests.mapNotNull(CatalogProductRequest::placementId).distinct().size != requests.size) {
@@ -119,6 +120,7 @@ internal data class JourneyProductCatalog(
                 basePlanId = basePlanId,
                 purchaseOptionId = purchaseOptionId,
                 featureAllowances = parseAllowances(id, product),
+                preview = product["preview"] as? JsonObject,
             )
         }
 
@@ -165,6 +167,7 @@ internal data class JourneyProductCatalog(
             val basePlanId: String?,
             val purchaseOptionId: String?,
             val featureAllowances: List<FeatureAllowance>,
+            val preview: JsonObject? = null,
         )
     }
 }
