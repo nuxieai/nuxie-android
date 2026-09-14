@@ -97,6 +97,8 @@ internal class ExperienceMountedScreen(
 
     val reduceMotion: Boolean get() = reduceMotionEnabled
 
+    fun setInputEnabled(enabled: Boolean) { textOverlay?.setInputEnabled(enabled) }
+
     fun activate() {
         if (lifecycle.phase == ExperienceScreenLifecycle.Phase.ENTERING ||
             lifecycle.phase == ExperienceScreenLifecycle.Phase.EXITING) {

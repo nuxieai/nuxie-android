@@ -45,6 +45,7 @@ internal class ExperienceTextInputOverlay(
     private val session = state.bind()
     private var snapshot: NuxieViewModelSnapshot? = null
     private var closed = false
+    private var inputEnabled = true
     private var keyboardShift = 0f
     private val keyboardLayoutListener = ViewTreeObserver.OnGlobalLayoutListener { avoidKeyboard() }
 
@@ -65,7 +66,7 @@ internal class ExperienceTextInputOverlay(
             editor.visibility = View.INVISIBLE
             addView(editor, LayoutParams(1, 1))
             bindings += Binding(input, editor)
-            fun retain(): Boolean = !closed && session.write(input.id, ExperienceTextInputState.Value(
+            fun retain(): Boolean = !closed && inputEnabled && session.write(input.id, ExperienceTextInputState.Value(
                 editor.text.toString(), editor.selectionStart, editor.selectionEnd,
             ))
             editor.onSelection = { retain(); Unit }
@@ -81,6 +82,23 @@ internal class ExperienceTextInputOverlay(
             }
             editor.onChange(false)
         }
+    }
+
+    /** IME callbacks can outlive touch dispatch; fence them during native preparation too. */
+    fun setInputEnabled(enabled: Boolean) {
+        if (closed || inputEnabled == enabled) return
+        if (!enabled) clearEditorFocus()
+        inputEnabled = false
+        bindings.forEach { binding ->
+            val editor = binding.editor
+            if (enabled) session.read(binding.input.id)?.let { retained ->
+                editor.setText(retained.text)
+                val length = editor.text?.length ?: 0
+                editor.setSelection(retained.selectionStart.coerceIn(0, length), retained.selectionEnd.coerceIn(0, length))
+            }
+            editor.isEnabled = enabled
+        }
+        inputEnabled = enabled
     }
 
     fun update(snapshot: NuxieViewModelSnapshot) {

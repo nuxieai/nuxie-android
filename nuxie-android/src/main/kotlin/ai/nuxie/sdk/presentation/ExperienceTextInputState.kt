@@ -1,11 +1,14 @@
 package ai.nuxie.sdk.presentation
 
 /** Process-local screen state. Never serialized into an Activity Bundle or persisted to disk. */
-internal class ExperienceTextInputState {
+internal class ExperienceTextInputState private constructor(
+    private val committedValues: MutableMap<String, String>,
+    private var preparationSource: ExperienceTextInputState?,
+) {
+    constructor() : this(mutableMapOf(), null)
     data class Value(val text: String, val selectionStart: Int, val selectionEnd: Int)
 
     private val values = mutableMapOf<String, Value>()
-    private val committedValues = mutableMapOf<String, String>()
     private var generation = 0L
 
     @Synchronized
@@ -16,26 +19,36 @@ internal class ExperienceTextInputState {
         generation++
     }
 
-    @Synchronized
-    fun committedValue(inputId: String): String? = committedValues[inputId]
+    fun committedValue(inputId: String): String? = synchronized(committedValues) { committedValues[inputId] }
 
     /** Keep only accepted response values, independently of the current draft. */
-    @Synchronized
     fun recordCommit(inputId: String, text: String) {
-        committedValues[inputId] = text
+        synchronized(committedValues) { committedValues[inputId] = text }
     }
 
+    /** Drafts are speculative; accepted response history belongs to the screen across visits. */
     @Synchronized
-    fun copyForPreparation(): ExperienceTextInputState = ExperienceTextInputState().also {
+    fun copyForPreparation(): ExperienceTextInputState = ExperienceTextInputState(committedValues, this).also {
         it.values.putAll(values)
-        it.committedValues.putAll(committedValues)
+    }
+
+    /** Refresh only before mounting, after outgoing input has been frozen on the UI thread. */
+    fun refreshBeforeMount() {
+        val source = preparationSource ?: return
+        val latest = synchronized(source) { source.values.toMap() }
+        synchronized(this) {
+            check(generation == 0L) { "Preparation state is already bound" }
+            values.clear()
+            values.putAll(latest)
+            preparationSource = null
+        }
     }
 
     @Synchronized
     fun resetUnrevealedAttempt() {
         generation++
         values.clear()
-        committedValues.clear()
+        synchronized(committedValues) { committedValues.clear() }
     }
 
     inner class Session internal constructor(private val owner: Long) {

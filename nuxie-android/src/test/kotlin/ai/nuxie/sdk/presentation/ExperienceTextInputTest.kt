@@ -36,6 +36,43 @@ internal fun textInputDescriptor(value: String = ""): JsonObject = Json.parseToJ
 @RunWith(RobolectricTestRunner::class)
 class ExperienceTextInputTest {
     @Test
+    fun `native preparation takes the latest draft and fences stale IME callbacks until abort`() {
+        val contract = Json.parseToJsonElement(ai.nuxie.sdk.fixtures.FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/navigation-input-handoff-android.json").readText()) as JsonObject
+        fun value(key: String) = (contract.getValue(key) as JsonPrimitive).content
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val state = ExperienceTextInputState()
+        val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(maxLength = null)
+        val writes = mutableListOf<String>()
+        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+            listOf(input), emptyMap(), { _, text, _, done -> writes += text; done(Result.success(Unit)) },
+            { throw it }, state)
+        val editor = overlay.getChildAt(0) as EditText
+        editor.setText(value("initialDraft"))
+        val target = state.copyForPreparation()
+        editor.setText(value("latestDraft"))
+        editor.setSelection(1, 3)
+        overlay.setInputEnabled(false)
+        target.refreshBeforeMount()
+        val targetSession = target.bind()
+        assertEquals(ExperienceTextInputState.Value(value("latestDraft"), 1, 3), targetSession.read("name"))
+        val count = writes.size
+        editor.setText(value("staleImeDraft"))
+        assertEquals(count, writes.size)
+        targetSession.write("name", ExperienceTextInputState.Value("provisional", 0, 0))
+        // A response accepted while native preparation runs must not be emitted again on arrival.
+        state.recordCommit("name", value("acceptedResponse"))
+        assertEquals(value("acceptedResponse"), target.committedValue("name"))
+        overlay.setInputEnabled(true)
+        assertEquals(value("latestDraft"), editor.text.toString())
+        assertEquals(1, editor.selectionStart)
+        assertEquals(3, editor.selectionEnd)
+        editor.setText("Resumed")
+        assertEquals("Resumed", writes.last())
+        overlay.close()
+    }
+
+    @Test
     fun `recreated editors restore draft and selection without accepting stale owners`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val state = ExperienceTextInputState()
@@ -194,6 +231,31 @@ class ExperienceTextInputTest {
         connection.finishComposingText()
         assertEquals("aXc", editor.text.toString())
         overlay.close()
+    }
+
+    @Test
+    fun `a response accepted after preparation starts is not duplicated on arrival`() = runTest {
+        val accepted = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val batches = mutableListOf<JourneyScreenEmissionBatch>()
+        val sourceState = ExperienceTextInputState()
+        val source = JourneyRuntimeEmissionCoordinator("journey", "survey", textInputDescriptor(), 0, 0,
+            onEmissionBatch = { entered.complete(Unit); accepted.await(); batches += it; true },
+            onPresentationRevealed = {})
+        assertTrue(source.reveal())
+        val pending = async { source.publishTextCommit("name", "Ada", sourceState) }
+        entered.await()
+        val destinationState = sourceState.copyForPreparation()
+        assertNull(destinationState.committedValue("name"))
+        accepted.complete(Unit)
+        assertTrue(pending.await())
+        val destination = JourneyRuntimeEmissionCoordinator("journey", "survey", textInputDescriptor(), 1, 1,
+            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
+        assertTrue(destination.reveal())
+        assertTrue(destination.publishTextCommit("name", "Ada", destinationState))
+        assertEquals(1, batches.size)
+        source.close()
+        destination.close()
     }
 
     @Test

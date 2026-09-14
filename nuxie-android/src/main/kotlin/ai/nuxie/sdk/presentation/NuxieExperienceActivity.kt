@@ -254,11 +254,19 @@ internal class NuxieExperienceActivity : Activity() {
         private var sourceAccessibility: Int? = null
         private var targetAccessibility: Int? = null
 
+        fun freezeInput() {
+            blocksInput = true
+            source.mounted?.setInputEnabled(false)
+            sourceAccessibility = source.view?.importantForAccessibility
+            source.view?.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        }
+
         private fun restoreInput() {
             sourceAccessibility?.let { source.view?.importantForAccessibility = it }
             targetAccessibility?.let { target.view?.importantForAccessibility = it }
             sourceAccessibility = null
             targetAccessibility = null
+            source.mounted?.setInputEnabled(true)
             blocksInput = false
         }
 
@@ -287,7 +295,6 @@ internal class NuxieExperienceActivity : Activity() {
                 val incoming = checkNotNull(target.view)
                 blocksInput = true
                 outgoing.clearFocus()
-                sourceAccessibility = outgoing.importantForAccessibility
                 targetAccessibility = incoming.importantForAccessibility
                 outgoing.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
                 incoming.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
@@ -371,6 +378,8 @@ internal class NuxieExperienceActivity : Activity() {
                 // Capture ownership before the main-thread handoff can discard a cancelled result.
                 pending = candidate
                 navigation = candidate
+                candidate.freezeInput()
+                prepared.textInputState.refreshBeforeMount()
                 screens += target
                 contentRoot.addView(target.mount().apply { alpha = 0f }, 0, FrameLayout.LayoutParams(-1, -1))
                 target.mounted?.observeWindow()

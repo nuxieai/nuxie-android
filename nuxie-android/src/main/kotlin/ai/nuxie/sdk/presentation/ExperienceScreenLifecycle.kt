@@ -36,9 +36,7 @@ internal class ExperienceScreenLifecycle {
 
     @Synchronized
     fun copyForPreparation(): ExperienceScreenLifecycle = ExperienceScreenLifecycle().also {
-        it.phase = phase
         it.appearances = appearances
-        it.transition = transition
         it.reduceMotion = reduceMotion
     }
 
