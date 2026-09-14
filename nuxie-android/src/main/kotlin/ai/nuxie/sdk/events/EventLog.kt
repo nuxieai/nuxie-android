@@ -772,19 +772,23 @@ internal class EventLog(
      * Replays subscriber routes left pending by a prior process. This
      * runs subscribers inline so a caller opening durable journey state can
      * finish recovery before admitting fresh work.
+     * Live routes already owned by the route worker are excluded: that worker
+     * may itself be waiting for the Journey command performing this replay.
      */
     suspend fun replayPendingLocalRoutes(distinctId: String): Boolean = runCatching {
         val admissionTickets = sampleAdmissionTickets()
+        var accepted = true
         for (event in store.queryPendingLocalRoutes(distinctId)) {
             if (!activeLocalRouteIds.add(event.id)) continue
             if (announce(event, admissionTickets)) {
                 acknowledgeLocalRouteIfNeeded(event.id)
             } else {
                 activeLocalRouteIds.remove(event.id)
+                accepted = false
             }
         }
-        retryFailedLocalRouteAcknowledgements()
-        store.queryPendingLocalRoutes(distinctId).isEmpty()
+        val acknowledged = retryFailedLocalRouteAcknowledgements()
+        accepted && acknowledged
     }.onFailure {
         Log.w(LOG_TAG, "Failed to replay pending local routes", it)
     }.getOrDefault(false)

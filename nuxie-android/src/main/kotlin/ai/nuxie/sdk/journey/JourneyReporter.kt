@@ -20,23 +20,25 @@ internal class JourneyReporter(
         this.onRunRetired = onRunRetired
     }
 
-    suspend fun flushPending() {
+    suspend fun flushPending(): Boolean {
+        var settled = true
         for (run in journal.runs()) {
             if (!run.startedQueued) {
-                if (!queue(run, completion = false)) continue
+                if (!queue(run, completion = false)) { settled = false; continue }
                 journal.markStartedQueued(run)
             }
             if (run.completion != null) {
                 if (run.experimentExposures.any {
                         it.shownAtMillis != null && !it.queued
                     }
-                ) continue
-                if (run.pendingPresentationPublication != null) continue
-                if (!queue(run, completion = true)) continue
+                ) { settled = false; continue }
+                if (run.pendingPresentationPublication != null) { settled = false; continue }
+                if (!queue(run, completion = true)) { settled = false; continue }
                 journal.markCompletionQueued(run)
                 onRunRetired(run)
             }
         }
+        return settled
     }
 
     private suspend fun queue(run: JourneyRun, completion: Boolean): Boolean {

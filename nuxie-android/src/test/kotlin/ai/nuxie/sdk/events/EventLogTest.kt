@@ -288,6 +288,33 @@ class EventLogTest {
     }
 
     @Test
+    fun replayDoesNotWaitForALiveRouteThatAlreadyOwnsItsReceipt() = runBlocking {
+        val store = RecordingStore()
+        val eventLog = log(store)
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var deliveries = 0
+        eventLog.subscribeCommittedWithAdmission(sampleGeneration = { 1L }) { _, _ ->
+            deliveries++
+            entered.complete(Unit)
+            release.await()
+            true
+        }
+        eventLog.capture("live-trigger")
+        try {
+            withTimeout(5_000) { entered.await() }
+            assertEquals(1, store.pendingLocalRoutes.size)
+            val contract = kotlinx.serialization.json.Json.parseToJsonElement(ai.nuxie.sdk.fixtures.FixtureRunner.fixturesRoot()
+                .resolve("sdk/warm-start-recovery.json").readText()) as JsonObject
+            val expected = contract.getValue("liveOwnedRouteAllowsReconciliation").toString().toBooleanStrict()
+            assertEquals(expected, withTimeout(5_000) { eventLog.replayPendingLocalRoutes("anon-1") })
+            assertEquals(1, deliveries)
+        } finally { release.complete(Unit) }
+        eventLog.awaitBarrier()
+        assertTrue(store.pendingLocalRoutes.isEmpty())
+    }
+
+    @Test
     fun rejectedAdmissionKeepsOrdinaryRoutePendingForReplay() = runBlocking {
         val store = RecordingStore()
         val eventLog = log(store)
@@ -304,10 +331,12 @@ class EventLogTest {
         assertEquals(1, attempts)
         assertEquals(1, store.pendingLocalRoutes.size)
 
+        assertFalse(eventLog.replayPendingLocalRoutes("anon-1"))
+
         accepts = true
         assertTrue(eventLog.replayPendingLocalRoutes("anon-1"))
 
-        assertEquals(2, attempts)
+        assertEquals(3, attempts)
         assertTrue(store.pendingLocalRoutes.isEmpty())
     }
 
