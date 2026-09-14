@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "0277afdc2e405918c2dfb39730fa235112cc03c7",
+  "sourceCommit": "320d0d6720eef035413580cb0de0b8b71d953b16",
   "files": {
     "README.md": "4363d6a79ac9828364a6a02bf400d98c0852b771062258c409a744dd1a5016e7",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
@@ -28,6 +28,7 @@
     "journeys/planes/release.json": "1514ec568c2ff0e5e4d1caf3f5f826f6bfe88ab9de3d660f5b0a7a60135ab0bd",
     "journeys/planes/reports.json": "6d5ff79acd668b02c4aeac84b1154425c720ba16b50beb5ef30f9b0899322d39",
     "journeys/planes/run-recovery.json": "4bf67b161af433a1d3c18332f3444d86aee7cbc60bf34286dcf3b63359746d88",
+    "journeys/planes/runtime-bound-state.json": "300f30c04c228bfc56b37de9622262a66399dfa08e2a961fd8d7e34979e9c246",
     "journeys/planes/runtime-visibility-android.json": "7f5d6982969e426dc22a4dfd98141f67c54a8cdaf7e55d18e60e307d1aa7d2bd",
     "journeys/planes/text-input-composition-android.json": "694ff733eea196ce84bfb3882952e603034a0d613119d6d4f4c20dc530006929",
     "journeys/planes/text-input-edits.json": "323cc0d71359c33d4738ef2ea30c9c99441859004b4adab79364b2af82889c3d",
