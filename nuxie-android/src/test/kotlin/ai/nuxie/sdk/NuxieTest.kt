@@ -465,6 +465,7 @@ class NuxieTest {
                 cleaningUp.await()
                 assertFalse(Nuxie.isSetup)
                 assertFalse(completion.isCompleted)
+                assertRuntimeSettingsUnavailable("stopping")
                 releaseCleanup.complete(Unit)
                 val failure = runCatching { restore.await().getOrThrow() }.exceptionOrNull()
                 assertTrue(failure is kotlinx.coroutines.CancellationException)
@@ -509,6 +510,52 @@ class NuxieTest {
     @Test
     fun dismissBeforeSetupIsANoop() = runBlocking {
         Nuxie.dismiss()
+    }
+
+    private fun assertRuntimeSettingsUnavailable(state: String) {
+        val fixture = Json.parseToJsonElement(java.io.File(
+            ai.nuxie.sdk.fixtures.FixtureRunner.fixturesRoot(), "sdk/runtime-settings.json",
+        ).readText()).jsonObject
+        assertTrue(fixture.getValue("unavailableStates").jsonArray.any { it.jsonPrimitive.content == state })
+        assertTrue(fixture.getValue("expected").jsonObject.getValue("rejectUnavailable").jsonPrimitive.boolean)
+        for (setter in fixture.getValue("setters").jsonArray) {
+            assertThrows("$state: $setter", IllegalStateException::class.java) {
+                when (setter.jsonPrimitive.content) {
+                    "localeIdentifier" -> runBlocking { Nuxie.setLocaleIdentifier("fr_FR") }
+                    "purchaseDelegate" -> Nuxie.setPurchaseDelegate(null)
+                    "purchaseHandlingMode" -> Nuxie.setPurchaseHandlingMode(ai.nuxie.sdk.billing.PurchaseHandlingMode.APP_MANAGED)
+                    else -> error("Unknown runtime setting: $setter")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun runtimeSettingsRequireRunningSdkAndDoNotLeakAcrossSetup() = runBlocking {
+        assertRuntimeSettingsUnavailable("beforeSetup")
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = FakeTransport(), registerLifecycle = false, requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
+        )
+        val context = RuntimeEnvironment.getApplication()
+        Nuxie.setup(context, NuxieConfiguration("pk_test_settings"))
+        val delegate = object : NuxiePurchaseDelegate {
+            override suspend fun purchase(product: StoreProduct): PurchaseResult = error("Unexpected checkout")
+            override suspend fun restorePurchases(): RestoreResult = error("Unexpected restore")
+        }
+        Nuxie.setPurchaseDelegate(delegate)
+        Nuxie.setPurchaseHandlingMode(ai.nuxie.sdk.billing.PurchaseHandlingMode.APP_MANAGED)
+        val settings = requireNotNull(Nuxie.core).purchaseSettings
+        assertTrue(settings.delegate === delegate)
+        assertEquals(ai.nuxie.sdk.billing.PurchaseHandlingMode.APP_MANAGED, settings.handlingMode)
+        Nuxie.setPurchaseDelegate(null)
+        assertEquals(null, settings.delegate)
+        Nuxie.shutdownAndAwait()
+        assertRuntimeSettingsUnavailable("afterShutdown")
+        Nuxie.setup(context, NuxieConfiguration("pk_test_fresh_settings"))
+        val fresh = requireNotNull(Nuxie.core).purchaseSettings
+        assertEquals(null, fresh.delegate)
+        assertEquals(ai.nuxie.sdk.billing.PurchaseHandlingMode.NUXIE_MANAGED, fresh.handlingMode)
     }
 
     @Test

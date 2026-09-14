@@ -336,9 +336,12 @@ object Nuxie {
 
     // MARK: Profile
 
-    /** Use this locale at the next launch/foreground profile synchronization. */
+    /**
+     * Use this locale at the next launch/foreground profile synchronization; null follows the device.
+     * @throws IllegalStateException when the SDK is not running.
+     */
     suspend fun setLocaleIdentifier(localeIdentifier: String?) {
-        val operation = lifecycle.admit() ?: return
+        val operation = lifecycle.admit() ?: throw IllegalStateException("Call Nuxie.setup first.")
         lifecycle.execute(operation) { state ->
             val core = state
             core.profile.setLocaleIdentifier(localeIdentifier)
@@ -510,13 +513,15 @@ object Nuxie {
         return lifecycle.executeOwned(operation, { it.producerScope }) { it.purchases.restorePurchases() }
     }
 
+    /** Replace the delegate for future purchases/restores; requires a running SDK. */
     fun setPurchaseDelegate(delegate: NuxiePurchaseDelegate?) {
-        val operation = lifecycle.admit() ?: return
+        val operation = lifecycle.admit() ?: throw IllegalStateException("Call Nuxie.setup first.")
         try { operation.graph.purchaseSettings.delegate = delegate } finally { operation.finish() }
     }
 
+    /** Change ownership of future Play purchase handling; requires a running SDK. */
     fun setPurchaseHandlingMode(mode: PurchaseHandlingMode) {
-        val operation = lifecycle.admit() ?: return
+        val operation = lifecycle.admit() ?: throw IllegalStateException("Call Nuxie.setup first.")
         try { operation.graph.purchaseSettings.handlingMode = mode } finally { operation.finish() }
     }
 

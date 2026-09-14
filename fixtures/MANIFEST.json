@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "36fa8442aa25b5a52d3d51f8b7497eddd65e69a9",
+  "sourceCommit": "f571ba4d96ec26ae8f0c9f2fa4470aaa20115872",
   "files": {
     "README.md": "4363d6a79ac9828364a6a02bf400d98c0852b771062258c409a744dd1a5016e7",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
@@ -67,6 +67,7 @@
     "purchases/test-store-preview.json": "dc379fe653fe0c7f71ce170ce620bda21a5ecbda93fda7aa5866d2c2f4198ce3",
     "purchases/test-store.json": "0a6025ef1e3b0c8706544fdbe022fd14cac22644af49a2f0c9d949070dc8e396",
     "runtime/surface-capability-android.json": "d4b0996d6008d94a64b547fd589c6cd2810c8d8f5867d2183b928fbed7e7a0ac",
+    "sdk/runtime-settings.json": "a94f62521e03c7886a9e10463c00626231824bace5af6edce497413ed3b1618e",
     "sdk/shutdown.json": "49ce1489c0be052e32f87ba57a8f8db2461361532cdf98588410e1642637058e",
     "unicode/GraphemeBreakTest-16.0.0.txt": "ee2b9354d270ac061b29f09662cafea06341d77e704b8cc6bd72aaeeda363cb5",
     "unicode/LICENSE.txt": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96",

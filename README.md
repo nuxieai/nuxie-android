@@ -113,6 +113,20 @@ Nuxie.setup(applicationContext, configuration)
 check(Nuxie.isSetup)
 ```
 
+Runtime updates through `setLocaleIdentifier`, `setPurchaseDelegate`, and
+`setPurchaseHandlingMode` require a running SDK. They throw
+`IllegalStateException` before setup and once shutdown starts; rejected changes
+are not saved for the next setup. Set initial values on `NuxieConfiguration`.
+Locale changes invalidate the old profile request and take effect at the next
+profile synchronization; `null` follows the device locale. Purchase settings
+apply to future purchase/restore work, and a null delegate restores native billing.
+
+Android retains `featureCacheTTL` on configuration, in milliseconds (five minutes
+by default). iOS exposes its equivalent through testing overrides in seconds;
+bindings must convert units. `testingOverrides.apiEndpoint` is available for
+attended test hosts on both platforms. Production integrations should use the
+configured environment.
+
 The legacy SDK is archived on branch `legacy/webview-sdk`.
 
 ## Development Test Store
