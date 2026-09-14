@@ -1,0 +1,283 @@
+package ai.nuxie.sdk.presentation
+
+import ai.nuxie.sdk.runtime.NativeViewModelSnapshot
+import ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance
+import ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue
+import ai.nuxie.sdk.runtime.NuxieViewModelPropertyKind
+import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
+import android.app.Activity
+import android.graphics.Color
+import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.widget.EditText
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import org.junit.Assert.*
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.Robolectric
+import org.robolectric.RobolectricTestRunner
+
+internal fun textInputDescriptor(value: String = ""): JsonObject = Json.parseToJsonElement("""
+    {"render":{"textInputs":[{
+      "id":"name","screenId":"survey","riveTextRunName":"headline","value":${JsonPrimitive(value)},"editable":true,
+      "responseFieldKey":"answer","secureTextEntry":false,"multiline":false,"maxLength":2,
+      "geometry":{"xPath":"x","yPath":"y","widthPath":"width","heightPath":"height",
+        "rotationPath":"rotation","scaleXPath":"scaleX","scaleYPath":"scaleY"},
+      "style":{"fontFamily":"sans-serif","fontWeight":"400","fontStyle":"normal","fontSize":16,
+        "lineHeight":20,"letterSpacing":0,"color":4278190080,"fontAssetRiveUniqueName":"font"}
+    }]}}
+""") as JsonObject
+
+@RunWith(RobolectricTestRunner::class)
+class ExperienceTextInputTest {
+    @Test
+    fun `recreated editors restore draft and selection without accepting stale owners`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val state = ExperienceTextInputState()
+        val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(maxLength = null)
+        val writes = mutableListOf<String>()
+        val callbacks = mutableListOf<(Result<Unit>) -> Unit>()
+        val failures = mutableListOf<Throwable>()
+        fun overlay() = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+            listOf(input), emptyMap(), { _, value, _, done -> writes += value; callbacks += done },
+            failures::add, state)
+        val first = overlay()
+        val oldEditor = first.getChildAt(0) as EditText
+        oldEditor.setText("Iris")
+        oldEditor.setSelection(1, 3)
+        val staleCompletion = callbacks.last()
+        // Activity attachment may overlap its predecessor's asynchronous teardown.
+        val second = overlay()
+        val editor = second.getChildAt(0) as EditText
+        assertEquals("Iris", editor.text.toString())
+        assertEquals(1, editor.selectionStart)
+        assertEquals(3, editor.selectionEnd)
+        assertFalse(editor.isSaveEnabled)
+        val count = writes.size
+        oldEditor.setText("stale")
+        staleCompletion(Result.failure(IllegalStateException("old runtime closed")))
+        assertEquals(count, writes.size)
+        assertTrue(failures.isEmpty())
+        first.close()
+        second.close()
+        val third = overlay()
+        assertEquals("Iris", (third.getChildAt(0) as EditText).text.toString())
+        third.close()
+    }
+
+    @Test
+    fun `geometry uses renderer contain fit and invalid geometry hides editor`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(value = "abcd")
+        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+            listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
+        activity.setContentView(overlay)
+        overlay.layout(0, 0, 400, 400)
+        overlay.update(snapshot())
+        val editor = overlay.getChildAt(0) as EditText
+        assertEquals("ab", editor.text.toString())
+        assertEquals(View.VISIBLE, editor.visibility)
+        assertEquals(20f, editor.x)
+        assertEquals(140f, editor.y)
+        assertEquals(160, editor.layoutParams.width)
+        assertEquals(40, editor.layoutParams.height)
+        assertEquals(Color.TRANSPARENT, editor.currentTextColor)
+        overlay.update(snapshot(width = Float.NaN))
+        assertEquals(View.INVISIBLE, editor.visibility)
+        overlay.close()
+        assertEquals(0, overlay.childCount)
+    }
+
+    @Test
+    fun `IME composition remains intact and committed text respects grapheme limit`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val writes = mutableListOf<Pair<String, Boolean>>()
+        val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single()
+        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+            listOf(input), emptyMap(), { _, text, commit, done ->
+                writes += text to commit; done(Result.success(Unit))
+            }, { throw it })
+        activity.setContentView(overlay)
+        overlay.layout(0, 0, 400, 400)
+        overlay.update(snapshot())
+        val editor = overlay.getChildAt(0) as EditText
+        editor.requestFocus()
+        val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
+        connection.setComposingText("abc", 1)
+        assertEquals("abc", editor.text.toString())
+        connection.commitText("e\u0301😀z", 1)
+        assertEquals("e\u0301😀", editor.text.toString())
+        editor.clearFocus()
+        assertTrue(writes.contains("e\u0301😀" to true))
+        val count = writes.size
+        overlay.close()
+        editor.setText("late")
+        assertEquals(count, writes.size)
+    }
+
+    @Test
+    fun `focused editor owns complete pre-edit text and restores Rive on blur`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val writes = mutableListOf<Pair<String, Boolean>>()
+        val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(value = "abc", maxLength = 3)
+        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+            listOf(input), emptyMap(), { _, text, commit, done ->
+                writes += text to commit; done(Result.success(Unit))
+            }, { throw it })
+        activity.setContentView(overlay)
+        overlay.layout(0, 0, 400, 400)
+        overlay.update(snapshot())
+        val editor = overlay.getChildAt(0) as EditText
+        assertEquals("abc" to false, writes.last())
+        assertEquals(Color.TRANSPARENT, editor.currentTextColor)
+        editor.requestFocus()
+        assertEquals("" to false, writes.last())
+        assertEquals(input.style.color, editor.currentTextColor)
+        val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
+        editor.setSelection(1, 2)
+        connection.setComposingText("XYZ", 1)
+        assertEquals("aXYZc", editor.text.toString())
+        assertEquals(input.style.color, editor.currentTextColor)
+        assertEquals("" to false, writes.last())
+        editor.clearFocus()
+        assertEquals("aXc" to true, writes.last())
+        assertEquals(Color.TRANSPARENT, editor.currentTextColor)
+        connection.finishComposingText()
+        assertEquals("aXc" to false, writes.last())
+        assertEquals(Color.TRANSPARENT, editor.currentTextColor)
+        overlay.close()
+    }
+
+    @Test
+    fun `ordinary over-limit insertion cannot discard unselected text`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(value = "ab")
+        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+            listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
+        activity.setContentView(overlay)
+        val editor = overlay.getChildAt(0) as EditText
+        val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
+        editor.setSelection(1)
+        connection.commitText("X", 1)
+        assertEquals("ab", editor.text.toString())
+        editor.setSelection(1, 2)
+        connection.commitText("XY", 1)
+        assertEquals("ab", editor.text.toString())
+        editor.setSelection(1, 2)
+        connection.commitText("Z", 1)
+        assertEquals("aZ", editor.text.toString())
+        overlay.close()
+    }
+
+    @Test
+    fun `composition commit and finish preserve text outside the composing range`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(value = "abc", maxLength = 3)
+        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+            listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
+        activity.setContentView(overlay)
+        val editor = overlay.getChildAt(0) as EditText
+        val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
+        editor.setSelection(1, 2)
+        connection.setComposingText("XYZ", 1)
+        assertEquals("aXYZc", editor.text.toString())
+        connection.commitText("XYZ", 1)
+        assertEquals("aXc", editor.text.toString())
+        editor.setText("abc")
+        editor.setSelection(1, 2)
+        connection.setComposingText("XYZ", 1)
+        connection.finishComposingText()
+        assertEquals("aXc", editor.text.toString())
+        overlay.close()
+    }
+
+    @Test
+    fun `text responses wait for reveal deduplicate and stop at close`() = runTest {
+        val batches = mutableListOf<JourneyScreenEmissionBatch>()
+        val coordinator = JourneyRuntimeEmissionCoordinator(
+            "journey", "survey", textInputDescriptor(), 3, 7,
+            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {},
+        )
+        val pending = async { coordinator.publishTextCommit("name", "Ada") }
+        yield()
+        assertFalse(pending.isCompleted)
+        assertTrue(coordinator.reveal())
+        assertTrue(pending.await())
+        assertEquals(3L, batches.single().batchSequence)
+        assertEquals(7L, batches.single().emissions.single().sequence)
+        assertEquals("text_input:name", batches.single().source.actionId)
+        assertEquals("name", batches.single().source.componentId)
+        assertEquals(JsonPrimitive("answer"), batches.single().emissions.single().payload["field"])
+        assertEquals(JsonPrimitive("Ada"), batches.single().emissions.single().payload["value"])
+        assertTrue(coordinator.publishTextCommit("name", "Ada"))
+        assertFalse(coordinator.publishTextCommit("other-screen-input", "injected"))
+        assertEquals(1, batches.size)
+        assertTrue(coordinator.publishTextCommit("name", ""))
+        assertEquals(4L, batches.last().batchSequence)
+        coordinator.close()
+        assertFalse(coordinator.publishTextCommit("name", "late"))
+        assertEquals(2, batches.size)
+    }
+
+    @Test
+    fun `accepted text commits survive screen replacement but drafts and rejected commits do not suppress responses`() = runTest {
+        val state = ExperienceTextInputState()
+        val values = mutableListOf<JsonPrimitive>()
+        var accept = true
+        fun coordinator() = JourneyRuntimeEmissionCoordinator(
+            "journey", "survey", textInputDescriptor(), 0, 0,
+            onEmissionBatch = {
+                values += it.emissions.single().payload.getValue("value") as JsonPrimitive
+                accept
+            }, onPresentationRevealed = {},
+        )
+        val first = coordinator()
+        assertTrue(first.reveal())
+        assertTrue(first.publishTextCommit("name", "Al", state))
+        first.close()
+        state.detach()
+        val second = coordinator()
+        assertTrue(second.reveal())
+        assertTrue(second.publishTextCommit("name", "Al", state))
+        assertEquals(listOf(JsonPrimitive("Al")), values)
+        accept = false
+        assertFalse(second.publishTextCommit("name", "Bo", state))
+        assertEquals("Al", state.committedValue("name"))
+        val third = coordinator()
+        assertTrue(third.reveal())
+        accept = true
+        state.bind().write("name", ExperienceTextInputState.Value("Bo", 2, 2))
+        assertTrue(third.publishTextCommit("name", "Bo", state))
+        assertTrue(third.publishTextCommit("name", "", state))
+        assertEquals(listOf("Al", "Bo", "Bo", ""), values.map { it.content })
+        third.close()
+    }
+
+    @Test
+    fun `limited authored value is the initial response baseline`() = runTest {
+        var publications = 0
+        val coordinator = JourneyRuntimeEmissionCoordinator(
+            "journey", "survey", textInputDescriptor("abcd"), 0, 0,
+            onEmissionBatch = { publications++; true }, onPresentationRevealed = {},
+        )
+        assertTrue(coordinator.reveal())
+        assertTrue(coordinator.publishTextCommit("name", "ab"))
+        assertEquals(0, publications)
+        coordinator.close()
+    }
+
+    private fun snapshot(width: Float = 80f): NuxieViewModelSnapshot =
+        NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(1,
+            arrayOf(NativeViewModelSnapshotInstance(1, 0)),
+            mapOf("x" to 10f, "y" to 20f, "width" to width, "height" to 20f,
+                "rotation" to 0f, "scaleX" to 1f, "scaleY" to 1f).map { (name, value) ->
+                NativeViewModelSnapshotValue(1, 0, name, NuxieViewModelPropertyKind.NUMBER.nativeValue,
+                    byteArrayOf(), 0, value)
+            }.toTypedArray(),
+        ))
+}

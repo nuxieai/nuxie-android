@@ -55,6 +55,10 @@ internal class ExperienceSurfaceHost(
         ) {}
         fun onFailure(error: ExperiencePresentationException)
         fun onRuntimeEvent(event: NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {}
+        /** UI-thread geometry update, after its frame has been presented. */
+        fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot) {}
+        /** Runtime-lane callback ordered with writes and renderer publications. */
+        fun onTextCommitted(inputId: String, text: String) {}
     }
 
     /** Owned runtime wrappers; created, touched, and closed only on the runtime lane. */
@@ -67,6 +71,7 @@ internal class ExperienceSurfaceHost(
     private var nextCorrelationId = 1uL
     private var firstFramePresented = false
     private val unpublishedSteps = ArrayDeque<PublishedStep>()
+    private var textInputs: Map<String, ExperienceTextInput> = emptyMap()
 
     /**
      * Lane-confined surface attachment. Jobs already queued when the
@@ -98,9 +103,11 @@ internal class ExperienceSurfaceHost(
         descriptor: JsonObject? = null,
         artifactsByKey: Map<String, File> = emptyMap(),
         viewModelProjection: NuxieViewModelListProjection? = null,
+        textInputs: List<ExperienceTextInput> = emptyList(),
         onLoaded: ((Boolean) -> Unit)? = null,
     ) {
         lane.enqueue {
+            this.textInputs = textInputs.associateBy(ExperienceTextInput::id)
             val activeRenderer = ensureRenderer(1, 1)
             if (activeRenderer == null) {
                 reportFailure(
@@ -214,6 +221,27 @@ internal class ExperienceSurfaceHost(
             }
             onLoaded?.invoke(true)
         }
+    }
+
+    /** UI entry point. Native edits and optional response commits share the frame lane. */
+    fun writeText(inputId: String, text: String, commit: Boolean, completion: (Result<Unit>) -> Unit) {
+        fun complete(result: Result<Unit>) { post { completion(result) } }
+        if (released.get()) {
+            complete(Result.failure(IllegalStateException("Experience surface is released")))
+            return
+        }
+        val accepted = lane.enqueue {
+            val result = runCatching {
+                check(!released.get()) { "Experience surface is released" }
+                val input = checkNotNull(textInputs[inputId]) { "Text input is not declared for this screen" }
+                val limited = ExperienceTextInputLimit.apply(text, input.maxLength)
+                checkNotNull(artboard) { "Experience artboard is unavailable" }
+                    .setTextRun(input.runName, if (input.secure) "" else limited)
+                if (commit) listener?.onTextCommitted(inputId, limited)
+            }
+            complete(result)
+        }
+        if (!accepted) complete(Result.failure(IllegalStateException("Runtime lane is shut down")))
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
@@ -334,10 +362,10 @@ internal class ExperienceSurfaceHost(
                 return@enqueue
             }
             val viewModelSnapshot = if (
-                outcome.events.isNotEmpty() || outcome.hasPublishableEffects()
+                textInputs.isNotEmpty() || outcome.events.isNotEmpty() || outcome.hasPublishableEffects()
             ) {
                 try {
-                    viewModelState?.snapshot()
+                    viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
                 } catch (error: Throwable) {
                     reportFailure(
                         ExperiencePresentationException.Reason.HOST_FAILED,
@@ -360,6 +388,11 @@ internal class ExperienceSurfaceHost(
                     "Experience rendering failed with status ${-disposition}",
                 )
             } else if (disposition > 0) {
+                if (textInputs.isNotEmpty() && viewModelSnapshot != null) {
+                    post {
+                        if (!released.get()) listener?.onTextInputSnapshot(viewModelSnapshot)
+                    }
+                }
                 if (!firstFramePresented) {
                     firstFramePresented = true
                     listener?.onFirstFrame()
@@ -388,7 +421,21 @@ internal class ExperienceSurfaceHost(
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (!running || released.get()) return false
-        return pointerInput.enqueue(event, width, height)
+        // Focus loss queues its text commit before dispatch reaches this view.
+        // Stage the pointer on that same lane: an older queued frame must not
+        // consume a button tap before the edit that preceded it on the UI thread.
+        val copy = MotionEvent.obtain(event)
+        val viewportWidth = width
+        val viewportHeight = height
+        val accepted = lane.enqueue {
+            try {
+                if (!released.get()) pointerInput.enqueue(copy, viewportWidth, viewportHeight)
+            } finally {
+                copy.recycle()
+            }
+        }
+        if (!accepted) copy.recycle()
+        return accepted
     }
 
     /** Release every native handle. The host is not reusable afterwards. */

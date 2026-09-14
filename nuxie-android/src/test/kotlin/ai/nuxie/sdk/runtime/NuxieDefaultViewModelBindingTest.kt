@@ -2,9 +2,24 @@ package ai.nuxie.sdk.runtime
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class NuxieDefaultViewModelBindingTest {
+    @Test
+    fun `geometry snapshots require a live signed default binding`() {
+        val native = RecordingNative()
+        val artboard = checkNotNull(NuxieRuntimeFile(10L, native).newArtboard())
+        assertNull(artboard.defaultViewModelSnapshot())
+        artboard.bindDefaultViewModel("Root")
+        assertEquals(20f, artboard.defaultViewModelSnapshot()?.resolveGeometryNumber("width"))
+        native.failOperation = "snapshot"
+        assertThrows(NuxieRuntimeCallException::class.java) { artboard.defaultViewModelSnapshot() }
+        artboard.close()
+        assertThrows(IllegalStateException::class.java) { artboard.defaultViewModelSnapshot() }
+        assertEquals(2, native.calls.count { it == "snapshot" })
+    }
+
     @Test
     fun `declared default is validated and bound before player creation and freed once`() {
         val native = RecordingNative()
@@ -158,6 +173,15 @@ class NuxieDefaultViewModelBindingTest {
             assertEquals(20L, artboardHandle)
             assertEquals(40L, viewModelHandle)
             return status("bind")
+        }
+
+        override fun snapshotViewModel(viewModelHandle: Long): NativeCallResult<NativeViewModelSnapshot> {
+            assertEquals(40L, viewModelHandle)
+            return NativeCallResult(status("snapshot"), NativeViewModelSnapshot(1,
+                arrayOf(NativeViewModelSnapshotInstance(1, 0)),
+                arrayOf(NativeViewModelSnapshotValue(1, 0, "width",
+                    NuxieViewModelPropertyKind.NUMBER.nativeValue, byteArrayOf(), 0, 20f)),
+            ))
         }
 
         override fun freeViewModel(handle: Long): Int {

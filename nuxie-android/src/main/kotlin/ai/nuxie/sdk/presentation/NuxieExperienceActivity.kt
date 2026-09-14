@@ -22,6 +22,9 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 internal class ScreenCloseState(
     private val report: (CloseReason) -> Unit = {},
@@ -58,6 +61,7 @@ internal class NuxieExperienceActivity :
     Activity(),
     PresentationActivityHandle {
     private var host: ExperienceSurfaceHost? = null
+    private var textOverlay: ExperienceTextInputOverlay? = null
     private var lane: NuxieRuntimeLane? = null
     private var presentationId: String? = null
     private val screenClose = ScreenCloseState(::reportSelectedClose)
@@ -135,12 +139,43 @@ internal class NuxieExperienceActivity :
                     event: NuxieRuntimeEvent,
                     viewModelSnapshot: NuxieViewModelSnapshot?,
                 ) = Unit
+
+                override fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot) {
+                    textOverlay?.update(snapshot)
+                }
+
+                override fun onTextCommitted(inputId: String, text: String) {
+                    PresentationRegistry.reportTextCommitted(presentationId, this@NuxieExperienceActivity, inputId, text)
+                }
             },
         )
         this.host = host
         loadPreparedRelease(host, rivBytes, prepared)
         dismissible = prepared.shell.dismissible
-        setContentView(shellView(host, prepared.shell))
+        val inputs = ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId)
+        val content = if (inputs.isNotEmpty()) {
+            val size = prepared.artboardSize
+            if (size == null) {
+                fail(IllegalStateException("Editable Experience has no authored artboard extent"))
+                return
+            }
+            val fonts = ((prepared.descriptor?.get("render") as? JsonObject)?.get("assets") as? JsonArray)
+                .orEmpty().mapNotNull { value ->
+                    val asset = value as? JsonObject ?: return@mapNotNull null
+                    if ((asset["kind"] as? JsonPrimitive)?.content != "font") return@mapNotNull null
+                    val name = (asset["riveUniqueName"] as? JsonPrimitive)?.content ?: return@mapNotNull null
+                    val key = (asset["key"] as? JsonPrimitive)?.content ?: return@mapNotNull null
+                    prepared.artifactsByKey[key]?.let { name to it }
+                }.toMap()
+            FrameLayout(this).apply {
+                addView(host, FrameLayout.LayoutParams(-1, -1))
+                val overlay = ExperienceTextInputOverlay(this@NuxieExperienceActivity, size, inputs, fonts,
+                    host::writeText, ::fail, prepared.textInputState)
+                textOverlay = overlay
+                addView(overlay, FrameLayout.LayoutParams(-1, -1))
+            }
+        } else host
+        setContentView(shellView(content, prepared.shell))
         registerPredictiveBack()
     }
 
@@ -152,6 +187,8 @@ internal class NuxieExperienceActivity :
     override fun onDestroy() {
         val changingConfigurations = isChangingConfigurations
         screenClose.prepareForTeardown(changingConfigurations)
+        textOverlay?.close()
+        textOverlay = null
         host?.release()
         unregisterPredictiveBack()
         super.onDestroy()
@@ -285,10 +322,11 @@ internal class NuxieExperienceActivity :
             descriptor = prepared.descriptor,
             artifactsByKey = prepared.artifactsByKey,
             viewModelProjection = prepared.viewModelProjection,
+            textInputs = ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId),
         )
     }
 
-    private fun shellView(host: ExperienceSurfaceHost, shell: PresentationShell): View {
+    private fun shellView(host: View, shell: PresentationShell): View {
         if (shell is PresentationShell.FullScreen) return host
 
         val root = FrameLayout(this)

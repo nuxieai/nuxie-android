@@ -43,6 +43,8 @@ internal class JourneyRuntimeEmissionCoordinator(
     private val gate = Mutex()
     private val revealed = CompletableDeferred<Unit>()
     private val controls = controlsForScreen(descriptor, screenId)
+    private val textInputs = ExperienceTextInput.forScreen(descriptor, screenId).associateBy { it.id }
+    private val textCommitState = ExperienceTextInputState()
     private var nextBatch = nextBatchSequence
     private var nextEmission = nextEmissionSequence
     private var closed = false
@@ -88,18 +90,6 @@ internal class JourneyRuntimeEmissionCoordinator(
                     authored + projected.drafts
                 }
             }
-            if (drafts.isEmpty()) return@withLock true
-            if (drafts.any(Draft::isInvalid)) {
-                Log.w(LOG_TAG, "Rejected invalid renderer emission transaction for $screenId")
-                return@withLock true
-            }
-            if (nextBatch == Long.MAX_VALUE ||
-                drafts.size.toLong() > Long.MAX_VALUE - nextEmission
-            ) {
-                closed = true
-                return@withLock false
-            }
-
             val source = projected.control?.invocation?.let { invocation ->
                 JourneyScreenEmissionSource(
                     screenId = projected.control.screenId,
@@ -111,36 +101,79 @@ internal class JourneyRuntimeEmissionCoordinator(
                 screenId = screenId,
                 actionId = "runtime:$correlationId",
             )
-            val firstEmission = nextEmission
-            val occurredAt = nowMillis()
-            val invocationId = createId()
-            val emissions = drafts.mapIndexed { offset, draft ->
-                draft.materialize(
-                    id = createId(),
-                    sequence = firstEmission + offset.toLong(),
-                    occurredAtMillis = occurredAt,
-                )
-            }
-            val batch = JourneyScreenEmissionBatch(
-                journeyId = journeyId,
-                batchSequence = nextBatch,
-                invocationId = invocationId,
-                source = source,
-                emissions = emissions,
-            )
-            val accepted = runCatching { onEmissionBatch(batch) }
-                .onFailure { error ->
-                    Log.w(LOG_TAG, "Journey renderer emission publication failed", error)
-                }
-                .getOrDefault(false)
-            if (!accepted) {
-                closed = true
-                return@withLock false
-            }
-            nextBatch += 1
-            nextEmission += emissions.size.toLong()
-            true
+            publishDrafts(drafts, source)
         }
+    }
+
+    /** Commits only an editable input belonging to this signed screen. */
+    suspend fun publishTextCommit(
+        inputId: String,
+        text: String,
+        state: ExperienceTextInputState = textCommitState,
+    ): Boolean {
+        revealed.await()
+        return gate.withLock {
+            if (closed) return@withLock false
+            val input = textInputs[inputId] ?: return@withLock false
+            val previous = state.committedValue(inputId)
+                ?: ExperienceTextInputLimit.apply(input.value, input.maxLength)
+            if (previous == text) return@withLock true
+            val field = input.responseField
+            val accepted = field == null || publishDrafts(
+                listOf(Draft.ResponseSet(field, JsonPrimitive(text))),
+                JourneyScreenEmissionSource(screenId, "text_input:$inputId", inputId, null),
+            )
+            if (accepted) state.recordCommit(inputId, text)
+            accepted
+        }
+    }
+
+    /** Called only while holding the shared publication gate. */
+    private suspend fun publishDrafts(
+        drafts: List<Draft>,
+        source: JourneyScreenEmissionSource,
+    ): Boolean {
+        if (drafts.isEmpty()) return true
+        if (drafts.any(Draft::isInvalid)) {
+            Log.w(LOG_TAG, "Rejected invalid renderer emission transaction for $screenId")
+            return true
+        }
+        if (nextBatch == Long.MAX_VALUE ||
+            drafts.size.toLong() > Long.MAX_VALUE - nextEmission
+        ) {
+            closed = true
+            return false
+        }
+
+        val firstEmission = nextEmission
+        val occurredAt = nowMillis()
+        val invocationId = createId()
+        val emissions = drafts.mapIndexed { offset, draft ->
+            draft.materialize(
+                id = createId(),
+                sequence = firstEmission + offset.toLong(),
+                occurredAtMillis = occurredAt,
+            )
+        }
+        val batch = JourneyScreenEmissionBatch(
+            journeyId = journeyId,
+            batchSequence = nextBatch,
+            invocationId = invocationId,
+            source = source,
+            emissions = emissions,
+        )
+        val accepted = runCatching { onEmissionBatch(batch) }
+            .onFailure { error ->
+                Log.w(LOG_TAG, "Journey renderer emission publication failed", error)
+            }
+            .getOrDefault(false)
+        if (!accepted) {
+            closed = true
+            return false
+        }
+        nextBatch += 1
+        nextEmission += emissions.size.toLong()
+        return true
     }
 
     /** Waits for an in-flight publication before preventing any later one. */
