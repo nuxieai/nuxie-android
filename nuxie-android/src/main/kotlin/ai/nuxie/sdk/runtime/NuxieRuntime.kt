@@ -114,7 +114,7 @@ internal class NuxieRuntime(
                 children += child
                 item.values.forEach { (path, value) ->
                     val property = catalog.propertyAtPath(itemSchema.index, path)
-                    val write = value.toNativeWrite(path, property.kind)
+                    val write = value.toNativeWrite(path, property.kind, property.enumLabels)
                     requireNativeSuccess(
                         native.mutateViewModel(child, write),
                         "project live ProductDetails into '$path'",
@@ -363,7 +363,7 @@ private fun writeBoundScalar(
 ) {
     val property = catalog.propertyAtPath(rootSchemaIndex, path)
     requireNativeSuccess(
-        native.mutateViewModel(root, value.toNativeWrite(path, property.kind)),
+        native.mutateViewModel(root, value.toNativeWrite(path, property.kind, property.enumLabels)),
         "write bound view-model property '$path'",
     )
 }
@@ -371,16 +371,21 @@ private fun writeBoundScalar(
 private fun NuxieViewModelScalarValue.toNativeWrite(
     path: String,
     propertyKind: NuxieViewModelPropertyKind,
+    enumLabels: List<String>,
 ): NativeViewModelWrite = when (this) {
     is NuxieViewModelScalarValue.StringValue -> {
-        require(propertyKind == NuxieViewModelPropertyKind.STRING) {
-            "View-model property '$path' is $propertyKind, not STRING"
+        if (propertyKind == NuxieViewModelPropertyKind.ENUM) {
+            val ordinal = enumLabels.indexOf(value)
+            require(ordinal >= 0) { "Unknown enum label for view-model property '$path'" }
+            NativeViewModelWrite(kind = NuxieViewModelMutationKind.SET_ENUM, path = path,
+                integerValue = ordinal.toLong())
+        } else {
+            require(propertyKind == NuxieViewModelPropertyKind.STRING) {
+                "View-model property '$path' is $propertyKind, not STRING"
+            }
+            NativeViewModelWrite(kind = NuxieViewModelMutationKind.SET_STRING,
+                path = path, bytesValue = value.encodeToByteArray())
         }
-        NativeViewModelWrite(
-            kind = NuxieViewModelMutationKind.SET_STRING,
-            path = path,
-            bytesValue = value.encodeToByteArray(),
-        )
     }
     is NuxieViewModelScalarValue.NumberValue -> {
         require(propertyKind == NuxieViewModelPropertyKind.NUMBER) {

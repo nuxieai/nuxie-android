@@ -1,5 +1,13 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
+import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
+import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
+import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
+import ai.nuxie.sdk.runtime.NuxieRuntimeLane
+import ai.nuxie.sdk.runtime.NativeCallResult
+import ai.nuxie.sdk.runtime.JniNuxieTypedRuntimeNative
+import ai.nuxie.sdk.runtime.NuxieTypedRuntimeNative
 import ai.nuxie.sdk.core.supportedRuntimeForEmbeddedRuntime
 import ai.nuxie.sdk.experiences.AuthenticatedJourneyRelease
 import ai.nuxie.sdk.experiences.AcquiredJourneyRelease
@@ -68,6 +76,95 @@ import org.junit.Test
 
 /** Real publisher bytes, signed defaults, runtime geometry and runtime text writer. */
 class PublishedTextInputDeviceTest {
+    @Test
+    fun publishedDefaultAcceptsLifecycleAndSafeAreaStateInNativeRuntime() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val fixture = loadPublishedFixture(instrumentation)
+        val screen = fixture.release.descriptor.getValue("render").jsonObject
+            .getValue("screens").jsonArray.first().jsonObject
+        val artboardName = screen.getValue("artboardName").jsonPrimitive.content
+        val schema = checkNotNull(ExperienceViewModelBinding
+            .defaultSchemaName(fixture.release.descriptor, artboardName))
+        var root = 0L
+        var defaultsCreated = 0
+        val native = object : NuxieTypedRuntimeNative by JniNuxieTypedRuntimeNative {
+            override fun newDefaultViewModel(artboardHandle: Long): NativeCallResult<Long> {
+                defaultsCreated++
+                return JniNuxieTypedRuntimeNative.newDefaultViewModel(artboardHandle)
+                    .also { root = checkNotNull(it.value) }
+            }
+        }
+        val runtime = NuxieRuntime(native)
+        val lane = NuxieRuntimeLane()
+        try {
+            runBlocking { lane.call {
+                val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(390, 844))
+                try {
+                    val bytes = fixture.riv.readBytes()
+                    val assets = ExperienceAssetImportBuilder.build(fixture.release.descriptor,
+                        fixture.assets, checkNotNull(runtime.inspectFileAssets(bytes)))
+                    val file = checkNotNull(runtime.importFile(renderer, bytes, assets.expectedAssets, assets.externalAssets))
+                    try {
+                        val artboard = checkNotNull(file.newArtboard(artboardName))
+                        try {
+                            artboard.bindDefaultViewModel(schema)
+                            val player = checkNotNull(artboard.newPlayer())
+                            try {
+                                fun verify(values: Map<String, NuxieViewModelScalarValue>) {
+                                    values.forEach { (path, value) -> assertTrue(artboard.setDefaultViewModelValue(path, value)) }
+                                    val result = native.snapshotViewModel(root)
+                                    assertEquals(0, result.status)
+                                    val snapshot = checkNotNull(result.value)
+                                    for ((path, expected) in values) {
+                                        var owner = snapshot.rootInstanceId
+                                        val segments = path.split('/')
+                                        for (segment in segments.dropLast(1)) {
+                                            owner = snapshot.values.single { it.ownerInstanceId == owner && it.name == segment }.referencedInstanceId
+                                        }
+                                        val actual = snapshot.values.single { it.ownerInstanceId == owner && it.name == segments.last() }
+                                        when (expected) {
+                                            is NuxieViewModelScalarValue.StringValue -> {
+                                                if (actual.kind == 5) {
+                                                    val catalog = checkNotNull(native.viewModelCatalog(file.requireHandle()).value)
+                                                    val instance = snapshot.instances.single { it.id == owner }
+                                                    val property = catalog.properties.single { it.schemaIndex == instance.schemaIndex && it.index == actual.propertyIndex }
+                                                    assertEquals(path, expected.value, property.enumLabels[actual.integerValue.toInt()])
+                                                    assertEquals(actual.integerValue, NuxieViewModelSnapshot.fromNative(snapshot).resolveEnumOrdinal(path))
+                                                } else {
+                                                    assertEquals(1, actual.kind)
+                                                    assertEquals(path, expected.value, actual.bytesValue.decodeToString())
+                                                }
+                                            }
+                                            is NuxieViewModelScalarValue.NumberValue -> assertEquals(path, expected.value.toFloat(), actual.numberValue, 0.00001f)
+                                            is NuxieViewModelScalarValue.BooleanValue -> {
+                                                assertEquals(3, actual.kind)
+                                                assertEquals(path, expected.value, actual.boolValue)
+                                                assertEquals(expected.value, NuxieViewModelSnapshot.fromNative(snapshot).resolveBoolean(path))
+                                            }
+                                        }
+                                    }
+                                }
+                                val lifecycle = ExperienceScreenLifecycle()
+                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING))
+                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ACTIVE))
+                                verify(lifecycle.updateReduceMotion(true))
+                                verify(ExperienceSafeAreaInsets(24.5, 12.0, 3.0, 7.0).stateValues())
+                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.EXITING, "checkout"))
+                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN))
+                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING, "return"))
+                                assertEquals(1, defaultsCreated)
+                            } finally { player.close() }
+                        } finally { artboard.close() }
+                    } finally { file.close() }
+                } finally { renderer.close() }
+            } }
+        } finally {
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(5_000))
+        }
+    }
+
     @Test
     @SdkSuppress(minSdkVersion = 26)
     fun closingBeforeFirstFrameDrainsWithoutActivatingScreen() {
