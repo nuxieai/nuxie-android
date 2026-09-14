@@ -59,10 +59,11 @@ class ExperienceSurfaceHostPointerTest {
             drain(lane)
             assertEquals(listOf(24f, 12f), native.stateWrites)
             assertEquals(1, native.playersCreated)
-            host.release()
+            host.release(ExperienceSafeAreaInsets.ZERO.stateValues())
             host.updateRuntimeValues(ExperienceSafeAreaInsets.ZERO.stateValues())
             drain(lane)
-            assertEquals(listOf(24f, 12f), native.stateWrites)
+            assertEquals(listOf(24f, 12f, 0f), native.stateWrites)
+            assertTrue(native.boundStateFreed)
         } finally {
             host.release()
             lane.shutdown()
@@ -324,6 +325,7 @@ class ExperienceSurfaceHostPointerTest {
         val elapsedSteps = mutableListOf<Float>()
         var playersCreated = 0
         var windowsAcquired = 0
+        var boundStateFreed = false
         val stateWrites = mutableListOf<Float>()
         val stateAtPlayerCreation = mutableListOf<Float>()
         override fun viewModelCatalog(fileHandle: Long) = NativeCallResult(0, NativeViewModelCatalog(
@@ -334,8 +336,9 @@ class ExperienceSurfaceHostPointerTest {
         ))
         override fun newDefaultViewModel(artboardHandle: Long) = NativeCallResult(0, 40L)
         override fun bindViewModel(artboardHandle: Long, viewModelHandle: Long) = 0
-        override fun freeViewModel(handle: Long) = 0
+        override fun freeViewModel(handle: Long): Int { boundStateFreed = true; return 0 }
         override fun mutateViewModel(handle: Long, write: NativeViewModelWrite): Int {
+            assertFalse(boundStateFreed)
             assertEquals(40L, handle)
             assertEquals("safeArea/top", write.path)
             stateWrites += write.numberValue

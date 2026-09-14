@@ -433,6 +433,7 @@ class ExperiencePresentationServiceTest {
         val launched = mutableListOf<String>()
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val service = service(this, launch = launched::add)
+        val lifecycles = mutableListOf<ExperienceScreenLifecycle>()
         var first = true
         suspend fun show(
             screenId: String,
@@ -454,6 +455,7 @@ class ExperiencePresentationServiceTest {
             }
             runCurrent()
             val presentation = requireNotNull(PresentationRegistry.resolve(launched.last()))
+            lifecycles += presentation.screenLifecycle
             assertEquals(screenId, presentation.screenId)
             PresentationRegistry.reportFirstFrame(launched.last())
             pending.await()
@@ -491,6 +493,12 @@ class ExperiencePresentationServiceTest {
         assertNull(show("screen_details", nextBuild).read("input_email"))
         // Returning to an earlier build must not resurrect its old drafts either.
         assertNull(show("screen_welcome", release).read("input_email"))
+        assertTrue(lifecycles[0] === lifecycles[2])
+        assertTrue(lifecycles[1] === lifecycles[3])
+        assertFalse(lifecycles[0] === lifecycles[1])
+        assertFalse(lifecycles[0] === lifecycles[4])
+        assertFalse(lifecycles[1] === lifecycles[5])
+        assertFalse(lifecycles[0] === lifecycles[6])
         service.dismissFromHost("customer-1")
     }
 

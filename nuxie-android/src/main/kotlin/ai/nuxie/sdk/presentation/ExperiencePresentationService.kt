@@ -78,6 +78,7 @@ internal data class PreparedPresentation(
     val artboardSize: ExperienceArtboardSize? = null,
     val viewModelProjection: NuxieViewModelListProjection? = null,
     val textInputState: ExperienceTextInputState = ExperienceTextInputState(),
+    val screenLifecycle: ExperienceScreenLifecycle = ExperienceScreenLifecycle(),
 )
 
 internal sealed interface PresentationShell {
@@ -364,6 +365,7 @@ internal class ExperiencePresentationService(
         val emissions: JourneyRuntimeEmissionCoordinator,
         val screenDismissed: AtomicBoolean = AtomicBoolean(false),
         var navigationHistory: List<String> = emptyList(),
+        var lifecycleByScreen: MutableMap<String, ExperienceScreenLifecycle> = mutableMapOf(),
         var textInputsByScreen: MutableMap<String, ExperienceTextInputState> = mutableMapOf(),
         val commerce: JourneyCommerceSession? = null,
     )
@@ -643,6 +645,7 @@ internal class ExperiencePresentationService(
                         previous.buildId == source.identity.buildId
                 }?.let {
                     journey.textInputsByScreen = it.journey.textInputsByScreen
+                    journey.lifecycleByScreen = it.journey.lifecycleByScreen
                 }
                 val textInputState = journey.textInputsByScreen.getOrPut(journey.screenId) {
                     ExperienceTextInputState()
@@ -688,6 +691,7 @@ internal class ExperiencePresentationService(
                                 artboardSize = source.artboardSize,
                                 viewModelProjection = source.viewModelProjection,
                                 textInputState = textInputState,
+                                screenLifecycle = journey.lifecycleByScreen.getOrPut(journey.screenId) { ExperienceScreenLifecycle() },
                             ),
                             onFirstFrame = { firstFrame(pending) },
                             onFailure = { error -> failed(pending, error) },

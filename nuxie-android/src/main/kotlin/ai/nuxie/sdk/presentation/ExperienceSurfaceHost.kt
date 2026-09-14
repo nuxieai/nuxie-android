@@ -498,11 +498,13 @@ internal class ExperienceSurfaceHost(
     }
 
     /** Release every native handle. The host is not reusable afterwards. */
-    fun release() {
-        released.set(true)
+    fun release(finalState: Map<String, NuxieViewModelScalarValue> = emptyMap()) {
+        if (!released.compareAndSet(false, true)) return
+        val finalValues = finalState.toMap()
         pointerInput.release()
         updateFrameScheduling()
         lane.enqueue {
+            applyRuntimeValues(finalValues)
             attached = false
             val closeHandles = listOfNotNull(
                 window?.let { it::close },

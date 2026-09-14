@@ -61,6 +61,7 @@ internal class NuxieExperienceActivity :
     Activity(),
     PresentationActivityHandle {
     private var host: ExperienceSurfaceHost? = null
+    private var screenLifecycle: ExperienceScreenLifecycle? = null
     private var reducedMotion: ExperienceReducedMotion? = null
     private var windowInsets: ExperienceWindowInsets? = null
     private var textOverlay: ExperienceTextInputOverlay? = null
@@ -117,7 +118,12 @@ internal class NuxieExperienceActivity :
             artboardSize = prepared.artboardSize,
             listener = object : ExperienceSurfaceHost.Listener {
                 override fun onFirstFrame() {
-                    PresentationRegistry.reportFirstFrame(presentationId)
+                    runOnUiThread {
+                        if (isDestroyed || isFinishing) return@runOnUiThread
+                        screenLifecycle?.takeIf { it.phase == ExperienceScreenLifecycle.Phase.ENTERING && screenClose.reason == null }
+                            ?.let { this@NuxieExperienceActivity.host?.updateRuntimeValues(it.move(ExperienceScreenLifecycle.Phase.ACTIVE)) }
+                        PresentationRegistry.reportFirstFrame(presentationId)
+                    }
                 }
 
                 override fun onRuntimeStep(
@@ -152,9 +158,12 @@ internal class NuxieExperienceActivity :
             },
         )
         this.host = host
+        val lifecycle = prepared.screenLifecycle
+        screenLifecycle = lifecycle
+        host.updateRuntimeValues(if (lifecycle.phase == ExperienceScreenLifecycle.Phase.HIDDEN)
+            lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING) else lifecycle.snapshot())
         reducedMotion = ExperienceReducedMotion(this) { reduced ->
-            host.updateRuntimeValues(mapOf("env/reduceMotion" to
-                ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.BooleanValue(reduced)))
+            host.updateRuntimeValues(lifecycle.updateReduceMotion(reduced))
         }
         loadPreparedRelease(host, rivBytes, prepared)
         dismissible = prepared.shell.dismissible
@@ -215,7 +224,10 @@ internal class NuxieExperienceActivity :
         windowInsets = null
         textOverlay?.close()
         textOverlay = null
-        host?.release()
+        val finalState = screenLifecycle?.let {
+            if (changingConfigurations) it.snapshot() else it.move(ExperienceScreenLifecycle.Phase.HIDDEN)
+        }.orEmpty()
+        host?.release(finalState)
         unregisterPredictiveBack()
         super.onDestroy()
 
@@ -237,7 +249,10 @@ internal class NuxieExperienceActivity :
     override fun screenCloseReason(): CloseReason? = screenClose.reason
 
     override fun finishAfterServiceClose() {
-        runOnUiThread { finish() }
+        runOnUiThread {
+            screenLifecycle?.let { host?.updateRuntimeValues(it.move(ExperienceScreenLifecycle.Phase.EXITING)) }
+            finish()
+        }
     }
 
     override fun purchaseActivity(): Activity = this
@@ -318,12 +333,12 @@ internal class NuxieExperienceActivity :
 
     private fun fail(error: Throwable) {
         val reason = CloseReason.Error(error)
-        if (screenClose.select(reason)) runOnUiThread { finish() }
+        if (screenClose.select(reason)) finishAfterServiceClose()
         presentationId?.let { PresentationRegistry.reportOutcome(it, reason) }
     }
 
     private fun finishTerminal(reason: CloseReason) {
-        if (screenClose.select(reason)) finish()
+        if (screenClose.select(reason)) finishAfterServiceClose()
         presentationId?.let { PresentationRegistry.reportOutcome(it, reason) }
     }
 
