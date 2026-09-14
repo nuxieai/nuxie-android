@@ -2130,6 +2130,38 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun testStoreIgnoresRetainedNativeEvidenceAndPlayCallbacks() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions, testStore = NuxieTestStore(object : TestStoreChoices {
+            override suspend fun purchase(product: StoreProduct) = TestStorePurchaseChoice.PURCHASED
+            override suspend fun restore() = TestStoreRestoreChoice.RESTORED
+        }))
+        val owner = fixture.core.identity.distinctId()
+        val retained = PurchaseEvidence(
+            purchaseToken = "real-token", packageName = "com.example.app",
+            storeProductIds = listOf("play-pro"), nuxieProductId = "nuxie-pro",
+            authorityScope = "test-fixture", purchaseState = StoredPurchaseState.PURCHASED,
+            syncAttributionDistinctId = owner, ownerDistinctId = owner,
+            acknowledged = false, firstSeenMillis = 1L, catalogResolved = true,
+        )
+        fixture.store.upsert(retained)
+        fixture.service.rememberProduct(product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))))
+        fixture.synchronizer = { error("Test Store synchronized native evidence") }
+        actions.clear()
+        runCurrent()
+        fixture.service.awaitInitialProjection()
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.service.withOptimisticProjectionSnapshot(owner) { assertNull(it) }
+        assertNull(fixture.service.useFeatureWithPendingPurchase(owner, "pro", 1.0, null, null))
+        fixture.service.recover()
+        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("incoming-real-token")))
+        fixture.service.onPurchasesUpdated(PurchaseUpdate(result(BillingClient.BillingResponseCode.USER_CANCELED), null))
+        assertTrue(fixture.billing.queries.isEmpty())
+        assertTrue(actions.isEmpty())
+        assertEquals(mapOf("real-token" to retained), fixture.store.load())
+    }
+
+    @Test
     fun testStoreCheckoutPrecedesDelegateAndNeverCreatesNativeEvidence() = runTest {
         for (choice in TestStorePurchaseChoice.entries) {
             val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
