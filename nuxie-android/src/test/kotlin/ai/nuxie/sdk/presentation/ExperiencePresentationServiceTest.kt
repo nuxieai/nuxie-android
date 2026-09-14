@@ -450,6 +450,21 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `authenticated shell resolves without render artifact acquisition`() {
+        val release = renderedJourneyRelease()
+        val screen = AuthenticatedPresentationScreen.resolve(release, "screen_welcome")
+        assertEquals("screen_welcome", screen.screenId)
+        assertEquals("Welcome", screen.artboardName)
+        assertEquals(0xff0a0a0a.toInt(), screen.clearColor)
+        assertEquals(PresentationShell.FullScreen, screen.shell)
+        assertEquals(ExperienceArtboardSize(390f, 844f), screen.artboardSize)
+        val error = org.junit.Assert.assertThrows(ExperiencePresentationException::class.java) {
+            AuthenticatedPresentationScreen.resolve(release, "not-a-signed-screen")
+        }
+        assertEquals(ExperiencePresentationException.Reason.PREPARATION_FAILED, error.reason)
+    }
+
+    @Test
     fun `authenticated Journey shows its signed screen and closes through Journey lifecycle`() = runTest {
         val release = renderedJourneyRelease()
         val emitted = mutableListOf<Emitted>()
