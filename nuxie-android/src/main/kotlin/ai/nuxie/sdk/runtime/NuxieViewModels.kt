@@ -296,6 +296,12 @@ internal interface NuxieTypedRuntimeNative {
     fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long =
         error("newAndroidVulkanRenderer is not implemented")
 
+    fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int =
+        error("attachRendererSurface is not implemented")
+
+    fun detachRendererSurface(rendererHandle: Long): Int =
+        error("detachRendererSurface is not implemented")
+
     fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int =
         error("resizeRenderer is not implemented")
 
@@ -417,6 +423,12 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
 
     override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long =
         NuxieRuntimeBridge.nativeRendererNewAndroidVulkan(pixelWidth, pixelHeight)
+
+    override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int =
+        NuxieRuntimeBridge.nativeRendererAttachSurface(rendererHandle, windowHandle)
+
+    override fun detachRendererSurface(rendererHandle: Long): Int =
+        NuxieRuntimeBridge.nativeRendererDetachSurface(rendererHandle)
 
     override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int =
         NuxieRuntimeBridge.nativeRendererResize(handle, pixelWidth, pixelHeight)

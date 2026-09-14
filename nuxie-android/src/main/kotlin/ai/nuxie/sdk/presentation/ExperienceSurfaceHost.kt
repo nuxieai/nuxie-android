@@ -362,8 +362,12 @@ internal class ExperienceSurfaceHost(
         val accepted = lane.enqueue {
             try {
                 attached = false
-                window?.close()
-                window = null
+                try {
+                    renderer?.detachSurface()
+                } finally {
+                    window?.close()
+                    window = null
+                }
             } finally {
                 releaseTexture()
             }
@@ -515,6 +519,7 @@ internal class ExperienceSurfaceHost(
             applyRuntimeValues(finalValues)
             attached = false
             val closeHandles = listOfNotNull(
+                renderer?.let { active -> { active.detachSurface(); Unit } },
                 window?.let { it::close },
                 player?.let { it::close },
                 viewModelState?.let { it::close },

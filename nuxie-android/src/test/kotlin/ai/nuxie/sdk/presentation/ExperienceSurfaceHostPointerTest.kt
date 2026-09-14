@@ -414,6 +414,10 @@ class ExperienceSurfaceHostPointerTest {
         override fun newDefaultPlayer(artboardHandle: Long): Long = 3L.also { playersCreated += 1; stateWrites.lastOrNull()?.let(stateAtPlayerCreation::add) }
         override fun freePlayer(handle: Long) = Unit
         override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long = 4L
+        override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int = 0
+
+        override fun detachRendererSurface(rendererHandle: Long): Int = 0
+
         override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int = 0
         override fun acquireWindow(surface: android.view.Surface): Long = 5L.also { windowsAcquired += 1 }
         override fun releaseWindow(handle: Long) = Unit

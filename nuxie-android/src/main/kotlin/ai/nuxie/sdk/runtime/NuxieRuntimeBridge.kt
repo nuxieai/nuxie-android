@@ -246,6 +246,10 @@ internal object NuxieRuntimeBridge {
         pixelHeight: Int,
     ): Long
 
+    external fun nativeRendererAttachSurface(renderer: Long, window: Long): Int
+
+    external fun nativeRendererDetachSurface(renderer: Long): Int
+
     external fun nativeRendererResize(renderer: Long, pixelWidth: Int, pixelHeight: Int): Int
 
     /** Acquire an ANativeWindow reference from a Surface (0 = failure). */

@@ -164,6 +164,7 @@ class NuxieOwnedRuntimeTest {
         assertEquals(5, renderer.resize(300, 400))
         assertEquals(1, renderer.renderAndPresent(player, window, 0xFF000000.toInt(), true))
 
+        renderer.detachSurface()
         window.close()
         window.close()
         assertEquals(listOf(40L), native.releasedWindows)
@@ -177,6 +178,50 @@ class NuxieOwnedRuntimeTest {
         assertThrows(IllegalStateException::class.java) {
             renderer.resize(1, 1)
         }
+    }
+
+    @Test
+    fun `surface attachment survives unavailable frames and renews after suboptimal`() {
+        val native = RecordingNative()
+        val runtime = NuxieRuntime(native)
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(100, 200))
+        val file = checkNotNull(runtime.importFile(renderer, byteArrayOf(1)))
+        val player = checkNotNull(checkNotNull(file.newArtboard()).newPlayer())
+        val window = NuxieRuntimeWindow(40L, native)
+        native.presentation = 0
+        assertEquals(0, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(0, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(listOf("attach:40"), native.surfaceCalls)
+        native.presentation = 2
+        assertEquals(2, renderer.renderAndPresent(player, window, 0, true))
+        native.presentation = 1
+        assertEquals(1, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(listOf("attach:40", "attach:40"), native.surfaceCalls)
+        renderer.close()
+        renderer.close()
+        assertEquals(listOf("attach:40", "attach:40", "detach"), native.surfaceCalls)
+        assertEquals(listOf(50L), native.freedRenderers)
+    }
+
+    @Test
+    fun `failed surface attachment never renders and resize retires attached surface`() {
+        val native = RecordingNative()
+        val runtime = NuxieRuntime(native)
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(100, 200))
+        val file = checkNotNull(runtime.importFile(renderer, byteArrayOf(1)))
+        val player = checkNotNull(checkNotNull(file.newArtboard()).newPlayer())
+        val window = NuxieRuntimeWindow(40L, native)
+        native.attachStatus = 5
+        assertEquals(-5, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(0, native.presentCalls)
+        native.attachStatus = 0
+        assertEquals(1, renderer.renderAndPresent(player, window, 0, true))
+        renderer.resize(300, 400)
+        assertEquals(listOf("attach:40", "attach:40", "detach"), native.surfaceCalls)
+        native.presentation = -5
+        assertEquals(-5, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(listOf("attach:40", "attach:40", "detach", "attach:40", "detach"), native.surfaceCalls)
+        renderer.close()
     }
 
     @Test
@@ -308,6 +353,21 @@ class NuxieOwnedRuntimeTest {
 
         override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long = 50L
 
+        val surfaceCalls = mutableListOf<String>()
+        var attachStatus = 0
+        var presentation = 1
+        var presentCalls = 0
+
+        override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int {
+            surfaceCalls += "attach:$windowHandle"
+            return attachStatus
+        }
+
+        override fun detachRendererSurface(rendererHandle: Long): Int {
+            surfaceCalls += "detach"
+            return 0
+        }
+
         override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int = 5
 
         override fun renderAndPresent(
@@ -316,7 +376,10 @@ class NuxieOwnedRuntimeTest {
             windowHandle: Long,
             clearColor: Int,
             fitContainCenter: Boolean,
-        ): Int = 1
+        ): Int {
+            presentCalls++
+            return presentation
+        }
 
         override fun renderToCpuFrame(
             rendererHandle: Long,
