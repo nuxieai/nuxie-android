@@ -509,21 +509,46 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
 ) {
     private val owned = NuxieOwnedHandle(handle, "Android Vulkan renderer", native::freeRenderer)
 
-    fun resize(pixelWidth: Int, pixelHeight: Int): Int =
-        native.resizeRenderer(owned.require(), pixelWidth, pixelHeight)
+    private var attachedWindow: Long? = null
+
+    fun detachSurface(): Int {
+        val handle = owned.require()
+        if (attachedWindow == null) return NUX_STATUS_OK
+        attachedWindow = null
+        return native.detachRendererSurface(handle)
+    }
+
+    fun resize(pixelWidth: Int, pixelHeight: Int): Int {
+        val status = detachSurface()
+        if (status != NUX_STATUS_OK) return status
+        return native.resizeRenderer(owned.require(), pixelWidth, pixelHeight)
+    }
 
     fun renderAndPresent(
         player: NuxieRuntimePlayer,
         window: NuxieRuntimeWindow,
         clearColor: Int,
         fitContainCenter: Boolean,
-    ): Int = native.renderAndPresent(
-        owned.require(),
-        player.requireHandle(),
-        window.requireHandle(),
-        clearColor,
-        fitContainCenter,
-    )
+    ): Int {
+        val rendererHandle = owned.require()
+        val playerHandle = player.requireHandle()
+        val windowHandle = window.requireHandle()
+        if (attachedWindow != windowHandle) {
+            val detached = detachSurface()
+            if (detached != NUX_STATUS_OK) return -detached
+            val status = native.attachRendererSurface(rendererHandle, windowHandle)
+            if (status != NUX_STATUS_OK) return -status
+            attachedWindow = windowHandle
+        }
+        val disposition = native.renderAndPresent(
+            rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter,
+        )
+        // Native SUBOPTIMAL retires the surface after delivering this frame.
+        // Other errors require explicit recovery; don't reuse cached attachment.
+        if (disposition == 2) attachedWindow = null
+        if (disposition < 0) detachSurface()
+        return disposition
+    }
 
     fun renderToCpuFrame(
         player: NuxieRuntimePlayer,
@@ -536,7 +561,13 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
         fitContainCenter,
     )
 
-    fun close() = owned.close()
+    fun close() {
+        try {
+            if (attachedWindow != null) detachSurface()
+        } finally {
+            owned.close()
+        }
+    }
 
     internal fun requireHandle(): Long = owned.require()
 }
