@@ -4,6 +4,9 @@ import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.features.FeatureAccess
 import ai.nuxie.sdk.util.IsoDates
 import java.util.Calendar
+import java.util.GregorianCalendar
+import java.util.Locale
+import java.util.TimeZone
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -104,6 +107,16 @@ internal object JourneyEntryEvaluator {
                     child("since") && child("until") && child("within") &&
                     (expression["where"]?.let { predicateAvailable(it, depth + 1) } ?: true) &&
                     (expression["type"].string() != "Events.Aggregate" || expression["agg"].string() in aggregateOps)
+                "Events.InOrder" -> events != null && distinctId != null && child("since") && child("until") &&
+                    child("overallWithin") && child("perStepWithin") &&
+                    (expression["steps"] as? JsonArray)?.all { step ->
+                        val node = step as? JsonObject
+                        node?.get("name").string() != null &&
+                            (node?.get("where")?.let { predicateAvailable(it, depth + 1) } ?: true)
+                    } == true
+                "Events.ActivePeriods" -> events != null && distinctId != null &&
+                    expression["period"].string() in setOf("day", "week", "month", "year") &&
+                    (expression["where"]?.let { predicateAvailable(it, depth + 1) } ?: true)
                 // First/last/stopped/restarted need complete lifetime history,
                 // which this device's retention-bounded store cannot promise.
                 else -> false
@@ -175,6 +188,8 @@ internal object JourneyEntryEvaluator {
                     compare(expression["op"].string(), left, right)?.let(::JsonPrimitive)
                 }
                 "Events.Exists", "Events.Count", "Events.Aggregate" -> occurrence(expression)
+                "Events.InOrder" -> inOrder(expression)
+                "Events.ActivePeriods" -> activePeriods(expression)
                 // Other operators stay unknown until their adapters exist.
                 else -> null
             }
@@ -243,6 +258,73 @@ internal object JourneyEntryEvaluator {
                 else -> null
             }
             return result?.let(::JsonPrimitive)
+        }
+
+        private suspend fun activePeriods(expression: JsonObject): JsonElement? {
+            val store = events ?: return null
+            val person = distinctId ?: return null
+            val name = expression["name"].string() ?: return null
+            val period = expression["period"].string() ?: return null
+            val total = expression["totalPeriods"].number() ?: return null
+            val minimum = expression["minPeriods"].number() ?: return null
+            if (total % 1.0 != 0.0 || minimum % 1.0 != 0.0 || total > Int.MAX_VALUE || minimum > Int.MAX_VALUE) return null
+            if (total <= 0 || minimum <= 0 || minimum > total) return JsonPrimitive(false)
+            fun bucket(timestamp: Long): GregorianCalendar = GregorianCalendar(TimeZone.getTimeZone("UTC"), Locale.ROOT).apply {
+                firstDayOfWeek = Calendar.SUNDAY
+                minimalDaysInFirstWeek = 1
+                timeInMillis = timestamp
+                set(Calendar.HOUR_OF_DAY, 0)
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+                when (period) {
+                    "week" -> add(Calendar.DAY_OF_MONTH, -(get(Calendar.DAY_OF_WEEK) - Calendar.SUNDAY))
+                    "month" -> set(Calendar.DAY_OF_MONTH, 1)
+                    "year" -> { set(Calendar.DAY_OF_MONTH, 1); set(Calendar.MONTH, Calendar.JANUARY) }
+                }
+            }
+            val component = when (period) {
+                "day" -> Calendar.DAY_OF_MONTH
+                "week" -> Calendar.WEEK_OF_YEAR
+                "month" -> Calendar.MONTH
+                "year" -> Calendar.YEAR
+                else -> return null
+            }
+            val lower = bucket(nowMillis).apply { add(component, -(total.toInt() - 1)) }.timeInMillis
+            if (lower > nowMillis) return null
+            val predicate = expression["where"]?.let { compilePredicate(it) ?: return null }
+            val rows = store.queryHistory(name, person, lower, nowMillis) ?: return null
+            val coverage = store.historyCoverageStartingAt() ?: return null
+            if (lower < coverage) return null
+            val buckets = rows.filter { predicate?.invoke(it.properties) != false }
+                .mapTo(mutableSetOf()) { bucket(it.timestampMillis).timeInMillis }
+            return JsonPrimitive(buckets.size >= minimum)
+        }
+
+        private suspend fun inOrder(expression: JsonObject): JsonElement? {
+            val store = events ?: return null
+            val person = distinctId ?: return null
+            val lower = expression["since"]?.let {
+                if (!isTimestamp(it)) return null
+                queryMilliseconds(evaluate(it)?.number() ?: return null, lower = true) ?: return null
+            } ?: return null // Retained history cannot establish a lifetime sequence.
+            val upper = expression["until"]?.let {
+                if (!isTimestamp(it)) return null
+                queryMilliseconds(evaluate(it)?.number() ?: return null, lower = false) ?: return null
+            }
+            val overall = expression["overallWithin"]?.let { evaluate(it)?.number() ?: return null }
+            val perStep = expression["perStepWithin"]?.let { evaluate(it)?.number() ?: return null }
+            val steps = (expression["steps"] as? JsonArray)?.map {
+                val step = it as? JsonObject ?: return null
+                EventSequenceMatcher.Step(step["name"].string() ?: return null,
+                    step["where"]?.let { predicate -> compilePredicate(predicate) ?: return null })
+            } ?: return null
+            val rows = steps.map { it.name }.distinct().flatMap { name ->
+                store.queryHistory(name, person, lower, upper) ?: return null
+            }.sortedWith(compareBy({ it.timestampMillis }, { it.id }))
+            val coverage = store.historyCoverageStartingAt() ?: return null
+            if (lower < coverage) return null
+            return JsonPrimitive(EventSequenceMatcher.matches(rows, steps, overall, perStep))
         }
 
         private suspend fun occurrence(expression: JsonObject): JsonElement? {
