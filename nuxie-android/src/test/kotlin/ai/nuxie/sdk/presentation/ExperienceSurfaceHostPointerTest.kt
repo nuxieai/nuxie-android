@@ -39,6 +39,45 @@ import kotlinx.serialization.json.long
 @RunWith(RobolectricTestRunner::class)
 class ExperienceSurfaceHostPointerTest {
     @Test
+    fun `busy renderer coalesces display ticks so input precedes the next frame`() {
+        val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/runtime-visibility-android.json").readText()).jsonObject
+            .getValue("frameBackpressure").jsonObject
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
+        val texture = SurfaceTexture(0)
+        val rendering = CountDownLatch(1)
+        val resume = CountDownLatch(1)
+        try {
+            host.loadArtboard(byteArrayOf(1), null,
+                textInputs = ExperienceTextInput.forScreen(textInputDescriptor(), "survey"))
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            native.onRender = { rendering.countDown(); check(resume.await(5, TimeUnit.SECONDS)) }
+            val first = fixture.getValue("firstFrameNanos").jsonPrimitive.long
+            host.doFrame(first)
+            assertTrue(rendering.await(2, TimeUnit.SECONDS))
+            repeat(fixture.getValue("busyFrameCount").jsonPrimitive.content.toInt()) {
+                host.doFrame(first + (it + 1) * fixture.getValue("busyTickNanos").jsonPrimitive.long)
+            }
+            host.writeText("name", "okay", true) {}
+            resume.countDown()
+            drain(lane)
+            host.doFrame(fixture.getValue("nextFrameNanos").jsonPrimitive.long)
+            drain(lane)
+            assertEquals(fixture.getValue("expectedOrder").jsonArray.map { it.jsonPrimitive.content }, native.order)
+            assertEquals(fixture.getValue("expectedElapsed").jsonArray.map { it.jsonPrimitive.float }, native.elapsedSteps)
+        } finally {
+            resume.countDown()
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
+    @Test
     fun `environment state queues before loading and updates the retained commerce root`() {
         val native = RecordingNative()
         val lane = NuxieRuntimeLane()
@@ -200,6 +239,7 @@ class ExperienceSurfaceHostPointerTest {
             drain(lane)
             assertEquals(listOf(0f), native.elapsedSteps)
             host.doFrame(100_000_000_000L)
+            drain(lane)
             host.doFrame(100_010_000_000L)
             drain(lane)
             host.onSurfaceTextureUpdated(texture)
@@ -329,6 +369,7 @@ class ExperienceSurfaceHostPointerTest {
         MotionEvent.obtain(0, eventTime, action, x, y, 0)
 
     private class RecordingNative : NuxieTypedRuntimeNative {
+        var onRender: () -> Unit = {}
         val pointerSteps = mutableListOf<List<NativePlayerPointer>>()
         val order = mutableListOf<String>()
         val elapsedSteps = mutableListOf<Float>()
@@ -405,7 +446,7 @@ class ExperienceSurfaceHostPointerTest {
             windowHandle: Long,
             clearColor: Int,
             fitContainCenter: Boolean,
-        ): Int = 1
+        ): Int { onRender(); return 1 }
 
         override fun renderToCpuFrame(
             rendererHandle: Long,

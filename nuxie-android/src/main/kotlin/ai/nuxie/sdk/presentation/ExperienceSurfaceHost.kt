@@ -115,6 +115,8 @@ internal class ExperienceSurfaceHost(
     private var running = false
     private val released = AtomicBoolean(false)
     private val frameGeneration = AtomicLong(0)
+    // At most one queued or executing frame. Input and cleanup share this FIFO lane.
+    private val framePending = AtomicBoolean(false)
     private var surfaceAvailable = false
     private var presentationVisible = true
     private var lastFrameNanos = 0L
@@ -389,6 +391,8 @@ internal class ExperienceSurfaceHost(
 
     override fun doFrame(frameTimeNanos: Long) {
         if (!running) return
+        Choreographer.getInstance().postFrameCallback(this)
+        if (!framePending.compareAndSet(false, true)) return
         val generation = frameGeneration.get()
         val elapsedSeconds = if (lastFrameNanos == 0L) {
             0.0
@@ -396,83 +400,87 @@ internal class ExperienceSurfaceHost(
             (frameTimeNanos - lastFrameNanos) / 1_000_000_000.0
         }
         lastFrameNanos = frameTimeNanos
-        lane.enqueue {
-            if (!attached || !running || generation != frameGeneration.get()) return@enqueue
-            val renderer = renderer ?: return@enqueue
-            val player = player ?: return@enqueue
-            // Invariant: attached is set only after a successful window
-            // acquire and cleared in the same lane task that closes the
-            // window, so attached implies a live window; this null-check is
-            // a type-level guard, never a reachable behavior change.
-            val window = window ?: return@enqueue
-            val correlationId = nextCorrelationId
-            nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) {
-                1uL
-            } else {
-                nextCorrelationId + 1uL
-            }
-            val outcome = try {
-                player.stepTyped(
-                    elapsedSeconds = elapsedSeconds,
-                    pointers = pointerInput.takeBatch(),
-                    correlationId = correlationId,
-                )
-            } catch (error: Throwable) {
-                reportFailure(
-                    ExperiencePresentationException.Reason.HOST_FAILED,
-                    "Experience runtime step failed",
-                    error,
-                )
-                return@enqueue
-            }
-            val viewModelSnapshot = if (
-                textInputs.isNotEmpty() || outcome.events.isNotEmpty() || outcome.hasPublishableEffects()
-            ) {
-                try {
-                    viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
+        val accepted = lane.enqueue {
+            try {
+                if (!attached || !running || generation != frameGeneration.get()) return@enqueue
+                val renderer = renderer ?: return@enqueue
+                val player = player ?: return@enqueue
+                // Invariant: attached is set only after a successful window
+                // acquire and cleared in the same lane task that closes the
+                // window, so attached implies a live window; this null-check is
+                // a type-level guard, never a reachable behavior change.
+                val window = window ?: return@enqueue
+                val correlationId = nextCorrelationId
+                nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) {
+                    1uL
+                } else {
+                    nextCorrelationId + 1uL
+                }
+                val outcome = try {
+                    player.stepTyped(
+                        elapsedSeconds = elapsedSeconds,
+                        pointers = pointerInput.takeBatch(),
+                        correlationId = correlationId,
+                    )
                 } catch (error: Throwable) {
                     reportFailure(
                         ExperiencePresentationException.Reason.HOST_FAILED,
-                        "Experience view-model snapshot failed",
+                        "Experience runtime step failed",
                         error,
                     )
                     return@enqueue
                 }
-            } else {
-                null
-            }
-            if (outcome.hasPublishableEffects()) {
-                unpublishedSteps.addLast(PublishedStep(correlationId, outcome, viewModelSnapshot))
-            }
-            val disposition = renderer.renderAndPresent(player, window, clearColor, true)
-            if (disposition < 0) {
-                Log.w(LOG_TAG, "render_player failed with status ${-disposition}")
-                reportFailure(
-                    ExperiencePresentationException.Reason.HOST_FAILED,
-                    "Experience rendering failed with status ${-disposition}",
-                )
-            } else if (disposition > 0) {
-                if (textInputs.isNotEmpty() && viewModelSnapshot != null) {
-                    post {
-                        if (!released.get()) listener?.onTextInputSnapshot(viewModelSnapshot)
+                val viewModelSnapshot = if (
+                    textInputs.isNotEmpty() || outcome.events.isNotEmpty() || outcome.hasPublishableEffects()
+                ) {
+                    try {
+                        viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
+                    } catch (error: Throwable) {
+                        reportFailure(
+                            ExperiencePresentationException.Reason.HOST_FAILED,
+                            "Experience view-model snapshot failed",
+                            error,
+                        )
+                        return@enqueue
                     }
+                } else {
+                    null
                 }
-                if (!firstFramePresented) {
-                    firstFramePresented = true
+                if (outcome.hasPublishableEffects()) {
+                    unpublishedSteps.addLast(PublishedStep(correlationId, outcome, viewModelSnapshot))
                 }
-                publishSteps()
-            }
-            if (outcome.events.isNotEmpty()) {
-                post {
-                    if (!released.get()) {
-                        outcome.events.forEach {
-                            listener?.onRuntimeEvent(it, viewModelSnapshot)
+                val disposition = renderer.renderAndPresent(player, window, clearColor, true)
+                if (disposition < 0) {
+                    Log.w(LOG_TAG, "render_player failed with status ${-disposition}")
+                    reportFailure(
+                        ExperiencePresentationException.Reason.HOST_FAILED,
+                        "Experience rendering failed with status ${-disposition}",
+                    )
+                } else if (disposition > 0) {
+                    if (textInputs.isNotEmpty() && viewModelSnapshot != null) {
+                        post {
+                            if (!released.get()) listener?.onTextInputSnapshot(viewModelSnapshot)
+                        }
+                    }
+                    if (!firstFramePresented) {
+                        firstFramePresented = true
+                    }
+                    publishSteps()
+                }
+                if (outcome.events.isNotEmpty()) {
+                    post {
+                        if (!released.get()) {
+                            outcome.events.forEach {
+                                listener?.onRuntimeEvent(it, viewModelSnapshot)
+                            }
                         }
                     }
                 }
+            } finally {
+                framePending.set(false)
             }
         }
-        Choreographer.getInstance().postFrameCallback(this)
+        if (!accepted) framePending.set(false)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
