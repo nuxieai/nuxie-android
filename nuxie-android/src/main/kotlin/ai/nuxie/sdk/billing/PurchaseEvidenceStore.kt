@@ -24,14 +24,20 @@ internal fun purchaseEvidenceDirectory(
     filesDirectory: File,
     apiKey: String,
     environment: NuxieEnvironment,
+    testStore: Boolean = false,
 ): File {
     // Keep the pre-rename directory stable so existing purchase evidence remains discoverable.
-    return File(File(filesDirectory, "nuxie-commerce"), purchaseAuthorityScope(apiKey, environment))
+    return File(File(filesDirectory, "nuxie-commerce"), purchaseAuthorityScope(apiKey, environment, testStore))
 }
 
-internal fun purchaseAuthorityScope(apiKey: String, environment: NuxieEnvironment): String =
+internal fun purchaseAuthorityScope(
+    apiKey: String,
+    environment: NuxieEnvironment,
+    testStore: Boolean = false,
+): String =
     MessageDigest.getInstance("SHA-256")
-        .digest("$apiKey\u0000${environment.name}".encodeToByteArray())
+        // Preserve the existing native scope exactly; only Test Store adds a domain.
+        .digest(("$apiKey\u0000${environment.name}" + if (testStore) "\u0000test-store" else "").encodeToByteArray())
         .joinToString("") { "%02x".format(it) }
 
 internal data class StoredPurchaseContext(

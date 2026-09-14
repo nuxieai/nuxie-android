@@ -549,6 +549,7 @@ internal class PurchaseService(
         entityId: String?,
         metadata: Map<String, Any?>?,
     ): FeatureUsageResult? {
+        if (testStore != null) return null
         val usageApi = api ?: return null
         if (!amount.isFinite() || amount <= 0.0) return null
         while (true) {
@@ -1083,6 +1084,7 @@ internal class PurchaseService(
     }
 
     suspend fun onPurchasesUpdated(update: PurchaseUpdate) {
+        if (testStore != null) return
         if (update.billingResult.responseCode == BillingClient.BillingResponseCode.USER_CANCELED) {
             withProcessingDecision { effects ->
                 commitPurchaseOutcome(
@@ -1115,6 +1117,7 @@ internal class PurchaseService(
 
     /** Billing connect and app foreground share one recovery lane. */
     suspend fun recover() {
+        if (testStore != null) return
         refreshOptimisticProjection()
         val revocationSnapshot = withProcessingDecision { missingRevocationSnapshot() }
         val active = mutableListOf<PlayPurchase>()
@@ -2397,6 +2400,7 @@ internal class PurchaseService(
     /** Resolve each retained token once; later catalog replacements cannot swap its allowances. */
     private fun deriveOptimisticProjection(currentDistinctId: String = distinctId()):
         Map<String, OptimisticFeatureOverlay>? {
+        if (testStore != null) return null
         val descriptors = evidenceStore.loadProductMappings()
         val bindings = evidenceStore.loadBindings()
         // Cross-commit visibility is deliberate: an evidence row is DURABLE

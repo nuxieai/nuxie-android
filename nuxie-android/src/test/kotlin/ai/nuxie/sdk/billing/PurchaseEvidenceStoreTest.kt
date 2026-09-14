@@ -2,6 +2,7 @@ package ai.nuxie.sdk.billing
 
 import ai.nuxie.sdk.NuxieEnvironment
 import android.util.Base64
+import java.io.File
 import java.math.BigDecimal
 import java.nio.file.Files
 import java.security.KeyPairGenerator
@@ -106,6 +107,33 @@ class PurchaseEvidenceStoreTest {
             )
         } finally {
             directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun testStoreAuthorityIsSeparateWhileNativeDirectoryRemainsStable() {
+        val root = Files.createTempDirectory("nuxie-test-store-scope").toFile()
+        try {
+            val key = "pk_test_separation"
+            val native = purchaseEvidenceDirectory(root, key, NuxieEnvironment.DEVELOPMENT)
+            val simulated = purchaseEvidenceDirectory(root, key, NuxieEnvironment.DEVELOPMENT, testStore = true)
+            val legacyDigest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest((key + "\u0000DEVELOPMENT").encodeToByteArray())
+                .joinToString("") { "%02x".format(it) }
+            assertEquals(legacyDigest, native.name)
+            assertTrue(native != simulated)
+            val marker = File(native, "feature-commands.json")
+            marker.parentFile!!.mkdirs()
+            marker.writeText("native-journal")
+            assertFalse(File(simulated, marker.name).exists())
+            simulated.mkdirs()
+            File(simulated, marker.name).writeText("test-journal")
+            assertEquals("native-journal", marker.readText())
+            assertFalse(simulated.absolutePath.contains(key))
+            assertTrue(simulated != purchaseEvidenceDirectory(root, "other-key", NuxieEnvironment.DEVELOPMENT, true))
+            assertTrue(simulated != purchaseEvidenceDirectory(root, key, NuxieEnvironment.PRODUCTION, true))
+        } finally {
+            root.deleteRecursively()
         }
     }
 
