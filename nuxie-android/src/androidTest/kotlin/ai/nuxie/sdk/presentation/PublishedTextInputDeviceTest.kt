@@ -67,6 +67,7 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.float
 import kotlinx.serialization.json.jsonArray
@@ -347,6 +348,8 @@ class PublishedTextInputDeviceTest {
     fun closingBeforeFirstFrameDrainsWithoutActivatingScreen() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
+        val closeContract = instrumentation.context.assets.open("journeys/planes/presentation-reveal-android.json")
+            .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject.getValue("unseenClose").jsonObject }
         assertTrue(NuxieRuntime.shared.isAvailable)
         val fixture = loadPublishedFixture(instrumentation)
         val screen = fixture.release.descriptor.getValue("render").jsonObject
@@ -358,7 +361,7 @@ class PublishedTextInputDeviceTest {
         val failures = AtomicReference<Throwable?>()
         val target = AtomicReference<Activity?>()
         val prepared = PreparedPresentation(fixture.riv, screen.getValue("artboardName").jsonPrimitive.content,
-            0xff000000.toInt(), PresentationShell.FullScreen, screen.getValue("id").jsonPrimitive.content,
+            0xff000000.toInt(), PresentationShell.Sheet(PresentationShell.Sheet.Detent.MEDIUM, false), screen.getValue("id").jsonPrimitive.content,
             fixture.release.descriptor, fixture.assets,
             ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float))
         val application = context.applicationContext as Application
@@ -368,7 +371,9 @@ class PublishedTextInputDeviceTest {
                 target.set(activity)
                 assertEquals(ExperienceScreenLifecycle.Phase.ENTERING, prepared.screenLifecycle.phase)
                 created.countDown()
-                activity.finish()
+                @Suppress("DEPRECATION")
+                activity.onBackPressed()
+                assertEquals(closeContract.getValue("loadingAllowsBack").jsonPrimitive.boolean, activity.isFinishing)
             }
             override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
             override fun onActivityResumed(activity: Activity) = Unit
@@ -880,6 +885,8 @@ class PublishedTextInputDeviceTest {
     fun drawerClipsNativeContentAlongWithItsRenderedSurface() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
+        val closeContract = instrumentation.context.assets.open("journeys/planes/presentation-reveal-android.json")
+            .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject.getValue("unseenClose").jsonObject }
         assertTrue(NuxieRuntime.shared.isAvailable)
         val fixture = loadPublishedFixture(instrumentation)
         val screen = fixture.release.descriptor.getValue("render").jsonObject
@@ -897,7 +904,7 @@ class PublishedTextInputDeviceTest {
             PresentationRegistry.register(presentationId, PreparedPresentation(
                 fixture.riv, screen.getValue("artboardName").jsonPrimitive.content, 0xff000000.toInt(),
                 PresentationShell.Drawer(PresentationShell.Drawer.Edge.BOTTOM,
-                    item.getValue("extentRatio").jsonPrimitive.float, radius, true),
+                    item.getValue("extentRatio").jsonPrimitive.float, radius, false),
                 screen.getValue("id").jsonPrimitive.content, fixture.release.descriptor, fixture.assets,
                 ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float),
             ), onFirstFrame = { approveFixtureFrame(presentationId); firstFrame.countDown() }, onFailure = { failure.set(it) },
@@ -909,6 +916,12 @@ class PublishedTextInputDeviceTest {
                 })
                 activity = checkNotNull(monitor.waitForActivityWithTimeout(15_000))
                 assertTrue("Runtime frame must arrive: ${failure.get()}", firstFrame.await(30, TimeUnit.SECONDS))
+                instrumentation.runOnMainSync {
+                    @Suppress("DEPRECATION")
+                    activity!!.onBackPressed()
+                    assertEquals("Revealed content must honor authored nondismissibility",
+                        closeContract.getValue("authoredDismissibilityAppliesAfterReveal").jsonPrimitive.boolean, !activity!!.isFinishing)
+                }
                 val content = checkNotNull(findSurface(activity!!.window.decorView)).parent as ViewGroup
                 val rect = Rect()
                 instrumentation.runOnMainSync {

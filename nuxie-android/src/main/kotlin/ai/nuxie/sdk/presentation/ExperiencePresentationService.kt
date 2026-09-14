@@ -1274,6 +1274,7 @@ internal class ExperiencePresentationService(
         synchronized(active.factLock) {
             if (
                 active.closed.get() ||
+                active.outcomeReason.get() != null ||
                 active.runTransitionFinished.isCompleted ||
                 !active.shown.compareAndSet(false, true)
             ) return@synchronized false
@@ -1348,7 +1349,10 @@ internal class ExperiencePresentationService(
         active: ActivePresentation,
         reason: CloseReason,
     ) {
-        if (!active.outcomeReason.compareAndSet(null, reason)) return
+        val wasShown = synchronized(active.factLock) {
+            if (!active.outcomeReason.compareAndSet(null, reason)) return
+            active.shown.get()
+        }
         if (reason == CloseReason.JourneyNavigation) {
             scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 active.journey.emissions.close()
@@ -1366,7 +1370,7 @@ internal class ExperiencePresentationService(
             try {
                 journey.emissions.close()
                 val admittedDismissal = checkpoint?.result?.await()
-                val dismissal = reason.screenDismissalMethod()?.let { method ->
+                val dismissal = reason.screenDismissalMethod()?.takeIf { wasShown }?.let { method ->
                     if (ownsDismissal) {
                         journey.onScreenDismissed(
                             journey.screenId,
@@ -1387,7 +1391,7 @@ internal class ExperiencePresentationService(
             } finally {
                 val emitClose = synchronized(active.factLock) {
                     active.runTransitionFinished.complete(Unit)
-                    active.shown.get() && reason != CloseReason.IdentityChanged
+                    wasShown && reason != CloseReason.IdentityChanged
                 }
                 if (emitClose) emitCloseFact(active, reason)
             }

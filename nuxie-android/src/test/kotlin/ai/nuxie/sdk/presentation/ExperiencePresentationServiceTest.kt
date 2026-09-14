@@ -461,6 +461,76 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `closing unseen content terminates once without authored dismissal or presentation facts`() = runTest {
+        val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/presentation-reveal-android.json").readText()).jsonObject
+            .getValue("unseenClose").jsonObject
+        for (phase in vector.getValue("phases").jsonArray.map { it.jsonPrimitive.content }) {
+            val release = renderedJourneyRelease()
+            val launched = mutableListOf<String>()
+            val events = mutableListOf<String>()
+            val outcomes = mutableListOf<JourneySurfaceOutcome>()
+            val releaseWork = CompletableDeferred<Unit>()
+            val entered = CompletableDeferred<Unit>()
+            val lease = Lease()
+            var checkpoints = 0
+            val service = service(this, launch = launched::add, emit = { name, _, _ -> events += name })
+            val pending = async {
+                runCatching {
+                    service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                        service.reserveJourney("customer-1"), acquire = { acquired(release.identity, lease) },
+                        onPresentationRevealed = {
+                            if (phase == "admission") { entered.complete(Unit); releaseWork.await() }
+                        }, onScreenDismissed = { _, _, _ -> checkpoints++; JourneyScreenDismissalResult.HANDLED },
+                        onOutcome = outcomes::add)
+                }
+            }
+            runCurrent()
+            val id = launched.single()
+            val host = AttachedHost()
+            PresentationRegistry.attach(id, host)
+            try {
+                if (phase != "beforeFrame") {
+                    PresentationRegistry.reportFirstFrame(id, host) {
+                        if (phase == "hostAcknowledgment") { entered.complete(Unit); releaseWork.await() }
+                        // A visibility acknowledgment already queued before close can
+                        // arrive late. Terminal fact selection must still win.
+                        phase == "hostAcknowledgment" || PresentationRegistry.canReveal(id, host)
+                    }
+                    entered.await()
+                }
+                val closing = async {
+                    service.dismiss(CloseReason.UserDismissed)
+                    service.dismissFromHost("customer-1") // Observe the already-selected user close draining.
+                }
+                runCurrent()
+                assertTrue(phase, host.finished)
+                assertFalse(phase, closing.isCompleted)
+                releaseWork.complete(Unit)
+                runCurrent()
+                assertTrue("$phase: terminal selection must reject late shown", events.isEmpty())
+                assertFalse("$phase: native cleanup still owns the close", closing.isCompleted)
+                PresentationRegistry.detach(id, host)
+                closing.await()
+                assertTrue(phase, pending.await().isFailure)
+                assertEquals(phase, vector.getValue("dismissalCheckpoints").jsonPrimitive.int, checkpoints)
+                assertEquals(phase, vector.getValue("shownFacts").jsonPrimitive.int,
+                    events.count { it == SystemEventNames.EXPERIENCE_SHOWN })
+                assertEquals(phase, vector.getValue("closeFacts").jsonPrimitive.int, events.size)
+                assertEquals(phase, vector.getValue("terminalOutcomes").jsonPrimitive.int, outcomes.size)
+                assertEquals(phase, vector.getValue("leaseCloseCount").jsonPrimitive.int, lease.closeCount.get())
+                service.dismiss(CloseReason.HostDismissed)
+                assertEquals(1, outcomes.size)
+            } finally {
+                releaseWork.complete(Unit)
+                service.dismiss(CloseReason.HostDismissed)
+                PresentationRegistry.detach(id, host)
+                service.shutdownOwnedBy("customer-1")
+            }
+        }
+    }
+
+    @Test
     fun `recreation retires a queued reveal without replaying durable admission or shown`() = runTest {
         val release = renderedJourneyRelease()
         val launched = mutableListOf<String>()
