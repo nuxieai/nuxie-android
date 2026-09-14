@@ -115,6 +115,49 @@ class ExperienceSurfaceHostPointerTest {
     }
 
     @Test
+    fun `unavailable swapchain frame does not activate the screen and later presentation recovers`() {
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        var firstFrames = 0
+        val failures = mutableListOf<ExperiencePresentationException>()
+        val host = ExperienceSurfaceHost(
+            RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native),
+            listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() { firstFrames++ }
+                override fun onFailure(error: ExperiencePresentationException) { failures += error }
+            },
+        )
+        val texture = SurfaceTexture(0)
+        try {
+            host.loadArtboard(byteArrayOf(1), null)
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            native.presentation = 0
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            assertEquals(0, firstFrames)
+            assertTrue(failures.isEmpty())
+            native.presentation = 1
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            assertEquals("Submission alone is not composition", 0, firstFrames)
+            host.onSurfaceTextureUpdated(texture)
+            assertEquals(1, firstFrames)
+            host.doFrame(1_032_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            assertEquals(1, firstFrames)
+            assertTrue(failures.isEmpty())
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
+    @Test
     fun `environment state queues before loading and updates the retained commerce root`() {
         val native = RecordingNative()
         val lane = NuxieRuntimeLane()
@@ -482,13 +525,15 @@ class ExperienceSurfaceHostPointerTest {
             )
         }
 
+        var presentation = 1
+
         override fun renderAndPresent(
             rendererHandle: Long,
             playerHandle: Long,
             windowHandle: Long,
             clearColor: Int,
             fitContainCenter: Boolean,
-        ): Int { onRender(); return 1 }
+        ): Int { onRender(); return presentation }
 
         override fun renderToCpuFrame(
             rendererHandle: Long,
