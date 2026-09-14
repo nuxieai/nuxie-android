@@ -26,6 +26,9 @@ import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.NonCancellable
@@ -149,21 +152,28 @@ internal enum class JourneyPermissionRequest {
  * engine-owned Activity. Absence after process death is deliberate: content
  * is never reconstructed from Intent extras.
  */
+internal sealed interface PresentationContentState {
+    data class Acquiring(val screen: AuthenticatedPresentationScreen) : PresentationContentState
+    data class Ready(val content: PreparedPresentation) : PresentationContentState
+    data class Closed(val reason: CloseReason) : PresentationContentState
+}
+
 internal object PresentationRegistry {
-    private class Entry(
-        val content: PreparedPresentation,
+    private class Callbacks(
         val onFirstFrame: () -> Unit,
         val onFailure: (Throwable) -> Unit,
         val onDismissed: (CloseReason) -> Unit,
         val onOutcome: (CloseReason) -> Unit,
         val onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?) -> Unit,
         val onTextCommitted: (String, String) -> Unit,
-    ) {
+    )
+
+    private class Entry(initial: PresentationContentState, var callbacks: Callbacks) {
+        val state = MutableStateFlow(initial)
         val terminal = AtomicBoolean(false)
         val firstFrame = AtomicBoolean(false)
+        val detached = CompletableDeferred<Unit>()
         var latestScreen = WeakReference<PresentationScreenHandle>(null)
-        // Configuration recreation changes the dismissal target, but every
-        // screen attachment remains pending until its runtime lane calls detach.
         val attachedScreens: MutableSet<PresentationScreenHandle> =
             Collections.newSetFromMap(IdentityHashMap())
         var dismissalReason: CloseReason? = null
@@ -182,22 +192,39 @@ internal object PresentationRegistry {
         onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?) -> Unit =
             { _, _, _ -> },
         onTextCommitted: (String, String) -> Unit = { _, _ -> },
+        requiresAcquiring: Boolean = false,
     ) {
         synchronized(lock) {
-            check(id !in entries) { "duplicate presentation id" }
-            entries[id] = Entry(
-                content,
-                onFirstFrame,
-                onFailure,
-                onDismissed,
-                onOutcome,
-                onRuntimeStep,
-                onTextCommitted,
-            )
+            val callbacks = Callbacks(onFirstFrame, onFailure, onDismissed, onOutcome, onRuntimeStep, onTextCommitted)
+            val existing = entries[id]
+            if (existing == null) {
+                check(!requiresAcquiring) { "Acquiring presentation was withdrawn" }
+                entries[id] = Entry(PresentationContentState.Ready(content), callbacks)
+            } else {
+                val pending = existing.state.value as? PresentationContentState.Acquiring
+                check(pending != null && existing.dismissalReason == null) { "duplicate or closed presentation id" }
+                check(content.screenId == pending.screen.screenId && content.artboardName == pending.screen.artboardName &&
+                    content.clearColor == pending.screen.clearColor && content.shell == pending.screen.shell) {
+                    "Prepared content differs from authenticated shell"
+                }
+                existing.callbacks = callbacks
+                existing.state.value = PresentationContentState.Ready(content)
+            }
         }
     }
 
-    fun resolve(id: String): PreparedPresentation? = synchronized(lock) { entries[id]?.content }
+    fun registerAcquiring(id: String, screen: AuthenticatedPresentationScreen, onClosed: (CloseReason) -> Unit): Deferred<Unit> =
+        synchronized(lock) {
+            check(id !in entries) { "duplicate presentation id" }
+            Entry(PresentationContentState.Acquiring(screen), Callbacks({}, { onClosed(CloseReason.Error(it)) }, onClosed,
+                onClosed, { _, _, _ -> }, { _, _ -> })).also { entries[id] = it }.detached
+        }
+
+    fun observe(id: String): StateFlow<PresentationContentState>? = synchronized(lock) { entries[id]?.state?.asStateFlow() }
+
+    fun resolve(id: String): PreparedPresentation? = synchronized(lock) {
+        (entries[id]?.state?.value as? PresentationContentState.Ready)?.content
+    }
 
     fun attach(id: String, screen: PresentationScreenHandle): Boolean = synchronized(lock) {
         val entry = entries[id] ?: return@synchronized false
@@ -225,14 +252,14 @@ internal object PresentationRegistry {
     fun reportFirstFrame(id: String) {
         val callback = synchronized(lock) {
             val entry = entries[id] ?: return
-            if (entry.terminal.get() || !entry.firstFrame.compareAndSet(false, true)) return
-            entry.onFirstFrame
+            if (entry.state.value !is PresentationContentState.Ready || entry.dismissalReason != null || entry.terminal.get() || !entry.firstFrame.compareAndSet(false, true)) return
+            entry.callbacks.onFirstFrame
         }
         callback()
     }
 
     fun reportFailure(id: String, error: Throwable) {
-        val outcome = synchronized(lock) { entries[id]?.onOutcome }
+        val outcome = synchronized(lock) { entries[id]?.callbacks?.onOutcome }
         dismiss(id, CloseReason.Error(error))
         outcome?.invoke(CloseReason.Error(error))
     }
@@ -241,7 +268,7 @@ internal object PresentationRegistry {
         var outcome: ((CloseReason) -> Unit)? = null
         val completion = synchronized(lock) {
             val entry = entries[id] ?: return
-            outcome = entry.onOutcome
+            outcome = entry.callbacks.onOutcome
             if (entry.dismissalReason == null) entry.dismissalReason = reason
             completionIfReady(id, entry)
         }
@@ -250,7 +277,7 @@ internal object PresentationRegistry {
     }
 
     fun reportOutcome(id: String, reason: CloseReason) {
-        val callback = synchronized(lock) { entries[id]?.onOutcome } ?: return
+        val callback = synchronized(lock) { entries[id]?.callbacks?.onOutcome } ?: return
         callback(reason)
     }
 
@@ -261,7 +288,7 @@ internal object PresentationRegistry {
         viewModelSnapshot: NuxieViewModelSnapshot?,
     ) {
         val callback = synchronized(lock) {
-            entries[id]?.takeUnless { it.terminal.get() }?.onRuntimeStep
+            entries[id]?.takeUnless { it.terminal.get() }?.callbacks?.onRuntimeStep
         } ?: return
         callback(outcome, correlationId, viewModelSnapshot)
     }
@@ -274,7 +301,7 @@ internal object PresentationRegistry {
         val callback = synchronized(lock) {
             entries[id]?.takeUnless {
                 it.terminal.get() || it.dismissalReason != null || it.latestScreen.get() !== screen
-            }?.onTextCommitted
+            }?.callbacks?.onTextCommitted
         } ?: return
         callback(inputId, text)
     }
@@ -309,10 +336,12 @@ internal object PresentationRegistry {
         val reason = entry.dismissalReason ?: return null
         if (entry.attachedScreens.isNotEmpty()) return null
         entries.remove(id)
+        entry.state.value = PresentationContentState.Closed(reason)
+        entry.detached.complete(Unit)
         if (!entry.terminal.compareAndSet(false, true)) return null
         return when (reason) {
-            is CloseReason.Error -> ({ entry.onFailure(reason.cause) })
-            else -> ({ entry.onDismissed(reason) })
+            is CloseReason.Error -> ({ entry.callbacks.onFailure(reason.cause) })
+            else -> ({ entry.callbacks.onDismissed(reason) })
         }
     }
 
@@ -525,7 +554,9 @@ internal class ExperiencePresentationService(
         val reserved = reservation as? JourneyReservation
         val request = reserved?.request ?: captureRequest(ownerDistinctId)
         if (request.ownerDistinctId != ownerDistinctId) throw declinedPresentation()
+        val selectedScreen = AuthenticatedPresentationScreen.resolve(release, screenId)
         return presentPrepared(
+            selectedScreen = selectedScreen,
             transition = transition,
             request = request,
             journeyId = journeyId,
@@ -574,12 +605,11 @@ internal class ExperiencePresentationService(
                     error,
                 )
             }
-            val screen = AuthenticatedPresentationScreen.resolve(release, screenId)
             PreparedSource(
                 identity = release.identity,
                 descriptor = release.descriptor,
                 acquired = acquire(),
-                screen = screen,
+                screen = selectedScreen,
                 commerceSession = commerceSession,
                 viewModelProjection = viewModelProjection,
             )
@@ -587,6 +617,7 @@ internal class ExperiencePresentationService(
     }
 
     private suspend fun presentPrepared(
+        selectedScreen: AuthenticatedPresentationScreen,
         request: PresentationRequest,
         journeyId: String?,
         reservationId: String?,
@@ -600,6 +631,9 @@ internal class ExperiencePresentationService(
             val attempt = PreparationAttempt(request, journeyId, Job(currentCoroutineContext()[Job]))
             var transitionClaimed = false
             var published = false
+            var acquiringId: String? = null
+            var acquiringDetached: Deferred<Unit>? = null
+            val acquiringFailure = AtomicReference<Throwable?>()
             var unownedAcquisition: AcquiredJourneyRelease? = null
             var navigation: PreparedScreenNavigation? = null
             val nativePreparationFinished = CompletableDeferred<Unit>()
@@ -634,6 +668,21 @@ internal class ExperiencePresentationService(
                         ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE,
                         "Experience renderer is unavailable on this device",
                     )
+                }
+
+                if (existing == null) {
+                    synchronized(stateLock) {
+                        if (!attempt.job.isActive || !isCurrentIdentity(request) || !canPresent()) {
+                            throw supersededByIdentityTransition()
+                        }
+                        val id = UUID.randomUUID().toString()
+                        acquiringId = id
+                        acquiringDetached = PresentationRegistry.registerAcquiring(id, selectedScreen) { reason ->
+                            if (reason is CloseReason.Error) acquiringFailure.compareAndSet(null, reason.cause)
+                            attempt.job.cancel()
+                        }
+                        launch(id)
+                    }
                 }
 
                 val source = try {
@@ -680,7 +729,7 @@ internal class ExperiencePresentationService(
                     source.identity.experienceVersionId,
                     journeyId,
                 )
-                val id = UUID.randomUUID().toString()
+                val id = acquiringId ?: UUID.randomUUID().toString()
                 val pending = ActivePresentation(
                     id = id,
                     ref = ref,
@@ -778,7 +827,9 @@ internal class ExperiencePresentationService(
                         // or observes a fully registered presentation afterward.
                         if (reservationStillMatches) pendingReservation = null
                         current = pending
-                        PresentationRegistry.register(
+                        try {
+                            PresentationRegistry.register(
+                            requiresAcquiring = acquiringId != null,
                             id = id,
                             content = preparedContent,
                             onFirstFrame = { firstFrame(pending) },
@@ -795,9 +846,14 @@ internal class ExperiencePresentationService(
                                 }
                             },
                         )
+                        } catch (error: Throwable) {
+                            current = existing
+                            throw error
+                        }
                         unownedAcquisition = null // The registered presentation now owns cleanup.
                         try {
-                            navigation?.activate() ?: launch(id)
+                            if (navigation != null) navigation.activate()
+                            else if (acquiringId == null) launch(id)
                         } catch (error: Throwable) {
                             PresentationRegistry.reportFailure(id, error)
                         }
@@ -817,6 +873,11 @@ internal class ExperiencePresentationService(
                 runCatching { unownedAcquisition?.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 if (error is CancellationException && !attempt.job.isActive &&
                     currentCoroutineContext()[Job]?.isActive == true) {
+                    acquiringFailure.get()?.let { failure ->
+                        throw (failure as? ExperiencePresentationException ?: ExperiencePresentationException(
+                            ExperiencePresentationException.Reason.HOST_FAILED, "Authenticated shell failed", failure,
+                        ))
+                    }
                     // Owned withdrawal is a presentation result, not cancellation of the Journey worker.
                     throw ExperiencePresentationException(
                         ExperiencePresentationException.Reason.SUPERSEDED,
@@ -825,6 +886,10 @@ internal class ExperiencePresentationService(
                 }
                 throw error
             } finally {
+                if (!published) withContext(NonCancellable) {
+                    acquiringId?.let { PresentationRegistry.dismiss(it, CloseReason.HostDismissed) }
+                    acquiringDetached?.await()
+                }
                 synchronized(stateLock) {
                     if (preparation === attempt) preparation = null
                     if (transitionClaimed) {

@@ -519,7 +519,8 @@ class ExperiencePresentationServiceTest {
                 assertEquals(label, vector.getValue("failureReason").jsonPrimitive.content,
                     (failure as ExperiencePresentationException).reason.name)
             }
-            assertTrue(label, launched.isEmpty())
+            assertEquals(label, vector.getValue("shellLaunchCount").jsonPrimitive.int, launched.size)
+            assertNull(label, PresentationRegistry.observe(launched.single()))
             assertEquals(label, if (phase == "acquisition") 1 else 0, acquisitions)
             assertEquals(label, vector.getValue("lateLeaseReleased").jsonPrimitive.boolean, lease.closed.get())
             assertEquals(label, if (phase == "acquisition") 1 else 0, lease.closeCount.get())
@@ -532,7 +533,8 @@ class ExperiencePresentationServiceTest {
         val release = renderedJourneyRelease()
         val releaseWork = CompletableDeferred<Unit>()
         val cancelled = CompletableDeferred<Unit>()
-        val service = service(this, launch = { fail("Cancelled acquisition cannot launch") })
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
         val pending = async {
             val result = runCatching {
                 service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
@@ -553,6 +555,89 @@ class ExperiencePresentationServiceTest {
         service.dismissFromHost("customer-1")
         assertTrue(cancelled.isCompleted)
         assertTrue(pending.await().isFailure)
+        assertEquals(1, launched.size)
+        assertNull(PresentationRegistry.observe(launched.single()))
+    }
+
+    @Test
+    fun `initial shell precedes acquisition and keeps its id through content handoff`() = runTest {
+        val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/presentation-preparation-android.json").readText()).jsonObject
+            .getValue("initialShell").jsonObject
+        val release = renderedJourneyRelease()
+        val lease = Lease()
+        val ready = CompletableDeferred<Unit>()
+        val launched = mutableListOf<String>()
+        var shown = 0
+        val service = service(this, launch = launched::add, emit = { name, _, _ ->
+            if (name == SystemEventNames.EXPERIENCE_SHOWN) shown++
+        })
+        val pending = async {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = {
+                    ready.await()
+                    acquired(release.identity, lease)
+                }, onOutcome = {})
+        }
+        runCurrent()
+        val id = launched.single()
+        val state = requireNotNull(PresentationRegistry.observe(id))
+        val shell = state.value as PresentationContentState.Acquiring
+        assertEquals(contract.getValue("expectedClearColorArgb").jsonPrimitive.int, shell.screen.clearColor)
+        assertNull(PresentationRegistry.resolve(id))
+        PresentationRegistry.reportFirstFrame(id)
+        assertEquals(contract.getValue("shownBeforeFirstFrame").jsonPrimitive.int, shown)
+        assertFalse(pending.isCompleted)
+        ready.complete(Unit)
+        runCurrent()
+        assertEquals(contract.getValue("launchCount").jsonPrimitive.int, launched.size)
+        assertEquals(contract.getValue("reusePresentationId").jsonPrimitive.boolean, launched.single() == id)
+        assertTrue(state.value is PresentationContentState.Ready)
+        assertNotNull(PresentationRegistry.resolve(id))
+        assertEquals(contract.getValue("shownBeforeFirstFrame").jsonPrimitive.int, shown)
+        PresentationRegistry.reportFirstFrame(id)
+        pending.await()
+        assertEquals(contract.getValue("shownAfterFirstFrame").jsonPrimitive.int, shown)
+        service.dismissFromHost("customer-1")
+        assertTrue(state.value is PresentationContentState.Closed)
+        assertEquals(1, lease.closeCount.get())
+    }
+
+    @Test
+    fun `withdrawn acquiring registry entry cannot be upgraded or recreated`() {
+        val screen = AuthenticatedPresentationScreen.resolve(renderedJourneyRelease(), "screen_welcome")
+        val detached = PresentationRegistry.registerAcquiring("pending-shell", screen) {}
+        val state = requireNotNull(PresentationRegistry.observe("pending-shell"))
+        val host = AttachedHost()
+        assertTrue(PresentationRegistry.attach("pending-shell", host))
+        PresentationRegistry.dismiss("pending-shell", CloseReason.UserDismissed)
+        assertTrue(host.finished)
+        assertFalse(detached.isCompleted)
+        val content = PreparedPresentation(File("not-acquired.riv"), screen.artboardName, screen.clearColor,
+            screen.shell, screenId = screen.screenId)
+        fun publish() = PresentationRegistry.register("pending-shell", content,
+            onFirstFrame = { fail("Closing shell cannot reveal") }, onFailure = {}, onDismissed = {}, onOutcome = {},
+            requiresAcquiring = true)
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) { publish() }
+        PresentationRegistry.reportFirstFrame("pending-shell")
+        PresentationRegistry.detach("pending-shell", host)
+        assertTrue(detached.isCompleted)
+        assertTrue(state.value is PresentationContentState.Closed)
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) { publish() }
+        assertNull(PresentationRegistry.observe("pending-shell"))
+    }
+
+    @Test
+    fun `early host failure retains its cause instead of becoming withdrawal`() = runTest {
+        val release = renderedJourneyRelease()
+        val failure = ExperiencePresentationException(ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE, "No Vulkan surface")
+        val service = service(this, launch = { PresentationRegistry.reportFailure(it, failure) })
+        val observed = expectPresentationFailure {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { error("Failed host cannot acquire") }, onOutcome = {})
+        }
+        org.junit.Assert.assertSame(failure, observed)
+        assertNotNull(service.reserveJourney("customer-2"))
     }
 
     @Test
@@ -758,7 +843,8 @@ class ExperiencePresentationServiceTest {
         val error = expectPresentationFailure { presentation.await() }
         assertEquals(ExperiencePresentationException.Reason.SUPERSEDED, error.reason)
         assertTrue(lease.closed.get())
-        assertTrue(launched.isEmpty())
+        assertEquals(1, launched.size)
+        assertNull(PresentationRegistry.observe(launched.single()))
     }
 
     @Test
