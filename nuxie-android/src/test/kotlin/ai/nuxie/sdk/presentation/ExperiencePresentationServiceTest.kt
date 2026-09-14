@@ -23,6 +23,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -74,6 +75,91 @@ class ExperiencePresentationServiceTest {
     @After
     fun tearDown() {
         PresentationRegistry.clearForTesting()
+    }
+
+    @Test
+    fun `navigation acquisition obeys outgoing ownership contract`() = runTest {
+        val fixture = Json.parseToJsonElement(
+            FixtureRunner.fixturesRoot().resolve("journeys/planes/navigation-acquisition-android.json").readText(),
+        ).jsonObject
+        for (case in fixture.getValue("cases").jsonArray.map { it.jsonObject }) {
+            val action = case.getValue("action").jsonPrimitive.content
+            val release = renderedJourneyRelease("text-input-navigation.json")
+            val launched = mutableListOf<String>()
+            val service = service(this, launch = launched::add)
+            val outgoingLease = Lease()
+            val destinationLease = Lease()
+            var dismissalReports = 0
+            var allowed = true
+            val first = async {
+                service.presentJourney(
+                    release, "screen_welcome", "journey-1", "customer-1",
+                    service.reserveJourney("customer-1"),
+                    acquire = { acquired(release.identity, outgoingLease) },
+                    onScreenDismissed = { _, _, _ ->
+                        dismissalReports++
+                        JourneyScreenDismissalResult.HANDLED
+                    }, onOutcome = {},
+                )
+            }
+            runCurrent()
+            val outgoingId = launched.single()
+            PresentationRegistry.reportFirstFrame(outgoingId)
+            first.await()
+            val acquisition = CompletableDeferred<AcquiredJourneyRelease>()
+            val next = async {
+                runCatching {
+                    service.presentJourney(
+                        release, "screen_details", "journey-1", "customer-1", null,
+                        canPresent = { allowed }, acquire = { acquisition.await() }, onOutcome = {},
+                    )
+                }
+            }
+            try {
+                runCurrent()
+                assertNotNull(action, PresentationRegistry.resolve(outgoingId))
+                assertFalse(action, outgoingLease.closed.get())
+                assertEquals(action, 0, dismissalReports)
+                when (action) {
+                    "failure" -> acquisition.completeExceptionally(java.io.IOException("offline"))
+                    "cancel" -> next.cancelAndJoin()
+                    "withdraw" -> allowed = false
+                    "hostClose" -> service.dismissFromHost("customer-1")
+                    "identityShutdown" -> service.shutdownOwnedBy("customer-1")
+                    else -> error("Unknown acquisition action: $action")
+                }
+                if (action !in listOf("failure", "cancel")) {
+                    acquisition.complete(acquired(release.identity, destinationLease))
+                }
+                runCurrent()
+                if (action != "cancel") assertTrue(action, next.await().isFailure)
+                val retained = case.getValue("outgoingRetained").jsonPrimitive.boolean
+                assertEquals(action, retained, PresentationRegistry.resolve(outgoingId) != null)
+                assertEquals(action, !retained, outgoingLease.closed.get())
+                assertEquals(action, case.getValue("destinationReleased").jsonPrimitive.boolean,
+                    destinationLease.closed.get())
+                assertEquals(action, 1, launched.size)
+                if (retained) assertEquals(action, 0, dismissalReports)
+                if (action in listOf("failure", "cancel")) {
+                    val retry = async {
+                        service.presentJourney(
+                            release, "screen_details", "journey-1", "customer-1", null,
+                            acquire = { acquired(release.identity, destinationLease) }, onOutcome = {},
+                        )
+                    }
+                    runCurrent()
+                    assertEquals(action, 2, launched.size)
+                    PresentationRegistry.reportFirstFrame(launched.last())
+                    retry.await()
+                    assertTrue(action, outgoingLease.closed.get())
+                    assertFalse(action, destinationLease.closed.get())
+                    assertEquals(action, 1, dismissalReports)
+                }
+            } finally {
+                next.cancelAndJoin()
+                service.dismissFromHost("customer-1")
+            }
+        }
     }
 
     @Test
@@ -503,11 +589,15 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun `completed dismissal prevents same Journey destination acquisition`() = runTest {
+    fun `completed dismissal releases acquired destination without launching it`() = runTest {
+        val contract = Json.parseToJsonElement(
+            FixtureRunner.fixturesRoot().resolve("journeys/planes/navigation-acquisition-android.json").readText(),
+        ).jsonObject.getValue("completedDismissal").jsonObject
         val release = renderedJourneyRelease()
         val launched = mutableListOf<String>()
         val firstLease = Lease()
         var secondAcquired = false
+        val secondLease = Lease()
         val service = service(this, launch = launched::add)
         val reservation = requireNotNull(service.reserveJourney("customer-1"))
         val first = async {
@@ -535,16 +625,17 @@ class ExperiencePresentationServiceTest {
                 reservation = null,
                 acquire = {
                     secondAcquired = true
-                    acquired(release.identity, Lease())
+                    acquired(release.identity, secondLease)
                 },
                 onOutcome = {},
             )
         }
 
-        assertEquals(ExperiencePresentationException.Reason.JOURNEY_COMPLETED, error.reason)
-        assertFalse(secondAcquired)
+        assertEquals(contract.getValue("reason").jsonPrimitive.content, error.reason.name)
+        assertEquals(contract.getValue("destinationAcquired").jsonPrimitive.boolean, secondAcquired)
+        assertEquals(contract.getValue("destinationReleased").jsonPrimitive.boolean, secondLease.closed.get())
         assertTrue(firstLease.closed.get())
-        assertEquals(1, launched.size)
+        assertEquals(contract.getValue("launchCount").jsonPrimitive.int, launched.size)
     }
 
     @Test
