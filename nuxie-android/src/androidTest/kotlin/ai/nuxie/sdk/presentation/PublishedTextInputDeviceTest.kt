@@ -231,6 +231,16 @@ class PublishedTextInputDeviceTest {
     @Test
     @SdkSuppress(minSdkVersion = 26)
     fun backgroundAndRecreationPreserveScreenAppearanceAndRenderedContent() {
+        repeat(5) { iteration ->
+            try {
+                exerciseBackgroundAndRecreation()
+            } catch (error: AssertionError) {
+                throw AssertionError("Recreation cycle ${iteration + 1}: ${error.message}", error)
+            }
+        }
+    }
+
+    private fun exerciseBackgroundAndRecreation() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
@@ -327,6 +337,20 @@ class PublishedTextInputDeviceTest {
             }
             File(instrumentation.targetContext.filesDir, "recreation-after.png").outputStream().use {
                 after.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            if (changedPixels(before, after, Rect(0, 0, before.width, before.height)) != 0) {
+                var viewState = ""
+                instrumentation.runOnMainSync {
+                    viewState = "available=${replacementSurface.isAvailable} attached=${replacementSurface.isAttachedToWindow} " +
+                        "shown=${replacementSurface.isShown} alpha=${replacementSurface.alpha} " +
+                        "size=${replacementSurface.width}x${replacementSurface.height} " +
+                        "registered=${PresentationRegistry.currentScreen(id)?.purchaseActivity() === replacement} " +
+                        "phase=${prepared.screenLifecycle.phase} failure=${failure.get()}"
+                }
+                val threads = Thread.getAllStackTraces().entries.joinToString("\n\n") { (thread, frames) ->
+                    "${thread.name} ${thread.state}\n${frames.joinToString("\n")}"
+                }
+                File(instrumentation.targetContext.filesDir, "recreation-failure.txt").writeText("$viewState\n$threads")
             }
             assertEquals("Recreated renderer must preserve the published surface; failure=${failure.get()}", 0,
                 changedPixels(before, after, Rect(0, 0, before.width, before.height)))
