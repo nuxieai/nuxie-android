@@ -361,7 +361,7 @@ internal class ExperiencePresentationService(
         val factLock: Any = Any(),
         // Every close path observes the same first-terminal run transition.
         val runTransitionFinished: CompletableDeferred<Unit> = CompletableDeferred(),
-        val outcomeStarted: AtomicBoolean = AtomicBoolean(false),
+        val outcomeReason: AtomicReference<CloseReason?> = AtomicReference(),
         val latestViewModelSnapshot: AtomicReference<NuxieViewModelSnapshot?> = AtomicReference(),
     )
 
@@ -705,6 +705,12 @@ internal class ExperiencePresentationService(
                     incoming.navigationHistory = back?.history
                         ?: (outgoing.navigationHistory + outgoing.screenId)
                     val dismissal = dismissForNavigation(outgoing, incoming.screenId)
+                    synchronized(stateLock) {
+                        if (!isCurrentIdentity(request) || !canPresent() || current !== existing ||
+                            it.outcomeReason.get() != null) {
+                            throw supersededByIdentityTransition()
+                        }
+                    }
                     if (dismissal == JourneyScreenDismissalResult.COMPLETED ||
                         dismissal == JourneyScreenDismissalResult.REJECTED) {
                         navigation?.abort()
@@ -735,7 +741,8 @@ internal class ExperiencePresentationService(
                         pendingReservation?.request == request
                     if (!isCurrentIdentity(request) || !canPresent() ||
                         (existing == null && reservationRequired && !reservationStillMatches) ||
-                        (navigation != null && current !== existing)
+                        (navigation != null && current !== existing) ||
+                        existing?.outcomeReason?.get()?.let { it != CloseReason.JourneyNavigation } == true
                     ) {
                         false
                     } else {
@@ -1173,6 +1180,7 @@ internal class ExperiencePresentationService(
         active: ActivePresentation,
         reason: CloseReason,
     ) {
+        if (!active.outcomeReason.compareAndSet(null, reason)) return
         if (reason == CloseReason.JourneyNavigation) {
             scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 active.journey.emissions.close()
@@ -1181,19 +1189,24 @@ internal class ExperiencePresentationService(
             return
         }
         val journey = active.journey
-        if (!active.outcomeStarted.compareAndSet(false, true)) return
+        // Close checkpoint admission under the same lock as navigation. A
+        // cancelled navigation waiter does not cancel its durable callback.
+        val (checkpoint, ownsDismissal) = synchronized(journey) {
+            journey.navigationDismissal to journey.screenDismissed.compareAndSet(false, true)
+        }
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
                 journey.emissions.close()
+                val admittedDismissal = checkpoint?.result?.await()
                 val dismissal = reason.screenDismissalMethod()?.let { method ->
-                    if (journey.screenDismissed.compareAndSet(false, true)) {
+                    if (ownsDismissal) {
                         journey.onScreenDismissed(
                             journey.screenId,
                             null,
                             method,
                         )
                     } else {
-                        JourneyScreenDismissalResult.HANDLED
+                        admittedDismissal ?: JourneyScreenDismissalResult.HANDLED
                     }
                 }
                 when (dismissal) {
