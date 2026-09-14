@@ -510,16 +510,23 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
     private val owned = NuxieOwnedHandle(handle, "Android Vulkan renderer", native::freeRenderer)
 
     private var attachedWindow: Long? = null
+    private var copiesToWindow = false
 
     fun detachSurface(): Int {
         val handle = owned.require()
         if (attachedWindow == null) return NUX_STATUS_OK
-        val status = native.detachRendererSurface(handle)
-        if (status == NUX_STATUS_OK) attachedWindow = null
+        val status = if (copiesToWindow) NUX_STATUS_OK else native.detachRendererSurface(handle)
+        if (status == NUX_STATUS_OK) {
+            attachedWindow = null
+            copiesToWindow = false
+        }
         return status
     }
 
     fun resize(pixelWidth: Int, pixelHeight: Int): Int {
+        // Android keeps the CPU producer connected after unlockAndPost. Resize
+        // that producer in place instead of attempting Vulkan on the same window.
+        if (copiesToWindow) return native.resizeRenderer(owned.require(), pixelWidth, pixelHeight)
         val status = detachSurface()
         if (status != NUX_STATUS_OK) return status
         return native.resizeRenderer(owned.require(), pixelWidth, pixelHeight)
@@ -538,8 +545,18 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
             val detached = detachSurface()
             if (detached != NUX_STATUS_OK) return -detached
             val status = native.attachRendererSurface(rendererHandle, windowHandle)
-            if (status != NUX_STATUS_OK) return -status
+            if (status != NUX_STATUS_OK && status != NUX_SURFACE_ATTACHMENT_UNSUPPORTED) {
+                return if (status > 0) -status else -NUX_STATUS_RUNTIME_ERROR
+            }
             attachedWindow = windowHandle
+            copiesToWindow = status == NUX_SURFACE_ATTACHMENT_UNSUPPORTED
+        }
+        if (copiesToWindow) {
+            val disposition = native.copyPlayerToWindow(
+                rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter,
+            )
+            if (disposition < 0) detachSurface()
+            return disposition
         }
         val disposition = native.renderAndPresent(
             rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter,
@@ -612,3 +629,5 @@ private class NuxieOwnedHandle(
 }
 
 private const val NUX_STATUS_OK = 0
+private const val NUX_STATUS_RUNTIME_ERROR = 4
+private const val NUX_SURFACE_ATTACHMENT_UNSUPPORTED = -1

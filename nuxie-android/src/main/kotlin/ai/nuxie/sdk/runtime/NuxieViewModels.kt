@@ -296,6 +296,7 @@ internal interface NuxieTypedRuntimeNative {
     fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long =
         error("newAndroidVulkanRenderer is not implemented")
 
+    /** 0: GPU attached, -1: unsupported capability, positive: runtime failure status. */
     fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int =
         error("attachRendererSurface is not implemented")
 
@@ -321,6 +322,14 @@ internal interface NuxieTypedRuntimeNative {
         clearColor: Int,
         fitContainCenter: Boolean,
     ): Int = error("renderAndPresent is not implemented")
+
+    fun copyPlayerToWindow(
+        rendererHandle: Long,
+        playerHandle: Long,
+        windowHandle: Long,
+        clearColor: Int,
+        fitContainCenter: Boolean,
+    ): Int = error("copyPlayerToWindow is not implemented")
 
     fun renderToCpuFrame(
         rendererHandle: Long,
@@ -454,6 +463,16 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         windowHandle,
         clearColor,
         fitContainCenter,
+    )
+
+    override fun copyPlayerToWindow(
+        rendererHandle: Long,
+        playerHandle: Long,
+        windowHandle: Long,
+        clearColor: Int,
+        fitContainCenter: Boolean,
+    ): Int = NuxieRuntimeBridge.nativeRendererCopyPlayerToWindow(
+        rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter,
     )
 
     override fun renderToCpuFrame(

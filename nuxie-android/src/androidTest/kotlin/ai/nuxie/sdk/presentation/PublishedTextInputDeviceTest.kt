@@ -959,6 +959,134 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
+    fun unsupportedSurfaceCopiesPublishedPixelsAndTextAndDrainsNativeOwnership() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val fixture = loadPublishedFixture(instrumentation)
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val screen = fixture.release.descriptor.getValue("render").jsonObject
+            .getValue("screens").jsonArray.first().jsonObject
+        val inputs = ExperienceTextInput.forScreen(fixture.release.descriptor, screen.getValue("id").jsonPrimitive.content)
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val lane = NuxieRuntimeLane()
+        val copied = java.util.concurrent.atomic.AtomicInteger()
+        val attachments = java.util.concurrent.atomic.AtomicInteger()
+        val freed = java.util.concurrent.atomic.AtomicInteger()
+        val firstFrame = CountDownLatch(1)
+        val commits = LinkedBlockingQueue<Pair<String, String>>()
+        val failure = AtomicReference<Throwable?>()
+        val releaseNative = CountDownLatch(1)
+        val native = object : ai.nuxie.sdk.runtime.NuxieTypedRuntimeNative by ai.nuxie.sdk.runtime.JniNuxieTypedRuntimeNative {
+            override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int {
+                attachments.incrementAndGet()
+                return -1
+            }
+            override fun renderAndPresent(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
+                clearColor: Int, fitContainCenter: Boolean): Int = error("Unsupported attachment must never use GPU surface presentation")
+            override fun copyPlayerToWindow(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
+                clearColor: Int, fitContainCenter: Boolean): Int {
+                copied.incrementAndGet()
+                return ai.nuxie.sdk.runtime.JniNuxieTypedRuntimeNative.copyPlayerToWindow(
+                    rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter)
+            }
+            override fun freeRenderer(handle: Long) {
+                freed.incrementAndGet()
+                ai.nuxie.sdk.runtime.JniNuxieTypedRuntimeNative.freeRenderer(handle)
+            }
+        }
+        var surface: ExperienceSurfaceHost? = null
+        try {
+            instrumentation.runOnMainSync {
+                surface = ExperienceSurfaceHost(activity, lane, clearColor = 0,
+                    artboardSize = ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float,
+                        screen.getValue("height").jsonPrimitive.float), runtime = NuxieRuntime(native),
+                    listener = object : ExperienceSurfaceHost.Listener {
+                        override fun onFirstFrame() { firstFrame.countDown() }
+                        override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
+                        override fun onTextCommitted(inputId: String, text: String) { commits.add(inputId to text) }
+                    })
+                checkNotNull(surface).loadArtboard(fixture.riv.readBytes(), screen.getValue("artboardName").jsonPrimitive.content,
+                    fixture.release.descriptor, fixture.assets, textInputs = inputs)
+                activity.setContentView(checkNotNull(surface))
+            }
+            assertTrue("Window-copy first frame must compose: ${failure.get()}", firstFrame.await(30, TimeUnit.SECONDS))
+            val original = copySurface(checkNotNull(surface))
+            val region = Rect(0, 0, original.width, original.height)
+            fun write(text: String) {
+                val finished = CountDownLatch(1)
+                val result = AtomicReference<Result<Unit>>()
+                instrumentation.runOnMainSync {
+                    checkNotNull(surface).writeText(inputs.single().id, text, true) { result.set(it); finished.countDown() }
+                }
+                assertTrue(finished.await(10, TimeUnit.SECONDS))
+                checkNotNull(result.get()).getOrThrow()
+                assertEquals(inputs.single().id to text, commits.poll(10, TimeUnit.SECONDS))
+            }
+            write("")
+            var cleared = copySurface(checkNotNull(surface))
+            val deadline = SystemClock.elapsedRealtime() + 10_000
+            while (changedPixels(original, cleared, region) < 20 && SystemClock.elapsedRealtime() < deadline) {
+                cleared.recycle()
+                SystemClock.sleep(25)
+                cleared = copySurface(checkNotNull(surface))
+            }
+            assertTrue("Native window copy must expose actual rendered glyph changes", changedPixels(original, cleared, region) >= 20)
+            cleared.recycle()
+            write(inputs.single().value)
+            var restored = copySurface(checkNotNull(surface))
+            val restoreDeadline = SystemClock.elapsedRealtime() + 10_000
+            while (changedPixels(original, restored, region) != 0 && SystemClock.elapsedRealtime() < restoreDeadline) {
+                restored.recycle()
+                SystemClock.sleep(25)
+                restored = copySurface(checkNotNull(surface))
+            }
+            assertEquals(0, changedPixels(original, restored, region))
+            restored.recycle()
+            instrumentation.runOnMainSync {
+                checkNotNull(surface).layoutParams = android.widget.FrameLayout.LayoutParams(original.width - 80, original.height - 120)
+            }
+            val resized = copySurfaceAtSize(checkNotNull(surface), original.width - 80, original.height - 120)
+            resized.recycle()
+            val copiedBeforeResize = copied.get()
+            val resizeDeadline = SystemClock.elapsedRealtime() + 10_000
+            while (copied.get() <= copiedBeforeResize && SystemClock.elapsedRealtime() < resizeDeadline) SystemClock.sleep(25)
+            assertTrue(copied.get() > copiedBeforeResize)
+            instrumentation.runOnMainSync {
+                checkNotNull(surface).layoutParams = android.widget.FrameLayout.LayoutParams(original.width, original.height)
+            }
+            var returned = copySurfaceAtSize(checkNotNull(surface), original.width, original.height)
+            val returnDeadline = SystemClock.elapsedRealtime() + 10_000
+            while (changedPixels(original, returned, region) != 0 && SystemClock.elapsedRealtime() < returnDeadline) {
+                returned.recycle()
+                SystemClock.sleep(25)
+                returned = copySurfaceAtSize(checkNotNull(surface), original.width, original.height)
+            }
+            assertEquals("Window-copy resize must preserve authored content", 0, changedPixels(original, returned, region))
+            assertEquals("Resize must not switch a connected CPU producer to Vulkan", 1, attachments.get())
+            original.recycle()
+            returned.recycle()
+            assertTrue(copied.get() > 0)
+            assertNull(failure.get())
+            val held = CountDownLatch(1)
+            assertTrue(lane.enqueue { held.countDown(); check(releaseNative.await(15, TimeUnit.SECONDS)) })
+            assertTrue(held.await(10, TimeUnit.SECONDS))
+            val drained = CountDownLatch(1)
+            instrumentation.runOnMainSync { checkNotNull(surface).release(); lane.shutdown { drained.countDown() } }
+            assertFalse(drained.await(100, TimeUnit.MILLISECONDS))
+            assertEquals(0, freed.get())
+            releaseNative.countDown()
+            assertTrue(drained.await(15, TimeUnit.SECONDS))
+            assertEquals(1, freed.get())
+        } finally {
+            releaseNative.countDown()
+            instrumentation.runOnMainSync { surface?.release(); activity.finish() }
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(30_000))
+        }
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
     fun publishedFieldReceivesNativeEditsThroughTheRuntimeHost() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
@@ -1897,6 +2025,7 @@ class PublishedTextInputDeviceTest {
         instrumentation: Instrumentation,
         fixture: String = "journeys/rendered-text-input",
     ): PublishedFixture {
+        check(NuxieRuntime.shared.isAvailable) { "Published fixture requires the native runtime" }
         val context = instrumentation.targetContext
         fun read(path: String) = instrumentation.context.assets.open("$fixture/$path").use { it.readBytes() }
         fun objectAt(path: String) = Json.parseToJsonElement(read(path).decodeToString()).jsonObject
