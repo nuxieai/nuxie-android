@@ -336,6 +336,88 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
+    fun transparentOutgoingScreenDoesNotRevealPreparedDestination() {
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val contract = instrumentation.context.assets.open("journeys/planes/persistent-navigation-android.json")
+            .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject
+                .getValue("transparentPreparation").jsonObject }
+        val fixture = loadPublishedFixture(instrumentation)
+        val screens = fixture.release.descriptor.getValue("render").jsonObject
+            .getValue("screens").jsonArray.map { it.jsonObject }
+        fun content(index: Int, background: Int): PreparedPresentation {
+            val screen = screens[index]
+            return PreparedPresentation(fixture.riv, screen.getValue("artboardName").jsonPrimitive.content,
+                background, PresentationShell.FullScreen, screen.getValue("id").jsonPrimitive.content,
+                fixture.release.descriptor, fixture.assets,
+                ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float,
+                    screen.getValue("height").jsonPrimitive.float))
+        }
+        val id = UUID.randomUUID().toString()
+        val destinationId = UUID.randomUUID().toString()
+        val destination = content(1, contract.getValue("destinationBackgroundArgb").jsonPrimitive.long.toInt())
+        val firstFrame = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>()
+        val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+        instrumentation.addMonitor(monitor)
+        var activity: Activity? = null
+        var pending: PreparedScreenNavigation? = null
+        PresentationRegistry.register(id, content(0, contract.getValue("sourceBackgroundArgb").jsonPrimitive.long.toInt()), onFirstFrame = { firstFrame.countDown() },
+            onFailure = { failure.set(it) }, onDismissed = {}, onOutcome = {})
+        try {
+            instrumentation.targetContext.startActivity(Intent(instrumentation.targetContext,
+                NuxieExperienceActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, id)
+            })
+            activity = checkNotNull(monitor.waitForActivityWithTimeout(15_000))
+            assertTrue("Outgoing frame must arrive: ${failure.get()}", firstFrame.await(30, TimeUnit.SECONDS))
+            val surface = checkNotNull(findSurface(activity!!.window.decorView))
+            stableSurface(surface).recycle()
+            val before = composedSurface(instrumentation, surface)
+            pending = runBlocking {
+                kotlinx.coroutines.withTimeout(15_000) {
+                    checkNotNull(PresentationRegistry.currentScreen(id)).prepareNavigation(
+                        destinationId, destination)
+                }
+            }
+            assertTrue("Destination must finish native preparation", pending != null)
+            val during = composedSurface(instrumentation, surface)
+            try {
+                assertEquals("Transparent source must not expose a provisional destination",
+                    contract.getValue("composedPixelsChanged").jsonPrimitive.long.toInt(),
+                    changedPixels(before, during, Rect(0, 0, before.width, before.height)))
+                val activated = CountDownLatch(1)
+                PresentationRegistry.register(destinationId, destination,
+                    onFirstFrame = { activated.countDown() }, onFailure = { failure.set(it) },
+                    onDismissed = {}, onOutcome = {})
+                checkNotNull(pending).activate()
+                pending = null
+                assertTrue("Destination activation must complete: ${failure.get()}", activated.await(10, TimeUnit.SECONDS))
+                val destinationSurface = checkNotNull(findSurface(activity!!.window.decorView))
+                val deadline = SystemClock.uptimeMillis() + 5_000
+                var changed = 0
+                while (changed == 0 && SystemClock.uptimeMillis() < deadline) {
+                    val after = composedSurface(instrumentation, destinationSurface)
+                    changed = changedPixels(before, after, Rect(0, 0, before.width, before.height))
+                    after.recycle()
+                    if (changed == 0) SystemClock.sleep(50)
+                }
+                assertTrue("Activation must reveal the prepared destination", changed > 0)
+            } finally {
+                before.recycle()
+                during.recycle()
+            }
+        } finally {
+            runBlocking { pending?.abort() }
+            instrumentation.runOnMainSync { activity?.finish() }
+            instrumentation.removeMonitor(monitor)
+            PresentationRegistry.clearForTesting()
+        }
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
     fun drawerClipsNativeContentAlongWithItsRenderedSurface() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext

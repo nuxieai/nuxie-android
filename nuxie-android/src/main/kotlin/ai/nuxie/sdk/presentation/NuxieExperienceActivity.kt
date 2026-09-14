@@ -193,6 +193,7 @@ internal class NuxieExperienceActivity : Activity() {
                     setContentView(shellView(contentRoot, target.prepared.shell))
                 }
                 intent.putExtra(EXTRA_PRESENTATION_ID, target.id)
+                target.view?.alpha = 1f
                 target.view?.bringToFront()
                 source.view?.let(contentRoot::removeView)
                 source.close(false)
@@ -223,8 +224,8 @@ internal class NuxieExperienceActivity : Activity() {
             navigation = pending
             screens += target
             try {
-                // Render the destination behind the outgoing content, retaining both until activation.
-                contentRoot.addView(target.mount(), 0, FrameLayout.LayoutParams(-1, -1))
+                // Retain native preparation without exposing destination pixels through a transparent source.
+                contentRoot.addView(target.mount().apply { alpha = 0f }, 0, FrameLayout.LayoutParams(-1, -1))
                 target.mounted?.observeWindow()
                 target.mounted?.setVisible(visible)
                 target.ready.await()
