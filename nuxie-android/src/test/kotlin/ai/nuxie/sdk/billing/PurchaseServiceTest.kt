@@ -2130,6 +2130,118 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun testStoreCheckoutPrecedesDelegateAndNeverCreatesNativeEvidence() = runTest {
+        for (choice in TestStorePurchaseChoice.entries) {
+            val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+            val store = NuxieTestStore(object : TestStoreChoices {
+                override suspend fun purchase(product: StoreProduct) = choice
+                override suspend fun restore() = TestStoreRestoreChoice.RESTORED
+            })
+            val fixture = fixture(this, emissions = emissions, testStore = store)
+            fixture.settings.delegate = object : NuxiePurchaseDelegate {
+                override suspend fun purchase(product: StoreProduct): PurchaseResult = error("Delegate called")
+                override suspend fun restorePurchases(): RestoreResult = error("Delegate called")
+            }
+            fixture.synchronizer = { error("Simulated purchase reached Play sync") }
+            val owner = fixture.core.identity.distinctId()
+            val result = fixture.service.purchase(
+                activity(), product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))), null,
+                outcomeCorrelation = CommerceOutcomeCorrelation("test-store-${choice.name}", owner),
+            )
+            when (choice) {
+                TestStorePurchaseChoice.PURCHASED -> assertEquals(PurchaseResult.Purchased, result)
+                TestStorePurchaseChoice.PENDING -> assertEquals(PurchaseResult.Pending, result)
+                TestStorePurchaseChoice.CANCELLED -> assertEquals(PurchaseResult.Cancelled, result)
+                TestStorePurchaseChoice.FAILED -> assertTrue(result is PurchaseResult.Failed)
+            }
+            val properties = emissions.single().second
+            assertEquals(true, properties["test_store"])
+            if (choice == TestStorePurchaseChoice.PURCHASED) {
+                assertEquals("checkout", properties["source"])
+                assertTrue((properties["transaction_id"] as String).startsWith("nuxie-test-"))
+            } else {
+                assertFalse("transaction_id" in properties)
+            }
+            assertEquals(if (choice == TestStorePurchaseChoice.PENDING) emptyList<String>() else listOf("test-store-${choice.name}"), fixture.purchaseCompletionEventIds)
+            assertEquals(if (choice == TestStorePurchaseChoice.PENDING) emptyList<String>() else listOf(owner), fixture.purchaseEventDistinctIds)
+            assertTrue(fixture.billing.queries.isEmpty())
+            assertNull(fixture.billing.launched)
+            assertTrue(fixture.store.load().isEmpty())
+            assertTrue(fixture.store.loadBindings().isEmpty())
+            assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        }
+    }
+
+    @Test
+    fun correlatedTestStoreOutcomesRetainCustomerAcrossIdentityChanges() = runTest {
+        for (choice in TestStorePurchaseChoice.entries) {
+            val decision = CompletableDeferred<TestStorePurchaseChoice>()
+            val fixture = fixture(this, testStore = NuxieTestStore(object : TestStoreChoices {
+                override suspend fun purchase(product: StoreProduct) = decision.await()
+                override suspend fun restore() = TestStoreRestoreChoice.RESTORED
+            }))
+            val owner = fixture.core.identity.distinctId()
+            val pending = async {
+                fixture.service.purchase(activity(), product(), null,
+                    outcomeCorrelation = CommerceOutcomeCorrelation("retained-${choice.name}", owner))
+            }
+            runCurrent()
+            fixture.core.identity.setDistinctId("replacement-customer")
+            decision.complete(choice)
+            pending.await()
+            assertEquals(if (choice == TestStorePurchaseChoice.PENDING) emptyList<String>() else listOf(owner), fixture.purchaseEventDistinctIds)
+            assertEquals(if (choice == TestStorePurchaseChoice.PENDING) emptyList<String>() else listOf("retained-${choice.name}"), fixture.purchaseCompletionEventIds)
+            assertTrue(fixture.store.load().isEmpty())
+        }
+        for (choice in TestStoreRestoreChoice.entries) {
+            val decision = CompletableDeferred<TestStoreRestoreChoice>()
+            val fixture = fixture(this, testStore = NuxieTestStore(object : TestStoreChoices {
+                override suspend fun purchase(product: StoreProduct) = TestStorePurchaseChoice.PURCHASED
+                override suspend fun restore() = decision.await()
+            }))
+            val owner = fixture.core.identity.distinctId()
+            val pending = async {
+                fixture.service.restorePurchases(
+                    outcomeCorrelation = CommerceOutcomeCorrelation("retained-restore-${choice.name}", owner))
+            }
+            runCurrent()
+            fixture.core.identity.setDistinctId("replacement-customer")
+            decision.complete(choice)
+            pending.await()
+            assertEquals(listOf(owner), fixture.purchaseEventDistinctIds)
+            assertEquals(listOf("retained-restore-${choice.name}"), fixture.purchaseCompletionEventIds)
+        }
+    }
+
+    @Test
+    fun testStoreRestoreChoicesBypassDelegateAndNativeQueries() = runTest {
+        for (choice in TestStoreRestoreChoice.entries) {
+            val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+            val fixture = fixture(this, emissions = emissions, testStore = NuxieTestStore(object : TestStoreChoices {
+                override suspend fun purchase(product: StoreProduct) = TestStorePurchaseChoice.PURCHASED
+                override suspend fun restore() = choice
+            }))
+            fixture.settings.delegate = object : NuxiePurchaseDelegate {
+                override suspend fun purchase(product: StoreProduct): PurchaseResult = error("Delegate called")
+                override suspend fun restorePurchases(): RestoreResult = error("Delegate called")
+            }
+            val owner = fixture.core.identity.distinctId()
+            val result = fixture.service.restorePurchases(
+                outcomeCorrelation = CommerceOutcomeCorrelation("restore-${choice.name}", owner),
+            )
+            when (choice) {
+                TestStoreRestoreChoice.RESTORED -> assertEquals(RestoreResult.Restored, result)
+                TestStoreRestoreChoice.NO_PURCHASES -> assertEquals(RestoreResult.NoPurchases, result)
+                TestStoreRestoreChoice.FAILED -> assertTrue(result is RestoreResult.Failed)
+            }
+            assertEquals(true, emissions.single().second["test_store"])
+            assertEquals(listOf("restore-${choice.name}"), fixture.purchaseCompletionEventIds)
+            assertTrue(fixture.billing.queries.isEmpty())
+            assertTrue(fixture.store.load().isEmpty())
+        }
+    }
+
+    @Test
     fun purchasedDelegateOutcomeCapturesCheckoutCompletionWithoutNativeEvidence() = runTest {
         val actions = mutableListOf<String>()
         val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
@@ -2723,6 +2835,7 @@ class PurchaseServiceTest {
         verifyPurchaseSignature: (String, String, String) -> Boolean = { _, _, _ -> true },
         logWarning: (String, Throwable) -> Unit = { _, _ -> },
         journeyEvents: MutableList<StoredEvent>? = null,
+        testStore: NuxieTestStore? = null,
     ): Fixture {
         val storageDirectory = temporaryFolder.newFolder("fixture-${fixtures.size}")
         val core = NuxieCore(
@@ -2806,6 +2919,7 @@ class PurchaseServiceTest {
                 ?: { "external-operation-${++externalOperationSequence}" },
             verifyPurchaseSignature = verifyPurchaseSignature,
             logWarning = logWarning,
+            testStore = testStore,
         )
         fixture = Fixture(
             core,
