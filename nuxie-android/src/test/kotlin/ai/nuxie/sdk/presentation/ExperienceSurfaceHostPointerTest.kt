@@ -36,6 +36,46 @@ import kotlinx.serialization.json.long
 @RunWith(RobolectricTestRunner::class)
 class ExperienceSurfaceHostPointerTest {
     @Test
+    fun `resume cancels a delivered press before the next gesture reaches the retained player`() {
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
+            artboardSize = ExperienceArtboardSize(400f, 200f), runtime = NuxieRuntime(native))
+        host.layout(0, 0, 1_000, 1_000)
+        val texture = SurfaceTexture(0)
+        val surface = Surface(texture)
+        try {
+            host.loadArtboard(byteArrayOf(1), null)
+            host.surfaceCreated(holder(surface))
+            val down = motion(MotionEvent.ACTION_DOWN, 1_000, 500f, 500f)
+            try { assertTrue(host.onTouchEvent(down)) } finally { down.recycle() }
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            assertEquals(listOf(NativePlayerPointer(0, 200f, 100f, 0, 1f)), native.pointerSteps.single())
+            host.setPresentationVisible(false)
+            host.setPresentationVisible(true)
+            host.setPresentationVisible(false)
+            host.setPresentationVisible(true)
+            val next = motion(MotionEvent.ACTION_DOWN, 100_000, 750f, 500f)
+            try { assertTrue(host.onTouchEvent(next)) } finally { next.recycle() }
+            host.doFrame(100_000_000_000L)
+            drain(lane)
+            assertEquals(listOf(
+                NativePlayerPointer(3, 200f, 100f, 0, 1f),
+                NativePlayerPointer(0, 300f, 100f, 0, 100f),
+            ), native.pointerSteps.last())
+            assertEquals(listOf(0f, 0f), native.elapsedSteps)
+            assertEquals(1, native.playersCreated)
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            surface.release()
+            texture.release()
+        }
+    }
+
+    @Test
     fun `shared visibility contract pauses time without replacing the player`() {
         val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/runtime-visibility-android.json").readText()).jsonObject
