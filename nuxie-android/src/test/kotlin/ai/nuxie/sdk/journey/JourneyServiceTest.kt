@@ -1244,7 +1244,17 @@ class JourneyServiceTest {
             replacement.await()
         }
 
-    @Test fun `warm journal reports finish before a queued startup event reaches admission`() = runBlocking {
+    @Test fun `warm journal reports finish before a queued startup event reaches admission`() = warmJournalOrdering("healthy")
+
+    @Test fun `failed warm capture blocks admission until authenticated reconciliation retries`() = warmJournalOrdering("capture")
+
+    @Test fun `failed recovered route blocks admission until authenticated reconciliation retries`() = warmJournalOrdering("replay")
+
+    @Test fun `failed recovered presentation blocks admission until authenticated reconciliation retries`() = warmJournalOrdering("presentation")
+
+    private fun warmJournalOrdering(failureMode: String) = runBlocking {
+        val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("sdk/warm-start-recovery.json").readText()).jsonObject
         val identity = identity("customer")
         val catalog = catalog()
         val authenticated = authenticatedSnapshot(catalog)
@@ -1256,15 +1266,31 @@ class JourneyServiceTest {
         val retained = requireNotNull(journal.admit(snapshot.profile.armedLegs.single(), JourneyReentry.EveryTime,
             authenticated.releasesByDigest.values.single().leg.getValue("entryStepId").jsonPrimitive.content,
             1_000L, release = snapshot.profile.releases.single(), executionSnapshot = executionSnapshot(snapshot)))
+        if (failureMode == "presentation") {
+            val publication = JourneyRun.PendingPresentationPublication("retained-publication", 0, 1,
+                "retained-screen", "retained-action", responsesChanged = false,
+                items = listOf(JourneyRun.PendingPresentationPublication.Item("retained-event", JsonObject(emptyMap()),
+                    "retained-event-id", 1_000L)))
+            assertTrue(journal.stagePresentationPublication(retained.id, retained.stepId, retained.context, publication) != null)
+        }
         val recovering = CompletableDeferred<Unit>()
         val releaseRecovery = CompletableDeferred<Unit>()
         val order = CopyOnWriteArrayList<String>()
+        var fail = failureMode != "healthy"
         val service = JourneyService(identity, store, catalog, directory, scope,
             capture = { _, _, eventId, _ ->
                 if (eventId == retained.startedEventId) { recovering.complete(Unit); releaseRecovery.await() }
-                order += eventId
-                true
-            }, nowMillis = { 100_000L }, beforeAdmission = { order += "fresh-admission" })
+                order += if (eventId == retained.startedEventId) "started" else if (eventId == retained.completedEventId) "completed" else eventId
+                !(fail && failureMode == "capture")
+            }, nowMillis = { 100_000L }, beforeAdmission = { order += "fresh-admission" },
+            captureScreenEvent = { _, _, _, _, _, _ ->
+                recovering.complete(Unit)
+                releaseRecovery.await()
+                order += "presentation"
+                StableEventCaptureResult(!fail, null)
+            },
+            replayPendingLocalRoutes = { !(fail && failureMode == "replay") })
+        fun expected(key: String) = contract.getValue(key).jsonArray.map { it.jsonPrimitive.content }
         service.profileDidCommit(snapshot, authority, "customer", 1)
         service.enqueueInitialization()
         try {
@@ -1275,8 +1301,16 @@ class JourneyServiceTest {
             assertTrue(order.isEmpty())
             assertTrue(!pending.isCompleted)
             releaseRecovery.complete(Unit)
-            withTimeout(5_000) { pending.await() }
-            assertEquals(listOf(retained.startedEventId, retained.completedEventId, "fresh-admission"), order)
+            val admitted = withTimeout(5_000) { pending.await() }
+            assertEquals(failureMode == "healthy", admitted)
+            assertEquals(expected(if (fail) "${failureMode}FailureOrder" else "healthyOrder"), order)
+            if (fail) {
+                fail = false
+                service.profileDidCommit(snapshot, authority, "customer", 2)
+                assertTrue(service.handleEvent(StoredEvent("retry-event", "inventory_opened",
+                    timestampMillis = 100_000L, distinctId = "customer"), service.eventAdmissionGeneration()))
+                assertEquals(expected("${failureMode}RetryOrder"), order)
+            }
         } finally { releaseRecovery.complete(Unit) }
     }
 

@@ -775,6 +775,7 @@ internal class JourneyService(
             event.name == JourneyEventNames.LEG_COMPLETED
         ) return true
         if (!initialized) return false
+        if (journal?.distinctId != event.distinctId) return false
         resumePresentationActionOutcome(event, excludingRunId = directlyRoutedRunId)
         val state = currentState() ?: return currentProfilePublished
         resumeParkedRuns(state, event, excludingRunId = directlyRoutedRunId)
@@ -978,8 +979,8 @@ internal class JourneyService(
                     journeyArtifactRunKey(run),
                 ) == run.artifactDigests
             }
-            publishTerminalPresentationPublications(opened)
-            flushPendingReports(opened)
+            check(publishTerminalPresentationPublications(opened)) { "Recovered presentation publication is pending" }
+            check(flushPendingReports(opened)) { "Recovered Journey reports are pending" }
             if (opened.finalizeRevocation()) revokingCustomers.remove(distinctId)
             else revokingCustomers += distinctId
         }.onFailure {
@@ -1021,45 +1022,54 @@ internal class JourneyService(
             }
         }
 
-    private suspend fun flushPendingReports(target: JourneyRunJournal) {
-        JourneyExperimentExposureReporter(target, capture).flushPending()
-        reporter(target).flushPending()
+    private suspend fun flushPendingReports(target: JourneyRunJournal): Boolean {
+        val exposures = JourneyExperimentExposureReporter(target, capture).flushPending()
+        val lifecycle = reporter(target).flushPending()
+        return exposures && lifecycle
     }
 
     private suspend fun reconcileNow(generation: Long) {
         val state = currentState()?.takeIf { it.generation == generation } ?: return
         if (!ensureJournal(state.distinctId)) return
-        settleLivePresentationPublications(state)
+        if (!settleLivePresentationPublications(state)) {
+            journal = null
+            cancelWake()
+            return
+        }
         if (!isCurrent(state)) return
         // A pending live route may still own its receipt while this command
         // runs. It is already queued behind us and will acknowledge itself;
         // every unowned receipt is replayed before fresh state-arm admission.
-        replayPendingLocalRoutes(state.distinctId)
+        if (!replayPendingLocalRoutes(state.distinctId)) {
+            journal = null
+            cancelWake()
+            return
+        }
         if (!isCurrent(state)) return
         resumeParkedRuns(state, null)
         evaluateStateArms(state)
         scheduleNextWake()
     }
 
-    private suspend fun settleLivePresentationPublications(state: ProfileState) {
-        val target = journal?.takeIf { it.distinctId == state.distinctId } ?: return
-        val executionToken = executionFence.token(state.executionFenceToken) ?: return
+    private suspend fun settleLivePresentationPublications(state: ProfileState): Boolean {
+        val target = journal?.takeIf { it.distinctId == state.distinctId } ?: return false
+        val executionToken = executionFence.token(state.executionFenceToken) ?: return false
         for (run in target.runs().filter {
             it.completion == null && it.pendingPresentationPublication != null
         }) {
-            if (!isCurrent(state) || !isExecutionCurrent(executionToken, target)) return
-            val release = releaseFor(run, state, executionToken, target) ?: continue
+            if (!isCurrent(state) || !isExecutionCurrent(executionToken, target)) return false
+            val release = releaseFor(run, state, executionToken, target) ?: return false
             val identityScope = identity.captureScope()
-            if (identityScope.distinctId != target.distinctId) return
-            settlePresentationPublication(
+            if (identityScope.distinctId != target.distinctId) return false
+            if (!settlePresentationPublication(
                 run,
                 release,
                 target,
                 executionToken,
                 identityScope,
-            )
+            )) return false
         }
-        publishTerminalPresentationPublications(target)
+        return publishTerminalPresentationPublications(target) && flushPendingReports(target)
     }
 
     private suspend fun publishAllPresentationObservability(
@@ -1074,12 +1084,13 @@ internal class JourneyService(
 
     private suspend fun publishTerminalPresentationPublications(
         target: JourneyRunJournal,
-    ) {
+    ): Boolean {
         for (run in target.runs().filter {
             it.completion != null && it.pendingPresentationPublication != null
         }) {
-            publishPresentationObservability(run, target)
+            if (!publishPresentationObservability(run, target)) return false
         }
+        return true
     }
 
     private suspend fun publishPresentationObservability(
