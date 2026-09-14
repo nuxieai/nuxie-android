@@ -25,6 +25,13 @@ internal class ExperienceTextInputState {
         committedValues[inputId] = text
     }
 
+    @Synchronized
+    fun resetUnrevealedAttempt() {
+        generation++
+        values.clear()
+        committedValues.clear()
+    }
+
     inner class Session internal constructor(private val owner: Long) {
         fun isCurrent(): Boolean = synchronized(this@ExperienceTextInputState) { owner == generation }
 

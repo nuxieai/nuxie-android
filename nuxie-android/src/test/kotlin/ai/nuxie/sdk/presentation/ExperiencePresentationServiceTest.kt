@@ -1329,7 +1329,7 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun `first frame timeout releases the Journey artifact lease`() = runTest {
+    fun `first frame timeout retains the lease for recovery and accepts a late frame`() = runTest {
         val release = renderedJourneyRelease()
         val launched = mutableListOf<String>()
         val lease = Lease()
@@ -1356,10 +1356,66 @@ class ExperiencePresentationServiceTest {
         advanceTimeBy(11)
         runCurrent()
 
-        val error = expectPresentationFailure { presentation.await() }
-        assertEquals(ExperiencePresentationException.Reason.FIRST_FRAME_TIMEOUT, error.reason)
+        assertFalse(presentation.isCompleted)
+        assertFalse(lease.closed.get())
+        assertEquals(AcquisitionProgress.Phase.FAILED, PresentationRegistry.nativeProgress(launched.single())?.phase)
+        PresentationRegistry.reportFirstFrame(launched.single())
+        presentation.await()
+        assertFalse(lease.closed.get())
+        assertFalse(PresentationRegistry.retryNative(launched.single(), 1))
+        service.dismissFromHost("customer-1")
         assertTrue(lease.closed.get())
         assertNull(PresentationRegistry.resolve(launched.single()))
+    }
+
+    @Test
+    fun `native retry drains old attached generation and rejects its late frame and failure`() = runTest {
+        val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/presentation-acquisition-recovery-android.json").readText()).jsonObject
+            .getValue("nativeRecovery").jsonObject
+        val replacementGeneration = contract.getValue("retryGeneration").jsonPrimitive.content.toLong()
+        val release = renderedJourneyRelease()
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val service = service(this, launch = launched::add)
+        val pending = async {
+            service.presentJourney(release, "screen_welcome", "native-retry", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, lease) }, onOutcome = {})
+        }
+        runCurrent()
+        val id = launched.single()
+        val drain = CompletableDeferred<Unit>()
+        val old = object : PresentationScreenHandle {
+            override val rendererEffects = RendererEffectLifetime()
+            override val nativeAttemptGeneration = 1L
+            override fun requestCloseFromService(reason: CloseReason) = true
+            override fun screenCloseReason(): CloseReason? = null
+            override fun finishAfterServiceClose() = Unit
+            override suspend fun retireForRetry() { drain.await(); PresentationRegistry.detach(id, this) }
+        }
+        assertTrue(PresentationRegistry.attach(id, old))
+        assertTrue(PresentationRegistry.recoverNative(id, old, 1, IllegalStateException("native fixture failure")))
+        assertFalse(pending.isCompleted)
+        assertFalse(lease.closed.get())
+        assertTrue(PresentationRegistry.retryNative(id, 1))
+        assertFalse(PresentationRegistry.retryNative(id, 1))
+        assertFalse(PresentationRegistry.nativeRetired(id, replacementGeneration))
+        val retirement = async { PresentationRegistry.drainNativeAttempts(id, replacementGeneration) }
+        runCurrent()
+        assertFalse(retirement.isCompleted)
+        PresentationRegistry.reportFirstFrame(id, old)
+        assertFalse(pending.isCompleted)
+        assertFalse(PresentationRegistry.recoverNative(id, old, 1, IllegalStateException("late failure")))
+        drain.complete(Unit)
+        retirement.await()
+        assertTrue(PresentationRegistry.nativeRetired(id, replacementGeneration))
+        assertEquals(replacementGeneration, PresentationRegistry.nativeProgress(id)?.generation)
+        PresentationRegistry.reportFirstFrame(id)
+        pending.await()
+        assertEquals(1, launched.size)
+        assertFalse(lease.closed.get())
+        service.dismissFromHost("customer-1")
+        assertTrue(lease.closed.get())
     }
 
     @Test

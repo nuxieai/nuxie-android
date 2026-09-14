@@ -1249,6 +1249,96 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
+    fun nativeLoadFailureRetriesWithinTheAuthenticatedShell() = verifyNativeRecovery(false)
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun nativeFailureRecoverySurvivesActivityRecreation() = verifyNativeRecovery(true)
+
+    private fun verifyNativeRecovery(recreate: Boolean) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val fixture = loadPublishedFixture(instrumentation)
+        val validBytes = fixture.riv.readBytes()
+        fixture.riv.writeText("invalid native fixture")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val closed = java.util.concurrent.atomic.AtomicInteger()
+        val shown = java.util.concurrent.atomic.AtomicInteger()
+        val service = ExperiencePresentationService(instrumentation.targetContext, { name, _, _ ->
+            if (name == ai.nuxie.sdk.events.SystemEventNames.EXPERIENCE_SHOWN) shown.incrementAndGet()
+        }, scope, { NuxieRuntime.shared.isAvailable })
+        val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+        instrumentation.addMonitor(monitor)
+        val pending = scope.async {
+            service.presentJourney(fixture.release, "screen_1", "native-recovery-device", "native-recovery-owner",
+                service.reserveJourney("native-recovery-owner"), acquire = {
+                    AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv,
+                        protection = Closeable { closed.incrementAndGet() })
+                }, onOutcome = {})
+        }
+        try {
+            var activity = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
+            var root: View? = null
+            instrumentation.runOnMainSync { root = activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0) }
+            fun descendants(view: View): List<View> = listOf(view) + if (view is ViewGroup)
+                (0 until view.childCount).flatMap { descendants(view.getChildAt(it)) } else emptyList()
+            fun awaitRetry(): android.widget.Button {
+                var retry: android.widget.Button? = null
+                val deadline = SystemClock.elapsedRealtime() + 10_000
+                while (retry == null && SystemClock.elapsedRealtime() < deadline) {
+                    instrumentation.runOnMainSync {
+                        retry = descendants(checkNotNull(root)).filterIsInstance<android.widget.Button>().singleOrNull { it.text == "Retry" }
+                    }
+                    if (retry == null) SystemClock.sleep(25)
+                }
+                return checkNotNull(retry) { "Native failure must retain an actionable recovery shell" }
+            }
+            var retry = awaitRetry()
+            if (recreate) {
+                val original = activity
+                instrumentation.runOnMainSync { original.recreate() }
+                val replacementDeadline = SystemClock.elapsedRealtime() + 10_000
+                var replacement: Activity? = null
+                while (replacement == null && SystemClock.elapsedRealtime() < replacementDeadline) {
+                    replacement = monitor.waitForActivityWithTimeout(500)?.takeUnless { it === original }
+                }
+                activity = checkNotNull(replacement) { "Recreation must provide a distinct Activity" }
+                instrumentation.waitForIdleSync()
+                instrumentation.runOnMainSync {
+                    root = activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0)
+                }
+                retry = awaitRetry()
+                val id = checkNotNull(activity.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
+                assertEquals(1L, PresentationRegistry.nativeProgress(id)?.generation)
+            }
+            assertFalse(pending.isCompleted)
+            assertEquals(0, shown.get())
+            assertEquals(0, closed.get())
+            fixture.riv.writeBytes(validBytes)
+            instrumentation.runOnMainSync { assertTrue(checkNotNull(retry).performClick()) }
+            runBlocking { kotlinx.coroutines.withTimeout(30_000) { pending.await() } }
+            assertHostedScreen(instrumentation, activity, "screen_1")
+            assertEquals("Recreation and Retry must not launch another presentation Intent", 1, monitor.hits)
+            assertEquals(1, shown.get())
+            instrumentation.runOnMainSync {
+                assertSame(root, activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0))
+                assertTrue(descendants(checkNotNull(root)).none { it is ExperienceRecoveryView })
+                val id = checkNotNull(activity.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
+                assertEquals(1uL, checkNotNull(PresentationRegistry.resolve(id)).screenLifecycle.appearances)
+                assertEquals(2L, PresentationRegistry.nativeProgress(id)?.generation)
+                assertFalse(PresentationRegistry.retryNative(id, 2))
+            }
+        } finally {
+            fixture.riv.writeBytes(validBytes)
+            runBlocking { service.shutdownOwnedBy("native-recovery-owner"); scope.coroutineContext[Job]?.cancelAndJoin() }
+            instrumentation.removeMonitor(monitor)
+            PresentationRegistry.clearForTesting()
+        }
+        assertEquals(1, closed.get())
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
     fun publishedResponseSurvivesPresentationNavigationWithoutDuplicateCommits() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         assertTrue(NuxieRuntime.shared.isAvailable)
