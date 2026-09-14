@@ -61,15 +61,16 @@ internal class ExperienceMountedScreen(
             viewModelProjection = prepared.viewModelProjection,
             textInputs = inputs,
         )
-        return inputSize?.let { size ->
-            FrameLayout(activity).apply {
-                addView(surface, FrameLayout.LayoutParams(-1, -1))
+        return FrameLayout(activity).apply {
+            setBackgroundColor(prepared.clearColor)
+            addView(surface, FrameLayout.LayoutParams(-1, -1))
+            inputSize?.let { size ->
                 val overlay = ExperienceTextInputOverlay(activity, size, inputs, fonts,
                     surface::writeText, onFailure, prepared.textInputState)
                 textOverlay = overlay
                 addView(overlay, FrameLayout.LayoutParams(-1, -1))
             }
-        } ?: surface
+        }
     }
 
     /** Install after attaching content, so projection uses the real window geometry. */

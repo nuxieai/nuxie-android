@@ -5,7 +5,6 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -18,7 +17,9 @@ import kotlin.coroutines.resumeWithException
  * back from arbitrary threads.
  */
 internal class NuxieRuntimeLane {
-    private val terminationCallback = AtomicReference<(() -> Unit)?>(null)
+    private val terminationLock = Any()
+    private var terminated = false
+    private val terminationCallbacks = mutableListOf<() -> Unit>()
     private val executor = object : ThreadPoolExecutor(
         1,
         1,
@@ -28,7 +29,11 @@ internal class NuxieRuntimeLane {
         { runnable -> Thread(runnable, THREAD_NAME).apply { isDaemon = true } },
     ) {
         override fun terminated() {
-            terminationCallback.getAndSet(null)?.let(::runTerminationCallback)
+            val callbacks = synchronized(terminationLock) {
+                terminated = true
+                terminationCallbacks.toList().also { terminationCallbacks.clear() }
+            }
+            callbacks.forEach(::runTerminationCallback)
             super.terminated()
         }
     }
@@ -78,11 +83,19 @@ internal class NuxieRuntimeLane {
      * lane has terminated.
      */
     fun shutdown(onTerminated: () -> Unit) {
-        terminationCallback.set(onTerminated)
+        afterTermination(onTerminated)
         executor.shutdown()
-        if (executor.isTerminated) {
-            terminationCallback.getAndSet(null)?.let(::runTerminationCallback)
+    }
+
+    /** Register independent cleanup without replacing another owner's completion. */
+    fun afterTermination(callback: () -> Unit) {
+        val runNow = synchronized(terminationLock) {
+            if (terminated) true else {
+                terminationCallbacks += callback
+                false
+            }
         }
+        if (runNow) runTerminationCallback(callback)
     }
 
     /**
