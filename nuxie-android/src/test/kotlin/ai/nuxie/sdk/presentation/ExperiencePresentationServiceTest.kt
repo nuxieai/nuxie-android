@@ -1419,6 +1419,119 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `terminal close during native drain rejects replacement and waits for the late owner`() = runTest {
+        val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/presentation-acquisition-recovery-android.json").readText()).jsonObject
+            .getValue("nativeRecovery").jsonObject.getValue("terminalDuringDrain").jsonObject
+        for (kind in vector.getValue("kinds").jsonArray.map { it.jsonPrimitive.content }) {
+            val release = renderedJourneyRelease()
+            val launched = mutableListOf<String>()
+            val emitted = mutableListOf<String>()
+            val outcomes = mutableListOf<JourneySurfaceOutcome>()
+            var leaseCloses = 0
+            var checkpoints = 0
+            val service = service(this, launch = launched::add, emit = { name, _, _ -> emitted += name })
+            val presentation = async {
+                runCatching { service.presentJourney(release, "screen_welcome", "native-drain-$kind", "customer-1",
+                    service.reserveJourney("customer-1"), acquire = {
+                        acquired(release.identity, Closeable { leaseCloses++ })
+                    }, onScreenDismissed = { _, _, _ -> checkpoints++; JourneyScreenDismissalResult.HANDLED }, onOutcome = outcomes::add) }
+            }
+            runCurrent()
+            val id = launched.single()
+            val drained = CompletableDeferred<Unit>()
+            val old = object : PresentationScreenHandle {
+                override val rendererEffects = RendererEffectLifetime()
+                override val nativeAttemptGeneration = 1L
+                override fun requestCloseFromService(reason: CloseReason) = true
+                override fun screenCloseReason(): CloseReason? = null
+                override fun finishAfterServiceClose() = Unit
+                override suspend fun retireForRetry() { drained.await(); PresentationRegistry.detach(id, this) }
+            }
+            assertTrue(PresentationRegistry.attach(id, old))
+            assertTrue(PresentationRegistry.retryNative(id, 1))
+            val shell = AttachedHost()
+            assertTrue(PresentationRegistry.attach(id, shell))
+            val retirement = async { PresentationRegistry.drainNativeAttempts(id, 2) }
+            runCurrent()
+            val closing = async {
+                when (kind) {
+                    "identity" -> service.shutdownOwnedBy("customer-1")
+                    "user" -> {
+                        shell.requestCloseFromService(CloseReason.UserDismissed)
+                        PresentationRegistry.reportOutcome(id, CloseReason.UserDismissed)
+                        shell.finishAfterServiceClose()
+                        presentation.await()
+                    }
+                    else -> service.dismissFromHost("customer-1")
+                }
+            }
+            runCurrent()
+            assertTrue(shell.finished)
+            PresentationRegistry.detach(id, shell)
+            runCurrent()
+            assertFalse(closing.isCompleted)
+            assertFalse(retirement.isCompleted)
+            assertFalse(presentation.isCompleted)
+            assertEquals(0, leaseCloses)
+            assertEquals(vector.getValue("replacementAdmitted").jsonPrimitive.boolean, PresentationRegistry.nativeRetired(id, 2))
+            assertFalse(PresentationRegistry.retryNative(id, 2))
+            drained.complete(Unit)
+            retirement.await()
+            closing.await()
+            assertTrue(presentation.await().isFailure)
+            assertEquals(vector.getValue("leaseCloseCount").jsonPrimitive.int, leaseCloses)
+            assertEquals(vector.getValue("shownFacts").jsonPrimitive.int, emitted.size)
+            assertEquals(vector.getValue("terminalOutcomes").jsonPrimitive.int, outcomes.size)
+            assertEquals(vector.getValue("dismissalCheckpoints").jsonPrimitive.int, checkpoints)
+            assertEquals(if (kind == "identity") JourneySurfaceOutcome.ABANDONED else JourneySurfaceOutcome.DISMISSED, outcomes.single())
+            assertFalse(PresentationRegistry.nativeRetired(id, 2))
+        }
+    }
+
+    @Test
+    fun `replacement drain observer cannot mount before the original native owner detaches`() = runTest {
+        val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/presentation-acquisition-recovery-android.json").readText()).jsonObject
+            .getValue("nativeRecovery").jsonObject.getValue("recreatedDrainWaiter").jsonObject
+        val release = renderedJourneyRelease()
+        val launched = mutableListOf<String>()
+        val lease = Lease()
+        val service = service(this, launch = launched::add)
+        val presentation = async {
+            service.presentJourney(release, "screen_welcome", "native-recreated-drain", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, lease) }, onOutcome = {})
+        }
+        runCurrent()
+        val id = launched.single()
+        val drained = CompletableDeferred<Unit>()
+        val old = object : PresentationScreenHandle {
+            override val nativeAttemptGeneration = 1L
+            override val rendererEffects = RendererEffectLifetime()
+            override fun requestCloseFromService(reason: CloseReason) = true
+            override fun screenCloseReason(): CloseReason? = null
+            override fun finishAfterServiceClose() = Unit
+            override suspend fun retireForRetry() { drained.await(); PresentationRegistry.detach(id, this) }
+        }
+        assertTrue(PresentationRegistry.attach(id, old))
+        assertTrue(PresentationRegistry.retryNative(id, 1))
+        val firstObserver = async { PresentationRegistry.drainNativeAttempts(id, 2) }
+        runCurrent()
+        firstObserver.cancelAndJoin()
+        val replacementObserver = async { PresentationRegistry.drainNativeAttempts(id, 2) }
+        runCurrent()
+        assertFalse(replacementObserver.isCompleted)
+        assertEquals(vector.getValue("replacementAdmittedBeforeDrain").jsonPrimitive.boolean, PresentationRegistry.nativeRetired(id, 2))
+        drained.complete(Unit)
+        replacementObserver.await()
+        assertEquals(vector.getValue("replacementAdmittedAfterDrain").jsonPrimitive.boolean, PresentationRegistry.nativeRetired(id, 2))
+        PresentationRegistry.reportFirstFrame(id)
+        presentation.await()
+        service.dismissFromHost("customer-1")
+        assertTrue(lease.closed.get())
+    }
+
+    @Test
     fun `renderer failure is typed and releases the Journey artifact lease`() = runTest {
         val release = renderedJourneyRelease()
         val launched = mutableListOf<String>()
@@ -1553,7 +1666,7 @@ class ExperiencePresentationServiceTest {
 
     private fun acquired(
         identity: JourneyReleaseIdentity,
-        lease: Lease,
+        lease: Closeable,
         extraArtifacts: Map<String, File> = emptyMap(),
     ): AcquiredJourneyRelease {
         val file = File.createTempFile("journey-presentation-", ".riv").apply {
