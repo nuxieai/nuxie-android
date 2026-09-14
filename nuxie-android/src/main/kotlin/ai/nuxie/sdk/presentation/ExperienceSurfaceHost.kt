@@ -25,6 +25,7 @@ import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.serialization.json.JsonObject
 
 /**
@@ -84,6 +85,9 @@ internal class ExperienceSurfaceHost(
     @Volatile
     private var running = false
     private val released = AtomicBoolean(false)
+    private val frameGeneration = AtomicLong(0)
+    private var surfaceAvailable = false
+    private var presentationVisible = true
     private var lastFrameNanos = 0L
     private val pointerInput = ExperienceRuntimePointerInput(artboardSize)
 
@@ -244,7 +248,30 @@ internal class ExperienceSurfaceHost(
         if (!accepted) complete(Result.failure(IllegalStateException("Runtime lane is shut down")))
     }
 
+    /** UI-thread visibility input; a paused but visible Activity remains active. */
+    fun setPresentationVisible(visible: Boolean) {
+        presentationVisible = visible
+        updateFrameScheduling()
+    }
+
+    private fun updateFrameScheduling() {
+        val shouldRun = surfaceAvailable && presentationVisible && !released.get()
+        if (running == shouldRun) return
+        running = shouldRun
+        frameGeneration.incrementAndGet()
+        lastFrameNanos = 0L
+        if (shouldRun) {
+            Choreographer.getInstance().postFrameCallback(this)
+        } else {
+            // Reset after any staging operation that already started on this
+            // lane; clearing on the UI thread could race its final enqueue.
+            lane.enqueue { pointerInput.reset() }
+            Choreographer.getInstance().removeFrameCallback(this)
+        }
+    }
+
     override fun surfaceCreated(holder: SurfaceHolder) {
+        if (released.get()) return
         val frame = holder.surfaceFrame
         val width = (frame?.width() ?: width).coerceAtLeast(1)
         val height = (frame?.height() ?: height).coerceAtLeast(1)
@@ -279,9 +306,8 @@ internal class ExperienceSurfaceHost(
             }
             attached = true
         }
-        running = true
-        lastFrameNanos = 0L
-        Choreographer.getInstance().postFrameCallback(this)
+        surfaceAvailable = true
+        updateFrameScheduling()
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -296,9 +322,8 @@ internal class ExperienceSurfaceHost(
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        running = false
-        pointerInput.reset()
-        Choreographer.getInstance().removeFrameCallback(this)
+        surfaceAvailable = false
+        updateFrameScheduling()
         // Session state (player/artboard) survives; only presentation stops.
         // The Surface contract requires rendering to have stopped before
         // this callback returns, so block until the lane drains past the
@@ -326,6 +351,7 @@ internal class ExperienceSurfaceHost(
 
     override fun doFrame(frameTimeNanos: Long) {
         if (!running) return
+        val generation = frameGeneration.get()
         val elapsedSeconds = if (lastFrameNanos == 0L) {
             0.0
         } else {
@@ -333,7 +359,7 @@ internal class ExperienceSurfaceHost(
         }
         lastFrameNanos = frameTimeNanos
         lane.enqueue {
-            if (!attached) return@enqueue
+            if (!attached || !running || generation != frameGeneration.get()) return@enqueue
             val renderer = renderer ?: return@enqueue
             val player = player ?: return@enqueue
             // Invariant: attached is set only after a successful window
@@ -427,9 +453,12 @@ internal class ExperienceSurfaceHost(
         val copy = MotionEvent.obtain(event)
         val viewportWidth = width
         val viewportHeight = height
+        val generation = frameGeneration.get()
         val accepted = lane.enqueue {
             try {
-                if (!released.get()) pointerInput.enqueue(copy, viewportWidth, viewportHeight)
+                if (!released.get() && running && generation == frameGeneration.get()) {
+                    pointerInput.enqueue(copy, viewportWidth, viewportHeight)
+                }
             } finally {
                 copy.recycle()
             }
@@ -442,8 +471,7 @@ internal class ExperienceSurfaceHost(
     fun release() {
         released.set(true)
         pointerInput.release()
-        running = false
-        Choreographer.getInstance().removeFrameCallback(this)
+        updateFrameScheduling()
         lane.enqueue {
             attached = false
             val closeHandles = listOfNotNull(

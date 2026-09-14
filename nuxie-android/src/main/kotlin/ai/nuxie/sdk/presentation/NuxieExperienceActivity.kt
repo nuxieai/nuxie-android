@@ -179,6 +179,16 @@ internal class NuxieExperienceActivity :
         registerPredictiveBack()
     }
 
+    override fun onStart() {
+        super.onStart()
+        host?.setPresentationVisible(true)
+    }
+
+    override fun onStop() {
+        host?.setPresentationVisible(false)
+        super.onStop()
+    }
+
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
         if (dismissible) finishTerminal(CloseReason.UserDismissed)
