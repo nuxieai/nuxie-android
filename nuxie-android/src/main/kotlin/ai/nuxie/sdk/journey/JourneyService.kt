@@ -2081,6 +2081,7 @@ internal class JourneyService(
         target: JourneyRunJournal,
         reservation: JourneyPresentationReservation?,
         canPresent: () -> Boolean,
+        transition: JsonObject? = null,
     ): PresentedScreen? {
         val presentation = presenter ?: return null
         val run = target.bindExperimentExposures(currentRun.id, screenId) ?: run {
@@ -2095,6 +2096,7 @@ internal class JourneyService(
                     release = release,
                     delivery = executionSnapshot.delivery,
                     screenId = screenId,
+                    transition = transition,
                     journeyId = run.journeyId,
                     ownerDistinctId = target.distinctId,
                     reservation = reservation,
@@ -2286,6 +2288,7 @@ internal class JourneyService(
                             val presented = presentScreen(
                                 currentRun = run,
                                 screenId = screenId,
+                                transition = result.action["transition"] as? JsonObject,
                                 release = release,
                                 executionSnapshot = executionSnapshot,
                                 executionToken = executionToken,

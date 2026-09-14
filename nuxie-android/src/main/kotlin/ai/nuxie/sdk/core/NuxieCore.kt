@@ -318,6 +318,7 @@ internal class NuxieCore(
             presentations.presentJourney(
                 release = request.release,
                 screenId = request.screenId,
+                transition = request.transition,
                 journeyId = request.journeyId,
                 ownerDistinctId = request.ownerDistinctId,
                 reservation = request.reservation,

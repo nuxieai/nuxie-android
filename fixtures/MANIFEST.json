@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "d568e9c5dbb2374b5265df3268eb66038f367c91",
+  "sourceCommit": "2e12cba3e518883baf46f5dd529e28b4933b3379",
   "files": {
     "README.md": "4363d6a79ac9828364a6a02bf400d98c0852b771062258c409a744dd1a5016e7",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
@@ -40,7 +40,7 @@
     "journeys/planes/text-input-edits.json": "323cc0d71359c33d4738ef2ea30c9c99441859004b4adab79364b2af82889c3d",
     "journeys/planes/text-input-geometry.json": "4db9f6c82327b31cb25202c8c13231ab857366bf55c6b592526e37495ff30089",
     "journeys/planes/text-input-limits.json": "7e3aa09d75d43b0326f13ff97de1b279e147e8fb8935c68b279640e2428b4137",
-    "journeys/planes/text-input-navigation.json": "379d2b40635b3a30c629c154124cae0629fc23b4ec97e4a3dd88359d4e93508f",
+    "journeys/planes/text-input-navigation.json": "49760fb0666fce8fb570c5cfda815c5dc579a9a3a5bc7e46f443801ab4257f7b",
     "journeys/planes/values.json": "e6f7b54cb33bb8d024638760c54221e858124affcbe182b4593924bfcca47bee",
     "journeys/rendered-text-input/LICENSE-Inter.txt": "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a",
     "journeys/rendered-text-input/assets/sha256/3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d.png": "3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d",

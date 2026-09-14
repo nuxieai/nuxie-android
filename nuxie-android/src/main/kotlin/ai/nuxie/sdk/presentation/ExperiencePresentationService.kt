@@ -83,6 +83,7 @@ internal data class PreparedPresentation(
     val viewModelProjection: NuxieViewModelListProjection? = null,
     val textInputState: ExperienceTextInputState = ExperienceTextInputState(),
     val screenLifecycle: ExperienceScreenLifecycle = ExperienceScreenLifecycle(),
+    val transition: JsonObject? = null,
 )
 
 internal sealed interface PresentationShell {
@@ -507,6 +508,7 @@ internal class ExperiencePresentationService(
         onEmissionBatch: suspend (JourneyScreenEmissionBatch) -> Boolean = { true },
         onPresentationRevealed: suspend (String) -> Unit = {},
         onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
+        transition: JsonObject? = null,
     ): ExperienceRef {
         val reserved = reservation as? JourneyReservation
         val request = reserved?.request ?: captureRequest(ownerDistinctId)
@@ -536,6 +538,7 @@ internal class ExperiencePresentationService(
             )
         }
         return presentPrepared(
+            transition = transition,
             request = request,
             journeyId = journeyId,
             reservationId = reserved?.id,
@@ -583,6 +586,7 @@ internal class ExperiencePresentationService(
         reservationRequired: Boolean,
         journey: JourneyOutcome,
         canPresent: () -> Boolean = { true },
+        transition: JsonObject? = null,
         prepare: suspend () -> PreparedSource,
     ): ExperienceRef {
         val active = presentationMutex.withLock {
@@ -684,6 +688,7 @@ internal class ExperiencePresentationService(
                     viewModelProjection = source.viewModelProjection,
                     textInputState = textInputState,
                     screenLifecycle = journey.lifecycleByScreen.getOrPut(journey.screenId) { ExperienceScreenLifecycle() },
+                    transition = transition,
                 )
                 navigation = existing?.let { previous ->
                     withTimeout(firstFrameTimeoutMillis) {

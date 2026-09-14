@@ -66,6 +66,7 @@ internal data class JourneyPresentationRequest(
     val onEmissionBatch: suspend (JourneyScreenEmissionBatch) -> Boolean = { true },
     val onPresentationRevealed: suspend (String) -> Unit = {},
     val onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
+    val transition: JsonObject? = null,
 )
 
 internal sealed interface JourneyPresentationResult {
