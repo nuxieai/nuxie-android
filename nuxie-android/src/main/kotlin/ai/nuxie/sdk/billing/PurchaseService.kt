@@ -134,8 +134,9 @@ internal class PurchaseService(
     private val newExternalOperationId: () -> String = TimeBasedEpochGenerator.shared::next,
     private val verifyPurchaseSignature: (String, String, String) -> Boolean =
         PlayPurchaseSignatureVerifier::verify,
-    private val logWarning: (String, Throwable) -> Unit = { message, failure ->
-        Log.w("NuxieBilling", message, failure)
+    private val logDroppedExternalPurchase: (String, Int, Throwable) -> Unit = { operationId, attempts, failure ->
+        Log.w("NuxieBilling", "Dropping external purchase operation after bounded capture retries", failure,
+            Log.sensitive("operation", operationId), Log.status("attempts", attempts))
     },
     /** Internal test observation only; null in production and never controls behavior. */
     private val purchaseCommitObserver: ((PurchaseCommitObservation) -> Unit)? = null,
@@ -443,11 +444,7 @@ internal class PurchaseService(
                 processing.withLock {
                     purchaseCommitOperations.remove(commit.identity, commit.operation)
                 }
-                logWarning(
-                    "Dropping external purchase operation ${commit.identity.operationId} " +
-                        "after ${commit.captureAttempt} capture attempts.",
-                    failure,
-                )
+                logDroppedExternalPurchase(commit.identity.operationId, commit.captureAttempt, failure)
             }
             return null
         }

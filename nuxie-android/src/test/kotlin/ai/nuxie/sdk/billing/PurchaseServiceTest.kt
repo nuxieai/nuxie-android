@@ -2401,7 +2401,7 @@ class PurchaseServiceTest {
             maxRetryDelayMillis = 1_000,
             purchaseEventCaptureResults = mutableListOf(false, false, false, false, true),
             externalOperationId = { "external-drop-${++mintedOperations}" },
-            logWarning = { message, _ -> warnings += message },
+            logDroppedExternalPurchase = { operation, _, _ -> warnings += operation },
         )
         fixture.settings.delegate = object : NuxiePurchaseDelegate {
             override suspend fun purchase(product: StoreProduct): PurchaseResult = PurchaseResult.Purchased
@@ -2865,7 +2865,7 @@ class PurchaseServiceTest {
         ) -> Boolean)? = null,
         externalOperationId: (() -> String)? = null,
         verifyPurchaseSignature: (String, String, String) -> Boolean = { _, _, _ -> true },
-        logWarning: (String, Throwable) -> Unit = { _, _ -> },
+        logDroppedExternalPurchase: (String, Int, Throwable) -> Unit = { _, _, _ -> },
         journeyEvents: MutableList<StoredEvent>? = null,
         testStore: NuxieTestStore? = null,
     ): Fixture {
@@ -2950,7 +2950,7 @@ class PurchaseServiceTest {
             newExternalOperationId = externalOperationId
                 ?: { "external-operation-${++externalOperationSequence}" },
             verifyPurchaseSignature = verifyPurchaseSignature,
-            logWarning = logWarning,
+            logDroppedExternalPurchase = logDroppedExternalPurchase,
             testStore = testStore,
         )
         fixture = Fixture(

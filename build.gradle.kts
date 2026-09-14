@@ -482,7 +482,14 @@ fun stripSourceComments(source: String): String {
   return stripped.toString()
 }
 
+val nativeLoggingPolicy by tasks.registering(Exec::class) {
+  group = "verification"
+  description = "Compile positive and negative probes for native Android logging policy."
+  commandLine("python3", "scripts/test-native-logging-policy.py")
+}
+
 val runtimeBoundary by tasks.registering {
+  dependsOn(nativeLoggingPolicy)
   group = "verification"
   description =
     "Checks source-level runtime boundary references; intentionally does not inspect reflection or compiled bytecode."

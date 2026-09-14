@@ -208,3 +208,22 @@ Set `redactSensitiveData = false` only for attended diagnostics that need raw
 values. Setup captures both controls; mutating the configuration or repeating
 setup does not reconfigure an active SDK. Await shutdown before setting up with
 a different policy.
+
+SDK development enforces the logging boundary with `NuxieLoggingPolicy` lint.
+It rejects direct platform/console output outside the sink and nonconstant tags,
+message structure or field names; use sensitive fields for dynamic values.
+The rule applies to the SDK module, not consumer applications. Native builds
+reject common direct-output and stream-redirection APIs at compilation, with
+positive/negative probes included in `runtimeBoundary`.
+
+After building the release AAR, qualify its JNI logging callback under R8 on an
+available Android emulator/device:
+
+```bash
+ANDROID_HOME=/path/to/android-sdk python3 scripts/test-minified-native-logging.py emulator-5558
+```
+
+This isolated, minified file-AAR consumer checks disabled/redacted/raw native
+warnings and unchanged stderr. It is a logging qualification fixture, not an
+integration example or a complete release/device qualification. Build logs,
+R8 mapping and device evidence remain under `build/minified-native-logging-consumer`.
