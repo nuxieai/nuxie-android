@@ -72,6 +72,8 @@ internal class NuxieExperienceActivity : Activity() {
     private inner class Screen(val id: String, val prepared: PreparedPresentation, @Volatile var provisional: Boolean = false) :
         PresentationScreenHandle, ExperienceSurfaceHost.Listener {
         var registered = false
+        var failure: Throwable? = null
+            private set
         var view: View? = null
         val ready = CompletableDeferred<Unit>()
         val closed = CompletableDeferred<Unit>()
@@ -167,8 +169,11 @@ internal class NuxieExperienceActivity : Activity() {
         override fun onFailure(error: ExperiencePresentationException) = fail(error)
 
         fun fail(error: Throwable) {
-            if (provisional) ready.completeExceptionally(error)
-            else finishTerminal(CloseReason.Error(error))
+            failure = error
+            if (provisional) {
+                ready.completeExceptionally(error)
+                mounted?.transitionEvents?.close()
+            } else finishTerminal(CloseReason.Error(error))
         }
         fun finishTerminal(reason: CloseReason) {
             if (closeState.select(reason)) finishAfterServiceClose()
@@ -193,7 +198,7 @@ internal class NuxieExperienceActivity : Activity() {
 
         fun setVisible(visible: Boolean) {
             animation?.setVisible(visible)
-            if (animation != null) target.mounted?.setVisible(visible)
+            if (blocksInput) target.mounted?.setVisible(visible)
         }
 
         fun cancel() { animation?.cancel() }
@@ -202,16 +207,16 @@ internal class NuxieExperienceActivity : Activity() {
             check(navigation === this@Navigation && currentScreen === source && !isFinishing && !isDestroyed) {
                 "Navigation source is no longer active"
             }
-            source.mounted?.awaitExit()
-            check(navigation === this@Navigation && !isFinishing && !isDestroyed)
             val render = target.prepared.descriptor?.get("render") as? JsonObject
             val plan = ExperienceScreenTransitionPlan.resolve(
                 target.prepared.transition,
                 render?.get("transitions") as? JsonArray ?: JsonArray(emptyList()),
                 checkNotNull(source.prepared.screenId), checkNotNull(target.prepared.screenId),
             )
-            if (plan.shouldAnimate(source.mounted?.reduceMotion == true) &&
-                plan.kind != ExperienceScreenTransitionPlan.Kind.CUSTOM) {
+            val animate = plan.shouldAnimate(source.mounted?.reduceMotion == true)
+            if (plan.kind != ExperienceScreenTransitionPlan.Kind.CUSTOM || !animate) source.mounted?.awaitExit()
+            check(navigation === this@Navigation && !isFinishing && !isDestroyed)
+            if (animate) {
                 val outgoing = checkNotNull(source.view)
                 val incoming = checkNotNull(target.view)
                 blocksInput = true
@@ -220,16 +225,30 @@ internal class NuxieExperienceActivity : Activity() {
                 targetAccessibility = incoming.importantForAccessibility
                 outgoing.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
                 incoming.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
-                animation = ExperienceScreenViewTransition(outgoing, incoming, plan.kind)
-                target.mounted?.setVisible(visible)
-                animation!!.play(visible)
+                val custom = plan.custom
+                if (custom != null) {
+                    val outgoingScreen = checkNotNull(source.mounted)
+                    val incomingScreen = checkNotNull(target.mounted)
+                    outgoingScreen.transitionEvents.performWith(incomingScreen.transitionEvents, custom) {
+                        incoming.alpha = 1f
+                        if (custom.incomingOnTop) incoming.bringToFront() else outgoing.bringToFront()
+                        outgoingScreen.beginCustomTransition(custom.id, outgoing = true)
+                        incomingScreen.beginCustomTransition(custom.id, outgoing = false)
+                        incomingScreen.setVisible(visible)
+                    }
+                } else {
+                    animation = ExperienceScreenViewTransition(outgoing, incoming, plan.kind)
+                    target.mounted?.setVisible(visible)
+                    animation!!.play(visible)
+                }
             }
+            target.failure?.let { throw it }
             Unit
         }
 
         override fun activate() {
             runOnUiThread {
-                if (isDestroyed || isFinishing || navigation !== this ||
+                if (isDestroyed || isFinishing || navigation !== this || target.failure != null ||
                     !PresentationRegistry.attach(target.id, target)) {
                     target.close(false)
                     target.closed.invokeOnCompletion {
