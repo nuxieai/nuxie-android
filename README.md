@@ -133,6 +133,22 @@ requires the development environment, a `pk_test_` key, and a debuggable host;
 setup rejects an enabled Test Store in a non-debuggable application. Configuration
 is captured at setup; await shutdown before changing modes.
 
+The AAR includes the fatal `NuxieTestStoreRelease` Android lint rule (qualified
+with AGP 8.10.1 / lint 31.10.1). Run your app's `lintRelease` task in its release
+gate. The rule accepts literal `false`, your module's `BuildConfig.DEBUG`, and
+`&&` expressions containing that gate; it rejects unconditional `true`, runtime
+flags alone, negated debug flags, and `||` expressions. Kotlin property writes
+and Java setters are checked. Test sources are excluded. Disabling lint or
+suppressing this rule removes the build-time protection; setup still enforces
+the runtime admission checks above.
+
+SDK maintainers can verify the shipped rule with
+`./gradlew :nuxie-android:assembleRelease` followed by
+`python3 scripts/test-test-store-lint.py` (Python 3.11+ and Android SDK required).
+The fixture consumes the resulting AAR directly and checks that release lint
+rejects `true` and accepts `BuildConfig.DEBUG` in Java and Kotlin. Detector tests also run through
+`:nuxie-android:test` and `:nuxie-android:check`.
+
 Published Experiences display their signed product previews with TEST labels.
 Checkout offers Purchased, Pending, Cancelled, and Failed choices. Restore offers
 Restored, No Purchases, and Failed; choosing Restored succeeds even with no local

@@ -57,6 +57,7 @@ android {
 }
 
 dependencies {
+  lintPublish(project(":nuxie-lint"))
   implementation(libs.androidx.sqlite.framework)
   // StoreProduct exposes ProductDetails, so Billing is part of consumers'
   // compile classpath. Use the plain artifact: billing-ktx ships Kotlin 2.2
@@ -214,4 +215,9 @@ tasks.withType<Test>().configureEach {
   inputs.dir(rootProject.layout.projectDirectory.dir("fixtures"))
     .withPathSensitivity(PathSensitivity.RELATIVE)
     .withPropertyName("crossSdkFixtures")
+}
+
+// Native readiness invokes this module's test task; keep shipped lint rules qualified too.
+tasks.matching { it.name == "test" || it.name == "check" }.configureEach {
+  dependsOn(":nuxie-lint:test")
 }
