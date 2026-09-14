@@ -962,25 +962,35 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun `artifact acquisition failure is a typed Journey presentation failure`() = runTest {
+    fun `artifact acquisition failure retries in the same authenticated presentation`() = runTest {
         val release = renderedJourneyRelease()
-        val service = service(this)
-        val reservation = requireNotNull(service.reserveJourney("customer-1"))
-
-        val error = expectPresentationFailure {
-            service.presentJourney(
-                release = release,
-                screenId = "screen_welcome",
-                journeyId = "journey-1",
-                ownerDistinctId = "customer-1",
-                reservation = reservation,
-                acquire = { throw java.io.IOException("offline") },
-                onOutcome = {},
-            )
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val lease = Lease()
+        var attempts = 0
+        val pending = async {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = {
+                    if (++attempts == 1) throw java.io.IOException("transport failed")
+                    acquired(release.identity, lease)
+                }, onOutcome = {})
         }
-
-        assertEquals(ExperiencePresentationException.Reason.ACQUISITION_FAILED, error.reason)
-        assertTrue(error.cause is java.io.IOException)
+        runCurrent()
+        val id = launched.single()
+        val failed = PresentationRegistry.observe(id)!!.value as PresentationContentState.Acquiring
+        assertEquals(AcquisitionProgress.Phase.FAILED, failed.progress!!.phase)
+        assertFalse(pending.isCompleted)
+        assertTrue(PresentationRegistry.retryAcquisition(id, failed.progress.generation))
+        assertFalse(PresentationRegistry.retryAcquisition(id, failed.progress.generation))
+        runCurrent()
+        assertEquals(1, launched.size)
+        assertEquals(2, attempts)
+        assertNotNull(PresentationRegistry.resolve(id))
+        PresentationRegistry.reportFirstFrame(id)
+        pending.await()
+        assertFalse(PresentationRegistry.retryAcquisition(id, failed.progress.generation))
+        service.dismissFromHost("customer-1")
+        assertEquals(1, lease.closeCount.get())
     }
 
     @Test

@@ -65,6 +65,9 @@ internal class NuxieExperienceActivity : Activity() {
     private val registryScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var acquiringScreen: AcquiringScreen? = null
     private var loadingView: ExperienceLoadingView? = null
+    private var recoveryView: ExperienceRecoveryView? = null
+    private var recoveryTimer: kotlinx.coroutines.Job? = null
+    private var acquisitionProgress: AcquisitionProgress? = null
     private var currentScreen: Screen? = null
     private val screens = mutableSetOf<Screen>()
     private var navigation: Navigation? = null
@@ -398,8 +401,10 @@ internal class NuxieExperienceActivity : Activity() {
                                 it.setActive(visible)
                             }
                         }
+                        content.progress?.let { updateAcquisitionRecovery(id, content.screen, it) }
                     }
                     is PresentationContentState.Ready -> if (currentScreen == null) {
+                        clearAcquisitionRecovery()
                         mountReadyScreen(id, content.content)
                         acquiringScreen?.let { PresentationRegistry.detach(id, it) }
                         acquiringScreen = null
@@ -441,7 +446,7 @@ internal class NuxieExperienceActivity : Activity() {
     override fun onStart() {
         super.onStart()
         visible = true
-        loadingView?.setActive(true)
+        loadingView?.setActive(recoveryView == null)
         navigation?.setVisible(true)
         screens.forEach { if (!it.provisional || !it.ready.isCompleted) it.mounted?.setVisible(true) }
     }
@@ -468,6 +473,7 @@ internal class NuxieExperienceActivity : Activity() {
 
     override fun onDestroy() {
         registryScope.cancel()
+        clearAcquisitionRecovery()
         removeLoadingView()
         acquiringScreen?.close(isChangingConfigurations)
         acquiringScreen = null
@@ -489,6 +495,49 @@ internal class NuxieExperienceActivity : Activity() {
             contentRoot.post { contentRoot.removeView(it) }
         }
         loadingView = null
+    }
+
+    private fun updateAcquisitionRecovery(id: String, screen: AuthenticatedPresentationScreen, progress: AcquisitionProgress) {
+        if (acquisitionProgress == progress) return
+        acquisitionProgress = progress
+        recoveryTimer?.cancel()
+        if (progress.phase != AcquisitionProgress.Phase.LOADING) {
+            showAcquisitionRecovery(id, screen, progress)
+        } else {
+            removeRecoveryView()
+            loadingView?.visibility = View.VISIBLE
+            loadingView?.setActive(visible)
+            recoveryTimer = registryScope.launch {
+                kotlinx.coroutines.delay((progress.startedAtMillis + 5_000 - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                if (acquisitionProgress == progress && acquiringScreen?.id == id && !isFinishing && !isDestroyed) {
+                    showAcquisitionRecovery(id, screen, progress)
+                }
+            }
+        }
+    }
+
+    private fun showAcquisitionRecovery(id: String, screen: AuthenticatedPresentationScreen, progress: AcquisitionProgress) {
+        removeRecoveryView()
+        loadingView?.setActive(false)
+        loadingView?.visibility = View.INVISIBLE
+        recoveryView = ExperienceRecoveryView(this, screen.clearColor, progress.phase,
+            retry = { PresentationRegistry.retryAcquisition(id, progress.generation) },
+            onClose = { finishTerminal(CloseReason.UserDismissed) },
+        ).also { contentRoot.addView(it, FrameLayout.LayoutParams(-1, -1)) }
+    }
+
+    private fun removeRecoveryView() {
+        recoveryView?.let { it.close(); contentRoot.removeView(it) }
+        recoveryView = null
+    }
+
+    private fun clearAcquisitionRecovery() {
+        recoveryTimer?.cancel()
+        recoveryTimer = null
+        acquisitionProgress = null
+        removeRecoveryView()
+        loadingView?.visibility = View.VISIBLE
+        loadingView?.setActive(visible)
     }
 
     private suspend fun resolveJourneyPermission(request: JourneyPermissionRequest): Boolean =
