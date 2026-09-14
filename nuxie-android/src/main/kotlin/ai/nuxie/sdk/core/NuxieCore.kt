@@ -20,6 +20,8 @@ import ai.nuxie.sdk.billing.FilePurchaseEvidenceStore
 import ai.nuxie.sdk.billing.GooglePlayBillingClientAdapter
 import ai.nuxie.sdk.billing.JourneyCommercePreparer
 import ai.nuxie.sdk.billing.NuxiePurchaseDelegate
+import ai.nuxie.sdk.billing.NuxieTestStore
+import ai.nuxie.sdk.billing.AndroidTestStoreChoices
 import ai.nuxie.sdk.billing.NuxieApiPurchaseSynchronizer
 import ai.nuxie.sdk.billing.PlayBillingConnection
 import ai.nuxie.sdk.billing.PurchaseEvidenceStore
@@ -107,12 +109,25 @@ internal class NuxieCore(
     localeIdentifier: String? = null,
     purchaseDelegate: NuxiePurchaseDelegate? = null,
     purchaseHandlingMode: PurchaseHandlingMode = PurchaseHandlingMode.NUXIE_MANAGED,
+    private val testStoreEnabled: Boolean = false,
     apiEndpointOverride: URL? = null,
     overrides: Overrides = Overrides(),
     private val forwardingEnabled: () -> Boolean = { false },
     private val forwardActivity: suspend (NuxieActivityInfo) -> Unit = {},
     construction: CoreConstruction? = null,
 ) {
+    init {
+        if (testStoreEnabled) {
+            require(environment == NuxieEnvironment.DEVELOPMENT) {
+                "testStoreEnabled requires DEVELOPMENT environment."
+            }
+            require(apiKey.startsWith("pk_test_")) { "testStoreEnabled requires a pk_test_ API key." }
+            require(context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+                "testStoreEnabled requires a debuggable host application."
+            }
+        }
+    }
+
     private val registerLifecycle = overrides.registerLifecycle
     private val stopped = AtomicBoolean(false)
     private val shutdownCompletion = CompletableDeferred<Unit>()
@@ -198,7 +213,7 @@ internal class NuxieCore(
 
     private val purchaseEvidenceStore = overrides.purchaseEvidenceStore
         ?: FilePurchaseEvidenceStore(
-            purchaseEvidenceDirectory(appContext.filesDir, apiKey, environment),
+            purchaseEvidenceDirectory(appContext.filesDir, apiKey, environment, testStoreEnabled),
         )
 
     private val releaseTrustRoots = JourneyTrustRoots.keys(environment)
@@ -238,6 +253,10 @@ internal class NuxieCore(
         onConnected = { purchaseService.recover() },
     ).also { billing -> construction?.onFailure { billing.close() } }
 
+    private val testStore = if (testStoreEnabled) {
+        NuxieTestStore(AndroidTestStoreChoices { presentations.purchaseActivity() ?: lifecycleCoordinator.purchaseActivity() })
+    } else null
+
     val purchases: PurchaseService = PurchaseService(
         billing = billing,
         evidenceStore = purchaseEvidenceStore,
@@ -249,13 +268,14 @@ internal class NuxieCore(
         scope = producerScope,
         nowMillis = nowMillis,
         api = api,
-        purchaseStorageScope = purchaseAuthorityScope(apiKey, environment),
+        purchaseStorageScope = purchaseAuthorityScope(apiKey, environment, testStoreEnabled),
         capturePurchaseSynced = eventLog::captureIdempotently,
         capturePurchaseEvent = ::capturePurchaseEvent,
+        testStore = testStore,
     ).also { purchaseService = it }
 
     private val journeyCommerce = JourneyCommercePreparer(
-        resolver = ProductResolver(billing, purchaseEvidenceStore),
+        resolver = ProductResolver(billing, purchaseEvidenceStore, testStoreEnabled),
         purchases = purchases,
     )
 
@@ -293,7 +313,7 @@ internal class NuxieCore(
         features = features,
         eventLog = eventLog,
         scope = scope,
-        journalFile = File(purchaseEvidenceDirectory(appContext.filesDir, apiKey, environment), "feature-commands.json"),
+        journalFile = File(purchaseEvidenceDirectory(appContext.filesDir, apiKey, environment, testStoreEnabled), "feature-commands.json"),
         nowMillis = nowMillis,
     )
 
@@ -513,7 +533,7 @@ internal class NuxieCore(
             delivery.flushAll()
         }
         lifecycleTracker.trackAppLaunchEvents()
-        billing.connect()
+        if (!testStoreEnabled) billing.connect()
         if (registerLifecycle) {
             (appContext as? Application)?.registerActivityLifecycleCallbacks(lifecycleCoordinator)
             initialActivity?.let(lifecycleCoordinator::admitVisibleActivity)

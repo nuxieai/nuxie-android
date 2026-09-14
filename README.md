@@ -115,6 +115,35 @@ check(Nuxie.isSetup)
 
 The legacy SDK is archived on branch `legacy/webview-sdk`.
 
+## Development Test Store
+
+Use Test Store to exercise purchase and restore outcomes without charging a
+customer or contacting Google Play:
+
+```kotlin
+val configuration = NuxieConfiguration("pk_test_YOUR_KEY").apply {
+    environment = NuxieEnvironment.DEVELOPMENT
+    testStoreEnabled = BuildConfig.DEBUG
+}
+Nuxie.setup(applicationContext, configuration)
+```
+
+`BuildConfig` above belongs to your app. Test Store is off by default. Enabling it
+requires the development environment, a `pk_test_` key, and a debuggable host;
+setup rejects an enabled Test Store in a non-debuggable application. Configuration
+is captured at setup; await shutdown before changing modes.
+
+Published Experiences display their signed product previews with TEST labels.
+Checkout offers Purchased, Pending, Cancelled, and Failed choices. Restore offers
+Restored, No Purchases, and Failed; choosing Restored succeeds even with no local
+purchase history. Test Store takes precedence over a purchase delegate and creates
+no Play transaction. Its purchase history is in memory and scoped to each customer.
+
+Initialize in your Application before Activities start so restore can find a
+visible host, or initialize with an already visible Activity. Direct purchase
+calls use the Activity supplied by the caller. These simulated choices do not
+qualify real Play billing, acknowledgement, consumption, or store recovery.
+
 ## Shutdown and repeated setup
 
 `Nuxie.shutdown()` closes public operation admission and starts teardown without

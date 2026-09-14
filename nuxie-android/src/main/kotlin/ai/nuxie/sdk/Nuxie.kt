@@ -93,6 +93,7 @@ object Nuxie {
                     localeIdentifier = configuration.localeIdentifier,
                     purchaseDelegate = configuration.purchaseDelegate,
                     purchaseHandlingMode = configuration.purchaseHandlingMode,
+                    testStoreEnabled = configuration.testStoreEnabled,
                     apiEndpointOverride = configuration.testingOverrides.apiEndpoint,
                     overrides = overridesForTesting ?: NuxieCore.Overrides(),
                     forwardingEnabled = { listener != null },

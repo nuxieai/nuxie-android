@@ -518,6 +518,7 @@ public final class ai/nuxie/sdk/NuxieConfiguration {
 	public final fun getLogLevel ()Lai/nuxie/sdk/LogLevel;
 	public final fun getPurchaseDelegate ()Lai/nuxie/sdk/billing/NuxiePurchaseDelegate;
 	public final fun getPurchaseHandlingMode ()Lai/nuxie/sdk/billing/PurchaseHandlingMode;
+	public final fun getTestStoreEnabled ()Z
 	public final fun getTestingOverrides ()Lai/nuxie/sdk/NuxieTestingOverrides;
 	public final fun setBeforeSend (Lkotlin/jvm/functions/Function1;)V
 	public final fun setEnvironment (Lai/nuxie/sdk/NuxieEnvironment;)V
@@ -526,6 +527,7 @@ public final class ai/nuxie/sdk/NuxieConfiguration {
 	public final fun setLogLevel (Lai/nuxie/sdk/LogLevel;)V
 	public final fun setPurchaseDelegate (Lai/nuxie/sdk/billing/NuxiePurchaseDelegate;)V
 	public final fun setPurchaseHandlingMode (Lai/nuxie/sdk/billing/PurchaseHandlingMode;)V
+	public final fun setTestStoreEnabled (Z)V
 }
 
 public final class ai/nuxie/sdk/NuxieEnvironment : java/lang/Enum {

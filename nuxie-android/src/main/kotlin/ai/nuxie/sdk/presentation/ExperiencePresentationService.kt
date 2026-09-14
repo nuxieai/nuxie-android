@@ -869,6 +869,12 @@ internal class ExperiencePresentationService(
         return JsonObject(action + ("placementId" to JsonPrimitive(placementId)))
     }
 
+    /** Activity currently owning the presented Experience; called by native checkout UI on Main. */
+    internal fun purchaseActivity(): Activity? {
+        val id = synchronized(stateLock) { current?.id } ?: return null
+        return PresentationRegistry.currentScreen(id)?.purchaseActivity()
+    }
+
     suspend fun dispatchJourneyAction(
         owner: JourneyPresentationOwner,
         action: JsonObject,

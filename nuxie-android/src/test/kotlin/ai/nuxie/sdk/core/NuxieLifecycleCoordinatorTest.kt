@@ -29,6 +29,40 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 class NuxieLifecycleCoordinatorTest {
     @Test
+    fun checkoutActivityTracksVisibleResumedOwnerWithoutRetainingStoppedHosts() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val context = RuntimeEnvironment.getApplication()
+        val coordinator = NuxieLifecycleCoordinator(
+            tracker = AppLifecycleTracker(
+                preferences = context.getSharedPreferences("checkout-owner", Context.MODE_PRIVATE),
+                appVersionProvider = { "1" }, nowMillis = { 100_000L }, emit = { _, _ -> },
+            ),
+            sessions = SessionService { 100_000L }, scope = scope,
+        )
+        val first = Robolectric.buildActivity(Activity::class.java).setup()
+        val second = Robolectric.buildActivity(Activity::class.java).setup()
+        try {
+            coordinator.onActivityStarted(first.get())
+            coordinator.onActivityStarted(second.get())
+            coordinator.onActivityResumed(first.get())
+            assertEquals(first.get(), coordinator.purchaseActivity())
+            coordinator.onActivityStopped(first.get())
+            assertEquals(second.get(), coordinator.purchaseActivity())
+            coordinator.onActivityStopped(second.get())
+            assertEquals(null, coordinator.purchaseActivity())
+            coordinator.close()
+            coordinator.onActivityStarted(first.get())
+            coordinator.onActivityResumed(first.get())
+            assertEquals(null, coordinator.purchaseActivity())
+        } finally {
+            first.pause().stop().destroy()
+            second.pause().stop().destroy()
+            coordinator.close()
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun closeWaitsForCancelledTransitionCleanupAndRejectsLaterCallbacks() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val entered = CompletableDeferred<Unit>()

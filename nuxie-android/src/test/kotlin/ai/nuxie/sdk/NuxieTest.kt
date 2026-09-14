@@ -25,6 +25,9 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.NonCancellable
@@ -36,6 +39,8 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.boolean
 import org.junit.Rule
 import org.junit.rules.TemporaryFolder
 import ai.nuxie.sdk.testsupport.FakeTransport
@@ -63,6 +68,84 @@ class NuxieTest {
     fun tearDown() {
         Nuxie.resetForTesting()
         Nuxie.overridesForTesting = null
+    }
+
+    @Test
+    fun testStoreSetupMatchesSharedAndroidAdmissionVectors() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val original = context.applicationInfo.flags
+        val fixture = Json.parseToJsonElement(java.io.File(
+            ai.nuxie.sdk.fixtures.FixtureRunner.fixturesRoot(), "purchases/test-store-configuration.json",
+        ).readText()).jsonObject
+        try {
+            Nuxie.overridesForTesting = NuxieCore.Overrides(
+                transport = FakeTransport(), registerLifecycle = false, requestInitialProfileRefresh = false,
+                billingClientFactory = InertBillingClientAdapter.factory,
+            )
+            for (raw in fixture.getValue("cases").jsonArray) {
+                val case = raw.jsonObject
+                val flag = android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE
+                context.applicationInfo.flags = if (case.getValue("debuggable").jsonPrimitive.boolean) original or flag
+                    else original and flag.inv()
+                val configuration = NuxieConfiguration(case.getValue("apiKey").jsonPrimitive.content).apply {
+                    environment = NuxieEnvironment.valueOf(case.getValue("environment").jsonPrimitive.content)
+                    testStoreEnabled = case.getValue("enabled").jsonPrimitive.boolean
+                }
+                if (case.getValue("allowed").jsonPrimitive.boolean) {
+                    Nuxie.setup(context, configuration)
+                    assertTrue(Nuxie.isSetup)
+                    Nuxie.shutdownAndAwait()
+                } else {
+                    assertThrows(IllegalArgumentException::class.java) { Nuxie.setup(context, configuration) }
+                }
+                assertFalse(Nuxie.isSetup)
+            }
+        } finally { context.applicationInfo.flags = original }
+    }
+
+    @Test
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun configuredTestStoreNeverConstructsBillingAndCapturesItsModeAtSetup() = runBlocking {
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+        val context = RuntimeEnvironment.getApplication()
+        val original = context.applicationInfo.flags
+        context.applicationInfo.flags = original or android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE
+        try {
+            val billingConstructions = java.util.concurrent.atomic.AtomicInteger()
+            Nuxie.overridesForTesting = NuxieCore.Overrides(
+                transport = FakeTransport(), registerLifecycle = false, requestInitialProfileRefresh = false,
+                billingClientFactory = BillingClientAdapterFactory {
+                    billingConstructions.incrementAndGet()
+                    error("Test Store constructed Billing")
+                },
+            )
+            val config = NuxieConfiguration("pk_test_store_config_${System.nanoTime()}").apply {
+                environment = NuxieEnvironment.DEVELOPMENT
+                testStoreEnabled = true
+                purchaseDelegate = object : NuxiePurchaseDelegate {
+                    override suspend fun purchase(product: StoreProduct): PurchaseResult = error("Delegate called")
+                    override suspend fun restorePurchases(): RestoreResult = error("Delegate called")
+                }
+            }
+            Nuxie.setup(context, config)
+            assertTrue(Nuxie.isSetup)
+            val testDirectory = ai.nuxie.sdk.billing.purchaseEvidenceDirectory(
+                context.filesDir, config.apiKey, config.environment, testStore = true,
+            )
+            assertTrue(testDirectory.isDirectory)
+            assertFalse(ai.nuxie.sdk.billing.purchaseEvidenceDirectory(
+                context.filesDir, config.apiKey, config.environment, testStore = false,
+            ).exists())
+            config.testStoreEnabled = false
+            // No visible Activity: Test Store fails presentation instead of entering delegate or Play.
+            assertTrue(Nuxie.restorePurchases() is RestoreResult.Failed)
+            Nuxie.shutdownAndAwait()
+            assertEquals(0, billingConstructions.get())
+        } finally {
+            Nuxie.resetForTesting()
+            context.applicationInfo.flags = original
+            Dispatchers.resetMain()
+        }
     }
 
     @Test
