@@ -40,8 +40,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -478,7 +476,6 @@ internal class ExperiencePresentationService(
 
     private var preparation: PreparationAttempt? = null
 
-    private val presentationMutex = Mutex()
     private val stateLock = Any()
     private var current: ActivePresentation? = null
     private var pendingReservation: PendingReservation? = null
@@ -627,7 +624,9 @@ internal class ExperiencePresentationService(
         transition: JsonObject? = null,
         prepare: suspend () -> PreparedSource,
     ): ExperienceRef {
-        val active = presentationMutex.withLock {
+        // stateLock atomically claims transitionInProgress below. Do not queue another
+        // request behind acquisition, native preparation, or a future recovery wait.
+        val active = run {
             val attempt = PreparationAttempt(request, journeyId, Job(currentCoroutineContext()[Job]))
             var transitionClaimed = false
             var published = false

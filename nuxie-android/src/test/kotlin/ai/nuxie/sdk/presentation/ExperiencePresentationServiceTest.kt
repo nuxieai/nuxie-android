@@ -461,6 +461,60 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `competing preparation is declined without waiting or disturbing the admitted owner`() = runTest {
+        val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/presentation-preparation-android.json").readText()).jsonObject
+            .getValue("concurrentAdmission").jsonObject
+        val release = renderedJourneyRelease()
+        val releaseWork = CompletableDeferred<Unit>()
+        val started = CompletableDeferred<Unit>()
+        val lease = Lease()
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val reservation = service.reserveJourney("customer-1")
+        val pending = async {
+            runCatching {
+                service.presentJourney(release, "screen_welcome", "journey-1", "customer-1", reservation,
+                    acquire = {
+                        withContext(NonCancellable) { started.complete(Unit); releaseWork.await() }
+                        acquired(release.identity, lease)
+                    }, onOutcome = {})
+            }
+        }
+        started.await()
+        var competitorAcquisitions = 0
+        val competitor = async {
+            runCatching {
+                service.presentJourney(release, "screen_welcome", "journey-1", "customer-1", reservation,
+                    acquire = { competitorAcquisitions++; error("Competing acquisition must not start") }, onOutcome = {})
+            }
+        }
+        try {
+            runCurrent()
+            assertTrue("Admission must not queue behind acquisition or user recovery", competitor.isCompleted)
+            assertEquals(vector.getValue("failureReason").jsonPrimitive.content,
+                (competitor.await().exceptionOrNull() as ExperiencePresentationException).reason.name)
+            assertFalse(pending.isCompleted)
+            assertEquals(vector.getValue("competitorAcquisitions").jsonPrimitive.int, competitorAcquisitions)
+            assertEquals(vector.getValue("shellLaunchCount").jsonPrimitive.int, launched.size)
+            assertTrue(PresentationRegistry.observe(launched.single())?.value is PresentationContentState.Acquiring)
+            assertNull(service.reserveJourney("customer-2"))
+            val close = async { service.dismissFromHost("customer-1") }
+            runCurrent()
+            assertFalse(close.isCompleted)
+            releaseWork.complete(Unit)
+            close.await()
+            assertEquals(ExperiencePresentationException.Reason.SUPERSEDED,
+                (pending.await().exceptionOrNull() as ExperiencePresentationException).reason)
+            assertEquals(vector.getValue("lateLeaseCloseCount").jsonPrimitive.int, lease.closeCount.get())
+            assertNotNull(service.reserveJourney("customer-2"))
+        } finally {
+            releaseWork.complete(Unit)
+            service.shutdownOwnedBy("customer-1")
+        }
+    }
+
+    @Test
     fun `pending preparation drains matching close before a host exists`() = runTest {
         val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/presentation-preparation-android.json").readText()).jsonObject
