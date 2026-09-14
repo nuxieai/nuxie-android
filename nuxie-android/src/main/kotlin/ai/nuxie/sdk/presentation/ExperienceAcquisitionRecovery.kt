@@ -39,7 +39,7 @@ internal class ExperienceAcquisitionRecovery<T : Any>(
 
     suspend fun acquire(
         prepare: suspend () -> T,
-        release: (T) -> Unit,
+        release: suspend (T) -> Unit,
         recoverable: (Throwable) -> Boolean,
         onFailure: (Throwable) -> Unit,
     ): T {
@@ -75,7 +75,7 @@ internal class ExperienceAcquisitionRecovery<T : Any>(
                 } catch (error: Throwable) {
                     failure = error
                 } finally {
-                    try { if (!transferred) acquired?.let(release) }
+                    try { if (!transferred) acquired?.let { release(it) } }
                     finally { attempt.job.complete() }
                 }
                 currentCoroutineContext().ensureActive()

@@ -63,11 +63,13 @@ internal class ScreenCloseState(
  */
 internal class NuxieExperienceActivity : Activity() {
     private val registryScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var registryObservation: kotlinx.coroutines.Job? = null
     private var acquiringScreen: AcquiringScreen? = null
     private var loadingView: ExperienceLoadingView? = null
     private var recoveryView: ExperienceRecoveryView? = null
     private var recoveryTimer: kotlinx.coroutines.Job? = null
     private var acquisitionProgress: AcquisitionProgress? = null
+    private var recoveryOwnerToken: String? = null
     private var currentScreen: Screen? = null
     private val screens = mutableSetOf<Screen>()
     private var navigation: Navigation? = null
@@ -212,6 +214,8 @@ internal class NuxieExperienceActivity : Activity() {
                             clearAcquisitionRecovery()
                             removeLoadingView()
                             mounted?.activate()
+                            (PresentationRegistry.observe(id)?.value as? PresentationContentState.Ready)?.navigationRecovery
+                                ?.let { updateNavigationRecovery(id, it) }
                         }
                         true
                     }
@@ -334,6 +338,7 @@ internal class NuxieExperienceActivity : Activity() {
                 source.close(false)
                 screens.remove(source)
                 navigation = null
+                observePresentation(target.id, checkNotNull(PresentationRegistry.observe(target.id)))
                 target.publishPreparedFrame()
                 target.mounted?.setVisible(visible)
             }
@@ -354,27 +359,30 @@ internal class NuxieExperienceActivity : Activity() {
         }
     }
 
-    private suspend fun prepareScreenNavigation(source: Screen, id: String, prepared: PreparedPresentation): PreparedScreenNavigation =
-        withContext(Dispatchers.Main.immediate) {
-            check(currentScreen === source && navigation == null && !isFinishing && !isDestroyed) {
-                "Navigation source is no longer active"
-            }
-            val target = Screen(id, prepared, provisional = true)
-            val pending = Navigation(source, target)
-            navigation = pending
-            screens += target
-            try {
-                // Retain native preparation without exposing destination pixels through a transparent source.
+    private suspend fun prepareScreenNavigation(source: Screen, id: String, prepared: PreparedPresentation): PreparedScreenNavigation {
+        var pending: Navigation? = null
+        try {
+            return withContext(Dispatchers.Main.immediate) {
+                check(currentScreen === source && navigation == null && !isFinishing && !isDestroyed) {
+                    "Navigation source is no longer active"
+                }
+                val target = Screen(id, prepared, provisional = true)
+                val candidate = Navigation(source, target)
+                // Capture ownership before the main-thread handoff can discard a cancelled result.
+                pending = candidate
+                navigation = candidate
+                screens += target
                 contentRoot.addView(target.mount().apply { alpha = 0f }, 0, FrameLayout.LayoutParams(-1, -1))
                 target.mounted?.observeWindow()
                 target.mounted?.setVisible(visible)
                 target.ready.await()
-                pending
-            } catch (error: Throwable) {
-                pending.abort()
-                throw error
+                candidate
             }
+        } catch (error: Throwable) {
+            pending?.abort()
+            throw error
         }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -398,7 +406,12 @@ internal class NuxieExperienceActivity : Activity() {
             return
         }
         registerPredictiveBack()
-        registryScope.launch {
+        observePresentation(id, state)
+    }
+
+    private fun observePresentation(id: String, state: kotlinx.coroutines.flow.StateFlow<PresentationContentState>) {
+        registryObservation?.cancel()
+        registryObservation = registryScope.launch {
             state.collect { content ->
                 if (isFinishing || isDestroyed) return@collect
                 when (content) {
@@ -423,6 +436,12 @@ internal class NuxieExperienceActivity : Activity() {
                         // An old screen's flow stays observed through initial recovery, but
                         // may not take ownership back after Journey navigation.
                         if (currentScreen != null && currentScreen?.id != id) return@collect
+                        val navigationRecovery = content.navigationRecovery
+                        if (navigationRecovery != null && currentScreen?.hasRevealed() == true) {
+                            updateNavigationRecovery(id, navigationRecovery)
+                            return@collect
+                        }
+                        if (currentScreen?.hasRevealed() == true && acquisitionProgress != null) clearAcquisitionRecovery()
                         val progress = content.progress
                         if (progress?.phase == AcquisitionProgress.Phase.RETRYING) {
                             retireNativeAttempt(id, content)
@@ -450,6 +469,29 @@ internal class NuxieExperienceActivity : Activity() {
                         if (currentScreen?.id == id || acquiringScreen?.id == id) finish()
                     }
                 }
+            }
+        }
+    }
+
+    private fun updateNavigationRecovery(id: String, recovery: NavigationRecoveryState) {
+        val progress = recovery.progress
+        if (acquisitionProgress == progress && recoveryOwnerToken == recovery.token) return
+        acquisitionProgress = progress
+        recoveryOwnerToken = recovery.token
+        recoveryTimer?.cancel()
+        fun show() {
+            val prepared = currentScreen?.takeIf { it.id == id }?.prepared ?: return
+            removeRecoveryView()
+            recoveryView = ExperienceRecoveryView(this, prepared.clearColor, progress.phase,
+                retry = { PresentationRegistry.retryNavigation(id, recovery.token, progress.generation) },
+                onClose = { finishTerminal(CloseReason.UserDismissed) },
+            ).also { contentRoot.addView(it, FrameLayout.LayoutParams(-1, -1)) }
+        }
+        if (progress.phase != AcquisitionProgress.Phase.LOADING) show() else {
+            removeRecoveryView()
+            recoveryTimer = registryScope.launch {
+                kotlinx.coroutines.delay((progress.startedAtMillis + 5_000 - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                if (acquisitionProgress == progress && recoveryOwnerToken == recovery.token && currentScreen?.id == id && !isFinishing && !isDestroyed) show()
             }
         }
     }
@@ -641,6 +683,7 @@ internal class NuxieExperienceActivity : Activity() {
         recoveryTimer?.cancel()
         recoveryTimer = null
         acquisitionProgress = null
+        recoveryOwnerToken = null
         removeRecoveryView()
         loadingView?.visibility = View.VISIBLE
         loadingView?.setActive(visible)
