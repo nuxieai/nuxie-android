@@ -3,7 +3,7 @@ package ai.nuxie.sdk.experiences
 import ai.nuxie.sdk.experiences.JourneyReleaseArtifactAcquisitionException.Reason
 import ai.nuxie.sdk.network.HttpTransport
 import android.content.Context
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.io.Closeable
 import java.io.File
 import java.io.IOException
@@ -312,7 +312,7 @@ internal class JourneyReleaseArtifactCache(
             synchronized(cacheScope.lock) {
                 cacheScope.liveTemporaryOwnership.remove(temporary.absolutePath)?.close()
                 if (temporary.exists() && !temporary.delete()) {
-                    Log.w(LOG_TAG, "Failed to remove artifact temporary file ${temporary.name}")
+                    Log.w(LOG_TAG, "Failed to remove artifact temporary file", null, Log.sensitive("file", temporary.name))
                 }
             }
         }
@@ -460,7 +460,7 @@ internal class JourneyReleaseArtifactCache(
                 total -= length
                 dropDigestLockIfUnreferencedLocked(file.name)
             }
-            else Log.w(LOG_TAG, "Failed to prune release artifact ${file.name}")
+            else Log.w(LOG_TAG, "Failed to prune release artifact", null, Log.sensitive("file", file.name))
         }
     }
 
@@ -487,7 +487,7 @@ internal class JourneyReleaseArtifactCache(
             ?.forEach { file ->
                 val deleted = withTemporaryClaim(file) { file.delete() }
                 if (deleted == false) {
-                    Log.w(LOG_TAG, "Failed to remove artifact temporary file ${file.name}")
+                    Log.w(LOG_TAG, "Failed to remove artifact temporary file", null, Log.sensitive("file", file.name))
                 }
             }
     }

@@ -6,7 +6,7 @@ import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.PermissionKind
 import ai.nuxie.sdk.PurchaseInfo
 import ai.nuxie.sdk.journey.JourneyEventNames
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -244,7 +244,7 @@ internal object ActivityCuration {
     }
 
     private fun missing(internalName: String): NuxieActivity? {
-        Log.w("Nuxie", "Suppressing malformed forwarded activity '$internalName'")
+        Log.w("Nuxie", "Suppressing malformed forwarded activity", null, Log.sensitive("event", internalName))
         return null
     }
 }

@@ -5,7 +5,7 @@ import ai.nuxie.sdk.runtime.NuxieHostValue
 import ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome
 import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
 import ai.nuxie.sdk.runtime.NuxieRuntimeEventPropertyValue
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
@@ -135,7 +135,7 @@ internal class JourneyRuntimeEmissionCoordinator(
     ): Boolean {
         if (drafts.isEmpty()) return true
         if (drafts.any(Draft::isInvalid)) {
-            Log.w(LOG_TAG, "Rejected invalid renderer emission transaction for $screenId")
+            Log.w(LOG_TAG, "Rejected invalid renderer emission transaction", null, Log.sensitive("screen", screenId))
             return true
         }
         if (nextBatch == Long.MAX_VALUE ||
@@ -302,7 +302,7 @@ internal class JourneyRuntimeEmissionCoordinator(
     private fun materializeControl(control: Control): List<Draft>? {
         val behavior = controls[control.invocation.actionId] ?: return null
         if (behavior.string("kind") != "declarative") {
-            Log.w(LOG_TAG, "Screen script control is unavailable: ${control.invocation.actionId}")
+            Log.w(LOG_TAG, "Screen script control is unavailable", null, Log.sensitive("action", control.invocation.actionId))
             return null
         }
         val program = behavior["program"] as? JsonArray ?: return null
@@ -330,7 +330,7 @@ internal class JourneyRuntimeEmissionCoordinator(
                 }
             }
         }.onFailure { error ->
-            Log.w(LOG_TAG, "Rejected signed screen control ${control.invocation.actionId}", error)
+            Log.w(LOG_TAG, "Rejected signed screen control", error, Log.sensitive("action", control.invocation.actionId))
         }.getOrNull()
     }
 

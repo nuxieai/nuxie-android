@@ -9,7 +9,7 @@ import ai.nuxie.sdk.features.FeatureService
 import ai.nuxie.sdk.features.FeatureUsageResult
 import ai.nuxie.sdk.network.NuxieApi
 import android.app.Activity
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import com.android.billingclient.api.BillingClient
 import java.security.MessageDigest
 import java.util.Collections

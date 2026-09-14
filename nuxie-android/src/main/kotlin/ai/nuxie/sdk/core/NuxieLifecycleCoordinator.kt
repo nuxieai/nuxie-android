@@ -3,7 +3,7 @@ package ai.nuxie.sdk.core
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
-import android.util.Log
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.cancelAndJoin
@@ -137,7 +137,7 @@ internal class NuxieLifecycleCoordinator(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Throwable) {
-            Log.w(LOG_TAG, "$label failed; lifecycle processing will continue", failure)
+            Log.w(LOG_TAG, "Lifecycle operation failed; processing will continue", failure, Log.sensitive("operation", label))
         }
     }
 

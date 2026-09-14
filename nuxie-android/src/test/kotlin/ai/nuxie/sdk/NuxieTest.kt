@@ -71,6 +71,28 @@ class NuxieTest {
     }
 
     @Test
+    fun activeConfigurationOwnsLogLevelIncludingIgnoredSetup() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = FakeTransport(), registerLifecycle = false, requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
+        )
+        val disabled = NuxieConfiguration("pk_test_logging").apply { logLevel = LogLevel.NONE }
+        Nuxie.setup(context, disabled)
+        org.robolectric.shadows.ShadowLog.clear()
+        disabled.logLevel = LogLevel.DEBUG
+        Nuxie.setup(context, NuxieConfiguration("pk_test_ignored").apply { logLevel = LogLevel.DEBUG })
+        assertTrue(org.robolectric.shadows.ShadowLog.getLogsForTag("Nuxie").isEmpty())
+        Nuxie.shutdownAndAwait()
+        Nuxie.setup(context, NuxieConfiguration("pk_test_logging").apply { logLevel = LogLevel.WARN })
+        org.robolectric.shadows.ShadowLog.clear()
+        Nuxie.setup(context, NuxieConfiguration("pk_test_ignored").apply { logLevel = LogLevel.NONE })
+        assertTrue(org.robolectric.shadows.ShadowLog.getLogsForTag("Nuxie").any {
+            it.msg == "SDK setup ignored while a graph is active or changing."
+        })
+    }
+
+    @Test
     fun testStoreSetupMatchesSharedAndroidAdmissionVectors() = runBlocking {
         val context = RuntimeEnvironment.getApplication()
         val original = context.applicationInfo.flags
