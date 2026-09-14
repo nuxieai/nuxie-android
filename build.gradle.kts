@@ -40,6 +40,7 @@ dependencies.add(bundletoolCli.name, "com.android.tools.build:bundletool:$bundle
 
 apiValidation {
   ignoredProjects.add("example-app")
+  ignoredProjects.add("nuxie-lint")
 }
 
 subprojects {
