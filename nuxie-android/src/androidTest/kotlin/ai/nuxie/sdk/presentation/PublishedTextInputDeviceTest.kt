@@ -112,7 +112,7 @@ class PublishedTextInputDeviceTest {
                                 }
                                 val player = checkNotNull(artboard.newPlayer())
                                 try {
-                                    for (reverse in listOf(false, true)) {
+                                    for (reverse in listOf(false, true, false, true)) {
                                         val outgoing = if (reverse) index == 1 else index == 0
                                         write("screen/transition", "")
                                         write("screen/phase", if (outgoing) "active" else "hidden")
@@ -130,11 +130,23 @@ class PublishedTextInputDeviceTest {
                                         }
                                         assertEquals("Native $name reverse=$reverse steps=$steps events=$events", 1, events.count { it == expected })
                                         assertTrue("Native completion must precede the 700ms watchdog", steps < 14)
+                                        val held = mutableListOf<String>()
+                                        repeat(20) { held += player.stepWithEvents(0.05).events.map { it.name } }
+                                        assertFalse("Completion must remain latched while its start conditions hold: $held", expected in held)
                                         write("screen/phase", if (outgoing) "hidden" else "active")
                                         write("screen/transition", "")
                                         val idle = mutableListOf<String>()
                                         repeat(20) { idle += player.stepWithEvents(0.05).events.map { it.name } }
                                         assertFalse("Completion must not replay after the SDK leaves its transition phase: $idle", expected in idle)
+
+                                        write("screen/phase", if (outgoing) "exiting" else "entering")
+                                        write("screen/transition", transitionId)
+                                        val interrupted = mutableListOf<String>()
+                                        repeat(2) { interrupted += player.stepWithEvents(0.05).events.map { it.name } }
+                                        write("screen/phase", if (outgoing) "active" else "hidden")
+                                        write("screen/transition", "")
+                                        repeat(20) { interrupted += player.stepWithEvents(0.05).events.map { it.name } }
+                                        assertFalse("An interrupted transition must not emit completion: $interrupted", expected in interrupted)
                                     }
                                 } finally { player.close() }
                             } finally { artboard.close() }
