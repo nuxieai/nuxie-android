@@ -1675,6 +1675,43 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeArtboardInstanceBindViewModel
 }
 
 JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeArtboardSetTextRun(
+    JNIEnv *env, jobject self, jlong artboard, jbyteArray name,
+    jbyteArray text, jintArray status_out) {
+  (void)self;
+  NuxStatus status = NUX_STATUS_NULL_ARGUMENT;
+  uint32_t changed = 0;
+  jbyte *name_data = NULL;
+  jbyte *text_data = NULL;
+  if (artboard == 0 || name == NULL || text == NULL) goto text_run_done;
+  status = NUX_STATUS_RUNTIME_ERROR;
+  jsize name_len = (*env)->GetArrayLength(env, name);
+  if (clear_jni_exception(env)) goto text_run_done;
+  jsize text_len = (*env)->GetArrayLength(env, text);
+  if (clear_jni_exception(env)) goto text_run_done;
+  name_data = (*env)->GetByteArrayElements(env, name, NULL);
+  if (clear_jni_exception(env) || name_data == NULL) goto text_run_done;
+  text_data = (*env)->GetByteArrayElements(env, text, NULL);
+  if (clear_jni_exception(env) || text_data == NULL) goto text_run_done;
+  struct NuxTextRunMutation mutation = {
+      .name = {.data = (const char *)name_data, .len = (size_t)name_len},
+      .text = {.data = (const uint8_t *)text_data, .len = (size_t)text_len},
+  };
+  struct NuxTextRunMutationBatch batch = {
+      .struct_size = sizeof(struct NuxTextRunMutationBatch),
+      .mutations = &mutation,
+      .mutation_count = 1,
+  };
+  status = nux_artboard_instance_set_text_runs(
+      (struct NuxArtboardInstance *)from_handle(artboard), &batch, &changed);
+text_run_done:
+  if (text_data != NULL) (*env)->ReleaseByteArrayElements(env, text, text_data, JNI_ABORT);
+  if (name_data != NULL) (*env)->ReleaseByteArrayElements(env, name, name_data, JNI_ABORT);
+  if (!set_status_out(env, status_out, status)) return 0;
+  return status == NUX_STATUS_OK ? (jint)changed : 0;
+}
+
+JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
     JNIEnv *env, jobject self, jlong view_model, jint kind, jbyteArray path,
     jbyteArray bytes_value, jfloat number_value, jlong integer_value,

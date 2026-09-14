@@ -248,6 +248,9 @@ internal interface NuxieTypedRuntimeNative {
 
     fun freeArtboard(handle: Long): Unit = error("freeArtboard is not implemented")
 
+    fun setTextRun(handle: Long, name: String, text: String): NativeCallResult<Boolean> =
+        error("setTextRun is not implemented")
+
     fun newDefaultPlayer(artboardHandle: Long): Long =
         error("newDefaultPlayer is not implemented")
 
@@ -356,6 +359,16 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
 
     override fun freeArtboard(handle: Long) {
         NuxieRuntimeBridge.nativeArtboardInstanceFree(handle)
+    }
+
+    override fun setTextRun(handle: Long, name: String, text: String): NativeCallResult<Boolean> {
+        val status = IntArray(1)
+        val changed = NuxieRuntimeBridge.nativeArtboardSetTextRun(
+            handle, name.toByteArray(Charsets.UTF_8), text.toByteArray(Charsets.UTF_8), status,
+        )
+        if (status[0] != NUX_STATUS_OK) return NativeCallResult(status[0], null)
+        check(changed == 0 || changed == 1) { "Native runtime returned a non-canonical text mutation result" }
+        return NativeCallResult(status[0], changed == 1)
     }
 
     override fun newDefaultPlayer(artboardHandle: Long): Long =
