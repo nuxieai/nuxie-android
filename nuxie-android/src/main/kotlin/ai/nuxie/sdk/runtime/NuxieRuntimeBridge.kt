@@ -192,6 +192,8 @@ internal object NuxieRuntimeBridge {
 
     external fun nativeArtboardInstanceBindViewModel(artboard: Long, viewModel: Long): Int
 
+    external fun nativeArtboardSetTextRun(artboard: Long, name: ByteArray, text: ByteArray, statusOut: IntArray): Int
+
     external fun nativeViewModelMutate(
         viewModel: Long,
         kind: Int,

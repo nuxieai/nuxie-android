@@ -213,6 +213,13 @@ internal class NuxieRuntimeArtboard internal constructor(
     private var defaultViewModel: NuxieOwnedHandle? = null
     private var boundDefaultSchemaName: String? = null
 
+    /** Write one exact authored TextValueRun on the owning runtime lane. */
+    fun setTextRun(name: String, text: String): Boolean {
+        val result = native.setTextRun(owned.require(), name, text)
+        if (result.status != NUX_STATUS_OK) throw NuxieRuntimeCallException("set text run", result.status)
+        return checkNotNull(result.value) { "Native runtime returned no text mutation result" }
+    }
+
     /**
      * Bind this artboard's exact authored default before creating its player,
      * only when the selected signed Journey screen declares [expectedSchemaName].
