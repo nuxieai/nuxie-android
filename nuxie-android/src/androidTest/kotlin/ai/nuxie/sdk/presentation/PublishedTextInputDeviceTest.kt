@@ -307,9 +307,19 @@ class PublishedTextInputDeviceTest {
             activity = replacement
             assertTrue("Recreation must create another Activity", replacement !== original)
             instrumentation.waitForIdleSync()
-            SystemClock.sleep(500)
             assertTrue(original.isDestroyed)
-            after = copySurface(checkNotNull(findSurface(replacement.window.decorView)))
+            val replacementSurface = checkNotNull(findSurface(replacement.window.decorView))
+            // Activity creation does not mean its asynchronous native frame is ready.
+            val renderDeadline = SystemClock.uptimeMillis() + 10_000
+            var rendered = copySurface(replacementSurface)
+            after = rendered
+            while (changedPixels(before, rendered, Rect(0, 0, before.width, before.height)) != 0 &&
+                SystemClock.uptimeMillis() < renderDeadline) {
+                rendered.recycle()
+                SystemClock.sleep(50)
+                rendered = copySurface(replacementSurface)
+                after = rendered
+            }
             assertEquals(before.width, after.width)
             assertEquals(before.height, after.height)
             assertEquals("Recreated renderer must preserve the published surface", 0,
@@ -331,6 +341,95 @@ class PublishedTextInputDeviceTest {
             instrumentation.runOnMainSync { activity?.finish() }
             instrumentation.removeMonitor(monitor)
             PresentationRegistry.clearForTesting()
+        }
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun terminalTeardownDrainsPreparedNativeScreensAndCheckpoint() {
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val fixture = loadPublishedFixture(instrumentation)
+        val contract = instrumentation.context.assets.open("journeys/planes/persistent-navigation-android.json")
+            .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject
+                .getValue("terminalCheckpoint").jsonObject }
+        val nativeContract = contract.getValue("nativeTeardown").jsonObject
+        for (item in contract.getValue("cases").jsonArray.map { it.jsonObject }) {
+            val identityChange = item.getValue("identityChange").jsonPrimitive.content.toBooleanStrict()
+            val cancelWaiter = item.getValue("cancelWaiter").jsonPrimitive.content.toBooleanStrict()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val service = ExperiencePresentationService(instrumentation.targetContext, { _, _, _ -> }, scope,
+                { NuxieRuntime.shared.isAvailable })
+            val checkpointEntered = CountDownLatch(1)
+            val checkpoint = CompletableDeferred<JourneyScreenDismissalResult>()
+            val sourceReleased = java.util.concurrent.atomic.AtomicBoolean(false)
+            val destinationReleased = java.util.concurrent.atomic.AtomicBoolean(false)
+            val calls = java.util.concurrent.atomic.AtomicInteger()
+            val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+            instrumentation.addMonitor(monitor)
+            var activity: Activity? = null
+            var navigation: Deferred<Result<*>>? = null
+            var teardown: Deferred<Unit>? = null
+            try {
+                runBlocking {
+                    kotlinx.coroutines.withTimeout(30_000) {
+                        service.presentJourney(fixture.release, "screen_1", "terminal-device", "terminal-owner",
+                            service.reserveJourney("terminal-owner"),
+                            acquire = { AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv,
+                                protection = Closeable { sourceReleased.set(true) }) },
+                            onScreenDismissed = { _, _, _ ->
+                                calls.incrementAndGet()
+                                checkpointEntered.countDown()
+                                checkpoint.await()
+                            }, onOutcome = {})
+                    }
+                }
+                activity = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
+                navigation = scope.async {
+                    runCatching {
+                        service.presentJourney(fixture.release, "screen_2", "terminal-device", "terminal-owner", null,
+                            acquire = { AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv,
+                                protection = Closeable { destinationReleased.set(true) }) }, onOutcome = {})
+                    }
+                }
+                assertTrue("Native destination must prepare before checkpoint", checkpointEntered.await(15, TimeUnit.SECONDS))
+                if (cancelWaiter) runBlocking { kotlinx.coroutines.withTimeout(15_000) { navigation.cancelAndJoin() } }
+                teardown = scope.async {
+                    if (identityChange) service.shutdownOwnedBy("terminal-owner")
+                    else service.dismissFromHost("terminal-owner")
+                }
+                val deadline = SystemClock.uptimeMillis() + 10_000
+                var destroyed = false
+                while (!destroyed && SystemClock.uptimeMillis() < deadline) {
+                    instrumentation.runOnMainSync { destroyed = activity!!.isDestroyed }
+                    if (!destroyed) SystemClock.sleep(25)
+                }
+                assertEquals("Activity teardown must not wait for the checkpoint",
+                    nativeContract.getValue("activityDestroyedBeforeCheckpoint").jsonPrimitive.content.toBooleanStrict(), destroyed)
+                assertFalse("Terminal completion must drain the pending checkpoint", teardown.isCompleted)
+                checkpoint.complete(JourneyScreenDismissalResult.HANDLED)
+                runBlocking { kotlinx.coroutines.withTimeout(15_000) { teardown.await() } }
+                assertEquals("Source lease must drain before terminal completion",
+                    nativeContract.getValue("sourceLeaseReleasedOnCompletion").jsonPrimitive.content.toBooleanStrict(), sourceReleased.get())
+                assertEquals("Prepared destination lease must drain before terminal completion",
+                    nativeContract.getValue("destinationLeaseReleasedOnCompletion").jsonPrimitive.content.toBooleanStrict(), destinationReleased.get())
+                runBlocking { kotlinx.coroutines.withTimeout(15_000) { navigation.join() } }
+                assertEquals(contract.getValue("checkpointCalls").jsonPrimitive.content.toInt(), calls.get())
+                assertEquals(contract.getValue("activityLaunches").jsonPrimitive.content.toInt(), monitor.hits)
+            } finally {
+                checkpoint.complete(JourneyScreenDismissalResult.HANDLED)
+                runBlocking {
+                    kotlinx.coroutines.withTimeout(15_000) {
+                        navigation?.cancelAndJoin()
+                        teardown?.await()
+                        service.shutdownOwnedBy("terminal-owner")
+                    }
+                }
+                instrumentation.runOnMainSync { activity?.finish() }
+                scope.cancel()
+                instrumentation.removeMonitor(monitor)
+                PresentationRegistry.clearForTesting()
+            }
         }
     }
 

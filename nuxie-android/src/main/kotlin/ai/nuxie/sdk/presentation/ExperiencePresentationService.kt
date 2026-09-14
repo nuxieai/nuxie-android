@@ -362,6 +362,7 @@ internal class ExperiencePresentationService(
         // Every close path observes the same first-terminal run transition.
         val runTransitionFinished: CompletableDeferred<Unit> = CompletableDeferred(),
         val outcomeReason: AtomicReference<CloseReason?> = AtomicReference(),
+        var nativePreparationFinished: CompletableDeferred<Unit>? = null,
         val latestViewModelSnapshot: AtomicReference<NuxieViewModelSnapshot?> = AtomicReference(),
     )
 
@@ -589,6 +590,7 @@ internal class ExperiencePresentationService(
             var published = false
             var unownedAcquisition: AcquiredJourneyRelease? = null
             var navigation: PreparedScreenNavigation? = null
+            val nativePreparationFinished = CompletableDeferred<Unit>()
             try {
                 val existing = synchronized(stateLock) {
                     if (!isCurrentIdentity(request) || !canPresent()) {
@@ -635,9 +637,13 @@ internal class ExperiencePresentationService(
                 // Acquisition is reversible; keep the outgoing presentation alive
                 // until artifacts exist and its ownership is still current.
                 synchronized(stateLock) {
-                    if (!isCurrentIdentity(request) || !canPresent() || current !== existing) {
+                    if (!isCurrentIdentity(request) || !canPresent() || current !== existing ||
+                        existing?.outcomeReason?.get() != null) {
                         throw supersededByIdentityTransition()
                     }
+                    // Once artifacts are owned, terminal teardown also owns the
+                    // native preparation/rollback and its destination lease.
+                    existing?.nativePreparationFinished = nativePreparationFinished
                 }
 
                 existing?.takeIf {
@@ -790,6 +796,7 @@ internal class ExperiencePresentationService(
                 runCatching { unownedAcquisition?.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 throw error
             } finally {
+                nativePreparationFinished.complete(Unit)
                 if (transitionClaimed) {
                     synchronized(stateLock) {
                         transitionInProgress = false
@@ -1032,7 +1039,9 @@ internal class ExperiencePresentationService(
         beforeHostTeardownForTesting()
         PresentationRegistry.dismiss(active.id, teardownReason)
         attemptOutcome(active, teardownReason)
+        val nativePreparation = synchronized(stateLock) { active.nativePreparationFinished }
         joinAll(active.finished, active.runTransitionFinished)
+        nativePreparation?.await()
     }
 
     /**
@@ -1052,7 +1061,9 @@ internal class ExperiencePresentationService(
         } ?: return
         PresentationRegistry.dismiss(active.id, CloseReason.IdentityChanged)
         attemptOutcome(active, CloseReason.IdentityChanged)
+        val nativePreparation = synchronized(stateLock) { active.nativePreparationFinished }
         joinAll(active.finished, active.runTransitionFinished)
+        nativePreparation?.await()
     }
 
     /** Closes only the terminal Journey surface without injecting another outcome. */
