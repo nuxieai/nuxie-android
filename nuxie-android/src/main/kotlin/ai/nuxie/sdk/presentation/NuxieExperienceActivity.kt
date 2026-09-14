@@ -61,6 +61,7 @@ internal class NuxieExperienceActivity :
     Activity(),
     PresentationActivityHandle {
     private var host: ExperienceSurfaceHost? = null
+    private var windowInsets: ExperienceWindowInsets? = null
     private var textOverlay: ExperienceTextInputOverlay? = null
     private var lane: NuxieRuntimeLane? = null
     private var presentationId: String? = null
@@ -176,6 +177,11 @@ internal class NuxieExperienceActivity :
             }
         } else host
         setContentView(shellView(content, prepared.shell))
+        prepared.artboardSize?.let { size ->
+            windowInsets = ExperienceWindowInsets(this, host, size) { insets ->
+                host.updateRuntimeValues(insets.stateValues())
+            }
+        }
         registerPredictiveBack()
     }
 
@@ -197,6 +203,8 @@ internal class NuxieExperienceActivity :
     override fun onDestroy() {
         val changingConfigurations = isChangingConfigurations
         screenClose.prepareForTeardown(changingConfigurations)
+        windowInsets?.close()
+        windowInsets = null
         textOverlay?.close()
         textOverlay = null
         host?.release()
