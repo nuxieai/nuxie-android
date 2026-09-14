@@ -53,8 +53,10 @@ class ExperiencePresentationServiceTest {
 
     private class Lease : Closeable {
         val closed = AtomicBoolean(false)
+        val closeCount = java.util.concurrent.atomic.AtomicInteger()
 
         override fun close() {
+            closeCount.incrementAndGet()
             closed.set(true)
         }
     }
@@ -194,7 +196,10 @@ class ExperiencePresentationServiceTest {
                 runCatching {
                     service.presentJourney(
                         release, "screen_details", "journey-1", "customer-1", null,
-                        canPresent = { allowed }, acquire = { acquisition.await() }, onOutcome = {},
+                        canPresent = { allowed }, acquire = {
+                            if (action in listOf("hostClose", "identityShutdown")) withContext(NonCancellable) { acquisition.await() }
+                            else acquisition.await()
+                        }, onOutcome = {},
                     )
                 }
             }
@@ -203,18 +208,24 @@ class ExperiencePresentationServiceTest {
                 assertNotNull(action, PresentationRegistry.resolve(outgoingId))
                 assertFalse(action, outgoingLease.closed.get())
                 assertEquals(action, 0, dismissalReports)
+                var close: kotlinx.coroutines.Deferred<Unit>? = null
                 when (action) {
                     "failure" -> acquisition.completeExceptionally(java.io.IOException("offline"))
                     "cancel" -> next.cancelAndJoin()
                     "withdraw" -> allowed = false
-                    "hostClose" -> service.dismissFromHost("customer-1")
-                    "identityShutdown" -> service.shutdownOwnedBy("customer-1")
+                    "hostClose" -> close = async { service.dismissFromHost("customer-1") }
+                    "identityShutdown" -> close = async { service.shutdownOwnedBy("customer-1") }
                     else -> error("Unknown acquisition action: $action")
+                }
+                close?.let {
+                    runCurrent()
+                    assertEquals(action, case.getValue("closeWaitsForAcquisition").jsonPrimitive.boolean, !it.isCompleted)
                 }
                 if (action !in listOf("failure", "cancel")) {
                     acquisition.complete(acquired(release.identity, destinationLease))
                 }
                 runCurrent()
+                close?.await()
                 if (action != "cancel") assertTrue(action, next.await().isFailure)
                 val retained = case.getValue("outgoingRetained").jsonPrimitive.boolean
                 assertEquals(action, retained, PresentationRegistry.resolve(outgoingId) != null)
@@ -447,6 +458,101 @@ class ExperiencePresentationServiceTest {
         PresentationRegistry.dismiss("edit-owner", CloseReason.UserDismissed)
         PresentationRegistry.reportTextCommitted("edit-owner", current, "name", "closed")
         assertEquals(listOf("first", "current"), received)
+    }
+
+    @Test
+    fun `pending preparation drains matching close before a host exists`() = runTest {
+        val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/presentation-preparation-android.json").readText()).jsonObject
+        for (raw in fixture.getValue("cases").jsonArray) {
+            val vector = raw.jsonObject
+            val action = vector.getValue("action").jsonPrimitive.content
+            val phase = vector.getValue("phase").jsonPrimitive.content
+            val label = "$action/$phase"
+            val release = renderedJourneyRelease()
+            val releaseWork = CompletableDeferred<Unit>()
+            val started = CompletableDeferred<Unit>()
+            val lease = Lease()
+            var acquisitions = 0
+            val launched = mutableListOf<String>()
+            suspend fun waitForRelease() = withContext(NonCancellable) {
+                started.complete(Unit)
+                releaseWork.await()
+            }
+            val service = ExperiencePresentationService(
+                emit = { _, _, _ -> fail("Unrevealed preparation must not emit presentation facts") },
+                scope = this, runtimeAvailable = { true }, launch = launched::add,
+                commerce = ai.nuxie.sdk.billing.JourneyCommercePreparing {
+                    if (phase == "commerce") waitForRelease()
+                    null
+                },
+            )
+            val pending = async {
+                runCatching {
+                    service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                        service.reserveJourney("customer-1"), acquire = {
+                            acquisitions++
+                            if (phase == "acquisition") waitForRelease()
+                            acquired(release.identity, lease)
+                        }, onOutcome = {})
+                }
+            }
+            started.await()
+            val close = async {
+                when (action) {
+                    "hostClose" -> service.dismissFromHost("customer-1")
+                    "identityShutdown" -> service.shutdownOwnedBy("customer-1")
+                    "journeyShutdown" -> service.shutdownJourney("customer-1", "journey-1")
+                    "callerCancel" -> pending.cancelAndJoin()
+                    else -> error(action)
+                }
+            }
+            runCurrent()
+            assertFalse(label, close.isCompleted)
+            assertFalse(label, pending.isCompleted)
+            assertNull(label, service.reserveJourney("customer-2"))
+            releaseWork.complete(Unit)
+            close.await()
+            if (action != "callerCancel") {
+                val failure = pending.await().exceptionOrNull()
+                assertTrue(label, failure is ExperiencePresentationException)
+                assertEquals(label, vector.getValue("failureReason").jsonPrimitive.content,
+                    (failure as ExperiencePresentationException).reason.name)
+            }
+            assertTrue(label, launched.isEmpty())
+            assertEquals(label, if (phase == "acquisition") 1 else 0, acquisitions)
+            assertEquals(label, vector.getValue("lateLeaseReleased").jsonPrimitive.boolean, lease.closed.get())
+            assertEquals(label, if (phase == "acquisition") 1 else 0, lease.closeCount.get())
+            assertNotNull(label, service.reserveJourney("customer-2"))
+        }
+    }
+
+    @Test
+    fun `foreign shutdown preserves pending acquisition and cooperative close leaves caller active`() = runTest {
+        val release = renderedJourneyRelease()
+        val releaseWork = CompletableDeferred<Unit>()
+        val cancelled = CompletableDeferred<Unit>()
+        val service = service(this, launch = { fail("Cancelled acquisition cannot launch") })
+        val pending = async {
+            val result = runCatching {
+                service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                    service.reserveJourney("customer-1"), acquire = {
+                        try { releaseWork.await(); error("Work was not cancelled") }
+                        finally { cancelled.complete(Unit) }
+                    }, onOutcome = {})
+            }
+            assertTrue("Presentation cancellation must not cancel its caller job",
+                kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]!!.isActive)
+            result
+        }
+        runCurrent()
+        service.shutdownOwnedBy("customer-2")
+        service.shutdownJourney("customer-1", "other-journey")
+        assertFalse(cancelled.isCompleted)
+        assertFalse(pending.isCompleted)
+        service.dismissFromHost("customer-1")
+        assertTrue(cancelled.isCompleted)
+        assertTrue(pending.await().isFailure)
     }
 
     @Test
