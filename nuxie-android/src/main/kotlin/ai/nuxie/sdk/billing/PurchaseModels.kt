@@ -21,6 +21,8 @@ class StoreProduct internal constructor(
     internal val featureAllowances: List<FeatureAllowance> = emptyList(),
     internal val licensingPublicKey: String? = null,
     internal val purchaseContext: PurchaseContext? = null,
+    /** Signed preview used only by Test Store; never native pricing or verification evidence. */
+    internal val testStorePreview: kotlinx.serialization.json.JsonObject? = null,
 )
 
 internal data class StorePrice(

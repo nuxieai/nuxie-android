@@ -13,6 +13,42 @@ import org.junit.Test
 
 class ProductResolverTest {
     @Test
+    fun testStoreResolvesSignedPreviewWithoutPlayOrNativeMapping() = runBlocking {
+        val store = InMemoryPurchaseEvidenceStore()
+        val resolver = ProductResolver(ProductDetailsQuery { error("Test Store queried Play") }, store, testStore = true)
+        val preview = kotlinx.serialization.json.buildJsonObject {
+            put("name", kotlinx.serialization.json.JsonPrimitive("Premium"))
+            put("price", kotlinx.serialization.json.JsonPrimitive("$9.99"))
+        }
+        val request = CatalogProductRequest(
+            productId = "nuxie-pro", storeProductId = "play-pro",
+            productType = BillingClient.ProductType.SUBS, basePlanId = "annual",
+            offerSelection = OfferSelection.Exact("trial"), placementId = "paywall",
+            experienceId = "experience", experienceVersion = "version", preview = preview,
+        )
+        val resolved = resolver.resolve(listOf(request)).single()
+        assertEquals("nuxie-pro", resolved.productId)
+        assertEquals("play-pro", resolved.storeProductId)
+        assertEquals("annual", resolved.basePlanId)
+        assertEquals("trial", resolved.offerId)
+        assertEquals("paywall", resolved.placementId)
+        assertEquals(PurchaseContext("experience", "version"), resolved.purchaseContext)
+        assertEquals(preview, resolved.testStorePreview)
+        assertNull(resolved.rawProduct)
+        assertNull(resolved.offerToken)
+        assertNull(resolved.storePrice())
+        assertTrue(store.loadProductMappings().isEmpty())
+        assertTrue(store.loadBindings().isEmpty())
+        assertTrue(store.load().isEmpty())
+        try {
+            resolver.resolve(listOf(request.copy(preview = null)))
+            fail("Missing signed Test Store preview was accepted")
+        } catch (_: ProductResolutionException) {
+            // Missing preview is an actionable preparation failure, never a Play fallback.
+        }
+    }
+
+    @Test
     fun resolutionCachesTheSignedCatalogMappingForLaterRecovery() = runBlocking {
         val store = InMemoryPurchaseEvidenceStore()
         val resolver = ProductResolver(

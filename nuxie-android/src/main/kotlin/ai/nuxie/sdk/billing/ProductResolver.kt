@@ -3,6 +3,7 @@ package ai.nuxie.sdk.billing
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.ProductDetails
 import ai.nuxie.sdk.features.FeatureAllowance
+import kotlinx.serialization.json.JsonObject
 
 internal sealed interface OfferSelection {
     data object None : OfferSelection
@@ -25,6 +26,7 @@ internal data class CatalogProductRequest(
     val licensingPublicKey: String? = null,
     val experienceId: String? = null,
     val experienceVersion: String? = null,
+    val preview: JsonObject? = null,
 )
 
 internal data class ProductQuery(
@@ -92,9 +94,31 @@ internal class ProductResolutionException(message: String) : IllegalStateExcepti
 internal class ProductResolver(
     private val productDetailsQuery: ProductDetailsQuery,
     private val purchaseStore: PurchaseEvidenceStore,
+    private val testStore: Boolean = false,
 ) {
     suspend fun resolve(requests: List<CatalogProductRequest>): List<StoreProduct> {
         if (requests.isEmpty()) return emptyList()
+        if (testStore) return requests.map { request ->
+            val preview = request.preview ?: throw ProductResolutionException(
+                "Test Store Product '${request.productId}' has no signed preview.",
+            )
+            StoreProduct(
+                productId = request.productId,
+                storeProductId = request.storeProductId,
+                basePlanId = request.basePlanId,
+                purchaseOptionId = request.purchaseOptionId,
+                offerId = (request.offerSelection as? OfferSelection.Exact)?.offerId,
+                placementId = request.placementId,
+                rawProduct = null,
+                offerToken = null,
+                isOfferPersonalized = false,
+                productType = request.productType,
+                consumable = request.consumable,
+                featureAllowances = request.featureAllowances,
+                purchaseContext = PurchaseContext(request.experienceId, request.experienceVersion),
+                testStorePreview = preview,
+            )
+        }
 
         val queryProducts = requests
             .map { ProductQuery(it.storeProductId, it.productType) }
