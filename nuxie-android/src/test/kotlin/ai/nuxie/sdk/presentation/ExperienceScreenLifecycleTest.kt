@@ -13,6 +13,22 @@ import org.junit.Test
 
 class ExperienceScreenLifecycleTest {
     @Test
+    fun `same screen preparation enters anew without changing the outgoing lifecycle`() {
+        val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/navigation-input-handoff-android.json").readText()).jsonObject
+        val source = ExperienceScreenLifecycle()
+        source.move(ExperienceScreenLifecycle.Phase.ENTERING)
+        source.move(ExperienceScreenLifecycle.Phase.ACTIVE)
+        val target = source.copyForPreparation()
+        assertEquals(ExperienceScreenLifecycle.Phase.HIDDEN, target.phase)
+        target.move(ExperienceScreenLifecycle.Phase.ENTERING)
+        target.beginPreparedTransition("self")
+        assertEquals(contract.getValue("destinationAppearances").jsonPrimitive.content.toULong(), target.appearances)
+        assertEquals(contract.getValue("initialAppearances").jsonPrimitive.content.toULong(), source.appearances)
+        assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, source.phase)
+    }
+
+    @Test
     fun `shared lifecycle vectors retain appearance counts independently of environment updates`() {
         val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/runtime-screen-lifecycle.json").readText()).jsonObject
