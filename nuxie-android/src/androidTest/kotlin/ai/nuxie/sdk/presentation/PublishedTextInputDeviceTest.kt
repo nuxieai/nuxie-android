@@ -1255,15 +1255,35 @@ class PublishedTextInputDeviceTest {
     @SdkSuppress(minSdkVersion = 26)
     fun nativeFailureRecoverySurvivesActivityRecreation() = verifyNativeRecovery(true)
 
-    private fun verifyNativeRecovery(recreate: Boolean) {
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun nativeRetryRecreationWaitsForTheOriginalRuntimeLane() = verifyNativeRecovery(false, "recreate")
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun nativeRetryUserCloseWaitsForTheOriginalRuntimeLane() = verifyNativeRecovery(false, "close")
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun nativeRetryIdentityWithdrawalWaitsForTheOriginalRuntimeLane() = verifyNativeRecovery(false, "identity")
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun nativeRetryHostDismissalWaitsForTheOriginalRuntimeLane() = verifyNativeRecovery(false, "host")
+
+    private fun verifyNativeRecovery(recreate: Boolean, drainAction: String? = null) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         assertTrue(NuxieRuntime.shared.isAvailable)
         val fixture = loadPublishedFixture(instrumentation)
         val validBytes = fixture.riv.readBytes()
+        val releaseNative = CountDownLatch(1)
         fixture.riv.writeText("invalid native fixture")
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val closed = java.util.concurrent.atomic.AtomicInteger()
         val shown = java.util.concurrent.atomic.AtomicInteger()
+        val terminalStarted = CountDownLatch(1)
+        val outcomes = java.util.concurrent.atomic.AtomicInteger()
+        val checkpoints = java.util.concurrent.atomic.AtomicInteger()
         val service = ExperiencePresentationService(instrumentation.targetContext, { name, _, _ ->
             if (name == ai.nuxie.sdk.events.SystemEventNames.EXPERIENCE_SHOWN) shown.incrementAndGet()
         }, scope, { NuxieRuntime.shared.isAvailable })
@@ -1274,7 +1294,10 @@ class PublishedTextInputDeviceTest {
                 service.reserveJourney("native-recovery-owner"), acquire = {
                     AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv,
                         protection = Closeable { closed.incrementAndGet() })
-                }, onOutcome = {})
+                }, onScreenDismissed = { _, _, _ ->
+                    checkpoints.incrementAndGet()
+                    JourneyScreenDismissalResult.HANDLED
+                }, onOutcome = { outcomes.incrementAndGet(); terminalStarted.countDown() })
         }
         try {
             var activity = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
@@ -1314,8 +1337,85 @@ class PublishedTextInputDeviceTest {
             assertFalse(pending.isCompleted)
             assertEquals(0, shown.get())
             assertEquals(0, closed.get())
+            if (drainAction != null) {
+                var surface: ExperienceSurfaceHost? = null
+                instrumentation.runOnMainSync {
+                    surface = descendants(checkNotNull(root)).filterIsInstance<ExperienceSurfaceHost>().single()
+                }
+                // Hold the real pinned lane ahead of release; do not replace native resources with doubles.
+                val lane = ExperienceSurfaceHost::class.java.getDeclaredField("lane").apply { isAccessible = true }
+                    .get(checkNotNull(surface)) as NuxieRuntimeLane
+                val nativeHeld = CountDownLatch(1)
+                val ownsRenderer = java.util.concurrent.atomic.AtomicBoolean()
+                assertTrue(lane.enqueue {
+                    ownsRenderer.set(ExperienceSurfaceHost::class.java.getDeclaredField("renderer")
+                        .apply { isAccessible = true }.get(surface) != null)
+                    nativeHeld.countDown()
+                    check(releaseNative.await(30, TimeUnit.SECONDS)) { "Native drain test barrier timed out" }
+                })
+                assertTrue(nativeHeld.await(10, TimeUnit.SECONDS))
+                assertTrue("Failure must still own a real native renderer", ownsRenderer.get())
+            }
             fixture.riv.writeBytes(validBytes)
             instrumentation.runOnMainSync { assertTrue(checkNotNull(retry).performClick()) }
+            if (drainAction != null) {
+                val id = checkNotNull(activity.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
+                instrumentation.waitForIdleSync()
+                assertEquals(AcquisitionProgress.Phase.RETRYING, PresentationRegistry.nativeProgress(id)?.phase)
+                assertEquals(2L, PresentationRegistry.nativeProgress(id)?.generation)
+                assertFalse(pending.isCompleted)
+                assertEquals(0, closed.get())
+                if (drainAction == "recreate") {
+                    val original = activity
+                    instrumentation.runOnMainSync { original.recreate() }
+                    val deadline = SystemClock.elapsedRealtime() + 10_000
+                    var replacement: Activity? = null
+                    while (replacement == null && SystemClock.elapsedRealtime() < deadline) {
+                        replacement = monitor.waitForActivityWithTimeout(500)?.takeUnless { it === original }
+                    }
+                    activity = checkNotNull(replacement)
+                    instrumentation.waitForIdleSync()
+                    instrumentation.runOnMainSync {
+                        root = activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0)
+                        assertTrue("Replacement must not mount before original native drain",
+                            descendants(checkNotNull(root)).none { it is ExperienceSurfaceHost })
+                    }
+                    assertEquals(AcquisitionProgress.Phase.RETRYING, PresentationRegistry.nativeProgress(id)?.phase)
+                    assertFalse(pending.isCompleted)
+                    assertEquals(0, shown.get())
+                    assertEquals(0, closed.get())
+                } else {
+                    val terminal = if (drainAction in listOf("identity", "host")) scope.async {
+                        if (drainAction == "identity") service.shutdownOwnedBy("native-recovery-owner")
+                        else service.dismissFromHost("native-recovery-owner")
+                    } else {
+                        instrumentation.runOnMainSync {
+                            val close = descendants(checkNotNull(root)).filterIsInstance<android.widget.Button>()
+                                .single { it.text == "Close" }
+                            assertTrue(close.performClick())
+                        }
+                        null
+                    }
+                    assertTrue(terminalStarted.await(10, TimeUnit.SECONDS))
+                    instrumentation.waitForIdleSync()
+                    assertFalse(pending.isCompleted)
+                    assertFalse(terminal?.isCompleted == true)
+                    assertEquals(0, closed.get())
+                    releaseNative.countDown()
+                    runBlocking { kotlinx.coroutines.withTimeout(30_000) {
+                        terminal?.await()
+                        pending.join()
+                    } }
+                    assertTrue(runBlocking { runCatching { pending.await() }.isFailure })
+                    assertEquals(0, shown.get())
+                    assertEquals(0, checkpoints.get())
+                    assertEquals(1, outcomes.get())
+                    assertEquals(1, closed.get())
+                    assertEquals(1, monitor.hits)
+                    return
+                }
+                releaseNative.countDown()
+            }
             runBlocking { kotlinx.coroutines.withTimeout(30_000) { pending.await() } }
             assertHostedScreen(instrumentation, activity, "screen_1")
             assertEquals("Recreation and Retry must not launch another presentation Intent", 1, monitor.hits)
@@ -1329,6 +1429,7 @@ class PublishedTextInputDeviceTest {
                 assertFalse(PresentationRegistry.retryNative(id, 2))
             }
         } finally {
+            releaseNative.countDown()
             fixture.riv.writeBytes(validBytes)
             runBlocking { service.shutdownOwnedBy("native-recovery-owner"); scope.coroutineContext[Job]?.cancelAndJoin() }
             instrumentation.removeMonitor(monitor)
