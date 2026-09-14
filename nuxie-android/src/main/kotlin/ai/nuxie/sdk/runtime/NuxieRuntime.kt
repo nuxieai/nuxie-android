@@ -150,7 +150,7 @@ internal class NuxieRuntime(
                 native.bindViewModel(artboard.requireHandle(), root),
                 "bind projected default view model",
             )
-            return NuxieRuntimeViewModelState(root, children, native)
+            return NuxieRuntimeViewModelState(root, children, native, catalog, rootSchema.index)
         } catch (error: Throwable) {
             freeViewModelHandles(root, children, native)
             throw error
@@ -181,19 +181,13 @@ internal class NuxieRuntimeFile(
         }
         return handle
             .takeUnless { it == 0L }
-            ?.let { NuxieRuntimeArtboard(it, native, ::viewModelSchemaName) }
+            ?.let { NuxieRuntimeArtboard(it, native, ::viewModelCatalog) }
     }
 
-    private fun viewModelSchemaName(schemaIndex: Long): String {
-        check(schemaIndex >= 0) { "Default view-model schema index is invalid" }
-        val result = native.viewModelCatalog(owned.require())
-        if (result.status != NUX_STATUS_OK) {
-            throw NuxieRuntimeCallException("read view-model catalog", result.status)
-        }
-        return checkNotNull(result.value?.schemas?.singleOrNull { it.index == schemaIndex }) {
-            "Default view model references an unavailable schema"
-        }.name
-    }
+    private fun viewModelCatalog(): NuxieViewModelCatalog = requireNativeValue(
+        native.viewModelCatalog(owned.require()),
+        "read view-model catalog",
+    ).toViewModelCatalog()
 
     fun close() = owned.close()
 
@@ -207,11 +201,22 @@ internal class NuxieRuntimeFile(
 internal class NuxieRuntimeArtboard internal constructor(
     handle: Long,
     private val native: NuxieTypedRuntimeNative,
-    private val viewModelSchemaName: (Long) -> String,
+    private val viewModelCatalog: () -> NuxieViewModelCatalog,
 ) {
     private val owned = NuxieOwnedHandle(handle, "artboard", native::freeArtboard)
     private var defaultViewModel: NuxieOwnedHandle? = null
     private var boundDefaultSchemaName: String? = null
+    private var boundCatalog: NuxieViewModelCatalog? = null
+    private var boundRootSchemaIndex: Int? = null
+
+    /** Mutate the existing signed default; never create a model for undeclared screens. */
+    fun setDefaultViewModelValue(path: String, value: NuxieViewModelScalarValue): Boolean {
+        owned.require()
+        val model = defaultViewModel ?: return false
+        writeBoundScalar(native, model.require(), checkNotNull(boundCatalog),
+            checkNotNull(boundRootSchemaIndex), path, value)
+        return true
+    }
 
     /** Write one exact authored TextValueRun on the owning runtime lane. */
     fun setTextRun(name: String, text: String): Boolean {
@@ -266,7 +271,12 @@ internal class NuxieRuntimeArtboard internal constructor(
             if (schema.status != NUX_STATUS_OK) {
                 throw NuxieRuntimeCallException("read default view-model root schema", schema.status)
             }
-            val actualName = viewModelSchemaName(checkNotNull(schema.value))
+            val schemaIndex = checkNotNull(schema.value)
+            check(schemaIndex in 0..Int.MAX_VALUE.toLong()) { "Default view-model schema index is invalid" }
+            val catalog = viewModelCatalog()
+            val actualName = checkNotNull(catalog.schemas.singleOrNull { it.index == schemaIndex.toInt() }) {
+                "Default view model references an unavailable schema"
+            }.name
             check(actualName == expectedSchemaName) {
                 "Declared default view model $expectedSchemaName does not match artboard default $actualName"
             }
@@ -274,6 +284,8 @@ internal class NuxieRuntimeArtboard internal constructor(
             if (status != NUX_STATUS_OK) {
                 throw NuxieRuntimeCallException("bind default view model", status)
             }
+            boundCatalog = catalog
+            boundRootSchemaIndex = schemaIndex.toInt()
         } catch (error: Throwable) {
             runCatching { viewModel.close() }.exceptionOrNull()?.let(error::addSuppressed)
             throw error
@@ -311,8 +323,16 @@ internal class NuxieRuntimeViewModelState(
     private var root: Long?,
     children: List<Long>,
     private val native: NuxieTypedRuntimeNative,
+    private val catalog: NuxieViewModelCatalog,
+    private val rootSchemaIndex: Int,
 ) {
     private val children = children.toMutableList()
+
+    /** Update the same root that owns projected commerce children, on its runtime lane. */
+    fun setValue(path: String, value: NuxieViewModelScalarValue) {
+        val rootHandle = checkNotNull(root) { "Runtime view-model state is closed" }
+        writeBoundScalar(native, rootHandle, catalog, rootSchemaIndex, path, value)
+    }
 
     /** Must be called on the owning runtime lane before the next player step. */
     fun snapshot(): NuxieViewModelSnapshot {
@@ -331,6 +351,21 @@ internal class NuxieRuntimeViewModelState(
         freeViewModelHandles(rootHandle, children, native)
         children.clear()
     }
+}
+
+private fun writeBoundScalar(
+    native: NuxieTypedRuntimeNative,
+    root: Long,
+    catalog: NuxieViewModelCatalog,
+    rootSchemaIndex: Int,
+    path: String,
+    value: NuxieViewModelScalarValue,
+) {
+    val property = catalog.propertyAtPath(rootSchemaIndex, path)
+    requireNativeSuccess(
+        native.mutateViewModel(root, value.toNativeWrite(path, property.kind)),
+        "write bound view-model property '$path'",
+    )
 }
 
 private fun NuxieViewModelScalarValue.toNativeWrite(

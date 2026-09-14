@@ -12,7 +12,7 @@ class NuxieRuntimeViewModelProjectionTest {
         val runtime = NuxieRuntime(native)
         val state = runtime.bindViewModelList(
             file = NuxieRuntimeFile(10, native),
-            artboard = NuxieRuntimeArtboard(20, native) { "Runtime" },
+            artboard = NuxieRuntimeArtboard(20, native) { error("Catalog is read by commerce projection") },
             projection = NuxieViewModelListProjection(
                 rootSchemaName = "Runtime",
                 listPath = "paywall/products",
@@ -46,6 +46,13 @@ class NuxieRuntimeViewModelProjectionTest {
             native.calls,
         )
 
+        // Runtime updates traverse the selected child through the bound root;
+        // they must not rebuild the projected list or replace its ownership.
+        state.setValue("paywall/selectedProduct/price", NuxieViewModelScalarValue.StringValue("€10.99"))
+        assertEquals("write:40:SET_STRING:paywall/selectedProduct/price:0:0", native.calls.last())
+        assertEquals(1, native.calls.count { it == "new-default:20" })
+        assertEquals(1, native.calls.count { it == "new-authored:2:0" })
+        assertEquals(1, native.calls.count { it == "bind:20:40" })
         state.close()
         assertEquals(listOf("free:40", "free:41"), native.calls.takeLast(2))
     }
@@ -56,7 +63,7 @@ class NuxieRuntimeViewModelProjectionTest {
         val error = assertThrows(IllegalArgumentException::class.java) {
             NuxieRuntime(native).bindViewModelList(
                 file = NuxieRuntimeFile(10, native),
-                artboard = NuxieRuntimeArtboard(20, native) { "Runtime" },
+                artboard = NuxieRuntimeArtboard(20, native) { error("Catalog is read by commerce projection") },
                 projection = NuxieViewModelListProjection(
                     rootSchemaName = "Runtime",
                     listPath = "paywall/products",
@@ -80,7 +87,7 @@ class NuxieRuntimeViewModelProjectionTest {
         val error = assertThrows(IllegalArgumentException::class.java) {
             NuxieRuntime(native).bindViewModelList(
                 file = NuxieRuntimeFile(10, native),
-                artboard = NuxieRuntimeArtboard(20, native) { "Runtime" },
+                artboard = NuxieRuntimeArtboard(20, native) { error("Catalog is read by commerce projection") },
                 projection = NuxieViewModelListProjection(
                     rootSchemaName = "Runtime",
                     listPath = "paywall/products",
@@ -101,7 +108,7 @@ class NuxieRuntimeViewModelProjectionTest {
     @Test
     fun `snapshot resolves the current selected product through nested references`() {
         val native = SnapshotNative()
-        val state = NuxieRuntimeViewModelState(40, listOf(41, 42), native)
+        val state = NuxieRuntimeViewModelState(40, listOf(41, 42), native, NuxieViewModelCatalog(emptyList(), emptyList(), emptyList()), 0)
 
         val first = state.snapshot()
         assertEquals("primary", first.resolveString("paywall.selectedProduct.placementId"))
