@@ -159,6 +159,8 @@ Initialize in your Application before Activities start so restore can find a
 visible host, or initialize with an already visible Activity. Direct purchase
 calls use the Activity supplied by the caller. These simulated choices do not
 qualify real Play billing, acknowledgement, consumption, or store recovery.
+Follow [Google Play qualification](docs/testing-google-play.md) for license
+testers, test tracks, Billing Lab, and the required SDK/backend evidence.
 
 ## Shutdown and repeated setup
 
