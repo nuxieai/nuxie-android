@@ -20,6 +20,7 @@ internal class NuxieLogger(
         companion object {
             fun sensitive(name: String, value: Any?) = Field(name, value, true)
             /** Only call-site selected diagnostic counts/statuses belong here. */
+            fun publicValue(name: String, value: String) = Field(name, value, false)
             fun status(name: String, value: Number) = Field(name, value, false)
         }
     }
