@@ -64,6 +64,7 @@ internal class NuxieLogger(
         LogLevel.WARN -> Log.WARN
         LogLevel.INFO -> Log.INFO
         LogLevel.DEBUG -> Log.DEBUG
+        LogLevel.VERBOSE -> Log.VERBOSE
         LogLevel.NONE -> error("NONE has no output priority")
     }
 }

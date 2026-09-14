@@ -93,6 +93,34 @@ class NuxieTest {
     }
 
     @Test
+    fun setupCapturesRedactionAndIgnoredSetupCannotChangeIt() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = FakeTransport(), registerLifecycle = false, requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
+        )
+        val configuration = NuxieConfiguration("pk_test_logging")
+        Nuxie.setup(context, configuration)
+        configuration.redactSensitiveData = false
+        Nuxie.setup(context, NuxieConfiguration("pk_test_ignored").apply { redactSensitiveData = false })
+        fun diagnostic(): String {
+            org.robolectric.shadows.ShadowLog.clear()
+            ai.nuxie.sdk.logging.NuxieLog.w("PrivacyProbe", "Customer", null,
+                ai.nuxie.sdk.logging.NuxieLog.sensitive("customer", "setup-secret"))
+            return org.robolectric.shadows.ShadowLog.getLogsForTag("PrivacyProbe").single().msg
+        }
+        assertFalse(diagnostic().contains("setup-secret"))
+        Nuxie.shutdownAndAwait()
+        Nuxie.setup(context, configuration)
+        configuration.redactSensitiveData = true
+        Nuxie.setup(context, NuxieConfiguration("pk_test_ignored"))
+        assertTrue(diagnostic().contains("setup-secret"))
+        Nuxie.shutdownAndAwait()
+        Nuxie.setup(context, NuxieConfiguration("pk_test_default"))
+        assertFalse(diagnostic().contains("setup-secret"))
+    }
+
+    @Test
     fun testStoreSetupMatchesSharedAndroidAdmissionVectors() = runBlocking {
         val context = RuntimeEnvironment.getApplication()
         val original = context.applicationInfo.flags

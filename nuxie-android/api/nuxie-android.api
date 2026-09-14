@@ -90,6 +90,7 @@ public final class ai/nuxie/sdk/LogLevel : java/lang/Enum {
 	public static final field ERROR Lai/nuxie/sdk/LogLevel;
 	public static final field INFO Lai/nuxie/sdk/LogLevel;
 	public static final field NONE Lai/nuxie/sdk/LogLevel;
+	public static final field VERBOSE Lai/nuxie/sdk/LogLevel;
 	public static final field WARN Lai/nuxie/sdk/LogLevel;
 	public static fun getEntries ()Lkotlin/enums/EnumEntries;
 	public static fun valueOf (Ljava/lang/String;)Lai/nuxie/sdk/LogLevel;
@@ -518,6 +519,7 @@ public final class ai/nuxie/sdk/NuxieConfiguration {
 	public final fun getLogLevel ()Lai/nuxie/sdk/LogLevel;
 	public final fun getPurchaseDelegate ()Lai/nuxie/sdk/billing/NuxiePurchaseDelegate;
 	public final fun getPurchaseHandlingMode ()Lai/nuxie/sdk/billing/PurchaseHandlingMode;
+	public final fun getRedactSensitiveData ()Z
 	public final fun getTestStoreEnabled ()Z
 	public final fun getTestingOverrides ()Lai/nuxie/sdk/NuxieTestingOverrides;
 	public final fun setBeforeSend (Lkotlin/jvm/functions/Function1;)V
@@ -527,6 +529,7 @@ public final class ai/nuxie/sdk/NuxieConfiguration {
 	public final fun setLogLevel (Lai/nuxie/sdk/LogLevel;)V
 	public final fun setPurchaseDelegate (Lai/nuxie/sdk/billing/NuxiePurchaseDelegate;)V
 	public final fun setPurchaseHandlingMode (Lai/nuxie/sdk/billing/PurchaseHandlingMode;)V
+	public final fun setRedactSensitiveData (Z)V
 	public final fun setTestStoreEnabled (Z)V
 }
 

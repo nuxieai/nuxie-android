@@ -12,6 +12,16 @@ import org.robolectric.shadows.ShadowLog
 class NuxieLogTest {
     @After fun restorePolicy() { NuxieLog.configure(LogLevel.WARN) }
 
+    @Test fun `verbose uses the Android verbose priority and is suppressed at DEBUG`() {
+        ShadowLog.clear()
+        NuxieLog.configure(LogLevel.DEBUG)
+        NuxieLog.v("PrivacyProbe", "Verbose diagnostic")
+        assertTrue(ShadowLog.getLogsForTag("PrivacyProbe").isEmpty())
+        NuxieLog.configure(LogLevel.VERBOSE)
+        NuxieLog.v("PrivacyProbe", "Verbose diagnostic")
+        assertEquals(android.util.Log.VERBOSE, ShadowLog.getLogsForTag("PrivacyProbe").single().type)
+    }
+
     @Test fun `platform receives only filtered rendered text without raw throwable`() {
         ShadowLog.clear()
         NuxieLog.configure(LogLevel.ERROR)
@@ -32,6 +42,7 @@ class NuxieLogTest {
         NuxieLog.d("PrivacyProbe", "Event", null, NuxieLog.sensitive("customer", "stable"))
         val first = ShadowLog.getLogsForTag("PrivacyProbe").single().msg
         NuxieLog.configure(LogLevel.NONE)
+        NuxieLog.v("PrivacyProbe", "No verbose")
         NuxieLog.d("PrivacyProbe", "No debug")
         NuxieLog.i("PrivacyProbe", "No info")
         NuxieLog.w("PrivacyProbe", "No warning")

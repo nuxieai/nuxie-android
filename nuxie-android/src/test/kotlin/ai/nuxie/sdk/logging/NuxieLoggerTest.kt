@@ -1,6 +1,10 @@
 package ai.nuxie.sdk.logging
 
 import ai.nuxie.sdk.LogLevel
+import ai.nuxie.sdk.NuxieConfiguration
+import ai.nuxie.sdk.fixtures.FixtureRunner
+import kotlinx.serialization.json.*
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
@@ -10,18 +14,33 @@ import org.junit.Test
 
 class NuxieLoggerTest {
     @Test fun `every level gates all severities including NONE`() {
-        val enabled = mapOf(
-            LogLevel.NONE to emptyList(), LogLevel.ERROR to listOf(LogLevel.ERROR),
-            LogLevel.WARN to listOf(LogLevel.ERROR, LogLevel.WARN),
-            LogLevel.INFO to listOf(LogLevel.ERROR, LogLevel.WARN, LogLevel.INFO),
-            LogLevel.DEBUG to listOf(LogLevel.ERROR, LogLevel.WARN, LogLevel.INFO, LogLevel.DEBUG),
-        )
+        val fixture = Json.parseToJsonElement(File(FixtureRunner.fixturesRoot(), "logging/policy.json").readText()).jsonObject
+        val configuration = NuxieConfiguration("pk_test_logging")
+        assertEquals(fixture.getValue("defaultLevel").jsonPrimitive.content, configuration.logLevel.name)
+        assertEquals(fixture.getValue("defaultRedactSensitiveData").jsonPrimitive.boolean, configuration.redactSensitiveData)
+        val enabled = fixture.getValue("levels").jsonArray.associate { raw ->
+            val vector = raw.jsonObject
+            LogLevel.valueOf(vector.getValue("threshold").jsonPrimitive.content) to
+                vector.getValue("emitted").jsonArray.map { LogLevel.valueOf(it.jsonPrimitive.content) }
+        }
         for ((threshold, expected) in enabled) {
             val messages = mutableListOf<String>()
             val logger = NuxieLogger(output = { _, _, message -> messages += message })
             logger.configure(NuxieLogger.Policy(threshold))
             for (level in LogLevel.entries) logger.log(level, "Nuxie", level.name)
             assertEquals(threshold.name, expected.map { it.name }, messages)
+        }
+    }
+
+    @Test fun `shared privacy vectors govern sensitive fields`() {
+        val fixture = Json.parseToJsonElement(File(FixtureRunner.fixturesRoot(), "logging/policy.json").readText()).jsonObject
+        for (raw in fixture.getValue("privacy").jsonArray) {
+            val vector = raw.jsonObject
+            val messages = mutableListOf<String>()
+            val logger = NuxieLogger(output = { _, _, message -> messages += message })
+            logger.configure(NuxieLogger.Policy(redactSensitiveData = vector.getValue("redactSensitiveData").jsonPrimitive.boolean))
+            logger.log(LogLevel.WARN, "Nuxie", "Customer", null, NuxieLogger.Field.sensitive("customer", "fixture-customer-secret"))
+            assertEquals(vector.getValue("containsSensitiveValue").jsonPrimitive.boolean, messages.single().contains("fixture-customer-secret"))
         }
     }
 

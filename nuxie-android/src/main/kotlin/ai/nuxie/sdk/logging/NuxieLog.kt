@@ -21,6 +21,8 @@ internal object NuxieLog {
             sensitive("code", code?.decodeToString()), sensitive("details", details?.decodeToString()))
     }
 
+    fun v(tag: String, message: String, error: Throwable? = null, vararg fields: NuxieLogger.Field) =
+        logger.log(LogLevel.VERBOSE, tag, message, error, *fields)
     fun d(tag: String, message: String, error: Throwable? = null, vararg fields: NuxieLogger.Field) =
         logger.log(LogLevel.DEBUG, tag, message, error, *fields)
     fun i(tag: String, message: String, error: Throwable? = null, vararg fields: NuxieLogger.Field) =
