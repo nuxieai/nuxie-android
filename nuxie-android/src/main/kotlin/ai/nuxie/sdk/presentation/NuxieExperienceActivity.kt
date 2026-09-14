@@ -97,6 +97,7 @@ internal class NuxieExperienceActivity : Activity() {
     /** Registry ownership belongs to this screen, even when the Activity hosts another one. */
     private inner class Screen(val id: String, val prepared: PreparedPresentation, @Volatile var provisional: Boolean = false) :
         PresentationScreenHandle, ExperienceSurfaceHost.Listener {
+        override val rendererEffects = RendererEffectLifetime()
         var registered = false
         var failure: Throwable? = null
             private set
@@ -127,6 +128,8 @@ internal class NuxieExperienceActivity : Activity() {
         fun close(changingConfigurations: Boolean) {
             if (closing) return
             closing = true
+            rendererEffects.retire()
+            synchronized(effectsLock) { pendingEffects.clear() }
             ready.completeExceptionally(IllegalStateException("Screen closed during preparation"))
             closeState.prepareForTeardown(changingConfigurations)
             val complete: () -> Unit = {
@@ -173,9 +176,9 @@ internal class NuxieExperienceActivity : Activity() {
         ) {
             synchronized(effectsLock) {
                 if (provisional) pendingEffects += {
-                    PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot)
+                    PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot, this)
                 } else if (closeState.reason == null) {
-                    PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot)
+                    PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot, this)
                 }
             }
         }

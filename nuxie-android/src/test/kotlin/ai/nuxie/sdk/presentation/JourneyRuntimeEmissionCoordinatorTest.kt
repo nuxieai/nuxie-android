@@ -380,6 +380,58 @@ class JourneyRuntimeEmissionCoordinatorTest {
         assertEquals(0, attempts)
     }
 
+    @Test
+    fun `retiring host releases queued effects without closing replacement emission lane`() = runTest {
+        val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/presentation-reveal-android.json").readText()).jsonObject
+            .getValue("rendererRetirement").jsonObject
+        var batches = 0
+        var admissions = 0
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", JsonObject(emptyMap()), 0, 0,
+            onEmissionBatch = { batches++; true }, onPresentationRevealed = { admissions++ })
+        val old = RendererEffectLifetime()
+        val waiting = async { coordinator.publish(outcome(events = listOf(event("old"))), 1uL, old) }
+        val text = async { coordinator.publishTextCommit("old-input", "stale", lifetime = old) }
+        yield()
+        assertFalse(waiting.isCompleted)
+        assertEquals(JourneyRuntimeEmissionCoordinator.RevealResult.WAITING_FOR_HOST, coordinator.reveal { false })
+        old.retire()
+        assertEquals(fixture.getValue("retiredWaiterHandled").jsonPrimitive.content.toBooleanStrict(), waiting.await())
+        assertTrue(text.await())
+        assertEquals(0, batches)
+        assertTrue(coordinator.reveal())
+        assertTrue(coordinator.publish(outcome(events = listOf(event("replacement"))), 2uL, RendererEffectLifetime()))
+        assertEquals(fixture.getValue("batchCountAfterReplacement").jsonPrimitive.content.toInt(), batches)
+        assertEquals(fixture.getValue("admissionCount").jsonPrimitive.content.toInt(), admissions)
+    }
+
+    @Test
+    fun `retirement drains admitted publication but drops work queued behind it`() = runTest {
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val sequences = mutableListOf<Long>()
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", JsonObject(emptyMap()), 0, 0,
+            onEmissionBatch = { batch ->
+                sequences += batch.batchSequence
+                if (sequences.size == 1) { entered.complete(Unit); release.await() }
+                true
+            }, onPresentationRevealed = {})
+        val old = RendererEffectLifetime()
+        coordinator.reveal()
+        val admitted = async { coordinator.publish(outcome(events = listOf(event("admitted"))), 1uL, old) }
+        entered.await()
+        val queued = async { coordinator.publish(outcome(events = listOf(event("queued"))), 2uL, old) }
+        yield()
+        old.retire()
+        assertFalse(admitted.isCompleted)
+        release.complete(Unit)
+        assertTrue(admitted.await())
+        assertTrue(queued.await())
+        assertEquals(listOf(0L), sequences)
+        assertTrue(coordinator.publish(outcome(events = listOf(event("replacement"))), 3uL, RendererEffectLifetime()))
+        assertEquals(listOf(0L, 1L), sequences)
+    }
+
     private fun controlDescriptor(): JsonObject {
         val run = screenEmissionFixture.getValue("run").jsonObject
         val input = screenEmissionFixture.getValue("input").jsonObject

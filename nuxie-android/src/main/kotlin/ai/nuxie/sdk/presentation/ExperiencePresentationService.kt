@@ -122,6 +122,8 @@ internal interface PreparedScreenNavigation {
 }
 
 internal interface PresentationScreenHandle {
+    val rendererEffects: RendererEffectLifetime? get() = null
+
     suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation? = null
 
     fun requestCloseFromService(reason: CloseReason): Boolean
@@ -162,8 +164,8 @@ internal object PresentationRegistry {
         val onFailure: (Throwable) -> Unit,
         val onDismissed: (CloseReason) -> Unit,
         val onOutcome: (CloseReason) -> Unit,
-        val onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?) -> Unit,
-        val onTextCommitted: (String, String) -> Unit,
+        val onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit,
+        val onTextCommitted: (String, String, RendererEffectLifetime?) -> Unit,
     )
 
     private class Entry(initial: PresentationContentState, var callbacks: Callbacks) {
@@ -190,9 +192,9 @@ internal object PresentationRegistry {
         onFailure: (Throwable) -> Unit,
         onDismissed: (CloseReason) -> Unit,
         onOutcome: (CloseReason) -> Unit,
-        onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?) -> Unit =
-            { _, _, _ -> },
-        onTextCommitted: (String, String) -> Unit = { _, _ -> },
+        onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit =
+            { _, _, _, _ -> },
+        onTextCommitted: (String, String, RendererEffectLifetime?) -> Unit = { _, _, _ -> },
         requiresAcquiring: Boolean = false,
     ) {
         synchronized(lock) {
@@ -220,7 +222,7 @@ internal object PresentationRegistry {
         synchronized(lock) {
             check(id !in entries) { "duplicate presentation id" }
             Entry(PresentationContentState.Acquiring(screen), Callbacks({}, { onClosed(CloseReason.Error(it)) }, onClosed,
-                onClosed, { _, _, _ -> }, { _, _ -> })).also { it.retry = onRetry; entries[id] = it }.detached
+                onClosed, { _, _, _, _ -> }, { _, _, _ -> })).also { it.retry = onRetry; entries[id] = it }.detached
         }
 
     fun updateAcquisition(id: String, progress: AcquisitionProgress) = synchronized(lock) {
@@ -247,6 +249,7 @@ internal object PresentationRegistry {
     fun attach(id: String, screen: PresentationScreenHandle): Boolean = synchronized(lock) {
         val entry = entries[id] ?: return@synchronized false
         if (entry.dismissalReason != null) return@synchronized false
+        entry.latestScreen.get()?.takeUnless { it === screen }?.rendererEffects?.retire()
         entry.attachedScreens += screen
         entry.latestScreen = WeakReference(screen)
         true
@@ -255,6 +258,7 @@ internal object PresentationRegistry {
     fun detach(id: String, screen: PresentationScreenHandle) {
         val completion = synchronized(lock) {
             val entry = entries[id] ?: return
+            screen.rendererEffects?.retire()
             entry.attachedScreens.remove(screen)
             entry.revealFrames.remove(screen)
             if (entry.latestScreen.get() === screen) {
@@ -332,11 +336,15 @@ internal object PresentationRegistry {
         outcome: NuxiePlayerStepOutcome,
         correlationId: ULong,
         viewModelSnapshot: NuxieViewModelSnapshot?,
+        source: PresentationScreenHandle? = null,
     ) {
         val callback = synchronized(lock) {
-            entries[id]?.takeUnless { it.terminal.get() }?.callbacks?.onRuntimeStep
+            entries[id]?.takeUnless {
+                it.terminal.get() || it.dismissalReason != null ||
+                    (source != null && (it.latestScreen.get() !== source || source.rendererEffects?.isRetired == true))
+            }?.callbacks?.onRuntimeStep
         } ?: return
-        callback(outcome, correlationId, viewModelSnapshot)
+        callback(outcome, correlationId, viewModelSnapshot, source?.rendererEffects)
     }
 
     fun currentScreen(id: String): PresentationScreenHandle? = synchronized(lock) {
@@ -346,10 +354,10 @@ internal object PresentationRegistry {
     fun reportTextCommitted(id: String, screen: PresentationScreenHandle, inputId: String, text: String) {
         val callback = synchronized(lock) {
             entries[id]?.takeUnless {
-                it.terminal.get() || it.dismissalReason != null || it.latestScreen.get() !== screen
+                it.terminal.get() || it.dismissalReason != null || it.latestScreen.get() !== screen || screen.rendererEffects?.isRetired == true
             }?.callbacks?.onTextCommitted
         } ?: return
-        callback(inputId, text)
+        callback(inputId, text, screen.rendererEffects)
     }
 
     fun dismiss(id: String, reason: CloseReason) {
@@ -905,13 +913,13 @@ internal class ExperiencePresentationService(
                             onFailure = { error -> failed(pending, error) },
                             onDismissed = { reason -> ended(pending, reason) },
                             onOutcome = { reason -> attemptOutcome(pending, reason) },
-                            onRuntimeStep = { outcome, correlationId, snapshot ->
+                            onRuntimeStep = { outcome, correlationId, snapshot, lifetime ->
                                 pending.latestViewModelSnapshot.set(snapshot)
-                                runtimeStep(pending, outcome, correlationId)
+                                runtimeStep(pending, outcome, correlationId, lifetime)
                             },
-                            onTextCommitted = { inputId, text ->
+                            onTextCommitted = { inputId, text, lifetime ->
                                 publishScreenEffects(pending) {
-                                    pending.journey.emissions.publishTextCommit(inputId, text, textInputState)
+                                    pending.journey.emissions.publishTextCommit(inputId, text, textInputState, lifetime)
                                 }
                             },
                         )
@@ -1336,8 +1344,9 @@ internal class ExperiencePresentationService(
         active: ActivePresentation,
         outcome: NuxiePlayerStepOutcome,
         correlationId: ULong,
+        lifetime: RendererEffectLifetime?,
     ) {
-        publishScreenEffects(active) { active.journey.emissions.publish(outcome, correlationId) }
+        publishScreenEffects(active) { active.journey.emissions.publish(outcome, correlationId, lifetime) }
     }
 
     private fun publishScreenEffects(active: ActivePresentation, publish: suspend () -> Boolean) {

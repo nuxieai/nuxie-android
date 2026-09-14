@@ -11,6 +11,7 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
@@ -21,6 +22,13 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+
+/** Native-host lifetime; retiring it never cancels an admitted durable write. */
+internal class RendererEffectLifetime {
+    internal val retired = CompletableDeferred<Unit>()
+    val isRetired: Boolean get() = retired.isCompleted
+    fun retire() { retired.complete(Unit) }
+}
 
 /**
  * Turns one committed renderer transaction into at most one durable Journey
@@ -82,10 +90,11 @@ internal class JourneyRuntimeEmissionCoordinator(
         }
     }
 
-    suspend fun publish(outcome: NuxiePlayerStepOutcome, correlationId: ULong): Boolean {
-        revealed.await()
+    suspend fun publish(outcome: NuxiePlayerStepOutcome, correlationId: ULong, lifetime: RendererEffectLifetime? = null): Boolean {
+        if (!awaitReveal(lifetime)) return true
         return gate.withLock {
             if (closed) return@withLock false
+            if (lifetime?.isRetired == true) return@withLock true
             val projected = project(outcome, correlationId)
             projected.links.forEach { link ->
                 runCatching { onOpenLink(link.url, link.target) }
@@ -120,10 +129,12 @@ internal class JourneyRuntimeEmissionCoordinator(
         inputId: String,
         text: String,
         state: ExperienceTextInputState = textCommitState,
+        lifetime: RendererEffectLifetime? = null,
     ): Boolean {
-        revealed.await()
+        if (!awaitReveal(lifetime)) return true
         return gate.withLock {
             if (closed) return@withLock false
+            if (lifetime?.isRetired == true) return@withLock true
             val input = textInputs[inputId] ?: return@withLock false
             val previous = state.committedValue(inputId)
                 ?: ExperienceTextInputLimit.apply(input.value, input.maxLength)
@@ -135,6 +146,14 @@ internal class JourneyRuntimeEmissionCoordinator(
             )
             if (accepted) state.recordCommit(inputId, text)
             accepted
+        }
+    }
+
+    private suspend fun awaitReveal(lifetime: RendererEffectLifetime?): Boolean {
+        if (lifetime == null) { revealed.await(); return true }
+        return select {
+            lifetime.retired.onAwait { false }
+            revealed.onAwait { true }
         }
     }
 
