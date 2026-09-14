@@ -231,6 +231,60 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `navigation retry waits for the original dismissal checkpoint after caller cancellation`() = runTest {
+        val contract = Json.parseToJsonElement(
+            FixtureRunner.fixturesRoot().resolve("journeys/planes/persistent-navigation-android.json").readText(),
+        ).jsonObject.getValue("checkpointRetry").jsonObject
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val firstLease = Lease()
+        val checkpoint = CompletableDeferred<JourneyScreenDismissalResult>()
+        val started = CompletableDeferred<Unit>()
+        var checkpointCalls = 0
+        val first = async {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, firstLease) },
+                onScreenDismissed = { _, _, _ ->
+                    checkpointCalls++
+                    started.complete(Unit)
+                    checkpoint.await()
+                }, onOutcome = {})
+        }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        first.await()
+        suspend fun navigate() = runCatching {
+            service.presentJourney(release, contract.getValue("destination").jsonPrimitive.content, "journey-1", "customer-1", null,
+                acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+        }
+        val cancelled = async { navigate() }
+        started.await()
+        cancelled.cancelAndJoin()
+        val conflict = expectPresentationFailure {
+            service.presentJourney(release, contract.getValue("conflictingDestination").jsonPrimitive.content,
+                "journey-1", "customer-1", null, acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+        }
+        assertEquals(contract.getValue("conflictReason").jsonPrimitive.content, conflict.reason.name)
+        val retry = async { navigate() }
+        try {
+            runCurrent()
+            assertEquals("An unsettled checkpoint cannot authorize a destination", contract.getValue("launchCountBeforeResult").jsonPrimitive.int, launched.size)
+            assertFalse(firstLease.closed.get())
+            assertEquals("A retry must join, not repeat, the checkpoint", contract.getValue("checkpointCalls").jsonPrimitive.int, checkpointCalls)
+            checkpoint.complete(JourneyScreenDismissalResult.valueOf(contract.getValue("result").jsonPrimitive.content))
+            runCurrent()
+            assertTrue(retry.await().isFailure)
+            assertEquals(contract.getValue("launchCountAfterResult").jsonPrimitive.int, launched.size)
+            assertTrue(firstLease.closed.get())
+        } finally {
+            checkpoint.complete(JourneyScreenDismissalResult.valueOf(contract.getValue("result").jsonPrimitive.content))
+            retry.cancelAndJoin()
+            service.dismissFromHost("customer-1")
+        }
+    }
+
+    @Test
     fun `text commits require the current attached Activity and an open presentation`() {
         val received = mutableListOf<String>()
         PresentationRegistry.register("edit-owner",
