@@ -45,7 +45,10 @@ class TextInputKeyboardDeviceTest {
         val failure = AtomicReference<Throwable>()
         PresentationRegistry.register(id,
             PreparedPresentation(file, null, 0xffdddddd.toInt(), PresentationShell.FullScreen),
-            onFirstFrame = { rendered.countDown() }, onFailure = { failure.set(it); rendered.countDown() },
+            onFirstFrame = {
+                kotlinx.coroutines.runBlocking { assertTrue(PresentationRegistry.reveal(id)) }
+                rendered.countDown()
+            }, onFailure = { failure.set(it); rendered.countDown() },
             onDismissed = {}, onOutcome = {})
         var activity: Activity? = null
         var overlay: ExperienceTextInputOverlay? = null
@@ -62,11 +65,10 @@ class TextInputKeyboardDeviceTest {
             lateinit var content: FrameLayout
             val snapshot = geometry()
             instrumentation.runOnMainSync {
-                val oldParent = owner.findViewById<ViewGroup>(android.R.id.content)
-                host = oldParent.getChildAt(0) as ExperienceSurfaceHost
-                oldParent.removeView(host)
-                content = FrameLayout(owner)
-                content.addView(host, FrameLayout.LayoutParams(-1, -1))
+                host = checkNotNull(findHost(owner.window.decorView))
+                // Use the mounted screen's common parent so the fixture exercises
+                // keyboard avoidance without replacing the Activity's owned tree.
+                content = host.parent as FrameLayout
                 val input = ExperienceTextInput("name", "headline", "", "answer", "Keyboard target", null,
                     false, false, null,
                     listOf("x", "y", "width", "height", "rotation", "scaleX", "scaleY")
@@ -79,7 +81,6 @@ class TextInputKeyboardDeviceTest {
                     listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) },
                     { throw AssertionError(it) })
                 content.addView(overlay, FrameLayout.LayoutParams(-1, -1))
-                owner.setContentView(content)
                 overlay!!.update(snapshot)
                 editor = overlay!!.getChildAt(0) as EditText
             }
@@ -135,6 +136,14 @@ class TextInputKeyboardDeviceTest {
             PresentationRegistry.clearForTesting()
             file.delete()
         }
+    }
+
+    private fun findHost(view: android.view.View): ExperienceSurfaceHost? {
+        if (view is ExperienceSurfaceHost) return view
+        if (view is ViewGroup) for (index in 0 until view.childCount) {
+            findHost(view.getChildAt(index))?.let { return it }
+        }
+        return null
     }
 
     private fun screenTop(view: android.view.View): Int = IntArray(2).also(view::getLocationOnScreen)[1]

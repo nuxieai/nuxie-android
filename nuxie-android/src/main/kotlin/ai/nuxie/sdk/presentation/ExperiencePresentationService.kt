@@ -170,6 +170,8 @@ internal object PresentationRegistry {
         val state = MutableStateFlow(initial)
         val terminal = AtomicBoolean(false)
         val firstFrame = AtomicBoolean(false)
+        var revealAdmitted = false
+        val revealFrames = IdentityHashMap<PresentationScreenHandle?, suspend () -> Boolean>()
         val detached = CompletableDeferred<Unit>()
         var latestScreen = WeakReference<PresentationScreenHandle>(null)
         val attachedScreens: MutableSet<PresentationScreenHandle> =
@@ -236,6 +238,7 @@ internal object PresentationRegistry {
         val completion = synchronized(lock) {
             val entry = entries[id] ?: return
             entry.attachedScreens.remove(screen)
+            entry.revealFrames.remove(screen)
             if (entry.latestScreen.get() === screen) {
                 entry.latestScreen = WeakReference(null)
             }
@@ -247,13 +250,40 @@ internal object PresentationRegistry {
         completion?.invoke()
     }
 
-    fun reportFirstFrame(id: String) {
+    fun reportFirstFrame(
+        id: String,
+        source: PresentationScreenHandle? = null,
+        present: suspend () -> Boolean = { true },
+    ) {
         val callback = synchronized(lock) {
             val entry = entries[id] ?: return
-            if (entry.state.value !is PresentationContentState.Ready || entry.dismissalReason != null || entry.terminal.get() || !entry.firstFrame.compareAndSet(false, true)) return
+            if (entry.state.value !is PresentationContentState.Ready || entry.dismissalReason != null || entry.terminal.get()) return
+            if (source != null && source !in entry.attachedScreens) return
+            val first = entry.firstFrame.compareAndSet(false, true)
+            if (!first && source == null) return
+            entry.revealFrames[source] = present
+            if (!first && !entry.revealAdmitted) return
             entry.callbacks.onFirstFrame
         }
         callback()
+    }
+
+    fun canReveal(id: String, source: PresentationScreenHandle): Boolean = synchronized(lock) {
+        val entry = entries[id] ?: return@synchronized false
+        entry.revealAdmitted && entry.dismissalReason == null && !entry.terminal.get() &&
+            entry.latestScreen.get() === source && source in entry.attachedScreens
+    }
+
+    suspend fun reveal(id: String): Boolean {
+        val frames = synchronized(lock) {
+            val entry = entries[id] ?: return false
+            if (entry.dismissalReason != null || entry.terminal.get()) return false
+            entry.revealAdmitted = true
+            entry.revealFrames.values.toList().also { entry.revealFrames.clear() }
+        }
+        var visible = false
+        for (present in frames) visible = present() || visible
+        return visible
     }
 
     fun reportFailure(id: String, error: Throwable) {
@@ -1225,9 +1255,10 @@ internal class ExperiencePresentationService(
     private fun firstFrame(active: ActivePresentation) {
         val journey = active.journey
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            if (journey.emissions.reveal() && markShown(active)) {
-                active.firstFrame.complete(active.ref)
-            } else if (!active.closed.get()) {
+            val result = journey.emissions.reveal { PresentationRegistry.reveal(active.id) }
+            if (result == JourneyRuntimeEmissionCoordinator.RevealResult.VISIBLE) {
+                if (markShown(active)) active.firstFrame.complete(active.ref)
+            } else if (result == JourneyRuntimeEmissionCoordinator.RevealResult.REJECTED && !active.closed.get()) {
                 PresentationRegistry.reportFailure(
                     active.id,
                     ExperiencePresentationException(

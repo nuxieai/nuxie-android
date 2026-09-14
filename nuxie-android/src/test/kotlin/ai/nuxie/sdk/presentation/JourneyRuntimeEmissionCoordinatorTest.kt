@@ -27,6 +27,56 @@ import org.junit.Test
 
 class JourneyRuntimeEmissionCoordinatorTest {
     @Test
+    fun `durable admission waits for live host before releasing effects and is not replayed on recreation`() = runTest {
+        val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/presentation-reveal-android.json").readText()).jsonObject
+        val order = mutableListOf<String>()
+        var admissionCount = 0
+        val coordinator = JourneyRuntimeEmissionCoordinator(
+            journeyId = "journey-reveal",
+            screenId = screenEmissionFixture.getValue("run").jsonObject.getValue("screen_id").jsonPrimitive.content,
+            descriptor = controlDescriptor(),
+            nextBatchSequence = 0, nextEmissionSequence = 0,
+            onEmissionBatch = { order += "batch"; true },
+            onScreenChanged = { order += "screen"; true },
+            onPresentationRevealed = { order += "admission"; admissionCount++ },
+        )
+        val publication = async { coordinator.publish(controlOutcome(), 17uL) }
+        yield()
+        assertEquals(JourneyRuntimeEmissionCoordinator.RevealResult.WAITING_FOR_HOST,
+            coordinator.reveal { order += "retired-host"; false })
+        yield()
+        assertFalse(publication.isCompleted)
+        assertEquals(JourneyRuntimeEmissionCoordinator.RevealResult.VISIBLE,
+            coordinator.reveal { order += "live-host"; true })
+        assertTrue(publication.await())
+        assertEquals(fixture.getValue("order").jsonArray.map { it.jsonPrimitive.content }, order)
+        assertEquals(JourneyRuntimeEmissionCoordinator.RevealResult.VISIBLE, coordinator.reveal { true })
+        assertEquals(fixture.getValue("recreationAdmissionCount").jsonPrimitive.content.toInt(), admissionCount)
+    }
+
+    @Test
+    fun `closing after admission but before live host releases waiting effects as rejected`() = runTest {
+        val coordinator = JourneyRuntimeEmissionCoordinator(
+            journeyId = "journey-reveal",
+            screenId = screenEmissionFixture.getValue("run").jsonObject.getValue("screen_id").jsonPrimitive.content,
+            descriptor = controlDescriptor(),
+            nextBatchSequence = 0, nextEmissionSequence = 0,
+            onEmissionBatch = { error("Closed generation must not publish") },
+            onPresentationRevealed = {},
+        )
+        val publication = async { coordinator.publish(controlOutcome(), 17uL) }
+        yield()
+        assertEquals(JourneyRuntimeEmissionCoordinator.RevealResult.WAITING_FOR_HOST, coordinator.reveal { false })
+        coordinator.close()
+        val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/presentation-reveal-android.json").readText()).jsonObject
+        assertEquals(fixture.getValue("closedWaitingPublication").jsonPrimitive.content.toBooleanStrict(), publication.await())
+        assertEquals(JourneyRuntimeEmissionCoordinator.RevealResult.REJECTED,
+            coordinator.reveal { error("Closed generation must not reveal") })
+    }
+
+    @Test
     fun `signed control publishes one atomic batch only after reveal`() = runTest {
         val fixture = screenEmissionFixture
         val run = fixture.getValue("run").jsonObject
