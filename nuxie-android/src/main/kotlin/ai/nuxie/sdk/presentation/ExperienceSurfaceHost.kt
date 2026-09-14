@@ -69,6 +69,8 @@ internal class ExperienceSurfaceHost(
     private var artboard: NuxieRuntimeArtboard? = null
     private var viewModelState: NuxieRuntimeViewModelState? = null
     private var nextCorrelationId = 1uL
+    private val surfaceUpdates = AtomicLong()
+    private var firstFrameUpdateBaseline = 0L
     @Volatile private var firstFramePresented = false
     @Volatile private var firstFrameComposed = false
     private var androidSurface: Surface? = null
@@ -386,9 +388,14 @@ internal class ExperienceSurfaceHost(
     }
 
     override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {
+        surfaceUpdates.incrementAndGet()
+        notifyFirstFrame()
+    }
+
+    private fun notifyFirstFrame() {
         if (!released.get() && firstFramePresented && !firstFrameComposed) {
-            firstFrameComposed = true
             listener?.onFirstFrame()
+            firstFrameComposed = true
             lane.enqueue { if (!released.get()) publishSteps() }
         }
     }
@@ -404,6 +411,16 @@ internal class ExperienceSurfaceHost(
         if (!running) return
         Choreographer.getInstance().postFrameCallback(this)
         if (!framePending.compareAndSet(false, true)) return
+        // The preceding native frame can finish while this tick acquires the
+        // slot. Wait for composition and the owner's preparation handoff before
+        // submitting another frame that could delay its transition state writes.
+        if (firstFramePresented && !firstFrameComposed) {
+            // A compositor callback can precede the native call's return. Its
+            // counter still proves composition of this first delivered attempt.
+            if (surfaceUpdates.get() != firstFrameUpdateBaseline) notifyFirstFrame()
+            framePending.set(false)
+            return
+        }
         val generation = frameGeneration.get()
         val elapsedSeconds = if (lastFrameNanos == 0L) {
             0.0
@@ -460,6 +477,7 @@ internal class ExperienceSurfaceHost(
                 if (outcome.hasPublishableEffects()) {
                     unpublishedSteps.addLast(PublishedStep(correlationId, outcome, viewModelSnapshot))
                 }
+                if (!firstFramePresented) firstFrameUpdateBaseline = surfaceUpdates.get()
                 val disposition = renderer.renderAndPresent(player, window, clearColor, true)
                 if (disposition < 0) {
                     Log.w(LOG_TAG, "render_player failed with status ${-disposition}")
