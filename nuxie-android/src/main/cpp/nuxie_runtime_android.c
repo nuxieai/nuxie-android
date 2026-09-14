@@ -8,103 +8,91 @@
 //   before returning.
 
 #if defined(__ANDROID__)
-#include <android/log.h>
 #include <android/native_window_jni.h>
 #endif
-#include <errno.h>
-#include <fcntl.h>
 #include <jni.h>
 #include <limits.h>
-#include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "nux_capi.generated.h"
 
+// Native diagnostics use the same Kotlin policy as every other SDK log. Never
+// redirect process-wide stderr: it belongs to the embedding application.
 #if defined(__ANDROID__)
-#define NUXIE_LOG_WARN(...) \
-  __android_log_print(ANDROID_LOG_WARN, "Nuxie", __VA_ARGS__)
+static JavaVM *logging_vm;
+static jclass logging_class;
+static jmethodID logging_method;
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+  (void)reserved;
+  JNIEnv *env = NULL;
+  if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
+  jclass local = (*env)->FindClass(env, "ai/nuxie/sdk/logging/NuxieLog");
+  if (local == NULL) return JNI_ERR;
+  jclass global = (*env)->NewGlobalRef(env, local);
+  (*env)->DeleteLocalRef(env, local);
+  if (global == NULL) return JNI_ERR;
+  jmethodID method = (*env)->GetStaticMethodID(env, global, "nativeWarning", "(Ljava/lang/String;I[B[B)V");
+  if (method == NULL) { (*env)->DeleteGlobalRef(env, global); return JNI_ERR; }
+  logging_class = global;
+  logging_method = method;
+  logging_vm = vm;
+  return JNI_VERSION_1_6;
+}
+
+JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
+  (void)reserved;
+  JNIEnv *env = NULL;
+  if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK && logging_class != NULL)
+    (*env)->DeleteGlobalRef(env, logging_class);
+  logging_class = NULL;
+  logging_method = NULL;
+  logging_vm = NULL;
+}
+
+static jbyteArray diagnostic_bytes(JNIEnv *env, const char *data, uint64_t length) {
+  if (data == NULL) return NULL;
+  // Diagnostics are bounded independently of renderer-owned allocations.
+  jsize count = (jsize)(length > 4096 ? 4096 : length);
+  jbyteArray bytes = (*env)->NewByteArray(env, count);
+  if (bytes != NULL && count != 0)
+    (*env)->SetByteArrayRegion(env, bytes, 0, count, (const jbyte *)data);
+  return bytes;
+}
+#endif
+
+static void log_native_warning(const char *operation, int status,
+                               const char *code, uint64_t code_length,
+                               const char *message, uint64_t message_length) {
+#if defined(__ANDROID__)
+  JNIEnv *env = NULL;
+  // All shim calls originate on JVM-owned threads. Logging must not attach
+  // workers or consume an exception already pending on the caller's thread.
+  if (logging_vm == NULL || logging_class == NULL ||
+      (*logging_vm)->GetEnv(logging_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK ||
+      (*env)->ExceptionCheck(env)) return;
+  jstring name = (*env)->NewStringUTF(env, operation); // Call-site ASCII constant.
+  jbyteArray code_bytes = NULL;
+  jbyteArray message_bytes = NULL;
+  if (!(*env)->ExceptionCheck(env)) code_bytes = diagnostic_bytes(env, code, code_length);
+  if (!(*env)->ExceptionCheck(env)) message_bytes = diagnostic_bytes(env, message, message_length);
+  if (!(*env)->ExceptionCheck(env))
+    (*env)->CallStaticVoidMethod(env, logging_class, logging_method, name, (jint)status, code_bytes, message_bytes);
+  // A diagnostic allocation/callback failure must not replace the native result.
+  if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+  if (name != NULL) (*env)->DeleteLocalRef(env, name);
+  if (code_bytes != NULL) (*env)->DeleteLocalRef(env, code_bytes);
+  if (message_bytes != NULL) (*env)->DeleteLocalRef(env, message_bytes);
 #else
-#define NUXIE_LOG_WARN(...)          \
-  do {                               \
-    fprintf(stderr, "Nuxie: ");     \
-    fprintf(stderr, __VA_ARGS__);    \
-    fputc('\n', stderr);             \
-  } while (0)
+  fprintf(stderr, "Nuxie: %s status=%d code=%.*s message=%.*s\n", operation, status,
+          (int)(code_length > 4096 ? 4096 : code_length), code != NULL ? code : "",
+          (int)(message_length > 4096 ? 4096 : message_length), message != NULL ? message : "");
 #endif
-
-// Android discards stderr, but Rust panic messages print there. Pump the
-// process's stderr into logcat so contained panics are diagnosable.
-#if defined(__ANDROID__)
-static void *stderr_pump(void *arg) {
-  int fd = (int)(intptr_t)arg;
-  char line[512];
-  size_t used = 0;
-  int read_failed = 0;
-  for (;;) {
-    char chunk[128];
-    ssize_t n = read(fd, chunk, sizeof(chunk));
-    if (n < 0 && errno == EINTR) continue;
-    if (n < 0) {
-      read_failed = 1;
-      break;
-    }
-    if (n == 0) break;
-    for (ssize_t i = 0; i < n; i++) {
-      if (chunk[i] == '\n' || used == sizeof(line) - 1) {
-        line[used] = '\0';
-        if (used > 0) {
-          NUXIE_LOG_WARN("stderr: %s", line);
-        }
-        used = 0;
-        if (chunk[i] == '\n') continue;
-      }
-      line[used++] = chunk[i];
-    }
-  }
-  // EOF means every write end is gone: the host replaced stderr with its
-  // own target, so leave it alone. A read error means stderr may still be
-  // our pipe with no reader, where writers would eventually block on a
-  // full pipe; point stderr at /dev/null before abandoning it. If open
-  // hands back fd 2 itself, /dev/null is already installed as stderr and
-  // must stay open.
-  if (read_failed) {
-    int devnull = open("/dev/null", O_WRONLY);
-    if (devnull >= 0 && devnull != STDERR_FILENO) {
-      dup2(devnull, STDERR_FILENO);
-      close(devnull);
-    }
-  }
-  close(fd);
-  return NULL;
 }
-
-__attribute__((constructor)) static void redirect_stderr_to_logcat(void) {
-  int fds[2];
-  if (pipe(fds) != 0) return;
-  if (fds[0] <= STDERR_FILENO || fds[1] <= STDERR_FILENO) {
-    // A stdio fd was closed in this process; redirecting would clobber
-    // our own pipe end. Leave stderr alone.
-    close(fds[0]);
-    close(fds[1]);
-    return;
-  }
-  pthread_t thread;
-  if (pthread_create(&thread, NULL, stderr_pump, (void *)(intptr_t)fds[0]) != 0) {
-    close(fds[0]);
-    close(fds[1]);
-    return;
-  }
-  pthread_detach(thread);
-  // The pump is guaranteed to be draining before any write can land.
-  dup2(fds[1], STDERR_FILENO);
-  close(fds[1]);
-}
-#endif
 
 static jlong as_handle(void *pointer) { return (jlong)(intptr_t)pointer; }
 static void *from_handle(jlong handle) { return (void *)(intptr_t)handle; }
@@ -125,13 +113,10 @@ static void log_and_free_result(const char *operation, NuxStatus status,
     view.struct_size = (uint32_t)sizeof(view);
     if (result != NULL &&
         nux_capi_result_diagnostic(result, &view) == NUX_STATUS_OK) {
-      NUXIE_LOG_WARN("%s failed: status=%d code=%.*s message=%.*s",
-                     operation, (int)status, (int)view.code.len,
-                     view.code.data ? view.code.data : "",
-                     (int)view.message.len,
-                     view.message.data ? view.message.data : "");
+      log_native_warning(operation, (int)status, view.code.data, view.code.len,
+                         view.message.data, view.message.len);
     } else {
-      NUXIE_LOG_WARN("%s failed: status=%d", operation, (int)status);
+      log_native_warning(operation, (int)status, NULL, 0, NULL, 0);
     }
   }
   free_result(result);
@@ -139,7 +124,7 @@ static void log_and_free_result(const char *operation, NuxStatus status,
 
 static void log_cleanup_failure(const char *operation, NuxStatus status) {
   if (status != NUX_STATUS_OK) {
-    NUXIE_LOG_WARN("%s cleanup failed: status=%d", operation, (int)status);
+    log_native_warning(operation, (int)status, NULL, 0, NULL, 0);
   }
 }
 
@@ -1787,11 +1772,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
     if (info_status != NUX_STATUS_OK || info.status != status) {
       status = info_status == NUX_STATUS_OK ? NUX_STATUS_RUNTIME_ERROR : info_status;
     } else if (status != NUX_STATUS_OK) {
-      NUXIE_LOG_WARN(
-          "view_model_mutate failed: status=%d code=%.*s message=%.*s",
-          (int)status, (int)info.code.len,
-          info.code.data != NULL ? info.code.data : "", (int)info.message.len,
-          info.message.data != NULL ? info.message.data : "");
+      log_native_warning("view_model_mutate", (int)status, info.code.data, info.code.len,
+                         info.message.data, info.message.len);
     }
     NuxStatus free_status = nux_view_model_mutation_result_free(result);
     log_cleanup_failure("view_model_mutation_result_free", free_status);
@@ -2102,12 +2084,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     diagnostic.struct_size = (uint32_t)sizeof(diagnostic);
     if (nux_player_step_result_diagnostic(step_result, &diagnostic) ==
         NUX_STATUS_OK) {
-      NUXIE_LOG_WARN(
-          "player_step failed: status=%d code=%.*s message=%.*s",
-          (int)result_status, (int)diagnostic.code.len,
-          diagnostic.code.data != NULL ? diagnostic.code.data : "",
-          (int)diagnostic.message.len,
-          diagnostic.message.data != NULL ? diagnostic.message.data : "");
+      log_native_warning("player_step", (int)result_status, diagnostic.code.data, diagnostic.code.len,
+                         diagnostic.message.data, diagnostic.message.len);
     }
     failed = 1;
     goto typed_step_cleanup;
@@ -2703,7 +2681,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererRenderPlayerToCpuFram
       source_len < (size_t)height * stride ||
       nux_android_vulkan_frame_pixel_format(frame) !=
           NUX_ANDROID_VULKAN_PIXEL_FORMAT_RGBA8_PREMULTIPLIED) {
-    NUXIE_LOG_WARN("renderer returned an invalid CPU frame");
+    log_native_warning("renderer_invalid_cpu_frame", NUX_STATUS_RUNTIME_ERROR, NULL, 0, NULL, 0);
     goto cpu_frame_cleanup;
   }
 

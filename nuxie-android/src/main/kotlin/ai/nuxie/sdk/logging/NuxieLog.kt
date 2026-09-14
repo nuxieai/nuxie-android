@@ -12,6 +12,15 @@ internal object NuxieLog {
     fun sensitive(name: String, value: Any?) = NuxieLogger.Field.sensitive(name, value)
     fun status(name: String, value: Number) = NuxieLogger.Field.status(name, value)
 
+    /** JNI passes a static operation name plus opaque diagnostic bytes. */
+    @JvmStatic
+    fun nativeWarning(operation: String, status: Int, code: ByteArray?, details: ByteArray?) {
+        logger.log(LogLevel.WARN, "Nuxie", "Native runtime call failed", null,
+            NuxieLogger.Field.publicValue("operation", operation),
+            NuxieLogger.Field.status("status", status),
+            sensitive("code", code?.decodeToString()), sensitive("details", details?.decodeToString()))
+    }
+
     fun d(tag: String, message: String, error: Throwable? = null, vararg fields: NuxieLogger.Field) =
         logger.log(LogLevel.DEBUG, tag, message, error, *fields)
     fun i(tag: String, message: String, error: Throwable? = null, vararg fields: NuxieLogger.Field) =
