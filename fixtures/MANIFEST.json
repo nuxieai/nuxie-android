@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "be1a5ffcebad6536a7e4395568ee260c926ea6f1",
+  "sourceCommit": "805e73264dacdf3439f731dfb1d487e4a7b3b2c1",
   "files": {
     "README.md": "4363d6a79ac9828364a6a02bf400d98c0852b771062258c409a744dd1a5016e7",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
@@ -29,6 +29,7 @@
     "journeys/planes/reports.json": "6d5ff79acd668b02c4aeac84b1154425c720ba16b50beb5ef30f9b0899322d39",
     "journeys/planes/run-recovery.json": "4bf67b161af433a1d3c18332f3444d86aee7cbc60bf34286dcf3b63359746d88",
     "journeys/planes/runtime-bound-state.json": "300f30c04c228bfc56b37de9622262a66399dfa08e2a961fd8d7e34979e9c246",
+    "journeys/planes/runtime-reduced-motion-android.json": "fff4b8245243801a0d0d95b468282da3b5434d52da78aca080a304a10d579897",
     "journeys/planes/runtime-safe-area.json": "f43169ae139a9a5a771645ef13faaa76d0d83077d8f58c5fa6e2ce929082e5c1",
     "journeys/planes/runtime-visibility-android.json": "7f5d6982969e426dc22a4dfd98141f67c54a8cdaf7e55d18e60e307d1aa7d2bd",
     "journeys/planes/runtime-window-insets-android.json": "4865dbaaf0b4f577dca1e1b2a1c86a3705019232c49aa6c1ffdf39de7b385a28",
