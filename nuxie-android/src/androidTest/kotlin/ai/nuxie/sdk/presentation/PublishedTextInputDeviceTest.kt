@@ -82,7 +82,17 @@ import org.junit.Test
 class PublishedTextInputDeviceTest {
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun renderedResourceDestructionCanOverlapRendererCreation() {
+    fun renderedResourceDestructionCanOverlapRendererCreation() = exerciseRendererOverlap(false)
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun activeRenderingCanOverlapRendererCreation() = exerciseRendererOverlap(true)
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun activeRenderingCanOverlapRendererCreationAndResize() = exerciseRendererOverlap(true, true)
+
+    private fun exerciseRendererOverlap(keepRendering: Boolean, startSmall: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val runtime = NuxieRuntime.shared
         assertTrue(runtime.isAvailable)
@@ -94,10 +104,15 @@ class PublishedTextInputDeviceTest {
         val bytes = fixture.riv.readBytes()
         val assets = ExperienceAssetImportBuilder.build(fixture.release.descriptor, fixture.assets,
             checkNotNull(runtime.inspectFileAssets(bytes)))
-        fun createRenderedResources(): Closeable {
+        class RenderedResources(val render: () -> Unit, val cleanup: () -> Unit) : Closeable {
+            override fun close() = cleanup()
+        }
+        fun createRenderedResources(): RenderedResources {
             val cleanup = mutableListOf<() -> Unit>()
             try {
-                val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(1080, 2400))
+                val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(
+                    if (startSmall) 1 else 1080, if (startSmall) 1 else 2400,
+                ))
                 cleanup += renderer::close
                 val file = checkNotNull(runtime.importFile(renderer, bytes, assets.expectedAssets, assets.externalAssets))
                 cleanup += file::close
@@ -106,13 +121,21 @@ class PublishedTextInputDeviceTest {
                 artboard.bindDefaultViewModel(schema)
                 val player = checkNotNull(artboard.newPlayer())
                 cleanup += player::close
+                if (startSmall) assertEquals(0, renderer.resize(1080, 2400))
                 player.stepWithEvents(0.0)
                 val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
                 assertEquals(1080 * 2400 * 4, frame.rgba.size)
                 assertTrue("Published content must produce non-background pixels", frame.rgba.indices.any {
                     it % 4 != 3 && frame.rgba[it] != 0.toByte()
                 })
-                return Closeable { cleanup.asReversed().forEach { it() } }
+                return RenderedResources(
+                    render = {
+                        player.stepWithEvents(1.0 / 60.0)
+                        val next = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        assertEquals(1080 * 2400 * 4, next.rgba.size)
+                    },
+                    cleanup = { cleanup.asReversed().forEach { it() } },
+                )
             } catch (error: Throwable) {
                 cleanup.asReversed().forEach { close -> runCatching(close).exceptionOrNull()?.let(error::addSuppressed) }
                 throw error
@@ -125,12 +148,13 @@ class PublishedTextInputDeviceTest {
         val created = java.util.concurrent.atomic.AtomicInteger()
         lanes.forEachIndexed { index, lane ->
             lane.enqueue {
-                var resources: Closeable? = null
+                var resources: RenderedResources? = null
                 try {
                     if (index == 0) { resources = createRenderedResources(); created.incrementAndGet() }
-                    repeat(20) {
+                    repeat(if (keepRendering) 100 else 20) {
                         rendezvous.await(30, TimeUnit.SECONDS)
-                        if (resources == null) { resources = createRenderedResources(); created.incrementAndGet() }
+                        if (keepRendering && index == 0) checkNotNull(resources).render()
+                        else if (resources == null) { resources = createRenderedResources(); created.incrementAndGet() }
                         else { resources?.close(); resources = null }
                         rendezvous.await(30, TimeUnit.SECONDS)
                     }
@@ -145,7 +169,7 @@ class PublishedTextInputDeviceTest {
             if (!completed) android.os.Process.sendSignal(android.os.Process.myPid(), 3)
             assertTrue("Rendered resource lifetimes must drain; created=${created.get()} failure=${failure.get()}", completed)
             assertEquals(null, failure.get())
-            assertEquals(21, created.get())
+            assertEquals(if (keepRendering) 51 else 21, created.get())
         } finally { lanes.forEach { it.shutdown() } }
     }
 
@@ -420,6 +444,9 @@ class PublishedTextInputDeviceTest {
                     "${thread.name} ${thread.state}\n${frames.joinToString("\n")}"
                 }
                 File(instrumentation.targetContext.filesDir, "recreation-failure.txt").writeText("$viewState\n$threads")
+                android.os.Process.sendSignal(android.os.Process.myPid(), 3)
+                // Let ART persist the failure-time native stacks before instrumentation exits.
+                SystemClock.sleep(500)
             }
             assertEquals("Recreated renderer must preserve the published surface; failure=${failure.get()}", 0,
                 changedPixels(before, after, Rect(0, 0, before.width, before.height)))
