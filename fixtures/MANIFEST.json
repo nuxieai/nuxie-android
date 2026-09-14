@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "1345e30f2abe8a2809e493bebb095c97c1b1cd20",
+  "sourceCommit": "915c6d46f9e58b1a36c858b64ec4678ab3fb467d",
   "files": {
     "README.md": "4363d6a79ac9828364a6a02bf400d98c0852b771062258c409a744dd1a5016e7",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
@@ -24,7 +24,7 @@
     "journeys/planes/history-targeting.json": "0ccdfad60797cb305082e6799cd8098131973fdcd17aee34dec6cd156cce8d48",
     "journeys/planes/navigation-acquisition-android.json": "497c86961345a464ee61ce9c3190671957b8bb07d4b1be41f61f511700505735",
     "journeys/planes/occurrence-evaluation.json": "5ec208634c9e0d1d0919f84fa008dffa1d59618a9556a37bf46c326d292f3e02",
-    "journeys/planes/persistent-navigation-android.json": "393fbd40d90723406e716f54dc099ce834653813f11b6a3405155ea33eebd46c",
+    "journeys/planes/persistent-navigation-android.json": "650cdb481be76516c931e8ef1f60e8f1e5f7143be00675e5e76c310f8db183d8",
     "journeys/planes/profile-fact-admission.json": "0ba16cfc6fd46b5604a38d8b5b22a197a9df01669852746468f5dc40664bb6a3",
     "journeys/planes/publication-admission.json": "d9f145e80d78ba68bb3197f4597947da31b837d509610b41b8134cf48aaf78d2",
     "journeys/planes/release.json": "1514ec568c2ff0e5e4d1caf3f5f826f6bfe88ab9de3d660f5b0a7a60135ab0bd",
