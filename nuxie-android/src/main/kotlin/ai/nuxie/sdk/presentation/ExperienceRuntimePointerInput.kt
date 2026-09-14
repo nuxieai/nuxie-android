@@ -46,7 +46,7 @@ internal class ExperienceRuntimePointerInput(
 
     fun reset() {
         synchronized(lock) {
-            if (!released) queue.clear()
+            if (!released) queue.cancelDelivered()
         }
     }
 
@@ -60,6 +60,7 @@ internal class ExperienceRuntimePointerInput(
     private class PointerQueue {
         private val events = mutableListOf<NuxiePlayerPointerEvent>()
         private val activePointerIds = mutableSetOf<Int>()
+        private val deliveredPointers = mutableMapOf<Int, NuxiePlayerPointerEvent>()
 
         fun enqueue(incoming: List<NuxiePlayerPointerEvent>) {
             incoming.forEach { event ->
@@ -94,14 +95,34 @@ internal class ExperienceRuntimePointerInput(
         fun takeBatch(): List<NuxiePlayerPointerEvent> {
             val count = min(events.size, MAXIMUM_ACTIVE_POINTERS)
             if (count == 0) return emptyList()
-            return events.subList(0, count).toList().also {
+            return events.subList(0, count).toList().also { batch ->
                 events.subList(0, count).clear()
+                batch.forEach { event ->
+                    when (event.kind) {
+                        NuxiePlayerPointerKind.DOWN, NuxiePlayerPointerKind.MOVE ->
+                            deliveredPointers[event.pointerId] = event
+                        NuxiePlayerPointerKind.UP, NuxiePlayerPointerKind.EXIT ->
+                            deliveredPointers.remove(event.pointerId)
+                    }
+                }
+            }
+        }
+
+        fun cancelDelivered() {
+            events.clear()
+            activePointerIds.clear()
+            // A retained player still owns pointers from earlier frames.
+            // Keep them until EXIT is consumed, so repeated hides cannot lose
+            // cancellation, and enqueue exits before any resumed gesture.
+            deliveredPointers.values.sortedBy { it.pointerId }.forEach { event ->
+                events += event.copy(kind = NuxiePlayerPointerKind.EXIT)
             }
         }
 
         fun clear() {
             events.clear()
             activePointerIds.clear()
+            deliveredPointers.clear()
         }
 
         private fun reserveNewPointer(pointerId: Int): Boolean {
