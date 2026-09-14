@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "c086a990754b3c51d9ceba580fcdd24307f15c07",
+  "sourceCommit": "4adcd82c58de29defcb9dfa98b3108813710143b",
   "files": {
     "README.md": "4363d6a79ac9828364a6a02bf400d98c0852b771062258c409a744dd1a5016e7",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
@@ -17,6 +17,7 @@
     "ir/eval-vectors.json": "f1a5a7a0f0cfaea29d62999cddf5082dade701ae07a9d3e523dc671e999e3d7d",
     "ir/response-field-conformance.json": "9871fd7126131f34c4e3ef91a89eddb50612152a9e0fbe987fed77e2b69e4001",
     "journeys/planes/admission.json": "8450409cfc97a09d89e102c75695d4d596ccc9962af80a479e18625c82fe6f41",
+    "journeys/planes/drawer-content-clipping.json": "c34045c264aa2e616f883252f2694aecbd90e0042ecaa0813a6665adf2179be8",
     "journeys/planes/entry-evaluation.json": "361608607b5cef842e89e712013dc5449b37a50265bf375b5d7c0545e1b42d33",
     "journeys/planes/executor-controls.json": "82fd502f9476bc229318d8fcd01f0574a5576c84898df1b8355929050e5f7963",
     "journeys/planes/history-coverage.json": "598dc2bfb411a11988547de9d01db35b0ba8f4a3aec5971b409ff1da6f843bbf",

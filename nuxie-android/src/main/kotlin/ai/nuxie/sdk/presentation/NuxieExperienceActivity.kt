@@ -344,6 +344,12 @@ internal class NuxieExperienceActivity :
             ),
         )
         host.isClickable = true
+        if (shell is PresentationShell.Drawer) {
+            // The SurfaceView has its own composition layer. Clip it and the
+            // common content parent so native editable controls share the shell.
+            applyRoundedOutline(host, shell.cornerRadiusDp)
+            this.host?.takeIf { it !== host }?.let { applyRoundedOutline(it, shell.cornerRadiusDp) }
+        }
         root.addView(host, shellLayoutParams(shell))
         return root
     }
@@ -379,24 +385,23 @@ internal class NuxieExperienceActivity :
                 PresentationShell.Drawer.Edge.LEADING -> Gravity.START
                 PresentationShell.Drawer.Edge.TRAILING -> Gravity.END
             }
-            applyRoundedOutline(shell.cornerRadiusDp)
             FrameLayout.LayoutParams(width, height, gravity)
         }
     }
 
-    private fun applyRoundedOutline(cornerRadiusDp: Float) {
+    private fun applyRoundedOutline(content: View, cornerRadiusDp: Float) {
         if (cornerRadiusDp <= 0f) return
         val radius = cornerRadiusDp * resources.displayMetrics.density
-        host?.background = GradientDrawable().apply {
+        content.background = GradientDrawable().apply {
             setColor(android.graphics.Color.TRANSPARENT)
             cornerRadius = radius
         }
-        host?.outlineProvider = object : ViewOutlineProvider() {
+        content.outlineProvider = object : ViewOutlineProvider() {
             override fun getOutline(view: View, outline: Outline) {
                 outline.setRoundRect(0, 0, view.width, view.height, radius)
             }
         }
-        host?.clipToOutline = true
+        content.clipToOutline = true
     }
 
     private fun registerPredictiveBack() {
