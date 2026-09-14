@@ -78,6 +78,43 @@ class ExperienceSurfaceHostPointerTest {
     }
 
     @Test
+    fun `failed surface resize reports failure and stops native frame submission`() {
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        val failures = mutableListOf<ExperiencePresentationException>()
+        val host = ExperienceSurfaceHost(
+            RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native),
+            listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() = Unit
+                override fun onFailure(error: ExperiencePresentationException) { failures += error }
+            },
+        )
+        val texture = SurfaceTexture(0)
+        try {
+            host.loadArtboard(byteArrayOf(1), null)
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            val submitted = native.elapsedSteps.size
+            assertTrue(submitted > 0)
+            native.resizeStatus = 5
+            host.onSurfaceTextureSizeChanged(texture, 200, 100)
+            drain(lane)
+            host.doFrame(1_100_000_000L)
+            drain(lane)
+            assertEquals(1, failures.size)
+            assertTrue(failures.single().message.orEmpty().contains("resize failed"))
+            assertEquals(submitted, native.elapsedSteps.size)
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
+    @Test
     fun `environment state queues before loading and updates the retained commerce root`() {
         val native = RecordingNative()
         val lane = NuxieRuntimeLane()
@@ -418,7 +455,8 @@ class ExperienceSurfaceHostPointerTest {
 
         override fun detachRendererSurface(rendererHandle: Long): Int = 0
 
-        override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int = 0
+        var resizeStatus = 0
+        override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int = resizeStatus
         override fun acquireWindow(surface: android.view.Surface): Long = 5L.also { windowsAcquired += 1 }
         override fun releaseWindow(handle: Long) = Unit
 
