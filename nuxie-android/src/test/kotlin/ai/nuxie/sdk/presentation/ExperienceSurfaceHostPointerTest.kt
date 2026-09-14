@@ -39,6 +39,62 @@ import kotlinx.serialization.json.long
 @RunWith(RobolectricTestRunner::class)
 class ExperienceSurfaceHostPointerTest {
     @Test
+    fun `first composed frame hands off before another native frame can start`() {
+        assertFirstFrameHandoff(false)
+    }
+
+    @Test
+    fun `composition before native return still hands off without another native frame`() {
+        assertFirstFrameHandoff(true)
+    }
+
+    private fun assertFirstFrameHandoff(earlyComposition: Boolean) {
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        lateinit var host: ExperienceSurfaceHost
+        var firstFrames = 0
+        host = ExperienceSurfaceHost(
+            RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native),
+            listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() {
+                    firstFrames++
+                    host.setPresentationVisible(false)
+                }
+                override fun onFailure(error: ExperiencePresentationException) { throw error }
+            },
+        )
+        val texture = SurfaceTexture(0)
+        try {
+            host.loadArtboard(byteArrayOf(1), null)
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            if (earlyComposition) native.onRender = { host.onSurfaceTextureUpdated(texture) }
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            native.onRender = {}
+            repeat(3) { host.doFrame(1_016_000_000L + it * 16_000_000L) }
+            drain(lane)
+            assertEquals("The prepared frame must await composition", 1, native.elapsedSteps.size)
+            host.onSurfaceTextureUpdated(texture)
+            host.doFrame(1_064_000_000L)
+            drain(lane)
+            assertEquals(1, firstFrames)
+            assertEquals("First-frame pause must prevent queued work", 1, native.elapsedSteps.size)
+            host.setPresentationVisible(true)
+            host.doFrame(1_080_000_000L)
+            drain(lane)
+            assertEquals(listOf(0f, 0f), native.elapsedSteps)
+            host.onSurfaceTextureUpdated(texture)
+            assertEquals(1, firstFrames)
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
+    @Test
     fun `busy renderer coalesces display ticks so input precedes the next frame`() {
         val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/runtime-visibility-android.json").readText()).jsonObject
@@ -64,6 +120,7 @@ class ExperienceSurfaceHostPointerTest {
             host.writeText("name", "okay", true) {}
             resume.countDown()
             drain(lane)
+            host.onSurfaceTextureUpdated(texture)
             host.doFrame(fixture.getValue("nextFrameNanos").jsonPrimitive.long)
             drain(lane)
             assertEquals(fixture.getValue("expectedOrder").jsonArray.map { it.jsonPrimitive.content }, native.order)
