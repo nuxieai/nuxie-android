@@ -83,6 +83,70 @@ import org.junit.Test
 class PublishedTextInputDeviceTest {
     @Test
     @SdkSuppress(minSdkVersion = 26)
+    fun signedPublishedCustomTransitionEmitsForwardAndReverseEvents() {
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val fixture = loadPublishedFixture(InstrumentationRegistry.getInstrumentation(), "journeys/rendered-custom-transition")
+        val render = fixture.release.descriptor.getValue("render").jsonObject
+        val screens = render.getValue("screens").jsonArray.map { it.jsonObject }
+        val declaration = render.getValue("transitions").jsonArray.single().jsonObject
+        val transitionId = declaration.getValue("id").jsonPrimitive.content
+        val runtime = NuxieRuntime.shared
+        val lane = NuxieRuntimeLane()
+        try {
+            runBlocking { lane.call {
+                val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(390, 844))
+                try {
+                    val bytes = fixture.riv.readBytes()
+                    val assets = ExperienceAssetImportBuilder.build(fixture.release.descriptor, fixture.assets,
+                        checkNotNull(runtime.inspectFileAssets(bytes)))
+                    val file = checkNotNull(runtime.importFile(renderer, bytes, assets.expectedAssets, assets.externalAssets))
+                    try {
+                        for ((index, screen) in screens.withIndex()) {
+                            val name = screen.getValue("artboardName").jsonPrimitive.content
+                            val artboard = checkNotNull(file.newArtboard(name))
+                            try {
+                                artboard.bindDefaultViewModel(checkNotNull(ExperienceViewModelBinding.defaultSchemaName(fixture.release.descriptor, name)))
+                                fun write(path: String, value: String) {
+                                    assertTrue("Native transition state must accept $path=$value",
+                                        artboard.setDefaultViewModelValue(path, NuxieViewModelScalarValue.StringValue(value)))
+                                }
+                                val player = checkNotNull(artboard.newPlayer())
+                                try {
+                                    for (reverse in listOf(false, true)) {
+                                        val outgoing = if (reverse) index == 1 else index == 0
+                                        write("screen/transition", "")
+                                        write("screen/phase", if (outgoing) "active" else "hidden")
+                                        player.stepWithEvents(0.0)
+                                        write("screen/phase", if (outgoing) "exiting" else "entering")
+                                        write("screen/transition", transitionId)
+                                        val edge = if (reverse) declaration.getValue("reverse").jsonObject else declaration
+                                        val endpoint = if (outgoing) "source" else "destination"
+                                        val expected = edge.getValue(endpoint).jsonObject.getValue("completeEventName").jsonPrimitive.content
+                                        val events = mutableListOf<String>()
+                                        var steps = 0
+                                        while (expected !in events && steps < 14) {
+                                            events += player.stepWithEvents(0.05).events.map { it.name }
+                                            steps++
+                                        }
+                                        assertEquals("Native $name reverse=$reverse steps=$steps events=$events", 1, events.count { it == expected })
+                                        assertTrue("Native completion must precede the 700ms watchdog", steps < 14)
+                                        write("screen/phase", if (outgoing) "hidden" else "active")
+                                        write("screen/transition", "")
+                                        val idle = mutableListOf<String>()
+                                        repeat(20) { idle += player.stepWithEvents(0.05).events.map { it.name } }
+                                        assertFalse("Completion must not replay after the SDK leaves its transition phase: $idle", expected in idle)
+                                    }
+                                } finally { player.close() }
+                            } finally { artboard.close() }
+                        }
+                    } finally { file.close() }
+                } finally { renderer.close() }
+            } }
+        } finally { lane.shutdown(); assertTrue(lane.awaitQuiescence(5_000)) }
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
     fun renderedResourceDestructionCanOverlapRendererCreation() = exerciseRendererOverlap(false)
 
     @Test
@@ -1213,9 +1277,11 @@ class PublishedTextInputDeviceTest {
         val trustedKeys: Map<String, ByteArray>,
     )
 
-    private fun loadPublishedFixture(instrumentation: Instrumentation): PublishedFixture {
+    private fun loadPublishedFixture(
+        instrumentation: Instrumentation,
+        fixture: String = "journeys/rendered-text-input",
+    ): PublishedFixture {
         val context = instrumentation.targetContext
-        val fixture = "journeys/rendered-text-input"
         fun read(path: String) = instrumentation.context.assets.open("$fixture/$path").use { it.readBytes() }
         fun objectAt(path: String) = Json.parseToJsonElement(read(path).decodeToString()).jsonObject
         val entry = objectAt("release-entry.json")
