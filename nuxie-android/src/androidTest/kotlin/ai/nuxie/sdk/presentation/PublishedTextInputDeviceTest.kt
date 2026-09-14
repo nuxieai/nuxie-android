@@ -67,6 +67,75 @@ import org.junit.Test
 class PublishedTextInputDeviceTest {
     @Test
     @SdkSuppress(minSdkVersion = 26)
+    fun drawerClipsNativeContentAlongWithItsRenderedSurface() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val fixture = loadPublishedFixture(instrumentation)
+        val screen = fixture.release.descriptor.getValue("render").jsonObject
+            .getValue("screens").jsonArray.first().jsonObject
+        val cases = instrumentation.context.assets.open("journeys/planes/drawer-content-clipping.json")
+            .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject.getValue("cases").jsonArray }
+        for (item in cases.map { it.jsonObject }) {
+            val radius = item.getValue("cornerRadius").jsonPrimitive.float
+            val presentationId = UUID.randomUUID().toString()
+            val firstFrame = CountDownLatch(1)
+            val failure = AtomicReference<Throwable?>()
+            val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+            instrumentation.addMonitor(monitor)
+            var activity: Activity? = null
+            PresentationRegistry.register(presentationId, PreparedPresentation(
+                fixture.riv, screen.getValue("artboardName").jsonPrimitive.content, 0xff000000.toInt(),
+                PresentationShell.Drawer(PresentationShell.Drawer.Edge.BOTTOM,
+                    item.getValue("extentRatio").jsonPrimitive.float, radius, true),
+                screen.getValue("id").jsonPrimitive.content, fixture.release.descriptor, fixture.assets,
+                ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float),
+            ), onFirstFrame = { firstFrame.countDown() }, onFailure = { failure.set(it) },
+                onDismissed = {}, onOutcome = {})
+            try {
+                context.startActivity(Intent(context, NuxieExperienceActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, presentationId)
+                })
+                activity = checkNotNull(monitor.waitForActivityWithTimeout(15_000))
+                assertTrue("Runtime frame must arrive: ${failure.get()}", firstFrame.await(30, TimeUnit.SECONDS))
+                val content = checkNotNull(findSurface(activity!!.window.decorView)).parent as ViewGroup
+                val rect = Rect()
+                instrumentation.runOnMainSync {
+                    // A solid native child makes clipping observable independently of glyph shape.
+                    // It occupies the same content parent as the real editable overlay.
+                    content.addView(View(activity).apply { setBackgroundColor(android.graphics.Color.MAGENTA) },
+                        ViewGroup.LayoutParams(-1, -1))
+                    val position = IntArray(2)
+                    content.getLocationInWindow(position)
+                    rect.set(position[0], position[1], position[0] + content.width, position[1] + content.height)
+                }
+                instrumentation.waitForIdleSync()
+                SystemClock.sleep(150)
+                val bitmap = Bitmap.createBitmap(rect.width(), rect.height(), Bitmap.Config.ARGB_8888)
+                val copied = CountDownLatch(1)
+                var status = -1
+                PixelCopy.request(activity!!.window, rect, bitmap,
+                    { result -> status = result; copied.countDown() }, Handler(Looper.getMainLooper()))
+                assertTrue(copied.await(5, TimeUnit.SECONDS))
+                assertEquals(PixelCopy.SUCCESS, status)
+                assertEquals("Native content must actually be drawn", android.graphics.Color.MAGENTA,
+                    bitmap.getPixel(bitmap.width / 2, bitmap.height / 2))
+                val cornerContainsContent = bitmap.getPixel(1, 1) == android.graphics.Color.MAGENTA
+                assertEquals(item.getValue("name").jsonPrimitive.content,
+                    item.getValue("cornerContainsContent").jsonPrimitive.content.toBooleanStrict(), cornerContainsContent)
+                bitmap.recycle()
+                assertEquals(null, failure.get())
+            } finally {
+                instrumentation.runOnMainSync { activity?.finish() }
+                instrumentation.removeMonitor(monitor)
+                PresentationRegistry.clearForTesting()
+            }
+        }
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
     fun publishedFieldReceivesNativeEditsThroughTheRuntimeHost() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
