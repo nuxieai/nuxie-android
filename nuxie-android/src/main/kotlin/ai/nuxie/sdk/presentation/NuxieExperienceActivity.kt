@@ -1,6 +1,5 @@
 package ai.nuxie.sdk.presentation
 
-import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import android.Manifest
@@ -22,9 +21,6 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 
 internal class ScreenCloseState(
     private val report: (CloseReason) -> Unit = {},
@@ -60,12 +56,7 @@ internal class ScreenCloseState(
 internal class NuxieExperienceActivity :
     Activity(),
     PresentationActivityHandle {
-    private var host: ExperienceSurfaceHost? = null
-    private var screenLifecycle: ExperienceScreenLifecycle? = null
-    private var reducedMotion: ExperienceReducedMotion? = null
-    private var windowInsets: ExperienceWindowInsets? = null
-    private var textOverlay: ExperienceTextInputOverlay? = null
-    private var lane: NuxieRuntimeLane? = null
+    private var mountedScreen: ExperienceMountedScreen? = null
     private var presentationId: String? = null
     private val screenClose = ScreenCloseState(::reportSelectedClose)
     private var dismissible = true
@@ -103,110 +94,70 @@ internal class NuxieExperienceActivity :
             finish()
             return
         }
-        val rivBytes = runCatching { prepared.rivFile.readBytes() }.getOrNull()
-        if (rivBytes == null) {
-            fail(IllegalStateException("Prepared Experience content is unreadable"))
+        val screen = try {
+            ExperienceMountedScreen(
+                activity = this,
+                prepared = prepared,
+                listener = object : ExperienceSurfaceHost.Listener {
+                    override fun onFirstFrame() {
+                        runOnUiThread {
+                            if (isDestroyed || isFinishing) return@runOnUiThread
+                            if (screenClose.reason == null) mountedScreen?.activate()
+                            PresentationRegistry.reportFirstFrame(presentationId)
+                        }
+                    }
+
+                    override fun onRuntimeStep(
+                        outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
+                        correlationId: ULong,
+                        viewModelSnapshot: NuxieViewModelSnapshot?,
+                    ) {
+                        PresentationRegistry.reportRuntimeStep(
+                            presentationId,
+                            outcome,
+                            correlationId,
+                            viewModelSnapshot,
+                        )
+                    }
+
+                    override fun onFailure(error: ExperiencePresentationException) {
+                        fail(error)
+                    }
+
+                    override fun onRuntimeEvent(
+                        event: NuxieRuntimeEvent,
+                        viewModelSnapshot: NuxieViewModelSnapshot?,
+                    ) = Unit
+
+                    override fun onTextCommitted(inputId: String, text: String) {
+                        PresentationRegistry.reportTextCommitted(presentationId, this@NuxieExperienceActivity, inputId, text)
+                    }
+                },
+                onFailure = ::fail,
+            )
+        } catch (error: Throwable) {
+            fail(error)
             return
         }
-
-        val lane = NuxieRuntimeLane()
-        this.lane = lane
-        val host = ExperienceSurfaceHost(
-            context = this,
-            lane = lane,
-            clearColor = prepared.clearColor,
-            artboardSize = prepared.artboardSize,
-            listener = object : ExperienceSurfaceHost.Listener {
-                override fun onFirstFrame() {
-                    runOnUiThread {
-                        if (isDestroyed || isFinishing) return@runOnUiThread
-                        screenLifecycle?.takeIf { it.phase == ExperienceScreenLifecycle.Phase.ENTERING && screenClose.reason == null }
-                            ?.let { this@NuxieExperienceActivity.host?.updateRuntimeValues(it.move(ExperienceScreenLifecycle.Phase.ACTIVE)) }
-                        PresentationRegistry.reportFirstFrame(presentationId)
-                    }
-                }
-
-                override fun onRuntimeStep(
-                    outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
-                    correlationId: ULong,
-                    viewModelSnapshot: NuxieViewModelSnapshot?,
-                ) {
-                    PresentationRegistry.reportRuntimeStep(
-                        presentationId,
-                        outcome,
-                        correlationId,
-                        viewModelSnapshot,
-                    )
-                }
-
-                override fun onFailure(error: ExperiencePresentationException) {
-                    fail(error)
-                }
-
-                override fun onRuntimeEvent(
-                    event: NuxieRuntimeEvent,
-                    viewModelSnapshot: NuxieViewModelSnapshot?,
-                ) = Unit
-
-                override fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot) {
-                    textOverlay?.update(snapshot)
-                }
-
-                override fun onTextCommitted(inputId: String, text: String) {
-                    PresentationRegistry.reportTextCommitted(presentationId, this@NuxieExperienceActivity, inputId, text)
-                }
-            },
-        )
-        this.host = host
-        val lifecycle = prepared.screenLifecycle
-        screenLifecycle = lifecycle
-        host.updateRuntimeValues(if (lifecycle.phase == ExperienceScreenLifecycle.Phase.HIDDEN)
-            lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING) else lifecycle.snapshot())
-        reducedMotion = ExperienceReducedMotion(this) { reduced ->
-            host.updateRuntimeValues(lifecycle.updateReduceMotion(reduced))
-        }
-        loadPreparedRelease(host, rivBytes, prepared)
+        mountedScreen = screen
         dismissible = prepared.shell.dismissible
-        val inputs = ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId)
-        val content = if (inputs.isNotEmpty()) {
-            val size = prepared.artboardSize
-            if (size == null) {
-                fail(IllegalStateException("Editable Experience has no authored artboard extent"))
-                return
-            }
-            val fonts = ((prepared.descriptor?.get("render") as? JsonObject)?.get("assets") as? JsonArray)
-                .orEmpty().mapNotNull { value ->
-                    val asset = value as? JsonObject ?: return@mapNotNull null
-                    if ((asset["kind"] as? JsonPrimitive)?.content != "font") return@mapNotNull null
-                    val name = (asset["riveUniqueName"] as? JsonPrimitive)?.content ?: return@mapNotNull null
-                    val key = (asset["key"] as? JsonPrimitive)?.content ?: return@mapNotNull null
-                    prepared.artifactsByKey[key]?.let { name to it }
-                }.toMap()
-            FrameLayout(this).apply {
-                addView(host, FrameLayout.LayoutParams(-1, -1))
-                val overlay = ExperienceTextInputOverlay(this@NuxieExperienceActivity, size, inputs, fonts,
-                    host::writeText, ::fail, prepared.textInputState)
-                textOverlay = overlay
-                addView(overlay, FrameLayout.LayoutParams(-1, -1))
-            }
-        } else host
-        setContentView(shellView(content, prepared.shell))
-        prepared.artboardSize?.let { size ->
-            windowInsets = ExperienceWindowInsets(this, host, size) { insets ->
-                host.updateRuntimeValues(insets.stateValues())
-            }
+        try {
+            setContentView(shellView(screen.mount(), prepared.shell))
+            screen.observeWindow()
+        } catch (error: Throwable) {
+            fail(error)
+            return
         }
         registerPredictiveBack()
     }
 
     override fun onStart() {
         super.onStart()
-        reducedMotion?.refresh()
-        host?.setPresentationVisible(true)
+        mountedScreen?.setVisible(true)
     }
 
     override fun onStop() {
-        host?.setPresentationVisible(false)
+        mountedScreen?.setVisible(false)
         super.onStop()
     }
 
@@ -218,16 +169,6 @@ internal class NuxieExperienceActivity :
     override fun onDestroy() {
         val changingConfigurations = isChangingConfigurations
         screenClose.prepareForTeardown(changingConfigurations)
-        reducedMotion?.close()
-        reducedMotion = null
-        windowInsets?.close()
-        windowInsets = null
-        textOverlay?.close()
-        textOverlay = null
-        val finalState = screenLifecycle?.let {
-            if (changingConfigurations) it.snapshot() else it.move(ExperienceScreenLifecycle.Phase.HIDDEN)
-        }.orEmpty()
-        host?.release(finalState)
         unregisterPredictiveBack()
         super.onDestroy()
 
@@ -239,7 +180,8 @@ internal class NuxieExperienceActivity :
             presentationId?.let { PresentationRegistry.detach(it, this) }
             Unit
         }
-        lane?.shutdown(completeTeardown) ?: completeTeardown()
+        mountedScreen?.close(changingConfigurations, completeTeardown) ?: completeTeardown()
+        mountedScreen = null
         pendingPermission?.second?.complete(false)
         pendingPermission = null
     }
@@ -250,7 +192,7 @@ internal class NuxieExperienceActivity :
 
     override fun finishAfterServiceClose() {
         runOnUiThread {
-            screenLifecycle?.let { host?.updateRuntimeValues(it.move(ExperienceScreenLifecycle.Phase.EXITING)) }
+            mountedScreen?.exit()
             finish()
         }
     }
@@ -351,22 +293,6 @@ internal class NuxieExperienceActivity :
         }
     }
 
-    /** Runtime attachment seam for authenticated, acquired Experience content. */
-    private fun loadPreparedRelease(
-        host: ExperienceSurfaceHost,
-        rivBytes: ByteArray,
-        prepared: PreparedPresentation,
-    ) {
-        host.loadArtboard(
-            rivBytes = rivBytes,
-            artboardName = prepared.artboardName,
-            descriptor = prepared.descriptor,
-            artifactsByKey = prepared.artifactsByKey,
-            viewModelProjection = prepared.viewModelProjection,
-            textInputs = ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId),
-        )
-    }
-
     private fun shellView(host: View, shell: PresentationShell): View {
         if (shell is PresentationShell.FullScreen) return host
 
@@ -389,7 +315,7 @@ internal class NuxieExperienceActivity :
             // The SurfaceView has its own composition layer. Clip it and the
             // common content parent so native editable controls share the shell.
             applyRoundedOutline(host, shell.cornerRadiusDp)
-            this.host?.takeIf { it !== host }?.let { applyRoundedOutline(it, shell.cornerRadiusDp) }
+            mountedScreen?.surface?.takeIf { it !== host }?.let { applyRoundedOutline(it, shell.cornerRadiusDp) }
         }
         root.addView(host, shellLayoutParams(shell))
         return root
