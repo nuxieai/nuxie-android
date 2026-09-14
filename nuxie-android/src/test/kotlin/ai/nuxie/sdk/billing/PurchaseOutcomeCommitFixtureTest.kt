@@ -947,7 +947,7 @@ class PurchaseOutcomeCommitFixtureTest {
                 signatureInputs += SignatureInput(publicKey, originalJson, signature)
                 true
             },
-            logWarning = { _, _ -> },
+            logDroppedExternalPurchase = { _, _, _ -> },
             purchaseCommitObserver = purchaseCommitObservations::add,
         )
 

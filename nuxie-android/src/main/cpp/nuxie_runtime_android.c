@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "nux_capi.generated.h"
+#include "nuxie_logging_policy.h"
 
 // Native diagnostics use the same Kotlin policy as every other SDK log. Never
 // redirect process-wide stderr: it belongs to the embedding application.

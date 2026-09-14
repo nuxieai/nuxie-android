@@ -9,5 +9,5 @@ import java.util.List;
 public final class NuxieIssueRegistry extends IssueRegistry {
     @Override public int getApi() { return ApiKt.CURRENT_API; }
     @Override public int getMinApi() { return ApiKt.CURRENT_API; }
-    @Override public List<Issue> getIssues() { return Collections.singletonList(TestStoreDetector.ISSUE); }
+    @Override public List<Issue> getIssues() { return java.util.Arrays.asList(TestStoreDetector.ISSUE, LoggingPolicyDetector.ISSUE); }
 }
