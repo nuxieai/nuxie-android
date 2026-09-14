@@ -14,6 +14,9 @@ import android.graphics.Outline
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
+import android.view.MotionEvent
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
 import java.util.concurrent.atomic.AtomicBoolean
@@ -174,11 +177,53 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private inner class Navigation(val source: Screen, val target: Screen) : PreparedScreenNavigation {
+        var blocksInput = false
+            private set
+        private var animation: ExperienceScreenViewTransition? = null
+        private var sourceAccessibility: Int? = null
+        private var targetAccessibility: Int? = null
+
+        private fun restoreInput() {
+            sourceAccessibility?.let { source.view?.importantForAccessibility = it }
+            targetAccessibility?.let { target.view?.importantForAccessibility = it }
+            sourceAccessibility = null
+            targetAccessibility = null
+            blocksInput = false
+        }
+
+        fun setVisible(visible: Boolean) {
+            animation?.setVisible(visible)
+            if (animation != null) target.mounted?.setVisible(visible)
+        }
+
+        fun cancel() { animation?.cancel() }
+
         override suspend fun awaitExit() = withContext(Dispatchers.Main.immediate) {
             check(navigation === this@Navigation && currentScreen === source && !isFinishing && !isDestroyed) {
                 "Navigation source is no longer active"
             }
             source.mounted?.awaitExit()
+            check(navigation === this@Navigation && !isFinishing && !isDestroyed)
+            val render = target.prepared.descriptor?.get("render") as? JsonObject
+            val plan = ExperienceScreenTransitionPlan.resolve(
+                target.prepared.transition,
+                render?.get("transitions") as? JsonArray ?: JsonArray(emptyList()),
+                checkNotNull(source.prepared.screenId), checkNotNull(target.prepared.screenId),
+            )
+            if (plan.shouldAnimate(source.mounted?.reduceMotion == true) &&
+                plan.kind != ExperienceScreenTransitionPlan.Kind.CUSTOM) {
+                val outgoing = checkNotNull(source.view)
+                val incoming = checkNotNull(target.view)
+                blocksInput = true
+                outgoing.clearFocus()
+                sourceAccessibility = outgoing.importantForAccessibility
+                targetAccessibility = incoming.importantForAccessibility
+                outgoing.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                incoming.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                animation = ExperienceScreenViewTransition(outgoing, incoming, plan.kind)
+                target.mounted?.setVisible(visible)
+                animation!!.play(visible)
+            }
             Unit
         }
 
@@ -193,6 +238,7 @@ internal class NuxieExperienceActivity : Activity() {
                     finish()
                     return@runOnUiThread
                 }
+                restoreInput()
                 target.registered = true
                 currentScreen = target
                 dismissible = target.prepared.shell.dismissible
@@ -213,6 +259,8 @@ internal class NuxieExperienceActivity : Activity() {
         }
 
         override suspend fun abort() = withContext(NonCancellable + Dispatchers.Main.immediate) {
+            animation?.restoreSource()
+            restoreInput()
             if (navigation === this@Navigation) navigation = null
             target.view?.let(contentRoot::removeView)
             target.close(false)
@@ -292,14 +340,23 @@ internal class NuxieExperienceActivity : Activity() {
     override fun onStart() {
         super.onStart()
         visible = true
+        navigation?.setVisible(true)
         screens.forEach { if (!it.provisional || !it.ready.isCompleted) it.mounted?.setVisible(true) }
     }
 
     override fun onStop() {
         visible = false
+        navigation?.setVisible(false)
         screens.forEach { it.mounted?.setVisible(false) }
         super.onStop()
     }
+
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean =
+        if (navigation?.blocksInput == true && event.keyCode != android.view.KeyEvent.KEYCODE_BACK) true
+        else super.dispatchKeyEvent(event)
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean =
+        if (navigation?.blocksInput == true) true else super.dispatchTouchEvent(event)
 
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
@@ -307,6 +364,7 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     override fun onDestroy() {
+        navigation?.cancel()
         unregisterPredictiveBack()
         super.onDestroy()
         screens.forEach { it.close(isChangingConfigurations && !it.provisional) }
