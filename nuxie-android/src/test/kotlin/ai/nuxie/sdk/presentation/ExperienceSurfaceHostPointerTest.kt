@@ -1,6 +1,12 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.fixtures.FixtureRunner
+import ai.nuxie.sdk.runtime.NativeViewModelCatalog
+import ai.nuxie.sdk.runtime.NativeViewModelSchema
+import ai.nuxie.sdk.runtime.NativeViewModelProperty
+import ai.nuxie.sdk.runtime.NativeViewModelWrite
+import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
+import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import ai.nuxie.sdk.runtime.NativeCallResult
 import ai.nuxie.sdk.runtime.NativePlayerInput
 import ai.nuxie.sdk.runtime.NativePlayerPointer
@@ -35,6 +41,35 @@ import kotlinx.serialization.json.long
 
 @RunWith(RobolectricTestRunner::class)
 class ExperienceSurfaceHostPointerTest {
+    @Test
+    fun `environment state queues before loading and updates the retained commerce root`() {
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
+        try {
+            host.updateRuntimeValues(linkedMapOf(
+                "missing" to NuxieViewModelScalarValue.NumberValue(1.0),
+                "safeArea/top" to NuxieViewModelScalarValue.NumberValue(24.0),
+            ))
+            host.loadArtboard(byteArrayOf(1), null, viewModelProjection =
+                NuxieViewModelListProjection("Root", "products", null, "Product", emptyList()))
+            drain(lane)
+            assertEquals(listOf(24f), native.stateAtPlayerCreation)
+            host.updateRuntimeValues(ExperienceSafeAreaInsets(12.0, 0.0, 0.0, 0.0).stateValues())
+            drain(lane)
+            assertEquals(listOf(24f, 12f), native.stateWrites)
+            assertEquals(1, native.playersCreated)
+            host.release()
+            host.updateRuntimeValues(ExperienceSafeAreaInsets.ZERO.stateValues())
+            drain(lane)
+            assertEquals(listOf(24f, 12f), native.stateWrites)
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+        }
+    }
+
     @Test
     fun `resume cancels a delivered press before the next gesture reaches the retained player`() {
         val native = RecordingNative()
@@ -289,6 +324,23 @@ class ExperienceSurfaceHostPointerTest {
         val elapsedSteps = mutableListOf<Float>()
         var playersCreated = 0
         var windowsAcquired = 0
+        val stateWrites = mutableListOf<Float>()
+        val stateAtPlayerCreation = mutableListOf<Float>()
+        override fun viewModelCatalog(fileHandle: Long) = NativeCallResult(0, NativeViewModelCatalog(
+            arrayOf(NativeViewModelSchema(0, "Root", 0, 2, 0, 0, -1, false),
+                NativeViewModelSchema(1, "Product", 2, 0, 0, 0, -1, false)),
+            arrayOf(NativeViewModelProperty(0, 0, "safeArea/top", 2, -1, emptyArray()),
+                NativeViewModelProperty(0, 1, "products", 8, 1, emptyArray())), emptyArray(),
+        ))
+        override fun newDefaultViewModel(artboardHandle: Long) = NativeCallResult(0, 40L)
+        override fun bindViewModel(artboardHandle: Long, viewModelHandle: Long) = 0
+        override fun freeViewModel(handle: Long) = 0
+        override fun mutateViewModel(handle: Long, write: NativeViewModelWrite): Int {
+            assertEquals(40L, handle)
+            assertEquals("safeArea/top", write.path)
+            stateWrites += write.numberValue
+            return 0
+        }
 
         override fun setTextRun(handle: Long, name: String, text: String): NativeCallResult<Boolean> {
             order += "write:$name:$text"
@@ -306,7 +358,7 @@ class ExperienceSurfaceHostPointerTest {
         override fun freeFile(handle: Long) = Unit
         override fun newDefaultArtboard(fileHandle: Long): Long = 2L
         override fun freeArtboard(handle: Long) = Unit
-        override fun newDefaultPlayer(artboardHandle: Long): Long = 3L.also { playersCreated += 1 }
+        override fun newDefaultPlayer(artboardHandle: Long): Long = 3L.also { playersCreated += 1; stateWrites.lastOrNull()?.let(stateAtPlayerCreation::add) }
         override fun freePlayer(handle: Long) = Unit
         override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long = 4L
         override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int = 0

@@ -12,6 +12,7 @@ import ai.nuxie.sdk.runtime.NuxieRuntimePlayer
 import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
 import ai.nuxie.sdk.runtime.NuxieRuntimeWindow
 import ai.nuxie.sdk.runtime.NuxieRuntimeViewModelState
+import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
 import android.content.Context
@@ -73,6 +74,34 @@ internal class ExperienceSurfaceHost(
     private var firstFramePresented = false
     private val unpublishedSteps = ArrayDeque<PublishedStep>()
     private var textInputs: Map<String, ExperienceTextInput> = emptyMap()
+    private val runtimeValues = linkedMapOf<String, NuxieViewModelScalarValue>()
+    private val reportedStatePaths = mutableSetOf<String>()
+
+    /** UI entry point; values submitted before loading are applied to the bound root before player creation. */
+    fun updateRuntimeValues(values: Map<String, NuxieViewModelScalarValue>) {
+        if (released.get()) return
+        val copied = values.toMap()
+        lane.enqueue {
+            if (released.get()) return@enqueue
+            runtimeValues.putAll(copied)
+            applyRuntimeValues(copied)
+        }
+    }
+
+    private fun applyRuntimeValues(values: Map<String, NuxieViewModelScalarValue>) {
+        val boundArtboard = artboard ?: return
+        for ((path, value) in values) {
+            try {
+                val projected = viewModelState
+                if (projected != null) projected.setValue(path, value)
+                else boundArtboard.setDefaultViewModelValue(path, value)
+            } catch (error: Exception) {
+                // Reserved environment fields are optional in older releases. One
+                // rejected field must not prevent valid siblings or close the screen.
+                if (reportedStatePaths.add(path)) Log.w(LOG_TAG, "Experience state path rejected: $path", error)
+            }
+        }
+    }
 
     /**
      * Lane-confined surface attachment. Jobs already queued when the
@@ -208,6 +237,7 @@ internal class ExperienceSurfaceHost(
                 onLoaded?.invoke(false)
                 return@enqueue
             }
+            applyRuntimeValues(runtimeValues)
             player = loadedArtboard.newPlayer()
             if (player == null) {
                 val error = IllegalStateException("Experience player creation failed")
