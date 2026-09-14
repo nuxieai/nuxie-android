@@ -9,6 +9,9 @@ class NuxieConfiguration(val apiKey: String) {
     var environment: NuxieEnvironment = NuxieEnvironment.PRODUCTION
     var logLevel: LogLevel = LogLevel.WARN
 
+    /** Redacts sensitive log fields and error details. Disable only for attended diagnostics. */
+    var redactSensitiveData: Boolean = true
+
     /** TTL in milliseconds for real-time Feature check results (five minutes by default). */
     var featureCacheTTL: Long = 5L * 60L * 1000L
 
@@ -56,4 +59,5 @@ enum class LogLevel {
     WARN,
     INFO,
     DEBUG,
+    VERBOSE,
 }

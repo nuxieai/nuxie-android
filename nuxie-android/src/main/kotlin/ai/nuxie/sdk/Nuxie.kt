@@ -77,7 +77,7 @@ object Nuxie {
     fun setup(context: Context, configuration: NuxieConfiguration) {
         val installed = lifecycle.install(create = {
             require(configuration.apiKey.isNotBlank()) { "apiKey must not be blank." }
-            Log.configure(configuration.logLevel)
+            Log.configure(configuration.logLevel, configuration.redactSensitiveData)
             featureInfoInstance.onFeatureChange = { featureId, oldAccess, newAccess, isCurrent ->
                 deliverFeatureAccessChange(featureId, oldAccess, newAccess, isCurrent)
             }

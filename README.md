@@ -184,3 +184,27 @@ prevent the operation being drained from finishing.
 
 Compatibility note: `shutdown()` previously blocked until cleanup returned. Code
 that immediately sets up another graph must now await `shutdownAndAwait()` first.
+
+### Logging
+
+Configure logging before `Nuxie.setup`:
+
+```kotlin
+val configuration = NuxieConfiguration("pk_live_...").apply {
+    logLevel = LogLevel.WARN
+    redactSensitiveData = true
+}
+Nuxie.setup(applicationContext, configuration)
+```
+
+`WARN` is the default. `NONE` disables SDK output; `ERROR`, `WARN`, `INFO`,
+`DEBUG`, and `VERBOSE` include progressively more diagnostics in logcat.
+Sensitive fields and exception details are redacted by default with summaries
+that correlate repeated values within the process. Static diagnostic text and
+explicit status/count fields remain readable. Kotlin and native bridge warnings
+use the same policy; the SDK leaves the application's stderr alone.
+
+Set `redactSensitiveData = false` only for attended diagnostics that need raw
+values. Setup captures both controls; mutating the configuration or repeating
+setup does not reconfigure an active SDK. Await shutdown before setting up with
+a different policy.
