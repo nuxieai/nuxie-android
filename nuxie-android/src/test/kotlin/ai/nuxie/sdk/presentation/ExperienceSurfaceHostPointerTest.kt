@@ -116,6 +116,15 @@ class ExperienceSurfaceHostPointerTest {
 
     @Test
     fun `unavailable swapchain frame does not activate the screen and later presentation recovers`() {
+        assertUndeliveredFrameRecovers(0)
+    }
+
+    @Test
+    fun `retired surface does not activate the screen and reattachment recovers`() {
+        assertUndeliveredFrameRecovers(3)
+    }
+
+    private fun assertUndeliveredFrameRecovers(disposition: Int) {
         val native = RecordingNative()
         val lane = NuxieRuntimeLane()
         var firstFrames = 0
@@ -132,7 +141,7 @@ class ExperienceSurfaceHostPointerTest {
             host.loadArtboard(byteArrayOf(1), null)
             host.onSurfaceTextureAvailable(texture, 100, 100)
             drain(lane)
-            native.presentation = 0
+            native.presentation = disposition
             host.doFrame(1_000_000_000L)
             drain(lane)
             host.onSurfaceTextureUpdated(texture)

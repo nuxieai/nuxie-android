@@ -544,6 +544,12 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
         val disposition = native.renderAndPresent(
             rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter,
         )
+        // REATTACH retires the surface without delivering a frame. Let the host
+        // schedule its next frame normally, without activating an unseen screen.
+        if (disposition == 3) {
+            attachedWindow = null
+            return 0
+        }
         // Native SUBOPTIMAL retires the surface after delivering this frame.
         // Other errors require explicit recovery; don't reuse cached attachment.
         if (disposition == 2) attachedWindow = null

@@ -204,6 +204,24 @@ class NuxieOwnedRuntimeTest {
     }
 
     @Test
+    fun `surface loss retries attachment without reporting a delivered frame`() {
+        val native = RecordingNative()
+        val runtime = NuxieRuntime(native)
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(100, 200))
+        val file = checkNotNull(runtime.importFile(renderer, byteArrayOf(1)))
+        val player = checkNotNull(checkNotNull(file.newArtboard()).newPlayer())
+        val window = NuxieRuntimeWindow(40L, native)
+        native.presentation = 3
+        assertEquals(0, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(listOf("attach:40"), native.surfaceCalls)
+        native.presentation = 1
+        assertEquals(1, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(listOf("attach:40", "attach:40"), native.surfaceCalls)
+        renderer.close()
+        assertEquals(listOf("attach:40", "attach:40", "detach"), native.surfaceCalls)
+    }
+
+    @Test
     fun `failed surface attachment never renders and resize retires attached surface`() {
         val native = RecordingNative()
         val runtime = NuxieRuntime(native)
