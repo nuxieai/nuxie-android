@@ -882,6 +882,116 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
+    fun sameScreenPreparationPreservesLateEditsAndRestoresInputOnAbort() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val fixture = loadPublishedFixture(instrumentation)
+        val contract = instrumentation.context.assets.open("journeys/planes/navigation-input-handoff-android.json")
+            .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject }
+        fun value(key: String) = contract.getValue(key).jsonPrimitive.content
+        val screen = fixture.release.descriptor.getValue("render").jsonObject
+            .getValue("screens").jsonArray.first().jsonObject
+        val source = PreparedPresentation(fixture.riv, screen.getValue("artboardName").jsonPrimitive.content,
+            android.graphics.Color.WHITE, PresentationShell.FullScreen, screen.getValue("id").jsonPrimitive.content,
+            fixture.release.descriptor, fixture.assets,
+            ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float))
+        val id = UUID.randomUUID().toString()
+        val firstFrame = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>()
+        val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+        instrumentation.addMonitor(monitor)
+        var activity: Activity? = null
+        var pending: PreparedScreenNavigation? = null
+        var expectedPixels: Bitmap? = null
+        PresentationRegistry.register(id, source,
+            onFirstFrame = { approveFixtureFrame(id); firstFrame.countDown() }, onFailure = { failure.set(it) },
+            onDismissed = {}, onOutcome = {})
+        try {
+            instrumentation.targetContext.startActivity(Intent(instrumentation.targetContext, NuxieExperienceActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, id)
+            })
+            val host = checkNotNull(monitor.waitForActivityWithTimeout(15_000)).also { activity = it }
+            assertTrue("Source frame: ${failure.get()}", firstFrame.await(30, TimeUnit.SECONDS))
+            val field = awaitEditor(instrumentation, host, "text-input/screen_1/email_input")
+            for (abort in listOf(true, false)) {
+                edit(instrumentation, field, value("initialDraft"))
+                val outgoingSurface = checkNotNull(findSurface(host.window.decorView))
+                val initialPixels = stableSurface(outgoingSurface)
+                val destinationId = UUID.randomUUID().toString()
+                // This is the service's speculative copy, before the Activity receives the handoff.
+                val destination = source.copy(textInputState = source.textInputState.copyForPreparation(),
+                    screenLifecycle = source.screenLifecycle.copyForPreparation())
+                edit(instrumentation, field, value("latestDraft"))
+                expectedPixels?.recycle()
+                expectedPixels = stableSurface(outgoingSurface)
+                try {
+                    assertTrue("The late edit must change native glyphs", changedPixels(initialPixels,
+                        checkNotNull(expectedPixels), Rect(0, 0, initialPixels.width, initialPixels.height)) > 20)
+                } finally { initialPixels.recycle() }
+                var connection: android.view.inputmethod.InputConnection? = null
+                instrumentation.runOnMainSync {
+                    field.setSelection(1, 3)
+                    connection = field.onCreateInputConnection(android.view.inputmethod.EditorInfo())
+                }
+                pending = runBlocking { kotlinx.coroutines.withTimeout(15_000) {
+                    checkNotNull(PresentationRegistry.currentScreen(id)).prepareNavigation(destinationId, destination)
+                } }
+                instrumentation.runOnMainSync {
+                    assertFalse("Outgoing editor must be frozen through native preparation", field.isEnabled)
+                    checkNotNull(connection).commitText(value("staleImeDraft"), 1)
+                    fun editors(view: View): List<EditText> = (if (view is EditText) listOf(view) else emptyList()) +
+                        if (view is ViewGroup) (0 until view.childCount).flatMap { editors(view.getChildAt(it)) } else emptyList()
+                    val incoming = editors(host.window.decorView).single { it !== field && it.tag == field.tag }
+                    assertEquals(value("latestDraft"), incoming.text.toString())
+                    assertEquals(1, incoming.selectionStart)
+                    assertEquals(3, incoming.selectionEnd)
+                }
+                assertEquals(contract.getValue("destinationAppearances").jsonPrimitive.long.toULong(),
+                    destination.screenLifecycle.appearances)
+                assertEquals(contract.getValue("initialAppearances").jsonPrimitive.long.toULong(), source.screenLifecycle.appearances)
+                if (abort) {
+                    runBlocking { checkNotNull(pending).abort() }
+                    pending = null
+                    instrumentation.runOnMainSync {
+                        assertTrue(field.isEnabled)
+                        assertEquals(value("latestDraft"), field.text.toString())
+                        assertEquals(1, field.selectionStart)
+                        assertEquals(3, field.selectionEnd)
+                    }
+                    edit(instrumentation, field, "Resumed")
+                } else {
+                    runBlocking { checkNotNull(pending).awaitExit() }
+                    val activated = CountDownLatch(1)
+                    PresentationRegistry.register(destinationId, destination,
+                        onFirstFrame = { approveFixtureFrame(destinationId); activated.countDown() },
+                        onFailure = { failure.set(it) }, onDismissed = {}, onOutcome = {})
+                    checkNotNull(pending).activate()
+                    pending = null
+                    assertTrue("Destination activation: ${failure.get()}", activated.await(10, TimeUnit.SECONDS))
+                    val incoming = awaitEditor(instrumentation, host, "text-input/screen_1/email_input")
+                    instrumentation.runOnMainSync {
+                        assertTrue(incoming.isEnabled)
+                        assertEquals(value("latestDraft"), incoming.text.toString())
+                    }
+                    val actual = stableSurface(checkNotNull(findSurface(host.window.decorView)))
+                    try {
+                        assertEquals("The native destination must render the late draft exactly", 0,
+                            changedPixels(checkNotNull(expectedPixels), actual, Rect(0, 0, actual.width, actual.height)))
+                    } finally { actual.recycle() }
+                    assertSame(host, PresentationRegistry.currentScreen(destinationId)?.purchaseActivity())
+                }
+            }
+        } finally {
+            expectedPixels?.recycle()
+            runBlocking { pending?.abort() }
+            instrumentation.runOnMainSync { activity?.finish() }
+            instrumentation.removeMonitor(monitor)
+            PresentationRegistry.clearForTesting()
+        }
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
     fun drawerClipsNativeContentAlongWithItsRenderedSurface() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
