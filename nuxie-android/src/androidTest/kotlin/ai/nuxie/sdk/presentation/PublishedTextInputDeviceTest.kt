@@ -50,7 +50,7 @@ import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.view.PixelCopy
-import android.view.SurfaceView
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import androidx.test.filters.SdkSuppress
@@ -751,7 +751,7 @@ class PublishedTextInputDeviceTest {
         }
     }
 
-    private fun composedSurface(instrumentation: Instrumentation, surface: SurfaceView): Bitmap {
+    private fun composedSurface(instrumentation: Instrumentation, surface: TextureView): Bitmap {
         val bounds = Rect()
         instrumentation.runOnMainSync { assertTrue(surface.getGlobalVisibleRect(bounds)) }
         val display = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
@@ -767,7 +767,7 @@ class PublishedTextInputDeviceTest {
         }
     }
 
-    private fun stableSurface(surface: SurfaceView): Bitmap {
+    private fun stableSurface(surface: TextureView): Bitmap {
         var previous = copySurface(surface)
         var unchanged = 0
         val deadline = SystemClock.elapsedRealtime() + 5_000
@@ -887,22 +887,18 @@ class PublishedTextInputDeviceTest {
         }
     }
 
-    private fun findSurface(view: View): SurfaceView? {
-        if (view is SurfaceView) return view
+    private fun findSurface(view: View): TextureView? {
+        if (view is TextureView) return view
         if (view is ViewGroup) for (index in 0 until view.childCount) {
             findSurface(view.getChildAt(index))?.let { return it }
         }
         return null
     }
 
-    private fun copySurface(surface: SurfaceView): Bitmap {
-        val bitmap = Bitmap.createBitmap(surface.width, surface.height, Bitmap.Config.ARGB_8888)
-        val done = CountDownLatch(1)
-        var status = -1
-        PixelCopy.request(surface, bitmap, { result -> status = result; done.countDown() }, Handler(Looper.getMainLooper()))
-        assertTrue("Surface pixel copy must finish", done.await(5, TimeUnit.SECONDS))
-        assertEquals("Surface pixel copy must succeed", PixelCopy.SUCCESS, status)
-        return bitmap
+    private fun copySurface(surface: TextureView): Bitmap {
+        var bitmap: Bitmap? = null
+        InstrumentationRegistry.getInstrumentation().runOnMainSync { bitmap = surface.bitmap }
+        return checkNotNull(bitmap) { "Runtime texture must contain a composed frame" }
     }
 
     private fun changedPixels(before: Bitmap, after: Bitmap, region: Rect): Int {

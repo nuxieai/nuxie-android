@@ -15,12 +15,9 @@ import ai.nuxie.sdk.runtime.NuxieCpuFrame
 import ai.nuxie.sdk.runtime.NuxieRuntime
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import ai.nuxie.sdk.runtime.NuxieTypedRuntimeNative
-import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.view.MotionEvent
 import android.view.Surface
-import android.view.SurfaceHolder
-import java.lang.reflect.Proxy
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
@@ -79,13 +76,14 @@ class ExperienceSurfaceHostPointerTest {
             artboardSize = ExperienceArtboardSize(400f, 200f), runtime = NuxieRuntime(native))
         host.layout(0, 0, 1_000, 1_000)
         val texture = SurfaceTexture(0)
-        val surface = Surface(texture)
         try {
             host.loadArtboard(byteArrayOf(1), null)
-            host.surfaceCreated(holder(surface))
+            host.onSurfaceTextureAvailable(texture, 1_000, 1_000)
             val down = motion(MotionEvent.ACTION_DOWN, 1_000, 500f, 500f)
             try { assertTrue(host.onTouchEvent(down)) } finally { down.recycle() }
             host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
             drain(lane)
             assertEquals(listOf(NativePlayerPointer(0, 200f, 100f, 0, 1f)), native.pointerSteps.single())
             host.setPresentationVisible(false)
@@ -96,6 +94,8 @@ class ExperienceSurfaceHostPointerTest {
             try { assertTrue(host.onTouchEvent(next)) } finally { next.recycle() }
             host.doFrame(100_000_000_000L)
             drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
             assertEquals(listOf(
                 NativePlayerPointer(3, 200f, 100f, 0, 1f),
                 NativePlayerPointer(0, 300f, 100f, 0, 100f),
@@ -103,10 +103,10 @@ class ExperienceSurfaceHostPointerTest {
             assertEquals(listOf(0f, 0f), native.elapsedSteps)
             assertEquals(1, native.playersCreated)
         } finally {
+            host.onSurfaceTextureDestroyed(texture)
             host.release()
             lane.shutdown()
             assertTrue(lane.awaitQuiescence(2_000))
-            surface.release()
             texture.release()
         }
     }
@@ -119,21 +119,26 @@ class ExperienceSurfaceHostPointerTest {
         val lane = NuxieRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
             artboardSize = ExperienceArtboardSize(400f, 200f), runtime = NuxieRuntime(native))
-        val texture = SurfaceTexture(0)
-        val surface = Surface(texture)
+        var texture = SurfaceTexture(0)
         try {
             host.setPresentationVisible(fixture.getValue("initialVisible").jsonPrimitive.boolean)
             host.loadArtboard(byteArrayOf(1), null)
             for (value in fixture.getValue("steps").jsonArray) {
                 val step = value.jsonObject
                 when (step.getValue("action").jsonPrimitive.content) {
-                    "attach" -> host.surfaceCreated(holder(surface))
-                    "detach" -> host.surfaceDestroyed(holder(surface))
+                    "attach" -> {
+                        texture.release()
+                        texture = SurfaceTexture(0)
+                        host.onSurfaceTextureAvailable(texture, 1_000, 1_000)
+                    }
+                    "detach" -> host.onSurfaceTextureDestroyed(texture)
                     "visible" -> host.setPresentationVisible(step.getValue("value").jsonPrimitive.boolean)
                     "release" -> host.release()
                     "frame" -> {
                         val before = native.elapsedSteps.size
                         host.doFrame(step.getValue("nanos").jsonPrimitive.long)
+                        drain(lane)
+                        host.onSurfaceTextureUpdated(texture)
                         drain(lane)
                         val expected = step.getValue("elapsed")
                         if (expected == JsonNull) assertEquals(step.toString(), before, native.elapsedSteps.size)
@@ -145,14 +150,16 @@ class ExperienceSurfaceHostPointerTest {
                     else -> error("Unknown visibility fixture action")
                 }
                 drain(lane)
+                host.onSurfaceTextureUpdated(texture)
+                drain(lane)
             }
             assertEquals("Visibility changes retain the same player", 1, native.playersCreated)
             assertEquals("Only actual surface reattachment acquires another window", 2, native.windowsAcquired)
         } finally {
+            host.onSurfaceTextureDestroyed(texture)
             host.release()
             lane.shutdown()
             assertTrue(lane.awaitQuiescence(2_000))
-            surface.release()
             texture.release()
         }
     }
@@ -165,16 +172,19 @@ class ExperienceSurfaceHostPointerTest {
             artboardSize = ExperienceArtboardSize(400f, 200f), runtime = NuxieRuntime(native))
         host.layout(0, 0, 1_000, 1_000)
         val texture = SurfaceTexture(0)
-        val surface = Surface(texture)
         val blocked = CountDownLatch(1)
         val resume = CountDownLatch(1)
         try {
             host.loadArtboard(byteArrayOf(1), null)
-            host.surfaceCreated(holder(surface))
+            host.onSurfaceTextureAvailable(texture, 1_000, 1_000)
             host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
             drain(lane)
             val staged = motion(MotionEvent.ACTION_DOWN, 1_001, 500f, 500f)
             try { assertTrue(host.onTouchEvent(staged)) } finally { staged.recycle() }
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
             drain(lane)
             lane.enqueue { blocked.countDown(); check(resume.await(5, TimeUnit.SECONDS)) }
             assertTrue(blocked.await(2, TimeUnit.SECONDS))
@@ -186,9 +196,13 @@ class ExperienceSurfaceHostPointerTest {
             host.setPresentationVisible(true)
             resume.countDown()
             drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
             assertEquals(listOf(0f), native.elapsedSteps)
             host.doFrame(100_000_000_000L)
             host.doFrame(100_010_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
             drain(lane)
             assertEquals(listOf(0f, 0f, 0.01f), native.elapsedSteps)
             assertTrue("Pre-hide input must not reach the resumed player", native.pointerSteps.all { it.isEmpty() })
@@ -197,7 +211,6 @@ class ExperienceSurfaceHostPointerTest {
             host.release()
             lane.shutdown()
             assertTrue(lane.awaitQuiescence(2_000))
-            surface.release()
             texture.release()
         }
     }
@@ -210,13 +223,14 @@ class ExperienceSurfaceHostPointerTest {
             artboardSize = ExperienceArtboardSize(400f, 200f), runtime = NuxieRuntime(native))
         host.layout(0, 0, 1_000, 1_000)
         val surfaceTexture = SurfaceTexture(0)
-        val surface = Surface(surfaceTexture)
         val blocked = CountDownLatch(1)
         val resume = CountDownLatch(1)
         try {
             host.loadArtboard(byteArrayOf(1), null,
                 textInputs = ExperienceTextInput.forScreen(textInputDescriptor(), "survey"))
-            host.surfaceCreated(holder(surface))
+            host.onSurfaceTextureAvailable(surfaceTexture, 1_000, 1_000)
+            drain(lane)
+            host.onSurfaceTextureUpdated(surfaceTexture)
             drain(lane)
             lane.enqueue { blocked.countDown(); check(resume.await(2, TimeUnit.SECONDS)) }
             assertTrue(blocked.await(2, TimeUnit.SECONDS))
@@ -226,7 +240,11 @@ class ExperienceSurfaceHostPointerTest {
             try { assertTrue(host.onTouchEvent(tap)) } finally { tap.recycle() }
             resume.countDown()
             drain(lane)
+            host.onSurfaceTextureUpdated(surfaceTexture)
+            drain(lane)
             host.doFrame(1_016_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(surfaceTexture)
             drain(lane)
             assertEquals(listOf("frame:0", "write:headline:ok", "frame:1"), native.order)
         } finally {
@@ -234,7 +252,6 @@ class ExperienceSurfaceHostPointerTest {
             host.release()
             lane.shutdown()
             assertTrue(lane.awaitQuiescence(2_000))
-            surface.release()
             surfaceTexture.release()
         }
     }
@@ -252,7 +269,6 @@ class ExperienceSurfaceHostPointerTest {
         host.layout(0, 0, 1_000, 1_000)
         val loaded = CountDownLatch(1)
         val surfaceTexture = SurfaceTexture(0)
-        val surface = Surface(surfaceTexture)
 
         try {
             host.loadArtboard(byteArrayOf(1), artboardName = null) { succeeded ->
@@ -260,7 +276,9 @@ class ExperienceSurfaceHostPointerTest {
                 loaded.countDown()
             }
             assertTrue("runtime did not load", loaded.await(2, TimeUnit.SECONDS))
-            host.surfaceCreated(holder(surface))
+            host.onSurfaceTextureAvailable(surfaceTexture, 1_000, 1_000)
+            drain(lane)
+            host.onSurfaceTextureUpdated(surfaceTexture)
             drain(lane)
 
             val down = motion(MotionEvent.ACTION_DOWN, 1_000, 500f, 500f)
@@ -273,6 +291,8 @@ class ExperienceSurfaceHostPointerTest {
                 up.recycle()
             }
             host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(surfaceTexture)
             drain(lane)
 
             assertEquals(
@@ -291,10 +311,10 @@ class ExperienceSurfaceHostPointerTest {
                 afterRelease.recycle()
             }
         } finally {
+            host.onSurfaceTextureDestroyed(surfaceTexture)
             host.release()
             lane.shutdown()
             assertTrue("runtime lane did not stop", lane.awaitQuiescence(2_000))
-            surface.release()
             surfaceTexture.release()
         }
     }
@@ -307,17 +327,6 @@ class ExperienceSurfaceHostPointerTest {
 
     private fun motion(action: Int, eventTime: Long, x: Float, y: Float): MotionEvent =
         MotionEvent.obtain(0, eventTime, action, x, y, 0)
-
-    private fun holder(surface: Surface): SurfaceHolder = Proxy.newProxyInstance(
-        SurfaceHolder::class.java.classLoader,
-        arrayOf(SurfaceHolder::class.java),
-    ) { _, method, _ ->
-        when (method.name) {
-            "getSurface" -> surface
-            "getSurfaceFrame" -> Rect(0, 0, 1_000, 1_000)
-            else -> error("Unexpected SurfaceHolder call ${method.name}")
-        }
-    } as SurfaceHolder
 
     private class RecordingNative : NuxieTypedRuntimeNative {
         val pointerSteps = mutableListOf<List<NativePlayerPointer>>()

@@ -89,7 +89,7 @@ internal class NuxieExperienceActivity : Activity() {
                 this@NuxieExperienceActivity, prepared, this, ::fail,
             )
             mounted = resources
-            return shellView(resources.mount(), prepared.shell, resources.surface).also { view = it }
+            return resources.mount().also { view = it }
         }
 
         fun close(changingConfigurations: Boolean) {
@@ -188,6 +188,10 @@ internal class NuxieExperienceActivity : Activity() {
                 target.registered = true
                 currentScreen = target
                 dismissible = target.prepared.shell.dismissible
+                if (target.prepared.shell != source.prepared.shell) {
+                    (contentRoot.parent as? android.view.ViewGroup)?.removeView(contentRoot)
+                    setContentView(shellView(contentRoot, target.prepared.shell))
+                }
                 intent.putExtra(EXTRA_PRESENTATION_ID, target.id)
                 target.view?.bringToFront()
                 source.view?.let(contentRoot::removeView)
@@ -264,7 +268,7 @@ internal class NuxieExperienceActivity : Activity() {
         try {
             contentRoot = FrameLayout(this)
             contentRoot.addView(screen.mount(), FrameLayout.LayoutParams(-1, -1))
-            setContentView(contentRoot)
+            setContentView(shellView(contentRoot, prepared.shell))
             screen.mounted?.observeWindow()
         } catch (error: Throwable) {
             screen.fail(error)
@@ -378,7 +382,12 @@ internal class NuxieExperienceActivity : Activity() {
         currentScreen?.finishTerminal(reason)
     }
 
-    private fun shellView(host: View, shell: PresentationShell, surface: View? = null): View {
+    private fun shellView(host: View, shell: PresentationShell): View {
+        host.clipToOutline = false
+        host.outlineProvider = ViewOutlineProvider.BACKGROUND
+        host.background = null
+        host.isClickable = false
+        host.layoutParams = FrameLayout.LayoutParams(-1, -1)
         if (shell is PresentationShell.FullScreen) return host
 
         val root = FrameLayout(this)
@@ -397,10 +406,8 @@ internal class NuxieExperienceActivity : Activity() {
         )
         host.isClickable = true
         if (shell is PresentationShell.Drawer) {
-            // The SurfaceView has its own composition layer. Clip it and the
-            // common content parent so native editable controls share the shell.
+            // Clip the runtime texture and the native editable controls to the same shell.
             applyRoundedOutline(host, shell.cornerRadiusDp)
-            surface?.takeIf { it !== host }?.let { applyRoundedOutline(it, shell.cornerRadiusDp) }
         }
         root.addView(host, shellLayoutParams(shell))
         return root

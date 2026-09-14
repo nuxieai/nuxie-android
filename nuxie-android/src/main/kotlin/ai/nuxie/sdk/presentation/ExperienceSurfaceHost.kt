@@ -16,21 +16,19 @@ import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
 import android.content.Context
-import android.graphics.PixelFormat
+import android.graphics.SurfaceTexture
 import android.util.Log
 import android.view.Choreographer
 import android.view.MotionEvent
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.view.Surface
+import android.view.TextureView
 import java.io.File
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.serialization.json.JsonObject
 
 /**
- * SurfaceView host driving the engine's headless Android Vulkan renderer:
+ * TextureView host driving the engine's headless Android Vulkan renderer:
  * Kotlin owns the frame clock (Choreographer) and issues one render per frame
  * per the iOS frame-ownership contract; the engine has no independent loop.
  * Session and surface lifetimes are separate: surface destroy/recreate
@@ -47,7 +45,7 @@ internal class ExperienceSurfaceHost(
     private val listener: Listener? = null,
     artboardSize: ExperienceArtboardSize? = null,
     private val runtime: NuxieRuntime = NuxieRuntime.shared,
-) : SurfaceView(context), SurfaceHolder.Callback, Choreographer.FrameCallback {
+) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
     interface Listener {
         fun onFirstFrame()
         fun onRuntimeStep(
@@ -71,7 +69,9 @@ internal class ExperienceSurfaceHost(
     private var artboard: NuxieRuntimeArtboard? = null
     private var viewModelState: NuxieRuntimeViewModelState? = null
     private var nextCorrelationId = 1uL
-    private var firstFramePresented = false
+    @Volatile private var firstFramePresented = false
+    @Volatile private var firstFrameComposed = false
+    private var androidSurface: Surface? = null
     private val unpublishedSteps = ArrayDeque<PublishedStep>()
     private var textInputs: Map<String, ExperienceTextInput> = emptyMap()
     private val runtimeValues = linkedMapOf<String, NuxieViewModelScalarValue>()
@@ -121,8 +121,8 @@ internal class ExperienceSurfaceHost(
     private val pointerInput = ExperienceRuntimePointerInput(artboardSize)
 
     init {
-        holder.setFormat(PixelFormat.TRANSLUCENT)
-        holder.addCallback(this)
+        isOpaque = false
+        surfaceTextureListener = this
     }
 
     /**
@@ -300,12 +300,10 @@ internal class ExperienceSurfaceHost(
         }
     }
 
-    override fun surfaceCreated(holder: SurfaceHolder) {
+    override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
         if (released.get()) return
-        val frame = holder.surfaceFrame
-        val width = (frame?.width() ?: width).coerceAtLeast(1)
-        val height = (frame?.height() ?: height).coerceAtLeast(1)
-        val surface = holder.surface
+        val surface = Surface(texture)
+        androidSurface = surface
         lane.enqueue {
             // Attach only once both the headless renderer and this surface's
             // window exist; a failed create/acquire keeps the frame gate shut.
@@ -340,7 +338,7 @@ internal class ExperienceSurfaceHost(
         updateFrameScheduling()
     }
 
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+    override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
         lane.enqueue {
             if (attached) {
                 renderer?.resize(
@@ -351,31 +349,41 @@ internal class ExperienceSurfaceHost(
         }
     }
 
-    override fun surfaceDestroyed(holder: SurfaceHolder) {
+    override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
         surfaceAvailable = false
         updateFrameScheduling()
-        // Session state (player/artboard) survives; only presentation stops.
-        // The Surface contract requires rendering to have stopped before
-        // this callback returns, so block until the lane drains past the
-        // detach marker; a FIFO marker alone would let already-queued
-        // frames render to the dead surface after we return.
-        val detached = CountDownLatch(1)
+        val surface = androidSurface
+        androidSurface = null
+        val releaseTexture: () -> Unit = {
+            try { surface?.release() } finally { texture.release() }
+        }
         val accepted = lane.enqueue {
-            attached = false
-            window?.close()
-            window = null
-            detached.countDown()
+            try {
+                attached = false
+                window?.close()
+                window = null
+            } finally {
+                releaseTexture()
+            }
         }
-        // A rejected marker means the lane is shutting down, but orderly
-        // shutdown still drains frames accepted before it; wait for full
-        // termination instead so none of them can touch the dead surface.
-        val drained = if (accepted) {
-            detached.await(SURFACE_DETACH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        } else {
-            lane.awaitQuiescence(SURFACE_DETACH_TIMEOUT_MS)
+        if (!accepted) lane.afterTermination(releaseTexture)
+        // Keep ownership until queued native rendering has drained. TextureView
+        // must not release this texture when the callback returns.
+        return false
+    }
+
+    override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {
+        if (!released.get() && firstFramePresented && !firstFrameComposed) {
+            firstFrameComposed = true
+            listener?.onFirstFrame()
+            lane.enqueue { if (!released.get()) publishSteps() }
         }
-        if (!drained) {
-            Log.w(LOG_TAG, "Runtime lane did not confirm surface detach in time")
+    }
+
+    private fun publishSteps() {
+        while (firstFrameComposed && unpublishedSteps.isNotEmpty()) {
+            val step = unpublishedSteps.removeFirst()
+            listener?.onRuntimeStep(step.outcome, step.correlationId, step.viewModelSnapshot)
         }
     }
 
@@ -451,16 +459,8 @@ internal class ExperienceSurfaceHost(
                 }
                 if (!firstFramePresented) {
                     firstFramePresented = true
-                    listener?.onFirstFrame()
                 }
-                while (unpublishedSteps.isNotEmpty()) {
-                    val step = unpublishedSteps.removeFirst()
-                    listener?.onRuntimeStep(
-                        step.outcome,
-                        step.correlationId,
-                        step.viewModelSnapshot,
-                    )
-                }
+                publishSteps()
             }
             if (outcome.events.isNotEmpty()) {
                 post {
@@ -568,11 +568,5 @@ internal class ExperienceSurfaceHost(
         const val CLEAR_COLOR_OPAQUE_BLACK = 0xFF000000.toInt()
         const val NUX_STATUS_OK = 0
 
-        /**
-         * Bound on the surfaceDestroyed drain. A frame takes milliseconds;
-         * this only trips if the runtime lane is wedged, and then leaking
-         * one frame to a dead surface beats deadlocking the main thread.
-         */
-        const val SURFACE_DETACH_TIMEOUT_MS = 1_000L
     }
 }
