@@ -22,6 +22,10 @@ import java.util.IdentityHashMap
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CompletableJob
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.NonCancellable
@@ -381,7 +385,7 @@ internal class ExperiencePresentationService(
         var navigationHistory: List<String> = emptyList(),
         var lifecycleByScreen: MutableMap<String, ExperienceScreenLifecycle> = mutableMapOf(),
         var textInputsByScreen: MutableMap<String, ExperienceTextInputState> = mutableMapOf(),
-        val commerce: JourneyCommerceSession? = null,
+        var commerce: JourneyCommerceSession? = null,
     )
 
     private data class NavigationDismissal(
@@ -416,6 +420,7 @@ internal class ExperiencePresentationService(
         val descriptor: JsonObject,
         val acquired: AcquiredJourneyRelease,
         val screen: AuthenticatedPresentationScreen,
+        val commerceSession: JourneyCommerceSession?,
         val viewModelProjection: NuxieViewModelListProjection? = null,
     )
 
@@ -434,6 +439,15 @@ internal class ExperiencePresentationService(
             }
         }
     }
+
+    private class PreparationAttempt(
+        val request: PresentationRequest,
+        val journeyId: String?,
+        val job: CompletableJob,
+        val finished: CompletableDeferred<Unit> = CompletableDeferred(),
+    )
+
+    private var preparation: PreparationAttempt? = null
 
     private val presentationMutex = Mutex()
     private val stateLock = Any()
@@ -511,30 +525,6 @@ internal class ExperiencePresentationService(
         val reserved = reservation as? JourneyReservation
         val request = reserved?.request ?: captureRequest(ownerDistinctId)
         if (request.ownerDistinctId != ownerDistinctId) throw declinedPresentation()
-        val commerceSession = try {
-            commerce.prepare(release)
-        } catch (error: Throwable) {
-            if (error is CancellationException) throw error
-            throw ExperiencePresentationException(
-                ExperiencePresentationException.Reason.PRODUCTS_UNAVAILABLE,
-                "Journey product preparation failed: ${error.message ?: "unknown error"}",
-                error,
-            )
-        }
-        val viewModelProjection = try {
-            GooglePlayProductViewModelProjection.prepare(
-                descriptor = release.descriptor,
-                products = commerceSession?.products.orEmpty(),
-                screenId = screenId,
-            )
-        } catch (error: Throwable) {
-            if (error is CancellationException) throw error
-            throw ExperiencePresentationException(
-                ExperiencePresentationException.Reason.PRODUCTS_UNAVAILABLE,
-                "Journey product projection failed: ${error.message ?: "unknown error"}",
-                error,
-            )
-        }
         return presentPrepared(
             transition = transition,
             request = request,
@@ -556,16 +546,41 @@ internal class ExperiencePresentationService(
                     onPresentationRevealed = onPresentationRevealed,
                     onOpenLink = openLink,
                 ),
-                commerce = commerceSession,
             ),
             canPresent = canPresent,
         ) {
+            val commerceSession = try {
+                commerce.prepare(release)
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                throw ExperiencePresentationException(
+                    ExperiencePresentationException.Reason.PRODUCTS_UNAVAILABLE,
+                    "Journey product preparation failed: ${error.message ?: "unknown error"}",
+                    error,
+                )
+            }
+            currentCoroutineContext().ensureActive()
+            val viewModelProjection = try {
+                GooglePlayProductViewModelProjection.prepare(
+                    descriptor = release.descriptor,
+                    products = commerceSession?.products.orEmpty(),
+                    screenId = screenId,
+                )
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                throw ExperiencePresentationException(
+                    ExperiencePresentationException.Reason.PRODUCTS_UNAVAILABLE,
+                    "Journey product projection failed: ${error.message ?: "unknown error"}",
+                    error,
+                )
+            }
             val screen = AuthenticatedPresentationScreen.resolve(release, screenId)
             PreparedSource(
                 identity = release.identity,
                 descriptor = release.descriptor,
                 acquired = acquire(),
                 screen = screen,
+                commerceSession = commerceSession,
                 viewModelProjection = viewModelProjection,
             )
         }
@@ -582,6 +597,7 @@ internal class ExperiencePresentationService(
         prepare: suspend () -> PreparedSource,
     ): ExperienceRef {
         val active = presentationMutex.withLock {
+            val attempt = PreparationAttempt(request, journeyId, Job(currentCoroutineContext()[Job]))
             var transitionClaimed = false
             var published = false
             var unownedAcquisition: AcquiredJourneyRelease? = null
@@ -589,7 +605,7 @@ internal class ExperiencePresentationService(
             val nativePreparationFinished = CompletableDeferred<Unit>()
             try {
                 val existing = synchronized(stateLock) {
-                    if (!isCurrentIdentity(request) || !canPresent()) {
+                    if (!attempt.job.isActive || !isCurrentIdentity(request) || !canPresent()) {
                         throw supersededByIdentityTransition()
                     }
                     val active = current
@@ -610,6 +626,7 @@ internal class ExperiencePresentationService(
                     if (transitionInProgress) throw declinedPresentation()
                     transitionInProgress = true
                     transitionClaimed = true
+                    preparation = attempt
                     active
                 }
                 if (!runtimeAvailable()) {
@@ -620,7 +637,10 @@ internal class ExperiencePresentationService(
                 }
 
                 val source = try {
-                    prepare().also { unownedAcquisition = it.acquired }
+                    withContext(attempt.job) {
+                        // Capture ownership before withContext can discard a late result on cancellation.
+                        prepare().also { unownedAcquisition = it.acquired }
+                    }
                 } catch (error: Throwable) {
                     if (error is CancellationException) throw error
                     if (error is ExperiencePresentationException) throw error
@@ -633,7 +653,7 @@ internal class ExperiencePresentationService(
                 // Acquisition is reversible; keep the outgoing presentation alive
                 // until artifacts exist and its ownership is still current.
                 synchronized(stateLock) {
-                    if (!isCurrentIdentity(request) || !canPresent() || current !== existing ||
+                    if (!attempt.job.isActive || !isCurrentIdentity(request) || !canPresent() || current !== existing ||
                         existing?.outcomeReason?.get() != null) {
                         throw supersededByIdentityTransition()
                     }
@@ -642,6 +662,7 @@ internal class ExperiencePresentationService(
                     existing?.nativePreparationFinished = nativePreparationFinished
                 }
 
+                journey.commerce = source.commerceSession
                 existing?.takeIf {
                     val previous = it.acquired.identity
                     previous.streamKey == source.identity.streamKey &&
@@ -691,7 +712,7 @@ internal class ExperiencePresentationService(
                 // of the destination's first-frame timeout.
                 navigation?.awaitExit()
                 synchronized(stateLock) {
-                    if (!isCurrentIdentity(request) || !canPresent() || current !== existing) {
+                    if (!attempt.job.isActive || !isCurrentIdentity(request) || !canPresent() || current !== existing) {
                         throw supersededByIdentityTransition()
                     }
                 }
@@ -712,7 +733,7 @@ internal class ExperiencePresentationService(
                         ?: (outgoing.navigationHistory + outgoing.screenId)
                     val dismissal = dismissForNavigation(outgoing, incoming.screenId)
                     synchronized(stateLock) {
-                        if (!isCurrentIdentity(request) || !canPresent() || current !== existing ||
+                        if (!attempt.job.isActive || !isCurrentIdentity(request) || !canPresent() || current !== existing ||
                             it.outcomeReason.get() != null) {
                             throw supersededByIdentityTransition()
                         }
@@ -745,7 +766,7 @@ internal class ExperiencePresentationService(
                     val reservationStillMatches = reservationId != null &&
                         pendingReservation?.id == reservationId &&
                         pendingReservation?.request == request
-                    if (!isCurrentIdentity(request) || !canPresent() ||
+                    if (!attempt.job.isActive || !isCurrentIdentity(request) || !canPresent() ||
                         (existing == null && reservationRequired && !reservationStillMatches) ||
                         (navigation != null && current !== existing) ||
                         existing?.outcomeReason?.get()?.let { it != CloseReason.JourneyNavigation } == true
@@ -794,19 +815,28 @@ internal class ExperiencePresentationService(
                     runCatching { navigation?.abort() }.exceptionOrNull()?.let(error::addSuppressed)
                 }
                 runCatching { unownedAcquisition?.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                if (error is CancellationException && !attempt.job.isActive &&
+                    currentCoroutineContext()[Job]?.isActive == true) {
+                    // Owned withdrawal is a presentation result, not cancellation of the Journey worker.
+                    throw ExperiencePresentationException(
+                        ExperiencePresentationException.Reason.SUPERSEDED,
+                        "Presentation preparation was withdrawn", error,
+                    )
+                }
                 throw error
             } finally {
-                nativePreparationFinished.complete(Unit)
-                if (transitionClaimed) {
-                    synchronized(stateLock) {
+                synchronized(stateLock) {
+                    if (preparation === attempt) preparation = null
+                    if (transitionClaimed) {
                         transitionInProgress = false
-                        if (!published && reservationId != null &&
-                            pendingReservation?.id == reservationId
-                        ) {
+                        if (!published && reservationId != null && pendingReservation?.id == reservationId) {
                             pendingReservation = null
                         }
                     }
                 }
+                attempt.job.complete()
+                nativePreparationFinished.complete(Unit)
+                attempt.finished.complete(Unit)
             }
         }
         return try {
@@ -1028,14 +1058,25 @@ internal class ExperiencePresentationService(
     }
 
     fun dismiss(reason: CloseReason = CloseReason.UserDismissed) {
-        synchronized(stateLock) { current }?.let { active ->
+        val active = synchronized(stateLock) {
+            preparation?.job?.cancel()
+            current
+        }
+        active?.let { active ->
             PresentationRegistry.dismiss(active.id, reason)
             attemptOutcome(active, reason)
         }
     }
 
     suspend fun dismissFromHost(initiatingDistinctId: String) {
-        val active = synchronized(stateLock) { current } ?: return
+        val (active, attempt) = synchronized(stateLock) {
+            preparation?.job?.cancel()
+            current to preparation
+        }
+        if (active == null) {
+            attempt?.finished?.await()
+            return
+        }
         val teardownReason = if (active.ownerDistinctId == initiatingDistinctId) {
             CloseReason.HostDismissed
         } else {
@@ -1048,6 +1089,7 @@ internal class ExperiencePresentationService(
         val nativePreparation = synchronized(stateLock) { active.nativePreparationFinished }
         joinAll(active.finished, active.runTransitionFinished)
         nativePreparation?.await()
+        attempt?.finished?.await()
     }
 
     /**
@@ -1055,31 +1097,45 @@ internal class ExperiencePresentationService(
      * an owner-attributed identity terminal transition without a close fact.
      */
     suspend fun shutdownOwnedBy(ownerDistinctId: String) {
-        synchronized(stateLock) {
+        val (active, attempt) = synchronized(stateLock) {
+            val departing = current?.takeIf { it.ownerDistinctId == ownerDistinctId }
             identityEpochByOwner[ownerDistinctId] =
                 (identityEpochByOwner[ownerDistinctId] ?: 0L) + 1L
             if (pendingReservation?.request?.ownerDistinctId == ownerDistinctId) {
                 pendingReservation = null
             }
+            val pending = preparation?.takeIf { it.request.ownerDistinctId == ownerDistinctId }
+                ?.also { it.job.cancel() }
+            departing to pending
         }
-        val active = synchronized(stateLock) {
-            current?.takeIf { it.ownerDistinctId == ownerDistinctId }
-        } ?: return
+        if (active == null) {
+            attempt?.finished?.await()
+            return
+        }
         PresentationRegistry.dismiss(active.id, CloseReason.IdentityChanged)
         attemptOutcome(active, CloseReason.IdentityChanged)
         val nativePreparation = synchronized(stateLock) { active.nativePreparationFinished }
         joinAll(active.finished, active.runTransitionFinished)
         nativePreparation?.await()
+        attempt?.finished?.await()
     }
 
     /** Closes only the terminal Journey surface without injecting another outcome. */
     suspend fun shutdownJourney(ownerDistinctId: String, journeyId: String) {
-        val active = synchronized(stateLock) {
-            current?.takeIf { it.isOwnedBy(journeyId, ownerDistinctId) }
-        } ?: return
+        val (active, attempt) = synchronized(stateLock) {
+            val pending = preparation?.takeIf {
+                it.request.ownerDistinctId == ownerDistinctId && it.journeyId == journeyId
+            }?.also { it.job.cancel() }
+            current?.takeIf { it.isOwnedBy(journeyId, ownerDistinctId) } to pending
+        }
+        if (active == null) {
+            attempt?.finished?.await()
+            return
+        }
         PresentationRegistry.dismiss(active.id, CloseReason.JourneyNavigation)
         attemptOutcome(active, CloseReason.JourneyNavigation)
         joinAll(active.finished, active.runTransitionFinished)
+        attempt?.finished?.await()
     }
 
     fun close() = dismiss(CloseReason.UserDismissed)
