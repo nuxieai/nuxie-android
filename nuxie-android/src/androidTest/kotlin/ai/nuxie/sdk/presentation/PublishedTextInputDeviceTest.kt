@@ -73,6 +73,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -561,7 +562,15 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun transparentOutgoingScreenDoesNotRevealPreparedDestination() {
+    fun transparentOutgoingScreenDoesNotRevealPreparedDestination() = exerciseTransparentPreparation()
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun standardViewTransitionsRevealDestinationAndRestoreSourceOnAbort() {
+        for (kind in listOf("fade", "push", "modal")) exerciseTransparentPreparation(kind)
+    }
+
+    private fun exerciseTransparentPreparation(transitionKind: String? = null) {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val contract = instrumentation.context.assets.open("journeys/planes/persistent-navigation-android.json")
@@ -580,7 +589,9 @@ class PublishedTextInputDeviceTest {
         }
         val id = UUID.randomUUID().toString()
         val destinationId = UUID.randomUUID().toString()
-        val destination = content(1, contract.getValue("destinationBackgroundArgb").jsonPrimitive.long.toInt())
+        val destination = content(1, contract.getValue("destinationBackgroundArgb").jsonPrimitive.long.toInt()).copy(
+            transition = transitionKind?.let { JsonObject(mapOf("type" to kotlinx.serialization.json.JsonPrimitive(it))) },
+        )
         val firstFrame = CountDownLatch(1)
         val failure = AtomicReference<Throwable?>()
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
@@ -599,7 +610,9 @@ class PublishedTextInputDeviceTest {
             assertTrue("Outgoing frame must arrive: ${failure.get()}", firstFrame.await(30, TimeUnit.SECONDS))
             val surface = checkNotNull(findSurface(activity!!.window.decorView))
             stableSurface(surface).recycle()
-            val before = composedSurface(instrumentation, surface)
+            val captureBounds = Rect()
+            instrumentation.runOnMainSync { assertTrue(surface.getGlobalVisibleRect(captureBounds)) }
+            val before = composedSurface(instrumentation, surface, captureBounds)
             pending = runBlocking {
                 kotlinx.coroutines.withTimeout(15_000) {
                     checkNotNull(PresentationRegistry.currentScreen(id)).prepareNavigation(
@@ -607,11 +620,35 @@ class PublishedTextInputDeviceTest {
                 }
             }
             assertTrue("Destination must finish native preparation", pending != null)
-            val during = composedSurface(instrumentation, surface)
+            val during = composedSurface(instrumentation, surface, captureBounds)
             try {
                 assertEquals("Transparent source must not expose a provisional destination",
                     contract.getValue("composedPixelsChanged").jsonPrimitive.long.toInt(),
                     changedPixels(before, during, Rect(0, 0, before.width, before.height)))
+                if (transitionKind != null) {
+                    runBlocking { kotlinx.coroutines.withTimeout(10_000) { checkNotNull(pending).awaitExit() } }
+                    val transitioned = composedSurface(instrumentation, surface, captureBounds)
+                    try {
+                        assertTrue("$transitionKind must reveal the destination before activation",
+                            changedPixels(before, transitioned, Rect(0, 0, before.width, before.height)) > 0)
+                    } finally { transitioned.recycle() }
+                    runBlocking { checkNotNull(pending).abort() }
+                    pending = null
+                    var restored = composedSurface(instrumentation, surface, captureBounds)
+                    val restoreDeadline = SystemClock.uptimeMillis() + 5_000
+                    while (changedPixels(before, restored, Rect(0, 0, before.width, before.height)) != 0 &&
+                        SystemClock.uptimeMillis() < restoreDeadline) {
+                        restored.recycle()
+                        SystemClock.sleep(50)
+                        restored = composedSurface(instrumentation, surface, captureBounds)
+                    }
+                    try {
+                        assertEquals("$transitionKind rollback must restore composed source pixels", 0,
+                            changedPixels(before, restored, Rect(0, 0, before.width, before.height)))
+                    } finally { restored.recycle() }
+                    assertSame(activity, PresentationRegistry.currentScreen(id)?.purchaseActivity())
+                    return
+                }
                 val activated = CountDownLatch(1)
                 PresentationRegistry.register(destinationId, destination,
                     onFirstFrame = { activated.countDown() }, onFailure = { failure.set(it) },
@@ -1058,9 +1095,9 @@ class PublishedTextInputDeviceTest {
         }
     }
 
-    private fun composedSurface(instrumentation: Instrumentation, surface: TextureView): Bitmap {
-        val bounds = Rect()
-        instrumentation.runOnMainSync { assertTrue(surface.getGlobalVisibleRect(bounds)) }
+    private fun composedSurface(instrumentation: Instrumentation, surface: TextureView, fixedBounds: Rect? = null): Bitmap {
+        val bounds = fixedBounds?.let { Rect(it) } ?: Rect()
+        if (fixedBounds == null) instrumentation.runOnMainSync { assertTrue(surface.getGlobalVisibleRect(bounds)) }
         val display = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
         return try {
             val cropped = Bitmap.createBitmap(display, bounds.left, bounds.top, bounds.width(), bounds.height())

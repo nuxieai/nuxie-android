@@ -95,6 +95,8 @@ internal class ExperienceMountedScreen(
         surface.setPresentationVisible(visible)
     }
 
+    val reduceMotion: Boolean get() = reduceMotionEnabled
+
     fun activate() {
         if (lifecycle.phase == ExperienceScreenLifecycle.Phase.ENTERING ||
             lifecycle.phase == ExperienceScreenLifecycle.Phase.EXITING) {
