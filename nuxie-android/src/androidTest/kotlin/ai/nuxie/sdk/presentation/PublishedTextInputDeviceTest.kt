@@ -650,15 +650,31 @@ class PublishedTextInputDeviceTest {
     @SdkSuppress(minSdkVersion = 26)
     fun customTransitionWatchdogPreservesPreparedAppearanceAndRollback() = exerciseTransparentPreparation("custom")
 
-    private fun exerciseTransparentPreparation(transitionKind: String? = null) {
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun signedCustomTransitionsComposeAndRestoreSourceOnAbort() {
+        exerciseTransparentPreparation("custom", signedCustom = true)
+        exerciseTransparentPreparation("custom", signedCustom = true, reverse = true)
+    }
+
+    private fun exerciseTransparentPreparation(
+        transitionKind: String? = null,
+        signedCustom: Boolean = false,
+        reverse: Boolean = false,
+    ) {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val contract = instrumentation.context.assets.open("journeys/planes/persistent-navigation-android.json")
             .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject
                 .getValue("transparentPreparation").jsonObject }
-        val fixture = loadPublishedFixture(instrumentation)
+        val fixture = loadPublishedFixture(instrumentation,
+            if (signedCustom) "journeys/rendered-custom-transition" else "journeys/rendered-text-input")
         val screens = fixture.release.descriptor.getValue("render").jsonObject
             .getValue("screens").jsonArray.map { it.jsonObject }
+        val sourceIndex = if (reverse) 1 else 0
+        val destinationIndex = if (reverse) 0 else 1
+        val signedDeclaration = if (signedCustom) fixture.release.descriptor.getValue("render").jsonObject
+            .getValue("transitions").jsonArray.single().jsonObject else null
         fun content(index: Int, background: Int): PreparedPresentation {
             val screen = screens[index]
             return PreparedPresentation(fixture.riv, screen.getValue("artboardName").jsonPrimitive.content,
@@ -672,7 +688,7 @@ class PublishedTextInputDeviceTest {
         val transitionContract = instrumentation.context.assets.open("journeys/planes/screen-transition-plan-android.json")
             .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject }
         val custom = transitionContract.getValue("customExecution").jsonObject
-        val descriptor = if (transitionKind == "custom") {
+        val descriptor = if (transitionKind == "custom" && !signedCustom) {
             val declaration = JsonObject(transitionContract.getValue("declaration").jsonObject + mapOf(
                 "sourceScreenId" to screens[0].getValue("id"), "destinationScreenId" to screens[1].getValue("id"),
             ))
@@ -680,11 +696,11 @@ class PublishedTextInputDeviceTest {
                 fixture.release.descriptor.getValue("render").jsonObject +
                     ("transitions" to kotlinx.serialization.json.JsonArray(listOf(declaration))))))
         } else fixture.release.descriptor
-        val destination = content(1, contract.getValue("destinationBackgroundArgb").jsonPrimitive.long.toInt()).copy(
+        val destination = content(destinationIndex, contract.getValue("destinationBackgroundArgb").jsonPrimitive.long.toInt()).copy(
             descriptor = descriptor,
             transition = transitionKind?.let { JsonObject(mapOf(
                 "type" to kotlinx.serialization.json.JsonPrimitive(it),
-                "transitionId" to custom.getValue("transitionId"),
+                "transitionId" to (signedDeclaration?.getValue("id") ?: custom.getValue("transitionId")),
             )) },
         )
         val firstFrame = CountDownLatch(1)
@@ -693,7 +709,7 @@ class PublishedTextInputDeviceTest {
         instrumentation.addMonitor(monitor)
         var activity: Activity? = null
         var pending: PreparedScreenNavigation? = null
-        PresentationRegistry.register(id, content(0, contract.getValue("sourceBackgroundArgb").jsonPrimitive.long.toInt()), onFirstFrame = { firstFrame.countDown() },
+        PresentationRegistry.register(id, content(sourceIndex, contract.getValue("sourceBackgroundArgb").jsonPrimitive.long.toInt()), onFirstFrame = { firstFrame.countDown() },
             onFailure = { failure.set(it) }, onDismissed = {}, onOutcome = {})
         try {
             instrumentation.targetContext.startActivity(Intent(instrumentation.targetContext,
@@ -724,8 +740,14 @@ class PublishedTextInputDeviceTest {
                     val started = SystemClock.uptimeMillis()
                     runBlocking { kotlinx.coroutines.withTimeout(10_000) { checkNotNull(pending).awaitExit() } }
                     if (transitionKind == "custom") {
-                        assertTrue("Missing native completion events must wait for the authored watchdog",
-                            SystemClock.uptimeMillis() - started >= custom.getValue("watchdogMs").jsonPrimitive.long)
+                        val elapsed = SystemClock.uptimeMillis() - started
+                        if (signedCustom) {
+                            val watchdog = checkNotNull(signedDeclaration).getValue("durationMs").jsonPrimitive.long + 250
+                            assertTrue("Both signed native completion events must finish before watchdog: reverse=$reverse elapsed=$elapsed", elapsed < watchdog)
+                        } else {
+                            assertTrue("Missing native completion events must wait for the authored watchdog",
+                                elapsed >= custom.getValue("watchdogMs").jsonPrimitive.long)
+                        }
                         assertEquals(custom.getValue("preparedAppearances").jsonPrimitive.long.toULong(),
                             destination.screenLifecycle.appearances)
                         assertEquals(ExperienceScreenLifecycle.Phase.ENTERING, destination.screenLifecycle.phase)
@@ -746,6 +768,14 @@ class PublishedTextInputDeviceTest {
                         restored = composedSurface(instrumentation, surface, captureBounds)
                     }
                     try {
+                        if (signedCustom && changedPixels(before, restored, Rect(0, 0, before.width, before.height)) != 0) {
+                            File(instrumentation.targetContext.cacheDir, "custom-rollback-before.png").outputStream().use {
+                                before.compress(Bitmap.CompressFormat.PNG, 100, it)
+                            }
+                            File(instrumentation.targetContext.cacheDir, "custom-rollback-after.png").outputStream().use {
+                                restored.compress(Bitmap.CompressFormat.PNG, 100, it)
+                            }
+                        }
                         assertEquals("$transitionKind rollback must restore composed source pixels", 0,
                             changedPixels(before, restored, Rect(0, 0, before.width, before.height)))
                     } finally { restored.recycle() }
