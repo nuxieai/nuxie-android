@@ -1246,6 +1246,91 @@ class JourneyServiceTest {
 
     @Test fun `warm journal reports finish before a queued startup event reaches admission`() = warmJournalOrdering("healthy")
 
+    @Test fun `SQLite startup trigger retries under the replacing profile after failed warm recovery`() =
+        integratedWarmRecovery(retryWithProfile = true)
+
+    @Test fun `closing event pipelines after failed warm recovery preserves the SQLite trigger`() =
+        integratedWarmRecovery(retryWithProfile = false)
+
+    private fun integratedWarmRecovery(retryWithProfile: Boolean) = runBlocking {
+        val identity = identity("customer")
+        val catalog = catalog()
+        val authenticated = authenticatedSnapshot(catalog)
+        val snapshot = JourneyProfileCatalog.Snapshot(JourneyPlaneProfile.decode(profile(buildJsonObject {
+            put("type", "event"); put("eventName", "inventory_opened")
+        }).toString().encodeToByteArray()), authenticated.releasesByDigest)
+        val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(authority))
+        val retained = requireNotNull(journal.admit(snapshot.profile.armedLegs.single(), JourneyReentry.EveryTime,
+            authenticated.releasesByDigest.values.single().leg.getValue("entryStepId").jsonPrimitive.content,
+            1_000L, release = snapshot.profile.releases.single(), executionSnapshot = executionSnapshot(snapshot)))
+        val eventLog = EventLog(store, NuxieContextBuilder(context, NuxieEnvironment.DEVELOPMENT, LogLevel.DEBUG, identity),
+            identity, beforeSend = null, scope = scope, nowMillis = { 100_000L })
+        val recovering = CompletableDeferred<Unit>()
+        val releaseRecovery = CompletableDeferred<Unit>()
+        val routed = CompletableDeferred<Unit>()
+        val failFirst = java.util.concurrent.atomic.AtomicBoolean(true)
+        val attempts = CopyOnWriteArrayList<Pair<Long, Boolean>>()
+        var admissions = 0
+        val service = JourneyService(identity, store, catalog, directory, scope,
+            capture = { name, properties, eventId, distinctId ->
+                if (eventId == retained.startedEventId && failFirst.compareAndSet(true, false)) {
+                    recovering.complete(Unit)
+                    releaseRecovery.await()
+                    false
+                } else eventLog.captureIdempotently(name, properties, eventId, distinctId)
+            }, nowMillis = { 100_000L }, replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
+            beforeAdmission = {
+                val persisted = store.pendingBatch(100).map { it.id }
+                assertTrue(retained.startedEventId in persisted)
+                assertTrue(retained.completedEventId in persisted)
+                admissions++
+            })
+        eventLog.subscribeCommittedWithAdmission(sampleGeneration = service::eventAdmissionGeneration) { event, generation ->
+            kotlinx.coroutines.coroutineScope {
+                val result = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { service.handleEvent(event, generation) }
+                if (event.name == "inventory_opened") routed.complete(Unit)
+                result.await().also { if (event.name == "inventory_opened") attempts += generation to it }
+            }
+        }
+        try {
+            service.profileDidCommit(snapshot, authority, "customer", 1)
+            service.enqueueInitialization()
+            withTimeout(5_000) { recovering.await() }
+            eventLog.capture("inventory_opened")
+            withTimeout(5_000) { routed.await() }
+            assertEquals(0, admissions)
+            assertEquals(1, store.queryPendingLocalRoutes("customer").count { it.name == "inventory_opened" })
+            if (retryWithProfile) {
+                val replacement = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                    service.profileDidCommit(snapshot, authority, "customer", 2)
+                }
+                releaseRecovery.complete(Unit)
+                withTimeout(5_000) { replacement.await(); eventLog.awaitBarrier() }
+                assertEquals(listOf(1L to false, 2L to true), attempts)
+                assertEquals(1, admissions)
+                assertTrue(store.queryPendingLocalRoutes("customer").isEmpty())
+                val persisted = store.pendingBatch(100)
+                assertEquals(1, persisted.count { it.id == retained.startedEventId })
+                assertEquals(1, persisted.count { it.id == retained.completedEventId })
+            } else {
+                val closing = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { eventLog.closeWorkers() }
+                assertTrue(!closing.isCompleted)
+                releaseRecovery.complete(Unit)
+                withTimeout(5_000) { closing.await() }
+                assertEquals(listOf(1L to false), attempts)
+                assertEquals(0, admissions)
+                store.close()
+                store = SQLiteEventStore(context, nowMillis = { 0L })
+                val pending = store.queryPendingLocalRoutes("customer")
+                assertEquals(listOf("inventory_opened"), pending.map { it.name })
+                assertTrue(store.pendingBatch(100).none { it.id == retained.startedEventId || it.id == retained.completedEventId })
+            }
+        } finally {
+            releaseRecovery.complete(Unit)
+            withTimeout(5_000) { eventLog.closeWorkers() }
+        }
+    }
+
     @Test fun `failed warm capture blocks admission until authenticated reconciliation retries`() = warmJournalOrdering("capture")
 
     @Test fun `failed recovered route blocks admission until authenticated reconciliation retries`() = warmJournalOrdering("replay")
