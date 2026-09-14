@@ -22,6 +22,8 @@ import java.util.IdentityHashMap
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CompletableDeferred
@@ -373,11 +375,39 @@ internal class ExperiencePresentationService(
         ) -> JourneyScreenDismissalResult,
         val emissions: JourneyRuntimeEmissionCoordinator,
         val screenDismissed: AtomicBoolean = AtomicBoolean(false),
+        var navigationDismissal: NavigationDismissal? = null,
         var navigationHistory: List<String> = emptyList(),
         var lifecycleByScreen: MutableMap<String, ExperienceScreenLifecycle> = mutableMapOf(),
         var textInputsByScreen: MutableMap<String, ExperienceTextInputState> = mutableMapOf(),
         val commerce: JourneyCommerceSession? = null,
     )
+
+    private data class NavigationDismissal(
+        val destination: String,
+        val result: Deferred<JourneyScreenDismissalResult>,
+    )
+
+    private suspend fun dismissForNavigation(outgoing: JourneyOutcome, destination: String): JourneyScreenDismissalResult {
+        val checkpoint = synchronized(outgoing) {
+            outgoing.navigationDismissal?.let {
+                if (it.destination != destination) throw supersededByIdentityTransition()
+                return@synchronized it
+            }
+            if (!outgoing.screenDismissed.compareAndSet(false, true)) throw supersededByIdentityTransition()
+            // Admission belongs to the screen. Cancelling a caller stops waiting,
+            // but must not cancel or forget a checkpoint that can durably commit.
+            NavigationDismissal(destination, scope.async {
+                try {
+                    outgoing.onScreenDismissed(outgoing.screenId, destination, "navigate")
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    JourneyScreenDismissalResult.REJECTED
+                }
+            }).also { outgoing.navigationDismissal = it }
+        }
+        return checkpoint.result.await()
+    }
 
     private data class PreparedSource(
         val identity: ai.nuxie.sdk.experiences.JourneyReleaseIdentity,
@@ -674,20 +704,7 @@ internal class ExperiencePresentationService(
                     }
                     incoming.navigationHistory = back?.history
                         ?: (outgoing.navigationHistory + outgoing.screenId)
-                    val dismissal = if (outgoing.screenDismissed.compareAndSet(false, true)
-                    ) {
-                        try {
-                            outgoing.onScreenDismissed(
-                                outgoing.screenId,
-                                incoming.screenId,
-                                "navigate",
-                            )
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (_: Throwable) {
-                            JourneyScreenDismissalResult.REJECTED
-                        }
-                    } else null
+                    val dismissal = dismissForNavigation(outgoing, incoming.screenId)
                     if (dismissal == JourneyScreenDismissalResult.COMPLETED ||
                         dismissal == JourneyScreenDismissalResult.REJECTED) {
                         navigation?.abort()
@@ -708,7 +725,7 @@ internal class ExperiencePresentationService(
                                 ExperiencePresentationException.Reason.HOST_FAILED,
                                 "Journey screen dismissal was rejected",
                             )
-                        JourneyScreenDismissalResult.HANDLED, null -> Unit
+                        JourneyScreenDismissalResult.HANDLED -> Unit
                     }
                 }
 
