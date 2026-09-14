@@ -21,6 +21,10 @@ import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -58,6 +62,8 @@ internal class ScreenCloseState(
  * SDK state behind it) finishes immediately and never re-presents.
  */
 internal class NuxieExperienceActivity : Activity() {
+    private val registryScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var acquiringScreen: AcquiringScreen? = null
     private var currentScreen: Screen? = null
     private val screens = mutableSetOf<Screen>()
     private var navigation: Navigation? = null
@@ -67,6 +73,22 @@ internal class NuxieExperienceActivity : Activity() {
     private var predictiveBackCallback: android.window.OnBackInvokedCallback? = null
     private var pendingPermission: Pair<Int, CompletableDeferred<Boolean>>? = null
     private var nextPermissionRequestCode = PERMISSION_REQUEST_CODE_START
+
+    private inner class AcquiringScreen(val id: String) : PresentationScreenHandle {
+        private val closeState = ScreenCloseState { PresentationRegistry.reportDismissed(id, it) }
+        override fun requestCloseFromService(reason: CloseReason) = closeState.select(reason)
+        override fun screenCloseReason() = closeState.reason
+        override fun finishAfterServiceClose() { runOnUiThread { finish() } }
+        fun close(recreating: Boolean) {
+            closeState.reportAtTeardown(recreating)
+            PresentationRegistry.detach(id, this)
+        }
+        fun finishTerminal(reason: CloseReason) {
+            closeState.select(reason)
+            PresentationRegistry.reportOutcome(id, reason)
+            finish()
+        }
+    }
 
     /** Registry ownership belongs to this screen, even when the Activity hosts another one. */
     private inner class Screen(val id: String, val prepared: PreparedPresentation, @Volatile var provisional: Boolean = false) :
@@ -329,12 +351,45 @@ internal class NuxieExperienceActivity : Activity() {
             finish()
             return
         }
-        val prepared = PresentationRegistry.resolve(id)
-        if (prepared == null) {
+        val state = PresentationRegistry.observe(id)
+        if (state == null) {
             Log.i(LOG_TAG, "Presentation state unavailable; finishing.")
             finish()
             return
         }
+        registerPredictiveBack()
+        registryScope.launch {
+            state.collect { content ->
+                if (isFinishing || isDestroyed) return@collect
+                when (content) {
+                    is PresentationContentState.Acquiring -> {
+                        if (acquiringScreen == null && currentScreen == null) {
+                            val pending = AcquiringScreen(id)
+                            if (!PresentationRegistry.attach(id, pending)) { finish(); return@collect }
+                            acquiringScreen = pending
+                            // A failed/slow acquisition must always permit leaving the native shell.
+                            dismissible = true
+                            contentRoot = FrameLayout(this@NuxieExperienceActivity).apply { setBackgroundColor(content.screen.clearColor) }
+                            setContentView(shellView(contentRoot, content.screen.shell))
+                            contentRoot.setBackgroundColor(content.screen.clearColor)
+                        }
+                    }
+                    is PresentationContentState.Ready -> if (currentScreen == null) {
+                        mountReadyScreen(id, content.content)
+                        acquiringScreen?.let { PresentationRegistry.detach(id, it) }
+                        acquiringScreen = null
+                        currentScreen?.mounted?.setVisible(visible)
+                        // Mounted screens now own lifecycle. Retiring this initial id during
+                        // navigation must not finish the persistent Activity via its old flow.
+                        registryScope.cancel()
+                    }
+                    is PresentationContentState.Closed -> finish()
+                }
+            }
+        }
+    }
+
+    private fun mountReadyScreen(id: String, prepared: PreparedPresentation) {
         val screen = Screen(id, prepared)
         if (!PresentationRegistry.attach(id, screen)) {
             finish()
@@ -345,15 +400,16 @@ internal class NuxieExperienceActivity : Activity() {
         currentScreen = screen
         dismissible = prepared.shell.dismissible
         try {
-            contentRoot = FrameLayout(this)
+            val newRoot = !::contentRoot.isInitialized
+            if (newRoot) contentRoot = FrameLayout(this)
+            contentRoot.background = null
             contentRoot.addView(screen.mount(), FrameLayout.LayoutParams(-1, -1))
-            setContentView(shellView(contentRoot, prepared.shell))
+            if (newRoot) setContentView(shellView(contentRoot, prepared.shell))
             screen.mounted?.observeWindow()
         } catch (error: Throwable) {
             screen.fail(error)
             return
         }
-        registerPredictiveBack()
     }
 
     override fun onStart() {
@@ -383,6 +439,9 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     override fun onDestroy() {
+        registryScope.cancel()
+        acquiringScreen?.close(isChangingConfigurations)
+        acquiringScreen = null
         navigation?.cancel()
         unregisterPredictiveBack()
         super.onDestroy()
@@ -468,7 +527,7 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private fun finishTerminal(reason: CloseReason) {
-        currentScreen?.finishTerminal(reason)
+        acquiringScreen?.finishTerminal(reason) ?: currentScreen?.finishTerminal(reason)
     }
 
     private fun shellView(host: View, shell: PresentationShell): View {
@@ -580,6 +639,6 @@ internal class NuxieExperienceActivity : Activity() {
 
         internal fun isColdRecreation(savedInstanceState: Bundle?, presentationId: String?): Boolean =
             savedInstanceState != null &&
-                (presentationId == null || PresentationRegistry.resolve(presentationId) == null)
+                (presentationId == null || PresentationRegistry.observe(presentationId) == null)
     }
 }

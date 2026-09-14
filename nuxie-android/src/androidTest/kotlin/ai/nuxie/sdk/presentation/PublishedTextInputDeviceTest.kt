@@ -1042,6 +1042,75 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
+    fun authenticatedShellPrecedesAcquisitionAndReusesActivityForNativeReveal() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val fixture = loadPublishedFixture(instrumentation)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val releaseAcquisition = CompletableDeferred<Unit>()
+        val started = CountDownLatch(1)
+        val shown = java.util.concurrent.atomic.AtomicInteger()
+        val service = ExperiencePresentationService(instrumentation.targetContext, { name, _, _ ->
+            if (name == ai.nuxie.sdk.events.SystemEventNames.EXPERIENCE_SHOWN) shown.incrementAndGet()
+        }, scope, { NuxieRuntime.shared.isAvailable })
+        val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+        instrumentation.addMonitor(monitor)
+        val before = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
+        val pending = scope.async {
+            service.presentJourney(fixture.release, "screen_1", "early-shell", "early-owner",
+                service.reserveJourney("early-owner"), acquire = {
+                    started.countDown()
+                    releaseAcquisition.await()
+                    AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv, protection = Closeable {})
+                }, onOutcome = {})
+        }
+        try {
+            assertTrue(started.await(10, TimeUnit.SECONDS))
+            val activity = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
+            instrumentation.waitForIdleSync()
+            var root: View? = null
+            val bounds = Rect()
+            instrumentation.runOnMainSync {
+                root = activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0)
+                assertTrue(checkNotNull(root).getGlobalVisibleRect(bounds))
+            }
+            val rgba = fixture.release.descriptor.getValue("presentation").jsonObject
+                .getValue("backgroundColor").jsonPrimitive.content.removePrefix("#")
+            assertEquals("Published fixture uses transparent signed background", "00000000", rgba)
+            instrumentation.runOnMainSync {
+                assertEquals(0, (checkNotNull(root).background as android.graphics.drawable.ColorDrawable).color)
+            }
+            val expected = before.getPixel(bounds.centerX(), bounds.centerY())
+            var observed = 0
+            val deadline = SystemClock.elapsedRealtime() + 5_000
+            do {
+                val screenshot = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
+                observed = screenshot.getPixel(bounds.centerX(), bounds.centerY())
+                screenshot.recycle()
+                if (observed != expected) SystemClock.sleep(30)
+            } while (observed != expected && SystemClock.elapsedRealtime() < deadline)
+            assertEquals("Composed loading shell must use signed background", expected, observed)
+            assertEquals(0, shown.get())
+            assertFalse(pending.isCompleted)
+            releaseAcquisition.complete(Unit)
+            runBlocking { kotlinx.coroutines.withTimeout(30_000) { pending.await() } }
+            assertHostedScreen(instrumentation, activity, "screen_1")
+            assertEquals(1, monitor.hits)
+            assertEquals(1, shown.get())
+            instrumentation.runOnMainSync {
+                assertSame(root, activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0))
+            }
+        } finally {
+            before.recycle()
+            releaseAcquisition.complete(Unit)
+            runBlocking { service.shutdownOwnedBy("early-owner"); scope.coroutineContext[Job]?.cancelAndJoin() }
+            instrumentation.removeMonitor(monitor)
+            PresentationRegistry.clearForTesting()
+        }
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
     fun publishedResponseSurvivesPresentationNavigationWithoutDuplicateCommits() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         assertTrue(NuxieRuntime.shared.isAvailable)
