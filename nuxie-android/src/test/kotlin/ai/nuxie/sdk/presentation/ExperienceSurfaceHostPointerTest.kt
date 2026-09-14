@@ -39,6 +39,62 @@ import kotlinx.serialization.json.long
 @RunWith(RobolectricTestRunner::class)
 class ExperienceSurfaceHostPointerTest {
     @Test
+    fun `transition events wait for a delivered frame after surface unavailability`() {
+        val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        val events = mutableListOf<String>()
+        val host = ExperienceSurfaceHost(activity.get(), lane, runtime = NuxieRuntime(native),
+            listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() = Unit
+                override fun onFailure(error: ExperiencePresentationException) { throw error }
+                override fun onRuntimeEvent(event: ai.nuxie.sdk.runtime.NuxieRuntimeEvent,
+                    viewModelSnapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?) {
+                    events += event.name
+                }
+            })
+        activity.get().setContentView(host)
+        val texture = SurfaceTexture(0)
+        fun drainUi() {
+            host.setPresentationVisible(false)
+            drain(lane)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            host.setPresentationVisible(true)
+        }
+        try {
+            host.loadArtboard(byteArrayOf(1), null)
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+            native.events = arrayOf(ai.nuxie.sdk.runtime.NativeRuntimeEvent(
+                0, 0, "nx_exit_done:test", "", "", 0f, emptyArray()))
+            native.presentation = 0
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            drainUi()
+            assertTrue("An undelivered frame cannot complete its transition", events.isEmpty())
+            native.presentation = 1
+            host.doFrame(1_032_000_000L)
+            drain(lane)
+            drainUi()
+            assertEquals(listOf("nx_exit_done:test"), events)
+            host.doFrame(1_048_000_000L)
+            drain(lane)
+            drainUi()
+            assertEquals(listOf("nx_exit_done:test"), events)
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+            activity.pause().stop().destroy()
+        }
+    }
+
+    @Test
     fun `first composed frame hands off before another native frame can start`() {
         assertFirstFrameHandoff(false)
     }
@@ -516,6 +572,7 @@ class ExperienceSurfaceHostPointerTest {
 
     private class RecordingNative : NuxieTypedRuntimeNative {
         var onRender: () -> Unit = {}
+        var events = emptyArray<ai.nuxie.sdk.runtime.NativeRuntimeEvent>()
         val pointerSteps = mutableListOf<List<NativePlayerPointer>>()
         val order = mutableListOf<String>()
         val elapsedSteps = mutableListOf<Float>()
@@ -584,7 +641,7 @@ class ExperienceSurfaceHostPointerTest {
                 NativePlayerStepOutcome(
                     keepGoing = true,
                     pointerHits = intArrayOf(),
-                    events = emptyArray(),
+                    events = events.also { events = emptyArray() },
                     hostCommands = emptyArray(),
                     viewModelChanges = emptyArray(),
                 ),

@@ -404,6 +404,15 @@ internal class ExperienceSurfaceHost(
         while (firstFrameComposed && unpublishedSteps.isNotEmpty()) {
             val step = unpublishedSteps.removeFirst()
             listener?.onRuntimeStep(step.outcome, step.correlationId, step.viewModelSnapshot)
+            if (step.outcome.events.isNotEmpty()) {
+                post {
+                    if (!released.get()) {
+                        step.outcome.events.forEach {
+                            listener?.onRuntimeEvent(it, step.viewModelSnapshot)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -495,15 +504,6 @@ internal class ExperienceSurfaceHost(
                         firstFramePresented = true
                     }
                     publishSteps()
-                }
-                if (outcome.events.isNotEmpty()) {
-                    post {
-                        if (!released.get()) {
-                            outcome.events.forEach {
-                                listener?.onRuntimeEvent(it, viewModelSnapshot)
-                            }
-                        }
-                    }
                 }
             } finally {
                 framePending.set(false)
