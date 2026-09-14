@@ -10,6 +10,7 @@ internal enum class TestStoreRestoreChoice { RESTORED, NO_PURCHASES, FAILED }
 /** Android checkout UI supplies choices; the store never receives a billing gateway or delegate. */
 internal interface TestStoreChoices {
     suspend fun purchase(product: StoreProduct): TestStorePurchaseChoice
+    suspend fun purchase(product: StoreProduct, activity: android.app.Activity): TestStorePurchaseChoice = purchase(product)
     suspend fun restore(): TestStoreRestoreChoice
 }
 
@@ -28,10 +29,10 @@ internal class NuxieTestStore(private val choices: TestStoreChoices) {
     private val mutex = Mutex()
     private val purchases = mutableMapOf<String, MutableMap<String, StoreProduct>>()
 
-    suspend fun purchase(product: StoreProduct, distinctId: String): TestStorePurchaseResponse {
+    suspend fun purchase(product: StoreProduct, distinctId: String, activity: android.app.Activity? = null): TestStorePurchaseResponse {
         // Do not hold storage ownership while waiting for a human choice. The
         // initiating customer is retained even if the SDK identity changes.
-        return when (choices.purchase(product)) {
+        return when (if (activity == null) choices.purchase(product) else choices.purchase(product, activity)) {
             TestStorePurchaseChoice.PURCHASED -> {
                 mutex.withLock {
                     purchases.getOrPut(distinctId) { linkedMapOf() }[product.productId] = product

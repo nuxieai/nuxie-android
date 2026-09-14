@@ -21,7 +21,17 @@ import kotlinx.serialization.json.JsonPrimitive
 internal class AndroidTestStoreChoices(
     private val activity: () -> Activity?,
 ) : TestStoreChoices {
-    override suspend fun purchase(product: StoreProduct): TestStorePurchaseChoice = choose(
+    override suspend fun purchase(product: StoreProduct): TestStorePurchaseChoice =
+        purchaseWithProvider(product, activity)
+
+    override suspend fun purchase(product: StoreProduct, activity: Activity): TestStorePurchaseChoice =
+        purchaseWithProvider(product) { activity }
+
+    private suspend fun purchaseWithProvider(
+        product: StoreProduct,
+        provider: () -> Activity?,
+    ): TestStorePurchaseChoice = choose(
+        activityProvider = provider,
         title = "Nuxie Test Store",
         message = "TEST PURCHASE — no charge, no Google Play transaction.\n\n" +
             listOf("name", "price").mapNotNull { key ->
@@ -50,11 +60,12 @@ internal class AndroidTestStoreChoices(
     private suspend fun <Choice> choose(
         title: String,
         message: String,
+        activityProvider: () -> Activity? = activity,
         choices: List<Pair<String, Choice>>,
         dismissed: Choice,
         unavailable: Choice,
     ): Choice = withContext(Dispatchers.Main.immediate) {
-        val owner = activity()?.takeUnless { it.isFinishing || it.isDestroyed }
+        val owner = activityProvider()?.takeUnless { it.isFinishing || it.isDestroyed }
             ?: return@withContext unavailable
         suspendCancellableCoroutine { continuation ->
             val content = LinearLayout(owner).apply {

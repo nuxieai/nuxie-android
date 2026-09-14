@@ -39,6 +39,7 @@ internal class NuxieLifecycleCoordinator(
         java.util.WeakHashMap<Activity, Boolean>(),
     )
     private var sawInitialForeground = false
+    private var lastResumed = java.lang.ref.WeakReference<Activity>(null)
 
     private val closed = AtomicBoolean(false)
 
@@ -109,7 +110,19 @@ internal class NuxieLifecycleCoordinator(
     }
 
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
-    override fun onActivityResumed(activity: Activity) = Unit
+    override fun onActivityResumed(activity: Activity) {
+        if (!closed.get()) lastResumed = java.lang.ref.WeakReference(activity)
+    }
+
+    /** Main-thread lookup for native checkout; never retain or select a stopped Activity. */
+    internal fun purchaseActivity(): Activity? {
+        if (closed.get()) return null
+        fun usable(activity: Activity) = activity in startedActivities &&
+            !activity.isFinishing && !activity.isDestroyed
+        return lastResumed.get()?.takeIf(::usable)
+            ?: startedActivities.firstOrNull { usable(it) && it.hasWindowFocus() }
+            ?: startedActivities.firstOrNull(::usable)
+    }
     override fun onActivityPaused(activity: Activity) = Unit
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
     override fun onActivityDestroyed(activity: Activity) = Unit

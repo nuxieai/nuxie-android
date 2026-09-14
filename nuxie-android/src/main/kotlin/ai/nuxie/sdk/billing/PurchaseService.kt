@@ -812,7 +812,7 @@ internal class PurchaseService(
             )
         }
         testStore?.let { store ->
-            val response = store.purchase(product, initiatingOwner)
+            val response = store.purchase(product, initiatingOwner, activity)
             val outcome = if (response.result == PurchaseResult.Purchased) {
                 PurchaseOutcome.External(ExternalPurchaseDeclaration.Purchase(
                     operationId = checkNotNull(response.transactionId),

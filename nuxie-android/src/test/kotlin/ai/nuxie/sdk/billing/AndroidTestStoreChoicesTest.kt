@@ -50,9 +50,9 @@ class AndroidTestStoreChoicesTest {
     fun nativeButtonsReturnEveryPurchaseAndRestoreChoice() = runTest {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
         try {
-            val choices = AndroidTestStoreChoices { controller.get() }
+            val choices = AndroidTestStoreChoices { null }
             for (expected in TestStorePurchaseChoice.entries) {
-                val result = async { choices.purchase(product()) }
+                val result = async { choices.purchase(product(), controller.get()) }
                 runCurrent()
                 shadowOf(Looper.getMainLooper()).idle()
                 val dialog = ShadowAlertDialog.getLatestAlertDialog()
@@ -71,7 +71,7 @@ class AndroidTestStoreChoicesTest {
                 "No Purchases" to TestStoreRestoreChoice.NO_PURCHASES,
                 "Failed" to TestStoreRestoreChoice.FAILED,
             )) {
-                val result = async { choices.restore() }
+                val result = async { AndroidTestStoreChoices { controller.get() }.restore() }
                 runCurrent()
                 shadowOf(Looper.getMainLooper()).idle()
                 val dialog = ShadowAlertDialog.getLatestAlertDialog()
