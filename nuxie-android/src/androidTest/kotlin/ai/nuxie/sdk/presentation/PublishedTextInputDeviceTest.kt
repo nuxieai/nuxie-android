@@ -81,6 +81,75 @@ import org.junit.Test
 /** Real publisher bytes, signed defaults, runtime geometry and runtime text writer. */
 class PublishedTextInputDeviceTest {
     @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun renderedResourceDestructionCanOverlapRendererCreation() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val runtime = NuxieRuntime.shared
+        assertTrue(runtime.isAvailable)
+        val fixture = loadPublishedFixture(instrumentation)
+        val screen = fixture.release.descriptor.getValue("render").jsonObject
+            .getValue("screens").jsonArray.first().jsonObject
+        val artboardName = screen.getValue("artboardName").jsonPrimitive.content
+        val schema = checkNotNull(ExperienceViewModelBinding.defaultSchemaName(fixture.release.descriptor, artboardName))
+        val bytes = fixture.riv.readBytes()
+        val assets = ExperienceAssetImportBuilder.build(fixture.release.descriptor, fixture.assets,
+            checkNotNull(runtime.inspectFileAssets(bytes)))
+        fun createRenderedResources(): Closeable {
+            val cleanup = mutableListOf<() -> Unit>()
+            try {
+                val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(1080, 2400))
+                cleanup += renderer::close
+                val file = checkNotNull(runtime.importFile(renderer, bytes, assets.expectedAssets, assets.externalAssets))
+                cleanup += file::close
+                val artboard = checkNotNull(file.newArtboard(artboardName))
+                cleanup += artboard::close
+                artboard.bindDefaultViewModel(schema)
+                val player = checkNotNull(artboard.newPlayer())
+                cleanup += player::close
+                player.stepWithEvents(0.0)
+                val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                assertEquals(1080 * 2400 * 4, frame.rgba.size)
+                assertTrue("Published content must produce non-background pixels", frame.rgba.indices.any {
+                    it % 4 != 3 && frame.rgba[it] != 0.toByte()
+                })
+                return Closeable { cleanup.asReversed().forEach { it() } }
+            } catch (error: Throwable) {
+                cleanup.asReversed().forEach { close -> runCatching(close).exceptionOrNull()?.let(error::addSuppressed) }
+                throw error
+            }
+        }
+        val lanes = List(2) { NuxieRuntimeLane() }
+        val rendezvous = java.util.concurrent.CyclicBarrier(2)
+        val finished = CountDownLatch(2)
+        val failure = AtomicReference<Throwable?>()
+        val created = java.util.concurrent.atomic.AtomicInteger()
+        lanes.forEachIndexed { index, lane ->
+            lane.enqueue {
+                var resources: Closeable? = null
+                try {
+                    if (index == 0) { resources = createRenderedResources(); created.incrementAndGet() }
+                    repeat(20) {
+                        rendezvous.await(30, TimeUnit.SECONDS)
+                        if (resources == null) { resources = createRenderedResources(); created.incrementAndGet() }
+                        else { resources?.close(); resources = null }
+                        rendezvous.await(30, TimeUnit.SECONDS)
+                    }
+                } catch (error: Throwable) { failure.compareAndSet(null, error) }
+                finally {
+                    try { resources?.close() } finally { finished.countDown() }
+                }
+            }
+        }
+        try {
+            val completed = finished.await(45, TimeUnit.SECONDS)
+            if (!completed) android.os.Process.sendSignal(android.os.Process.myPid(), 3)
+            assertTrue("Rendered resource lifetimes must drain; created=${created.get()} failure=${failure.get()}", completed)
+            assertEquals(null, failure.get())
+            assertEquals(21, created.get())
+        } finally { lanes.forEach { it.shutdown() } }
+    }
+
+    @Test
     fun publishedDefaultAcceptsLifecycleAndSafeAreaStateInNativeRuntime() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         assertTrue(NuxieRuntime.shared.isAvailable)
