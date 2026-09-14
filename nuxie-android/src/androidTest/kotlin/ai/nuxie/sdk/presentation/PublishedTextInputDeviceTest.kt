@@ -28,6 +28,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
+import android.app.Application
+import android.accessibilityservice.AccessibilityService
+import android.os.Bundle
 import android.app.Activity
 import android.app.Instrumentation
 import android.content.Intent
@@ -65,6 +68,171 @@ import org.junit.Test
 
 /** Real publisher bytes, signed defaults, runtime geometry and runtime text writer. */
 class PublishedTextInputDeviceTest {
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun closingBeforeFirstFrameDrainsWithoutActivatingScreen() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val fixture = loadPublishedFixture(instrumentation)
+        val screen = fixture.release.descriptor.getValue("render").jsonObject
+            .getValue("screens").jsonArray.first().jsonObject
+        val id = UUID.randomUUID().toString()
+        val closed = CountDownLatch(1)
+        val created = CountDownLatch(1)
+        val frames = java.util.concurrent.atomic.AtomicInteger()
+        val failures = AtomicReference<Throwable?>()
+        val target = AtomicReference<Activity?>()
+        val prepared = PreparedPresentation(fixture.riv, screen.getValue("artboardName").jsonPrimitive.content,
+            0xff000000.toInt(), PresentationShell.FullScreen, screen.getValue("id").jsonPrimitive.content,
+            fixture.release.descriptor, fixture.assets,
+            ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float))
+        val application = context.applicationContext as Application
+        val callbacks = object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityStarted(activity: Activity) {
+                if (activity.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID) != id) return
+                target.set(activity)
+                assertEquals(ExperienceScreenLifecycle.Phase.ENTERING, prepared.screenLifecycle.phase)
+                created.countDown()
+                activity.finish()
+            }
+            override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
+            override fun onActivityResumed(activity: Activity) = Unit
+            override fun onActivityPaused(activity: Activity) = Unit
+            override fun onActivityStopped(activity: Activity) = Unit
+            override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
+            override fun onActivityDestroyed(activity: Activity) = Unit
+        }
+        application.registerActivityLifecycleCallbacks(callbacks)
+        PresentationRegistry.register(id, prepared, onFirstFrame = { frames.incrementAndGet() },
+            onFailure = { failures.set(it); closed.countDown() }, onDismissed = { closed.countDown() }, onOutcome = {})
+        try {
+            context.startActivity(Intent(context, NuxieExperienceActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, id)
+            })
+            assertTrue(created.await(15, TimeUnit.SECONDS))
+            assertTrue("Close must join native cleanup", closed.await(15, TimeUnit.SECONDS))
+            instrumentation.runOnMainSync {
+                assertEquals(ExperienceScreenLifecycle.Phase.HIDDEN, prepared.screenLifecycle.phase)
+                assertEquals(1uL, prepared.screenLifecycle.appearances)
+            }
+            assertEquals(0, frames.get())
+            assertEquals(null, failures.get())
+            assertEquals(null, PresentationRegistry.resolve(id))
+        } finally {
+            application.unregisterActivityLifecycleCallbacks(callbacks)
+            instrumentation.runOnMainSync { target.get()?.finish() }
+            PresentationRegistry.clearForTesting()
+        }
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun backgroundAndRecreationPreserveScreenAppearanceAndRenderedContent() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val fixture = loadPublishedFixture(instrumentation)
+        val screen = fixture.release.descriptor.getValue("render").jsonObject
+            .getValue("screens").jsonArray.first().jsonObject
+        val id = UUID.randomUUID().toString()
+        val firstFrame = CountDownLatch(1)
+        val dismissed = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>()
+        val prepared = PreparedPresentation(fixture.riv, screen.getValue("artboardName").jsonPrimitive.content,
+            0xff000000.toInt(), PresentationShell.FullScreen, screen.getValue("id").jsonPrimitive.content,
+            fixture.release.descriptor, fixture.assets,
+            ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float))
+        var monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+        instrumentation.addMonitor(monitor)
+        var activity: Activity? = null
+        var before: Bitmap? = null
+        var after: Bitmap? = null
+        PresentationRegistry.register(id, prepared, onFirstFrame = { firstFrame.countDown() },
+            onFailure = { failure.set(it) }, onDismissed = { dismissed.countDown() }, onOutcome = {})
+        try {
+            context.startActivity(Intent(context, NuxieExperienceActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, id)
+            })
+            val original = checkNotNull(monitor.waitForActivityWithTimeout(15_000))
+            activity = original
+            assertTrue("Initial frame: ${failure.get()}", firstFrame.await(30, TimeUnit.SECONDS))
+            instrumentation.waitForIdleSync()
+            SystemClock.sleep(150)
+            before = copySurface(checkNotNull(findSurface(original.window.decorView)))
+            val stopped = CountDownLatch(1)
+            val resumed = CountDownLatch(1)
+            val application = original.application
+            val callbacks = object : Application.ActivityLifecycleCallbacks {
+                override fun onActivityStopped(activity: Activity) { if (activity === original) stopped.countDown() }
+                override fun onActivityResumed(activity: Activity) { if (activity === original) resumed.countDown() }
+                override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
+                override fun onActivityStarted(activity: Activity) = Unit
+                override fun onActivityPaused(activity: Activity) = Unit
+                override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
+                override fun onActivityDestroyed(activity: Activity) = Unit
+            }
+            application.registerActivityLifecycleCallbacks(callbacks)
+            try {
+                assertTrue(instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME))
+                assertTrue("System Home must stop the original Activity", stopped.await(10, TimeUnit.SECONDS))
+                instrumentation.runOnMainSync {
+                    assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, prepared.screenLifecycle.phase)
+                    assertEquals(1uL, prepared.screenLifecycle.appearances)
+                }
+                context.startActivity(Intent(context, NuxieExperienceActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, id)
+                })
+                assertTrue("Return must resume the same Activity", resumed.await(10, TimeUnit.SECONDS))
+                instrumentation.waitForIdleSync()
+                SystemClock.sleep(150)
+                val returned = copySurface(checkNotNull(findSurface(original.window.decorView)))
+                try {
+                    assertEquals(0, changedPixels(before, returned, Rect(0, 0, before.width, before.height)))
+                } finally { returned.recycle() }
+            } finally { application.unregisterActivityLifecycleCallbacks(callbacks) }
+            instrumentation.removeMonitor(monitor)
+            monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+            instrumentation.addMonitor(monitor)
+            instrumentation.runOnMainSync {
+                assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, prepared.screenLifecycle.phase)
+                assertEquals(1uL, prepared.screenLifecycle.appearances)
+                original.recreate()
+            }
+            val replacement = checkNotNull(monitor.waitForActivityWithTimeout(15_000))
+            activity = replacement
+            assertTrue("Recreation must create another Activity", replacement !== original)
+            instrumentation.waitForIdleSync()
+            SystemClock.sleep(500)
+            assertTrue(original.isDestroyed)
+            after = copySurface(checkNotNull(findSurface(replacement.window.decorView)))
+            assertEquals(before.width, after.width)
+            assertEquals(before.height, after.height)
+            assertEquals("Recreated renderer must preserve the published surface", 0,
+                changedPixels(before, after, Rect(0, 0, before.width, before.height)))
+            instrumentation.runOnMainSync {
+                assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, prepared.screenLifecycle.phase)
+                assertEquals(1uL, prepared.screenLifecycle.appearances)
+                replacement.finish()
+            }
+            assertTrue("Teardown must drain", dismissed.await(15, TimeUnit.SECONDS))
+            instrumentation.runOnMainSync {
+                assertEquals(ExperienceScreenLifecycle.Phase.HIDDEN, prepared.screenLifecycle.phase)
+                assertEquals(1uL, prepared.screenLifecycle.appearances)
+            }
+            assertEquals(null, failure.get())
+        } finally {
+            before?.recycle()
+            after?.recycle()
+            instrumentation.runOnMainSync { activity?.finish() }
+            instrumentation.removeMonitor(monitor)
+            PresentationRegistry.clearForTesting()
+        }
+    }
+
     @Test
     @SdkSuppress(minSdkVersion = 26)
     fun drawerClipsNativeContentAlongWithItsRenderedSurface() {
