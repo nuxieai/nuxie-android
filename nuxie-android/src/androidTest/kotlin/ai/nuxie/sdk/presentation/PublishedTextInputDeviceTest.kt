@@ -1079,6 +1079,10 @@ class PublishedTextInputDeviceTest {
             assertEquals("Published fixture uses transparent signed background", "00000000", rgba)
             instrumentation.runOnMainSync {
                 assertEquals(0, (checkNotNull(root).background as android.graphics.drawable.ColorDrawable).color)
+                val container = checkNotNull(root) as ViewGroup
+                assertEquals(1, container.childCount)
+                assertTrue(container.getChildAt(0) is ExperienceLoadingView)
+                assertEquals("Experience loading", container.getChildAt(0).contentDescription)
             }
             val expected = before.getPixel(bounds.centerX(), bounds.centerY())
             var observed = 0
@@ -1099,6 +1103,9 @@ class PublishedTextInputDeviceTest {
             assertEquals(1, shown.get())
             instrumentation.runOnMainSync {
                 assertSame(root, activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0))
+                val container = checkNotNull(root) as ViewGroup
+                assertEquals(1, container.childCount)
+                assertFalse(container.getChildAt(0) is ExperienceLoadingView)
             }
         } finally {
             before.recycle()
