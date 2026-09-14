@@ -110,12 +110,14 @@ class PublishedTextInputDeviceTest {
                                     assertTrue("Native transition state must accept $path=$value",
                                         artboard.setDefaultViewModelValue(path, NuxieViewModelScalarValue.StringValue(value)))
                                 }
+                                write("screen/phase", "entering")
                                 val player = checkNotNull(artboard.newPlayer())
                                 try {
-                                    for (reverse in listOf(false, true, false, true)) {
+                                    repeat(10) { player.stepWithEvents(0.05) }
+                                    for (reverse in listOf(true, false, true, false)) {
                                         val outgoing = if (reverse) index == 1 else index == 0
                                         write("screen/transition", "")
-                                        write("screen/phase", if (outgoing) "active" else "hidden")
+                                        write("screen/phase", if (outgoing) "active" else "entering")
                                         player.stepWithEvents(0.0)
                                         write("screen/phase", if (outgoing) "exiting" else "entering")
                                         write("screen/transition", transitionId)
