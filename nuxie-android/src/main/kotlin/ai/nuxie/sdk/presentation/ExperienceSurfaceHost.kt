@@ -343,10 +343,17 @@ internal class ExperienceSurfaceHost(
     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
         lane.enqueue {
             if (attached) {
-                renderer?.resize(
+                val status = renderer?.resize(
                     width.coerceAtLeast(1),
                     height.coerceAtLeast(1),
                 )
+                if (status != NUX_STATUS_OK) {
+                    attached = false
+                    reportFailure(
+                        ExperiencePresentationException.Reason.HOST_FAILED,
+                        "Experience renderer resize failed with status $status",
+                    )
+                }
             }
         }
     }
