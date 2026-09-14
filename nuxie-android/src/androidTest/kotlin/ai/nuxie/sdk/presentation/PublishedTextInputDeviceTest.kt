@@ -12,6 +12,9 @@ import ai.nuxie.sdk.core.supportedRuntimeForEmbeddedRuntime
 import ai.nuxie.sdk.experiences.AuthenticatedJourneyRelease
 import ai.nuxie.sdk.experiences.AcquiredJourneyRelease
 import java.io.Closeable
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -531,6 +534,10 @@ class PublishedTextInputDeviceTest {
         val navigationScreens = navigationContract.getValue("screens").jsonArray.map { it.jsonPrimitive.content }
         var hostActivity: Activity? = null
         var dismissalCheckpoints = 0
+        val checkpointEntered = CountDownLatch(1)
+        val releaseCheckpoint = CompletableDeferred<Unit>()
+        var holdCheckpoint = false
+        var pendingNavigation: Deferred<Activity>? = null
         var nextBatch = 0L
         var nextEmission = 0L
         fun present(screenId: String): Activity {
@@ -545,6 +552,10 @@ class PublishedTextInputDeviceTest {
                         true
                     }, onScreenDismissed = { _, _, _ ->
                         dismissalCheckpoints++
+                        if (holdCheckpoint) {
+                            checkpointEntered.countDown()
+                            releaseCheckpoint.await()
+                        }
                         JourneyScreenDismissalResult.HANDLED
                     }, onOutcome = {})
             }
@@ -593,7 +604,26 @@ class PublishedTextInputDeviceTest {
                 changedPixels(beforeFailure, afterFailure, Rect(0, 0, beforeFailure.width, beforeFailure.height)))
             beforeFailure.recycle()
             afterFailure.recycle()
-            val second = present(navigationScreens[1])
+            val beforePending = composedSurface(instrumentation, outgoingSurface)
+            holdCheckpoint = true
+            pendingNavigation = scope.async { present(navigationScreens[1]) }
+            assertTrue("Prepared destination must reach the outgoing checkpoint", checkpointEntered.await(15, TimeUnit.SECONDS))
+            assertHostedScreen(instrumentation, first, navigationScreens[0])
+            val duringPending = composedSurface(instrumentation, outgoingSurface)
+            File(instrumentation.targetContext.filesDir, "navigation-before-pending.png").outputStream().use {
+                beforePending.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            File(instrumentation.targetContext.filesDir, "navigation-during-pending.png").outputStream().use {
+                duringPending.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            assertEquals("A prepared destination must not cover the outgoing screen before its checkpoint completes",
+                navigationContract.getValue("pendingCheckpointComposedPixelsChanged").jsonPrimitive.content.toInt(),
+                changedPixels(beforePending, duringPending, Rect(0, 0, beforePending.width, beforePending.height)))
+            beforePending.recycle()
+            duringPending.recycle()
+            holdCheckpoint = false
+            releaseCheckpoint.complete(Unit)
+            val second = runBlocking { pendingNavigation.await() }
             assertTrue("Navigation must retain the Activity", first === second)
             val returned = present(navigationScreens[2])
             assertEquals(navigationContract.getValue("activityLaunches").jsonPrimitive.content.toInt(), monitor.hits)
@@ -611,7 +641,11 @@ class PublishedTextInputDeviceTest {
             runBlocking { service.shutdownOwnedBy(owner) }
             assertEquals(null, service.journeyScreenId(JourneyPresentationOwner(journey, owner)))
         } finally {
-            runBlocking { service.shutdownOwnedBy(owner) }
+            releaseCheckpoint.complete(Unit)
+            runBlocking {
+                pendingNavigation?.cancelAndJoin()
+                service.shutdownOwnedBy(owner)
+            }
             scope.cancel()
             instrumentation.removeMonitor(monitor)
             PresentationRegistry.clearForTesting()
@@ -714,6 +748,22 @@ class PublishedTextInputDeviceTest {
             }
             instrumentation.removeMonitor(monitor)
             PresentationRegistry.clearForTesting()
+        }
+    }
+
+    private fun composedSurface(instrumentation: Instrumentation, surface: SurfaceView): Bitmap {
+        val bounds = Rect()
+        instrumentation.runOnMainSync { assertTrue(surface.getGlobalVisibleRect(bounds)) }
+        val display = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
+        return try {
+            val cropped = Bitmap.createBitmap(display, bounds.left, bounds.top, bounds.width(), bounds.height())
+            try {
+                checkNotNull(cropped.copy(Bitmap.Config.ARGB_8888, false))
+            } finally {
+                if (cropped !== display) cropped.recycle()
+            }
+        } finally {
+            display.recycle()
         }
     }
 
