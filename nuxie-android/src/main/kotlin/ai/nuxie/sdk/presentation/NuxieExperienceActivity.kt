@@ -101,6 +101,7 @@ internal class NuxieExperienceActivity : Activity() {
         val ready = CompletableDeferred<Unit>()
         val closed = CompletableDeferred<Unit>()
         private var closing = false
+        private var revealed = false
         private val effectsLock = Any()
         private val pendingEffects = mutableListOf<() -> Unit>()
         var mounted: ExperienceMountedScreen? = null
@@ -158,9 +159,7 @@ internal class NuxieExperienceActivity : Activity() {
                     mounted?.setVisible(false)
                     ready.complete(Unit)
                 } else {
-                    if (currentScreen === this) removeLoadingView()
-                    if (closeState.reason == null) mounted?.activate()
-                    PresentationRegistry.reportFirstFrame(id)
+                    requestReveal()
                 }
             }
         }
@@ -181,10 +180,29 @@ internal class NuxieExperienceActivity : Activity() {
         fun publishPreparedFrame() {
             synchronized(effectsLock) {
                 provisional = false
-                mounted?.activate()
-                PresentationRegistry.reportFirstFrame(id)
+                requestReveal()
                 pendingEffects.forEach { it() }
                 pendingEffects.clear()
+            }
+        }
+
+        private fun requestReveal() {
+            PresentationRegistry.reportFirstFrame(id, this) {
+                withContext(Dispatchers.Main.immediate) {
+                    if (closing || isDestroyed || isFinishing || closeState.reason != null ||
+                        currentScreen !== this@Screen || !PresentationRegistry.canReveal(id, this@Screen)) {
+                        false
+                    } else {
+                        if (!revealed) {
+                            revealed = true
+                            contentRoot.background = null
+                            view?.alpha = 1f
+                            removeLoadingView()
+                            mounted?.activate()
+                        }
+                        true
+                    }
+                }
             }
         }
         override fun onRuntimeEvent(event: NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) = Unit
@@ -408,9 +426,9 @@ internal class NuxieExperienceActivity : Activity() {
         try {
             val newRoot = !::contentRoot.isInitialized
             if (newRoot) contentRoot = FrameLayout(this)
-            contentRoot.background = null
-            contentRoot.addView(screen.mount(), 0, FrameLayout.LayoutParams(-1, -1))
+            contentRoot.addView(screen.mount().apply { alpha = 0f }, 0, FrameLayout.LayoutParams(-1, -1))
             if (newRoot) setContentView(shellView(contentRoot, prepared.shell))
+            contentRoot.setBackgroundColor(prepared.clearColor)
             screen.mounted?.observeWindow()
         } catch (error: Throwable) {
             screen.fail(error)

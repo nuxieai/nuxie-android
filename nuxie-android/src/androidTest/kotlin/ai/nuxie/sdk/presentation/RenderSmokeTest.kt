@@ -65,7 +65,7 @@ class RenderSmokeTest {
                 SENTINEL_CLEAR,
                 PresentationShell.FullScreen,
             ),
-            onFirstFrame = {},
+            onFirstFrame = { kotlinx.coroutines.runBlocking { assertTrue(PresentationRegistry.reveal(presentationId)) } },
             onFailure = { throw AssertionError("Experience host failed", it) },
             onDismissed = {},
             onOutcome = {},

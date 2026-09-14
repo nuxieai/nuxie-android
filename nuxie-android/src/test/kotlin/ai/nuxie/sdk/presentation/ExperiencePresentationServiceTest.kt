@@ -461,6 +461,57 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `recreation retires a queued reveal without replaying durable admission or shown`() = runTest {
+        val release = renderedJourneyRelease()
+        val launched = mutableListOf<String>()
+        val events = mutableListOf<String>()
+        val service = service(this, launch = launched::add, emit = { name, _, _ -> events += name })
+        val admission = CompletableDeferred<Unit>()
+        val oldFrameEntered = CompletableDeferred<Unit>()
+        val oldFrameReleased = CompletableDeferred<Unit>()
+        var admissions = 0
+        var oldVisible = false
+        var replacementVisible = false
+        val pending = async {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
+                onPresentationRevealed = { admissions++; admission.await() }, onOutcome = {})
+        }
+        runCurrent()
+        val id = launched.single()
+        val old = AttachedHost()
+        PresentationRegistry.attach(id, old)
+        PresentationRegistry.reportFirstFrame(id, old) {
+            oldFrameEntered.complete(Unit)
+            oldFrameReleased.await()
+            PresentationRegistry.canReveal(id, old).also { oldVisible = it }
+        }
+        runCurrent()
+        assertFalse(oldFrameEntered.isCompleted)
+        assertFalse(pending.isCompleted)
+        assertTrue(events.isEmpty())
+        admission.complete(Unit)
+        oldFrameEntered.await()
+        PresentationRegistry.detach(id, old)
+        val replacement = AttachedHost()
+        PresentationRegistry.attach(id, replacement)
+        PresentationRegistry.reportFirstFrame(id, replacement) {
+            PresentationRegistry.canReveal(id, replacement).also { replacementVisible = it }
+        }
+        runCurrent()
+        assertFalse(replacementVisible)
+        oldFrameReleased.complete(Unit)
+        pending.await()
+        assertFalse(oldVisible)
+        assertTrue(replacementVisible)
+        assertEquals(1, admissions)
+        assertEquals(1, events.count { it == SystemEventNames.EXPERIENCE_SHOWN })
+        service.dismiss(CloseReason.HostDismissed)
+        PresentationRegistry.detach(id, replacement)
+        service.shutdownOwnedBy("customer-1")
+    }
+
+    @Test
     fun `competing preparation is declined without waiting or disturbing the admitted owner`() = runTest {
         val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/presentation-preparation-android.json").readText()).jsonObject

@@ -77,6 +77,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /** Real publisher bytes, signed defaults, runtime geometry and runtime text writer. */
@@ -438,7 +439,7 @@ class PublishedTextInputDeviceTest {
         var activity: Activity? = null
         var before: Bitmap? = null
         var after: Bitmap? = null
-        PresentationRegistry.register(id, prepared, onFirstFrame = { firstFrame.countDown() },
+        PresentationRegistry.register(id, prepared, onFirstFrame = { approveFixtureFrame(id); firstFrame.countDown() },
             onFailure = { failure.set(it) }, onDismissed = { dismissed.countDown() }, onOutcome = {})
         try {
             context.startActivity(Intent(context, NuxieExperienceActivity::class.java).apply {
@@ -447,10 +448,23 @@ class PublishedTextInputDeviceTest {
             })
             val original = checkNotNull(monitor.waitForActivityWithTimeout(15_000))
             activity = original
+            instrumentation.runOnMainSync {
+                // This corpus compares identical portrait extents before/after Home.
+                // Do not inherit another app's transient display orientation.
+                original.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            }
             assertTrue("Initial frame: ${failure.get()}", firstFrame.await(30, TimeUnit.SECONDS))
             instrumentation.waitForIdleSync()
             SystemClock.sleep(150)
-            before = copySurface(checkNotNull(findSurface(original.window.decorView)))
+            val portraitDeadline = SystemClock.elapsedRealtime() + 10_000
+            var initial = copySurface(checkNotNull(findSurface(original.window.decorView)))
+            while (initial.width >= initial.height && SystemClock.elapsedRealtime() < portraitDeadline) {
+                initial.recycle()
+                SystemClock.sleep(50)
+                initial = copySurface(checkNotNull(findSurface(original.window.decorView)))
+            }
+            assertTrue("Initial portrait frame must be established", initial.height > initial.width)
+            before = initial
             val stopped = CountDownLatch(1)
             val resumed = CountDownLatch(1)
             val application = original.application
@@ -478,7 +492,7 @@ class PublishedTextInputDeviceTest {
                 assertTrue("Return must resume the same Activity", resumed.await(10, TimeUnit.SECONDS))
                 instrumentation.waitForIdleSync()
                 SystemClock.sleep(150)
-                val returned = copySurface(checkNotNull(findSurface(original.window.decorView)))
+                val returned = copySurfaceAtSize(checkNotNull(findSurface(original.window.decorView)), before.width, before.height)
                 try {
                     assertEquals(0, changedPixels(before, returned, Rect(0, 0, before.width, before.height)))
                 } finally { returned.recycle() }
@@ -541,13 +555,13 @@ class PublishedTextInputDeviceTest {
             val replacementSurface = checkNotNull(findSurface(replacement.window.decorView))
             // Activity creation does not mean its asynchronous native frame is ready.
             val renderDeadline = SystemClock.uptimeMillis() + 10_000
-            var rendered = copySurface(replacementSurface)
+            var rendered = copySurfaceAtSize(replacementSurface, before.width, before.height)
             after = rendered
             while (changedPixels(before, rendered, Rect(0, 0, before.width, before.height)) != 0 &&
                 SystemClock.uptimeMillis() < renderDeadline) {
                 rendered.recycle()
                 SystemClock.sleep(50)
-                rendered = copySurface(replacementSurface)
+                rendered = copySurfaceAtSize(replacementSurface, before.width, before.height)
                 after = rendered
             }
             assertEquals(before.width, after.width)
@@ -759,7 +773,7 @@ class PublishedTextInputDeviceTest {
         instrumentation.addMonitor(monitor)
         var activity: Activity? = null
         var pending: PreparedScreenNavigation? = null
-        PresentationRegistry.register(id, content(sourceIndex, contract.getValue("sourceBackgroundArgb").jsonPrimitive.long.toInt()), onFirstFrame = { firstFrame.countDown() },
+        PresentationRegistry.register(id, content(sourceIndex, contract.getValue("sourceBackgroundArgb").jsonPrimitive.long.toInt()), onFirstFrame = { approveFixtureFrame(id); firstFrame.countDown() },
             onFailure = { failure.set(it) }, onDismissed = {}, onOutcome = {})
         try {
             instrumentation.targetContext.startActivity(Intent(instrumentation.targetContext,
@@ -834,7 +848,7 @@ class PublishedTextInputDeviceTest {
                 }
                 val activated = CountDownLatch(1)
                 PresentationRegistry.register(destinationId, destination,
-                    onFirstFrame = { activated.countDown() }, onFailure = { failure.set(it) },
+                    onFirstFrame = { approveFixtureFrame(destinationId); activated.countDown() }, onFailure = { failure.set(it) },
                     onDismissed = {}, onOutcome = {})
                 checkNotNull(pending).activate()
                 pending = null
@@ -886,7 +900,7 @@ class PublishedTextInputDeviceTest {
                     item.getValue("extentRatio").jsonPrimitive.float, radius, true),
                 screen.getValue("id").jsonPrimitive.content, fixture.release.descriptor, fixture.assets,
                 ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float),
-            ), onFirstFrame = { firstFrame.countDown() }, onFailure = { failure.set(it) },
+            ), onFirstFrame = { approveFixtureFrame(presentationId); firstFrame.countDown() }, onFailure = { failure.set(it) },
                 onDismissed = {}, onOutcome = {})
             try {
                 context.startActivity(Intent(context, NuxieExperienceActivity::class.java).apply {
@@ -956,7 +970,7 @@ class PublishedTextInputDeviceTest {
             PresentationShell.FullScreen, screen.getValue("id").jsonPrimitive.content,
             release.descriptor, assets,
             ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float),
-        ), onFirstFrame = { firstFrame.countDown() }, onFailure = { failure.set(it) },
+        ), onFirstFrame = { approveFixtureFrame(presentationId); firstFrame.countDown() }, onFailure = { failure.set(it) },
             onDismissed = {}, onOutcome = { if (it is CloseReason.Error) failure.set(it.cause) }, onTextCommitted = { id, text -> commits.add(id to text) })
         try {
             context.startActivity(Intent(context, NuxieExperienceActivity::class.java).apply {
@@ -1048,6 +1062,8 @@ class PublishedTextInputDeviceTest {
         val fixture = loadPublishedFixture(instrumentation)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val releaseAcquisition = CompletableDeferred<Unit>()
+        val releaseReveal = CompletableDeferred<Unit>()
+        val revealStarted = CountDownLatch(1)
         val started = CountDownLatch(1)
         val shown = java.util.concurrent.atomic.AtomicInteger()
         val service = ExperiencePresentationService(instrumentation.targetContext, { name, _, _ ->
@@ -1062,7 +1078,7 @@ class PublishedTextInputDeviceTest {
                     started.countDown()
                     releaseAcquisition.await()
                     AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv, protection = Closeable {})
-                }, onOutcome = {})
+                }, onPresentationRevealed = { revealStarted.countDown(); releaseReveal.await() }, onOutcome = {})
         }
         try {
             assertTrue(started.await(10, TimeUnit.SECONDS))
@@ -1097,6 +1113,17 @@ class PublishedTextInputDeviceTest {
             assertEquals(0, shown.get())
             assertFalse(pending.isCompleted)
             releaseAcquisition.complete(Unit)
+            assertTrue(revealStarted.await(15, TimeUnit.SECONDS))
+            assertFalse(pending.isCompleted)
+            assertEquals(0, shown.get())
+            instrumentation.runOnMainSync {
+                val container = checkNotNull(root) as ViewGroup
+                assertEquals(2, container.childCount)
+                assertEquals(0f, container.getChildAt(0).alpha)
+                assertTrue(container.getChildAt(1) is ExperienceLoadingView)
+                assertEquals(0, (container.background as android.graphics.drawable.ColorDrawable).color)
+            }
+            releaseReveal.complete(Unit)
             runBlocking { kotlinx.coroutines.withTimeout(30_000) { pending.await() } }
             assertHostedScreen(instrumentation, activity, "screen_1")
             assertEquals(1, monitor.hits)
@@ -1106,9 +1133,12 @@ class PublishedTextInputDeviceTest {
                 val container = checkNotNull(root) as ViewGroup
                 assertEquals(1, container.childCount)
                 assertFalse(container.getChildAt(0) is ExperienceLoadingView)
+                assertEquals(1f, container.getChildAt(0).alpha)
+                assertNull(container.background)
             }
         } finally {
             before.recycle()
+            releaseReveal.complete(Unit)
             releaseAcquisition.complete(Unit)
             runBlocking { service.shutdownOwnedBy("early-owner"); scope.coroutineContext[Job]?.cancelAndJoin() }
             instrumentation.removeMonitor(monitor)
@@ -1355,19 +1385,43 @@ class PublishedTextInputDeviceTest {
     }
 
     private fun composedSurface(instrumentation: Instrumentation, surface: TextureView, fixedBounds: Rect? = null): Bitmap {
-        val bounds = fixedBounds?.let { Rect(it) } ?: Rect()
-        if (fixedBounds == null) instrumentation.runOnMainSync { assertTrue(surface.getGlobalVisibleRect(bounds)) }
-        val display = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
-        return try {
-            val cropped = Bitmap.createBitmap(display, bounds.left, bounds.top, bounds.width(), bounds.height())
+        val deadline = SystemClock.elapsedRealtime() + 5_000
+        do {
+            val bounds = fixedBounds?.let { Rect(it) } ?: Rect()
+            if (fixedBounds == null) instrumentation.runOnMainSync { surface.getGlobalVisibleRect(bounds) }
+            val display = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
             try {
-                checkNotNull(cropped.copy(Bitmap.Config.ARGB_8888, false))
-            } finally {
-                if (cropped !== display) cropped.recycle()
-            }
-        } finally {
-            display.recycle()
-        }
+                val after = Rect()
+                if (fixedBounds == null) instrumentation.runOnMainSync { surface.getGlobalVisibleRect(after) }
+                // Capture and layout are asynchronous during window/rotation changes.
+                // Retry the whole observation; never clamp away content under test.
+                if ((fixedBounds != null || bounds == after) && bounds.width() > 0 && bounds.height() > 0 &&
+                    bounds.left >= 0 && bounds.top >= 0 && bounds.right <= display.width && bounds.bottom <= display.height) {
+                    val cropped = Bitmap.createBitmap(display, bounds.left, bounds.top, bounds.width(), bounds.height())
+                    try { return checkNotNull(cropped.copy(Bitmap.Config.ARGB_8888, false)) }
+                    finally { if (cropped !== display) cropped.recycle() }
+                }
+            } finally { display.recycle() }
+            SystemClock.sleep(50)
+        } while (SystemClock.elapsedRealtime() < deadline)
+        error("Surface bounds did not stabilize inside the composed display")
+    }
+
+    private fun copySurfaceAtSize(surface: TextureView, width: Int, height: Int): Bitmap {
+        val deadline = SystemClock.elapsedRealtime() + 10_000
+        do {
+            val bitmap = copySurface(surface)
+            if (bitmap.width == width && bitmap.height == height) return bitmap
+            bitmap.recycle()
+            SystemClock.sleep(50)
+        } while (SystemClock.elapsedRealtime() < deadline)
+        error("Rendered surface did not restore its expected extent ${width}x${height}")
+    }
+
+    // Direct renderer fixtures stand in for the Journey's durable admission owner.
+    // They must explicitly acknowledge the new host handoff before inspecting pixels.
+    private fun approveFixtureFrame(id: String) = runBlocking {
+        assertTrue("Fixture host must accept its admitted frame", PresentationRegistry.reveal(id))
     }
 
     private fun stableSurface(surface: TextureView): Bitmap {
@@ -1377,7 +1431,8 @@ class PublishedTextInputDeviceTest {
         while (unchanged < 3 && SystemClock.elapsedRealtime() < deadline) {
             SystemClock.sleep(50)
             val next = copySurface(surface)
-            unchanged = if (changedPixels(previous, next, Rect(0, 0, previous.width, previous.height)) == 0) unchanged + 1 else 0
+            unchanged = if (previous.width == next.width && previous.height == next.height &&
+                changedPixels(previous, next, Rect(0, 0, previous.width, previous.height)) == 0) unchanged + 1 else 0
             previous.recycle()
             previous = next
         }

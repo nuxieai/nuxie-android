@@ -48,6 +48,7 @@ internal class JourneyRuntimeEmissionCoordinator(
     private var nextBatch = nextBatchSequence
     private var nextEmission = nextEmissionSequence
     private var closed = false
+    private var admissionCommitted = false
 
     init {
         require(nextBatchSequence >= 0) { "Next presentation batch sequence must be nonnegative" }
@@ -56,19 +57,28 @@ internal class JourneyRuntimeEmissionCoordinator(
         }
     }
 
-    suspend fun reveal(): Boolean = gate.withLock {
-        if (closed) return@withLock false
-        if (revealed.isCompleted) return@withLock true
+    internal enum class RevealResult { VISIBLE, WAITING_FOR_HOST, REJECTED }
+
+    suspend fun reveal(): Boolean = reveal { true } == RevealResult.VISIBLE
+
+    suspend fun reveal(present: suspend () -> Boolean): RevealResult = gate.withLock {
+        if (closed) return@withLock RevealResult.REJECTED
         return@withLock runCatching {
-            check(onScreenChanged(screenId)) { "Journey screen activation was rejected" }
-            onPresentationRevealed(screenId)
+            if (!admissionCommitted) {
+                check(onScreenChanged(screenId)) { "Journey screen activation was rejected" }
+                onPresentationRevealed(screenId)
+                admissionCommitted = true
+            }
+            // Recreation may retire the first native frame while durable admission is
+            // suspended. Retain admission, but never release effects before a live host.
+            if (!present()) return@withLock RevealResult.WAITING_FOR_HOST
             revealed.complete(Unit)
-            true
+            RevealResult.VISIBLE
         }.getOrElse { error ->
             Log.w(LOG_TAG, "Journey presentation reveal callback failed", error)
             closed = true
             revealed.complete(Unit)
-            false
+            RevealResult.REJECTED
         }
     }
 
