@@ -269,6 +269,15 @@ internal object NuxieRuntimeBridge {
         fitContainCenter: Boolean,
     ): Int
 
+    /** Headless render and native window copy: 1 after posting, negative status on failure. */
+    external fun nativeRendererCopyPlayerToWindow(
+        renderer: Long,
+        player: Long,
+        window: Long,
+        clearColor: Int,
+        fitContainCenter: Boolean,
+    ): Int
+
     /** Renders into JVM-owned, tightly packed RGBA8 premultiplied-sRGB pixels. */
     external fun nativeRendererRenderPlayerToCpuFrame(
         renderer: Long,

@@ -1,5 +1,12 @@
 package ai.nuxie.sdk.runtime
 
+import ai.nuxie.sdk.fixtures.FixtureRunner
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
@@ -286,6 +293,59 @@ class NuxieOwnedRuntimeTest {
         }
     }
 
+    @Test
+    fun `unsupported surfaces copy without masking attachment failures`() {
+        val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("runtime/surface-capability-android.json").readText()).jsonObject
+        val native = RecordingNative().apply { resizeStatus = 0 }
+        val runtime = NuxieRuntime(native)
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(100, 200))
+        val file = checkNotNull(runtime.importFile(renderer, byteArrayOf(1)))
+        val player = checkNotNull(checkNotNull(file.newArtboard()).newPlayer())
+        val window = NuxieRuntimeWindow(40L, native)
+        for (status in contract.getValue("failureStatuses").jsonArray.map { it.jsonPrimitive.int }) {
+            native.attachStatus = status
+            assertEquals(-status, renderer.renderAndPresent(player, window, 0, true))
+        }
+        native.attachStatus = -99
+        assertEquals(-4, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(0, native.copyCalls)
+        assertEquals(0, native.presentCalls)
+        native.surfaceCalls.clear()
+        native.attachStatus = contract.getValue("unsupportedAttachment").jsonPrimitive.int
+        repeat(2) {
+            assertEquals(contract.getValue("copyPresented").jsonPrimitive.int,
+                renderer.renderAndPresent(player, window, 0, true))
+        }
+        assertEquals(2, native.copyCalls)
+        assertEquals(0, native.presentCalls)
+        assertEquals(listOf("attach:40"), native.surfaceCalls)
+        native.copyDisposition = contract.getValue("copyFailure").jsonPrimitive.int
+        assertEquals(native.copyDisposition, renderer.renderAndPresent(player, window, 0, true))
+        window.close()
+        val replacement = NuxieRuntimeWindow(41L, native)
+        native.attachStatus = contract.getValue("attached").jsonPrimitive.int
+        assertEquals(1, renderer.renderAndPresent(player, replacement, 0, true))
+        assertEquals(1, native.presentCalls)
+        renderer.resize(300, 400)
+        native.attachStatus = contract.getValue("unsupportedAttachment").jsonPrimitive.int
+        native.copyDisposition = 1
+        assertEquals(1, renderer.renderAndPresent(player, replacement, 0, true))
+        val attachments = native.surfaceCalls.toList()
+        renderer.resize(400, 300)
+        native.attachStatus = 0
+        assertEquals(1, renderer.renderAndPresent(player, replacement, 0, true))
+        assertEquals("Resize must retain the connected CPU producer", attachments, native.surfaceCalls)
+        assertEquals(1, native.presentCalls)
+        renderer.close()
+        renderer.close()
+        replacement.close()
+        replacement.close()
+        assertEquals(listOf("attach:40", "attach:41", "detach", "attach:41"), native.surfaceCalls)
+        assertEquals(listOf(50L), native.freedRenderers)
+        assertEquals(listOf(40L, 41L), native.releasedWindows)
+    }
+
     private class RecordingNative : NuxieTypedRuntimeNative {
         override val isAvailable = true
         var inspectedAssets: List<ExpectedFileAsset>? = emptyList()
@@ -394,6 +454,9 @@ class NuxieOwnedRuntimeTest {
         var detachStatus = 0
         var presentation = 1
         var presentCalls = 0
+        var copyCalls = 0
+        var copyDisposition = 1
+        var resizeStatus = 5
 
         override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int {
             surfaceCalls += "attach:$windowHandle"
@@ -405,7 +468,7 @@ class NuxieOwnedRuntimeTest {
             return detachStatus
         }
 
-        override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int = 5
+        override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int = resizeStatus
 
         override fun renderAndPresent(
             rendererHandle: Long,
@@ -416,6 +479,17 @@ class NuxieOwnedRuntimeTest {
         ): Int {
             presentCalls++
             return presentation
+        }
+
+        override fun copyPlayerToWindow(
+            rendererHandle: Long,
+            playerHandle: Long,
+            windowHandle: Long,
+            clearColor: Int,
+            fitContainCenter: Boolean,
+        ): Int {
+            copyCalls++
+            return copyDisposition
         }
 
         override fun renderToCpuFrame(
