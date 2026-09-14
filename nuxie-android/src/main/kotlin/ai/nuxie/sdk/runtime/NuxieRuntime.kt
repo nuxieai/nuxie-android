@@ -514,8 +514,9 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
     fun detachSurface(): Int {
         val handle = owned.require()
         if (attachedWindow == null) return NUX_STATUS_OK
-        attachedWindow = null
-        return native.detachRendererSurface(handle)
+        val status = native.detachRendererSurface(handle)
+        if (status == NUX_STATUS_OK) attachedWindow = null
+        return status
     }
 
     fun resize(pixelWidth: Int, pixelHeight: Int): Int {

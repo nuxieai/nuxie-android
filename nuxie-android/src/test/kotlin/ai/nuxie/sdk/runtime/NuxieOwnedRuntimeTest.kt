@@ -225,6 +225,24 @@ class NuxieOwnedRuntimeTest {
     }
 
     @Test
+    fun `failed detach remains owned until retry or renderer destruction`() {
+        val native = RecordingNative()
+        val runtime = NuxieRuntime(native)
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(100, 200))
+        val file = checkNotNull(runtime.importFile(renderer, byteArrayOf(1)))
+        val player = checkNotNull(checkNotNull(file.newArtboard()).newPlayer())
+        val window = NuxieRuntimeWindow(40L, native)
+        assertEquals(1, renderer.renderAndPresent(player, window, 0, true))
+        native.detachStatus = 5
+        assertEquals(5, renderer.detachSurface())
+        native.detachStatus = 0
+        assertEquals(0, renderer.detachSurface())
+        assertEquals(listOf("attach:40", "detach", "detach"), native.surfaceCalls)
+        renderer.close()
+        assertEquals(listOf(50L), native.freedRenderers)
+    }
+
+    @Test
     fun `renderer returns an owned CPU frame and rejects rendering after close`() {
         val native = RecordingNative()
         val runtime = NuxieRuntime(native)
@@ -355,6 +373,7 @@ class NuxieOwnedRuntimeTest {
 
         val surfaceCalls = mutableListOf<String>()
         var attachStatus = 0
+        var detachStatus = 0
         var presentation = 1
         var presentCalls = 0
 
@@ -365,7 +384,7 @@ class NuxieOwnedRuntimeTest {
 
         override fun detachRendererSurface(rendererHandle: Long): Int {
             surfaceCalls += "detach"
-            return 0
+            return detachStatus
         }
 
         override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int = 5
