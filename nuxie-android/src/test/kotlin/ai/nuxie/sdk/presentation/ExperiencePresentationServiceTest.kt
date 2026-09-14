@@ -227,7 +227,12 @@ class ExperiencePresentationServiceTest {
                 }
                 runCurrent()
                 close?.await()
-                if (action != "cancel") assertTrue(action, next.await().isFailure)
+                if (action == "failure") {
+                    assertFalse(next.isCompleted)
+                    val recovery = (PresentationRegistry.observe(outgoingId)?.value as PresentationContentState.Ready).navigationRecovery
+                    assertEquals(AcquisitionProgress.Phase.FAILED, recovery?.progress?.phase)
+                    next.cancelAndJoin()
+                } else if (action != "cancel") assertTrue(action, next.await().isFailure)
                 val retained = case.getValue("outgoingRetained").jsonPrimitive.boolean
                 assertEquals(action, retained, PresentationRegistry.resolve(outgoingId) != null)
                 assertEquals(action, !retained, outgoingLease.closed.get())
@@ -254,6 +259,120 @@ class ExperiencePresentationServiceTest {
                 next.cancelAndJoin()
                 service.dismissFromHost("customer-1")
             }
+        }
+    }
+
+    @Test
+    fun `navigation retries provisional preparation without a second source checkpoint`() = runTest {
+        val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/presentation-navigation-recovery-android.json").readText()).jsonObject
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val sourceLease = Lease()
+        var destinationCloses = 0
+        var checkpoints = 0
+        var attempts = 0
+        val first = async { service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.reserveJourney("customer-1"), acquire = { acquired(release.identity, sourceLease) },
+            onScreenDismissed = { _, _, _ -> checkpoints++; JourneyScreenDismissalResult.HANDLED }, onOutcome = {}) }
+        runCurrent()
+        val sourceId = launched.single()
+        PresentationRegistry.reportFirstFrame(sourceId)
+        first.await()
+        val host = object : PresentationScreenHandle {
+            var reason: CloseReason? = null
+            override fun requestCloseFromService(reason: CloseReason): Boolean { this.reason = reason; return true }
+            override fun screenCloseReason() = reason
+            override fun finishAfterServiceClose() {
+                if (reason != CloseReason.JourneyNavigation) PresentationRegistry.detach(sourceId, this)
+            }
+            override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation {
+                attempts++
+                assertEquals(0uL, content.screenLifecycle.appearances)
+                assertNull(content.textInputState.bind().read("probe"))
+                if (attempts == 1) {
+                    content.screenLifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING)
+                    content.textInputState.bind().write("probe", ExperienceTextInputState.Value("retired", 0, 0))
+                    error("Provisional native failure")
+                }
+                val source = this
+                return object : PreparedScreenNavigation {
+                    override fun activate() { PresentationRegistry.detach(sourceId, source); PresentationRegistry.reportFirstFrame(id) }
+                    override suspend fun abort() = Unit
+                }
+            }
+        }
+        assertTrue(PresentationRegistry.attach(sourceId, host))
+        val next = async { service.presentJourney(release, "screen_details", "journey-1", "customer-1", null,
+            acquire = { acquired(release.identity, Closeable { destinationCloses++ }) }, onOutcome = {}) }
+        runCurrent()
+        val recovery = checkNotNull((PresentationRegistry.observe(sourceId)?.value as PresentationContentState.Ready).navigationRecovery)
+        assertEquals(AcquisitionProgress.Phase.FAILED, recovery.progress.phase)
+        assertFalse(next.isCompleted)
+        assertEquals(0, checkpoints)
+        assertEquals(1, destinationCloses)
+        assertFalse(sourceLease.closed.get())
+        assertEquals(contract.getValue("sourceRemainsOwnedWhileRecovering").jsonPrimitive.boolean,
+            PresentationRegistry.resolve(sourceId) != null)
+        assertTrue(PresentationRegistry.retryNavigation(sourceId, recovery.token, recovery.progress.generation))
+        assertFalse(PresentationRegistry.retryNavigation(sourceId, recovery.token, recovery.progress.generation))
+        next.await()
+        assertEquals(contract.getValue("attempts").jsonPrimitive.int, attempts)
+        assertEquals(contract.getValue("dismissalCheckpoints").jsonPrimitive.int, checkpoints)
+        assertEquals(contract.getValue("activityLaunches").jsonPrimitive.int, launched.size)
+        assertTrue(sourceLease.closed.get())
+        service.dismissFromHost("customer-1")
+        assertEquals(2, destinationCloses)
+    }
+
+    @Test
+    fun `user close cancels destination recovery without a Journey callback`() = runTest {
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val sourceLease = Lease()
+        var checkpoints = 0
+        val first = async {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, sourceLease) },
+                onScreenDismissed = { _, _, method ->
+                    assertEquals("user", method)
+                    checkpoints++
+                    JourneyScreenDismissalResult.HANDLED
+                }, onOutcome = {})
+        }
+        runCurrent()
+        val sourceId = launched.single()
+        PresentationRegistry.reportFirstFrame(sourceId)
+        first.await()
+        val host = AttachedHost()
+        assertTrue(PresentationRegistry.attach(sourceId, host))
+        val next = async {
+            runCatching {
+                service.presentJourney(release, "screen_details", "journey-1", "customer-1", null,
+                    acquire = { throw java.io.IOException("offline") }, onOutcome = {})
+            }
+        }
+        try {
+            runCurrent()
+            val recovery = checkNotNull((PresentationRegistry.observe(sourceId)?.value as PresentationContentState.Ready).navigationRecovery)
+            assertEquals(AcquisitionProgress.Phase.FAILED, recovery.progress.phase)
+            assertFalse(next.isCompleted)
+            host.requestCloseFromService(CloseReason.UserDismissed)
+            PresentationRegistry.reportOutcome(sourceId, CloseReason.UserDismissed)
+            host.finishAfterServiceClose()
+            PresentationRegistry.detach(sourceId, host)
+            runCurrent()
+            assertTrue("Close must cancel recovery independently of Journey callbacks", next.isCompleted)
+            assertTrue(next.await().isFailure)
+            assertFalse(PresentationRegistry.retryNavigation(sourceId, recovery.token, recovery.progress.generation))
+            assertTrue(sourceLease.closed.get())
+            assertEquals(1, checkpoints)
+            assertEquals(1, launched.size)
+        } finally {
+            next.cancelAndJoin()
+            service.dismissFromHost("customer-1")
         }
     }
 
@@ -1269,8 +1388,10 @@ class ExperiencePresentationServiceTest {
         assertNull(show("screen_details", nextBuild).read("input_email"))
         // Returning to an earlier build must not resurrect its old drafts either.
         assertNull(show("screen_welcome", release).read("input_email"))
-        assertTrue(lifecycles[0] === lifecycles[2])
-        assertTrue(lifecycles[1] === lifecycles[3])
+        assertFalse(lifecycles[0] === lifecycles[2])
+        assertEquals(lifecycles[0].snapshot(), lifecycles[2].snapshot())
+        assertFalse(lifecycles[1] === lifecycles[3])
+        assertEquals(lifecycles[1].snapshot(), lifecycles[3].snapshot())
         assertFalse(lifecycles[0] === lifecycles[1])
         assertFalse(lifecycles[0] === lifecycles[4])
         assertFalse(lifecycles[1] === lifecycles[5])

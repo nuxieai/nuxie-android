@@ -1410,15 +1410,23 @@ class PublishedTextInputDeviceTest {
             val invalidRiv = File.createTempFile("invalid-navigation", ".riv", instrumentation.targetContext.cacheDir)
             invalidRiv.writeText("invalid native content")
             val unusedLeaseClosed = java.util.concurrent.atomic.AtomicBoolean(false)
-            val preparationFailure = runBlocking {
+            val failedPreparation = scope.async {
                 runCatching {
                     service.presentJourney(fixture.release, navigationScreens[1], journey, owner, null,
                         acquire = { AcquiredJourneyRelease(fixture.release.identity, fixture.assets, invalidRiv,
                             protection = Closeable { unusedLeaseClosed.set(true) }) }, onOutcome = {})
-                }.exceptionOrNull()
+                }
+            }
+            val sourceId = checkNotNull(first.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
+            runBlocking {
+                kotlinx.coroutines.withTimeout(15_000) {
+                    while ((PresentationRegistry.observe(sourceId)?.value as? PresentationContentState.Ready)
+                            ?.navigationRecovery?.progress?.phase != AcquisitionProgress.Phase.FAILED) kotlinx.coroutines.delay(20)
+                }
+                assertFalse("Native preparation failure should wait for recovery", failedPreparation.isCompleted)
+                failedPreparation.cancelAndJoin()
             }
             invalidRiv.delete()
-            assertTrue("Invalid native content must fail preparation", preparationFailure is ExperiencePresentationException)
             assertHostedScreen(instrumentation, first, navigationScreens[0])
             val failedContract = navigationContract.getValue("failedPreparation").jsonObject
             assertEquals(failedContract.getValue("dismissalCheckpoints").jsonPrimitive.content.toInt(), dismissalCheckpoints)
@@ -1474,6 +1482,99 @@ class PublishedTextInputDeviceTest {
             instrumentation.removeMonitor(monitor)
             PresentationRegistry.clearForTesting()
         }
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun navigationRecoveryRetriesAcquisitionAndNativeFailureOnTheOutgoingScreen() {
+        exerciseOutgoingRecovery(closeAfterNativeFailure = false)
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun navigationRecoveryCloseCancelsTheDestinationWithoutJourneyCallbacks() {
+        exerciseOutgoingRecovery(closeAfterNativeFailure = true)
+    }
+
+    private fun exerciseOutgoingRecovery(closeAfterNativeFailure: Boolean) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val fixture = loadPublishedFixture(instrumentation)
+        val screenIds = instrumentation.context.assets.open("journeys/planes/persistent-navigation-android.json")
+            .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject }
+            .getValue("screens").jsonArray.map { it.jsonPrimitive.content }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val attempts = java.util.concurrent.atomic.AtomicInteger()
+        val destinationCloses = java.util.concurrent.atomic.AtomicInteger()
+        val checkpoints = java.util.concurrent.atomic.AtomicInteger()
+        val service = ExperiencePresentationService(instrumentation.targetContext, { _, _, _ -> }, scope,
+            { NuxieRuntime.shared.isAvailable })
+        val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+        instrumentation.addMonitor(monitor)
+        val invalid = File.createTempFile("navigation-recovery", ".riv", instrumentation.targetContext.cacheDir).apply { writeText("invalid native fixture") }
+        var next: Deferred<ai.nuxie.sdk.ExperienceRef>? = null
+        try {
+            val initial = scope.async { service.presentJourney(fixture.release, screenIds[0], "recover-navigation", "recover-owner",
+                service.reserveJourney("recover-owner"), acquire = { AcquiredJourneyRelease(fixture.release.identity,
+                    fixture.assets, fixture.riv, protection = Closeable {}) },
+                onScreenDismissed = { _, _, _ -> checkpoints.incrementAndGet(); JourneyScreenDismissalResult.HANDLED }, onOutcome = {}) }
+            val activity = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
+            runBlocking { kotlinx.coroutines.withTimeout(30_000) { initial.await() } }
+            val sourceId = checkNotNull(activity.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
+            next = scope.async { service.presentJourney(fixture.release, screenIds[1], "recover-navigation", "recover-owner", null,
+                acquire = {
+                    val attempt = attempts.incrementAndGet()
+                    if (attempt == 1) throw java.io.IOException("Fixture acquisition failure")
+                    AcquiredJourneyRelease(fixture.release.identity, fixture.assets, if (attempt == 2) invalid else fixture.riv,
+                        protection = Closeable { destinationCloses.incrementAndGet() })
+                }, onOutcome = {}) }
+            fun descendants(view: View): List<View> = listOf(view) + if (view is ViewGroup)
+                (0 until view.childCount).flatMap { descendants(view.getChildAt(it)) } else emptyList()
+            for (generation in 1L..2L) {
+                runBlocking { kotlinx.coroutines.withTimeout(15_000) {
+                    while ((PresentationRegistry.observe(sourceId)?.value as? PresentationContentState.Ready)?.navigationRecovery
+                            ?.let { it.progress.generation == generation && it.progress.phase == AcquisitionProgress.Phase.FAILED } != true) {
+                        kotlinx.coroutines.delay(20)
+                    }
+                } }
+                assertHostedScreen(instrumentation, activity, screenIds[0])
+                assertFalse(checkNotNull(next).isCompleted)
+                assertEquals(0, checkpoints.get())
+                assertEquals((generation - 1).toInt(), destinationCloses.get())
+                val closing = closeAfterNativeFailure && generation == 2L
+                var retry: android.widget.Button? = null
+                val deadline = SystemClock.elapsedRealtime() + 5_000
+                while (retry == null && SystemClock.elapsedRealtime() < deadline) {
+                    instrumentation.runOnMainSync {
+                        retry = descendants(activity.window.decorView).filterIsInstance<android.widget.Button>()
+                            .singleOrNull { it.text == (if (closing) "Close" else "Retry") && it.isEnabled }
+                    }
+                    if (retry == null) SystemClock.sleep(20)
+                }
+                instrumentation.runOnMainSync { assertTrue(checkNotNull(retry).performClick()) }
+                if (closing) {
+                    runBlocking { kotlinx.coroutines.withTimeout(30_000) { checkNotNull(next).join() } }
+                    assertTrue(checkNotNull(next).isCancelled)
+                    assertEquals(2, attempts.get())
+                    assertEquals(1, checkpoints.get())
+                    assertEquals(1, monitor.hits)
+                    assertEquals(1, destinationCloses.get())
+                    return
+                }
+            }
+            runBlocking { kotlinx.coroutines.withTimeout(30_000) { checkNotNull(next).await() } }
+            assertHostedScreen(instrumentation, activity, screenIds[1])
+            assertEquals(3, attempts.get())
+            assertEquals(1, checkpoints.get())
+            assertEquals(1, monitor.hits)
+            assertEquals(1, destinationCloses.get())
+        } finally {
+            runBlocking { next?.cancelAndJoin(); service.shutdownOwnedBy("recover-owner"); scope.coroutineContext[Job]?.cancelAndJoin() }
+            invalid.delete()
+            instrumentation.removeMonitor(monitor)
+            PresentationRegistry.clearForTesting()
+        }
+        assertEquals(2, destinationCloses.get())
     }
 
     @Test

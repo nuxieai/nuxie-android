@@ -155,9 +155,11 @@ internal enum class JourneyPermissionRequest {
  * engine-owned Activity. Absence after process death is deliberate: content
  * is never reconstructed from Intent extras.
  */
+internal data class NavigationRecoveryState(val token: String, val progress: AcquisitionProgress)
+
 internal sealed interface PresentationContentState {
     data class Acquiring(val screen: AuthenticatedPresentationScreen, val progress: AcquisitionProgress? = null) : PresentationContentState
-    data class Ready(val content: PreparedPresentation, val progress: AcquisitionProgress? = null) : PresentationContentState
+    data class Ready(val content: PreparedPresentation, val progress: AcquisitionProgress? = null, val navigationRecovery: NavigationRecoveryState? = null) : PresentationContentState
     data class Closed(val reason: CloseReason) : PresentationContentState
 }
 
@@ -184,6 +186,7 @@ internal object PresentationRegistry {
             Collections.newSetFromMap(IdentityHashMap())
         var dismissalReason: CloseReason? = null
         var retry: ((Long) -> Boolean)? = null
+        var navigationRetry: Pair<String, (Long) -> Boolean>? = null
     }
 
     private val lock = Any()
@@ -243,6 +246,38 @@ internal object PresentationRegistry {
             entry.retry
         }
         return retry?.invoke(generation) == true
+    }
+
+    fun beginNavigationRecovery(id: String, token: String, retry: (Long) -> Boolean): Boolean = synchronized(lock) {
+        val entry = entries[id] ?: return@synchronized false
+        if (entry.state.value !is PresentationContentState.Ready || entry.dismissalReason != null ||
+            entry.terminal.get() || entry.navigationRetry != null) return@synchronized false
+        entry.navigationRetry = token to retry
+        true
+    }
+
+    fun updateNavigationRecovery(id: String, token: String, progress: AcquisitionProgress) = synchronized(lock) {
+        val entry = entries[id] ?: return@synchronized
+        val ready = entry.state.value as? PresentationContentState.Ready ?: return@synchronized
+        if (entry.navigationRetry?.first != token || entry.dismissalReason != null || entry.terminal.get()) return@synchronized
+        entry.state.value = ready.copy(navigationRecovery = NavigationRecoveryState(token, progress))
+    }
+
+    fun retryNavigation(id: String, token: String, generation: Long): Boolean {
+        val retry = synchronized(lock) {
+            val entry = entries[id] ?: return false
+            if (entry.dismissalReason != null || entry.terminal.get()) return false
+            entry.navigationRetry?.takeIf { it.first == token }?.second
+        }
+        return retry?.invoke(generation) == true
+    }
+
+    fun endNavigationRecovery(id: String, token: String) = synchronized(lock) {
+        val entry = entries[id] ?: return@synchronized
+        if (entry.navigationRetry?.first != token) return@synchronized
+        entry.navigationRetry = null
+        val ready = entry.state.value as? PresentationContentState.Ready ?: return@synchronized
+        entry.state.value = ready.copy(navigationRecovery = null)
     }
 
     fun nativeProgress(id: String): AcquisitionProgress? = synchronized(lock) {
@@ -767,6 +802,8 @@ internal class ExperiencePresentationService(
             val acquiringFailure = AtomicReference<Throwable?>()
             var unownedAcquisition: AcquiredJourneyRelease? = null
             var navigation: PreparedScreenNavigation? = null
+            var navigationRecoveryOwner: String? = null
+            val navigationRecoveryToken = UUID.randomUUID().toString()
             val nativePreparationFinished = CompletableDeferred<Unit>()
             try {
                 val existing = synchronized(stateLock) {
@@ -820,7 +857,26 @@ internal class ExperiencePresentationService(
                     }
                 }
 
-                val source = try {
+                val id = acquiringId ?: UUID.randomUUID().toString()
+                fun checkOwnership() = synchronized(stateLock) {
+                    if (!attempt.job.isActive || !isCurrentIdentity(request) || !canPresent() || current !== existing ||
+                        existing?.outcomeReason?.get() != null) throw supersededByIdentityTransition()
+                }
+                fun contentFor(source: PreparedSource, isolated: Boolean): PreparedPresentation {
+                    val sameRelease = existing?.acquired?.identity?.let { previous ->
+                        previous.streamKey == source.identity.streamKey && previous.experienceVersionId == source.identity.experienceVersionId &&
+                            previous.buildId == source.identity.buildId
+                    } == true
+                    val texts = if (sameRelease) existing!!.journey.textInputsByScreen else journey.textInputsByScreen
+                    val lifecycles = if (sameRelease) existing!!.journey.lifecycleByScreen else journey.lifecycleByScreen
+                    val text = texts[journey.screenId]?.let { if (isolated) it.copyForPreparation() else it } ?: ExperienceTextInputState()
+                    val lifecycle = lifecycles[journey.screenId]?.let { if (isolated) it.copyForPreparation() else it } ?: ExperienceScreenLifecycle()
+                    return PreparedPresentation(source.acquired.rivFile, source.screen.artboardName, source.screen.clearColor,
+                        source.screen.shell, source.screen.screenId, source.descriptor, source.acquired.artifactsByKey,
+                        source.screen.artboardSize, source.viewModelProjection, text, lifecycle, transition)
+                }
+                data class Destination(val source: PreparedSource, val content: PreparedPresentation, val navigation: PreparedScreenNavigation?)
+                suspend fun acquireInitial(): PreparedSource = try {
                     withContext(attempt.job) {
                         // Capture ownership before withContext can discard a late result on cancellation.
                         val source = recovery?.acquire(
@@ -851,73 +907,79 @@ internal class ExperiencePresentationService(
                         error,
                     )
                 }
-                // Acquisition is reversible; keep the outgoing presentation alive
-                // until artifacts exist and its ownership is still current.
-                synchronized(stateLock) {
-                    if (!attempt.job.isActive || !isCurrentIdentity(request) || !canPresent() || current !== existing ||
-                        existing?.outcomeReason?.get() != null) {
+
+                val destination = if (existing == null) {
+                    val source = acquireInitial()
+                    checkOwnership()
+                    Destination(source, contentFor(source, false), null)
+                } else {
+                    val controller = ExperienceAcquisitionRecovery<Destination>(publish = {
+                        PresentationRegistry.updateNavigationRecovery(existing.id, navigationRecoveryToken, it)
+                    })
+                    if (!PresentationRegistry.beginNavigationRecovery(existing.id, navigationRecoveryToken, controller::retry)) {
                         throw supersededByIdentityTransition()
                     }
-                    // Once artifacts are owned, terminal teardown also owns the
-                    // native preparation/rollback and its destination lease.
-                    existing?.nativePreparationFinished = nativePreparationFinished
+                    navigationRecoveryOwner = existing.id
+                    synchronized(stateLock) {
+                        checkOwnership()
+                        existing.nativePreparationFinished = nativePreparationFinished
+                    }
+                    withContext(attempt.job) {
+                        controller.acquire(
+                            prepare = {
+                                checkOwnership()
+                                var acquired: PreparedSource? = null
+                                var provisional: PreparedScreenNavigation? = null
+                                try {
+                                    val source = prepare().also { acquired = it }
+                                    currentCoroutineContext().ensureActive()
+                                    checkOwnership()
+                                    val content = contentFor(source, true)
+                                    provisional = withTimeout(firstFrameTimeoutMillis) {
+                                        PresentationRegistry.currentScreen(existing.id)?.prepareNavigation(id, content).also { provisional = it }
+                                    }
+                                    provisional?.awaitExit()
+                                    currentCoroutineContext().ensureActive()
+                                    checkOwnership()
+                                    Destination(source, content, provisional)
+                                } catch (error: Throwable) {
+                                    withContext(NonCancellable) {
+                                        try { provisional?.abort() } finally { acquired?.acquired?.close() }
+                                    }
+                                    throw error
+                                }
+                            },
+                            release = { retired -> withContext(NonCancellable) {
+                                try { retired.navigation?.abort() } finally { retired.source.acquired.close() }
+                            } },
+                            recoverable = { error -> error !is ExperiencePresentationException || error.reason in setOf(
+                                ExperiencePresentationException.Reason.ACQUISITION_FAILED,
+                                ExperiencePresentationException.Reason.PRODUCTS_UNAVAILABLE,
+                                ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                                ExperiencePresentationException.Reason.HOST_FAILED,
+                                ExperiencePresentationException.Reason.FIRST_FRAME_TIMEOUT) },
+                            onFailure = { error -> ai.nuxie.sdk.logging.NuxieLog.w("ExperiencePresentation", "Navigation preparation requires recovery", error) },
+                        ).also { unownedAcquisition = it.source.acquired; navigation = it.navigation }
+                    }.also { PresentationRegistry.endNavigationRecovery(existing.id, navigationRecoveryToken) }
                 }
-
+                val source = destination.source
+                val preparedContent = destination.content
+                val textInputState = preparedContent.textInputState
+                navigation = destination.navigation
                 journey.commerce = source.commerceSession
                 existing?.takeIf {
                     val previous = it.acquired.identity
-                    previous.streamKey == source.identity.streamKey &&
-                        previous.experienceVersionId == source.identity.experienceVersionId &&
+                    previous.streamKey == source.identity.streamKey && previous.experienceVersionId == source.identity.experienceVersionId &&
                         previous.buildId == source.identity.buildId
                 }?.let {
                     journey.textInputsByScreen = it.journey.textInputsByScreen
                     journey.lifecycleByScreen = it.journey.lifecycleByScreen
                 }
-                val textInputState = journey.textInputsByScreen.getOrPut(journey.screenId) {
-                    ExperienceTextInputState()
-                }
-                val ref = ExperienceRef(
-                    source.identity.experienceId,
-                    source.identity.experienceVersionId,
-                    journeyId,
-                )
-                val id = acquiringId ?: UUID.randomUUID().toString()
-                val pending = ActivePresentation(
-                    id = id,
-                    ref = ref,
-                    acquired = source.acquired,
-                    ownerDistinctId = request.ownerDistinctId,
-                    journey = journey,
-                    nativeRecovery = acquiringId != null,
-                    firstFrame = CompletableDeferred(),
-                )
-                val preparedContent = PreparedPresentation(
-                    rivFile = source.acquired.rivFile,
-                    artboardName = source.screen.artboardName,
-                    screenId = source.screen.screenId,
-                    clearColor = source.screen.clearColor,
-                    shell = source.screen.shell,
-                    descriptor = source.descriptor,
-                    artifactsByKey = source.acquired.artifactsByKey,
-                    artboardSize = source.screen.artboardSize,
-                    viewModelProjection = source.viewModelProjection,
-                    textInputState = textInputState,
-                    screenLifecycle = journey.lifecycleByScreen.getOrPut(journey.screenId) { ExperienceScreenLifecycle() },
-                    transition = transition,
-                )
-                navigation = existing?.let { previous ->
-                    withTimeout(firstFrameTimeoutMillis) {
-                        PresentationRegistry.currentScreen(previous.id)?.prepareNavigation(id, preparedContent)
-                    }
-                }
-                // Authored exits have their own duration/watchdog, independent
-                // of the destination's first-frame timeout.
-                navigation?.awaitExit()
-                synchronized(stateLock) {
-                    if (!attempt.job.isActive || !isCurrentIdentity(request) || !canPresent() || current !== existing) {
-                        throw supersededByIdentityTransition()
-                    }
-                }
+                val ref = ExperienceRef(source.identity.experienceId, source.identity.experienceVersionId, journeyId)
+                val pending = ActivePresentation(id = id, ref = ref, acquired = source.acquired,
+                    ownerDistinctId = request.ownerDistinctId, journey = journey, nativeRecovery = acquiringId != null,
+                    firstFrame = CompletableDeferred())
+                checkOwnership()
 
                 existing?.let {
                     val outgoing = it.journey
@@ -979,6 +1041,8 @@ internal class ExperiencePresentationService(
                         // transition: teardown either invalidates the epoch first
                         // or observes a fully registered presentation afterward.
                         if (reservationStillMatches) pendingReservation = null
+                        journey.textInputsByScreen[journey.screenId] = preparedContent.textInputState
+                        journey.lifecycleByScreen[journey.screenId] = preparedContent.screenLifecycle
                         current = pending
                         try {
                             PresentationRegistry.register(
@@ -1039,6 +1103,7 @@ internal class ExperiencePresentationService(
                 }
                 throw error
             } finally {
+                navigationRecoveryOwner?.let { PresentationRegistry.endNavigationRecovery(it, navigationRecoveryToken) }
                 if (!published) withContext(NonCancellable) {
                     acquiringId?.let { PresentationRegistry.dismiss(it, CloseReason.HostDismissed) }
                     acquiringDetached?.await()
@@ -1490,6 +1555,14 @@ internal class ExperiencePresentationService(
             }
             active.runTransitionFinished.complete(Unit)
             return
+        }
+        synchronized(stateLock) {
+            if (current === active || current == null) {
+                preparation?.takeIf {
+                    it.journeyId == active.ref.journeyId &&
+                        it.request.ownerDistinctId == active.ownerDistinctId
+                }?.job?.cancel()
+            }
         }
         val journey = active.journey
         // Close checkpoint admission under the same lock as navigation. A

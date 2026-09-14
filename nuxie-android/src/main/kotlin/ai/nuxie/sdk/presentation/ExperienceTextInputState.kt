@@ -26,6 +26,12 @@ internal class ExperienceTextInputState {
     }
 
     @Synchronized
+    fun copyForPreparation(): ExperienceTextInputState = ExperienceTextInputState().also {
+        it.values.putAll(values)
+        it.committedValues.putAll(committedValues)
+    }
+
+    @Synchronized
     fun resetUnrevealedAttempt() {
         generation++
         values.clear()
