@@ -412,7 +412,13 @@ class PublishedTextInputDeviceTest {
         }
     }
 
-    private fun exerciseBackgroundAndRecreation() {
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun rotationRestoresPublishedContentWithoutAnotherAppearance() {
+        exerciseBackgroundAndRecreation(rotate = true)
+    }
+
+    private fun exerciseBackgroundAndRecreation(rotate: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
@@ -480,16 +486,58 @@ class PublishedTextInputDeviceTest {
             instrumentation.removeMonitor(monitor)
             monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
             instrumentation.addMonitor(monitor)
-            instrumentation.runOnMainSync {
-                assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, prepared.screenLifecycle.phase)
-                assertEquals(1uL, prepared.screenLifecycle.appearances)
-                original.recreate()
+            if (rotate) {
+                assertTrue("Rotation probe starts in portrait", before.height > before.width)
+                instrumentation.runOnMainSync {
+                    original.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                }
+                val landscape = original
+                activity = landscape
+                instrumentation.waitForIdleSync()
+                val landscapeSurface = checkNotNull(findSurface(landscape.window.decorView))
+                val landscapeDeadline = SystemClock.uptimeMillis() + 15_000
+                var landscapeRendered = false
+                while (!landscapeRendered && SystemClock.uptimeMillis() < landscapeDeadline) {
+                    val pixels = copySurface(landscapeSurface)
+                    try {
+                        val colors = IntArray(pixels.width * pixels.height)
+                        pixels.getPixels(colors, 0, pixels.width, 0, 0, pixels.width, pixels.height)
+                        landscapeRendered = pixels.width > pixels.height && colors.toSet().size > 8
+                    } finally { pixels.recycle() }
+                    if (!landscapeRendered) SystemClock.sleep(50)
+                }
+                assertTrue("Landscape must render published content: ${failure.get()}", landscapeRendered)
+                instrumentation.removeMonitor(monitor)
+                monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+                instrumentation.addMonitor(monitor)
+                instrumentation.runOnMainSync {
+                    assertEquals(1uL, prepared.screenLifecycle.appearances)
+                    landscape.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                }
+            } else {
+                instrumentation.runOnMainSync {
+                    assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, prepared.screenLifecycle.phase)
+                    assertEquals(1uL, prepared.screenLifecycle.appearances)
+                    original.recreate()
+                }
             }
-            val replacement = checkNotNull(monitor.waitForActivityWithTimeout(15_000))
+            val replacement = if (rotate) original else checkNotNull(monitor.waitForActivityWithTimeout(15_000))
             activity = replacement
-            assertTrue("Recreation must create another Activity", replacement !== original)
+            assertEquals("Only explicit recreation replaces the Activity", !rotate, replacement !== original)
             instrumentation.waitForIdleSync()
-            assertTrue(original.isDestroyed)
+            assertEquals(!rotate, original.isDestroyed)
+            if (rotate) {
+                val portraitDeadline = SystemClock.uptimeMillis() + 15_000
+                var portraitSized = false
+                while (!portraitSized && SystemClock.uptimeMillis() < portraitDeadline) {
+                    instrumentation.runOnMainSync {
+                        val view = checkNotNull(findSurface(replacement.window.decorView))
+                        portraitSized = view.width == before.width && view.height == before.height
+                    }
+                    if (!portraitSized) SystemClock.sleep(50)
+                }
+                assertTrue("Portrait surface extent must be restored", portraitSized)
+            }
             val replacementSurface = checkNotNull(findSurface(replacement.window.decorView))
             // Activity creation does not mean its asynchronous native frame is ready.
             val renderDeadline = SystemClock.uptimeMillis() + 10_000
