@@ -56,7 +56,7 @@ class ExperiencePresentationServiceTest {
         }
     }
 
-    private class AttachedHost : PresentationActivityHandle {
+    private class AttachedHost : PresentationScreenHandle {
         var requestedReason: CloseReason? = null
         var finished = false
 

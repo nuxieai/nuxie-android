@@ -105,8 +105,8 @@ internal sealed interface PresentationShell {
     }
 }
 
-/** Physical close operations coordinated with the attached host Activity. */
-internal interface PresentationActivityHandle {
+/** Screen-scoped close operations and access to its hosting Activity. */
+internal interface PresentationScreenHandle {
     fun requestCloseFromService(reason: CloseReason): Boolean
 
     fun screenCloseReason(): CloseReason?
@@ -145,10 +145,10 @@ internal object PresentationRegistry {
     ) {
         val terminal = AtomicBoolean(false)
         val firstFrame = AtomicBoolean(false)
-        var latestActivity = WeakReference<PresentationActivityHandle>(null)
+        var latestScreen = WeakReference<PresentationScreenHandle>(null)
         // Configuration recreation changes the dismissal target, but every
-        // instance remains pending until its runtime lane calls detach.
-        val attachedActivities: MutableSet<PresentationActivityHandle> =
+        // screen attachment remains pending until its runtime lane calls detach.
+        val attachedScreens: MutableSet<PresentationScreenHandle> =
             Collections.newSetFromMap(IdentityHashMap())
         var dismissalReason: CloseReason? = null
     }
@@ -183,23 +183,23 @@ internal object PresentationRegistry {
 
     fun resolve(id: String): PreparedPresentation? = synchronized(lock) { entries[id]?.content }
 
-    fun attach(id: String, activity: PresentationActivityHandle): Boolean = synchronized(lock) {
+    fun attach(id: String, screen: PresentationScreenHandle): Boolean = synchronized(lock) {
         val entry = entries[id] ?: return@synchronized false
         if (entry.dismissalReason != null) return@synchronized false
-        entry.attachedActivities += activity
-        entry.latestActivity = WeakReference(activity)
+        entry.attachedScreens += screen
+        entry.latestScreen = WeakReference(screen)
         true
     }
 
-    fun detach(id: String, activity: PresentationActivityHandle) {
+    fun detach(id: String, screen: PresentationScreenHandle) {
         val completion = synchronized(lock) {
             val entry = entries[id] ?: return
-            entry.attachedActivities.remove(activity)
-            if (entry.latestActivity.get() === activity) {
-                entry.latestActivity = WeakReference(null)
+            entry.attachedScreens.remove(screen)
+            if (entry.latestScreen.get() === screen) {
+                entry.latestScreen = WeakReference(null)
             }
             if (entry.dismissalReason == null) {
-                entry.dismissalReason = activity.screenCloseReason()
+                entry.dismissalReason = screen.screenCloseReason()
             }
             completionIfReady(id, entry)
         }
@@ -250,14 +250,14 @@ internal object PresentationRegistry {
         callback(outcome, correlationId, viewModelSnapshot)
     }
 
-    fun currentActivity(id: String): PresentationActivityHandle? = synchronized(lock) {
-        entries[id]?.latestActivity?.get()
+    fun currentScreen(id: String): PresentationScreenHandle? = synchronized(lock) {
+        entries[id]?.latestScreen?.get()
     }
 
-    fun reportTextCommitted(id: String, activity: PresentationActivityHandle, inputId: String, text: String) {
+    fun reportTextCommitted(id: String, screen: PresentationScreenHandle, inputId: String, text: String) {
         val callback = synchronized(lock) {
             entries[id]?.takeUnless {
-                it.terminal.get() || it.dismissalReason != null || it.latestActivity.get() !== activity
+                it.terminal.get() || it.dismissalReason != null || it.latestScreen.get() !== screen
             }?.onTextCommitted
         } ?: return
         callback(inputId, text)
@@ -265,9 +265,9 @@ internal object PresentationRegistry {
 
     fun dismiss(id: String, reason: CloseReason) {
         var completion: (() -> Unit)? = null
-        val activityToFinish = synchronized(lock) {
+        val screenToFinish = synchronized(lock) {
             val entry = entries[id] ?: return
-            val attached = entry.latestActivity.get()
+            val attached = entry.latestScreen.get()
             val selected = entry.dismissalReason
             when {
                 selected != null -> {
@@ -286,12 +286,12 @@ internal object PresentationRegistry {
             }
         }
         completion?.invoke()
-        activityToFinish?.finishAfterServiceClose()
+        screenToFinish?.finishAfterServiceClose()
     }
 
     private fun completionIfReady(id: String, entry: Entry): (() -> Unit)? {
         val reason = entry.dismissalReason ?: return null
-        if (entry.attachedActivities.isNotEmpty()) return null
+        if (entry.attachedScreens.isNotEmpty()) return null
         entries.remove(id)
         if (!entry.terminal.compareAndSet(false, true)) return null
         return when (reason) {
@@ -816,7 +816,7 @@ internal class ExperiencePresentationService(
                 if (session.products.none { it.placementId == placementId }) {
                     return JourneyPresentationActionResult.ProductsUnavailable
                 }
-                val activity = PresentationRegistry.currentActivity(active.id)?.purchaseActivity()
+                val activity = PresentationRegistry.currentScreen(active.id)?.purchaseActivity()
                     ?: return JourneyPresentationActionResult.NoPresentation
                 scope.launch {
                     session.purchase(
@@ -917,7 +917,7 @@ internal class ExperiencePresentationService(
         request: JourneyPermissionRequest,
         permissionType: String?,
     ): JourneyPresentationActionResult {
-        val host = PresentationRegistry.currentActivity(active.id)
+        val host = PresentationRegistry.currentScreen(active.id)
             ?: return JourneyPresentationActionResult.NoPresentation
         val granted = runCatching { host.resolveJourneyPermission(request) }
             .getOrElse { return JourneyPresentationActionResult.Failed }
