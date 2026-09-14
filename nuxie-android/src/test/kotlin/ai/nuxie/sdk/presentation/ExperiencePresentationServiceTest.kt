@@ -285,6 +285,73 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `terminal teardown waits for an admitted navigation checkpoint after waiter cancellation`() = runTest {
+        val contract = Json.parseToJsonElement(
+            FixtureRunner.fixturesRoot().resolve("journeys/planes/persistent-navigation-android.json").readText(),
+        ).jsonObject.getValue("terminalCheckpoint").jsonObject
+        for (item in contract.getValue("cases").jsonArray.map { it.jsonObject }) {
+            val identityChange = item.getValue("identityChange").jsonPrimitive.boolean
+            val cancelWaiter = item.getValue("cancelWaiter").jsonPrimitive.boolean
+            val release = renderedJourneyRelease("text-input-navigation.json")
+            val launched = mutableListOf<String>()
+            val service = service(this, launch = launched::add)
+            val checkpoint = CompletableDeferred<JourneyScreenDismissalResult>()
+            val started = CompletableDeferred<Unit>()
+            val outcomes = mutableListOf<JourneySurfaceOutcome>()
+            val outcomeEntered = CompletableDeferred<Unit>()
+            val releaseOutcome = CompletableDeferred<Unit>()
+            var calls = 0
+            val first = async {
+                service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                    service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
+                    onScreenDismissed = { _, _, _ ->
+                        calls++
+                        started.complete(Unit)
+                        checkpoint.await()
+                    }, onOutcome = {
+                        outcomeEntered.complete(Unit)
+                        releaseOutcome.await()
+                        outcomes.add(it)
+                    })
+            }
+            runCurrent()
+            PresentationRegistry.reportFirstFrame(launched.single())
+            first.await()
+            val navigation = async {
+                runCatching {
+                    service.presentJourney(release, "screen_details", "journey-1", "customer-1", null,
+                        acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+                }
+            }
+            started.await()
+            if (cancelWaiter) navigation.cancelAndJoin()
+            val teardown = async {
+                if (identityChange) service.shutdownOwnedBy("customer-1")
+                else service.dismissFromHost("customer-1")
+            }
+            try {
+                runCurrent()
+                assertFalse("Teardown must drain the admitted checkpoint (identity=$identityChange)", teardown.isCompleted)
+                assertTrue("Terminal outcomes must not overtake an admitted checkpoint", outcomes.isEmpty())
+                checkpoint.complete(JourneyScreenDismissalResult.HANDLED)
+                outcomeEntered.await()
+                runCurrent()
+                assertFalse("Teardown must also drain its terminal outcome", teardown.isCompleted)
+                releaseOutcome.complete(Unit)
+                teardown.await()
+                assertEquals(contract.getValue("checkpointCalls").jsonPrimitive.int, calls)
+                assertEquals(listOf(if (identityChange) JourneySurfaceOutcome.ABANDONED else JourneySurfaceOutcome.DISMISSED), outcomes)
+                assertEquals(contract.getValue("activityLaunches").jsonPrimitive.int, launched.size)
+            } finally {
+                checkpoint.complete(JourneyScreenDismissalResult.HANDLED)
+                releaseOutcome.complete(Unit)
+                teardown.await()
+                navigation.cancelAndJoin()
+            }
+        }
+    }
+
+    @Test
     fun `text commits require the current attached Activity and an open presentation`() {
         val received = mutableListOf<String>()
         PresentationRegistry.register("edit-owner",
