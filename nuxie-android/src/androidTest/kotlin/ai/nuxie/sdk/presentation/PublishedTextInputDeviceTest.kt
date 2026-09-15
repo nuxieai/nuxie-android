@@ -1925,11 +1925,15 @@ class PublishedTextInputDeviceTest {
     @SdkSuppress(minSdkVersion = 26)
     fun compiledScriptResponseIsDurableBeforeItsAuthoredJourneyNavigation() = exerciseDurableNativeEmission(true)
 
-    private fun exerciseDurableNativeEmission(scripted: Boolean) {
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun failedCompiledScriptClosesWithoutCommittingPartialResponses() = exerciseDurableNativeEmission(true, true)
+
+    private fun exerciseDurableNativeEmission(scripted: Boolean, failScript: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
-        val fixture = loadPublishedFixture(instrumentation, if (scripted) "journeys/rendered-screen-control" else "journeys/rendered-text-input")
+        val fixture = loadPublishedFixture(instrumentation, if (failScript) "journeys/rendered-screen-control-error" else if (scripted) "journeys/rendered-screen-control" else "journeys/rendered-text-input")
         val owner = "published-durable-${UUID.randomUUID()}"
         val directory = File(context.cacheDir, owner).apply { mkdirs() }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -1941,6 +1945,10 @@ class PublishedTextInputDeviceTest {
         val activeRequest = AtomicReference<JourneyPresentationRequest?>()
         val presentationCount = java.util.concurrent.atomic.AtomicInteger()
         val navigationPresented = CountDownLatch(1)
+        val initiallyRevealed = CountDownLatch(1)
+        val terminalOutcomes = LinkedBlockingQueue<JourneySurfaceOutcome>()
+        val errorDismissals = LinkedBlockingQueue<JourneyScreenDismissalResult>()
+        val failureCheckpointResponses = AtomicReference<JsonObject?>()
         val responsesBeforeNavigation = AtomicReference<JsonObject?>()
         val downloaded = java.util.concurrent.CopyOnWriteArrayList<String>()
         val renderKey = fixture.release.descriptor.getValue("render").jsonObject.getValue("riv").jsonObject.getValue("key").jsonPrimitive.content
@@ -1983,12 +1991,25 @@ class PublishedTextInputDeviceTest {
                         else AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv, protection = Closeable {})
                     },
                     nextBatchSequence = request.nextBatchSequence, nextEmissionSequence = request.nextEmissionSequence,
-                    onScreenChanged = request.onScreenChanged, onScreenDismissed = request.onScreenDismissed,
+                    onScreenChanged = request.onScreenChanged, onScreenDismissed = { screenId, nextScreen, method ->
+                        if (method == "error") failureCheckpointResponses.set(
+                            JourneyRunJournal(directory, owner, JourneyStorageScope(authority)).runs().single()
+                                .context.getValue("responses").jsonObject)
+                        request.onScreenDismissed(screenId, nextScreen, method).also {
+                            if (method == "error") errorDismissals.add(it)
+                        }
+                    },
                     onEmissionBatch = { batch ->
                         val committed = request.onEmissionBatch(batch)
                         if (committed) accepted.add(batch)
                         committed
-                    }, onPresentationRevealed = request.onPresentationRevealed, onOutcome = request.onOutcome)
+                    }, onPresentationRevealed = { id ->
+                        request.onPresentationRevealed(id)
+                        initiallyRevealed.countDown()
+                    }, onOutcome = { outcome ->
+                        request.onOutcome(outcome)
+                        terminalOutcomes.add(outcome)
+                    })
                 if (presentationNumber > 1) navigationPresented.countDown()
                 return JourneyPresentationResult.Shown
             }
@@ -2014,6 +2035,7 @@ class PublishedTextInputDeviceTest {
             }
             val first = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
             if (scripted) {
+                assertTrue("Script gesture requires the revealed presentation", initiallyRevealed.await(10, TimeUnit.SECONDS))
                 var surface: ExperienceSurfaceHost? = null
                 val deadline = SystemClock.uptimeMillis() + 10_000
                 while (surface == null && SystemClock.uptimeMillis() < deadline) {
@@ -2038,6 +2060,25 @@ class PublishedTextInputDeviceTest {
             } else {
                 val field = awaitEditor(instrumentation, first, "text-input/screen_1/email_input")
                 edit(instrumentation, field, "durable@example.com")
+            }
+            if (failScript) {
+                assertEquals(JourneyScreenDismissalResult.COMPLETED, errorDismissals.poll(10, TimeUnit.SECONDS))
+                val completedJournal = JourneyRunJournal(directory, owner, JourneyStorageScope(authority))
+                assertEquals("abandoned", checkNotNull(completedJournal.checkmark(fixture.release.identity.experienceId)).outcome)
+                assertTrue(completedJournal.runs().isEmpty())
+                assertTrue(terminalOutcomes.isEmpty())
+                assertFalse(checkNotNull(failureCheckpointResponses.get()).containsKey("selection"))
+                assertEquals(null, accepted.poll(300, TimeUnit.MILLISECONDS))
+                assertEquals(1, presentationCount.get())
+                assertEquals(artifactFiles.keys, downloaded.toSet())
+                val deadline = SystemClock.uptimeMillis() + 10_000
+                var destroyed = false
+                while (!destroyed && SystemClock.uptimeMillis() < deadline) {
+                    instrumentation.runOnMainSync { destroyed = first.isDestroyed }
+                    if (!destroyed) SystemClock.sleep(20)
+                }
+                assertTrue("Failed script must drain and destroy its Activity", destroyed)
+                return
             }
             val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS)) { "Journey service must durably accept native input" }
             val reopened = journalRun()
