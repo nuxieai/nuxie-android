@@ -18,11 +18,16 @@ import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.After
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -48,6 +53,63 @@ class NuxieWarmStartRecoveryTest {
 
     @Test fun profileRefreshRetriesWarmReportsAndThePublicTrigger() = exercise(retry = true)
     @Test fun publicShutdownPreservesTheTriggerWhenWarmReportStorageFails() = exercise(retry = false)
+
+    @Test fun identityReplacementRejectsTheHeldStartupProfile() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val oldCustomer = "old-${temporary.root.name}"
+        val newCustomer = "new-${temporary.root.name}"
+        val identity = IdentityService(context).apply { setDistinctId(oldCustomer) }
+        val oldRequest = CompletableDeferred<Unit>()
+        val newRequest = CompletableDeferred<Unit>()
+        val releaseOld = CompletableDeferred<Unit>()
+        val releaseNew = CompletableDeferred<Unit>()
+        val transport = HttpTransport { request ->
+            if (request.url.path != "/profile") HttpTransport.Response(503, ByteArray(0))
+            else {
+                val customer = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                    .getValue("distinct_id").jsonPrimitive.content
+                val feature = when (customer) {
+                    oldCustomer -> { oldRequest.complete(Unit); runBlocking { releaseOld.await() }; "old_only" }
+                    newCustomer -> { newRequest.complete(Unit); runBlocking { releaseNew.await() }; "new_only" }
+                    else -> error("Unexpected profile customer: $customer")
+                }
+                canonicalJourneyProfileResponse(
+                    """[{"id":"$feature","type":"metered","balance":3,"unlimited":false}]""",
+                    etag = "\"$feature\"",
+                )
+            }
+        }
+        Nuxie.overridesForTesting = NuxieCore.Overrides(identity = identity, transport = transport,
+            registerLifecycle = false, eventDatabaseFile = File(temporary.root, "identity-events.db"),
+            profileCacheDirectory = File(temporary.root, "identity-profiles"))
+        Nuxie.setup(context, NuxieConfiguration("pk_test_warm_identity"))
+        val core = checkNotNull(Nuxie.core)
+        try {
+            withTimeout(5_000) { oldRequest.await() }
+            Nuxie.trigger("before_identity_change")
+            withTimeout(5_000) { core.eventLog.awaitBarrier() }
+            Nuxie.identify(newCustomer)
+            withTimeout(5_000) { core.userTransitions.drain() }
+            assertEquals(newCustomer, Nuxie.distinctId)
+            assertNull(core.profile.currentProfile())
+            releaseOld.complete(Unit)
+            withTimeout(5_000) { newRequest.await() }
+            // Hold the new response: the old response must not populate this gap.
+            assertNull(core.profile.currentProfile())
+            assertTrue(core.featureInfo.all.value.isEmpty())
+            releaseNew.complete(Unit)
+            withTimeout(5_000) { core.featureInfo.all.first { "new_only" in it } }
+            assertEquals(newCustomer, core.profile.currentProfile()?.distinctId)
+            assertFalse(core.featureInfo.all.value.containsKey("old_only"))
+            core.eventLog.awaitBarrier()
+            val captured = core.store.pendingBatch(100).single { it.name == "before_identity_change" }
+            assertEquals(oldCustomer, captured.distinctId)
+        } finally {
+            releaseOld.complete(Unit)
+            releaseNew.complete(Unit)
+            withTimeout(5_000) { Nuxie.shutdownAndAwait() }
+        }
+    }
 
     private fun exercise(retry: Boolean) = runBlocking {
         val context = RuntimeEnvironment.getApplication()
