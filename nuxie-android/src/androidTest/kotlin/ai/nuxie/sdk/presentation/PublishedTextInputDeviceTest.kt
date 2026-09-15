@@ -995,6 +995,9 @@ class PublishedTextInputDeviceTest {
     @SdkSuppress(minSdkVersion = 26)
     fun drawerClipsNativeContentAlongWithItsRenderedSurface() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        // Corner colors describe clipping in touch presentation. Non-touch-mode
+        // edge decoration can cover this pixel independently of shell clipping.
+        instrumentation.setInTouchMode(true)
         val context = instrumentation.targetContext
         val closeContract = instrumentation.context.assets.open("journeys/planes/presentation-reveal-android.json")
             .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject.getValue("unseenClose").jsonObject }
