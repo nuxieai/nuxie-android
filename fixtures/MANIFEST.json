@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "616c20b4386274644c57a604185e21dec9ac5aa3",
+  "sourceCommit": "8d04a737a3f1bd05fe0a061265b80f97d0f34512",
   "files": {
     "README.md": "4363d6a79ac9828364a6a02bf400d98c0852b771062258c409a744dd1a5016e7",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
@@ -85,10 +85,10 @@
     "purchases/test-store-preview.json": "dc379fe653fe0c7f71ce170ce620bda21a5ecbda93fda7aa5866d2c2f4198ce3",
     "purchases/test-store.json": "0a6025ef1e3b0c8706544fdbe022fd14cac22644af49a2f0c9d949070dc8e396",
     "runtime/screen-control-error/action.luau": "b886b79f82b7d893c2a8e7440eb97ed5c04e0e83412677627d26019141f40456",
-    "runtime/screen-control-error/provenance.json": "16e9114bae95b9b9c990e74bc890635793514260658a22beb4ee3e0d2537145c",
+    "runtime/screen-control-error/provenance.json": "94e6747f4814acb4bd82ed7deb66f812cbae714969676d86ab2ef361df59c167",
     "runtime/screen-control-error/screen.riv": "906bcd5aed60801553ed32c12833767e6d2bc75c555cd8fb583cab1d6f3a9ad7",
     "runtime/screen-control/action.luau": "564a25a9f5d395517f449873a9de9535acf59e82f95d123b7b5e8cef97babffc",
-    "runtime/screen-control/provenance.json": "1ba4506487a4e8f4db8327e77402cf33ea705c3578dc890289da66f1d6c8a45a",
+    "runtime/screen-control/provenance.json": "204da591b566daa82bd04a82a6bc9db27bfd16963c48716a40e071665d1c37a1",
     "runtime/screen-control/screen.riv": "bd03eb17500876217d7f20048ed01bf214475f5934f78b225c703a431e2eb4e1",
     "runtime/surface-capability-android.json": "d4b0996d6008d94a64b547fd589c6cd2810c8d8f5867d2183b928fbed7e7a0ac",
     "sdk/android-foreground-admission.json": "382dc4fc7e55db672234c761bc5b32966d84eac0c6d611b7e1d9895a87f88c00",
