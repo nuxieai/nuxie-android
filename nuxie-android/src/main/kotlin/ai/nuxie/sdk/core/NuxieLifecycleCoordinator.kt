@@ -25,6 +25,8 @@ internal class NuxieLifecycleCoordinator(
     private val tracker: AppLifecycleTracker,
     private val sessions: ai.nuxie.sdk.session.SessionService,
     scope: CoroutineScope,
+    /** Synchronous admission fence; cannot wait behind a profile request. */
+    private val onVisibilityChanged: (Boolean) -> Unit = {},
     /** Best-effort work on entering background (e.g. a delivery flush). */
     private val onBackground: (suspend () -> Unit)? = null,
     /** Best-effort work after the background event is durably captured. */
@@ -92,6 +94,7 @@ internal class NuxieLifecycleCoordinator(
         if (closed.get()) return
         if (!startedActivities.add(activity)) return
         if (startedActivities.size == 1) {
+            onVisibilityChanged(true)
             if (!sawInitialForeground) {
                 sawInitialForeground = true
                 transitions.trySend(Transition.INITIAL_FOREGROUND)
@@ -105,6 +108,7 @@ internal class NuxieLifecycleCoordinator(
         if (closed.get()) return
         if (!startedActivities.remove(activity)) return
         if (startedActivities.isEmpty()) {
+            onVisibilityChanged(false)
             transitions.trySend(Transition.BACKGROUND)
         }
     }

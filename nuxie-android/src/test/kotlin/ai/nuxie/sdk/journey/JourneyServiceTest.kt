@@ -1331,6 +1331,55 @@ class JourneyServiceTest {
         }
     }
 
+    @Test fun `live route deferred by revalidation retries when foreground opens`() = runBlocking {
+        val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("sdk/android-foreground-admission.json").readText()).jsonObject
+            .getValue("deferredLiveRoute").jsonObject
+        val identity = identity("customer")
+        val catalog = catalog()
+        val authenticated = authenticatedSnapshot(catalog)
+        val snapshot = JourneyProfileCatalog.Snapshot(JourneyPlaneProfile.decode(profile(buildJsonObject {
+            put("type", "event"); put("eventName", "inventory_opened")
+        }).toString().encodeToByteArray()), authenticated.releasesByDigest)
+        val eventLog = EventLog(store, NuxieContextBuilder(context, NuxieEnvironment.DEVELOPMENT, LogLevel.DEBUG, identity),
+            identity, beforeSend = null, scope = scope, nowMillis = { 100_000L })
+        val deferred = CompletableDeferred<Unit>()
+        val returnDeferred = CompletableDeferred<Unit>()
+        val admissions = AtomicInteger()
+        val service = JourneyService(identity, store, catalog, directory, scope,
+            capture = { name, properties, eventId, customer ->
+                eventLog.captureIdempotently(name, properties, eventId, customer)
+            }, nowMillis = { 100_000L }, replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
+            beforeAdmission = { admissions.incrementAndGet() })
+        eventLog.subscribeCommittedWithAdmission(sampleGeneration = service::eventAdmissionGeneration) { event, generation ->
+            val accepted = service.handleEvent(event, generation)
+            if (event.name == "inventory_opened" && !accepted && !deferred.isCompleted) {
+                deferred.complete(Unit)
+                returnDeferred.await()
+            }
+            accepted
+        }
+        try {
+            service.onAppVisibilityChanged(true)
+            val token = checkNotNull(service.foregroundRevalidationToken())
+            service.initialize()
+            service.profileDidCommit(snapshot, authority, "customer", 1)
+            eventLog.capture("inventory_opened")
+            withTimeout(5_000) { deferred.await() }
+            assertEquals(0, admissions.get())
+            // Reconciliation excludes the route still owned by EventLog's live worker.
+            service.completeForegroundRevalidation(token)
+            returnDeferred.complete(Unit)
+            withTimeout(5_000) { eventLog.awaitBarrier() }
+            assertEquals(contract.getValue("expectedNewRuns").jsonPrimitive.int, admissions.get())
+            assertEquals(contract.getValue("expectedPendingLocalRoutes").jsonPrimitive.int,
+                store.queryPendingLocalRoutes("customer").size)
+        } finally {
+            returnDeferred.complete(Unit)
+            withTimeout(5_000) { eventLog.closeWorkers() }
+        }
+    }
+
     @Test fun `failed warm capture blocks admission until authenticated reconciliation retries`() = warmJournalOrdering("capture")
 
     @Test fun `failed recovered route blocks admission until authenticated reconciliation retries`() = warmJournalOrdering("replay")
