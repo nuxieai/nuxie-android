@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "05018f56402d5a2154933a4cfc57f5236858fdb0",
+  "sourceCommit": "0a5ea0bfb55dfceb43dc529f08c27fa62f18c9f6",
   "files": {
     "README.md": "4363d6a79ac9828364a6a02bf400d98c0852b771062258c409a744dd1a5016e7",
     "accessibility/control-state.json": "48d1d9ea62bc7890ecd41d69592cbe3f7d137cf7bdb5849f7c64137489a5360c",
@@ -67,6 +67,12 @@
     "journeys/rendered-screen-control/release-entry.json": "7f9e6f5b4cb4fbf53352023ddc78f532d262bcda1784f35c04bb7f5b73158a5b",
     "journeys/rendered-screen-control/renders/sha256/bd03eb17500876217d7f20048ed01bf214475f5934f78b225c703a431e2eb4e1.riv": "bd03eb17500876217d7f20048ed01bf214475f5934f78b225c703a431e2eb4e1",
     "journeys/rendered-screen-control/screen-behavior/sha256/afa9c7ef672a2766bac6fe0cfb662e024364573d8b113f74b0b6086be5724984.bin": "afa9c7ef672a2766bac6fe0cfb662e024364573d8b113f74b0b6086be5724984",
+    "journeys/rendered-semantic-roles/README.md": "90c34537f948078e2cf476df6fedbdd122aa56422edf93926a2e7d6b15aeb23c",
+    "journeys/rendered-semantic-roles/assets/sha256/2898476918b21c3f9b5ba22e86853c6d63b544f92da277a92533011a28c93af5.otf": "2898476918b21c3f9b5ba22e86853c6d63b544f92da277a92533011a28c93af5",
+    "journeys/rendered-semantic-roles/provenance.json": "80ad2db8140eedf9b1eeff87e105808a2a71f55ff9ac58aa810d939977778950",
+    "journeys/rendered-semantic-roles/publish-snapshot.json": "75fba33ad4711572aa2efe59f7cc704de7a46600ecfadfbffdb8d715be40189b",
+    "journeys/rendered-semantic-roles/release-entry.json": "7d3fff80a9b6921a488b4d19a56c6f8d4ff07dce08cf35fc9e258dd8fee1305a",
+    "journeys/rendered-semantic-roles/renders/sha256/4bbdb76c72b1405cc2c4f4706c77bc673e43570c9ac18041affaa581adf9d534.riv": "4bbdb76c72b1405cc2c4f4706c77bc673e43570c9ac18041affaa581adf9d534",
     "journeys/rendered-semantic-screen-control-error/provenance.json": "9d766a6fc96e7c377be628d47171745743a0552d8abf8de2a8c478df67f22047",
     "journeys/rendered-semantic-screen-control-error/release-entry.json": "b0fdecb6aa4b127b38959a0bc4cd486057a5208b5ea3b788eef21e67b7d69b5e",
     "journeys/rendered-semantic-screen-control-error/renders/sha256/af94c3db361e8030afa5449a635db683e675ec3ab1fb6e5d8f3a67259b598841.riv": "af94c3db361e8030afa5449a635db683e675ec3ab1fb6e5d8f3a67259b598841",

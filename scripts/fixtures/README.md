@@ -6,4 +6,4 @@ The fixture uses canonical schema keys. It contains one Text owner with TextFiel
 
 Generated against runtime `037e9ac3a9d949e9ff3cb0e971b9628eb2a14db5`. SHA-256: `4e5cbeb29d08c54311b631d6fae83b3d132246670a3e574e24980b9570505f5f`.
 
-`NativeSemanticsDeviceTest.populatedNodesAndUnicodeTextOwnershipCrossJni` imports and presents the fixture through the Android Vulkan renderer, reads the populated snapshot through JNI, checks its role/label/parent, resolves the exact Unicode run name to its semantic owner, and checks a missing run returns NotFound. The ordinary Gradle runtime fetch consumes the pinned public v0.3.11 artifact; no local runtime override is needed.
+`NativeSemanticsDeviceTest.populatedNodesAndUnicodeTextOwnershipCrossJni` imports and presents the fixture through the Android Vulkan renderer, reads the populated snapshot through JNI, checks its role/label/parent, resolves the exact Unicode run name to its semantic owner, and checks a missing run returns NotFound. The ordinary Gradle runtime fetch consumes the pinned public v0.3.12 artifact; no local runtime override is needed.

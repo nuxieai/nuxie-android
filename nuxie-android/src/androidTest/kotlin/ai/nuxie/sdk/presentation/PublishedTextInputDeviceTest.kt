@@ -1923,50 +1923,56 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun nativeResponseIsDurableBeforeItsAuthoredJourneyNavigation() = exerciseDurableNativeEmission(false)
+    fun nativeResponseIsDurableBeforeItsAuthoredJourneyNavigation() = exerciseDurableNativeEmission(PublishedBehavior.TEXT_INPUT)
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun compiledScriptResponseIsDurableBeforeItsAuthoredJourneyNavigation() = exerciseDurableNativeEmission(true)
+    fun compiledScriptResponseIsDurableBeforeItsAuthoredJourneyNavigation() = exerciseDurableNativeEmission(PublishedBehavior.SCRIPT)
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
     fun signedSemanticActivationIsDurableBeforeAuthoredNavigation() =
-        exerciseDurableNativeEmission(true, activation = ControlActivation.ACCESSIBILITY)
+        exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_SCRIPT)
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
     fun failedSignedSemanticActionDoesNotCommitPartialResponses() =
-        exerciseDurableNativeEmission(true, failScript = true, activation = ControlActivation.ACCESSIBILITY)
+        exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_SCRIPT, failScript = true)
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun failedCompiledScriptClosesWithoutCommittingPartialResponses() = exerciseDurableNativeEmission(true, true)
+    fun failedCompiledScriptClosesWithoutCommittingPartialResponses() = exerciseDurableNativeEmission(PublishedBehavior.SCRIPT, true)
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
     fun accessibilityTextEditIsDurableBeforeAuthoredJourneyNavigation() =
-        exerciseDurableNativeEmission(false, accessibilityEdit = true)
+        exerciseDurableNativeEmission(PublishedBehavior.TEXT_INPUT, accessibilityEdit = true)
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
     fun backgroundCancelsPressedCompiledControlBeforeFreshGesture() =
-        exerciseDurableNativeEmission(true, interruptPress = true)
+        exerciseDurableNativeEmission(PublishedBehavior.SCRIPT, interruptPress = true)
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
     fun shutdownAfterCompiledActionAdmissionDrains() =
-        exerciseDurableNativeEmission(true, shutdownAfterAdmission = true)
+        exerciseDurableNativeEmission(PublishedBehavior.SCRIPT, shutdownAfterAdmission = true)
 
-    private enum class ControlActivation { POINTER, ACCESSIBILITY }
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun signedAuthoredRolesExposeSecureEditorAndDurableNativeActions() =
+        exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES)
 
-    private fun exerciseDurableNativeEmission(scripted: Boolean, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, activation: ControlActivation = ControlActivation.POINTER) {
+    private enum class PublishedBehavior { TEXT_INPUT, SCRIPT, SEMANTIC_SCRIPT, SEMANTIC_ROLES }
+
+    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
-        val candidateSemantics = activation == ControlActivation.ACCESSIBILITY
-        check(!candidateSemantics || scripted)
-        val fixturePath = if (candidateSemantics) "journeys/rendered-semantic-screen-control${if (failScript) "-error" else ""}"
+        val scripted = behavior == PublishedBehavior.SCRIPT || behavior == PublishedBehavior.SEMANTIC_SCRIPT
+        val candidateSemantics = behavior == PublishedBehavior.SEMANTIC_SCRIPT || behavior == PublishedBehavior.SEMANTIC_ROLES
+        val fixturePath = if (behavior == PublishedBehavior.SEMANTIC_ROLES) "journeys/rendered-semantic-roles"
+            else if (candidateSemantics) "journeys/rendered-semantic-screen-control${if (failScript) "-error" else ""}"
             else if (failScript) "journeys/rendered-screen-control-error" else if (scripted) "journeys/rendered-screen-control" else "journeys/rendered-text-input"
         val fixture = loadPublishedFixture(instrumentation, fixturePath, candidateSemantics)
         val owner = "published-durable-${UUID.randomUUID()}"
@@ -2022,7 +2028,7 @@ class PublishedTextInputDeviceTest {
                 presentations.presentJourney(request.release, request.screenId, request.journeyId,
                     request.ownerDistinctId, request.reservation, request.canPresent,
                     acquire = {
-                        if (scripted) artifactAcquirer.acquire(request.release, checkNotNull(catalog.snapshot(owner)).profile.delivery)
+                        if (scripted || candidateSemantics) artifactAcquirer.acquire(request.release, checkNotNull(catalog.snapshot(owner)).profile.delivery)
                         else AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv, protection = Closeable {})
                     },
                     nextBatchSequence = request.nextBatchSequence, nextEmissionSequence = request.nextEmissionSequence,
@@ -2069,6 +2075,12 @@ class PublishedTextInputDeviceTest {
                 journeys.profileDidCommit(checkNotNull(catalog.snapshot(owner)), authority, owner, 1)
             }
             val first = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
+            if (behavior == PublishedBehavior.SEMANTIC_ROLES) {
+                assertTrue("Authored roles require a revealed presentation", initiallyRevealed.await(10, TimeUnit.SECONDS))
+                assertAuthoredRoles(instrumentation, accepted) { journalRun().context.getValue("responses").jsonObject }
+                assertEquals(artifactFiles.keys, downloaded.toSet())
+                return
+            }
             if (scripted) {
                 assertTrue("Script gesture requires the revealed presentation", initiallyRevealed.await(10, TimeUnit.SECONDS))
                 var surface: ExperienceSurfaceHost? = null
@@ -2127,7 +2139,7 @@ class PublishedTextInputDeviceTest {
                         assertEquals(1, presentationCount.get())
                     } finally { first.application.unregisterActivityLifecycleCallbacks(callbacks) }
                 }
-                if (activation == ControlActivation.ACCESSIBILITY) {
+                if (behavior == PublishedBehavior.SEMANTIC_SCRIPT) {
                     instrumentation.uiAutomation.waitForIdle(100, 5000)
                     val semanticDeadline = SystemClock.uptimeMillis() + 5_000
                     var publishedButton: android.view.accessibility.AccessibilityNodeInfo? = null
@@ -2233,6 +2245,59 @@ class PublishedTextInputDeviceTest {
             instrumentation.removeMonitor(monitor)
             PresentationRegistry.clearForTesting()
         }
+    }
+
+    private fun assertAuthoredRoles(
+        instrumentation: Instrumentation,
+        accepted: LinkedBlockingQueue<JourneyScreenEmissionBatch>,
+        responses: () -> JsonObject,
+    ) {
+        val expectedLabels = listOf("Choose your plan", "Continue", "Annual plan", "Seats", "Password", "Unavailable", "Plan option", "Plan option")
+        fun nodes(): List<android.view.accessibility.AccessibilityNodeInfo> {
+            fun collect(node: android.view.accessibility.AccessibilityNodeInfo): List<android.view.accessibility.AccessibilityNodeInfo> =
+                listOf(node) + (0 until node.childCount).mapNotNull { node.getChild(it) }.flatMap { collect(it) }
+            return instrumentation.uiAutomation.rootInActiveWindow?.let { collect(it) }.orEmpty()
+        }
+        fun label(node: android.view.accessibility.AccessibilityNodeInfo): String? =
+            listOf(node.text, node.contentDescription, node.hintText).firstOrNull { it?.toString() in expectedLabels }?.toString()
+        var published = emptyList<android.view.accessibility.AccessibilityNodeInfo>()
+        val deadline = SystemClock.uptimeMillis() + 10_000
+        while (SystemClock.uptimeMillis() < deadline) {
+            published = nodes().filter { label(it) != null }
+            if (published.size == expectedLabels.size) break
+            SystemClock.sleep(20)
+        }
+        assertEquals(expectedLabels.sorted(), published.mapNotNull { label(it) }.sorted())
+        fun named(name: String) = checkNotNull(nodes().singleOrNull { label(it) == name })
+        val selected = named("Annual plan")
+        assertTrue(selected.isCheckable)
+        assertTrue(selected.isChecked)
+        val disabled = named("Unavailable")
+        assertFalse(disabled.isEnabled)
+        assertFalse(disabled.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK))
+        assertEquals(2, published.filter { label(it) == "Plan option" }.distinct().size)
+        val field = named("Password")
+        assertTrue(field.isEditable)
+        assertTrue(field.isPassword)
+        assertEquals(1, nodes().count { it.isEditable })
+        assertTrue(field.text.isNullOrEmpty())
+        fun awaitEmission(name: String) {
+            val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS)) { "Authored native action must reach durable Journey admission: $name" }
+            assertEquals(listOf(name), batch.emissions.map { it.name })
+        }
+        assertTrue(named("Seats").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_FORWARD))
+        awaitEmission("seat_increased")
+        assertTrue(named("Seats").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD))
+        awaitEmission("seat_decreased")
+        val arguments = Bundle().apply {
+            putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "typed-password")
+        }
+        assertTrue(named("Password").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, arguments))
+        awaitEmission("\$response_set")
+        assertEquals("typed-password", responses().getValue("password").jsonPrimitive.content)
+        assertFalse(nodes().any { it.text?.toString() == "typed-password" || it.contentDescription?.toString() == "typed-password" })
+        assertEquals(1, nodes().count { it.isEditable })
+        assertEquals(null, accepted.poll(300, TimeUnit.MILLISECONDS))
     }
 
     private fun composedSurface(instrumentation: Instrumentation, surface: TextureView, fixedBounds: Rect? = null): Bitmap {

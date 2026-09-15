@@ -2,7 +2,7 @@
 
 The internal Android adapter projects the runtime's presented semantic tree through an `AccessibilityNodeProvider`, with native EditText controls represented by their real Views. This is implementation work for [UNIV-3172](https://universe.basis.dev/issue/UNIV-3172). The SDK capability registry does not yet admit `scene-semantics-v1`; this document does not declare accessible published Experiences or parity complete.
 
-The adapter consumes the public Android runtime v0.3.11 pinned in `runtime/artifact.json`. Snapshots and exact authored action dispatch remain owned by the runtime lane. The shared tree projects ancestor-disabled state for both virtual controls and real editors. Presented geometry, occurrence retirement and input suspension fence UI publication and actions. The UI action result reports queue admission; native validation can still reject an action later if its capture becomes stale.
+The adapter consumes the public Android runtime v0.3.12 pinned in `runtime/artifact.json`. Snapshots and exact authored action dispatch remain owned by the runtime lane. The shared tree projects ancestor-disabled state for both virtual controls and real editors. Presented geometry, occurrence retirement and input suspension fence UI publication and actions. The UI action result reports queue admission; native validation can still reject an action later if its capture becomes stale.
 
 ## Executing evidence
 
