@@ -72,6 +72,16 @@ adapters, app-managed purchase completion, and exact-release Companion preview
 remain tracked in [UNIV-2601](https://universe.basis.dev/issue/UNIV-2601). Test Store
 is not a substitute for either provider integration or real-store qualification.
 
+When implementing `NuxiePurchaseDelegate`, preserve the resolved
+`storeProductId`, `basePlanId`, `purchaseOptionId`, `offerId` and
+`isOfferPersonalized`. Do not let a provider select its default offer after Nuxie
+has displayed a different one. For example, RevenueCat's
+[PurchaseParams](https://github.com/RevenueCat/purchases-android/blob/main/purchases/src/main/kotlin/com/revenuecat/purchases/PurchaseParams.kt)
+supports an explicit subscription option and personalized-price flag; passing
+only its StoreProduct instead uses its default-option selection. The provider
+examples still need compilation and orchestration qualification against pinned
+provider versions.
+
 Validate the app and its Test Store release gate with:
 
 ```bash

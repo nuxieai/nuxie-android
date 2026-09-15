@@ -15,7 +15,8 @@ class StoreProduct internal constructor(
     val placementId: String?,
     val rawProduct: ProductDetails?,
     internal val offerToken: String?,
-    internal val isOfferPersonalized: Boolean,
+    /** Signed Placement flag; purchase delegates must forward it to their checkout provider. */
+    val isOfferPersonalized: Boolean,
     internal val productType: String,
     internal val consumable: Boolean = false,
     internal val featureAllowances: List<FeatureAllowance> = emptyList(),

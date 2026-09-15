@@ -680,6 +680,7 @@ public final class ai/nuxie/sdk/billing/StoreProduct {
 	public final fun getPurchaseOptionId ()Ljava/lang/String;
 	public final fun getRawProduct ()Lcom/android/billingclient/api/ProductDetails;
 	public final fun getStoreProductId ()Ljava/lang/String;
+	public final fun isOfferPersonalized ()Z
 }
 
 public final class ai/nuxie/sdk/billing/SubscriptionReplacement {
