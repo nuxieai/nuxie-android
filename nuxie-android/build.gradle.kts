@@ -2,6 +2,7 @@ plugins {
   alias(libs.plugins.android.library)
   alias(libs.plugins.kotlin.android)
   `maven-publish`
+  signing
 }
 
 android {
@@ -99,6 +100,14 @@ publishing {
       name = "staging"
       url = uri(rootProject.layout.buildDirectory.dir("maven-repository"))
     }
+  }
+}
+
+val releaseSigningKey = providers.environmentVariable("NUXIE_SIGNING_KEY")
+if (releaseSigningKey.isPresent) {
+  signing {
+    useInMemoryPgpKeys(releaseSigningKey.get(), providers.environmentVariable("NUXIE_SIGNING_PASSWORD").orNull)
+    sign(publishing.publications["release"])
   }
 }
 

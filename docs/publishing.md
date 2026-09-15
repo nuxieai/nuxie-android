@@ -24,8 +24,36 @@ sources and logs remain under `build/maven-consumer`.
 
 The `--repository` option accepts another repository URL for qualification of a
 published candidate. Local staging is not evidence that an artifact is available
-on Maven Central. Signing, Central upload, tagged release orchestration and a
+on Maven Central. Central upload, tagged release orchestration and a
 public-repository consumer run remain required before announcing availability.
+
+## Signed bundle
+
+Provide the armored release private key through `NUXIE_SIGNING_KEY` and its
+password through `NUXIE_SIGNING_PASSWORD` using the release secret environment.
+These are signing credentials, separate from the Central user token. With that
+environment present, Gradle signs the publication in memory:
+
+```sh
+./gradlew --no-daemon :nuxie-android:publishReleasePublicationToStagingRepository
+python3 scripts/bundle-maven-release.py --version 0.1.0 \
+  --public-key /absolute/path/to/release-public-key.asc \
+  --fingerprint FULL_RELEASE_KEY_FINGERPRINT \
+  --output build/distributions/nuxie-android-0.1.0-central.zip
+```
+
+Bundle verification requires GnuPG on PATH. Supply the independently known full
+release-key fingerprint. The builder verifies each artifact against that key,
+checks publication identity and required metadata/content, and creates the Maven
+repository layout with signatures and MD5, SHA-1, SHA-256 and SHA-512 checksums.
+It does not upload or publish anything.
+
+`python3 scripts/test-maven-signing.py` qualifies Gradle signing with a temporary
+test key and rejects a wrong fingerprint, altered bytes and missing signatures.
+It replaces staging signatures with test signatures; regenerate the publication
+with the release key before preparing a real release bundle. The temporary
+private key is removed when the test exits. No production credential is needed
+for this test.
 
 Publication uses the Android release software component so dependency scopes
 are preserved. Billing and coroutines are compile dependencies because public
