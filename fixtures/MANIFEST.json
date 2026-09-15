@@ -1,8 +1,9 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "8d04a737a3f1bd05fe0a061265b80f97d0f34512",
+  "sourceCommit": "0fc9673ae03d0f174fd044f0c0c3d6bcc2ef6d91",
   "files": {
     "README.md": "4363d6a79ac9828364a6a02bf400d98c0852b771062258c409a744dd1a5016e7",
+    "encodings/activity-identity.json": "6f6c5010911fac834706a986f4a94d7d7a63c7f34bfb7cdf7f616246b1f896a2",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
     "encodings/feature-consumption.json": "8b34dd248e9f28a0bead3b07f146b3579cb47f1f486489c46afefaf21f914b72",
     "encodings/feature-usage.json": "2606a5062e041237fb7245dd919e921c383d94735d537e509aab429855b17c69",

@@ -2711,6 +2711,41 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun restoreConnectionFailureEmitsTheCorrelatedFailureWithoutThrowing() = runTest {
+        val captured = mutableListOf<List<String>>()
+        val fixture = fixture(this, capturePurchaseEventOverride = { name, _, id, owner ->
+            captured += listOf(name, id, owner)
+            true
+        })
+        val owner = fixture.core.identity.distinctId()
+        val failure = BillingUnavailableException(3, "Billing service unavailable on device.")
+        fixture.billing.queryFailure = failure
+
+        val result = fixture.service.restorePurchases(
+            expectedOwnerDistinctId = owner,
+            outcomeCorrelation = CommerceOutcomeCorrelation("restore-unavailable", owner),
+        )
+
+        assertEquals(RestoreResult.Failed(failure), result)
+        assertEquals(listOf(listOf(SystemEventNames.RESTORE_FAILED, "restore-unavailable", owner)), captured)
+        assertEquals(listOf(BillingClient.ProductType.SUBS), fixture.billing.queries)
+        assertTrue(fixture.store.load().isEmpty())
+    }
+
+    @Test
+    fun restoreQueryCancellationRemainsCancellationWithoutFailureOutcome() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
+        val cancellation = kotlinx.coroutines.CancellationException("restore cancelled")
+        fixture.billing.queryFailure = cancellation
+
+        val result = runCatching { fixture.service.restorePurchases() }
+
+        assertEquals(cancellation, result.exceptionOrNull())
+        assertFalse(SystemEventNames.RESTORE_FAILED in actions)
+    }
+
+    @Test
     fun restoreQueriesBothProductTypesAndDistinguishesEmptyFromRestored() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(this, actions = actions)
@@ -3030,6 +3065,7 @@ class PurchaseServiceTest {
         var launched: CheckoutRequest? = null
         var launchCode = BillingClient.BillingResponseCode.OK
         val acknowledgeCodes = mutableListOf<Int>()
+        var queryFailure: Exception? = null
         var failQueries = false
         var queryStarted: CompletableDeferred<Unit>? = null
         var releaseQueries: CompletableDeferred<Unit>? = null
@@ -3041,6 +3077,7 @@ class PurchaseServiceTest {
 
         override suspend fun queryActive(productType: String): ActivePurchasesResult {
             queries += productType
+            queryFailure?.let { throw it }
             queryStarted?.complete(Unit)
             releaseQueries?.await()
             if (failQueries) {

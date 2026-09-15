@@ -14,12 +14,18 @@ internal class ActivityForwarder(
         val receivedAtMillis = event.forwardingReceivedAtMillis ?: return
         if (event.forwardingName !in ActivityCuration.curatedNames) return
         val activity = ActivityCuration.activity(event.forwardingName, event.properties) ?: return
+        val identity = event.forwardingIdentity
+        val customerId = event.distinctId
         deliver(
             NuxieActivityInfo(
                 id = event.id,
                 timestampMillis = occurrenceTime(event),
                 receivedAtMillis = receivedAtMillis,
                 activity = activity,
+                customerId = customerId,
+                identityIsCurrent = {
+                    identity != null && identity.customerId == customerId && identity.isCurrent()
+                },
             ),
         )
     }

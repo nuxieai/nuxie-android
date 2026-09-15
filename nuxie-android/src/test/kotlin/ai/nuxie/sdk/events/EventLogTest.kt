@@ -4,6 +4,8 @@ import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.NuxieEvent
+import ai.nuxie.sdk.fixtures.FixtureRunner
+import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.journey.JourneyEventNames
 import kotlinx.coroutines.CoroutineScope
@@ -14,7 +16,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.boolean
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -33,6 +40,16 @@ class EventLogTest {
         override fun anonymousId(): String = "anon-1"
         override fun rawDistinctId(): String? = null
         override val isIdentified: Boolean = false
+    }
+
+    private class MutableIdentity : IdentityProvider {
+        @Volatile var current = IdentityScope("customer-a", 0L)
+        override fun distinctId() = current.distinctId
+        override fun anonymousId() = "anonymous"
+        override fun rawDistinctId() = current.distinctId
+        override val isIdentified = true
+        override fun captureScope() = current
+        override fun isCurrentScope(scope: IdentityScope) = current == scope
     }
 
     private class RecordingStore : EventStore {
@@ -143,11 +160,12 @@ class EventLogTest {
         forwardingEnabled: () -> Boolean = { false },
         nowMillis: () -> Long = { 1_784_462_400_000L },
         sessionIdProvider: (() -> String?)? = null,
+        identity: IdentityProvider = FakeIdentity(),
         beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
     ): EventLog = EventLog(
         store = store,
         contextBuilder = contextBuilder(),
-        identity = FakeIdentity(),
+        identity = identity,
         beforeSend = beforeSend,
         scope = scope,
         nowMillis = nowMillis,
@@ -159,6 +177,190 @@ class EventLogTest {
     @After
     fun tearDown() {
         runBlocking { scope.coroutineContext[Job]?.cancelAndJoin() }
+    }
+
+    @Test
+    fun activityRetainsCustomerAndExpiresAcrossIdentityRoundTripAndShutdown() = runBlocking {
+        val fixture = Json.parseToJsonElement(
+            java.io.File(FixtureRunner.fixturesRoot(), "encodings/activity-identity.json").readText(),
+        ).jsonObject
+        val identity = MutableIdentity()
+        identity.current = IdentityScope(fixture.getValue("initialCustomerId").jsonPrimitive.content, 0L)
+        val store = RecordingStore()
+        val eventLog = log(store, forwardingEnabled = { true }, identity = identity)
+        val activities = mutableListOf<ai.nuxie.sdk.NuxieActivityInfo>()
+        val forwarder = ActivityForwarder { activities.add(it) }
+        eventLog.subscribeForwarding { forwarder.onCommitted(it) }
+        try {
+            eventLog.capture(SystemEventNames.APP_OPENED)
+            eventLog.awaitBarrier()
+            val original = activities.single()
+            for (element in fixture.getValue("steps").jsonArray) {
+                val step = element.jsonObject
+                val action = step.getValue("action").jsonPrimitive.content
+                when (action) {
+                    "observe" -> Unit
+                    "identify" -> identity.current = IdentityScope(
+                        step.getValue("customerId").jsonPrimitive.content,
+                        identity.current.revision + 1,
+                    )
+                    "shutdown" -> {
+                        eventLog.capture(SystemEventNames.APP_OPENED)
+                        eventLog.awaitBarrier()
+                        assertTrue(activities.last().isCurrentIdentity)
+                        val priorSessionActivity = activities.last()
+                        eventLog.close()
+                        assertFalse(priorSessionActivity.isCurrentIdentity)
+                        val replacement = log(RecordingStore(), forwardingEnabled = { true }, identity = identity)
+                        replacement.subscribeForwarding { forwarder.onCommitted(it) }
+                        try {
+                            replacement.capture(SystemEventNames.APP_OPENED)
+                            replacement.awaitBarrier()
+                            assertTrue(activities.last().isCurrentIdentity)
+                            assertFalse(priorSessionActivity.isCurrentIdentity)
+                        } finally {
+                            replacement.close()
+                        }
+                    }
+                    else -> error("Unknown identity fixture action: $action")
+                }
+                assertEquals(action, step.getValue("expectedCustomerId").jsonPrimitive.content, original.customerId)
+                assertEquals(action, step.getValue("expectedCurrent").jsonPrimitive.boolean, original.isCurrentIdentity)
+            }
+            assertEquals(2, store.pending.size)
+        } finally {
+            eventLog.close()
+        }
+    }
+
+    @Test
+    fun identityIsCapturedBeforeBeforeSendForOrdinaryAndStableEvents() = runBlocking {
+        for (origin in listOf("ordinary", "stable", "delivered")) {
+            val identity = MutableIdentity()
+            val store = RecordingStore()
+            val eventLog = log(store, forwardingEnabled = { true }, identity = identity) { event ->
+                identity.current = IdentityScope("customer-b", 1L)
+                identity.current = IdentityScope("customer-a", 2L)
+                event
+            }
+            val activities = mutableListOf<ai.nuxie.sdk.NuxieActivityInfo>()
+            val forwarder = ActivityForwarder { activities.add(it) }
+            eventLog.subscribeForwarding { forwarder.onCommitted(it) }
+            try {
+                when (origin) {
+                    "ordinary" -> eventLog.capture(SystemEventNames.APP_OPENED)
+                    "stable" -> eventLog.captureIdempotently(
+                        SystemEventNames.APP_OPENED, emptyMap(), "stable-event", "customer-a",
+                    )
+                    "delivered" -> eventLog.captureDeliveredIdempotently(
+                        SystemEventNames.APP_OPENED, emptyMap(), "delivered-event", "customer-a",
+                    )
+                }
+                eventLog.awaitBarrier()
+                val activity = activities.single()
+                assertEquals(origin, "customer-a", activity.customerId)
+                assertFalse(origin, activity.isCurrentIdentity)
+                assertEquals(origin, 1, store.pending.size + store.delivered.size)
+            } finally {
+                eventLog.close()
+            }
+        }
+    }
+
+    @Test
+    fun queuedCaptureKeepsAdmissionCustomerEvenWhenIdentityChangesBeforeWorkerRuns() = runBlocking {
+        val identity = MutableIdentity()
+        val store = RecordingStore()
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val eventLog = log(store, forwardingEnabled = { true }, identity = identity) { event ->
+            if (event.name == "hold-worker") {
+                entered.countDown()
+                check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            }
+            event
+        }
+        val activities = mutableListOf<ai.nuxie.sdk.NuxieActivityInfo>()
+        val forwarder = ActivityForwarder { activities.add(it) }
+        eventLog.subscribeForwarding { forwarder.onCommitted(it) }
+        try {
+            eventLog.capture("hold-worker")
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            eventLog.capture(SystemEventNames.APP_OPENED)
+            identity.current = IdentityScope("customer-b", 1L)
+            release.countDown()
+            eventLog.awaitBarrier()
+            assertEquals("customer-a", activities.single().customerId)
+            assertFalse(activities.single().isCurrentIdentity)
+            assertEquals("customer-a", store.pending.last().distinctId)
+        } finally {
+            release.countDown()
+            eventLog.close()
+        }
+    }
+
+    @Test
+    fun transformedDeliveredActivityCannotClaimTheOriginalCustomerIsCurrent() = runBlocking {
+        val identity = MutableIdentity()
+        val store = RecordingStore()
+        val eventLog = log(store, forwardingEnabled = { true }, identity = identity) {
+            NuxieEvent(it.id, it.name, "customer-b", it.properties, it.timestampMillis)
+        }
+        val activities = mutableListOf<ai.nuxie.sdk.NuxieActivityInfo>()
+        val forwarder = ActivityForwarder { activities.add(it) }
+        eventLog.subscribeForwarding { forwarder.onCommitted(it) }
+        try {
+            assertTrue(eventLog.captureDeliveredIdempotently(
+                SystemEventNames.APP_OPENED, emptyMap(), "transformed-identity", "customer-a",
+            ))
+            eventLog.awaitBarrier()
+            assertEquals("customer-b", activities.single().customerId)
+            assertFalse(activities.single().isCurrentIdentity)
+            assertEquals("customer-b", store.delivered.single().distinctId)
+        } finally {
+            eventLog.close()
+        }
+    }
+
+    @Test(timeout = 10_000)
+    fun heldMainThreadActivityIsStaleAfterIdentifyOrResetRoundTrip() = runBlocking {
+        for (transition in listOf("identify", "reset")) {
+            val identity = ai.nuxie.sdk.identity.IdentityService(
+                org.robolectric.RuntimeEnvironment.getApplication(),
+            )
+            identity.setDistinctId("customer-a")
+            val store = RecordingStore()
+            val eventLog = log(store, forwardingEnabled = { true }, identity = identity)
+            val delivered = mutableListOf<Pair<String, Boolean>>()
+            val listener = object : ai.nuxie.sdk.NuxieListener {
+                override fun onAppActionRequested(sdk: ai.nuxie.sdk.Nuxie, action: ai.nuxie.sdk.AppAction) = Unit
+                override fun onActivityEmitted(sdk: ai.nuxie.sdk.Nuxie, info: ai.nuxie.sdk.NuxieActivityInfo) {
+                    delivered.add(info.customerId to info.isCurrentIdentity)
+                }
+            }
+            ai.nuxie.sdk.Nuxie.listener = listener
+            val forwarder = ActivityForwarder { ai.nuxie.sdk.Nuxie.deliverActivity(it) }
+            eventLog.subscribeForwarding { forwarder.onCommitted(it) }
+            val main = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            try {
+                eventLog.capture(SystemEventNames.APP_OPENED)
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2)
+                while (main.isIdle && System.nanoTime() < deadline) Thread.yield()
+                assertFalse("native main-thread callback was not queued", main.isIdle)
+                assertTrue(delivered.isEmpty())
+                if (transition == "identify") identity.setDistinctId("customer-b")
+                else identity.reset(keepAnonymousId = true)
+                identity.setDistinctId("customer-a")
+                main.idle()
+                eventLog.awaitBarrier()
+                assertEquals(transition, listOf("customer-a" to false), delivered)
+                assertEquals(1, store.pending.size)
+            } finally {
+                ai.nuxie.sdk.Nuxie.listener = null
+                main.idle()
+                eventLog.close()
+            }
+        }
     }
 
     @Test
