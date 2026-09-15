@@ -36,6 +36,12 @@ The staging script verifies the build's source revision and pinned NDK.
 Without `NUXIE_RUNTIME_USE_LOCAL=1`, Gradle restores the public pinned artifact;
 restage the candidate before resuming local development if that happens.
 
+## Integration example
+
+The [example app guide](example-app/README.md) covers setup, identity, authored
+triggers, Feature access, restore, a local analytics sink and the development
+Test Store. Its current local-runtime requirement is described above.
+
 ## Host JVM render harness
 
 The host-only harness drives a release descriptor through the SDK's configured
