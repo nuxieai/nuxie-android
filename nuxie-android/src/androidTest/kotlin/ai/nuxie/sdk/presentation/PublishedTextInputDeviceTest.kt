@@ -80,6 +80,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
+import org.junit.Assert.fail
 import org.junit.Test
 
 /** Real publisher bytes, signed defaults, runtime geometry and runtime text writer. */
@@ -1930,6 +1931,16 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
+    fun signedSemanticActivationIsDurableBeforeAuthoredNavigation() =
+        exerciseDurableNativeEmission(true, activation = ControlActivation.ACCESSIBILITY)
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun failedSignedSemanticActionDoesNotCommitPartialResponses() =
+        exerciseDurableNativeEmission(true, failScript = true, activation = ControlActivation.ACCESSIBILITY)
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
     fun failedCompiledScriptClosesWithoutCommittingPartialResponses() = exerciseDurableNativeEmission(true, true)
 
     @Test
@@ -1947,11 +1958,17 @@ class PublishedTextInputDeviceTest {
     fun shutdownAfterCompiledActionAdmissionDrains() =
         exerciseDurableNativeEmission(true, shutdownAfterAdmission = true)
 
-    private fun exerciseDurableNativeEmission(scripted: Boolean, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false) {
+    private enum class ControlActivation { POINTER, ACCESSIBILITY }
+
+    private fun exerciseDurableNativeEmission(scripted: Boolean, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, activation: ControlActivation = ControlActivation.POINTER) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
-        val fixture = loadPublishedFixture(instrumentation, if (failScript) "journeys/rendered-screen-control-error" else if (scripted) "journeys/rendered-screen-control" else "journeys/rendered-text-input")
+        val candidateSemantics = activation == ControlActivation.ACCESSIBILITY
+        check(!candidateSemantics || scripted)
+        val fixturePath = if (candidateSemantics) "journeys/rendered-semantic-screen-control${if (failScript) "-error" else ""}"
+            else if (failScript) "journeys/rendered-screen-control-error" else if (scripted) "journeys/rendered-screen-control" else "journeys/rendered-text-input"
+        val fixture = loadPublishedFixture(instrumentation, fixturePath, candidateSemantics)
         val owner = "published-durable-${UUID.randomUUID()}"
         val directory = File(context.cacheDir, owner).apply { mkdirs() }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -1982,7 +1999,7 @@ class PublishedTextInputDeviceTest {
                 }, cacheDirectory = File(directory, "artifacts")))
         val authority = ProfileDeliveryAuthority(fixture.release.identity.appId, fixture.release.identity.environment)
         val catalog = JourneyProfileCatalog(fixture.trustedKeys, JourneyReleaseHighWaterStore(context)) {
-            supportedRuntimeForEmbeddedRuntime(nuxieRuntimeSourceRevision())
+            runtimeForFixture(candidateSemantics)
         }
         val presenter = object : JourneyPresenting {
             override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
@@ -2110,8 +2127,23 @@ class PublishedTextInputDeviceTest {
                         assertEquals(1, presentationCount.get())
                     } finally { first.application.unregisterActivityLifecycleCallbacks(callbacks) }
                 }
-                dispatch(MotionEvent.ACTION_DOWN)
-                dispatch(MotionEvent.ACTION_UP)
+                if (activation == ControlActivation.ACCESSIBILITY) {
+                    instrumentation.uiAutomation.waitForIdle(100, 5000)
+                    val semanticDeadline = SystemClock.uptimeMillis() + 5_000
+                    var publishedButton: android.view.accessibility.AccessibilityNodeInfo? = null
+                    while (publishedButton == null && SystemClock.uptimeMillis() < semanticDeadline) {
+                        publishedButton = instrumentation.uiAutomation.rootInActiveWindow
+                            ?.findAccessibilityNodeInfosByText("Choose Pro")
+                            ?.singleOrNull { it.text?.toString() == "Choose Pro" }
+                        if (publishedButton == null) SystemClock.sleep(20)
+                    }
+                    val button = checkNotNull(publishedButton) { "The signed control must reach the accessibility client" }
+                    assertTrue(button.isClickable)
+                    assertTrue(button.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK))
+                } else {
+                    dispatch(MotionEvent.ACTION_DOWN)
+                    dispatch(MotionEvent.ACTION_UP)
+                }
             } else {
                 val field = awaitEditor(instrumentation, first, "text-input/screen_1/email_input")
                 if (accessibilityEdit) editUsingAccessibility(instrumentation, "durable@example.com")
@@ -2322,6 +2354,7 @@ class PublishedTextInputDeviceTest {
     private fun loadPublishedFixture(
         instrumentation: Instrumentation,
         fixture: String = "journeys/rendered-text-input",
+        candidateSemantics: Boolean = false,
     ): PublishedFixture {
         check(NuxieRuntime.shared.isAvailable) { "Published fixture requires the native runtime" }
         val context = instrumentation.targetContext
@@ -2333,14 +2366,23 @@ class PublishedTextInputDeviceTest {
         val provenance = objectAt("provenance.json")
         val keyId = envelope.getValue("signature").jsonObject.getValue("keyId").jsonPrimitive.content
         val trustedKeys = mapOf(keyId to Base64.decode(provenance.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))
-        val release = JourneyReleaseVerifier.authenticate(
+        fun authenticate(supported: ai.nuxie.sdk.experiences.JourneyReleaseSupportedRuntime) = JourneyReleaseVerifier.authenticate(
             envelope.toString().toByteArray(),
             trustedKeys,
             checkNotNull(JourneyReleaseIdentity.fromJson(locator, setOf("legId"))),
             locator.getValue("legId").jsonPrimitive.content,
-            checkNotNull(supportedRuntimeForEmbeddedRuntime(nuxieRuntimeSourceRevision())),
+            supported,
             JourneyReleaseReplayPolicy.Active(0),
         )
+        if (candidateSemantics) {
+            try {
+                authenticate(runtimeForFixture(false))
+                fail("Production admission must reject the unqualified semantic capability")
+            } catch (expected: ai.nuxie.sdk.experiences.JourneyReleaseAuthenticationException) {
+                assertTrue(expected.message.orEmpty().contains("unsupported capabilities"))
+            }
+        }
+        val release = authenticate(runtimeForFixture(candidateSemantics))
         assertEquals(provenance.getValue("descriptorSha256").jsonPrimitive.content, release.descriptorSha256)
         val directory = File(context.cacheDir, "published-input-${UUID.randomUUID()}").apply { mkdirs() }
         fun stage(artifact: JsonObject): Pair<String, File> {
@@ -2359,6 +2401,12 @@ class PublishedTextInputDeviceTest {
         }
         val assets = (render.getValue("assets").jsonArray.map { it.jsonObject } + scripts).associate { stage(it) }
         return PublishedFixture(release, riv, assets, entry, trustedKeys)
+    }
+
+    /** Candidate qualification only; the production registry must continue to reject this capability. */
+    private fun runtimeForFixture(candidateSemantics: Boolean): ai.nuxie.sdk.experiences.JourneyReleaseSupportedRuntime {
+        val current = checkNotNull(supportedRuntimeForEmbeddedRuntime(nuxieRuntimeSourceRevision()))
+        return if (candidateSemantics) current.copy(supportedCapabilities = current.supportedCapabilities + "scene-semantics-v1") else current
     }
 
     private fun awaitDeliveredPointer(surface: ExperienceSurfaceHost) {

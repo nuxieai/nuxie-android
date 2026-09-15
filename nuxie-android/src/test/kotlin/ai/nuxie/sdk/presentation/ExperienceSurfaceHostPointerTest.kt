@@ -678,6 +678,11 @@ class ExperienceSurfaceHostPointerTest {
             android.view.Choreographer.getInstance().removeFrameCallback(host)
             org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
             assertEquals(1, checkNotNull(host.accessibilityNodeProvider.createAccessibilityNodeInfo(-1)).childCount)
+            // A repeated render submission can be pending while the native
+            // presented capture remains valid. The runtime decides staleness.
+            native.presentation = 4
+            host.doFrame(1_018_000_000L)
+            drain(lane)
             assertTrue(host.accessibilityNodeProvider.performAction(1,
                 android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK, null))
             drain(lane)
@@ -700,6 +705,7 @@ class ExperienceSurfaceHostPointerTest {
             } finally { resume.countDown() }
             drain(lane)
             assertEquals("Queued action cannot cross suspended input", listOf(42L to 0), native.semanticActions)
+            native.presentation = 1
             host.doFrame(1_032_000_000L)
             drain(lane)
             assertTrue("Queued pointer cannot cross suspended input", native.pointerSteps.all { it.isEmpty() })
