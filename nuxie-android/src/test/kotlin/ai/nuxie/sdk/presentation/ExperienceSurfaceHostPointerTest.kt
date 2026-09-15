@@ -134,6 +134,7 @@ class ExperienceSurfaceHostPointerTest {
         fun drainUi() {
             host.setPresentationVisible(false)
             drain(lane)
+            android.view.Choreographer.getInstance().removeFrameCallback(host)
             org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
             host.setPresentationVisible(true)
         }
@@ -637,6 +638,84 @@ class ExperienceSurfaceHostPointerTest {
         }
     }
 
+    @Test fun `semantics wait for delivery and composition then retire before hidden work can act`() {
+        val controller = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(controller.get(), lane,
+            artboardSize = ExperienceArtboardSize(100f, 100f), runtime = NuxieRuntime(native),
+            listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() {}
+                override fun onFailure(error: ExperiencePresentationException) { throw error }
+            })
+        controller.get().setContentView(host)
+        host.layout(0, 0, 100, 100)
+        val texture = SurfaceTexture(0)
+        val descriptor = Json.parseToJsonElement("""{
+            "requirements":{"requiredCapabilities":["scene-semantics-v1"]},
+            "render":{"assets":[],"screens":[{"id":"screen","artboardName":"Main"}]},
+            "leg":{"screens":[{"id":"screen"}]}
+        }""").jsonObject
+        try {
+            host.loadArtboard(byteArrayOf(1), null, descriptor)
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            assertEquals(1, native.semanticsEnabled)
+            native.presentation = 4
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            assertEquals(0, native.semanticCaptures)
+            native.presentation = 1
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            android.view.Choreographer.getInstance().removeFrameCallback(host)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertEquals(1, native.semanticCaptures)
+            assertEquals(0, checkNotNull(host.accessibilityNodeProvider.createAccessibilityNodeInfo(-1)).childCount)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+            android.view.Choreographer.getInstance().removeFrameCallback(host)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertEquals(1, checkNotNull(host.accessibilityNodeProvider.createAccessibilityNodeInfo(-1)).childCount)
+            assertTrue(host.accessibilityNodeProvider.performAction(1,
+                android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK, null))
+            drain(lane)
+            assertEquals(listOf(42L to 0), native.semanticActions)
+            val blocked = CountDownLatch(1)
+            val resume = CountDownLatch(1)
+            lane.enqueue { blocked.countDown(); check(resume.await(5, TimeUnit.SECONDS)) }
+            assertTrue(blocked.await(2, TimeUnit.SECONDS))
+            try {
+                assertTrue(host.accessibilityNodeProvider.performAction(1,
+                    android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK, null))
+                val pointer = motion(MotionEvent.ACTION_DOWN, 1_020, 50f, 50f)
+                try { assertTrue(host.onTouchEvent(pointer)) } finally { pointer.recycle() }
+                host.setInputEnabled(false)
+                assertFalse(checkNotNull(host.accessibilityNodeProvider.createAccessibilityNodeInfo(1)).isEnabled)
+                assertFalse(host.accessibilityNodeProvider.performAction(1,
+                    android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK, null))
+                host.setInputEnabled(true)
+            } finally { resume.countDown() }
+            drain(lane)
+            assertEquals("Queued action cannot cross suspended input", listOf(42L to 0), native.semanticActions)
+            host.doFrame(1_032_000_000L)
+            drain(lane)
+            assertTrue("Queued pointer cannot cross suspended input", native.pointerSteps.all { it.isEmpty() })
+            host.setPresentationVisible(false)
+            assertEquals(0, checkNotNull(host.accessibilityNodeProvider.createAccessibilityNodeInfo(-1)).childCount)
+            assertFalse(host.accessibilityNodeProvider.performAction(1,
+                android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK, null))
+            drain(lane)
+            assertEquals(listOf(99L, 99L), native.semanticFreed)
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+            controller.pause().stop().destroy()
+        }
+    }
+
     private fun drain(lane: NuxieRuntimeLane) {
         val drained = CountDownLatch(1)
         assertTrue(lane.enqueue { drained.countDown() })
@@ -647,6 +726,20 @@ class ExperienceSurfaceHostPointerTest {
         MotionEvent.obtain(0, eventTime, action, x, y, 0)
 
     private class RecordingNative : NuxieTypedRuntimeNative {
+        var semanticsEnabled = 0
+        var semanticCaptures = 0
+        val semanticFreed = mutableListOf<Long>()
+        val semanticActions = mutableListOf<Pair<Long, Int>>()
+        override fun inspectFileAssets(bytes: ByteArray) = emptyList<ai.nuxie.sdk.runtime.ExpectedFileAsset>()
+        override fun enableSemantics(player: Long): Int { semanticsEnabled++; return 0 }
+        override fun captureSemantics(player: Long): NativeCallResult<Long> { semanticCaptures++; return NativeCallResult(0, 99L) }
+        override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(1, 1, 1))
+        override fun semanticNode(snapshot: Long, index: Int) = NativeCallResult(0,
+            ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 1, 0, 0, 0, 1, 10f, 10f, 80f, 80f, "Continue", "", ""))
+        override fun freeSemantics(snapshot: Long): Int { semanticFreed += snapshot; return 0 }
+        override fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int): Int {
+            semanticActions += nodeId to action; return 0
+        }
         var onRender: () -> Unit = {}
         var events = emptyArray<ai.nuxie.sdk.runtime.NativeRuntimeEvent>()
         val pointerSteps = mutableListOf<List<NativePlayerPointer>>()

@@ -149,7 +149,7 @@ internal class ExperienceRuntimePointerInput(
     }
 }
 
-private data class ContainCenterTransform(
+internal data class ContainCenterTransform(
     val scale: Float,
     val contentLeft: Float,
     val contentTop: Float,

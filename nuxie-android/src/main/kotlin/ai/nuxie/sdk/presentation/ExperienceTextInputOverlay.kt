@@ -1,11 +1,14 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NativeSemanticNode
+import android.view.accessibility.AccessibilityNodeInfo
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import android.content.Context
 import android.graphics.Color
 import android.graphics.Rect
 import android.graphics.Typeface
 import android.os.Build
+import android.os.Bundle
 import android.text.Editable
 import android.text.InputFilter
 import android.text.Spanned
@@ -46,6 +49,7 @@ internal class ExperienceTextInputOverlay(
     private var snapshot: NuxieViewModelSnapshot? = null
     private var closed = false
     private var inputEnabled = true
+    private var semanticFields: Map<String, NativeSemanticNode>? = null
     private var keyboardShift = 0f
     private val keyboardLayoutListener = ViewTreeObserver.OnGlobalLayoutListener { avoidKeyboard() }
 
@@ -66,7 +70,7 @@ internal class ExperienceTextInputOverlay(
             editor.visibility = View.INVISIBLE
             addView(editor, LayoutParams(1, 1))
             bindings += Binding(input, editor)
-            fun retain(): Boolean = !closed && inputEnabled && session.write(input.id, ExperienceTextInputState.Value(
+            fun retain(): Boolean = !closed && inputEnabled && editor.isEnabled && session.write(input.id, ExperienceTextInputState.Value(
                 editor.text.toString(), editor.selectionStart, editor.selectionEnd,
             ))
             editor.onSelection = { retain(); Unit }
@@ -96,10 +100,45 @@ internal class ExperienceTextInputOverlay(
                 val length = editor.text?.length ?: 0
                 editor.setSelection(retained.selectionStart.coerceIn(0, length), retained.selectionEnd.coerceIn(0, length))
             }
-            editor.isEnabled = enabled
+            val node = semanticFields?.get(binding.input.id)
+            editor.isEnabled = enabled && (semanticFields == null || node != null && node.stateFlags and 64 == 0)
         }
         inputEnabled = enabled
     }
+
+    fun updateSemantics(fields: Map<String, NativeSemanticNode>) {
+        if (closed) return
+        semanticFields = fields.toMap()
+        bindings.forEach { binding ->
+            val node = fields[binding.input.id]
+            binding.editor.semanticNode = node
+            binding.editor.importantForAccessibility = if (node == null) View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                else View.IMPORTANT_FOR_ACCESSIBILITY_YES
+            val enabled = inputEnabled && node != null && node.stateFlags and 64 == 0
+            if (enabled && !binding.editor.isEnabled) {
+                // Restore while disabled so TextWatcher/selection callbacks cannot
+                // admit a stale IME draft or emit a second response transaction.
+                session.read(binding.input.id)?.let { retained ->
+                    binding.editor.setText(retained.text)
+                    val length = binding.editor.text?.length ?: 0
+                    binding.editor.setSelection(retained.selectionStart.coerceIn(0, length),
+                        retained.selectionEnd.coerceIn(0, length))
+                }
+            }
+            binding.editor.isEnabled = enabled
+            if (node == null) {
+                // Fence callbacks before clearing focus: a late IME commit must not
+                // write into an occurrence whose presented field has disappeared.
+                if (binding.editor.hasFocus()) clearEditorFocus()
+                binding.editor.visibility = View.INVISIBLE
+            }
+        }
+        layoutEditors()
+    }
+
+    fun semanticViews(): Map<Long, View> = bindings.mapNotNull { binding ->
+        binding.editor.semanticNode?.let { it.id to binding.editor }
+    }.toMap()
 
     fun update(snapshot: NuxieViewModelSnapshot) {
         if (closed || !session.isCurrent()) return
@@ -225,6 +264,10 @@ internal class ExperienceTextInputOverlay(
         val left = (width - artboardSize.width * scale) / 2f
         val top = (height - artboardSize.height * scale) / 2f
         for ((input, editor) in bindings) {
+            if (semanticFields != null && input.id !in semanticFields.orEmpty()) {
+                editor.visibility = View.INVISIBLE
+                continue
+            }
             val geometry = input.geometry(snapshot)
             if (geometry == null || geometry.scaleX <= 0 || geometry.scaleY <= 0) {
                 editor.visibility = View.INVISIBLE
@@ -260,6 +303,45 @@ internal class ExperienceTextInputOverlay(
     }
 
     private inner class Editor(context: Context, private val input: ExperienceTextInput) : EditText(context) {
+        var semanticNode: NativeSemanticNode? = null
+
+        override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
+            super.onInitializeAccessibilityNodeInfo(info)
+            if (Build.VERSION.SDK_INT < 26 && isEnabled) {
+                info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_TEXT)
+            }
+            semanticNode?.let { node ->
+                // Preserve EditText's value, selection and edit actions. Its label is a hint,
+                // never a content description that replaces native editing semantics.
+                val authoredHint = listOf(node.label, node.hint)
+                    .filter(String::isNotEmpty).joinToString(", ")
+                if (Build.VERSION.SDK_INT >= 26) info.hintText = authoredHint
+                else {
+                    // AccessibilityNodeInfoCompat's pre-26 wire contract. Preserve
+                    // the real EditText value/actions without an AndroidX runtime dependency.
+                    info.extras.putCharSequence(
+                        "androidx.view.accessibility.AccessibilityNodeInfoCompat.HINT_TEXT_KEY", authoredHint)
+                }
+                info.isPassword = input.secure
+                info.isEnabled = isEnabled
+            }
+        }
+
+        override fun performAccessibilityAction(action: Int, arguments: Bundle?): Boolean {
+            if (action == AccessibilityNodeInfo.ACTION_SET_TEXT) {
+                if (!isEnabled || closed || !inputEnabled) return false
+                val replacement = arguments?.getCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE)?.toString().orEmpty()
+                // TextView.setText applies filters against an empty destination. Reject
+                // an over-limit whole-value replacement before it can erase a valid draft.
+                if (!ExperienceTextInputLimit.fits(replacement, input.maxLength)) return false
+                setText(replacement)
+                setSelection(text?.length ?: 0)
+                return true
+            }
+            return super.performAccessibilityAction(action, arguments)
+        }
+
         var onChange: (Boolean) -> Unit = {}
         var onSelection: (() -> Unit)? = null
         private var normalizing = false

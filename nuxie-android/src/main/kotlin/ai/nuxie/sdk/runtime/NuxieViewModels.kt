@@ -253,7 +253,7 @@ internal class NuxieViewModelSnapshot private constructor(
 internal data class NativeCallResult<out T>(val status: Int, val value: T?)
 
 /** Injectable raw seam; production delegates to [NuxieRuntimeBridge]. */
-internal interface NuxieTypedRuntimeNative {
+internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
     val isAvailable: Boolean get() = error("isAvailable is not implemented")
 
     fun runtimeInfo(): String = error("runtimeInfo is not implemented")
@@ -437,6 +437,33 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         val names = NuxieRuntimeBridge.nativeFileStateMachineNames(fileHandle, artboardName?.encodeToByteArray(), status)
         return NativeCallResult(status.single(), names?.toList())
     }
+
+    override fun enableSemantics(player: Long) = NuxieRuntimeBridge.nativePlayerEnableSemantics(player)
+    override fun captureSemantics(player: Long): NativeCallResult<Long> {
+        val status = intArrayOf(4)
+        val handle = NuxieRuntimeBridge.nativePlayerSemanticSnapshot(player, status)
+        return NativeCallResult(status.single(), handle.takeIf { it != 0L })
+    }
+    override fun semanticInfo(snapshot: Long): NativeCallResult<LongArray> {
+        val status = intArrayOf(4)
+        val info = NuxieRuntimeBridge.nativeSemanticSnapshotInfo(snapshot, status)
+        return NativeCallResult(status.single(), info)
+    }
+    override fun semanticNode(snapshot: Long, index: Int): NativeCallResult<NativeSemanticNode> {
+        val status = intArrayOf(4)
+        val node = NuxieRuntimeBridge.nativeSemanticSnapshotNode(snapshot, index, status)
+        return NativeCallResult(status.single(), node)
+    }
+    override fun semanticNodeForTextRun(player: Long, snapshot: Long, name: String): NativeCallResult<Long> {
+        val status = intArrayOf(4)
+        val id = NuxieRuntimeBridge.nativePlayerSemanticNodeForTextRun(player, snapshot, name.encodeToByteArray(), status)
+        return NativeCallResult(status.single(), id.takeIf { status.single() == 0 })
+    }
+    override fun freeSemantics(snapshot: Long) = NuxieRuntimeBridge.nativeSemanticSnapshotFree(snapshot)
+    override fun validateSemantics(player: Long, snapshot: Long) =
+        NuxieRuntimeBridge.nativePlayerValidateSemanticSnapshot(player, snapshot)
+    override fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int) =
+        NuxieRuntimeBridge.nativePlayerQueueSemanticAction(player, snapshot, nodeId, action)
 
     override fun playerStateMachineName(playerHandle: Long): NativeCallResult<String> {
         val status = intArrayOf(4)

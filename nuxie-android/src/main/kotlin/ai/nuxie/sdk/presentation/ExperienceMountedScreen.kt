@@ -46,6 +46,10 @@ internal class ExperienceMountedScreen(
                 transitionEvents.receive(event.name)
                 listener.onRuntimeEvent(event, viewModelSnapshot)
             }
+            override fun onSemanticFields(fields: Map<String, ai.nuxie.sdk.runtime.NativeSemanticNode>): Map<Long, View> {
+                textOverlay?.updateSemantics(fields)
+                return textOverlay?.semanticViews().orEmpty()
+            }
             override fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot) {
                 textOverlay?.update(snapshot)
             }
@@ -68,7 +72,7 @@ internal class ExperienceMountedScreen(
             viewModelProjection = prepared.viewModelProjection,
             textInputs = inputs,
         )
-        return FrameLayout(activity).apply {
+        return ExperienceInputContainer(activity, surface::dispatchSemanticKeyEvent, surface::semanticKeyboardEntry).apply {
             setBackgroundColor(prepared.clearColor)
             addView(surface, FrameLayout.LayoutParams(-1, -1))
             inputSize?.let { size ->
@@ -97,7 +101,10 @@ internal class ExperienceMountedScreen(
 
     val reduceMotion: Boolean get() = reduceMotionEnabled
 
-    fun setInputEnabled(enabled: Boolean) { textOverlay?.setInputEnabled(enabled) }
+    fun setInputEnabled(enabled: Boolean) {
+        surface.setInputEnabled(enabled)
+        textOverlay?.setInputEnabled(enabled)
+    }
 
     fun activate() {
         if (lifecycle.phase == ExperienceScreenLifecycle.Phase.ENTERING ||

@@ -451,8 +451,22 @@ internal class NuxieRuntimePlayer internal constructor(
 ) {
     private val owned = NuxieOwnedHandle(handle, "player", native::freePlayer)
     private var interactionPlayer: NuxieRuntimePlayer? = null
-    private var interactionNeedsInitialStep = true
+    private var interactionStepPending = true
     private var stepFailed = false
+
+    fun enableSemantics() {
+        val status = native.enableSemantics(requireHandle())
+        if (status != NUX_STATUS_OK) throw NuxieRuntimeCallException("enable semantics", status)
+    }
+
+    fun captureSemantics(): NuxieSemanticSnapshot = NuxieSemanticSnapshot.capture(requireHandle(), native)
+
+    /** Queue the exact authored action; normal stepping drains its generated listener output. */
+    fun queueSemanticAction(snapshot: NuxieSemanticSnapshot, nodeId: Long, action: Int): Int {
+        val status = snapshot.queueAction(requireHandle(), nodeId, action)
+        if (status == NUX_STATUS_OK) interactionStepPending = true
+        return status
+    }
 
     internal fun installInteractionPlayer(player: NuxieRuntimePlayer) {
         check(interactionPlayer == null)
@@ -496,9 +510,9 @@ internal class NuxieRuntimePlayer internal constructor(
         if (auxiliary == null) return stepSingle(inputs, pointers, nativeElapsed, correlationId)
         try {
             val primary = stepSingle(emptyList(), pointers, nativeElapsed, correlationId)
-            if (!interactionNeedsInitialStep && inputs.isEmpty() && pointers.isEmpty()) return primary
+            if (!interactionStepPending && inputs.isEmpty() && pointers.isEmpty()) return primary
             val interaction = auxiliary.stepTyped(inputs, pointers, 0.0, correlationId)
-            interactionNeedsInitialStep = false
+            interactionStepPending = false
             return NuxiePlayerStepOutcome(
                 keepGoing = primary.keepGoing || interaction.keepGoing,
                 pointerHits = pointers.indices.map { index ->

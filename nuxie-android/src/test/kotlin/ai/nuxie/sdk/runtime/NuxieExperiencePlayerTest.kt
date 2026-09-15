@@ -77,8 +77,35 @@ class NuxieExperiencePlayerTest {
         player.close()
     }
 
+    @Test fun `accepted semantic action wakes generated player without synthesizing pointer input`() {
+        val native = RecordingNative()
+        val player = NuxieRuntimePlayer(10, native)
+        player.installInteractionPlayer(NuxieRuntimePlayer(11, native))
+        player.stepTyped(elapsedSeconds = 0.0)
+        val snapshot = player.captureSemantics()
+        try {
+            assertEquals(0, player.queueSemanticAction(snapshot, 42, 0))
+            val result = player.stepTyped(elapsedSeconds = 0.25)
+            assertEquals(listOf(10L, 11L), native.steps.takeLast(2).map { it.handle })
+            assertTrue(native.steps.takeLast(2).all { it.pointers == 0 && it.inputs.isEmpty() })
+            assertEquals(listOf("command-10", "command-11"), result.hostCommands.map { it.name })
+            player.stepTyped(elapsedSeconds = 0.25)
+            assertEquals(10L, native.steps.last().handle)
+            native.semanticActionStatus = 9
+            assertEquals(9, player.queueSemanticAction(snapshot, 42, 0))
+            val before = native.steps.size
+            player.stepTyped(elapsedSeconds = 0.25)
+            assertEquals(before + 1, native.steps.size)
+        } finally { snapshot.close(); player.close() }
+    }
+
     private data class Step(val handle: Long, val elapsed: Float, val inputs: List<String>, val pointers: Int, val correlation: Long)
     private class RecordingNative : NuxieTypedRuntimeNative {
+        var semanticActionStatus = 0
+        override fun captureSemantics(player: Long) = NativeCallResult(0, 99L)
+        override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(1, 1, 0))
+        override fun freeSemantics(snapshot: Long) = 0
+        override fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int) = semanticActionStatus
         var machines = listOf("Generated Nuxie Pressable Interaction")
         var primaryName = "Authored"
         var failAuxiliaryCreation = false

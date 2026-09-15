@@ -1,0 +1,296 @@
+package ai.nuxie.sdk.presentation
+
+import ai.nuxie.sdk.runtime.NativeSemanticNode
+import ai.nuxie.sdk.runtime.NuxieSemanticTree
+import android.app.Activity
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Rect
+import android.view.KeyEvent
+import android.view.View
+import android.view.accessibility.AccessibilityManager
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityNodeProvider
+import org.junit.Assert.*
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.Robolectric
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [30])
+class ExperienceAccessibilityProviderTest {
+    @Test fun `Android nodes expose authored labels geometry and exact actions`() = withHost { host ->
+        val requests = mutableListOf<Triple<Long, Long, Int>>()
+        val provider = provider(host) { tree, id, action -> requests += Triple(tree.renderRevision, id, action); true }
+        provider.publish(NuxieSemanticTree(7, 1, listOf(node().copy(actions = 3))))
+        val info = checkNotNull(provider.createAccessibilityNodeInfo(1))
+        assertEquals("Continue", info.text)
+        assertEquals("android.widget.Button", info.className)
+        assertEquals("More information", info.hintText)
+        val screen = Rect()
+        info.getBoundsInScreen(screen)
+        assertEquals(Rect(30, 40, 130, 90), screen)
+        assertTrue(info.isVisibleToUser)
+        assertTrue(info.isClickable)
+        assertTrue(provider.performAction(1, AccessibilityNodeInfo.ACTION_CLICK, null))
+        assertTrue(provider.performAction(1, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD, null))
+        assertFalse(provider.performAction(1, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD, null))
+        assertEquals(listOf(Triple(7L, 42L, 0), Triple(7L, 42L, 1)), requests)
+        assertEquals(1, provider.findAccessibilityNodeInfosByText("CONTINUE", AccessibilityNodeProvider.HOST_VIEW_ID).size)
+    }
+
+    @Test fun `focus survives stable updates and retirement invalidates old virtual ids`() = withHost { host ->
+        val provider = provider(host)
+        provider.publish(NuxieSemanticTree(1, 1, listOf(node())))
+        assertTrue(provider.performAction(1, AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null))
+        provider.publish(NuxieSemanticTree(2, 2, listOf(node().copy(label = "Changed"))))
+        assertEquals("Changed", provider.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)?.text)
+        provider.retire()
+        assertNull(provider.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY))
+        provider.publish(NuxieSemanticTree(1, 1, listOf(node())))
+        assertNull(provider.createAccessibilityNodeInfo(1))
+        assertFalse(provider.performAction(1, AccessibilityNodeInfo.ACTION_CLICK, null))
+        assertNotNull(provider.createAccessibilityNodeInfo(2))
+    }
+
+    @Test fun `disabled actions and obscured values stay unavailable`() = withHost { host ->
+        var calls = 0
+        val provider = provider(host) { _, _, _ -> calls++; true }
+        provider.publish(NuxieSemanticTree(1, 1, listOf(node().copy(stateFlags = 64 or 4096, value = "secret"))))
+        val info = checkNotNull(provider.createAccessibilityNodeInfo(1))
+        assertFalse(info.isEnabled)
+        assertFalse(info.isClickable)
+        assertTrue(info.isPassword)
+        assertNull(info.stateDescription)
+        assertFalse(provider.performAction(1, AccessibilityNodeInfo.ACTION_CLICK, null))
+        assertEquals(0, calls)
+    }
+
+    @Test @Config(sdk = [23]) fun `older Android exposes values and hints while omitting secure values`() = withHost { host ->
+        val provider = provider(host)
+        provider.publish(NuxieSemanticTree(1, 1, listOf(node().copy(value = "50 percent"))))
+        assertEquals("Continue, 50 percent, More information", provider.createAccessibilityNodeInfo(1)?.contentDescription)
+        provider.publish(NuxieSemanticTree(2, 2, listOf(node().copy(stateFlags = 4096, value = "secret"))))
+        assertEquals("Continue, More information", provider.createAccessibilityNodeInfo(1)?.contentDescription)
+    }
+
+    @Test @Config(sdk = [23, 30]) fun `keyboard follows authored order skips disabled nodes and leaves at edges`() = withHost { host ->
+        val requests = mutableListOf<Long>()
+        val provider = provider(host) { _, id, _ -> requests += id; true }
+        provider.publish(NuxieSemanticTree(1, 1, listOf(
+            node().copy(id = 90, siblingIndex = 3, label = "Last"),
+            node().copy(id = 50, siblingIndex = 1, stateFlags = 64, label = "Disabled"),
+            node().copy(id = 42, siblingIndex = 0, label = "First"),
+            node().copy(id = 60, siblingIndex = 2, actions = 0, label = "Static"),
+        )))
+        assertTrue(host.requestFocus())
+        fun key(code: Int, modifiers: Int = 0, repeats: Int = 0) =
+            provider.key(KeyEvent(0, 0, KeyEvent.ACTION_DOWN, code, repeats, modifiers))
+        assertTrue(key(KeyEvent.KEYCODE_TAB))
+        assertEquals("First", provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+        assertFalse(key(KeyEvent.KEYCODE_ENTER, KeyEvent.META_CTRL_ON))
+        assertFalse(key(KeyEvent.KEYCODE_ENTER, repeats = 1))
+        assertTrue(key(KeyEvent.KEYCODE_ENTER))
+        assertTrue(key(KeyEvent.KEYCODE_TAB))
+        assertEquals("Last", provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+        assertFalse(key(KeyEvent.KEYCODE_TAB))
+        assertTrue(key(KeyEvent.KEYCODE_TAB, KeyEvent.META_SHIFT_ON))
+        assertEquals("First", provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+        assertFalse(key(KeyEvent.KEYCODE_TAB, KeyEvent.META_SHIFT_ON))
+        assertEquals(listOf(42L), requests)
+        provider.clearInputFocus()
+        assertNull(provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT))
+        assertFalse(key(KeyEvent.KEYCODE_SPACE))
+        assertTrue(key(KeyEvent.KEYCODE_TAB, KeyEvent.META_SHIFT_ON))
+        assertEquals("Last", provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+        host.isEnabled = false
+        provider.invalidateState()
+        assertNull(provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT))
+        assertFalse(key(KeyEvent.KEYCODE_TAB))
+    }
+
+    @Test @Config(sdk = [30], qualifiers = "mdpi")
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun `keyboard focus indicator renders on committed bounds and disappears on focus loss`() = withHost { host ->
+        host.setBackgroundColor(Color.RED)
+        var geometry = Rect(10, 20, 110, 70)
+        val provider = ExperienceAccessibilityProvider(host,
+            { ExperienceAccessibilityProvider.Bounds(Rect(geometry), Rect(geometry)) }, { _, _, _ -> true })
+        provider.publish(NuxieSemanticTree(1, 1, listOf(node())))
+        assertTrue(host.requestFocus())
+        provider.hostFocusChanged(true, View.FOCUS_FORWARD)
+        assertEquals("Continue", provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+        fun pixel(x: Int, y: Int): Int {
+            val bitmap = Bitmap.createBitmap(300, 300, Bitmap.Config.ARGB_8888)
+            host.draw(Canvas(bitmap))
+            return bitmap.getPixel(x, y).also { bitmap.recycle() }
+        }
+        assertEquals(Color.BLACK, pixel(10, 40))
+        assertEquals(Color.WHITE, pixel(12, 40))
+        assertEquals(Color.RED, pixel(20, 40))
+        geometry = Rect(50, 20, 150, 70)
+        provider.publish(NuxieSemanticTree(2, 1, listOf(node())))
+        assertEquals(Color.RED, pixel(12, 40))
+        assertEquals(Color.WHITE, pixel(52, 40))
+        provider.hostFocusChanged(false, View.FOCUS_FORWARD)
+        assertNull(provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT))
+        assertEquals(Color.RED, pixel(52, 40))
+        provider.hostFocusChanged(true, View.FOCUS_FORWARD)
+        provider.retire()
+        assertEquals(Color.RED, pixel(52, 40))
+    }
+
+    @Test @Config(sdk = [23, 30])
+    fun `reverse focus entry selects final control without an extra tab`() = withHost { host ->
+        val provider = provider(host)
+        provider.publish(NuxieSemanticTree(1, 1, listOf(node(), node().copy(id = 99, siblingIndex = 1, label = "Last"))))
+        assertTrue(host.requestFocus())
+        provider.hostFocusChanged(true, View.FOCUS_BACKWARD)
+        assertEquals("Last", provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+        provider.hostFocusChanged(false, View.FOCUS_FORWARD)
+        provider.hostFocusChanged(true, View.FOCUS_FORWARD)
+        assertEquals("Continue", provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+    }
+
+    @Test @Config(sdk = [23, 30])
+    fun `native fields link to neighboring virtual controls without duplicate children`() = withHost { host ->
+        val field = android.widget.EditText(host.context).apply { setText("Ada") }
+        val provider = provider(host)
+        provider.publish(NuxieSemanticTree(1, 1, listOf(
+            node().copy(id = 1, siblingIndex = 0, label = "Before"),
+            node().copy(id = 2, siblingIndex = 1, role = 6, label = "Name"),
+            node().copy(id = 3, siblingIndex = 2, label = "After"),
+        )), mapOf(2L to field))
+        assertEquals(2, provider.createAccessibilityNodeInfo(AccessibilityNodeProvider.HOST_VIEW_ID)?.childCount)
+        val info = field.createAccessibilityNodeInfo()
+        assertTrue(info.isEditable)
+        assertEquals("Ada", info.text.toString())
+        // Robolectric's traversal setters discard virtual IDs. Exact targets are
+        // verified through UiAutomation in SemanticTraversalDeviceTest.
+        assertNotNull(info.traversalAfter)
+        assertNotNull(info.traversalBefore)
+        assertNotNull(provider.createAccessibilityNodeInfo(1)?.traversalBefore)
+        assertNotNull(provider.createAccessibilityNodeInfo(3)?.traversalAfter)
+        provider.retire()
+        val retired = field.createAccessibilityNodeInfo()
+        assertNull(retired.traversalAfter)
+        assertNull(retired.traversalBefore)
+    }
+
+    @Test @Config(sdk = [23, 30])
+    fun `keyboard crosses native fields in authored order and leaves the mixed group`() = withHost { host ->
+        val activity = host.context as Activity
+        (host.parent as android.view.ViewGroup).removeView(host)
+        val before = android.widget.Button(activity).apply { text = "Outside before"; isFocusableInTouchMode = true }
+        val field = android.widget.EditText(activity).apply { setText("Ada") }
+        val after = android.widget.Button(activity).apply { text = "Outside after"; isFocusableInTouchMode = true }
+        val root = android.widget.LinearLayout(activity).apply { orientation = android.widget.LinearLayout.VERTICAL }
+        listOf(before, host, field, after).forEach {
+            root.addView(it, android.widget.LinearLayout.LayoutParams(300, 80))
+        }
+        activity.setContentView(root)
+        root.measure(View.MeasureSpec.makeMeasureSpec(300, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(400, View.MeasureSpec.EXACTLY))
+        root.layout(0, 0, 300, 400)
+        val provider = provider(host)
+        provider.publish(NuxieSemanticTree(1, 1, listOf(
+            node().copy(id = 1, siblingIndex = 0, label = "First"),
+            node().copy(id = 2, siblingIndex = 1, role = 6),
+            node().copy(id = 3, siblingIndex = 2, label = "Last"),
+        )), mapOf(2L to field))
+        fun tab(backwards: Boolean = false) = provider.key(KeyEvent(0, 0, KeyEvent.ACTION_DOWN,
+            KeyEvent.KEYCODE_TAB, 0, if (backwards) KeyEvent.META_SHIFT_ON else 0))
+        assertTrue(host.requestFocus())
+        provider.hostFocusChanged(true, View.FOCUS_FORWARD)
+        assertTrue(tab())
+        assertTrue(field.hasFocus())
+        assertFalse(provider.key(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER)))
+        assertEquals("Ada", field.text.toString())
+        assertTrue(tab())
+        assertTrue(host.hasFocus())
+        assertEquals("Last", provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+        assertTrue(tab(true))
+        assertTrue(field.hasFocus())
+        assertTrue(tab(true))
+        assertEquals("First", provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+        assertTrue(tab(true))
+        assertTrue(before.hasFocus())
+        assertTrue(host.requestFocus())
+        provider.hostFocusChanged(true, View.FOCUS_FORWARD)
+        assertTrue(tab())
+        assertTrue(tab())
+        assertTrue(tab())
+        assertTrue(after.hasFocus())
+    }
+
+    @Test @Config(sdk = [23, 30])
+    fun `arrows follow geometry skip disabled controls and do not activate during movement`() = withHost { host ->
+        val actions = mutableListOf<Long>()
+        val provider = ExperienceAccessibilityProvider(host, { node ->
+            val rect = Rect(node.minX.toInt(), node.minY.toInt(), node.maxX.toInt(), node.maxY.toInt())
+            ExperienceAccessibilityProvider.Bounds(rect, Rect(rect))
+        }, { _, id, _ -> actions += id; true })
+        fun button(id: Long, x: Float, y: Float) = node().copy(id = id, siblingIndex = id.toInt(),
+            minX = x, minY = y, maxX = x + 20, maxY = y + 20, label = "Button $id")
+        provider.publish(NuxieSemanticTree(1, 1, listOf(
+            button(1, 0f, 0f), button(2, 100f, 0f), button(3, 0f, 100f), button(4, 100f, 100f),
+            button(5, 30f, 40f), button(6, 50f, 0f).copy(stateFlags = 64),
+        )))
+        assertTrue(host.requestFocus())
+        provider.hostFocusChanged(true, View.FOCUS_FORWARD)
+        fun key(code: Int, repeats: Int = 0) = provider.key(KeyEvent(0, 0, KeyEvent.ACTION_DOWN, code, repeats))
+        assertTrue(key(KeyEvent.KEYCODE_DPAD_RIGHT))
+        assertEquals("Button 2", provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+        assertTrue(key(KeyEvent.KEYCODE_DPAD_DOWN, 1))
+        assertEquals("Button 4", provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+        assertTrue(key(KeyEvent.KEYCODE_DPAD_LEFT))
+        assertEquals("Button 3", provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+        assertTrue(key(KeyEvent.KEYCODE_DPAD_UP))
+        assertEquals("Button 1", provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+        assertTrue(actions.isEmpty())
+        assertTrue(key(KeyEvent.KEYCODE_DPAD_CENTER))
+        assertEquals(listOf(1L), actions)
+    }
+
+    @Test @Config(sdk = [23, 30])
+    fun `adjustable control arrows use declared actions and honor RTL`() = withHost { host ->
+        val actions = mutableListOf<Int>()
+        val provider = provider(host) { _, _, action -> actions += action; true }
+        provider.publish(NuxieSemanticTree(1, 1, listOf(node().copy(role = 5, actions = 6))))
+        assertTrue(host.requestFocus())
+        provider.hostFocusChanged(true, View.FOCUS_FORWARD)
+        assertTrue(provider.key(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT)))
+        assertTrue(provider.key(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT)))
+        host.context.applicationInfo.flags = host.context.applicationInfo.flags or android.content.pm.ApplicationInfo.FLAG_SUPPORTS_RTL
+        host.layoutDirection = View.LAYOUT_DIRECTION_RTL
+        assertEquals(View.LAYOUT_DIRECTION_RTL, host.layoutDirection)
+        assertTrue(provider.key(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT)))
+        assertTrue(provider.key(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT)))
+        assertEquals(listOf(2, 1, 2, 1), actions)
+        assertFalse(provider.key(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_CENTER)))
+    }
+
+    private fun provider(host: View, dispatch: (NuxieSemanticTree, Long, Int) -> Boolean = { _, _, _ -> true }) =
+        ExperienceAccessibilityProvider(host, { ExperienceAccessibilityProvider.Bounds(Rect(10, 20, 110, 70), Rect(30, 40, 130, 90)) }, dispatch)
+
+    private fun node() = NativeSemanticNode(42, -1, 0, 1, 0, 0, 0, 1,
+        10f, 20f, 110f, 70f, "Continue", "", "More information")
+
+    private fun withHost(block: (View) -> Unit) {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup().visible()
+        try {
+            val activity = controller.get()
+            Shadows.shadowOf(activity.getSystemService(AccessibilityManager::class.java)).setEnabled(true)
+            val host = View(activity).apply { isFocusableInTouchMode = true }
+            activity.setContentView(host)
+            host.layout(0, 0, 300, 300)
+            assertTrue(host.isShown)
+            block(host)
+        } finally { controller.pause().stop().destroy() }
+    }
+}

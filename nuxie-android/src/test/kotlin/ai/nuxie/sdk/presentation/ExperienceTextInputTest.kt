@@ -35,6 +35,79 @@ internal fun textInputDescriptor(value: String = ""): JsonObject = Json.parseToJ
 
 @RunWith(RobolectricTestRunner::class)
 class ExperienceTextInputTest {
+    @Test @org.robolectric.annotation.Config(sdk = [23, 26, 30])
+    fun `semantic field label preserves real editing and absent capture retires traversal`() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val input = ExperienceTextInput.forScreen(textInputDescriptor("ok"), "survey").single()
+        val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
+            listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
+        try {
+            val editor = overlay.getChildAt(0) as EditText
+            val node = ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 6, 0, 0, 0, 0,
+                0f, 0f, 100f, 30f, "Your name", "", "Use your full name")
+            controller.get().setContentView(overlay)
+            overlay.layout(0, 0, 400, 400)
+            overlay.update(snapshot())
+            overlay.updateSemantics(mapOf("name" to node))
+            assertTrue(editor.requestFocus())
+            val info = editor.createAccessibilityNodeInfo()
+            assertEquals("ok", info.text.toString())
+            val hint = if (android.os.Build.VERSION.SDK_INT >= 26) info.hintText else
+                info.extras.getCharSequence("androidx.view.accessibility.AccessibilityNodeInfoCompat.HINT_TEXT_KEY")
+            assertEquals("Your name, Use your full name", hint.toString())
+            assertNull(info.contentDescription)
+            assertTrue(info.isEditable)
+            assertTrue("actions=${info.actions}, list=${info.actionList.map { it.id }}", info.actions and
+                android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT != 0)
+            assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_YES, editor.importantForAccessibility)
+            val replacement = android.os.Bundle().apply {
+                putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Ad")
+            }
+            assertTrue(editor.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, replacement))
+            assertEquals("Ad", editor.text.toString())
+            replacement.putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Ada")
+            assertFalse(editor.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, replacement))
+            assertEquals("Ad", editor.text.toString()) // Rejected whole-value edits preserve the valid draft.
+            overlay.updateSemantics(emptyMap())
+            assertFalse(editor.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, replacement))
+            assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_NO, editor.importantForAccessibility)
+            assertFalse(editor.isEnabled)
+            overlay.setInputEnabled(false)
+            overlay.setInputEnabled(true)
+            assertFalse(editor.isEnabled)
+            overlay.updateSemantics(mapOf("name" to node))
+            assertTrue(editor.isEnabled)
+        } finally { overlay.close(); controller.pause().stop().destroy() }
+    }
+
+    @Test @org.robolectric.annotation.Config(sdk = [23, 30])
+    fun `retired semantic fields cannot persist late edits and secure nodes retain native password behavior`() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val input = ExperienceTextInput.forScreen(textInputDescriptor("ok"), "survey").single().copy(secure = true)
+        val writes = mutableListOf<String>()
+        val state = ExperienceTextInputState()
+        val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
+            listOf(input), emptyMap(), { _, text, _, done -> writes += text; done(Result.success(Unit)) }, { throw it }, state)
+        try {
+            val editor = overlay.getChildAt(0) as EditText
+            val node = ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 6, 4096, 0, 0, 0,
+                0f, 0f, 100f, 30f, "Password", "", "")
+            overlay.updateSemantics(mapOf("name" to node))
+            val info = editor.createAccessibilityNodeInfo()
+            assertTrue(info.isPassword)
+            assertTrue(info.isEditable)
+            assertNull(info.contentDescription)
+            overlay.updateSemantics(emptyMap())
+            val count = writes.size
+            editor.setText("zz")
+            assertEquals(count, writes.size)
+            overlay.updateSemantics(mapOf("name" to node))
+            // Retirement must restore the last admitted draft, not an IME mutation
+            // that arrived while the authored field was absent.
+            assertEquals("ok", editor.text.toString())
+        } finally { overlay.close(); controller.pause().stop().destroy() }
+    }
+
     @Test
     fun `native preparation takes the latest draft and fences stale IME callbacks until abort`() {
         val contract = Json.parseToJsonElement(ai.nuxie.sdk.fixtures.FixtureRunner.fixturesRoot()
@@ -107,6 +180,41 @@ class ExperienceTextInputTest {
         third.close()
     }
 
+    @Test @org.robolectric.annotation.Config(sdk = [23, 30])
+    fun `absent semantic field stays hidden across geometry updates and restores retained value`() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup().visible()
+        val input = ExperienceTextInput.forScreen(textInputDescriptor("ok"), "survey").single()
+        val writes = mutableListOf<String>()
+        val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
+            listOf(input), emptyMap(), { _, text, _, done -> writes += text; done(Result.success(Unit)) }, { throw it })
+        try {
+            controller.get().setContentView(overlay)
+            overlay.layout(0, 0, 400, 400)
+            overlay.update(snapshot())
+            val editor = overlay.getChildAt(0) as EditText
+            val node = ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 6, 0, 0, 0, 0,
+                10f, 20f, 90f, 40f, "Your name", "", "")
+            overlay.updateSemantics(mapOf("name" to node))
+            assertEquals(View.VISIBLE, editor.visibility)
+            assertTrue(editor.requestFocus())
+            overlay.updateSemantics(emptyMap())
+            val count = writes.size
+            assertEquals(View.INVISIBLE, editor.visibility)
+            assertFalse(editor.hasFocus())
+            overlay.update(snapshot())
+            assertEquals(View.INVISIBLE, editor.visibility)
+            editor.setText("zz")
+            assertEquals(count, writes.size)
+            overlay.updateSemantics(mapOf("name" to node))
+            assertEquals(View.VISIBLE, editor.visibility)
+            assertEquals("ok", editor.text.toString())
+            assertFalse(editor.hasFocus())
+            overlay.updateSemantics(mapOf("name" to node.copy(stateFlags = 64)))
+            assertEquals(View.VISIBLE, editor.visibility)
+            assertFalse(editor.isEnabled)
+        } finally { overlay.close(); controller.pause().stop().destroy() }
+    }
+
     @Test
     fun `geometry uses renderer contain fit and invalid geometry hides editor`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
@@ -155,6 +263,44 @@ class ExperienceTextInputTest {
         overlay.close()
         editor.setText("late")
         assertEquals(count, writes.size)
+    }
+
+    @Test @org.robolectric.annotation.Config(sdk = [23, 30])
+    fun `accessibility replacement resolves composition without losing rejected drafts`() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup().visible()
+        val writes = mutableListOf<Pair<String, Boolean>>()
+        val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single()
+        val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
+            listOf(input), emptyMap(), { _, text, commit, done ->
+                writes += text to commit; done(Result.success(Unit))
+            }, { throw it })
+        try {
+            controller.get().setContentView(overlay)
+            overlay.layout(0, 0, 400, 400)
+            overlay.update(snapshot())
+            val editor = overlay.getChildAt(0) as EditText
+            assertTrue(editor.requestFocus())
+            val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
+            assertTrue(connection.setComposingText("abc", 1))
+            assertEquals("abc", editor.text.toString())
+            val before = android.view.inputmethod.BaseInputConnection.getComposingSpanEnd(editor.text)
+            assertTrue(before >= 0)
+            val arguments = android.os.Bundle().apply {
+                putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "toolong")
+            }
+            assertFalse(editor.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, arguments))
+            assertEquals("abc", editor.text.toString())
+            assertEquals(before, android.view.inputmethod.BaseInputConnection.getComposingSpanEnd(editor.text))
+            arguments.putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "e\u0301😀")
+            assertTrue(editor.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, arguments))
+            assertEquals("e\u0301😀", editor.text.toString())
+            assertEquals(-1, android.view.inputmethod.BaseInputConnection.getComposingSpanStart(editor.text))
+            assertEquals(editor.text.length, editor.selectionStart)
+            connection.finishComposingText()
+            assertEquals("e\u0301😀", editor.text.toString())
+            editor.clearFocus()
+            assertEquals("e\u0301😀" to true, writes.last())
+        } finally { overlay.close(); controller.pause().stop().destroy() }
     }
 
     @Test
