@@ -69,7 +69,9 @@ it supports through `onAppActionRequested`, using the typed payload.
 
 This sample demonstrates Nuxie-managed purchase handling. The separate
 [RevenueCat delegate](../example-revenuecat/README.md) provides compiled adapter
-source with explicit product limitations. Superwall integration, complete
+source with explicit product limitations. A separate
+[Superwall delegate](../example-superwall/README.md) supports validated selection
+for non-personalized purchases. Complete
 app-managed purchase examples, and exact-release Companion preview
 remain tracked in [UNIV-2601](https://universe.basis.dev/issue/UNIV-2601). Test Store
 is not a substitute for either provider integration or real-store qualification.

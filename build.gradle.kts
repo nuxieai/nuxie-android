@@ -41,6 +41,7 @@ dependencies.add(bundletoolCli.name, "com.android.tools.build:bundletool:$bundle
 apiValidation {
   ignoredProjects.add("example-app")
   ignoredProjects.add("example-revenuecat")
+  ignoredProjects.add("example-superwall")
   ignoredProjects.add("nuxie-lint")
 }
 
@@ -67,6 +68,7 @@ val verifyProviderBoundary = tasks.register("verifyProviderBoundary") {
 
 project(":nuxie-android").tasks.matching { it.name == "lint" }.configureEach {
   dependsOn(verifyProviderBoundary, ":example-revenuecat:test", ":example-revenuecat:lint")
+  dependsOn(":example-superwall:test", ":example-superwall:lint")
 }
 
 val runtimeDirectory = layout.projectDirectory.dir("runtime").asFile

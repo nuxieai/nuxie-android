@@ -46,6 +46,9 @@ The separate [RevenueCat adapter example](example-revenuecat/README.md) compiles
 against a pinned provider SDK and preserves exact subscription checkout terms.
 Its supported product scope and remaining real-store qualification are explicit
 in that guide. Provider dependencies are checked to remain outside the SDK.
+The [Superwall adapter example](example-superwall/README.md) similarly compiles
+against a pinned provider and validates exact selection, with an explicit
+personalized-price limitation.
 
 ## Host JVM render harness
 
