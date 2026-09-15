@@ -3,6 +3,7 @@ package ai.nuxie.sdk.presentation
 import ai.nuxie.sdk.runtime.NuxiePlayerPointerEvent
 import ai.nuxie.sdk.runtime.NuxiePlayerPointerKind
 import ai.nuxie.sdk.runtime.NuxieRuntime
+import ai.nuxie.sdk.runtime.NuxieRuntimeCallException
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
@@ -51,4 +52,42 @@ class GeneratedInteractionPlayerDeviceTest {
             } finally { file.close() }
         } finally { renderer.close() }
     }
+    @Test fun failedCompiledActionRejectsPartialEffectsAndRetiresItsOccurrence() {
+        val runtime = NuxieRuntime.shared
+        assertTrue(runtime.isAvailable)
+        val assets = InstrumentationRegistry.getInstrumentation().context.assets
+        val contract = assets.open("sdk/interaction-player.json").bufferedReader().use {
+            Json.parseToJsonElement(it.readText()).jsonObject.getValue("scriptFailure").jsonObject
+        }
+        val bytes = assets.open(contract.getValue("fixture").jsonPrimitive.content).use { it.readBytes() }
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(390, 844))
+        try {
+            val file = checkNotNull(runtime.importFile(renderer, bytes, checkNotNull(runtime.inspectFileAssets(bytes))))
+            try {
+                // Reuse the imported file after failure, but allocate a new occurrence.
+                repeat(2) {
+                    val name = contract.getValue("artboard").jsonPrimitive.content
+                    val artboard = checkNotNull(file.newArtboard(name))
+                    try {
+                        val player = file.newExperiencePlayer(artboard, name)
+                        try {
+                            assertTrue(player.stepTyped(elapsedSeconds = 0.0).hostCommands.isEmpty())
+                            val position = contract.getValue("pointer").jsonObject
+                            fun pointer(kind: NuxiePlayerPointerKind) = NuxiePlayerPointerEvent(kind,
+                                position.getValue("x").jsonPrimitive.float, position.getValue("y").jsonPrimitive.float, 1, 0f)
+                            assertTrue(player.stepTyped(elapsedSeconds = 0.0,
+                                pointers = listOf(pointer(NuxiePlayerPointerKind.DOWN))).hostCommands.isEmpty())
+                            val failure = assertThrows(NuxieRuntimeCallException::class.java) {
+                                player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(pointer(NuxiePlayerPointerKind.UP)))
+                            }
+                            assertEquals(contract.getValue("nativeStatus").jsonPrimitive.int, failure.status)
+                            assertThrows(IllegalStateException::class.java) { player.requireHandle() }
+                            assertThrows(IllegalStateException::class.java) { player.stepTyped(elapsedSeconds = 0.0) }
+                        } finally { player.close() }
+                    } finally { artboard.close() }
+                }
+            } finally { file.close() }
+        } finally { renderer.close() }
+    }
+
 }
