@@ -1423,7 +1423,11 @@ internal class ExperiencePresentationService(
         }
         PresentationRegistry.dismiss(active.id, CloseReason.JourneyNavigation)
         attemptOutcome(active, CloseReason.JourneyNavigation)
-        joinAll(active.finished, active.runTransitionFinished)
+        // The caller may be the Journey worker completing a terminal action.
+        // An earlier identity/host outcome can be queued to that same worker;
+        // joining it here would prevent the worker from ever processing it.
+        // Its outer shutdown owner still joins runTransitionFinished.
+        active.finished.await()
         attempt?.finished?.await()
     }
 

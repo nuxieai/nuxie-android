@@ -1939,7 +1939,12 @@ class PublishedTextInputDeviceTest {
     fun backgroundCancelsPressedCompiledControlBeforeFreshGesture() =
         exerciseDurableNativeEmission(true, interruptPress = true)
 
-    private fun exerciseDurableNativeEmission(scripted: Boolean, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false) {
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun shutdownAfterCompiledActionAdmissionDrains() =
+        exerciseDurableNativeEmission(true, shutdownAfterAdmission = true)
+
+    private fun exerciseDurableNativeEmission(scripted: Boolean, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
@@ -2129,6 +2134,21 @@ class PublishedTextInputDeviceTest {
                 return
             }
             val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS)) { "Journey service must durably accept native input" }
+            if (shutdownAfterAdmission) {
+                assertEquals(listOf("\$response_set", "script_control_activated"), batch.emissions.map { it.name })
+                runBlocking { kotlinx.coroutines.withTimeout(10_000) { presentations.shutdownOwnedBy(owner) } }
+                val completed = JourneyRunJournal(directory, owner, JourneyStorageScope(authority))
+                assertTrue(completed.runs().isEmpty())
+                assertEquals("abandoned", checkNotNull(completed.checkmark(fixture.release.identity.experienceId)).outcome)
+                val deadline = SystemClock.uptimeMillis() + 10_000
+                var destroyed = false
+                while (!destroyed && SystemClock.uptimeMillis() < deadline) {
+                    instrumentation.runOnMainSync { destroyed = first.isDestroyed }
+                    if (!destroyed) SystemClock.sleep(20)
+                }
+                assertTrue("Terminal action shutdown must destroy its Activity", destroyed)
+                return
+            }
             val reopened = journalRun()
             val responseKey = if (scripted) "selection" else "email"
             val expectedValue = if (scripted) "pro" else "durable@example.com"
