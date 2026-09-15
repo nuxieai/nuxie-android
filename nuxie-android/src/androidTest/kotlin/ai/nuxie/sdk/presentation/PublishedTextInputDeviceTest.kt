@@ -52,6 +52,7 @@ import android.os.Looper
 import android.view.PixelCopy
 import android.view.TextureView
 import android.view.View
+import android.view.MotionEvent
 import android.view.ViewGroup
 import androidx.test.filters.SdkSuppress
 import android.os.SystemClock
@@ -1918,11 +1919,17 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun nativeResponseIsDurableBeforeItsAuthoredJourneyNavigation() {
+    fun nativeResponseIsDurableBeforeItsAuthoredJourneyNavigation() = exerciseDurableNativeEmission(false)
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun compiledScriptResponseIsDurableBeforeItsAuthoredJourneyNavigation() = exerciseDurableNativeEmission(true)
+
+    private fun exerciseDurableNativeEmission(scripted: Boolean) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
-        val fixture = loadPublishedFixture(instrumentation)
+        val fixture = loadPublishedFixture(instrumentation, if (scripted) "journeys/rendered-screen-control" else "journeys/rendered-text-input")
         val owner = "published-durable-${UUID.randomUUID()}"
         val directory = File(context.cacheDir, owner).apply { mkdirs() }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -1932,6 +1939,21 @@ class PublishedTextInputDeviceTest {
         instrumentation.addMonitor(monitor)
         val accepted = LinkedBlockingQueue<JourneyScreenEmissionBatch>()
         val activeRequest = AtomicReference<JourneyPresentationRequest?>()
+        val presentationCount = java.util.concurrent.atomic.AtomicInteger()
+        val navigationPresented = CountDownLatch(1)
+        val responsesBeforeNavigation = AtomicReference<JsonObject?>()
+        val downloaded = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val renderKey = fixture.release.descriptor.getValue("render").jsonObject.getValue("riv").jsonObject.getValue("key").jsonPrimitive.content
+        val artifactFiles = fixture.assets + (renderKey to fixture.riv)
+        val artifactAcquirer = ai.nuxie.sdk.experiences.JourneyReleaseArtifactAcquirer(
+            ai.nuxie.sdk.experiences.JourneyReleaseArtifactCache(context,
+                ai.nuxie.sdk.network.HttpTransport { request ->
+                    val key = request.url.path.trimStart('/')
+                    val file = checkNotNull(artifactFiles[key]) { "Unexpected artifact request: $key" }
+                    downloaded += key
+                    ai.nuxie.sdk.network.HttpTransport.Response(200, file.readBytes(),
+                        mapOf("Content-Type" to if (key.endsWith(".riv")) "application/vnd.rive" else "application/octet-stream"))
+                }, cacheDirectory = File(directory, "artifacts")))
         val authority = ProfileDeliveryAuthority(fixture.release.identity.appId, fixture.release.identity.environment)
         val catalog = JourneyProfileCatalog(fixture.trustedKeys, JourneyReleaseHighWaterStore(context)) {
             supportedRuntimeForEmbeddedRuntime(nuxieRuntimeSourceRevision())
@@ -1949,9 +1971,17 @@ class PublishedTextInputDeviceTest {
             override suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) = presentations.shutdownJourney(ownerDistinctId, journeyId)
             override suspend fun present(request: JourneyPresentationRequest): JourneyPresentationResult {
                 activeRequest.set(request)
+                val presentationNumber = presentationCount.incrementAndGet()
+                if (presentationNumber > 1) {
+                    responsesBeforeNavigation.set(JourneyRunJournal(directory, owner, JourneyStorageScope(authority))
+                        .runs().single().context.getValue("responses").jsonObject)
+                }
                 presentations.presentJourney(request.release, request.screenId, request.journeyId,
                     request.ownerDistinctId, request.reservation, request.canPresent,
-                    acquire = { AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv, protection = Closeable {}) },
+                    acquire = {
+                        if (scripted) artifactAcquirer.acquire(request.release, checkNotNull(catalog.snapshot(owner)).profile.delivery)
+                        else AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv, protection = Closeable {})
+                    },
                     nextBatchSequence = request.nextBatchSequence, nextEmissionSequence = request.nextEmissionSequence,
                     onScreenChanged = request.onScreenChanged, onScreenDismissed = request.onScreenDismissed,
                     onEmissionBatch = { batch ->
@@ -1959,6 +1989,7 @@ class PublishedTextInputDeviceTest {
                         if (committed) accepted.add(batch)
                         committed
                     }, onPresentationRevealed = request.onPresentationRevealed, onOutcome = request.onOutcome)
+                if (presentationNumber > 1) navigationPresented.countDown()
                 return JourneyPresentationResult.Shown
             }
         }
@@ -1982,13 +2013,58 @@ class PublishedTextInputDeviceTest {
                 journeys.profileDidCommit(checkNotNull(catalog.snapshot(owner)), authority, owner, 1)
             }
             val first = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
-            val field = awaitEditor(instrumentation, first, "text-input/screen_1/email_input")
-            edit(instrumentation, field, "durable@example.com")
+            if (scripted) {
+                var surface: ExperienceSurfaceHost? = null
+                val deadline = SystemClock.uptimeMillis() + 10_000
+                while (surface == null && SystemClock.uptimeMillis() < deadline) {
+                    instrumentation.runOnMainSync {
+                        fun find(view: View): ExperienceSurfaceHost? = if (view is ExperienceSurfaceHost) view
+                            else if (view is ViewGroup) (0 until view.childCount).firstNotNullOfOrNull { find(view.getChildAt(it)) } else null
+                        surface = find(first.window.decorView)?.takeIf { it.isShown && it.width > 1 && it.height > 1 && it.isAvailable }
+                    }
+                    if (surface == null) SystemClock.sleep(20)
+                }
+                instrumentation.runOnMainSync {
+                    val target = checkNotNull(surface)
+                    val scale = minOf(target.width / 390f, target.height / 844f)
+                    val x = (target.width - 390f * scale) / 2f + 100f * scale
+                    val y = (target.height - 844f * scale) / 2f + 728f * scale
+                    val downTime = SystemClock.uptimeMillis()
+                    for (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
+                        val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
+                        try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }
+                    }
+                }
+            } else {
+                val field = awaitEditor(instrumentation, first, "text-input/screen_1/email_input")
+                edit(instrumentation, field, "durable@example.com")
+            }
             val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS)) { "Journey service must durably accept native input" }
             val reopened = journalRun()
-            assertEquals("durable@example.com", reopened.context.getValue("responses").jsonObject.getValue("email").jsonPrimitive.content)
+            val responseKey = if (scripted) "selection" else "email"
+            val expectedValue = if (scripted) "pro" else "durable@example.com"
+            assertEquals(expectedValue, reopened.context.getValue("responses").jsonObject.getValue(responseKey).jsonPrimitive.content)
             assertEquals(batch.batchSequence + 1, reopened.nextPresentationBatchSequence)
             assertEquals(batch.emissions.last().sequence + 1, reopened.nextPresentationEmissionSequence)
+            if (scripted) {
+                runBlocking { kotlinx.coroutines.withTimeout(10_000) {
+                    while (responsesBeforeNavigation.get() == null) kotlinx.coroutines.delay(20)
+                } }
+                assertEquals("pro", checkNotNull(responsesBeforeNavigation.get()).getValue("selection").jsonPrimitive.content)
+                assertEquals(listOf("\$response_set", "script_control_activated"), batch.emissions.map { it.name })
+                assertEquals("compiled", batch.emissions.last().payload.getValue("source").jsonPrimitive.content)
+                assertEquals(batch.emissions.first().sequence + 1, batch.emissions.last().sequence)
+                val captured = runBlocking { checkNotNull(store.stableEvent(batch.emissions.last().id)) }
+                assertEquals("script_control_activated", captured.name)
+                assertEquals(owner, captured.distinctId)
+                assertTrue("Authored navigation must finish presenting", navigationPresented.await(10, TimeUnit.SECONDS))
+                assertEquals(2, presentationCount.get())
+                assertEquals(1, monitor.hits)
+                assertEquals(artifactFiles.keys, downloaded.toSet())
+                assertEquals(2, downloaded.size)
+                assertEquals(null, accepted.poll(300, TimeUnit.MILLISECONDS))
+                return
+            }
             // A screen-scoped route is activated by that screen's emission
             // callback, never by an unrelated global customer event.
             val screenRequest = checkNotNull(activeRequest.get())
@@ -2166,7 +2242,10 @@ class PublishedTextInputDeviceTest {
         }
         val render = release.descriptor.getValue("render").jsonObject
         val riv = stage(render.getValue("riv").jsonObject).second
-        val assets = render.getValue("assets").jsonArray.associate { stage(it.jsonObject) }
+        val scripts = (release.descriptor["screenBehaviors"] as? JsonArray).orEmpty().mapNotNull {
+            (it.jsonObject["script"] as? JsonObject)?.get("artifact")?.jsonObject
+        }
+        val assets = (render.getValue("assets").jsonArray.map { it.jsonObject } + scripts).associate { stage(it) }
         return PublishedFixture(release, riv, assets, entry, trustedKeys)
     }
 
