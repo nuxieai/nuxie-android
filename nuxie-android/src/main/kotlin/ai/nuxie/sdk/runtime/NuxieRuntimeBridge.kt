@@ -214,6 +214,10 @@ internal object NuxieRuntimeBridge {
     /** nux_player_new_state_machine_named -> player handle (0 = failure). */
     external fun nativePlayerNewStateMachineNamed(artboard: Long, stateMachineName: String): Long
 
+    external fun nativeFileStateMachineNames(file: Long, artboardName: ByteArray?, statusOut: IntArray): Array<String>?
+
+    external fun nativePlayerStateMachineName(player: Long, statusOut: IntArray): String?
+
     external fun nativePlayerFree(player: Long)
 
     /** nux_player_step: advance by elapsed seconds; returns a status code. */

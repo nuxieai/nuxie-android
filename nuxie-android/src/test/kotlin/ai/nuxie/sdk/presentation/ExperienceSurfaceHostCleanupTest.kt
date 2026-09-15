@@ -83,6 +83,7 @@ class ExperienceSurfaceHostCleanupTest {
                 emptyArray(), emptyArray(),
             ))
         override fun bindViewModel(artboardHandle: Long, viewModelHandle: Long): Int = 0
+        override fun stateMachineNames(fileHandle: Long, artboardName: String?): NativeCallResult<List<String>> = NativeCallResult(0, emptyList())
         override fun newDefaultPlayer(artboardHandle: Long): Long = 5
         override fun freePlayer(handle: Long) { freed += "player" }
         override fun freeViewModel(handle: Long): Int {

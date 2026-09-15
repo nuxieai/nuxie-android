@@ -1821,6 +1821,98 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerNewStateMachineNamed(
   return status == NUX_STATUS_OK ? as_handle(player) : 0;
 }
 
+// Metadata is copied while its file/player owner is still live on the native lane.
+JNIEXPORT jobjectArray JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileStateMachineNames(
+    JNIEnv *env, jobject self, jlong file_handle, jbyteArray artboard_name,
+    jintArray status_out) {
+  (void)self;
+  const struct NuxFile *file = (const struct NuxFile *)from_handle(file_handle);
+  NuxStatus status = NUX_STATUS_NULL_ARGUMENT;
+  jobjectArray result = NULL;
+  jclass string_class = NULL;
+  jbyte *name = NULL;
+  size_t artboard_index = 0, count = 0;
+  if (file == NULL) goto machine_names_done;
+  if (artboard_name != NULL) {
+    jsize length = (*env)->GetArrayLength(env, artboard_name);
+    name = (*env)->GetByteArrayElements(env, artboard_name, NULL);
+    if (clear_jni_exception(env) || name == NULL) {
+      status = NUX_STATUS_RUNTIME_ERROR;
+      goto machine_names_done;
+    }
+    status = nux_file_artboard_count(file, &count);
+    if (status != NUX_STATUS_OK) goto machine_names_done;
+    for (artboard_index = 0; artboard_index < count; artboard_index++) {
+      struct NuxStringView candidate = {0};
+      status = nux_file_artboard_name(file, artboard_index, &candidate);
+      if (status != NUX_STATUS_OK) goto machine_names_done;
+      if (candidate.len == (size_t)length &&
+          (length == 0 || memcmp(candidate.data, name, (size_t)length) == 0)) break;
+    }
+    if (artboard_index == count) {
+      status = NUX_STATUS_RUNTIME_ERROR;
+      goto machine_names_done;
+    }
+  }
+  status = nux_file_artboard_state_machine_count(file, artboard_index, &count);
+  if (status != NUX_STATUS_OK) goto machine_names_done;
+  if (count > INT32_MAX) { status = NUX_STATUS_RUNTIME_ERROR; goto machine_names_done; }
+  string_class = (*env)->FindClass(env, "java/lang/String");
+  if (clear_jni_exception(env) || string_class == NULL) {
+    status = NUX_STATUS_RUNTIME_ERROR;
+    goto machine_names_done;
+  }
+  result = (*env)->NewObjectArray(env, (jsize)count, string_class, NULL);
+  if (clear_jni_exception(env) || result == NULL) {
+    status = NUX_STATUS_RUNTIME_ERROR;
+    goto machine_names_done;
+  }
+  for (size_t index = 0; index < count; index++) {
+    struct NuxStringView value = {0};
+    status = nux_file_artboard_state_machine_name(file, artboard_index, index, &value);
+    if (status != NUX_STATUS_OK) goto machine_names_done;
+    jstring copied = new_string_view(env, value);
+    if (copied == NULL) { status = NUX_STATUS_RUNTIME_ERROR; goto machine_names_done; }
+    (*env)->SetObjectArrayElement(env, result, (jsize)index, copied);
+    (*env)->DeleteLocalRef(env, copied);
+    if (clear_jni_exception(env)) { status = NUX_STATUS_RUNTIME_ERROR; goto machine_names_done; }
+  }
+machine_names_done:
+  if (name != NULL) (*env)->ReleaseByteArrayElements(env, artboard_name, name, JNI_ABORT);
+  if (string_class != NULL) (*env)->DeleteLocalRef(env, string_class);
+  if (status != NUX_STATUS_OK && result != NULL) {
+    (*env)->DeleteLocalRef(env, result);
+    result = NULL;
+  }
+  if (!set_status_out(env, status_out, status)) {
+    if (result != NULL) (*env)->DeleteLocalRef(env, result);
+    return NULL;
+  }
+  return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStateMachineName(
+    JNIEnv *env, jobject self, jlong player, jintArray status_out) {
+  (void)self;
+  struct NuxPlayerInfo info = {0};
+  info.struct_size = sizeof(info);
+  NuxStatus status = nux_player_info((const struct NuxPlayer *)from_handle(player), &info);
+  jstring result = NULL;
+  if (status == NUX_STATUS_OK) {
+    struct NuxStringView name = info.kind == NUX_PLAYER_KIND_STATE_MACHINE
+        ? info.name : (struct NuxStringView){"", 0};
+    result = new_string_view(env, name);
+    if (result == NULL) status = NUX_STATUS_RUNTIME_ERROR;
+  }
+  if (!set_status_out(env, status_out, status)) {
+    if (result != NULL) (*env)->DeleteLocalRef(env, result);
+    return NULL;
+  }
+  return result;
+}
+
 JNIEXPORT void JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerFree(
     JNIEnv *env, jobject self, jlong player) {

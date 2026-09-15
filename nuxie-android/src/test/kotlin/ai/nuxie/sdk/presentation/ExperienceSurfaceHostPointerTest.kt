@@ -690,6 +690,7 @@ class ExperienceSurfaceHostPointerTest {
         override fun freeFile(handle: Long) = Unit
         override fun newDefaultArtboard(fileHandle: Long): Long = 2L
         override fun freeArtboard(handle: Long) = Unit
+        override fun stateMachineNames(fileHandle: Long, artboardName: String?): NativeCallResult<List<String>> = NativeCallResult(0, emptyList())
         override fun newDefaultPlayer(artboardHandle: Long): Long = 3L.also { playersCreated += 1; stateWrites.lastOrNull()?.let(stateAtPlayerCreation::add) }
         override fun freePlayer(handle: Long) = Unit
         override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long = 4L
