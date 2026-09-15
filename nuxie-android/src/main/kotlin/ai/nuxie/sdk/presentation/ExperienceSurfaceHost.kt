@@ -24,6 +24,8 @@ import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
 import android.content.Context
 import android.graphics.Rect
 import android.graphics.SurfaceTexture
+import android.os.Handler
+import android.os.Looper
 import ai.nuxie.sdk.logging.NuxieLog as Log
 import android.view.Choreographer
 import android.view.KeyEvent
@@ -54,6 +56,7 @@ internal class ExperienceSurfaceHost(
     private val artboardSize: ExperienceArtboardSize? = null,
     private val runtime: NuxieRuntime = NuxieRuntime.shared,
 ) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
+    private val mainHandler = Handler(Looper.getMainLooper())
     interface Listener {
         fun onFirstFrame()
         fun onRuntimeStep(
@@ -240,6 +243,7 @@ internal class ExperienceSurfaceHost(
     @Volatile
     private var running = false
     private val released = AtomicBoolean(false)
+    private val failureReported = AtomicBoolean(false)
     private val frameGeneration = AtomicLong(0)
     // At most one queued or executing frame. Input and cleanup share this FIFO lane.
     private val framePending = AtomicBoolean(false)
@@ -571,7 +575,7 @@ internal class ExperienceSurfaceHost(
     }
 
     override fun doFrame(frameTimeNanos: Long) {
-        if (!running) return
+        if (!running || failureReported.get()) return
         Choreographer.getInstance().postFrameCallback(this)
         if (!framePending.compareAndSet(false, true)) return
         // The preceding native frame can finish while this tick acquires the
@@ -588,7 +592,7 @@ internal class ExperienceSurfaceHost(
         val epoch = semanticEpoch.get()
         val accepted = lane.enqueue {
             try {
-                if (!attached || !running || generation != frameGeneration.get()) return@enqueue
+                if (!attached || !running || failureReported.get() || generation != frameGeneration.get()) return@enqueue
                 val renderer = renderer ?: return@enqueue
                 val player = player ?: return@enqueue
                 // Invariant: attached is set only after a successful window
@@ -752,7 +756,13 @@ internal class ExperienceSurfaceHost(
         message: String,
         cause: Throwable? = null,
     ) {
-        listener?.onFailure(ExperiencePresentationException(reason, message, cause))
+        if (!failureReported.compareAndSet(false, true)) return
+        val failure = ExperiencePresentationException(reason, message, cause)
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            if (!released.get()) listener?.onFailure(failure)
+        } else {
+            mainHandler.post { if (!released.get()) listener?.onFailure(failure) }
+        }
     }
 
     private fun NuxiePlayerStepOutcome.hasPublishableEffects(): Boolean =
