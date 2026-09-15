@@ -295,8 +295,13 @@ interrupted active effects are abandoned rather than replayed. The driver checks
 that the original response and event IDs survive, the preallocated completion ID
 reports abandonment once, and repeated profile refresh does not reopen the screen.
 
+Use `--boundary parked` to kill after a signed `wait_until` action has parked.
+The restarted SDK must retain that run, wake deadline and artifact references,
+ignore an unrelated event, then resume on the authored event without another
+enrollment. The resumed native control must commit its response and event once.
+
 Logs and the result are retained under `build/process-death/<run-id>/`. The
 instrumentation method is opt-in and skips in an ordinary suite; its seed phase
 must be terminated by this driver. These cases use controlled HTTP and real
-native rendering/storage. They do not qualify resumption of parked Journeys, death during store checkout, OS task
-restoration, or a live server release.
+native rendering/storage. They do not qualify death during store checkout,
+OS task restoration, or a live server release.

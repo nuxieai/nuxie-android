@@ -17,7 +17,7 @@ import uuid
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--device', required=True)
-    parser.add_argument('--boundary', choices=['pending-profile', 'active-screen'], default='pending-profile')
+    parser.add_argument('--boundary', choices=['pending-profile', 'active-screen', 'parked'], default='pending-profile')
     parser.add_argument('--adb', default=shutil.which('adb'))
     args = parser.parse_args()
     if not args.adb:
