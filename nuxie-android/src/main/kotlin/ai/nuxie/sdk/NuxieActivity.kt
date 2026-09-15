@@ -9,12 +9,37 @@ data class NuxieActivityInfo internal constructor(
     val timestampMillis: Long,
     val receivedAtMillis: Long,
     val activity: NuxieActivity,
+    /** Customer attributed to the durable event, including an anonymous customer. */
+    val customerId: String = "",
+    private val identityIsCurrent: () -> Boolean = { false },
 ) {
+    /**
+     * Whether the original identity session is still active when this property is read.
+     * Switching away and back does not reactivate an old activity. Analytics may still
+     * forward stale activities using [customerId]; identity-scoped UI should ignore them.
+     */
+    val isCurrentIdentity: Boolean
+        get() = identityIsCurrent()
+
     val name: String
         get() = activity.name
 
     val properties: Map<String, NuxieActivityValue>
         get() = activity.properties
+
+    // Equality describes the captured activity, not the changing liveness of its owner.
+    override fun equals(other: Any?): Boolean =
+        other is NuxieActivityInfo && id == other.id &&
+            timestampMillis == other.timestampMillis && receivedAtMillis == other.receivedAtMillis &&
+            activity == other.activity && customerId == other.customerId
+
+    override fun hashCode(): Int {
+        var result = id.hashCode()
+        result = 31 * result + timestampMillis.hashCode()
+        result = 31 * result + receivedAtMillis.hashCode()
+        result = 31 * result + activity.hashCode()
+        return 31 * result + customerId.hashCode()
+    }
 
     companion object {
         /** Contract version of the typed activity and its flat wire encoding. */

@@ -20,6 +20,8 @@ internal class ActivityForwarder(
                 timestampMillis = occurrenceTime(event),
                 receivedAtMillis = receivedAtMillis,
                 activity = activity,
+                customerId = event.distinctId,
+                identityIsCurrent = event.forwardingIdentity?.isCurrent ?: { false },
             ),
         )
     }
