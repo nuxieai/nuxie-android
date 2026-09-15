@@ -1761,6 +1761,46 @@ class ExperiencePresentationServiceTest {
         assertNull(PresentationRegistry.resolve(presentationId))
     }
 
+    @Test
+    fun `terminal shutdown drains native ownership without joining an outer outcome callback`() = runTest {
+        val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/terminal-shutdown-android.json").readText()).jsonObject
+        val release = renderedJourneyRelease()
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val finishOutcome = CompletableDeferred<Unit>()
+        var outcomes = 0
+        val presentation = async {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
+                onOutcome = { outcomes++; finishOutcome.await() })
+        }
+        runCurrent()
+        val id = launched.single()
+        val host = AttachedHost()
+        PresentationRegistry.attach(id, host)
+        PresentationRegistry.reportFirstFrame(id)
+        presentation.await()
+        val identityShutdown = async { service.shutdownOwnedBy("customer-1") }
+        runCurrent()
+        val terminalShutdown = async { service.shutdownJourney("customer-1", "journey-1") }
+        runCurrent()
+        val beforeDetach = terminalShutdown.isCompleted
+        PresentationRegistry.detach(id, host)
+        runCurrent()
+        val afterDetach = terminalShutdown.isCompleted
+        val beforeOutcome = identityShutdown.isCompleted
+        // Release the independent callback before asserting, so a regression
+        // fails promptly instead of leaving the test scope deadlocked.
+        finishOutcome.complete(Unit)
+        identityShutdown.await()
+        terminalShutdown.await()
+        assertEquals(vector.getValue("terminalCompletesBeforeNativeDetach").jsonPrimitive.boolean, beforeDetach)
+        assertEquals(vector.getValue("terminalCompletesAfterNativeDetach").jsonPrimitive.boolean, afterDetach)
+        assertEquals(vector.getValue("identityCompletesBeforeOutcome").jsonPrimitive.boolean, beforeOutcome)
+        assertEquals(vector.getValue("outcomeCount").jsonPrimitive.int, outcomes)
+    }
+
     private fun service(
         scope: CoroutineScope,
         runtimeAvailable: () -> Boolean = { true },
