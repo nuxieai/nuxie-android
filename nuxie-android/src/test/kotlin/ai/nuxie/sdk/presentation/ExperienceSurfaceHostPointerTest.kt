@@ -294,6 +294,7 @@ class ExperienceSurfaceHostPointerTest {
             drain(lane)
             host.doFrame(1_100_000_000L)
             drain(lane)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
             assertEquals(1, failures.size)
             assertTrue(failures.single().message.orEmpty().contains("resize failed"))
             assertEquals(submitted, native.elapsedSteps.size)
@@ -639,6 +640,49 @@ class ExperienceSurfaceHostPointerTest {
         }
     }
 
+    @Test fun `semantic capture failure reaches recovery on the main thread`() {
+        val controller = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+        val native = RecordingNative().apply { semanticCaptureStatus = 9; presentation = 1 }
+        val lane = NuxieRuntimeLane()
+        val failures = mutableListOf<ExperiencePresentationException>()
+        var callbackOnMain: Boolean? = null
+        lateinit var host: ExperienceSurfaceHost
+        host = ExperienceSurfaceHost(controller.get(), lane, runtime = NuxieRuntime(native),
+            listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() = Unit
+                override fun onFailure(error: ExperiencePresentationException) {
+                    callbackOnMain = android.os.Looper.myLooper() == android.os.Looper.getMainLooper()
+                    host.setPresentationVisible(false)
+                    failures += error
+                }
+            })
+        controller.get().setContentView(host)
+        host.layout(0, 0, 100, 100)
+        val texture = SurfaceTexture(0)
+        val descriptor = Json.parseToJsonElement("""{
+            "requirements":{"requiredCapabilities":["scene-semantics-v1"]},
+            "render":{"assets":[],"screens":[{"id":"screen","artboardName":"Main"}]},
+            "leg":{"screens":[{"id":"screen"}]}
+        }""").jsonObject
+        try {
+            host.loadArtboard(byteArrayOf(1), null, descriptor)
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertEquals(true, callbackOnMain)
+            assertEquals(1, failures.size)
+            assertTrue(failures.single().message.orEmpty().contains("semantic capture failed"))
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+            controller.pause().stop().destroy()
+        }
+    }
+
     @Test fun `semantics wait for delivery and composition then retire before hidden work can act`() {
         val controller = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
         val native = RecordingNative()
@@ -754,12 +798,13 @@ class ExperienceSurfaceHostPointerTest {
     private class RecordingNative : NuxieTypedRuntimeNative {
         var semanticsEnabled = 0
         var semanticCaptures = 0
+        var semanticCaptureStatus = 0
         var semanticRevision = 1L
         val semanticFreed = mutableListOf<Long>()
         val semanticActions = mutableListOf<Pair<Long, Int>>()
         override fun inspectFileAssets(bytes: ByteArray) = emptyList<ai.nuxie.sdk.runtime.ExpectedFileAsset>()
         override fun enableSemantics(player: Long): Int { semanticsEnabled++; return 0 }
-        override fun captureSemantics(player: Long): NativeCallResult<Long> { semanticCaptures++; return NativeCallResult(0, 99L) }
+        override fun captureSemantics(player: Long): NativeCallResult<Long> { semanticCaptures++; return NativeCallResult(semanticCaptureStatus, if (semanticCaptureStatus == 0) 99L else null) }
         override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(semanticRevision, 1, 1))
         override fun semanticNode(snapshot: Long, index: Int) = NativeCallResult(0,
             ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 1, 0, 0, 0, 1, 10f, 10f, 80f, 80f, "Continue", "", ""))

@@ -2001,7 +2001,7 @@ class PublishedTextInputDeviceTest {
                     val file = checkNotNull(artifactFiles[key]) { "Unexpected artifact request: $key" }
                     downloaded += key
                     ai.nuxie.sdk.network.HttpTransport.Response(200, file.readBytes(),
-                        mapOf("Content-Type" to if (key.endsWith(".riv")) "application/vnd.rive" else "application/octet-stream"))
+                        mapOf("Content-Type" to fixture.contentTypes.getValue(key)))
                 }, cacheDirectory = File(directory, "artifacts")))
         val authority = ProfileDeliveryAuthority(fixture.release.identity.appId, fixture.release.identity.environment)
         val catalog = JourneyProfileCatalog(fixture.trustedKeys, JourneyReleaseHighWaterStore(context)) {
@@ -2069,10 +2069,12 @@ class PublishedTextInputDeviceTest {
         fun journalRun() = JourneyRunJournal(directory, owner, JourneyStorageScope(authority)).runs().single()
         try {
             runBlocking {
-                catalog.commit(owner, catalog.prepare(profileFor(fixture.entry), authority))
-                journeys.initialize()
-                journeys.onAppWillEnterForeground()
-                journeys.profileDidCommit(checkNotNull(catalog.snapshot(owner)), authority, owner, 1)
+                kotlinx.coroutines.withTimeout(30_000) {
+                    catalog.commit(owner, catalog.prepare(profileFor(fixture.entry), authority))
+                    journeys.initialize()
+                    journeys.onAppWillEnterForeground()
+                    journeys.profileDidCommit(checkNotNull(catalog.snapshot(owner)), authority, owner, 1)
+                }
             }
             val first = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
             if (behavior == PublishedBehavior.SEMANTIC_ROLES) {
@@ -2414,6 +2416,7 @@ class PublishedTextInputDeviceTest {
         val assets: Map<String, File>,
         val entry: JsonObject,
         val trustedKeys: Map<String, ByteArray>,
+        val contentTypes: Map<String, String>,
     )
 
     private fun loadPublishedFixture(
@@ -2465,7 +2468,9 @@ class PublishedTextInputDeviceTest {
             (it.jsonObject["script"] as? JsonObject)?.get("artifact")?.jsonObject
         }
         val assets = (render.getValue("assets").jsonArray.map { it.jsonObject } + scripts).associate { stage(it) }
-        return PublishedFixture(release, riv, assets, entry, trustedKeys)
+        val references = render.getValue("assets").jsonArray.map { it.jsonObject } + scripts + render.getValue("riv").jsonObject
+        val contentTypes = references.associate { it.getValue("key").jsonPrimitive.content to it.getValue("contentType").jsonPrimitive.content }
+        return PublishedFixture(release, riv, assets, entry, trustedKeys, contentTypes)
     }
 
     /** Candidate qualification only; the production registry must continue to reject this capability. */
