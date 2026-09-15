@@ -88,12 +88,14 @@ internal class EventLog(
         val generation: Long,
     )
 
+    private val forwardingActive = java.util.concurrent.atomic.AtomicBoolean(true)
+
     private sealed interface Command {
         data class Capture(
             val name: String,
             val properties: Map<String, Any?>?,
-            val distinctIdOverride: String?,
             val admissionTickets: List<AdmissionTicket>,
+            val activityIdentity: ActivityIdentity,
         ) : Command
         data class CaptureIdempotently(
             val name: String,
@@ -104,6 +106,7 @@ internal class EventLog(
             val occurredAtMillis: Long?,
             val commitAdmission: StableEventCommitAdmission?,
             val admissionTickets: List<AdmissionTicket>,
+            val activityIdentity: ActivityIdentity,
             val done: CompletableDeferred<StableEventCaptureResult>,
         ) : Command
         data class CaptureDeliveredIdempotently(
@@ -113,12 +116,14 @@ internal class EventLog(
             val distinctId: String,
             val occurredAtMillis: Long?,
             val admissionTickets: List<AdmissionTicket>,
+            val activityIdentity: ActivityIdentity,
             val done: CompletableDeferred<Boolean>,
         ) : Command
         data class CommitServerFact(
             val event: StoredEvent,
             val receivedAtMillis: Long,
             val admissionTickets: List<AdmissionTicket>,
+            val activityIdentity: ActivityIdentity,
             val done: CompletableDeferred<ServerFactCommitResult>,
         ) : Command
         data class Barrier(val done: CompletableDeferred<Unit>) : Command
@@ -164,8 +169,8 @@ internal class EventLog(
                     process(
                         command.name,
                         command.properties,
-                        command.distinctIdOverride,
                         command.admissionTickets,
+                        command.activityIdentity,
                     )
                 }
                     .onFailure { Log.w(LOG_TAG, "Event capture failed", it) }
@@ -180,6 +185,7 @@ internal class EventLog(
                             command.occurredAtMillis,
                             command.commitAdmission,
                             command.admissionTickets,
+                            command.activityIdentity,
                         )
                     }.onFailure { Log.w(LOG_TAG, "Idempotent event capture failed", it) }
                         .getOrDefault(StableEventCaptureResult(false, null))
@@ -194,6 +200,7 @@ internal class EventLog(
                             command.distinctId,
                             command.occurredAtMillis,
                             command.admissionTickets,
+                            command.activityIdentity,
                         )
                     }.onFailure { Log.w(LOG_TAG, "Delivered event capture failed", it) }
                         .getOrDefault(false)
@@ -204,6 +211,7 @@ internal class EventLog(
                         command.event,
                         command.receivedAtMillis,
                         command.admissionTickets,
+                        command.activityIdentity,
                     )
                 }.fold(command.done::complete, command.done::completeExceptionally)
                 is Command.Barrier -> command.done.complete(Unit)
@@ -269,7 +277,10 @@ internal class EventLog(
             return
         }
         val result = commands.trySend(
-            Command.Capture(name, properties, distinctIdOverride, sampleAdmissionTickets()),
+            Command.Capture(
+                name, properties, sampleAdmissionTickets(),
+                captureActivityIdentity(distinctIdOverride),
+            ),
         )
         if (result.isFailure) {
             Log.w(LOG_TAG, "Event dropped: capture pipeline is closed", null, Log.sensitive("event", name))
@@ -358,6 +369,7 @@ internal class EventLog(
 
     /** Stop the pipelines without closing the store owned by the composition root. */
     suspend fun closeWorkers() {
+        forwardingActive.set(false)
         awaitBarrier()
         commands.close()
         worker.join()
@@ -514,6 +526,7 @@ internal class EventLog(
             occurredAtMillis,
             commitAdmission,
             sampleAdmissionTickets(),
+            captureActivityIdentity(distinctId),
             done,
         )
         if (commands.trySend(command).isFailure) {
@@ -539,6 +552,7 @@ internal class EventLog(
             distinctId,
             occurredAtMillis,
             sampleAdmissionTickets(),
+            captureActivityIdentity(distinctId),
             done,
         )
         if (commands.trySend(command).isFailure) return false
@@ -558,6 +572,7 @@ internal class EventLog(
             event,
             receivedAtMillis,
             sampleAdmissionTickets(),
+            captureActivityIdentity(event.distinctId),
             done,
         )
         check(commands.trySend(command).isSuccess) { "Event capture pipeline is closed." }
@@ -567,8 +582,8 @@ internal class EventLog(
     private suspend fun process(
         name: String,
         commandProperties: Map<String, Any?>?,
-        distinctIdOverride: String? = null,
-        admissionTickets: List<AdmissionTicket> = emptyList(),
+        admissionTickets: List<AdmissionTicket>,
+        activityIdentity: ActivityIdentity,
     ): StoredEvent? {
         var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties ?: emptyMap())
         if (!sanitized.containsKey(SESSION_ID_PROPERTY)) {
@@ -579,7 +594,7 @@ internal class EventLog(
         val enriched = contextBuilder.buildEnrichedProperties(sanitized)
         val original = NuxieEvent(
             name = name,
-            distinctId = distinctIdOverride ?: identity.distinctId(),
+            distinctId = activityIdentity.customerId,
             properties = enriched,
             timestampMillis = nowMillis(),
         )
@@ -592,7 +607,7 @@ internal class EventLog(
             return null
         }
 
-        val stored = projectPostTransform(original, transformed)
+        val stored = projectPostTransform(original, transformed, activityIdentity)
         val commit = store.insertPendingAndStageRoute(stored)
         if (commit.inserted) resolveForwarding(stored)
         if (commit.localRoutePending && activeLocalRouteIds.add(stored.id)) {
@@ -610,6 +625,7 @@ internal class EventLog(
         occurredAtMillis: Long?,
         commitAdmission: StableEventCommitAdmission?,
         admissionTickets: List<AdmissionTicket>,
+        activityIdentity: ActivityIdentity,
     ): StableEventCaptureResult {
         existingStableCapture(eventId)?.let { return it }
         var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties)
@@ -650,7 +666,7 @@ internal class EventLog(
             Log.d(LOG_TAG, "Event terminally dropped by beforeSend hook", null, Log.sensitive("event", name))
             return StableEventCaptureResult(true, null)
         }
-        val stored = projectPostTransform(original, transformed)
+        val stored = projectPostTransform(original, transformed, activityIdentity)
         val commit = if (commitAdmission == null) {
             store.insertPendingIfAbsentAndStageRoute(stored)
         } else {
@@ -694,8 +710,9 @@ internal class EventLog(
         event: StoredEvent,
         receivedAtMillis: Long,
         admissionTickets: List<AdmissionTicket>,
+        activityIdentity: ActivityIdentity,
     ): ServerFactCommitResult {
-        val admitted = event.withForwardingAdmission(forwardingAdmission(receivedAtMillis))
+        val admitted = event.withForwardingAdmission(forwardingAdmission(receivedAtMillis), activityIdentity)
         val commit = store.insertDeliveredIfAbsentAndStageRoute(admitted)
         if (!commit.inserted) return ServerFactCommitResult.DUPLICATE
         resolveForwarding(admitted)
@@ -712,6 +729,7 @@ internal class EventLog(
         distinctId: String,
         occurredAtMillis: Long?,
         admissionTickets: List<AdmissionTicket>,
+        activityIdentity: ActivityIdentity,
     ): Boolean {
         if (store.hasStableOutcome(eventId)) return true
         var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties)
@@ -732,7 +750,7 @@ internal class EventLog(
             store.recordStableDrop(original.id, original.timestampMillis)
             return true
         }
-        val stored = projectPostTransform(original, transformed)
+        val stored = projectPostTransform(original, transformed, activityIdentity)
         val commit = store.insertDeliveredIfAbsentAndStageRoute(stored)
         if (commit.inserted) {
             resolveForwarding(stored)
@@ -741,6 +759,17 @@ internal class EventLog(
             resolveRoute(stored, admissionTickets, localRouteEventId = stored.id)
         }
         return true
+    }
+
+    private fun captureActivityIdentity(expectedCustomerId: String?): ActivityIdentity {
+        val captured = identity.captureScope()
+        val customerId = expectedCustomerId ?: captured.distinctId
+        val provider = java.lang.ref.WeakReference(identity)
+        val active = forwardingActive
+        return ActivityIdentity(customerId) {
+            active.get() && captured.distinctId == customerId &&
+                provider.get()?.isCurrentScope(captured) == true
+        }
     }
 
     private fun forwardingAdmission(receivedAtMillis: Long): Long? =
@@ -886,7 +915,11 @@ internal class EventLog(
      * Forwarding classification belongs to the original capture, while the
      * durable event and forwarding receipt time belong to the prepared result.
      */
-    private fun projectPostTransform(original: NuxieEvent, transformed: NuxieEvent): StoredEvent {
+    private fun projectPostTransform(
+        original: NuxieEvent,
+        transformed: NuxieEvent,
+        activityIdentity: ActivityIdentity,
+    ): StoredEvent {
         // The prepared field is authoritative, matching iOS: wrappers that pin
         // distinctId also restore its property after a deleting or spoofing hook.
         val projected = NuxieEvent(
@@ -900,6 +933,7 @@ internal class EventLog(
             projected,
             forwardingName = original.name,
             forwardingReceivedAtMillis = forwardingAdmission(transformed.timestampMillis),
+            forwardingIdentity = activityIdentity,
         )
     }
 

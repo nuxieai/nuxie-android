@@ -19,6 +19,7 @@ internal class StoredEvent private constructor(
     val forwardingName: String,
     /** Admission time when forwarding was enabled; null means do not replay. */
     val forwardingReceivedAtMillis: Long?,
+    val forwardingIdentity: ActivityIdentity? = null,
 ) {
     private val encodedProperties = encodedProperties.copyOf()
 
@@ -37,6 +38,7 @@ internal class StoredEvent private constructor(
         distinctId: String,
         forwardingName: String = name,
         forwardingReceivedAtMillis: Long? = null,
+        forwardingIdentity: ActivityIdentity? = null,
     ) : this(
         id = id,
         name = name,
@@ -48,11 +50,15 @@ internal class StoredEvent private constructor(
             ?.contentOrNull,
         forwardingName = forwardingName,
         forwardingReceivedAtMillis = forwardingReceivedAtMillis,
+        forwardingIdentity = forwardingIdentity,
     )
 
     fun encodedProperties(): ByteArray = encodedProperties.copyOf()
 
-    fun withForwardingAdmission(receivedAtMillis: Long?): StoredEvent = StoredEvent(
+    fun withForwardingAdmission(
+        receivedAtMillis: Long?,
+        identity: ActivityIdentity?,
+    ): StoredEvent = StoredEvent(
         id = id,
         name = name,
         encodedProperties = encodedProperties,
@@ -61,6 +67,7 @@ internal class StoredEvent private constructor(
         sessionId = sessionId,
         forwardingName = forwardingName,
         forwardingReceivedAtMillis = receivedAtMillis,
+        forwardingIdentity = identity,
     )
 
     internal companion object {
@@ -70,6 +77,7 @@ internal class StoredEvent private constructor(
             event: NuxieEvent,
             forwardingName: String = event.name,
             forwardingReceivedAtMillis: Long? = null,
+            forwardingIdentity: ActivityIdentity? = null,
         ): StoredEvent = StoredEvent(
             id = event.id,
             name = event.name,
@@ -78,6 +86,7 @@ internal class StoredEvent private constructor(
             distinctId = event.distinctId,
             forwardingName = forwardingName,
             forwardingReceivedAtMillis = forwardingReceivedAtMillis,
+            forwardingIdentity = forwardingIdentity,
         )
 
         fun fromStorage(

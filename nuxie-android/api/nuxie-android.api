@@ -448,14 +448,17 @@ public final class ai/nuxie/sdk/NuxieActivityInfo {
 	public final fun component2 ()J
 	public final fun component3 ()J
 	public final fun component4 ()Lai/nuxie/sdk/NuxieActivity;
+	public final fun component5 ()Ljava/lang/String;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getActivity ()Lai/nuxie/sdk/NuxieActivity;
+	public final fun getCustomerId ()Ljava/lang/String;
 	public final fun getId ()Ljava/lang/String;
 	public final fun getName ()Ljava/lang/String;
 	public final fun getProperties ()Ljava/util/Map;
 	public final fun getReceivedAtMillis ()J
 	public final fun getTimestampMillis ()J
 	public fun hashCode ()I
+	public final fun isCurrentIdentity ()Z
 	public fun toString ()Ljava/lang/String;
 }
 
