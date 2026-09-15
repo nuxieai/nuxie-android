@@ -3,5 +3,6 @@
   <style name="Theme.NuxieExample" parent="android:style/Theme.Material.Light.NoActionBar">
     <item name="android:fontFamily">sans</item>
     <item name="android:colorAccent">#6750A4</item>
+    <item name="android:windowLightStatusBar">true</item>
   </style>
 </resources>
