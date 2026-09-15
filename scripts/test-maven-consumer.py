@@ -30,7 +30,10 @@ def main():
     (fixture / 'settings.gradle.kts').write_text('''pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
     dependencyResolutionManagement {
       repositories {
-        maven { url = uri(%s); content { includeModule("ai.nuxie", "nuxie-android") } }
+        exclusiveContent {
+          forRepository { maven { url = uri(%s) } }
+          filter { includeModule("ai.nuxie", "nuxie-android") }
+        }
         google(); mavenCentral()
       }
     }
@@ -107,7 +110,26 @@ def main():
             raise RuntimeError(f'Published lint did not reject unsafe Test Store: {unsafe_log}')
     finally:
         source.write_text(safe_source)
-    print(f'Maven consumer compile, R8, native packaging and lint enforcement passed: {log}; {unsafe_log}')
+    settings = fixture / 'settings.gradle.kts'
+    selected_settings = settings.read_text()
+    empty = fixture / 'empty-repository'
+    empty.mkdir(exist_ok=True)
+    missing_log = fixture / 'missing-selected-repository.log'
+    try:
+        missing_settings = selected_settings.replace(kotlin(args.repository), kotlin(empty.as_uri()))
+        missing_settings = missing_settings.replace('google(); mavenCentral()\n',
+            'google(); mavenCentral(); maven { url = uri(' + kotlin(args.repository) + ') }\n')
+        settings.write_text(missing_settings)
+        with missing_log.open('w') as output:
+            missing = subprocess.run([str(root / 'gradlew'), '--no-watch-fs', '-p', str(fixture),
+                                      '--refresh-dependencies', 'checkReleaseAarMetadata'],
+                                     cwd=root, env=os.environ, stdout=output, stderr=subprocess.STDOUT)
+        reason = f'Could not find ai.nuxie:nuxie-android:{args.version}'
+        if missing.returncode == 0 or reason not in missing_log.read_text():
+            raise RuntimeError(f'Empty selected repository did not reject the SDK despite populated fallback: {missing_log}')
+    finally:
+        settings.write_text(selected_settings)
+    print(f'Maven consumer compile, R8, native packaging, lint enforcement and exclusive repository selection passed: {log}; {unsafe_log}; {missing_log}')
 
 
 if __name__ == '__main__':
