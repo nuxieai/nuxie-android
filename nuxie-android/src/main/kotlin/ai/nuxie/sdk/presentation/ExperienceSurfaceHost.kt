@@ -114,8 +114,11 @@ internal class ExperienceSurfaceHost(
                 val capture = semanticSnapshot ?: return@enqueue
                 val active = player ?: return@enqueue
                 if (!running || !sceneInputEnabled.get() || released.get() || generation != frameGeneration.get() ||
-                    epoch != semanticEpoch.get() || pendingPresentation ||
+                    epoch != semanticEpoch.get() ||
                     capture.tree.renderRevision != tree.renderRevision || capture.tree.treeVersion != tree.treeVersion) return@enqueue
+                // A repeated renderer submission may be pending without
+                // invalidating the presented capture. Native action admission
+                // checks the occurrence's current and presented revisions.
                 active.queueSemanticAction(capture, nodeId, action)
             } finally { semanticActionPending.set(false) }
         }
