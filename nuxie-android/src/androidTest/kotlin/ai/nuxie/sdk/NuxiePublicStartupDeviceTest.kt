@@ -4,6 +4,7 @@ import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.identity.IdentityService
+import ai.nuxie.sdk.journey.JourneyEventNames
 import ai.nuxie.sdk.journey.JourneyRunJournal
 import ai.nuxie.sdk.journey.JourneyStorageScope
 import ai.nuxie.sdk.network.HttpTransport
@@ -47,7 +48,9 @@ class NuxiePublicStartupDeviceTest {
         require(phase == "seed" || phase == "recover")
         val run = checkNotNull(arguments.getString("nuxie_process_run"))
         require(run.matches(Regex("[a-f0-9-]{36}")))
-        exercise(eventEntry = true, processPhase = phase, processRun = run)
+        val boundary = arguments.getString("nuxie_process_boundary") ?: "pending-profile"
+        require(boundary in listOf("pending-profile", "active-screen"))
+        exercise(eventEntry = true, processPhase = phase, processRun = run, processBoundary = boundary)
     }
 
     private fun exercise(
@@ -56,6 +59,7 @@ class NuxiePublicStartupDeviceTest {
         holdInitialProfile: Boolean = true,
         processPhase: String? = null,
         processRun: String? = null,
+        processBoundary: String = "pending-profile",
     ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
@@ -75,7 +79,7 @@ class NuxiePublicStartupDeviceTest {
             }).toSet()
         check(Nuxie.core == null) { "This test requires an inactive SDK." }
         // Evict only this test fixture's content-addressed objects so reruns prove download too.
-        artifactKeys.forEach { key ->
+        if (!(processPhase == "recover" && processBoundary == "active-screen")) artifactKeys.forEach { key ->
             val digest = key.substringAfterLast('/').substringBefore('.')
             check(digest.matches(Regex("[a-f0-9]{64}")))
             val cached = File(context.cacheDir, "nuxie/journey_release_objects/$digest")
@@ -149,20 +153,17 @@ class NuxiePublicStartupDeviceTest {
             runBlocking { withTimeout(10_000) { core.eventLog.awaitBarrier() } }
             if (holdInitialProfile) assertEquals(0, monitor.hits)
             if (eventEntry && holdInitialProfile) runBlocking {
-                assertEquals(1, core.store.queryPendingLocalRoutes(owner).count { it.name == "startup_probe" })
+                assertEquals(if (processPhase == "recover" && processBoundary == "active-screen") 0 else 1,
+                    core.store.queryPendingLocalRoutes(owner).count { it.name == "startup_probe" })
             }
-            if (processPhase == "seed") {
+            if (processPhase == "seed" && processBoundary == "pending-profile") {
                 val captured = runBlocking { core.store.queryPendingLocalRoutes(owner).single { it.name == "startup_probe" } }
                 val marker = buildJsonObject {
                     put("pid", android.os.Process.myPid())
                     put("owner", owner)
                     put("eventId", captured.id)
                 }
-                val temporaryMarker = File(directory, "ready.tmp")
-                temporaryMarker.writeText(marker.toString())
-                check(temporaryMarker.renameTo(markerFile))
-                // The external driver kills this exact process here; no shutdown/finally is run.
-                check(CountDownLatch(1).await(60, TimeUnit.SECONDS)) { "Process-death driver did not kill the seed process" }
+                awaitProcessKill(markerFile, marker)
             }
             if (backgroundDuringRefresh) {
                 assertNotNull(core.journeys.foregroundRevalidationToken())
@@ -190,54 +191,101 @@ class NuxiePublicStartupDeviceTest {
                 assertEquals("A background event must not enroll on return", 0, monitor.hits)
                 Nuxie.trigger("startup_probe")
             }
-            val experience = checkNotNull(monitor.waitForActivityWithTimeout(15_000)) {
+            if (processPhase == "recover" && processBoundary == "active-screen") {
+                val saved = checkNotNull(previous)
+                val recoveryContract = Json.parseToJsonElement(instrumentation.context.assets
+                    .open("journeys/planes/run-recovery.json").bufferedReader().use { it.readText() }).jsonObject
+                    .getValue("cases").jsonArray.first { it.jsonObject.getValue("beforeDeath").jsonPrimitive.content == "executing" }.jsonObject
+                runBlocking { withTimeout(15_000) {
+                    core.profile.refreshAndWait()
+                    while (core.store.pendingBatch(200).none { it.name == JourneyEventNames.LEG_COMPLETED }) delay(25)
+                    // A second revalidation must not replay the active effect or its terminal report.
+                    core.profile.refreshAndWait()
+                    core.eventLog.awaitBarrier()
+                    val events = core.store.pendingBatch(200)
+                    val completed = events.single { it.name == JourneyEventNames.LEG_COMPLETED }
+                    assertEquals(saved.getValue("completedEventId").jsonPrimitive.content, completed.id)
+                    assertEquals(recoveryContract.getValue("expectedOutcome"), completed.properties.getValue("outcome"))
+                    assertEquals(saved.getValue("journeyId"), completed.properties.getValue("journey_id"))
+                    assertEquals("pro", completed.properties.getValue("outputs").jsonObject
+                        .getValue("responses").jsonObject.getValue("selection").jsonPrimitive.content)
+                    for ((name, key) in listOf("startup_probe" to "eventId", "script_control_activated" to "controlEventId",
+                        JourneyEventNames.LEG_STARTED to "startedEventId")) {
+                        assertEquals(saved.getValue(key).jsonPrimitive.content, events.single { it.name == name }.id)
+                    }
+                    assertTrue(core.store.queryPendingLocalRoutes(owner).isEmpty())
+                } }
+                assertEquals("Interrupted active effects must not reopen automatically", 0, monitor.hits)
+            } else {
+                val experience = checkNotNull(monitor.waitForActivityWithTimeout(15_000)) {
+                    runBlocking {
+                        val runs = JourneyRunJournal(File(context.filesDir, "nuxie"), owner, JourneyStorageScope(
+                            ProfileDeliveryAuthority(locator.getValue("appId").jsonPrimitive.content, "test"),
+                        )).runs()
+                        "Initial profile must present; profile=${core.profile.currentProfile() != null}, " +
+                            "catalog=${core.journeyProfiles.snapshot(owner) != null}, " +
+                            "pending=${core.store.queryPendingLocalRoutes(owner).map { it.name }}, " +
+                            "runs=${runs.map { it.stepId to it.completion }}, downloads=$downloaded"
+                    }
+                }
                 runBlocking {
-                    val runs = JourneyRunJournal(File(context.filesDir, "nuxie"), owner, JourneyStorageScope(
-                        ProfileDeliveryAuthority(locator.getValue("appId").jsonPrimitive.content, "test"),
-                    )).runs()
-                    "Initial profile must present; profile=${core.profile.currentProfile() != null}, " +
-                        "catalog=${core.journeyProfiles.snapshot(owner) != null}, " +
-                        "pending=${core.store.queryPendingLocalRoutes(owner).map { it.name }}, " +
-                        "runs=${runs.map { it.stepId to it.completion }}, downloads=$downloaded"
+                    withTimeout(15_000) {
+                        while (core.store.pendingBatch(200).none { it.name == SystemEventNames.EXPERIENCE_SHOWN }) delay(25)
+                    }
+                }
+                var surface: ExperienceSurfaceHost? = null
+                instrumentation.runOnMainSync { surface = findSurface(experience.window.decorView) }
+                val target = checkNotNull(surface)
+                val down = SystemClock.uptimeMillis()
+                instrumentation.runOnMainSync {
+                    val scale = minOf(target.width / 390f, target.height / 844f)
+                    val x = (target.width - 390f * scale) / 2f + 100f * scale
+                    val y = (target.height - 844f * scale) / 2f + 728f * scale
+                    for (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
+                        val event = MotionEvent.obtain(down, SystemClock.uptimeMillis(), action, x, y, 0)
+                        try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }
+                    }
+                }
+                runBlocking {
+                    withTimeout(10_000) {
+                        while (core.store.pendingBatch(200).none { it.name == "script_control_activated" }) delay(25)
+                    }
+                    val events = core.store.pendingBatch(200)
+                    assertEquals(if (backgroundDuringRefresh) 3 else 1, events.count { it.name == "startup_probe" && it.distinctId == owner })
+                    assertEquals(1, events.count { it.name == "script_control_activated" && it.distinctId == owner })
+                    previous?.let {
+                        assertEquals(it.getValue("eventId").jsonPrimitive.content,
+                            events.single { event -> event.name == "startup_probe" }.id)
+                    }
+                    assertTrue(core.store.queryPendingLocalRoutes(owner).none { it.name == "startup_probe" })
+                }
+                val journal = JourneyRunJournal(File(context.filesDir, "nuxie"), owner, JourneyStorageScope(
+                    ProfileDeliveryAuthority(locator.getValue("appId").jsonPrimitive.content, "test"),
+                ))
+                assertEquals("pro", journal.runs().single().context.getValue("responses").jsonObject
+                    .getValue("selection").jsonPrimitive.content)
+                assertTrue("Signed render and behavior artifacts must be downloaded", downloaded.toSet().containsAll(artifactKeys))
+                if (processPhase == "seed" && processBoundary == "active-screen") {
+                    runBlocking { withTimeout(10_000) {
+                        core.eventLog.awaitBarrier()
+                        while (journal.runs().single().pendingPresentationPublication != null) delay(10)
+                    } }
+                    val run = journal.runs().single()
+                    assertNull(run.completion)
+                    assertNull(run.park)
+                    val events = runBlocking { core.store.pendingBatch(200) }
+                    val marker = buildJsonObject {
+                        put("pid", android.os.Process.myPid())
+                        put("owner", owner)
+                        put("eventId", events.single { it.name == "startup_probe" }.id)
+                        put("controlEventId", events.single { it.name == "script_control_activated" }.id)
+                        put("startedEventId", run.startedEventId)
+                        put("completedEventId", run.completedEventId)
+                        put("journeyId", run.journeyId)
+                    }
+                    awaitProcessKill(markerFile, marker)
                 }
             }
-            runBlocking {
-                withTimeout(15_000) {
-                    while (core.store.pendingBatch(200).none { it.name == SystemEventNames.EXPERIENCE_SHOWN }) delay(25)
-                }
-            }
-            var surface: ExperienceSurfaceHost? = null
-            instrumentation.runOnMainSync { surface = findSurface(experience.window.decorView) }
-            val target = checkNotNull(surface)
-            val down = SystemClock.uptimeMillis()
-            instrumentation.runOnMainSync {
-                val scale = minOf(target.width / 390f, target.height / 844f)
-                val x = (target.width - 390f * scale) / 2f + 100f * scale
-                val y = (target.height - 844f * scale) / 2f + 728f * scale
-                for (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
-                    val event = MotionEvent.obtain(down, SystemClock.uptimeMillis(), action, x, y, 0)
-                    try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }
-                }
-            }
-            runBlocking {
-                withTimeout(10_000) {
-                    while (core.store.pendingBatch(200).none { it.name == "script_control_activated" }) delay(25)
-                }
-                val events = core.store.pendingBatch(200)
-                assertEquals(if (backgroundDuringRefresh) 3 else 1, events.count { it.name == "startup_probe" && it.distinctId == owner })
-                assertEquals(1, events.count { it.name == "script_control_activated" && it.distinctId == owner })
-                previous?.let {
-                    assertEquals(it.getValue("eventId").jsonPrimitive.content,
-                        events.single { event -> event.name == "startup_probe" }.id)
-                }
-                assertTrue(core.store.queryPendingLocalRoutes(owner).none { it.name == "startup_probe" })
-            }
-            val journal = JourneyRunJournal(File(context.filesDir, "nuxie"), owner, JourneyStorageScope(
-                ProfileDeliveryAuthority(locator.getValue("appId").jsonPrimitive.content, "test"),
-            ))
-            assertEquals("pro", journal.runs().single().context.getValue("responses").jsonObject
-                .getValue("selection").jsonPrimitive.content)
-            assertTrue("Signed render and behavior artifacts must be downloaded", downloaded.toSet().containsAll(artifactKeys))
         } finally {
             releaseProfile.countDown()
             try { runBlocking { withTimeout(15_000) { Nuxie.shutdownAndAwait() } } }
@@ -250,11 +298,26 @@ class NuxiePublicStartupDeviceTest {
         val reopened = SQLiteEventStore(context, databaseFile = File(directory, "events.db"))
         try {
             runBlocking {
-                assertEquals(1, reopened.pendingBatch(200).count {
+                val persisted = reopened.pendingBatch(200)
+                assertEquals(1, persisted.count {
                     it.name == "script_control_activated" && it.distinctId == identity.distinctId()
                 })
+                if (processPhase == "recover" && processBoundary == "active-screen") {
+                    val completed = persisted.single { it.name == JourneyEventNames.LEG_COMPLETED }
+                    assertEquals(checkNotNull(previous).getValue("completedEventId").jsonPrimitive.content, completed.id)
+                    assertEquals("pro", completed.properties.getValue("outputs").jsonObject
+                        .getValue("responses").jsonObject.getValue("selection").jsonPrimitive.content)
+                }
             }
         } finally { runBlocking { reopened.close() } }
+    }
+
+    private fun awaitProcessKill(markerFile: File, marker: JsonObject) {
+        val temporaryMarker = File(markerFile.parentFile, "ready.tmp")
+        temporaryMarker.writeText(marker.toString())
+        check(temporaryMarker.renameTo(markerFile))
+        // The external driver kills this exact process here; no shutdown/finally is run.
+        check(CountDownLatch(1).await(60, TimeUnit.SECONDS)) { "Process-death driver did not kill the seed process" }
     }
 
     private fun findSurface(view: View): ExperienceSurfaceHost? {
