@@ -218,6 +218,24 @@ internal object NuxieRuntimeBridge {
 
     external fun nativePlayerStateMachineName(player: Long, statusOut: IntArray): String?
 
+    external fun nativePlayerEnableSemantics(player: Long): Int
+
+    external fun nativePlayerSemanticSnapshot(player: Long, statusOut: IntArray): Long
+
+    /** Render revision, tree version, node count. */
+    external fun nativeSemanticSnapshotInfo(snapshot: Long, statusOut: IntArray): LongArray?
+
+    external fun nativeSemanticSnapshotNode(snapshot: Long, index: Int, statusOut: IntArray): NativeSemanticNode?
+
+    external fun nativePlayerSemanticNodeForTextRun(player: Long, snapshot: Long, name: ByteArray, statusOut: IntArray): Long
+
+    external fun nativeSemanticSnapshotFree(snapshot: Long): Int
+
+    external fun nativePlayerValidateSemanticSnapshot(player: Long, snapshot: Long): Int
+
+    /** Action 0 = tap, 1 = increase, 2 = decrease; accepted work requires a normal player step. */
+    external fun nativePlayerQueueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int): Int
+
     external fun nativePlayerFree(player: Long)
 
     /** nux_player_step: advance by elapsed seconds; returns a status code. */

@@ -1913,6 +1913,137 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStateMachineName(
   return result;
 }
 
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerEnableSemantics(
+    JNIEnv *env, jobject self, jlong player) {
+  (void)env; (void)self;
+  return nux_player_enable_semantics((struct NuxPlayer *)from_handle(player));
+}
+
+JNIEXPORT jlong JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerSemanticSnapshot(
+    JNIEnv *env, jobject self, jlong player, jintArray status_out) {
+  (void)self;
+  struct NuxSemanticSnapshot *snapshot = NULL;
+  NuxStatus status = nux_player_semantic_snapshot(
+      (const struct NuxPlayer *)from_handle(player), &snapshot);
+  if (!set_status_out(env, status_out, status)) {
+    if (snapshot != NULL) nux_semantic_snapshot_free(snapshot);
+    return 0;
+  }
+  return (jlong)(intptr_t)snapshot;
+}
+
+JNIEXPORT jlong JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerSemanticNodeForTextRun(
+    JNIEnv *env, jobject self, jlong player, jlong snapshot, jbyteArray name, jintArray status_out) {
+  (void)self;
+  uint32_t node_id = 0;
+  NuxStatus status = NUX_STATUS_NULL_ARGUMENT;
+  if (name != NULL) {
+    jsize length = (*env)->GetArrayLength(env, name);
+    if (length > 4096) {
+      status = NUX_STATUS_LIMIT_EXCEEDED;
+    } else {
+      jbyte *bytes = (*env)->GetByteArrayElements(env, name, NULL);
+      if (bytes == NULL) {
+        status = NUX_STATUS_RUNTIME_ERROR;
+      } else {
+        struct NuxStringView view = {(const char *)bytes, (size_t)length};
+        status = nux_player_semantic_node_for_text_run(
+            (const struct NuxPlayer *)from_handle(player),
+            (const struct NuxSemanticSnapshot *)from_handle(snapshot), view, &node_id);
+        (*env)->ReleaseByteArrayElements(env, name, bytes, JNI_ABORT);
+      }
+    }
+  }
+  if (!set_status_out(env, status_out, status)) return 0;
+  return (jlong)node_id;
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeSemanticSnapshotFree(
+    JNIEnv *env, jobject self, jlong snapshot) {
+  (void)env; (void)self;
+  return nux_semantic_snapshot_free((struct NuxSemanticSnapshot *)from_handle(snapshot));
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerValidateSemanticSnapshot(
+    JNIEnv *env, jobject self, jlong player, jlong snapshot) {
+  (void)env; (void)self;
+  return nux_player_validate_semantic_snapshot(
+      (const struct NuxPlayer *)from_handle(player),
+      (const struct NuxSemanticSnapshot *)from_handle(snapshot));
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerQueueSemanticAction(
+    JNIEnv *env, jobject self, jlong player, jlong snapshot, jlong node_id, jint action) {
+  (void)env; (void)self;
+  if (node_id < 0 || node_id > UINT32_MAX || action < 0 || action > 2)
+    return NUX_STATUS_INVALID_ARGUMENT;
+  return nux_player_queue_semantic_action(
+      (struct NuxPlayer *)from_handle(player),
+      (const struct NuxSemanticSnapshot *)from_handle(snapshot), (uint32_t)node_id, (uint32_t)action);
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeSemanticSnapshotInfo(
+    JNIEnv *env, jobject self, jlong snapshot, jintArray status_out) {
+  (void)self;
+  struct NuxSemanticSnapshotInfo info = {0};
+  info.struct_size = sizeof(info);
+  NuxStatus status = nux_semantic_snapshot_info(
+      (const struct NuxSemanticSnapshot *)from_handle(snapshot), &info);
+  jlongArray result = NULL;
+  if (status == NUX_STATUS_OK) {
+    result = (*env)->NewLongArray(env, 3);
+    if (result != NULL) {
+      jlong values[] = {(jlong)info.render_revision, (jlong)info.tree_version, (jlong)info.node_count};
+      (*env)->SetLongArrayRegion(env, result, 0, 3, values);
+    } else status = NUX_STATUS_RUNTIME_ERROR;
+  }
+  if (!set_status_out(env, status_out, status)) {
+    if (result != NULL) (*env)->DeleteLocalRef(env, result);
+    return NULL;
+  }
+  return result;
+}
+
+JNIEXPORT jobject JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeSemanticSnapshotNode(
+    JNIEnv *env, jobject self, jlong snapshot, jint index, jintArray status_out) {
+  (void)self;
+  struct NuxSemanticNodeView node = {0};
+  node.struct_size = sizeof(node);
+  NuxStatus status = index < 0 ? NUX_STATUS_INVALID_ARGUMENT : nux_semantic_snapshot_node(
+      (const struct NuxSemanticSnapshot *)from_handle(snapshot), (size_t)index, &node);
+  jobject result = NULL;
+  if (status == NUX_STATUS_OK && (*env)->PushLocalFrame(env, 5) == 0) {
+    jclass cls = (*env)->FindClass(env, "ai/nuxie/sdk/runtime/NativeSemanticNode");
+    jmethodID ctor = cls == NULL ? NULL : (*env)->GetMethodID(env, cls, "<init>",
+        "(JIIIIIIIFFFFLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+    if (ctor != NULL) {
+      jstring label = new_string_view(env, node.label);
+      jstring value = label == NULL ? NULL : new_string_view(env, node.value);
+      jstring hint = value == NULL ? NULL : new_string_view(env, node.hint);
+      if (hint != NULL) result = (*env)->NewObject(env, cls, ctor,
+          (jlong)node.id, (jint)node.parent_id, (jint)node.sibling_index, (jint)node.role,
+          (jint)node.state_flags, (jint)node.trait_flags, (jint)node.heading_level, (jint)node.actions,
+          (jfloat)node.min_x, (jfloat)node.min_y, (jfloat)node.max_x, (jfloat)node.max_y,
+          label, value, hint);
+    }
+    result = (*env)->PopLocalFrame(env, result);
+  }
+  if (status == NUX_STATUS_OK && result == NULL) status = NUX_STATUS_RUNTIME_ERROR;
+  if (!set_status_out(env, status_out, status)) {
+    if (result != NULL) (*env)->DeleteLocalRef(env, result);
+    return NULL;
+  }
+  return result;
+}
+
 JNIEXPORT void JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerFree(
     JNIEnv *env, jobject self, jlong player) {

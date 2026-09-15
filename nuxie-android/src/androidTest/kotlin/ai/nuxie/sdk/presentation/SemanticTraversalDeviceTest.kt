@@ -1,0 +1,174 @@
+package ai.nuxie.sdk.presentation
+
+import ai.nuxie.sdk.runtime.NativeSemanticNode
+import ai.nuxie.sdk.runtime.NuxieSemanticTree
+import android.content.Context
+import android.content.Intent
+import android.graphics.Rect
+import android.view.KeyEvent
+import android.view.View
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityNodeProvider
+import android.widget.EditText
+import android.widget.FrameLayout
+import androidx.test.platform.app.InstrumentationRegistry
+import org.junit.Assert.*
+import org.junit.Test
+
+class SemanticTraversalDeviceTest {
+    private class SemanticView(context: Context) : View(context) {
+        val semantics = ExperienceAccessibilityProvider(this, { node ->
+            val local = Rect(node.minX.toInt(), node.minY.toInt(), node.maxX.toInt(), node.maxY.toInt())
+            val origin = IntArray(2)
+            getLocationOnScreen(origin)
+            ExperienceAccessibilityProvider.Bounds(local, Rect(local).apply { offset(origin[0], origin[1]) })
+        }, { _, _, _ -> true })
+        override fun getAccessibilityNodeProvider(): AccessibilityNodeProvider = semantics
+        override fun dispatchKeyEvent(event: KeyEvent): Boolean = semantics.key(event) || super.dispatchKeyEvent(event)
+        override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: Rect?) {
+            super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
+            semantics.hostFocusChanged(gainFocus, direction)
+        }
+    }
+
+    @Test fun nativeFieldLinksResolveToExactVirtualNeighborsThroughAndroid() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        try {
+            instrumentation.runOnMainSync {
+                val host = SemanticView(activity).apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES }
+                val field = EditText(activity).apply { setText("Traversal field"); id = View.generateViewId() }
+                val root = FrameLayout(activity)
+                root.addView(host, FrameLayout.LayoutParams(400, 400))
+                root.addView(field, FrameLayout.LayoutParams(300, 80).apply { topMargin = 100 })
+                activity.setContentView(root)
+                host.semantics.publish(NuxieSemanticTree(1, 1, listOf(
+                    node(1, 0, 1, 0f, "Traversal before"),
+                    node(2, 1, 6, 100f, "Field"),
+                    node(3, 2, 1, 200f, "Traversal after"),
+                )), mapOf(2L to field))
+            }
+            instrumentation.waitForIdleSync()
+            instrumentation.uiAutomation.waitForIdle(100, 5000)
+            val root = checkNotNull(instrumentation.uiAutomation.rootInActiveWindow)
+            val field = root.findAccessibilityNodeInfosByText("Traversal field").single { it.isEditable }
+            assertTrue(field.isVisibleToUser)
+            val before = checkNotNull(field.traversalAfter) { "Native field must follow the first virtual control" }
+            val after = checkNotNull(field.traversalBefore) { "Native field must precede the final virtual control" }
+            assertEquals("Traversal before", before.text.toString())
+            assertEquals("Traversal after", after.text.toString())
+            assertEquals("Traversal field", before.traversalBefore?.text.toString())
+            assertEquals("Traversal field", after.traversalAfter?.text.toString())
+            assertTrue(before.isClickable)
+            assertTrue(after.isClickable)
+        } finally { instrumentation.runOnMainSync { activity.finish() } }
+    }
+
+    @Test fun injectedKeyboardTraversesContainerEditorsAndExternalControls() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        lateinit var host: SemanticView
+        lateinit var field: EditText
+        lateinit var before: android.widget.Button
+        lateinit var after: android.widget.Button
+        val keys = mutableListOf<String>()
+        try {
+            instrumentation.runOnMainSync {
+                before = android.widget.Button(activity).apply { text = "Outside before" }
+                after = android.widget.Button(activity).apply { text = "Outside after" }
+                host = SemanticView(activity).apply { isFocusableInTouchMode = true }
+                field = EditText(activity).apply { setText("Ada"); showSoftInputOnFocus = false }
+                val group = ExperienceInputContainer(activity, { event ->
+                    val from = if (field.hasFocus()) "field" else if (host.hasFocus()) "host" else "outside"
+                    val accepted = host.semantics.key(event)
+                    keys += "${event.action}:$from:$accepted:${host.semantics.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text}"
+                    accepted
+                }, host.semantics::keyboardEntry)
+                group.addView(host, FrameLayout.LayoutParams(400, 320))
+                group.addView(field, FrameLayout.LayoutParams(300, 80).apply { topMargin = 100 })
+                val root = android.widget.LinearLayout(activity).apply { orientation = android.widget.LinearLayout.VERTICAL }
+                root.addView(before, android.widget.LinearLayout.LayoutParams(400, 80))
+                root.addView(group, android.widget.LinearLayout.LayoutParams(400, 320))
+                root.addView(after, android.widget.LinearLayout.LayoutParams(400, 80))
+                activity.setContentView(root)
+                host.semantics.publish(NuxieSemanticTree(1, 1, listOf(
+                    node(1, 0, 1, 0f, "First"), node(2, 1, 6, 100f, "Field"),
+                    node(3, 2, 1, 200f, "Last"),
+                )), mapOf(2L to field))
+            }
+            instrumentation.waitForIdleSync()
+            fun tab(backwards: Boolean = false) {
+                val now = android.os.SystemClock.uptimeMillis()
+                val modifiers = if (backwards) KeyEvent.META_SHIFT_ON else 0
+                instrumentation.sendKeySync(KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_TAB, 0, modifiers))
+                instrumentation.sendKeySync(KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_TAB, 0, modifiers))
+                instrumentation.waitForIdleSync()
+            }
+            fun awaitFocus(view: View) {
+                val deadline = android.os.SystemClock.uptimeMillis() + 5000
+                while (android.os.SystemClock.uptimeMillis() < deadline) {
+                    val focused = java.util.concurrent.atomic.AtomicBoolean()
+                    instrumentation.runOnMainSync { focused.set(view.hasFocus()) }
+                    if (focused.get()) return
+                    android.os.SystemClock.sleep(20)
+                }
+                instrumentation.runOnMainSync { fail("Expected focus on $view; actual=${activity.currentFocus}; keys=$keys") }
+            }
+            instrumentation.runOnMainSync {
+                assertTrue(host.requestFocus(View.FOCUS_FORWARD))
+                assertEquals("First", host.semantics.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+            }
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_DOWN)
+            awaitFocus(field)
+            instrumentation.runOnMainSync { field.setSelection(2) }
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_LEFT)
+            val selectionDeadline = android.os.SystemClock.uptimeMillis() + 5000
+            val selectionMoved = java.util.concurrent.atomic.AtomicBoolean()
+            while (!selectionMoved.get() && android.os.SystemClock.uptimeMillis() < selectionDeadline) {
+                instrumentation.runOnMainSync { selectionMoved.set(field.selectionStart == 1 && field.selectionEnd == 1) }
+                if (!selectionMoved.get()) android.os.SystemClock.sleep(20)
+            }
+            assertTrue("Native editor must retain arrow-key cursor movement", selectionMoved.get())
+            tab(true)
+            awaitFocus(host)
+            instrumentation.runOnMainSync { assertEquals("First", host.semantics.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text) }
+            tab()
+            awaitFocus(field)
+            instrumentation.runOnMainSync { assertTrue(field.hasFocus()); assertEquals("Ada", field.text.toString()) }
+            tab()
+            awaitFocus(host)
+            instrumentation.runOnMainSync {
+                assertTrue("focus=${activity.currentFocus}; keys=$keys", host.hasFocus())
+                assertEquals("Last", host.semantics.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+            }
+            tab(true)
+            awaitFocus(field)
+            instrumentation.runOnMainSync { assertTrue(field.hasFocus()) }
+            tab(true)
+            awaitFocus(host)
+            instrumentation.runOnMainSync { assertEquals("First", host.semantics.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text) }
+            tab(true)
+            awaitFocus(before)
+            instrumentation.runOnMainSync { assertTrue(before.hasFocus()) }
+            tab()
+            awaitFocus(host)
+            instrumentation.runOnMainSync { assertEquals("First", host.semantics.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text) }
+            tab()
+            awaitFocus(field)
+            tab()
+            awaitFocus(host)
+            tab()
+            awaitFocus(after)
+            instrumentation.runOnMainSync { assertTrue(after.hasFocus()) }
+            tab(true)
+            awaitFocus(host)
+            instrumentation.runOnMainSync { assertEquals("Last", host.semantics.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text) }
+        } finally { instrumentation.runOnMainSync { activity.finish() } }
+    }
+
+    private fun node(id: Long, order: Int, role: Int, y: Float, label: String) = NativeSemanticNode(
+        id, -1, order, role, 0, 0, 0, if (role == 6) 0 else 1,
+        0f, y, 300f, y + 80f, label, "", "")
+}

@@ -2,6 +2,12 @@ package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
 import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
+import ai.nuxie.sdk.runtime.NativeSemanticNode
+import ai.nuxie.sdk.runtime.NuxieSemanticSnapshot
+import ai.nuxie.sdk.runtime.NuxieSemanticTree
+import android.view.accessibility.AccessibilityNodeProvider
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import ai.nuxie.sdk.runtime.NuxieAndroidVulkanRenderer
 import ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome
 import ai.nuxie.sdk.runtime.NuxieRuntime
@@ -16,9 +22,11 @@ import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
 import android.content.Context
+import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import ai.nuxie.sdk.logging.NuxieLog as Log
 import android.view.Choreographer
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.TextureView
@@ -43,7 +51,7 @@ internal class ExperienceSurfaceHost(
     private val lane: NuxieRuntimeLane,
     private val clearColor: Int = CLEAR_COLOR_OPAQUE_BLACK,
     private val listener: Listener? = null,
-    artboardSize: ExperienceArtboardSize? = null,
+    private val artboardSize: ExperienceArtboardSize? = null,
     private val runtime: NuxieRuntime = NuxieRuntime.shared,
 ) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
     interface Listener {
@@ -57,6 +65,8 @@ internal class ExperienceSurfaceHost(
         fun onRuntimeEvent(event: NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {}
         /** UI-thread geometry update, after its frame has been presented. */
         fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot) {}
+        /** Complete visible native-field association map, copied from the same presented capture. */
+        fun onSemanticFields(fields: Map<String, NativeSemanticNode>): Map<Long, android.view.View> = emptyMap()
         /** Runtime-lane callback ordered with writes and renderer publications. */
         fun onTextCommitted(inputId: String, text: String) {}
     }
@@ -68,6 +78,92 @@ internal class ExperienceSurfaceHost(
     private var file: NuxieRuntimeFile? = null
     private var artboard: NuxieRuntimeArtboard? = null
     private var viewModelState: NuxieRuntimeViewModelState? = null
+    @Volatile private var semanticsEnabled = false
+    private var semanticSnapshot: NuxieSemanticSnapshot? = null
+    private var semanticSnapshotEpoch = -1L
+    private var semanticFields: Map<String, NativeSemanticNode> = emptyMap()
+    private val semanticActionPending = AtomicBoolean(false)
+    private val sceneInputEnabled = AtomicBoolean(true)
+    private val semanticEpoch = AtomicLong()
+    private val accessibility = ExperienceAccessibilityProvider(this,
+        bounds = { semanticBounds(this, artboardSize, it) }, dispatch = ::dispatchSemanticAction)
+
+    override fun getAccessibilityNodeProvider(): AccessibilityNodeProvider = accessibility
+
+    override fun dispatchHoverEvent(event: MotionEvent): Boolean =
+        accessibility.hover(event) || super.dispatchHoverEvent(event)
+
+    fun semanticKeyboardEntry(direction: Int): android.view.View? = accessibility.keyboardEntry(direction)
+
+    fun dispatchSemanticKeyEvent(event: KeyEvent): Boolean = accessibility.key(event)
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean =
+        accessibility.key(event) || super.dispatchKeyEvent(event)
+
+    override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: Rect?) {
+        super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
+        accessibility.hostFocusChanged(gainFocus, direction)
+    }
+
+    private fun dispatchSemanticAction(tree: NuxieSemanticTree, nodeId: Long, action: Int): Boolean {
+        if (!running || !sceneInputEnabled.get() || released.get() || !semanticActionPending.compareAndSet(false, true)) return false
+        val generation = frameGeneration.get()
+        val epoch = semanticEpoch.get()
+        val accepted = lane.enqueue {
+            try {
+                val capture = semanticSnapshot ?: return@enqueue
+                val active = player ?: return@enqueue
+                if (!running || !sceneInputEnabled.get() || released.get() || generation != frameGeneration.get() ||
+                    epoch != semanticEpoch.get() || pendingPresentation ||
+                    capture.tree.renderRevision != tree.renderRevision || capture.tree.treeVersion != tree.treeVersion) return@enqueue
+                active.queueSemanticAction(capture, nodeId, action)
+            } finally { semanticActionPending.set(false) }
+        }
+        if (!accepted) semanticActionPending.set(false)
+        return accepted
+    }
+
+    /** UI invalidation precedes queued native teardown, excluding already-posted old publications. */
+    private fun retireSemantics() {
+        semanticEpoch.incrementAndGet()
+        accessibility.retire()
+        if (semanticsEnabled) listener?.onSemanticFields(emptyMap())
+        lane.enqueue { semanticSnapshot?.close(); semanticSnapshot = null }
+    }
+
+    private fun publishSemantics(active: NuxieRuntimePlayer, generation: Long, epoch: Long) {
+        if (!semanticsEnabled || epoch != semanticEpoch.get()) return
+        val next = active.captureSemantics()
+        val fields = try {
+            textInputs.values.mapNotNull { input ->
+                next.nodeForTextRun(active.requireHandle(), input.runName)?.let { input.id to it }
+            }.toMap().also { fields ->
+                check(fields.values.map { it.id }.distinct().size == fields.size) {
+                    "Multiple native fields name the same semantic owner"
+                }
+            }
+        } catch (error: Throwable) { next.close(); throw error }
+        semanticSnapshot?.close()
+        semanticFields = fields
+        semanticSnapshot = next
+        semanticSnapshotEpoch = epoch
+        postSemanticTree(next.tree, fields, generation, epoch)
+    }
+
+    private fun postSemanticTree(tree: NuxieSemanticTree, fields: Map<String, NativeSemanticNode>, generation: Long, epoch: Long) {
+        post {
+            if (!released.get() && running && firstFrameComposed && generation == frameGeneration.get() && epoch == semanticEpoch.get()) {
+                try {
+                    val nativeFields = listener?.onSemanticFields(fields).orEmpty()
+                    accessibility.publish(tree, nativeFields)
+                } catch (error: Exception) {
+                    retireSemantics()
+                    reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Experience semantic publication failed", error)
+                }
+            }
+        }
+    }
+
     private var nextCorrelationId = 1uL
     private val surfaceUpdates = AtomicLong()
     private var firstFrameUpdateBaseline = 0L
@@ -148,7 +244,11 @@ internal class ExperienceSurfaceHost(
         textInputs: List<ExperienceTextInput> = emptyList(),
         onLoaded: ((Boolean) -> Unit)? = null,
     ) {
+        retireSemantics()
         lane.enqueue {
+            val requirements = descriptor?.get("requirements") as? JsonObject
+            semanticsEnabled = (requirements?.get("requiredCapabilities") as? JsonArray).orEmpty()
+                .any { (it as? JsonPrimitive)?.content == "scene-semantics-v1" }
             this.textInputs = textInputs.associateBy(ExperienceTextInput::id)
             val activeRenderer = ensureRenderer(1, 1)
             if (activeRenderer == null) {
@@ -249,7 +349,11 @@ internal class ExperienceSurfaceHost(
             applyRuntimeValues(runtimeValues)
             try {
                 player = loadedFile.newExperiencePlayer(loadedArtboard, artboardName)
+                if (semanticsEnabled) checkNotNull(player).enableSemantics()
             } catch (error: Exception) {
+                val failedPlayer = player
+                player = null
+                runCatching { failedPlayer?.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 artboard = null
                 file = null
                 runCatching { loadedArtboard.close() }.exceptionOrNull()?.let(error::addSuppressed)
@@ -287,8 +391,18 @@ internal class ExperienceSurfaceHost(
         if (!accepted) complete(Result.failure(IllegalStateException("Runtime lane is shut down")))
     }
 
+    /** Suspend scene actions during navigation while allowing authored exit animation to render. */
+    fun setInputEnabled(enabled: Boolean) {
+        if (sceneInputEnabled.getAndSet(enabled) == enabled) return
+        isEnabled = enabled
+        semanticEpoch.incrementAndGet()
+        if (!enabled) lane.enqueue { pointerInput.reset() }
+        accessibility.invalidateState()
+    }
+
     /** UI-thread visibility input; a paused but visible Activity remains active. */
     fun setPresentationVisible(visible: Boolean) {
+        if (!visible) retireSemantics()
         presentationVisible = visible
         updateFrameScheduling()
     }
@@ -347,6 +461,7 @@ internal class ExperienceSurfaceHost(
     }
 
     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
+        retireSemantics()
         lane.enqueue {
             if (attached) {
                 pendingPresentation = false
@@ -367,6 +482,7 @@ internal class ExperienceSurfaceHost(
     }
 
     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+        retireSemantics()
         surfaceAvailable = false
         updateFrameScheduling()
         val surface = androidSurface
@@ -404,7 +520,13 @@ internal class ExperienceSurfaceHost(
         if (!released.get() && firstFramePresented && !firstFrameComposed) {
             listener?.onFirstFrame()
             firstFrameComposed = true
-            lane.enqueue { if (!released.get()) publishSteps() }
+            val generation = frameGeneration.get()
+            lane.enqueue {
+                if (!released.get()) {
+                    publishSteps()
+                    semanticSnapshot?.tree?.let { postSemanticTree(it, semanticFields, generation, semanticSnapshotEpoch) }
+                }
+            }
         }
     }
 
@@ -439,6 +561,7 @@ internal class ExperienceSurfaceHost(
             return
         }
         val generation = frameGeneration.get()
+        val epoch = semanticEpoch.get()
         val accepted = lane.enqueue {
             try {
                 if (!attached || !running || generation != frameGeneration.get()) return@enqueue
@@ -467,6 +590,7 @@ internal class ExperienceSurfaceHost(
                         nextCorrelationId + 1uL
                     }
                     val outcome = try {
+                        if (!sceneInputEnabled.get()) pointerInput.reset()
                         player.stepTyped(
                             elapsedSeconds = elapsedSeconds,
                             pointers = pointerInput.takeBatch(),
@@ -511,6 +635,10 @@ internal class ExperienceSurfaceHost(
                         "Experience rendering failed with status ${-disposition}",
                     )
                 } else if (disposition == 1 || disposition == 2) {
+                    try { publishSemantics(player, generation, epoch) } catch (error: Exception) {
+                        reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Experience semantic capture failed", error)
+                        return@enqueue
+                    }
                     val viewModelSnapshot = submittedSnapshot
                     submittedSnapshot = null
                     if (textInputs.isNotEmpty() && viewModelSnapshot != null) {
@@ -531,7 +659,7 @@ internal class ExperienceSurfaceHost(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (!running || released.get()) return false
+        if (!running || !sceneInputEnabled.get() || released.get()) return false
         // Focus loss queues its text commit before dispatch reaches this view.
         // Stage the pointer on that same lane: an older queued frame must not
         // consume a button tap before the edit that preceded it on the UI thread.
@@ -539,9 +667,11 @@ internal class ExperienceSurfaceHost(
         val viewportWidth = width
         val viewportHeight = height
         val generation = frameGeneration.get()
+        val epoch = semanticEpoch.get()
         val accepted = lane.enqueue {
             try {
-                if (!released.get() && running && generation == frameGeneration.get()) {
+                if (!released.get() && running && sceneInputEnabled.get() && generation == frameGeneration.get() &&
+                    epoch == semanticEpoch.get()) {
                     pointerInput.enqueue(copy, viewportWidth, viewportHeight)
                 }
             } finally {
@@ -555,6 +685,7 @@ internal class ExperienceSurfaceHost(
     /** Release every native handle. The host is not reusable afterwards. */
     fun release(finalState: Map<String, NuxieViewModelScalarValue> = emptyMap()) {
         if (!released.compareAndSet(false, true)) return
+        retireSemantics()
         val finalValues = finalState.toMap()
         pointerInput.release()
         updateFrameScheduling()
