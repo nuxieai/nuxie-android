@@ -993,7 +993,16 @@ internal class PurchaseService(
         val revocationSnapshot = withProcessingDecision { missingRevocationSnapshot() }
         val found = mutableListOf<PlayPurchase>()
         for (type in listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP)) {
-            when (val result = billing.queryActive(type)) {
+            val query = try {
+                billing.queryActive(type)
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                // Connection setup can fail before Play supplies a query response.
+                return RestoreResult.Failed(error).also {
+                    emitRestoreOutcome(it, initiatingOwner, outcomeCorrelation?.eventId)
+                }
+            }
+            when (val result = query) {
                 is ActivePurchasesResult.Success -> found += result.purchases
                 is ActivePurchasesResult.Failed -> return RestoreResult.Failed(
                     BillingUnavailableException(result.responseCode, result.debugMessage),
