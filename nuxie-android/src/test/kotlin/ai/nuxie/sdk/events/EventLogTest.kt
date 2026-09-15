@@ -208,8 +208,19 @@ class EventLogTest {
                         eventLog.capture(SystemEventNames.APP_OPENED)
                         eventLog.awaitBarrier()
                         assertTrue(activities.last().isCurrentIdentity)
+                        val priorSessionActivity = activities.last()
                         eventLog.close()
-                        assertFalse(activities.last().isCurrentIdentity)
+                        assertFalse(priorSessionActivity.isCurrentIdentity)
+                        val replacement = log(RecordingStore(), forwardingEnabled = { true }, identity = identity)
+                        replacement.subscribeForwarding { forwarder.onCommitted(it) }
+                        try {
+                            replacement.capture(SystemEventNames.APP_OPENED)
+                            replacement.awaitBarrier()
+                            assertTrue(activities.last().isCurrentIdentity)
+                            assertFalse(priorSessionActivity.isCurrentIdentity)
+                        } finally {
+                            replacement.close()
+                        }
                     }
                     else -> error("Unknown identity fixture action: $action")
                 }
@@ -285,6 +296,70 @@ class EventLogTest {
         } finally {
             release.countDown()
             eventLog.close()
+        }
+    }
+
+    @Test
+    fun transformedDeliveredActivityCannotClaimTheOriginalCustomerIsCurrent() = runBlocking {
+        val identity = MutableIdentity()
+        val store = RecordingStore()
+        val eventLog = log(store, forwardingEnabled = { true }, identity = identity) {
+            NuxieEvent(it.id, it.name, "customer-b", it.properties, it.timestampMillis)
+        }
+        val activities = mutableListOf<ai.nuxie.sdk.NuxieActivityInfo>()
+        val forwarder = ActivityForwarder { activities.add(it) }
+        eventLog.subscribeForwarding { forwarder.onCommitted(it) }
+        try {
+            assertTrue(eventLog.captureDeliveredIdempotently(
+                SystemEventNames.APP_OPENED, emptyMap(), "transformed-identity", "customer-a",
+            ))
+            eventLog.awaitBarrier()
+            assertEquals("customer-b", activities.single().customerId)
+            assertFalse(activities.single().isCurrentIdentity)
+            assertEquals("customer-b", store.delivered.single().distinctId)
+        } finally {
+            eventLog.close()
+        }
+    }
+
+    @Test(timeout = 10_000)
+    fun heldMainThreadActivityIsStaleAfterIdentifyOrResetRoundTrip() = runBlocking {
+        for (transition in listOf("identify", "reset")) {
+            val identity = ai.nuxie.sdk.identity.IdentityService(
+                org.robolectric.RuntimeEnvironment.getApplication(),
+            )
+            identity.setDistinctId("customer-a")
+            val store = RecordingStore()
+            val eventLog = log(store, forwardingEnabled = { true }, identity = identity)
+            val delivered = mutableListOf<Pair<String, Boolean>>()
+            val listener = object : ai.nuxie.sdk.NuxieListener {
+                override fun onAppActionRequested(sdk: ai.nuxie.sdk.Nuxie, action: ai.nuxie.sdk.AppAction) = Unit
+                override fun onActivityEmitted(sdk: ai.nuxie.sdk.Nuxie, info: ai.nuxie.sdk.NuxieActivityInfo) {
+                    delivered.add(info.customerId to info.isCurrentIdentity)
+                }
+            }
+            ai.nuxie.sdk.Nuxie.listener = listener
+            val forwarder = ActivityForwarder { ai.nuxie.sdk.Nuxie.deliverActivity(it) }
+            eventLog.subscribeForwarding { forwarder.onCommitted(it) }
+            val main = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            try {
+                eventLog.capture(SystemEventNames.APP_OPENED)
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2)
+                while (main.isIdle && System.nanoTime() < deadline) Thread.yield()
+                assertFalse("native main-thread callback was not queued", main.isIdle)
+                assertTrue(delivered.isEmpty())
+                if (transition == "identify") identity.setDistinctId("customer-b")
+                else identity.reset(keepAnonymousId = true)
+                identity.setDistinctId("customer-a")
+                main.idle()
+                eventLog.awaitBarrier()
+                assertEquals(transition, listOf("customer-a" to false), delivered)
+                assertEquals(1, store.pending.size)
+            } finally {
+                ai.nuxie.sdk.Nuxie.listener = null
+                main.idle()
+                eventLog.close()
+            }
         }
     }
 
