@@ -40,12 +40,33 @@ dependencies.add(bundletoolCli.name, "com.android.tools.build:bundletool:$bundle
 
 apiValidation {
   ignoredProjects.add("example-app")
+  ignoredProjects.add("example-revenuecat")
   ignoredProjects.add("nuxie-lint")
 }
 
 subprojects {
   group = rootProject.group
   version = rootProject.version
+}
+
+val verifyProviderBoundary = tasks.register("verifyProviderBoundary") {
+  group = "verification"
+  description = "Rejects example purchase-provider dependencies in SDK runtime configurations."
+  doLast {
+    val sdk = project(":nuxie-android")
+    for (variant in listOf("debug", "release")) {
+      val leaked = sdk.configurations.getByName("${variant}RuntimeClasspath")
+        .resolvedConfiguration.resolvedArtifacts.filter {
+          val group = it.moduleVersion.id.group
+          group.startsWith("com.revenuecat") || group.startsWith("com.superwall")
+        }
+      check(leaked.isEmpty()) { "Purchase providers belong only in examples: ${leaked.map { it.moduleVersion.id }}" }
+    }
+  }
+}
+
+project(":nuxie-android").tasks.matching { it.name == "lint" }.configureEach {
+  dependsOn(verifyProviderBoundary, ":example-revenuecat:test", ":example-revenuecat:lint")
 }
 
 val runtimeDirectory = layout.projectDirectory.dir("runtime").asFile

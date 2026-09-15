@@ -18,6 +18,7 @@ rootProject.name = "nuxie-android-sdk"
 
 include(":nuxie-android")
 include(":example-app")
+include(":example-revenuecat")
 include(":nuxie-lint")
 
 // Task-only lifecycle project for the operator-facing runtime:fetch and
