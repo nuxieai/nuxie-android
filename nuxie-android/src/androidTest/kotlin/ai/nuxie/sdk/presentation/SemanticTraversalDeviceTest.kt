@@ -2,6 +2,8 @@ package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.runtime.NativeSemanticNode
 import ai.nuxie.sdk.runtime.NuxieSemanticTree
+import kotlinx.serialization.json.*
+import android.os.Build
 import android.content.Context
 import android.content.Intent
 import android.graphics.Rect
@@ -29,6 +31,56 @@ class SemanticTraversalDeviceTest {
             super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
             semantics.hostFocusChanged(gainFocus, direction)
         }
+    }
+
+    @Test fun sharedControlStatesReachAndroidAccessibilityClients() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val fixture = Json.parseToJsonElement(instrumentation.context.assets
+            .open("accessibility/control-state.json").bufferedReader().use { it.readText() }).jsonObject
+        assertEquals(1, fixture.getValue("schemaVersion").jsonPrimitive.int)
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        lateinit var host: SemanticView
+        try {
+            instrumentation.runOnMainSync {
+                host = SemanticView(activity).apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES }
+                activity.setContentView(host)
+            }
+            fixture.getValue("cases").jsonArray.forEachIndexed { index, item ->
+                val case = item.jsonObject
+                fun int(key: String) = case.getValue(key).jsonPrimitive.int
+                fun bool(key: String) = case.getValue(key).jsonPrimitive.boolean
+                fun text(key: String) = case.getValue(key).jsonPrimitive.content
+                val label = "State vector " + text("id")
+                instrumentation.runOnMainSync {
+                    host.semantics.publish(NuxieSemanticTree(index.toLong(), index.toLong(), listOf(
+                        node(1, 0, int("role"), 100f, label).copy(
+                            traitFlags = int("traits"), stateFlags = int("state"), value = text("value")),
+                    )))
+                }
+                instrumentation.waitForIdleSync()
+                instrumentation.uiAutomation.waitForIdle(100, 5000)
+                val root = checkNotNull(instrumentation.uiAutomation.rootInActiveWindow)
+                val info = root.findAccessibilityNodeInfosByText(label).single { it.text?.toString() == label }
+                assertEquals(label, bool("checkable"), info.isCheckable)
+                if (Build.VERSION.SDK_INT >= 36) {
+                    assertEquals(label, when {
+                        bool("mixed") -> AccessibilityNodeInfo.CHECKED_STATE_PARTIAL
+                        bool("checked") -> AccessibilityNodeInfo.CHECKED_STATE_TRUE
+                        else -> AccessibilityNodeInfo.CHECKED_STATE_FALSE
+                    }, info.checked)
+                    assertEquals(label, when {
+                        !bool("expandable") -> AccessibilityNodeInfo.EXPANDED_STATE_UNDEFINED
+                        bool("expanded") -> AccessibilityNodeInfo.EXPANDED_STATE_FULL
+                        else -> AccessibilityNodeInfo.EXPANDED_STATE_COLLAPSED
+                    }, info.expandedState)
+                } else assertEquals(label, bool("checked") && !bool("mixed"), info.isChecked)
+                if (Build.VERSION.SDK_INT >= 30) {
+                    assertEquals(label, text("value").takeIf { it.isNotEmpty() && int("state") and 4096 == 0 },
+                        info.stateDescription?.toString())
+                }
+            }
+        } finally { instrumentation.runOnMainSync { activity.finish() } }
     }
 
     @Test fun nativeFieldLinksResolveToExactVirtualNeighborsThroughAndroid() {

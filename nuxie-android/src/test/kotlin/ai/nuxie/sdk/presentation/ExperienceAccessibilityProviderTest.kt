@@ -2,6 +2,9 @@ package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.runtime.NativeSemanticNode
 import ai.nuxie.sdk.runtime.NuxieSemanticTree
+import java.io.File
+import kotlinx.serialization.json.*
+import android.os.Build
 import android.app.Activity
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -292,6 +295,43 @@ class ExperienceAccessibilityProviderTest {
         assertTrue(provider.key(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT)))
         assertEquals(listOf(2, 1, 2, 1), actions)
         assertFalse(provider.key(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_CENTER)))
+    }
+
+    @Test @Config(sdk = [23, 30, 36])
+    fun `shared control states project through native Android node fields`() = withHost { host ->
+        val fixture = Json.parseToJsonElement(File("../fixtures/accessibility/control-state.json").readText()).jsonObject
+        assertEquals(1, fixture.getValue("schemaVersion").jsonPrimitive.int)
+        val provider = provider(host)
+        fixture.getValue("cases").jsonArray.forEachIndexed { index, item ->
+            val case = item.jsonObject
+            fun int(key: String) = case.getValue(key).jsonPrimitive.int
+            fun bool(key: String) = case.getValue(key).jsonPrimitive.boolean
+            fun text(key: String) = case.getValue(key).jsonPrimitive.content
+            val id = text("id")
+            provider.publish(NuxieSemanticTree(index.toLong(), index.toLong(), listOf(node().copy(
+                role = int("role"), traitFlags = int("traits"), stateFlags = int("state"), value = text("value"),
+            ))))
+            val info = checkNotNull(provider.createAccessibilityNodeInfo(1))
+            assertEquals(id, bool("checkable"), info.isCheckable)
+            if (Build.VERSION.SDK_INT >= 36) {
+                assertEquals(id, when {
+                    bool("mixed") -> AccessibilityNodeInfo.CHECKED_STATE_PARTIAL
+                    bool("checked") -> AccessibilityNodeInfo.CHECKED_STATE_TRUE
+                    else -> AccessibilityNodeInfo.CHECKED_STATE_FALSE
+                }, info.checked)
+                assertEquals(id, when {
+                    !bool("expandable") -> AccessibilityNodeInfo.EXPANDED_STATE_UNDEFINED
+                    bool("expanded") -> AccessibilityNodeInfo.EXPANDED_STATE_FULL
+                    else -> AccessibilityNodeInfo.EXPANDED_STATE_COLLAPSED
+                }, info.expandedState)
+            } else {
+                assertEquals(id, bool("checked") && !bool("mixed"), info.isChecked)
+            }
+            if (Build.VERSION.SDK_INT >= 30) {
+                val expected = text("value").takeIf { it.isNotEmpty() && int("state") and 4096 == 0 }
+                assertEquals(id, expected, info.stateDescription?.toString())
+            }
+        }
     }
 
     private fun provider(host: View, dispatch: (NuxieSemanticTree, Long, Int) -> Boolean = { _, _, _ -> true }) =

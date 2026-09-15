@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.runtime.NativeSemanticRole
+import ai.nuxie.sdk.runtime.NativeSemanticTrait
 import ai.nuxie.sdk.runtime.NativeSemanticState
 import ai.nuxie.sdk.runtime.NativeSemanticNode
 import ai.nuxie.sdk.runtime.NuxieSemanticTree
@@ -108,7 +109,7 @@ internal class ExperienceAccessibilityProvider(
             val obscured = node.stateFlags and NativeSemanticState.OBSCURED != 0
             isPassword = obscured
             if (Build.VERSION.SDK_INT >= 26) hintText = node.hint
-            if (Build.VERSION.SDK_INT >= 30 && !obscured) stateDescription = node.value
+            if (Build.VERSION.SDK_INT >= 30 && !obscured) stateDescription = node.value.takeIf(String::isNotEmpty)
             if (Build.VERSION.SDK_INT < 30) {
                 contentDescription = listOf(node.label, if (obscured) "" else node.value,
                     if (Build.VERSION.SDK_INT < 26) node.hint else "")
@@ -118,7 +119,24 @@ internal class ExperienceAccessibilityProvider(
             isEnabled = host.isEnabled && node.stateFlags and NativeSemanticState.DISABLED == 0
             isSelected = node.stateFlags and NativeSemanticState.SELECTED != 0
             isCheckable = node.role in listOf(NativeSemanticRole.CHECKBOX, NativeSemanticRole.SWITCH_CONTROL, NativeSemanticRole.RADIO_BUTTON)
-            isChecked = node.stateFlags and (NativeSemanticState.CHECKED or NativeSemanticState.TOGGLED) != 0
+                || node.traitFlags and (NativeSemanticTrait.CHECKABLE or NativeSemanticTrait.TOGGLEABLE) != 0
+            val mixed = node.stateFlags and NativeSemanticState.MIXED != 0
+            val checked = node.stateFlags and (NativeSemanticState.CHECKED or NativeSemanticState.TOGGLED) != 0
+            if (Build.VERSION.SDK_INT >= 36) {
+                setChecked(when {
+                    !isCheckable -> AccessibilityNodeInfo.CHECKED_STATE_FALSE
+                    mixed -> AccessibilityNodeInfo.CHECKED_STATE_PARTIAL
+                    checked -> AccessibilityNodeInfo.CHECKED_STATE_TRUE
+                    else -> AccessibilityNodeInfo.CHECKED_STATE_FALSE
+                })
+                expandedState = when {
+                    node.traitFlags and NativeSemanticTrait.EXPANDABLE == 0 -> AccessibilityNodeInfo.EXPANDED_STATE_UNDEFINED
+                    node.stateFlags and NativeSemanticState.EXPANDED != 0 -> AccessibilityNodeInfo.EXPANDED_STATE_FULL
+                    else -> AccessibilityNodeInfo.EXPANDED_STATE_COLLAPSED
+                }
+            } else {
+                isChecked = isCheckable && checked && !mixed
+            }
             isVisibleToUser = host.isShown && !geometry.inScreen.isEmpty
             isFocusable = true
             isFocused = inputFocus == virtualViewId
