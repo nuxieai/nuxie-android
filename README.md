@@ -10,6 +10,10 @@ This is a pre-release greenfield rebuild. The
 implementation. The specification lives in the `nuxie-dev` repository at
 `specs/android-sdk/overview.md`.
 
+Maintainers can stage and qualify the Maven artifact using the
+[publication guide](docs/publishing.md). Maven Central availability is still
+pending; local publication does not establish a public release.
+
 ## Requirements
 
 - Android minSdk 23

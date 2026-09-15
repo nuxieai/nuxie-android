@@ -1,10 +1,17 @@
 plugins {
   alias(libs.plugins.android.library)
   alias(libs.plugins.kotlin.android)
+  `maven-publish`
 }
 
 android {
   namespace = "ai.nuxie.sdk"
+  publishing {
+    singleVariant("release") {
+      withSourcesJar()
+      withJavadocJar()
+    }
+  }
   compileSdk = 36
   buildToolsVersion = rootProject.extra["nuxieBuildToolsVersion"] as String
   ndkVersion = rootProject.extra["nuxieNdkVersion"] as String
@@ -57,6 +64,44 @@ android {
   }
 }
 
+publishing {
+  publications {
+    register<MavenPublication>("release") {
+      artifactId = "nuxie-android"
+      afterEvaluate { from(components["release"]) }
+      pom {
+        name.set("Nuxie Android SDK")
+        description.set("Native Android Experiences, Journeys, and Features for Nuxie.")
+        url.set("https://nuxie.ai")
+        licenses {
+          license {
+            name.set("Apache License, Version 2.0")
+            url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+          }
+        }
+        developers {
+          developer {
+            id.set("nuxie")
+            name.set("Nuxie")
+            url.set("https://nuxie.ai")
+          }
+        }
+        scm {
+          connection.set("scm:git:https://github.com/nuxieai/nuxie-android.git")
+          developerConnection.set("scm:git:ssh://git@github.com/nuxieai/nuxie-android.git")
+          url.set("https://github.com/nuxieai/nuxie-android")
+        }
+      }
+    }
+  }
+  repositories {
+    maven {
+      name = "staging"
+      url = uri(rootProject.layout.buildDirectory.dir("maven-repository"))
+    }
+  }
+}
+
 dependencies {
   lintPublish(project(":nuxie-lint"))
   lintChecks(project(":nuxie-lint"))
@@ -65,7 +110,9 @@ dependencies {
   // compile classpath. Use the plain artifact: billing-ktx ships Kotlin 2.2
   // metadata this repo's pinned compiler cannot read.
   api(libs.google.play.billing)
-  implementation(libs.kotlinx.coroutines.android)
+  // FeatureInfo exposes StateFlow; consumers must not rely on Billing's
+  // incidental transitive coroutine dependency to compile that public API.
+  api(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.serialization.json)
 
   testImplementation(libs.junit)
