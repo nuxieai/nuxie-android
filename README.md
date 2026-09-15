@@ -269,3 +269,28 @@ This isolated, minified file-AAR consumer checks disabled/redacted/raw native
 warnings and unchanged stderr. It is a logging qualification fixture, not an
 integration example or a complete release/device qualification. Build logs,
 R8 mapping and device evidence remain under `build/minified-native-logging-consumer`.
+
+## Startup process-death qualification
+
+Build and install the debug instrumentation APK on a dedicated test device, then
+run the external driver (pass `--adb /path/to/adb` when adb is not on PATH):
+
+```sh
+NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew :nuxie-android:assembleDebugAndroidTest
+adb -s emulator-5558 install -r nuxie-android/build/outputs/apk/androidTest/debug/nuxie-android-debug-androidTest.apk
+python3 scripts/test-startup-process-death.py --device emulator-5558
+```
+
+Stage the current unpublished runtime candidate using the instructions above
+before this command. The driver captures an ordinary public trigger while the initial
+profile response is held, verifies the test package owns the recorded PID, and
+kills that process without SDK shutdown. A second instrumentation process reads
+the existing identity and SQLite event, admits its signed Journey, exercises the
+native compiled control, and verifies durable response/event state after shutdown.
+The original trigger ID must survive unchanged and appear exactly once.
+
+Logs and the result are retained under `build/process-death/<run-id>/`. The
+instrumentation method is opt-in and skips in an ordinary suite; its seed phase
+must be terminated by this driver. This checks process death before initial
+profile admission with controlled HTTP. It does not qualify death during an
+active Journey or store checkout, OS task restoration, or a live server release.
