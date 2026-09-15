@@ -108,6 +108,50 @@ class ExperienceTextInputTest {
         } finally { overlay.close(); controller.pause().stop().destroy() }
     }
 
+    @Test @org.robolectric.annotation.Config(sdk = [23, 30])
+    fun `disabled semantic ancestor fences native edits and reenabling restores admitted draft`() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val input = ExperienceTextInput.forScreen(textInputDescriptor("ok"), "survey").single()
+        val writes = mutableListOf<String>()
+        val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
+            listOf(input), emptyMap(), { _, text, _, done -> writes += text; done(Result.success(Unit)) }, { throw it })
+        try {
+            controller.get().setContentView(overlay)
+            overlay.layout(0, 0, 400, 400)
+            overlay.update(snapshot())
+            val editor = overlay.getChildAt(0) as EditText
+            val group = ai.nuxie.sdk.runtime.NativeSemanticNode(10, -1, 0, 9, 0, 0, 0, 0,
+                0f, 0f, 200f, 100f, "Group", "", "")
+            val field = group.copy(id = 42, parentId = 10, role = 6, label = "Name")
+            fun publish(disabled: Boolean) {
+                val tree = ai.nuxie.sdk.runtime.NuxieSemanticTree(1, 1,
+                    listOf(field, group.copy(stateFlags = if (disabled) 64 else 0)))
+                overlay.updateSemantics(mapOf("name" to tree.nodes.single { it.id == 42L }))
+            }
+            publish(false)
+            assertTrue(editor.requestFocus())
+            val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
+            publish(true)
+            assertEquals(View.VISIBLE, editor.visibility)
+            assertFalse(editor.isEnabled)
+            val before = writes.toList()
+            connection.commitText("zz", 1)
+            val replacement = android.os.Bundle().apply {
+                putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Ad")
+            }
+            assertFalse(editor.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, replacement))
+            assertEquals(before, writes)
+            overlay.setInputEnabled(false)
+            overlay.setInputEnabled(true)
+            assertFalse(editor.isEnabled)
+            publish(false)
+            assertTrue(editor.isEnabled)
+            assertEquals("ok", editor.text.toString())
+            assertTrue(editor.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, replacement))
+            assertEquals("Ad", writes.last())
+        } finally { overlay.close(); controller.pause().stop().destroy() }
+    }
+
     @Test
     fun `native preparation takes the latest draft and fences stale IME callbacks until abort`() {
         val contract = Json.parseToJsonElement(ai.nuxie.sdk.fixtures.FixtureRunner.fixturesRoot()

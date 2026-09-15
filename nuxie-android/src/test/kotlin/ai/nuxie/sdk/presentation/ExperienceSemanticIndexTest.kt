@@ -49,9 +49,10 @@ class ExperienceSemanticIndexTest {
 
     @Test fun `maximum depth is resolved without recursive stack growth`() {
         val index = ExperienceSemanticIndex()
-        val nodes = (1..16_384).map { id -> node(id.toLong()).copy(parentId = if (id == 1) -1 else id - 1) }
+        val nodes = (1..16_384).map { id -> node(id.toLong()).copy(parentId = if (id == 1) -1 else id - 1, stateFlags = if (id == 1) 64 else 0) }
         index.update(NuxieSemanticTree(1, 1, nodes.reversed()))
         assertEquals(16_384, index.entries.size)
+        assertTrue(index.entries.values.all { it.node.stateFlags and 64 != 0 })
         assertEquals(1L, index.children(null).single().node.id)
     }
 
