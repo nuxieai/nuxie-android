@@ -1929,7 +1929,12 @@ class PublishedTextInputDeviceTest {
     @SdkSuppress(minSdkVersion = 26)
     fun failedCompiledScriptClosesWithoutCommittingPartialResponses() = exerciseDurableNativeEmission(true, true)
 
-    private fun exerciseDurableNativeEmission(scripted: Boolean, failScript: Boolean = false) {
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun accessibilityTextEditIsDurableBeforeAuthoredJourneyNavigation() =
+        exerciseDurableNativeEmission(false, accessibilityEdit = true)
+
+    private fun exerciseDurableNativeEmission(scripted: Boolean, failScript: Boolean = false, accessibilityEdit: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
@@ -2059,7 +2064,8 @@ class PublishedTextInputDeviceTest {
                 }
             } else {
                 val field = awaitEditor(instrumentation, first, "text-input/screen_1/email_input")
-                edit(instrumentation, field, "durable@example.com")
+                if (accessibilityEdit) editUsingAccessibility(instrumentation, "durable@example.com")
+                else edit(instrumentation, field, "durable@example.com")
             }
             if (failScript) {
                 assertEquals(JourneyScreenDismissalResult.COMPLETED, errorDismissals.poll(10, TimeUnit.SECONDS))
@@ -2288,6 +2294,38 @@ class PublishedTextInputDeviceTest {
         }
         val assets = (render.getValue("assets").jsonArray.map { it.jsonObject } + scripts).associate { stage(it) }
         return PublishedFixture(release, riv, assets, entry, trustedKeys)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun editUsingAccessibility(instrumentation: Instrumentation, value: String) {
+        // Query the system's exposed tree, rather than manufacturing a node from the View.
+        val deadline = SystemClock.uptimeMillis() + 10_000
+        var editor: android.view.accessibility.AccessibilityNodeInfo? = null
+        while (editor == null && SystemClock.uptimeMillis() < deadline) {
+            val root = instrumentation.uiAutomation.rootInActiveWindow
+            if (root != null) {
+                try {
+                    val matches = root.findAccessibilityNodeInfosByText("levi@nuxie.dev")
+                    editor = matches.firstOrNull { it.isEditable && it.isVisibleToUser }
+                    matches.filter { it !== editor }.forEach { it.recycle() }
+                } finally { root.recycle() }
+            }
+            if (editor == null) SystemClock.sleep(20)
+        }
+        val node = checkNotNull(editor) { "Published editor must be discoverable in the accessibility tree" }
+        try {
+            assertEquals("android.widget.EditText", node.className.toString())
+            assertEquals("you@example.com", node.hintText.toString())
+            assertFalse(node.isPassword)
+            assertTrue(node.isEnabled)
+            assertTrue(node.actionList.any { it.id == android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT })
+            assertTrue(node.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_FOCUS))
+            val arguments = android.os.Bundle().apply {
+                putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
+            }
+            assertTrue(node.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, arguments))
+            assertTrue(node.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLEAR_FOCUS))
+        } finally { node.recycle() }
     }
 
     private fun edit(instrumentation: Instrumentation, field: EditText, value: String) {
