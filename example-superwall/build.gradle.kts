@@ -17,7 +17,7 @@ android {
 
 dependencies {
   implementation(project(":nuxie-android"))
-  implementation("com.superwall.sdk:superwall-android:2.8.3")
+  api("com.superwall.sdk:superwall-android:2.8.3")
   testImplementation(libs.junit)
   testImplementation(libs.robolectric)
 }

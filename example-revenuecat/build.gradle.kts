@@ -17,7 +17,7 @@ android {
 
 dependencies {
   implementation(project(":nuxie-android"))
-  implementation("com.revenuecat.purchases:purchases:10.21.1")
+  api("com.revenuecat.purchases:purchases:10.21.1")
   testImplementation(libs.junit)
   testImplementation(libs.robolectric)
 }
