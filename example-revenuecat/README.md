@@ -65,11 +65,11 @@ and consumption/acknowledgement remain unqualified here. Test Store bypasses
 delegates and therefore cannot qualify this adapter. This is not a completed
 provider parity claim.
 
-The module currently consumes the SDK project and the staged local runtime
-candidate described in the root README. Published SDK consumption is pending.
+The module consumes the SDK project and its pinned published native runtime.
+Consumption of a published SDK artifact remains pending.
 
 ```bash
-NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew :example-revenuecat:test :example-revenuecat:lint verifyProviderBoundary
+./gradlew :example-revenuecat:test :example-revenuecat:lint verifyProviderBoundary
 ```
 
 SDK lint also runs these example checks. The boundary checks the SDK's resolved

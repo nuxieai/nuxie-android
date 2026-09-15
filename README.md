@@ -17,15 +17,16 @@ implementation. The specification lives in the `nuxie-dev` repository at
 
 ## Runtime artifact
 
-Gradle fetches and SHA-256 verifies the release pinned in `runtime/artifact.json`.
-The current surface-presentation work requires native APIs newer than that
-v0.3.9 pin, so this development branch does not yet build from the public
-runtime artifact. Publishing and pinning the qualified runtime is a release
-prerequisite; local test results do not establish a consumable SDK release.
+Gradle fetches and SHA-256 verifies the published Android runtime v0.3.10 pinned
+in `runtime/artifact.json`. It contains the native surface-presentation APIs used
+by this SDK. Ordinary builds and tests use that artifact automatically:
 
-For local development, build the Android runtime candidate at
-`7437338d0fc9e53352734dd856142ee471c0a768` in a `nuxie-runtime` checkout, then
-stage its verified build outputs and opt in to using them:
+```bash
+./gradlew :nuxie-android:test :nuxie-android:apiCheck :nuxie-android:lint :example-app:assembleDebug
+```
+
+For development of runtime changes, build the Android distribution in a
+`nuxie-runtime` checkout and optionally stage its verified outputs:
 
 ```bash
 scripts/stage-runtime.sh /absolute/path/to/nuxie-runtime
@@ -34,13 +35,13 @@ NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew :nuxie-android:test :nuxie-android:apiCheck 
 
 The staging script verifies the build's source revision and pinned NDK.
 Without `NUXIE_RUNTIME_USE_LOCAL=1`, Gradle restores the public pinned artifact;
-restage the candidate before resuming local development if that happens.
+restage your runtime build before resuming local runtime development if needed.
 
 ## Integration example
 
 The [example app guide](example-app/README.md) covers setup, identity, authored
 triggers, Feature access, restore, a local analytics sink and the development
-Test Store. Its current local-runtime requirement is described above.
+Test Store using the pinned runtime artifact.
 
 The separate [RevenueCat adapter example](example-revenuecat/README.md) compiles
 against a pinned provider SDK and preserves exact subscription checkout terms.
@@ -276,13 +277,12 @@ Build and install the debug instrumentation APK on a dedicated test device, then
 run the external driver (pass `--adb /path/to/adb` when adb is not on PATH):
 
 ```sh
-NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew :nuxie-android:assembleDebugAndroidTest
+./gradlew :nuxie-android:assembleDebugAndroidTest
 adb -s emulator-5558 install -r nuxie-android/build/outputs/apk/androidTest/debug/nuxie-android-debug-androidTest.apk
 python3 scripts/test-startup-process-death.py --device emulator-5558
 ```
 
-Stage the current unpublished runtime candidate using the instructions above
-before this command. The driver captures an ordinary public trigger while the
+The driver captures an ordinary public trigger while the
 initial profile response is held, verifies the test package owns the recorded PID, and
 kills that process without SDK shutdown. A second instrumentation process reads
 the existing identity and SQLite event, admits its signed Journey, exercises the
