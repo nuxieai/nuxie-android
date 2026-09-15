@@ -66,12 +66,10 @@ internal class ExperienceRuntimePointerInput(
             incoming.forEach { event ->
                 when (event.kind) {
                     NuxiePlayerPointerKind.MOVE -> {
-                        if (event.pointerId in activePointerIds) {
-                            removeSupersededMove(event.pointerId)
-                            if (!hasCapacity(1)) return@forEach
-                        } else if (!reserveNewPointer(event.pointerId)) {
-                            return@forEach
-                        }
+                        // Touch MOVE cannot establish a new gesture after hiding.
+                        if (event.pointerId !in activePointerIds) return@forEach
+                        removeSupersededMove(event.pointerId)
+                        if (!hasCapacity(1)) return@forEach
                     }
                     NuxiePlayerPointerKind.DOWN -> {
                         if (event.pointerId in activePointerIds) {
@@ -83,9 +81,9 @@ internal class ExperienceRuntimePointerInput(
                     NuxiePlayerPointerKind.UP,
                     NuxiePlayerPointerKind.EXIT,
                     -> {
-                        if (!activePointerIds.remove(event.pointerId) && !hasCapacity(1)) {
-                            return@forEach
-                        }
+                        // A retained native control may still react to UP after
+                        // EXIT. Only a DOWN in this visible interval owns release.
+                        if (!activePointerIds.remove(event.pointerId)) return@forEach
                     }
                 }
                 events += event
