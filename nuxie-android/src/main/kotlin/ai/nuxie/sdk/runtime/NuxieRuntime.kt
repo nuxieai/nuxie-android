@@ -184,6 +184,25 @@ internal class NuxieRuntimeFile(
             ?.let { NuxieRuntimeArtboard(it, native, ::viewModelCatalog) }
     }
 
+    /** Preserve the authored scene while enabling the publisher's interaction machine. */
+    fun newExperiencePlayer(artboard: NuxieRuntimeArtboard, artboardName: String?): NuxieRuntimePlayer {
+        val names = requireNativeValue(native.stateMachineNames(owned.require(), artboardName), "read state machines")
+        val interaction = listOf("Generated Nuxie Pressable Interaction", "Generated Nuxie Interaction")
+            .firstOrNull { it in names }
+        val primary = checkNotNull(artboard.newPlayer()) { "Experience primary player creation failed" }
+        try {
+            if (interaction == null || requireNativeValue(
+                native.playerStateMachineName(primary.requireHandle()), "read primary player selection",
+            ) == interaction) return primary
+            val auxiliary = checkNotNull(artboard.newPlayer(interaction)) { "Experience interaction player creation failed" }
+            primary.installInteractionPlayer(auxiliary)
+            return primary
+        } catch (error: Throwable) {
+            runCatching { primary.close() }.exceptionOrNull()?.let(error::addSuppressed)
+            throw error
+        }
+    }
+
     private fun viewModelCatalog(): NuxieViewModelCatalog = requireNativeValue(
         native.viewModelCatalog(owned.require()),
         "read view-model catalog",
@@ -431,9 +450,21 @@ internal class NuxieRuntimePlayer internal constructor(
     private val native: NuxieTypedRuntimeNative,
 ) {
     private val owned = NuxieOwnedHandle(handle, "player", native::freePlayer)
+    private var interactionPlayer: NuxieRuntimePlayer? = null
+    private var interactionNeedsInitialStep = true
+    private var stepFailed = false
 
-    fun step(elapsedSeconds: Double): Int =
-        native.stepPlayerFrame(owned.require(), elapsedSeconds)
+    internal fun installInteractionPlayer(player: NuxieRuntimePlayer) {
+        check(interactionPlayer == null)
+        interactionPlayer = player
+    }
+
+
+    fun step(elapsedSeconds: Double): Int {
+        if (interactionPlayer == null) return native.stepPlayerFrame(requireHandle(), elapsedSeconds)
+        stepTyped(elapsedSeconds = elapsedSeconds)
+        return NUX_STATUS_OK
+    }
 
     /**
      * Advance one configured ProductHost frame and copy every emitted event
@@ -460,6 +491,38 @@ internal class NuxieRuntimePlayer internal constructor(
         }
         val nativeElapsed = elapsedSeconds.toFloat()
         require(nativeElapsed.isFinite()) { "Player elapsed seconds exceed the native Float range" }
+        requireHandle()
+        val auxiliary = interactionPlayer
+        if (auxiliary == null) return stepSingle(inputs, pointers, nativeElapsed, correlationId)
+        try {
+            val primary = stepSingle(emptyList(), pointers, nativeElapsed, correlationId)
+            if (!interactionNeedsInitialStep && inputs.isEmpty() && pointers.isEmpty()) return primary
+            val interaction = auxiliary.stepTyped(inputs, pointers, 0.0, correlationId)
+            interactionNeedsInitialStep = false
+            return NuxiePlayerStepOutcome(
+                keepGoing = primary.keepGoing || interaction.keepGoing,
+                pointerHits = pointers.indices.map { index ->
+                    listOfNotNull(primary.pointerHits.getOrNull(index), interaction.pointerHits.getOrNull(index))
+                        .maxByOrNull { it.nativeValue } ?: NuxiePlayerPointerHit.NONE
+                },
+                events = primary.events + interaction.events,
+                hostCommands = primary.hostCommands + interaction.hostCommands,
+                viewModelChanges = primary.viewModelChanges + interaction.viewModelChanges,
+            )
+        } catch (error: Throwable) {
+            // Native mutations cannot be rolled back after a partial composite step.
+            // Do not publish its partial result or allow rendering/retrying that occurrence.
+            stepFailed = true
+            throw error
+        }
+    }
+
+    private fun stepSingle(
+        inputs: List<NuxiePlayerInput>,
+        pointers: List<NuxiePlayerPointerEvent>,
+        nativeElapsed: Float,
+        correlationId: ULong,
+    ): NuxiePlayerStepOutcome {
         val result = native.stepPlayer(
             playerHandle = owned.require(),
             inputs = encodePlayerInputs(inputs),
@@ -475,9 +538,14 @@ internal class NuxieRuntimePlayer internal constructor(
         }.toPlayerStepOutcome()
     }
 
-    fun close() = owned.close()
+    fun close() {
+        try { interactionPlayer?.close() } finally { owned.close() }
+    }
 
-    internal fun requireHandle(): Long = owned.require()
+    internal fun requireHandle(): Long {
+        check(!stepFailed) { "Experience player failed during a composite step" }
+        return owned.require()
+    }
 }
 
 /** JVM-owned tightly packed, top-row-first RGBA8 premultiplied-sRGB pixels. */

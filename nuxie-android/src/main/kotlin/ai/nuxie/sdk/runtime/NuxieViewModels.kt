@@ -288,6 +288,12 @@ internal interface NuxieTypedRuntimeNative {
     fun newNamedStateMachinePlayer(artboardHandle: Long, name: String): Long =
         error("newNamedStateMachinePlayer is not implemented")
 
+    fun stateMachineNames(fileHandle: Long, artboardName: String?): NativeCallResult<List<String>> =
+        error("stateMachineNames is not implemented")
+
+    fun playerStateMachineName(playerHandle: Long): NativeCallResult<String> =
+        error("playerStateMachineName is not implemented")
+
     fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int =
         error("stepPlayerFrame is not implemented")
 
@@ -424,6 +430,18 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         if (status[0] != NUX_STATUS_OK) return NativeCallResult(status[0], null)
         check(changed == 0 || changed == 1) { "Native runtime returned a non-canonical text mutation result" }
         return NativeCallResult(status[0], changed == 1)
+    }
+
+    override fun stateMachineNames(fileHandle: Long, artboardName: String?): NativeCallResult<List<String>> {
+        val status = intArrayOf(4)
+        val names = NuxieRuntimeBridge.nativeFileStateMachineNames(fileHandle, artboardName?.encodeToByteArray(), status)
+        return NativeCallResult(status.single(), names?.toList())
+    }
+
+    override fun playerStateMachineName(playerHandle: Long): NativeCallResult<String> {
+        val status = intArrayOf(4)
+        val name = NuxieRuntimeBridge.nativePlayerStateMachineName(playerHandle, status)
+        return NativeCallResult(status.single(), name)
     }
 
     override fun newDefaultPlayer(artboardHandle: Long): Long =

@@ -247,9 +247,9 @@ internal class ExperienceSurfaceHost(
                 return@enqueue
             }
             applyRuntimeValues(runtimeValues)
-            player = loadedArtboard.newPlayer()
-            if (player == null) {
-                val error = IllegalStateException("Experience player creation failed")
+            try {
+                player = loadedFile.newExperiencePlayer(loadedArtboard, artboardName)
+            } catch (error: Exception) {
                 artboard = null
                 file = null
                 runCatching { loadedArtboard.close() }.exceptionOrNull()?.let(error::addSuppressed)
