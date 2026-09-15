@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NativeSemanticState
 import ai.nuxie.sdk.runtime.NativeSemanticNode
 import android.view.accessibility.AccessibilityNodeInfo
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
@@ -101,7 +102,7 @@ internal class ExperienceTextInputOverlay(
                 editor.setSelection(retained.selectionStart.coerceIn(0, length), retained.selectionEnd.coerceIn(0, length))
             }
             val node = semanticFields?.get(binding.input.id)
-            editor.isEnabled = enabled && (semanticFields == null || node != null && node.stateFlags and 64 == 0)
+            editor.isEnabled = enabled && (semanticFields == null || node != null && node.stateFlags and NativeSemanticState.DISABLED == 0)
         }
         inputEnabled = enabled
     }
@@ -114,7 +115,7 @@ internal class ExperienceTextInputOverlay(
             binding.editor.semanticNode = node
             binding.editor.importantForAccessibility = if (node == null) View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 else View.IMPORTANT_FOR_ACCESSIBILITY_YES
-            val enabled = inputEnabled && node != null && node.stateFlags and 64 == 0
+            val enabled = inputEnabled && node != null && node.stateFlags and NativeSemanticState.DISABLED == 0
             if (enabled && !binding.editor.isEnabled) {
                 // Restore while disabled so TextWatcher/selection callbacks cannot
                 // admit a stale IME draft or emit a second response transaction.

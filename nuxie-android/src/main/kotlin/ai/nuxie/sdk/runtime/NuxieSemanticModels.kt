@@ -1,5 +1,29 @@
 package ai.nuxie.sdk.runtime
 
+/** Values from the pinned nux_capi.generated.h semantic ABI. */
+internal object NativeSemanticRole {
+    const val BUTTON = 1
+    const val LINK = 2
+    const val CHECKBOX = 3
+    const val SWITCH_CONTROL = 4
+    const val SLIDER = 5
+    const val TEXT_FIELD = 6
+    const val TEXT = 7
+    const val IMAGE = 8
+    const val LIST = 10
+    const val RADIO_GROUP = 16
+    const val RADIO_BUTTON = 17
+}
+
+internal object NativeSemanticState {
+    const val SELECTED = 1 shl 1
+    const val CHECKED = 1 shl 2
+    const val TOGGLED = 1 shl 4
+    const val DISABLED = 1 shl 6
+    const val HIDDEN = 1 shl 8
+    const val OBSCURED = 1 shl 12
+}
+
 /** Copied C ABI node. IDs retain all unsigned 32 bits; these are not Android virtual IDs. */
 internal data class NativeSemanticNode(
     val id: Long,
@@ -32,11 +56,42 @@ internal interface NuxieSemanticNative {
 }
 
 /** UI-safe data only. The native capture that authorizes actions stays on the runtime lane. */
-internal data class NuxieSemanticTree(
+internal class NuxieSemanticTree(
     val renderRevision: Long,
     val treeVersion: Long,
-    val nodes: List<NativeSemanticNode>,
-)
+    nodes: List<NativeSemanticNode>,
+) {
+    // Native captures retain each node's own flags. Native editors bypass semantic
+    // action admission, so every consumer needs the same ancestor-disabled state.
+    val nodes: List<NativeSemanticNode> = inheritDisabledState(nodes)
+
+    private fun inheritDisabledState(nodes: List<NativeSemanticNode>): List<NativeSemanticNode> {
+        require(nodes.size <= 16_384) { "Semantic tree exceeds native node limit" }
+        val byId = nodes.associateBy { it.id }
+        require(byId.size == nodes.size) { "Duplicate semantic node identity" }
+        val disabled = mutableMapOf<Long, Boolean>()
+        for (node in nodes) {
+            val path = mutableListOf<NativeSemanticNode>()
+            val visiting = mutableSetOf<Long>()
+            var current: NativeSemanticNode? = node
+            while (current != null && current.id !in disabled) {
+                require(visiting.add(current.id)) { "Cyclic semantic hierarchy" }
+                path += current
+                current = if (current.parentId == -1) null else
+                    requireNotNull(byId[current.parentId.toLong() and 0xffff_ffffL]) { "Missing semantic ancestor" }
+            }
+            var inherited = current?.let { disabled.getValue(it.id) } ?: false
+            for (item in path.asReversed()) {
+                inherited = inherited || item.stateFlags and NativeSemanticState.DISABLED != 0
+                disabled[item.id] = inherited
+            }
+        }
+        return nodes.map { node ->
+            if (disabled.getValue(node.id)) node.copy(stateFlags = node.stateFlags or NativeSemanticState.DISABLED)
+            else node
+        }
+    }
+}
 
 /** Lane-confined ownership of a presented capture, including atomic copy failure cleanup. */
 internal class NuxieSemanticSnapshot private constructor(
@@ -55,7 +110,7 @@ internal class NuxieSemanticSnapshot private constructor(
         if (result.status == 3) return null
         if (result.status != 0) throw NuxieRuntimeCallException("associate semantic text field", result.status)
         val id = checkNotNull(result.value) { "Native semantic association returned no identity" }
-        return checkNotNull(tree.nodes.singleOrNull { it.id == id && it.role == 6 }) {
+        return checkNotNull(tree.nodes.singleOrNull { it.id == id && it.role == NativeSemanticRole.TEXT_FIELD }) {
             "Native semantic association returned an absent or non-field node"
         }
     }

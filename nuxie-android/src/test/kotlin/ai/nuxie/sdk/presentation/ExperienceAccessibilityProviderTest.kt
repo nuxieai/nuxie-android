@@ -71,6 +71,25 @@ class ExperienceAccessibilityProviderTest {
         assertEquals(0, calls)
     }
 
+    @Test @Config(sdk = [23, 30])
+    fun `disabled ancestor is announced and rejects virtual activation until reenabling`() = withHost { host ->
+        var calls = 0
+        val provider = provider(host) { _, _, _ -> calls++; true }
+        val group = node().copy(id = 10, role = 9, actions = 0, label = "Group")
+        val child = node().copy(parentId = 10)
+        fun publish(disabled: Boolean) = provider.publish(NuxieSemanticTree(1, 1,
+            listOf(child, group.copy(stateFlags = if (disabled) 64 else 0))))
+        publish(true)
+        assertFalse(checkNotNull(provider.createAccessibilityNodeInfo(1)).isEnabled)
+        assertFalse(provider.performAction(1, AccessibilityNodeInfo.ACTION_CLICK, null))
+        assertFalse(provider.performAction(1, AccessibilityNodeInfo.ACTION_FOCUS, null))
+        assertEquals(0, calls)
+        publish(false)
+        assertTrue(checkNotNull(provider.createAccessibilityNodeInfo(1)).isEnabled)
+        assertTrue(provider.performAction(1, AccessibilityNodeInfo.ACTION_CLICK, null))
+        assertEquals(1, calls)
+    }
+
     @Test @Config(sdk = [23]) fun `older Android exposes values and hints while omitting secure values`() = withHost { host ->
         val provider = provider(host)
         provider.publish(NuxieSemanticTree(1, 1, listOf(node().copy(value = "50 percent"))))

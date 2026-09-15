@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NativeSemanticRole
+import ai.nuxie.sdk.runtime.NativeSemanticState
 import ai.nuxie.sdk.runtime.NativeSemanticNode
 import ai.nuxie.sdk.runtime.NuxieSemanticTree
 import android.graphics.Rect
@@ -91,19 +93,19 @@ internal class ExperienceAccessibilityProvider(
             if (entry.parent == null) setParent(host) else setParent(host, entry.parent)
             packageName = host.context.packageName
             className = when (node.role) {
-                1 -> "android.widget.Button"
-                3 -> "android.widget.CheckBox"
-                4 -> "android.widget.Switch"
-                5 -> "android.widget.SeekBar"
-                7, 2 -> "android.widget.TextView"
-                8 -> "android.widget.ImageView"
-                10 -> "android.widget.ListView"
-                16 -> "android.widget.RadioGroup"
-                17 -> "android.widget.RadioButton"
+                NativeSemanticRole.BUTTON -> "android.widget.Button"
+                NativeSemanticRole.CHECKBOX -> "android.widget.CheckBox"
+                NativeSemanticRole.SWITCH_CONTROL -> "android.widget.Switch"
+                NativeSemanticRole.SLIDER -> "android.widget.SeekBar"
+                NativeSemanticRole.TEXT, NativeSemanticRole.LINK -> "android.widget.TextView"
+                NativeSemanticRole.IMAGE -> "android.widget.ImageView"
+                NativeSemanticRole.LIST -> "android.widget.ListView"
+                NativeSemanticRole.RADIO_GROUP -> "android.widget.RadioGroup"
+                NativeSemanticRole.RADIO_BUTTON -> "android.widget.RadioButton"
                 else -> "android.view.View"
             }
             text = node.label
-            val obscured = node.stateFlags and (1 shl 12) != 0
+            val obscured = node.stateFlags and NativeSemanticState.OBSCURED != 0
             isPassword = obscured
             if (Build.VERSION.SDK_INT >= 26) hintText = node.hint
             if (Build.VERSION.SDK_INT >= 30 && !obscured) stateDescription = node.value
@@ -113,10 +115,10 @@ internal class ExperienceAccessibilityProvider(
                     .filter(String::isNotEmpty).joinToString(", ")
             }
             if (Build.VERSION.SDK_INT >= 28) isHeading = node.headingLevel > 0
-            isEnabled = host.isEnabled && node.stateFlags and (1 shl 6) == 0
-            isSelected = node.stateFlags and (1 shl 1) != 0
-            isCheckable = node.role in listOf(3, 4, 17)
-            isChecked = node.stateFlags and ((1 shl 2) or (1 shl 4)) != 0
+            isEnabled = host.isEnabled && node.stateFlags and NativeSemanticState.DISABLED == 0
+            isSelected = node.stateFlags and NativeSemanticState.SELECTED != 0
+            isCheckable = node.role in listOf(NativeSemanticRole.CHECKBOX, NativeSemanticRole.SWITCH_CONTROL, NativeSemanticRole.RADIO_BUTTON)
+            isChecked = node.stateFlags and (NativeSemanticState.CHECKED or NativeSemanticState.TOGGLED) != 0
             isVisibleToUser = host.isShown && !geometry.inScreen.isEmpty
             isFocusable = true
             isFocused = inputFocus == virtualViewId
@@ -189,7 +191,7 @@ internal class ExperienceAccessibilityProvider(
                 return true
             }
             AccessibilityNodeInfo.ACTION_FOCUS -> {
-                if (!host.isEnabled || entry.node.stateFlags and (1 shl 6) != 0 ||
+                if (!host.isEnabled || entry.node.stateFlags and NativeSemanticState.DISABLED != 0 ||
                     inputFocus == virtualViewId || !host.requestFocus()) return false
                 inputFocus = virtualViewId
                 refreshKeyboardIndicator()
@@ -202,7 +204,7 @@ internal class ExperienceAccessibilityProvider(
                 return true
             }
         }
-        if (!host.isEnabled || entry.node.stateFlags and (1 shl 6) != 0) return false
+        if (!host.isEnabled || entry.node.stateFlags and NativeSemanticState.DISABLED != 0) return false
         val nativeAction = when (action) {
             AccessibilityNodeInfo.ACTION_CLICK -> 0
             AccessibilityNodeInfo.ACTION_SCROLL_FORWARD -> 1
@@ -242,7 +244,7 @@ internal class ExperienceAccessibilityProvider(
         }
         if (direction != null) {
             val node = index.entries[target]?.node ?: return false
-            if (node.role == 5 && direction in listOf(View.FOCUS_LEFT, View.FOCUS_RIGHT)) {
+            if (node.role == NativeSemanticRole.SLIDER && direction in listOf(View.FOCUS_LEFT, View.FOCUS_RIGHT)) {
                 val increase = (direction == View.FOCUS_RIGHT) != (host.layoutDirection == View.LAYOUT_DIRECTION_RTL)
                 val action = if (increase) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
                 return performAction(target, action, null)
@@ -351,7 +353,7 @@ internal class ExperienceAccessibilityProvider(
 
     private fun isKeyboardTarget(id: Int): Boolean {
         val node = index.entries[id]?.node ?: return false
-        return node.actions != 0 && node.stateFlags and (1 shl 6) == 0 &&
+        return node.actions != 0 && node.stateFlags and NativeSemanticState.DISABLED == 0 &&
             bounds(node)?.inScreen?.isEmpty == false
     }
 

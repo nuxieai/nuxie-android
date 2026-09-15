@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NativeSemanticRole
+import ai.nuxie.sdk.runtime.NativeSemanticState
 import ai.nuxie.sdk.runtime.NativeSemanticNode
 import ai.nuxie.sdk.runtime.NuxieSemanticTree
 
@@ -30,7 +32,7 @@ internal class ExperienceSemanticIndex {
         val byId = incoming.nodes.associateBy { it.id }
         require(byId.size == incoming.nodes.size) { "Duplicate semantic node identity" }
         require(incoming.nodes.all { it.id in 0..0xffff_ffffL }) { "Invalid semantic node identity" }
-        require(incoming.nodes.filter { it.role == 6 }.all { it.id in nativeFieldIds }) {
+        require(incoming.nodes.filter { it.role == NativeSemanticRole.TEXT_FIELD }.all { it.id in nativeFieldIds }) {
             "Semantic text fields require an associated native editable control"
         }
         data class Placement(val hidden: Boolean, val represented: Boolean, val parent: Long?)
@@ -52,7 +54,7 @@ internal class ExperienceSemanticIndex {
             for (item in path.asReversed()) {
                 val parentId = if (item.parentId == -1) null else item.parentId.toLong() and 0xffff_ffffL
                 val parent = parentId?.let { placements.getValue(it) }
-                val hidden = item.stateFlags and (1 shl 8) != 0 || parent?.hidden == true
+                val hidden = item.stateFlags and NativeSemanticState.HIDDEN != 0 || parent?.hidden == true
                 placements[item.id] = Placement(hidden, !hidden && item.id !in nativeFieldIds,
                     if (parent?.represented == true) parentId else parent?.parent)
             }
