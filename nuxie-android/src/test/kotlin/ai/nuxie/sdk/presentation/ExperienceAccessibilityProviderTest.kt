@@ -27,6 +27,44 @@ import org.robolectric.annotation.GraphicsMode
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [30])
 class ExperienceAccessibilityProviderTest {
+    @Test fun `outer sheet recovery focus cancels restoration in nested content root`() = withHost { host ->
+        Shadows.shadowOf(host.context.getSystemService(AccessibilityManager::class.java)).setTouchExplorationEnabled(true)
+        val inner = host.parent as ExperienceFocusRoot
+        val activity = host.context as Activity
+        val outer = ExperienceFocusRoot(activity)
+        activity.setContentView(outer)
+        outer.addView(inner)
+        val shell = android.widget.Button(activity)
+        outer.addView(shell)
+        shell.layout(0, 0, 100, 50)
+        val provider = provider(host)
+        val tree = NuxieSemanticTree(1, 1, listOf(node()))
+        provider.publish(tree)
+        assertTrue(provider.performAction(1, AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null))
+        provider.withdraw()
+        assertTrue(shell.performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null))
+        provider.publish(tree)
+        assertNull(provider.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY))
+        assertTrue(shell.isAccessibilityFocused)
+    }
+
+    @Test fun `focus history detaches from old window and observes reattachment`() = withHost { host ->
+        val root = host.parent as ExperienceFocusRoot
+        val activity = host.context as Activity
+        val outside = android.widget.EditText(activity)
+        activity.setContentView(outside)
+        val detachedRevision = root.inputRevision
+        outside.clearFocus()
+        assertTrue(outside.requestFocus())
+        assertEquals(detachedRevision, root.inputRevision)
+        activity.setContentView(root)
+        val inside = android.widget.EditText(activity)
+        root.addView(inside)
+        val attachedRevision = root.inputRevision
+        assertTrue(inside.requestFocus())
+        assertTrue(root.inputRevision > attachedRevision)
+    }
+
     @Test fun `keyboard restoration works without accessibility and yields to a new native owner`() = withHost { host ->
         Shadows.shadowOf(host.context.getSystemService(AccessibilityManager::class.java)).setEnabled(false)
         val provider = provider(host)

@@ -35,6 +35,51 @@ internal fun textInputDescriptor(value: String = ""): JsonObject = Json.parseToJ
 
 @RunWith(RobolectricTestRunner::class)
 class ExperienceTextInputTest {
+    @Test fun `semantic native focus survives overlay withdrawal and input rollback`() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup().visible()
+        val activity = controller.get()
+        val input = ExperienceTextInput.forScreen(textInputDescriptor("ok"), "survey").single()
+        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+            listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
+        val host = View(activity)
+        val provider = ExperienceAccessibilityProvider(host, { null }, { _, _, _ -> true })
+        val node = ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 6, 0, 0, 0, 0,
+            0f, 0f, 100f, 30f, "Your name", "", "")
+        val tree = ai.nuxie.sdk.runtime.NuxieSemanticTree(1, 1, listOf(node))
+        try {
+            activity.setContentView(ExperienceFocusRoot(activity).apply {
+                addView(host)
+                addView(overlay)
+            })
+            host.layout(0, 0, 400, 400)
+            overlay.layout(0, 0, 400, 400)
+            overlay.update(snapshot())
+            val editor = overlay.getChildAt(0) as EditText
+            fun present() {
+                overlay.updateSemantics(mapOf("name" to node))
+                provider.publish(tree, overlay.semanticViews())
+            }
+            present()
+            assertTrue(editor.requestFocus())
+            provider.withdraw()
+            overlay.updateSemantics(emptyMap())
+            assertFalse(editor.hasFocus())
+            present()
+            assertTrue("A new semantic frame restores the real editor", editor.hasFocus())
+            provider.withdraw()
+            overlay.setInputEnabled(false)
+            assertFalse(editor.hasFocus())
+            overlay.setInputEnabled(true)
+            present()
+            assertTrue("Navigation rollback restores the real editor", editor.hasFocus())
+            assertEquals("ok", editor.text.toString())
+        } finally {
+            provider.retire()
+            overlay.close()
+            controller.pause().stop().destroy()
+        }
+    }
+
     @Test @org.robolectric.annotation.Config(sdk = [23, 26, 30])
     fun `semantic field label preserves real editing and absent capture retires traversal`() {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()

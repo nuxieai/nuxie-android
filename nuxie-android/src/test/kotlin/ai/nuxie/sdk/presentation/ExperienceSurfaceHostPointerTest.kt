@@ -21,6 +21,7 @@ import android.view.Surface
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -691,7 +692,8 @@ class ExperienceSurfaceHostPointerTest {
                 val pointer = motion(MotionEvent.ACTION_DOWN, 1_020, 50f, 50f)
                 try { assertTrue(host.onTouchEvent(pointer)) } finally { pointer.recycle() }
                 host.setInputEnabled(false)
-                assertFalse(checkNotNull(host.accessibilityNodeProvider.createAccessibilityNodeInfo(1)).isEnabled)
+                assertNull(host.accessibilityNodeProvider.createAccessibilityNodeInfo(1))
+                assertEquals(0, checkNotNull(host.accessibilityNodeProvider.createAccessibilityNodeInfo(-1)).childCount)
                 assertFalse(host.accessibilityNodeProvider.performAction(1,
                     android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK, null))
                 host.setInputEnabled(true)

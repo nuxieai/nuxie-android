@@ -37,12 +37,18 @@ class SemanticTraversalDeviceTest {
         fun find(label: String): AccessibilityNodeInfo = checkNotNull(automation.rootInActiveWindow)
             .findAccessibilityNodeInfosByText(label).single { it.text?.toString() == label }
         try {
-            for (item in fixture.getValue("cases").jsonArray) {
+            val cases = fixture.getValue("cases").jsonArray.flatMap { listOf(it to false, it to true) }
+            for ((item, useNativeField) in cases) {
                 val scenario = item.jsonObject
+                lateinit var editor: EditText
                 instrumentation.runOnMainSync {
                     host = SemanticView(activity).apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES }
+                    editor = EditText(activity).apply { setText("2"); id = View.generateViewId() }
                     activity.setContentView(ExperienceFocusRoot(activity).apply {
-                        addView(host, FrameLayout.LayoutParams(400, 400))
+                        addView(ExperienceFocusRoot(activity).apply {
+                            addView(host, FrameLayout.LayoutParams(400, 400))
+                            if (useNativeField) addView(editor, FrameLayout.LayoutParams(300, 80).apply { topMargin = 100 })
+                        }, FrameLayout.LayoutParams(400, 400))
                         addView(android.widget.Button(activity).apply { text = "shell"; isAllCaps = false },
                             FrameLayout.LayoutParams(200, 80).apply { topMargin = 500 })
                     })
@@ -52,14 +58,20 @@ class SemanticTraversalDeviceTest {
                     val step = raw.jsonObject
                     when (step.getValue("op").jsonPrimitive.content) {
                         "publish" -> instrumentation.runOnMainSync {
+                            if (useNativeField) editor.visibility = View.VISIBLE
                             host.semantics.publish(NuxieSemanticTree(1, 1,
                                 step.getValue("nodes").jsonArray.mapIndexed { position, id ->
-                                    node(id.jsonPrimitive.int.toLong(), position, 1, position * 100f, id.jsonPrimitive.content)
-                                }))
+                                    node(id.jsonPrimitive.int.toLong(), position,
+                                        if (useNativeField && id.jsonPrimitive.int == 2) 6 else 1,
+                                        position * 100f, id.jsonPrimitive.content)
+                                }), if (useNativeField) mapOf(2L to editor) else emptyMap())
                         }
                         "focus" -> assertTrue(find(step.getValue("target").jsonPrimitive.content)
                             .performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS))
-                        "withdraw" -> instrumentation.runOnMainSync { host.semantics.withdraw() }
+                        "withdraw" -> instrumentation.runOnMainSync {
+                            host.semantics.withdraw()
+                            if (useNativeField) editor.visibility = View.INVISIBLE
+                        }
                         "resume" -> Unit
                         "shell" -> assertTrue(find("shell").performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS))
                         else -> error("Unknown shared focus operation")
@@ -67,7 +79,7 @@ class SemanticTraversalDeviceTest {
                     settle()
                 }
                 val focused = automation.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
-                assertEquals(scenario.getValue("id").jsonPrimitive.content,
+                assertEquals("${scenario.getValue("id").jsonPrimitive.content}, native field: $useNativeField",
                     scenario.getValue("expectedFocus").jsonPrimitive.content, focused?.text?.toString())
             }
         } finally {
