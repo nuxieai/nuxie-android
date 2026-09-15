@@ -1934,7 +1934,12 @@ class PublishedTextInputDeviceTest {
     fun accessibilityTextEditIsDurableBeforeAuthoredJourneyNavigation() =
         exerciseDurableNativeEmission(false, accessibilityEdit = true)
 
-    private fun exerciseDurableNativeEmission(scripted: Boolean, failScript: Boolean = false, accessibilityEdit: Boolean = false) {
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun backgroundCancelsPressedCompiledControlBeforeFreshGesture() =
+        exerciseDurableNativeEmission(true, interruptPress = true)
+
+    private fun exerciseDurableNativeEmission(scripted: Boolean, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
@@ -2051,17 +2056,54 @@ class PublishedTextInputDeviceTest {
                     }
                     if (surface == null) SystemClock.sleep(20)
                 }
-                instrumentation.runOnMainSync {
-                    val target = checkNotNull(surface)
+                val target = checkNotNull(surface)
+                var downTime = SystemClock.uptimeMillis()
+                fun dispatch(action: Int) = instrumentation.runOnMainSync {
+                    if (action == MotionEvent.ACTION_DOWN) downTime = SystemClock.uptimeMillis()
                     val scale = minOf(target.width / 390f, target.height / 844f)
                     val x = (target.width - 390f * scale) / 2f + 100f * scale
                     val y = (target.height - 844f * scale) / 2f + 728f * scale
-                    val downTime = SystemClock.uptimeMillis()
-                    for (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
-                        val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
-                        try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }
-                    }
+                    val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
+                    try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }
                 }
+                if (interruptPress) {
+                    dispatch(MotionEvent.ACTION_DOWN)
+                    awaitDeliveredPointer(target)
+                    val stopped = CountDownLatch(1)
+                    val resumed = CountDownLatch(1)
+                    val callbacks = object : Application.ActivityLifecycleCallbacks {
+                        override fun onActivityStopped(activity: Activity) { if (activity === first) stopped.countDown() }
+                        override fun onActivityResumed(activity: Activity) { if (activity === first) resumed.countDown() }
+                        override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
+                        override fun onActivityStarted(activity: Activity) = Unit
+                        override fun onActivityPaused(activity: Activity) = Unit
+                        override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
+                        override fun onActivityDestroyed(activity: Activity) = Unit
+                    }
+                    first.application.registerActivityLifecycleCallbacks(callbacks)
+                    try {
+                        assertTrue(instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME))
+                        assertTrue("Home must stop the pressed control's Activity", stopped.await(10, TimeUnit.SECONDS))
+                        context.startActivity(Intent(first.intent).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        })
+                        assertTrue("Return must resume the original Activity", resumed.await(10, TimeUnit.SECONDS))
+                        instrumentation.waitForIdleSync()
+                        val deadline = SystemClock.uptimeMillis() + 10_000
+                        var ready = false
+                        while (!ready && SystemClock.uptimeMillis() < deadline) {
+                            instrumentation.runOnMainSync { ready = target.isShown && target.isAvailable }
+                            if (!ready) SystemClock.sleep(20)
+                        }
+                        assertTrue("Retained control surface must return", ready)
+                        dispatch(MotionEvent.ACTION_UP)
+                        assertEquals("Stale release must not publish an action", null, accepted.poll(500, TimeUnit.MILLISECONDS))
+                        assertFalse(journalRun().context.getValue("responses").jsonObject.containsKey("selection"))
+                        assertEquals(1, presentationCount.get())
+                    } finally { first.application.unregisterActivityLifecycleCallbacks(callbacks) }
+                }
+                dispatch(MotionEvent.ACTION_DOWN)
+                dispatch(MotionEvent.ACTION_UP)
             } else {
                 val field = awaitEditor(instrumentation, first, "text-input/screen_1/email_input")
                 if (accessibilityEdit) editUsingAccessibility(instrumentation, "durable@example.com")
@@ -2106,7 +2148,7 @@ class PublishedTextInputDeviceTest {
                 assertEquals(owner, captured.distinctId)
                 assertTrue("Authored navigation must finish presenting", navigationPresented.await(10, TimeUnit.SECONDS))
                 assertEquals(2, presentationCount.get())
-                assertEquals(1, monitor.hits)
+                assertEquals(if (interruptPress) 2 else 1, monitor.hits)
                 assertEquals(artifactFiles.keys, downloaded.toSet())
                 assertEquals(2, downloaded.size)
                 assertEquals(null, accepted.poll(300, TimeUnit.MILLISECONDS))
@@ -2294,6 +2336,28 @@ class PublishedTextInputDeviceTest {
         }
         val assets = (render.getValue("assets").jsonArray.map { it.jsonObject } + scripts).associate { stage(it) }
         return PublishedFixture(release, riv, assets, entry, trustedKeys)
+    }
+
+    private fun awaitDeliveredPointer(surface: ExperienceSurfaceHost) {
+        // Observe only the precondition on its owning lane. Durable output is the oracle.
+        val lane = ExperienceSurfaceHost::class.java.getDeclaredField("lane").apply { isAccessible = true }
+            .get(surface) as NuxieRuntimeLane
+        val input = ExperienceSurfaceHost::class.java.getDeclaredField("pointerInput").apply { isAccessible = true }.get(surface)
+        val queue = input.javaClass.getDeclaredField("queue").apply { isAccessible = true }.get(input)
+        val delivered = queue.javaClass.getDeclaredField("deliveredPointers").apply { isAccessible = true }
+        val deadline = SystemClock.uptimeMillis() + 10_000
+        while (SystemClock.uptimeMillis() < deadline) {
+            val result = java.util.concurrent.atomic.AtomicBoolean()
+            val read = CountDownLatch(1)
+            assertTrue(lane.enqueue {
+                result.set((delivered.get(queue) as Map<*, *>).isNotEmpty())
+                read.countDown()
+            })
+            assertTrue("Pointer precondition must settle on native lane", read.await(10, TimeUnit.SECONDS))
+            if (result.get()) return
+            SystemClock.sleep(20)
+        }
+        throw AssertionError("DOWN must be delivered before lifecycle interruption")
     }
 
     @Suppress("DEPRECATION")
