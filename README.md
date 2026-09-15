@@ -17,10 +17,24 @@ implementation. The specification lives in the `nuxie-dev` repository at
 
 ## Runtime artifact
 
-A fresh clone builds normally; Gradle fetches and SHA-256 verifies the pinned
-runtime release when needed. For local runtime development, stage a checkout
-with `scripts/stage-runtime.sh <path-to-nuxie-runtime-checkout>` and build with
-`NUXIE_RUNTIME_USE_LOCAL=1`.
+Gradle fetches and SHA-256 verifies the release pinned in `runtime/artifact.json`.
+The current surface-presentation work requires native APIs newer than that
+v0.3.9 pin, so this development branch does not yet build from the public
+runtime artifact. Publishing and pinning the qualified runtime is a release
+prerequisite; local test results do not establish a consumable SDK release.
+
+For local development, build the Android runtime candidate at
+`7437338d0fc9e53352734dd856142ee471c0a768` in a `nuxie-runtime` checkout, then
+stage its verified build outputs and opt in to using them:
+
+```bash
+scripts/stage-runtime.sh /absolute/path/to/nuxie-runtime
+NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew :nuxie-android:test :nuxie-android:apiCheck :nuxie-android:lint :example-app:assembleDebug
+```
+
+The staging script verifies the build's source revision and pinned NDK.
+Without `NUXIE_RUNTIME_USE_LOCAL=1`, Gradle restores the public pinned artifact;
+restage the candidate before resuming local development if that happens.
 
 ## Host JVM render harness
 
