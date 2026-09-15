@@ -82,6 +82,7 @@ internal class ExperienceSurfaceHost(
     private var semanticSnapshot: NuxieSemanticSnapshot? = null
     private var semanticSnapshotEpoch = -1L
     private var semanticFields: Map<String, NativeSemanticNode> = emptyMap()
+    private var queuedSemanticAction: QueuedSemanticAction? = null
     private val semanticActionPending = AtomicBoolean(false)
     private val sceneInputEnabled = AtomicBoolean(true)
     private val semanticEpoch = AtomicLong()
@@ -110,28 +111,48 @@ internal class ExperienceSurfaceHost(
         val generation = frameGeneration.get()
         val epoch = semanticEpoch.get()
         val accepted = lane.enqueue {
-            try {
-                val capture = semanticSnapshot ?: return@enqueue
-                val active = player ?: return@enqueue
-                if (!running || !sceneInputEnabled.get() || released.get() || generation != frameGeneration.get() ||
-                    epoch != semanticEpoch.get() ||
-                    capture.tree.renderRevision != tree.renderRevision || capture.tree.treeVersion != tree.treeVersion) return@enqueue
-                // A repeated renderer submission may be pending without
-                // invalidating the presented capture. Native action admission
-                // checks the occurrence's current and presented revisions.
-                active.queueSemanticAction(capture, nodeId, action)
-            } finally { semanticActionPending.set(false) }
+            queuedSemanticAction = QueuedSemanticAction(tree, nodeId, action, generation, epoch)
+            drainSemanticAction()
         }
         if (!accepted) semanticActionPending.set(false)
         return accepted
     }
+
+    /** Activation invalidates the render revision; never mutate an in-flight submission. */
+    private fun drainSemanticAction() {
+        val request = queuedSemanticAction ?: return
+        if (pendingPresentation) return
+        queuedSemanticAction = null
+        try {
+            val capture = semanticSnapshot ?: return
+            val active = player ?: return
+            if (!running || !sceneInputEnabled.get() || released.get() ||
+                request.generation != frameGeneration.get() || request.epoch != semanticEpoch.get() ||
+                capture.tree.renderRevision != request.tree.renderRevision ||
+                capture.tree.treeVersion != request.tree.treeVersion) return
+            active.queueSemanticAction(capture, request.nodeId, request.action)
+        } finally { semanticActionPending.set(false) }
+    }
+
+    private data class QueuedSemanticAction(
+        val tree: NuxieSemanticTree,
+        val nodeId: Long,
+        val action: Int,
+        val generation: Long,
+        val epoch: Long,
+    )
 
     /** UI invalidation precedes queued native teardown, excluding already-posted old publications. */
     private fun retireSemantics(preserveFocus: Boolean = false) {
         semanticEpoch.incrementAndGet()
         if (preserveFocus) accessibility.withdraw() else accessibility.retire()
         if (semanticsEnabled) listener?.onSemanticFields(emptyMap())
-        lane.enqueue { semanticSnapshot?.close(); semanticSnapshot = null }
+        lane.enqueue {
+            semanticSnapshot?.close()
+            semanticSnapshot = null
+            queuedSemanticAction = null
+            semanticActionPending.set(false)
+        }
     }
 
     private fun publishSemantics(active: NuxieRuntimePlayer, generation: Long, epoch: Long) {
@@ -653,6 +674,7 @@ internal class ExperienceSurfaceHost(
                         firstFramePresented = true
                     }
                     publishSteps()
+                    drainSemanticAction()
                 }
             } finally {
                 framePending.set(false)
