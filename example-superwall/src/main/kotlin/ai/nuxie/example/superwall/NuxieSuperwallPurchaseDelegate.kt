@@ -21,9 +21,11 @@ import kotlinx.coroutines.withContext
 /** Example source; Superwall must be configured with its automatic purchase controller. */
 class NuxieSuperwallPurchaseDelegate(
   private val superwall: Superwall = Superwall.instance,
+  private val expectedCustomerId: String? = null,
 ) : NuxiePurchaseDelegate {
   override suspend fun purchase(product: StoreProduct): PurchaseResult = withContext(Dispatchers.Main.immediate) {
     try {
+      checkExpectedCustomer()
       val exact = exactSuperwallProduct(
         requireNotNull(product.rawProduct) { "Native Play product required." },
         product.basePlanId, product.purchaseOptionId, product.offerId, product.isOfferPersonalized,
@@ -38,6 +40,7 @@ class NuxieSuperwallPurchaseDelegate(
 
   override suspend fun restorePurchases(): RestoreResult = withContext(Dispatchers.Main.immediate) {
     try {
+      checkExpectedCustomer()
       when (val result = superwall.restorePurchases().getOrThrow()) {
         is RestorationResult.Restored -> {
           val status = superwall.subscriptionStatus.value
@@ -53,6 +56,12 @@ class NuxieSuperwallPurchaseDelegate(
       throw cancelled
     } catch (failure: Exception) {
       RestoreResult.Failed(failure)
+    }
+  }
+
+  private fun checkExpectedCustomer() {
+    check(expectedCustomerId == null || superwall.userId == expectedCustomerId) {
+      "Superwall has not resolved the expected customer identity."
     }
   }
 }

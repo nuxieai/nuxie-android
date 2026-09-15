@@ -12,7 +12,7 @@ its first setup:
 ```kotlin
 val configuration = NuxieConfiguration(nuxiePublicKey).apply {
   purchaseHandlingMode = PurchaseHandlingMode.APP_MANAGED
-  purchaseDelegate = NuxieSuperwallPurchaseDelegate()
+  purchaseDelegate = NuxieSuperwallPurchaseDelegate(expectedCustomerId = customerId)
 }
 Nuxie.setup(application, configuration)
 Nuxie.identify(customerId)
@@ -40,6 +40,11 @@ active Superwall entitlements before returning Restored. Keep using provider
 access until the Connector is configured, mapped, synchronized and explicitly
 cut over to Nuxie Feature authority. Provider checkout success alone grants no
 Nuxie Feature.
+
+The runnable host in `example-app` passes `expectedCustomerId` to the delegate.
+That rejects checkout or restore while Superwall's asynchronous identity state
+still exposes a different customer. Use that guard when copying the example;
+it does not make an in-flight account switch safe.
 
 ## Limits and qualification
 

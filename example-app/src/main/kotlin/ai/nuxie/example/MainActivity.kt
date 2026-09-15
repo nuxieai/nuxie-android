@@ -90,7 +90,7 @@ class MainActivity : Activity() {
         }
       }
     }
-    button("Reset to anonymous identity") {
+    if (ExamplePurchaseProvider.supportsAnonymousReset) button("Reset to anonymous identity") {
       Nuxie.reset()
       status.text = "Using an anonymous identity."
     }
@@ -126,13 +126,17 @@ class MainActivity : Activity() {
         testStoreEnabled = BuildConfig.DEBUG && intent.getBooleanExtra(EXTRA_TEST_STORE, false)
         intent.getStringExtra(EXTRA_API_ENDPOINT)?.let { testingOverrides.apiEndpoint = URL(it) }
       }
+      ExamplePurchaseProvider.configure(
+        application as ExampleApplication, intent.getStringExtra("nuxie_provider_key"),
+        intent.getStringExtra(EXTRA_DISTINCT_ID), configuration,
+      )
       Nuxie.listener = listener
       Nuxie.setup(this, configuration)
       intent.getStringExtra(EXTRA_DISTINCT_ID)?.let(Nuxie::identify)
       status.text = getString(R.string.setup_status, Nuxie.version) +
-        if (configuration.testStoreEnabled) " Test Store enabled; no Play charges." else " Play purchase handling enabled."
+        if (configuration.testStoreEnabled) " Test Store enabled; no Play charges." else " ${ExamplePurchaseProvider.name}."
     } catch (_: Exception) {
-      status.text = "Setup failed. Check the test key and endpoint."
+      status.text = "Setup failed. Check keys, customer, endpoint and Test Store compatibility for ${ExamplePurchaseProvider.name}."
       if (Nuxie.listener === listener) Nuxie.listener = null
       buttons.forEach { it.isEnabled = false }
     }

@@ -69,6 +69,7 @@ val verifyProviderBoundary = tasks.register("verifyProviderBoundary") {
 project(":nuxie-android").tasks.matching { it.name == "lint" }.configureEach {
   dependsOn(verifyProviderBoundary, ":example-revenuecat:test", ":example-revenuecat:lint")
   dependsOn(":example-superwall:test", ":example-superwall:lint")
+  dependsOn(":example-app:testDebugUnitTest")
 }
 
 val runtimeDirectory = layout.projectDirectory.dir("runtime").asFile

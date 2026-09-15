@@ -67,12 +67,62 @@ it supports through `onAppActionRequested`, using the typed payload.
 
 ## Remaining integration examples
 
+### Run with provider-owned billing
+
+Choose one provider at build time. The default `nuxie` build contains neither
+provider; `revenuecat` and `superwall` include only their selected adapter and
+provider dependency. Both set `PurchaseHandlingMode.APP_MANAGED` and configure
+the provider before Nuxie setup.
+
+```bash
+NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew -PnuxieExamplePurchaseProvider=revenuecat :example-app:installDebug
+# Or replace revenuecat with superwall.
+adb shell am start -S -n ai.nuxie.example/.MainActivity \
+  --es nuxie_api_key pk_test_YOUR_NUXIE_KEY \
+  --es nuxie_provider_key YOUR_PROVIDER_PUBLIC_ANDROID_KEY \
+  --es nuxie_distinct_id example-customer \
+  --es nuxie_trigger_event example_opened \
+  --es nuxie_feature_id exports
+```
+
+The provider key and an explicit customer ID are required; missing values
+disable the sample controls before provider setup. Do not enable Test Store in
+a provider build: it would bypass the delegate, so the sample rejects that
+combination. Configure the provider project and Google Play for this app's
+package and products before expecting real checkout. Provider-specific product
+limitations still apply. The sample checks Nuxie Features; only use those
+decisions for provider-owned access after Connector cutover.
+
+Provider configuration is retained across Activity recreation. The application
+tracks its current resumed Activity with a weak reference, including Nuxie's
+Experience Activity, for RevenueCat checkout. Superwall checkout and restore
+also require the expected customer to be visible in its identity state. The
+provider builds deliberately omit anonymous reset: coordinated logout and
+in-flight identity changes are not implemented by this sample. Restart with a
+different explicit customer to exercise a new session, after all checkout work
+has finished. Do not copy a one-SDK reset into a two-SDK production session.
+
+Build and check every selection separately, returning to the default build last:
+
+```bash
+NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew -PnuxieExamplePurchaseProvider=revenuecat :example-app:assembleDebug :example-app:lintDebug :example-app:lintRelease :example-app:testDebugUnitTest
+NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew -PnuxieExamplePurchaseProvider=superwall :example-app:assembleDebug :example-app:lintDebug :example-app:lintRelease :example-app:testDebugUnitTest
+NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew :example-app:assembleDebug :example-app:lintDebug :example-app:lintRelease :example-app:testDebugUnitTest
+```
+
+All selections use the same package and APK output path; installing another
+selection replaces the sample app. Selection changes do not alter the SDK's
+runtime dependency graph. Published-artifact consumption, real-store provider
+qualification and coordinated logout remain outstanding.
+
+### Remaining work
+
 This sample demonstrates Nuxie-managed purchase handling. The separate
 [RevenueCat delegate](../example-revenuecat/README.md) provides compiled adapter
 source with explicit product limitations. A separate
 [Superwall delegate](../example-superwall/README.md) supports validated selection
-for non-personalized purchases. Complete
-app-managed purchase examples, and exact-release Companion preview
+for non-personalized purchases. Provider session/logout and real-store
+qualification, and exact-release Companion preview
 remain tracked in [UNIV-2601](https://universe.basis.dev/issue/UNIV-2601). Test Store
 is not a substitute for either provider integration or real-store qualification.
 
