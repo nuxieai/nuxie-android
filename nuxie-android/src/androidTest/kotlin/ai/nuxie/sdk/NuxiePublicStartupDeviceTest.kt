@@ -49,7 +49,7 @@ class NuxiePublicStartupDeviceTest {
         val run = checkNotNull(arguments.getString("nuxie_process_run"))
         require(run.matches(Regex("[a-f0-9-]{36}")))
         val boundary = arguments.getString("nuxie_process_boundary") ?: "pending-profile"
-        require(boundary in listOf("pending-profile", "active-screen"))
+        require(boundary in listOf("pending-profile", "active-screen", "parked"))
         exercise(eventEntry = true, processPhase = phase, processRun = run, processBoundary = boundary)
     }
 
@@ -63,7 +63,7 @@ class NuxiePublicStartupDeviceTest {
     ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
-        val fixture = if (eventEntry) "journeys/rendered-startup-event" else "journeys/rendered-screen-control"
+        val fixture = if (processBoundary == "parked") "journeys/rendered-startup-parked" else if (eventEntry) "journeys/rendered-startup-event" else "journeys/rendered-screen-control"
         fun read(path: String) = instrumentation.context.assets.open("$fixture/$path").use { it.readBytes() }
         val entry = Json.parseToJsonElement(read("release-entry.json").decodeToString()).jsonObject
         val locator = entry.getValue("locator").jsonObject
@@ -79,7 +79,7 @@ class NuxiePublicStartupDeviceTest {
             }).toSet()
         check(Nuxie.core == null) { "This test requires an inactive SDK." }
         // Evict only this test fixture's content-addressed objects so reruns prove download too.
-        if (!(processPhase == "recover" && processBoundary == "active-screen")) artifactKeys.forEach { key ->
+        if (!(processPhase == "recover" && processBoundary != "pending-profile")) artifactKeys.forEach { key ->
             val digest = key.substringAfterLast('/').substringBefore('.')
             check(digest.matches(Regex("[a-f0-9]{64}")))
             val cached = File(context.cacheDir, "nuxie/journey_release_objects/$digest")
@@ -141,7 +141,7 @@ class NuxiePublicStartupDeviceTest {
             if (!holdInitialProfile) releaseProfile.countDown()
             instrumentation.runOnMainSync {
                 // A credential is durably bound to one app authority; these fixtures are separate apps.
-                Nuxie.setup(host, NuxieConfiguration("pk_test_public_startup_${if (eventEntry) "event" else "foreground"}").apply {
+                Nuxie.setup(host, NuxieConfiguration("pk_test_public_startup_${if (processBoundary == "parked") "parked" else if (eventEntry) "event" else "foreground"}").apply {
                     environment = NuxieEnvironment.DEVELOPMENT
                     testStoreEnabled = true
                 })
@@ -153,7 +153,7 @@ class NuxiePublicStartupDeviceTest {
             runBlocking { withTimeout(10_000) { core.eventLog.awaitBarrier() } }
             if (holdInitialProfile) assertEquals(0, monitor.hits)
             if (eventEntry && holdInitialProfile) runBlocking {
-                assertEquals(if (processPhase == "recover" && processBoundary == "active-screen") 0 else 1,
+                assertEquals(if (processPhase == "recover" && processBoundary != "pending-profile") 0 else 1,
                     core.store.queryPendingLocalRoutes(owner).count { it.name == "startup_probe" })
             }
             if (processPhase == "seed" && processBoundary == "pending-profile") {
@@ -190,6 +190,40 @@ class NuxiePublicStartupDeviceTest {
                 } }
                 assertEquals("A background event must not enroll on return", 0, monitor.hits)
                 Nuxie.trigger("startup_probe")
+            }
+            if (processBoundary == "parked") {
+                val journal = JourneyRunJournal(File(context.filesDir, "nuxie"), owner, JourneyStorageScope(
+                    ProfileDeliveryAuthority(locator.getValue("appId").jsonPrimitive.content, "test"),
+                ))
+                runBlocking { withTimeout(10_000) {
+                    core.profile.refreshAndWait()
+                    while (journal.runs().singleOrNull()?.park == null) delay(10)
+                    core.eventLog.awaitBarrier()
+                } }
+                val parked = journal.runs().single()
+                assertNull(parked.completion)
+                assertEquals("wait", parked.stepId)
+                assertTrue(parked.artifactDigests.isNotEmpty())
+                assertEquals(0, monitor.hits)
+                if (processPhase == "seed") {
+                    val trigger = runBlocking { core.store.pendingBatch(200).single { it.name == "startup_probe" } }
+                    awaitProcessKill(markerFile, buildJsonObject {
+                        put("pid", android.os.Process.myPid()); put("owner", owner); put("eventId", trigger.id)
+                        put("runId", parked.id); put("startedEventId", parked.startedEventId)
+                        put("wakeAtMillis", checkNotNull(parked.park).wakeAtMillis)
+                        put("artifactDigests", JsonArray(parked.artifactDigests.sorted().map(::JsonPrimitive)))
+                    })
+                } else {
+                    val saved = checkNotNull(previous)
+                    assertEquals(saved.getValue("runId").jsonPrimitive.content, parked.id)
+                    assertEquals(saved.getValue("artifactDigests"), JsonArray(parked.artifactDigests.sorted().map(::JsonPrimitive)))
+                    assertEquals(saved.getValue("wakeAtMillis").jsonPrimitive.long, checkNotNull(parked.park).wakeAtMillis)
+                    Nuxie.trigger("unrelated_resume_probe")
+                    runBlocking { withTimeout(10_000) { core.eventLog.awaitBarrier() } }
+                    assertEquals("An unrelated event must preserve the park", parked.park, journal.runs().single().park)
+                    assertEquals(0, monitor.hits)
+                    Nuxie.trigger("resume_probe")
+                }
             }
             if (processPhase == "recover" && processBoundary == "active-screen") {
                 val saved = checkNotNull(previous)
@@ -264,7 +298,17 @@ class NuxiePublicStartupDeviceTest {
                 ))
                 assertEquals("pro", journal.runs().single().context.getValue("responses").jsonObject
                     .getValue("selection").jsonPrimitive.content)
-                assertTrue("Signed render and behavior artifacts must be downloaded", downloaded.toSet().containsAll(artifactKeys))
+                if (processPhase == "recover" && processBoundary == "parked") {
+                    val saved = checkNotNull(previous)
+                    assertEquals(saved.getValue("runId").jsonPrimitive.content, journal.runs().single().id)
+                    assertNull(journal.runs().single().park)
+                    val events = runBlocking { core.store.pendingBatch(200) }
+                    assertEquals(saved.getValue("startedEventId").jsonPrimitive.content,
+                        events.single { it.name == JourneyEventNames.LEG_STARTED }.id)
+                    assertTrue(events.none { it.name == JourneyEventNames.LEG_COMPLETED })
+                }
+                if (!(processPhase == "recover" && processBoundary == "parked"))
+                    assertTrue("Signed render and behavior artifacts must be downloaded", downloaded.toSet().containsAll(artifactKeys))
                 if (processPhase == "seed" && processBoundary == "active-screen") {
                     runBlocking { withTimeout(10_000) {
                         core.eventLog.awaitBarrier()
