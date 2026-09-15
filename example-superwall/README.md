@@ -65,11 +65,11 @@ and account changes during provider checkout remain unqualified. Do not use
 this sample as a subscription-replacement integration. Test Store bypasses
 purchase delegates and is not provider qualification.
 
-The module uses the local SDK project and staged runtime candidate from the
-root README; consumption of a published SDK artifact remains pending.
+The module uses the SDK project and its pinned published native runtime;
+consumption of a published SDK artifact remains pending.
 
 ```bash
-NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew :example-superwall:test :example-superwall:lint verifyProviderBoundary
+./gradlew :example-superwall:test :example-superwall:lint verifyProviderBoundary
 ```
 
 The SDK lint task runs these example checks too. Tests use pinned Superwall

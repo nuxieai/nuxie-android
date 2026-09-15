@@ -5,17 +5,16 @@ trigger, Feature access, restore, identity reset and activity forwarding to a
 bounded local analytics sink. It does not show an Experience directly: the
 configured Journey decides whether a trigger presents anything.
 
-The current development branch requires the locally built runtime candidate
-described in the [SDK README](../README.md#runtime-artifact). The published runtime
-pin is not yet sufficient for this branch. This sample currently consumes the
-SDK project; it is not proof of installation from a published SDK artifact.
+Gradle fetches the published native runtime pinned by the SDK automatically;
+see the [runtime guide](../README.md#runtime-artifact). This sample consumes the
+SDK project; installation from a published SDK artifact is a separate qualification.
 
 ## Run with the development Test Store
 
-After building and staging the runtime candidate, run from the SDK repository:
+Run from the SDK repository:
 
 ```bash
-NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew :example-app:installDebug
+./gradlew :example-app:installDebug
 adb shell am start -S -n ai.nuxie.example/.MainActivity \
   --es nuxie_api_key pk_test_YOUR_KEY \
   --es nuxie_distinct_id example-customer \
@@ -75,7 +74,7 @@ provider dependency. Both set `PurchaseHandlingMode.APP_MANAGED` and configure
 the provider before Nuxie setup.
 
 ```bash
-NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew -PnuxieExamplePurchaseProvider=revenuecat :example-app:installDebug
+./gradlew -PnuxieExamplePurchaseProvider=revenuecat :example-app:installDebug
 # Or replace revenuecat with superwall.
 adb shell am start -S -n ai.nuxie.example/.MainActivity \
   --es nuxie_api_key pk_test_YOUR_NUXIE_KEY \
@@ -105,9 +104,9 @@ has finished. Do not copy a one-SDK reset into a two-SDK production session.
 Build and check every selection separately, returning to the default build last:
 
 ```bash
-NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew -PnuxieExamplePurchaseProvider=revenuecat :example-app:assembleDebug :example-app:lintDebug :example-app:lintRelease :example-app:testDebugUnitTest
-NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew -PnuxieExamplePurchaseProvider=superwall :example-app:assembleDebug :example-app:lintDebug :example-app:lintRelease :example-app:testDebugUnitTest
-NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew :example-app:assembleDebug :example-app:lintDebug :example-app:lintRelease :example-app:testDebugUnitTest
+./gradlew -PnuxieExamplePurchaseProvider=revenuecat :example-app:assembleDebug :example-app:lintDebug :example-app:lintRelease :example-app:testDebugUnitTest
+./gradlew -PnuxieExamplePurchaseProvider=superwall :example-app:assembleDebug :example-app:lintDebug :example-app:lintRelease :example-app:testDebugUnitTest
+./gradlew :example-app:assembleDebug :example-app:lintDebug :example-app:lintRelease :example-app:testDebugUnitTest
 ```
 
 All selections use the same package and APK output path; installing another
@@ -133,12 +132,11 @@ has displayed a different one. For example, RevenueCat's
 [PurchaseParams](https://github.com/RevenueCat/purchases-android/blob/main/purchases/src/main/kotlin/com/revenuecat/purchases/PurchaseParams.kt)
 supports an explicit subscription option and personalized-price flag; passing
 only its StoreProduct instead uses its default-option selection. The provider
-examples still need compilation and orchestration qualification against pinned
-provider versions; the RevenueCat module now provides the pinned compile and
-selection/outcome checks, while actual provider checkout remains unqualified.
+examples compile against pinned versions and check selection/outcome mapping;
+actual provider checkout and orchestration remain unqualified.
 
 Validate the app and its Test Store release gate with:
 
 ```bash
-NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew :example-app:assembleDebug :example-app:lintDebug :example-app:lintRelease
+./gradlew :example-app:assembleDebug :example-app:lintDebug :example-app:lintRelease
 ```
