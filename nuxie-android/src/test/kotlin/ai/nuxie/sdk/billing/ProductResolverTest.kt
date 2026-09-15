@@ -1,5 +1,8 @@
 package ai.nuxie.sdk.billing
 
+import ai.nuxie.sdk.fixtures.FixtureRunner
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.jsonPrimitive
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.ProductDetails
 import kotlinx.coroutines.runBlocking
@@ -336,17 +339,20 @@ class ProductResolverTest {
             ),
         )
 
-        val product = resolver.resolve(
-            listOf(
-                request(OfferSelection.Exact("launch")).copy(isOfferPersonalized = true),
-            ),
-        ).single()
+        FixtureRunner.run("sdk/android-provider-checkout-terms.json", "android-provider-checkout-terms") { vector ->
+            val personalized = vector.body.getValue("personalized").jsonPrimitive.boolean
+            val product = runBlocking {
+                resolver.resolve(
+                    listOf(request(OfferSelection.Exact("launch")).copy(isOfferPersonalized = personalized)),
+                ).single()
+            }
 
-        assertEquals("annual", product.basePlanId)
-        assertEquals("launch", product.offerId)
-        assertEquals("annual-launch", product.offerToken)
-        assertEquals(true, product.isOfferPersonalized)
-        assertSame(rawProduct, product.rawProduct)
+            assertEquals("annual", product.basePlanId)
+            assertEquals("launch", product.offerId)
+            assertEquals("annual-launch", product.offerToken)
+            assertEquals(personalized, product.isOfferPersonalized)
+            assertSame(rawProduct, product.rawProduct)
+        }
     }
 
     @Test
