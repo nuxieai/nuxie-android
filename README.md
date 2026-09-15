@@ -42,6 +42,11 @@ The [example app guide](example-app/README.md) covers setup, identity, authored
 triggers, Feature access, restore, a local analytics sink and the development
 Test Store. Its current local-runtime requirement is described above.
 
+The separate [RevenueCat adapter example](example-revenuecat/README.md) compiles
+against a pinned provider SDK and preserves exact subscription checkout terms.
+Its supported product scope and remaining real-store qualification are explicit
+in that guide. Provider dependencies are checked to remain outside the SDK.
+
 ## Host JVM render harness
 
 The host-only harness drives a release descriptor through the SDK's configured
