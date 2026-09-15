@@ -18,6 +18,64 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SemanticTraversalDeviceTest {
+    @Test fun sharedFocusRestorationReachesAndroidAccessibilityClient() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val automation = instrumentation.uiAutomation
+        val originalInfo = automation.serviceInfo
+        val originalFlags = originalInfo.flags
+        originalInfo.flags = originalFlags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE
+        automation.serviceInfo = originalInfo
+        val fixture = Json.parseToJsonElement(instrumentation.context.assets
+            .open("accessibility/focus-restoration.json").bufferedReader().use { it.readText() }).jsonObject
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        lateinit var host: SemanticView
+        fun settle() {
+            instrumentation.waitForIdleSync()
+            automation.waitForIdle(100, 5000)
+        }
+        fun find(label: String): AccessibilityNodeInfo = checkNotNull(automation.rootInActiveWindow)
+            .findAccessibilityNodeInfosByText(label).single { it.text?.toString() == label }
+        try {
+            for (item in fixture.getValue("cases").jsonArray) {
+                val scenario = item.jsonObject
+                instrumentation.runOnMainSync {
+                    host = SemanticView(activity).apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES }
+                    activity.setContentView(ExperienceFocusRoot(activity).apply {
+                        addView(host, FrameLayout.LayoutParams(400, 400))
+                        addView(android.widget.Button(activity).apply { text = "shell"; isAllCaps = false },
+                            FrameLayout.LayoutParams(200, 80).apply { topMargin = 500 })
+                    })
+                }
+                settle()
+                for (raw in scenario.getValue("steps").jsonArray) {
+                    val step = raw.jsonObject
+                    when (step.getValue("op").jsonPrimitive.content) {
+                        "publish" -> instrumentation.runOnMainSync {
+                            host.semantics.publish(NuxieSemanticTree(1, 1,
+                                step.getValue("nodes").jsonArray.mapIndexed { position, id ->
+                                    node(id.jsonPrimitive.int.toLong(), position, 1, position * 100f, id.jsonPrimitive.content)
+                                }))
+                        }
+                        "focus" -> assertTrue(find(step.getValue("target").jsonPrimitive.content)
+                            .performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS))
+                        "withdraw" -> instrumentation.runOnMainSync { host.semantics.withdraw() }
+                        "resume" -> Unit
+                        "shell" -> assertTrue(find("shell").performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS))
+                        else -> error("Unknown shared focus operation")
+                    }
+                    settle()
+                }
+                val focused = automation.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+                assertEquals(scenario.getValue("id").jsonPrimitive.content,
+                    scenario.getValue("expectedFocus").jsonPrimitive.content, focused?.text?.toString())
+            }
+        } finally {
+            instrumentation.runOnMainSync { activity.finish() }
+            automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags }
+        }
+    }
+
     private class SemanticView(context: Context) : View(context) {
         val semantics = ExperienceAccessibilityProvider(this, { node ->
             val local = Rect(node.minX.toInt(), node.minY.toInt(), node.maxX.toInt(), node.maxY.toInt())

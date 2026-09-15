@@ -124,9 +124,9 @@ internal class ExperienceSurfaceHost(
     }
 
     /** UI invalidation precedes queued native teardown, excluding already-posted old publications. */
-    private fun retireSemantics() {
+    private fun retireSemantics(preserveFocus: Boolean = false) {
         semanticEpoch.incrementAndGet()
-        accessibility.retire()
+        if (preserveFocus) accessibility.withdraw() else accessibility.retire()
         if (semanticsEnabled) listener?.onSemanticFields(emptyMap())
         lane.enqueue { semanticSnapshot?.close(); semanticSnapshot = null }
     }
@@ -152,7 +152,7 @@ internal class ExperienceSurfaceHost(
 
     private fun postSemanticTree(tree: NuxieSemanticTree, fields: Map<String, NativeSemanticNode>, generation: Long, epoch: Long) {
         post {
-            if (!released.get() && running && firstFrameComposed && generation == frameGeneration.get() && epoch == semanticEpoch.get()) {
+            if (!released.get() && running && sceneInputEnabled.get() && firstFrameComposed && generation == frameGeneration.get() && epoch == semanticEpoch.get()) {
                 try {
                     val nativeFields = listener?.onSemanticFields(fields).orEmpty()
                     accessibility.publish(tree, nativeFields)
@@ -397,12 +397,12 @@ internal class ExperienceSurfaceHost(
         isEnabled = enabled
         semanticEpoch.incrementAndGet()
         if (!enabled) lane.enqueue { pointerInput.reset() }
-        accessibility.invalidateState()
+        if (!enabled) accessibility.withdraw() else accessibility.invalidateState()
     }
 
     /** UI-thread visibility input; a paused but visible Activity remains active. */
     fun setPresentationVisible(visible: Boolean) {
-        if (!visible) retireSemantics()
+        if (!visible) retireSemantics(preserveFocus = true)
         presentationVisible = visible
         updateFrameScheduling()
     }
@@ -461,7 +461,7 @@ internal class ExperienceSurfaceHost(
     }
 
     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
-        retireSemantics()
+        retireSemantics(preserveFocus = true)
         lane.enqueue {
             if (attached) {
                 pendingPresentation = false
@@ -482,7 +482,7 @@ internal class ExperienceSurfaceHost(
     }
 
     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
-        retireSemantics()
+        retireSemantics(preserveFocus = true)
         surfaceAvailable = false
         updateFrameScheduling()
         val surface = androidSurface

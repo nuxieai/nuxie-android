@@ -33,6 +33,9 @@ internal class ExperienceAccessibilityProvider(
     private var inputFocus: Int? = null
     private var requestingKeyboardTarget = false
     private var hovered: Int? = null
+    private data class SavedFocus(val nodeId: Long, val position: Int, val root: ExperienceFocusRoot, val revision: Long)
+    private var savedAccessibilityFocus: SavedFocus? = null
+    private var savedInputFocus: SavedFocus? = null
     private val keyboardIndicator = ExperienceKeyboardFocusDrawable(host.resources.displayMetrics.density)
 
     fun publish(tree: NuxieSemanticTree, nativeFields: Map<Long, View> = emptyMap()) {
@@ -58,6 +61,7 @@ internal class ExperienceAccessibilityProvider(
         refreshKeyboardIndicator()
         if (hovered !in index.entries) updateHover(null)
         if (oldNodes != tree.nodes) send(HOST_VIEW_ID, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+        restoreFocus()
     }
 
     fun invalidateState() {
@@ -66,6 +70,52 @@ internal class ExperienceAccessibilityProvider(
     }
 
     fun retire() {
+        savedAccessibilityFocus = null
+        savedInputFocus = null
+        removeTree(preserveHostFocus = false)
+    }
+
+    /** Remove stale interaction targets while retaining focus in this artboard occurrence. */
+    fun withdraw() {
+        if (index.readingOrder.isNotEmpty()) {
+            val root = ExperienceFocusRoot.containing(host)
+            fun save(id: Long?, revision: Long): SavedFocus? =
+                if (id != null && root != null) SavedFocus(id, index.readingOrder.indexOf(id), root, revision) else null
+            val accessibilityId = nativeViews.entries.firstOrNull { it.value.isAccessibilityFocused }?.key
+                ?: accessibilityFocus?.let { index.entries[it]?.node?.id }
+            val inputId = nativeViews.entries.firstOrNull { it.value.hasFocus() }?.key
+                ?: inputFocus?.let { index.entries[it]?.node?.id }
+            savedAccessibilityFocus = save(accessibilityId, root?.accessibilityRevision ?: 0)
+            savedInputFocus = save(inputId, root?.inputRevision ?: 0)
+        }
+        removeTree(preserveHostFocus = true)
+    }
+
+    private fun restoreFocus() {
+        if (!host.isShown || !host.isEnabled) return
+        val root = ExperienceFocusRoot.containing(host)
+        fun target(saved: SavedFocus, order: List<Long>): Long? =
+            saved.nodeId.takeIf { it in order } ?: order.getOrNull(saved.position.coerceIn(0, (order.size - 1).coerceAtLeast(0)))
+        savedAccessibilityFocus?.let { saved ->
+            if (root == null || root !== saved.root || root.accessibilityRevision != saved.revision) {
+                savedAccessibilityFocus = null
+            } else {
+                val id = target(saved, index.readingOrder)
+                val accepted = id?.let { nativeViews[it]?.performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null)
+                    ?: virtualIds[it]?.let { virtual -> performAction(virtual, AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null) } } == true
+                if (accepted) savedAccessibilityFocus = null
+            }
+        }
+        savedInputFocus?.let { saved ->
+            if (root == null || root !== saved.root || root.inputRevision != saved.revision) {
+                savedInputFocus = null
+            } else if (target(saved, keyboardOrder())?.let { focusKeyboardTarget(it, View.FOCUS_FORWARD) } == true) {
+                savedInputFocus = null
+            }
+        }
+    }
+
+    private fun removeTree(preserveHostFocus: Boolean) {
         clearAccessibilityFocus()
         updateHover(null)
         clearInputFocus()
@@ -74,7 +124,9 @@ internal class ExperienceAccessibilityProvider(
         nativeViews = emptyMap()
         traversalNeighbors = emptyMap()
         virtualIds = emptyMap()
-        host.isFocusable = false
+        // A resize withdraws virtual targets without moving the host's keyboard
+        // focus or resetting its focusable-in-touch-mode policy.
+        if (!preserveHostFocus) host.isFocusable = false
         send(HOST_VIEW_ID, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
     }
 
