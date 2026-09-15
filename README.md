@@ -282,15 +282,21 @@ python3 scripts/test-startup-process-death.py --device emulator-5558
 ```
 
 Stage the current unpublished runtime candidate using the instructions above
-before this command. The driver captures an ordinary public trigger while the initial
-profile response is held, verifies the test package owns the recorded PID, and
+before this command. The driver captures an ordinary public trigger while the
+initial profile response is held, verifies the test package owns the recorded PID, and
 kills that process without SDK shutdown. A second instrumentation process reads
 the existing identity and SQLite event, admits its signed Journey, exercises the
 native compiled control, and verifies durable response/event state after shutdown.
 The original trigger ID must survive unchanged and appear exactly once.
 
+To kill after a compiled control has committed a response on an active screen,
+add `--boundary active-screen`. Recovery follows the shared iOS/Android contract:
+interrupted active effects are abandoned rather than replayed. The driver checks
+that the original response and event IDs survive, the preallocated completion ID
+reports abandonment once, and repeated profile refresh does not reopen the screen.
+
 Logs and the result are retained under `build/process-death/<run-id>/`. The
 instrumentation method is opt-in and skips in an ordinary suite; its seed phase
-must be terminated by this driver. This checks process death before initial
-profile admission with controlled HTTP. It does not qualify death during an
-active Journey or store checkout, OS task restoration, or a live server release.
+must be terminated by this driver. These cases use controlled HTTP and real
+native rendering/storage. They do not qualify resumption of parked Journeys, death during store checkout, OS task
+restoration, or a live server release.

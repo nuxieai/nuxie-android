@@ -17,6 +17,7 @@ import uuid
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--device', required=True)
+    parser.add_argument('--boundary', choices=['pending-profile', 'active-screen'], default='pending-profile')
     parser.add_argument('--adb', default=shutil.which('adb'))
     args = parser.parse_args()
     if not args.adb:
@@ -34,7 +35,8 @@ def main():
 
     def invocation(phase):
         return adb + ['shell', 'am', 'instrument', '-w', '-r', '-e', 'class', case,
-                      '-e', 'nuxie_process_phase', phase, '-e', 'nuxie_process_run', run_id, runner]
+                      '-e', 'nuxie_process_phase', phase, '-e', 'nuxie_process_run', run_id,
+                      '-e', 'nuxie_process_boundary', args.boundary, runner]
 
     marker_path = f'files/process-startup-{run_id}/ready.json'
     with (output / 'seed.log').open('w') as log:
@@ -73,7 +75,7 @@ def main():
     result = (output / 'recover.log').read_text()
     if recovered.returncode != 0 or not re.search(r'^OK \(1 test\)$', result, re.MULTILINE):
         raise RuntimeError(f'Cross-process recovery failed; see {output / "recover.log"}')
-    summary = {'run': run_id, 'seedPid': marker['pid'], 'retainedEventId': marker['eventId'],
+    summary = {'boundary': args.boundary, 'run': run_id, 'seedPid': marker['pid'], 'retainedEventId': marker['eventId'],
                'result': 'passed', 'logs': str(output)}
     (output / 'result.json').write_text(json.dumps(summary, indent=2) + '\n')
     print(json.dumps(summary, indent=2))
