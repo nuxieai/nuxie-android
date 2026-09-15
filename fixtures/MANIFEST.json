@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "fe5e41cf15181675037ef0e07124eaf0544190a2",
+  "sourceCommit": "d7890d68cf08506d277163faa687b1baca20c3b6",
   "files": {
     "README.md": "4363d6a79ac9828364a6a02bf400d98c0852b771062258c409a744dd1a5016e7",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
@@ -65,6 +65,10 @@
     "journeys/rendered-screen-control/release-entry.json": "7f9e6f5b4cb4fbf53352023ddc78f532d262bcda1784f35c04bb7f5b73158a5b",
     "journeys/rendered-screen-control/renders/sha256/bd03eb17500876217d7f20048ed01bf214475f5934f78b225c703a431e2eb4e1.riv": "bd03eb17500876217d7f20048ed01bf214475f5934f78b225c703a431e2eb4e1",
     "journeys/rendered-screen-control/screen-behavior/sha256/afa9c7ef672a2766bac6fe0cfb662e024364573d8b113f74b0b6086be5724984.bin": "afa9c7ef672a2766bac6fe0cfb662e024364573d8b113f74b0b6086be5724984",
+    "journeys/rendered-startup-event/provenance.json": "261e4ee25f3866d52a34777f73e0c36fd4fffea20162d962a8a1d7d09c78ac3c",
+    "journeys/rendered-startup-event/release-entry.json": "7351d0f73d8b6ee918e7ee1dfa6b997908153acbd75c61c9ad594e9fea212c79",
+    "journeys/rendered-startup-event/renders/sha256/bd03eb17500876217d7f20048ed01bf214475f5934f78b225c703a431e2eb4e1.riv": "bd03eb17500876217d7f20048ed01bf214475f5934f78b225c703a431e2eb4e1",
+    "journeys/rendered-startup-event/screen-behavior/sha256/afa9c7ef672a2766bac6fe0cfb662e024364573d8b113f74b0b6086be5724984.bin": "afa9c7ef672a2766bac6fe0cfb662e024364573d8b113f74b0b6086be5724984",
     "journeys/rendered-text-input/LICENSE-Inter.txt": "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a",
     "journeys/rendered-text-input/assets/sha256/3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d.png": "3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d",
     "journeys/rendered-text-input/assets/sha256/4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf.ttf": "4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf",
@@ -83,6 +87,7 @@
     "runtime/screen-control/provenance.json": "1ba4506487a4e8f4db8327e77402cf33ea705c3578dc890289da66f1d6c8a45a",
     "runtime/screen-control/screen.riv": "bd03eb17500876217d7f20048ed01bf214475f5934f78b225c703a431e2eb4e1",
     "runtime/surface-capability-android.json": "d4b0996d6008d94a64b547fd589c6cd2810c8d8f5867d2183b928fbed7e7a0ac",
+    "sdk/android-foreground-admission.json": "382dc4fc7e55db672234c761bc5b32966d84eac0c6d611b7e1d9895a87f88c00",
     "sdk/android-provider-checkout-terms.json": "79897c560d7dd1b5c78df1b32a0cdb468c2cc4bf38a63e85af9249125d03da74",
     "sdk/interaction-player.json": "21ce49e151920c6c443d9c7a4d558e8962483c2018da04301e8a83e256737718",
     "sdk/runtime-settings.json": "a94f62521e03c7886a9e10463c00626231824bace5af6edce497413ed3b1618e",

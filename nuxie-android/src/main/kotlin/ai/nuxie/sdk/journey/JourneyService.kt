@@ -332,7 +332,7 @@ internal class JourneyService(
     // Setup can run from a receiver, worker, or service before any Activity is
     // visible. Keep screen-bearing admission closed until the lifecycle
     // coordinator observes the first Activity entering the foreground.
-    private val foreground = AtomicBoolean(false)
+    private val foreground = JourneyForegroundAdmission()
     private var profileState: ProfileState? = null
     private var journal: JourneyRunJournal? = null
     private val retainedReleasesByDigest = linkedMapOf<String, AuthenticatedJourneyRelease>()
@@ -402,7 +402,8 @@ internal class JourneyService(
         }
     }
 
-    fun eventAdmissionGeneration(): Long = profileGeneration.get()
+    // Opening foreground authority also invalidates an in-flight deferred route's ticket.
+    fun eventAdmissionGeneration(): Long = profileGeneration.get() + foreground.completedRevalidations()
 
     suspend fun initialize() = submit(Command::Initialize)
 
@@ -623,13 +624,23 @@ internal class JourneyService(
         )
     }
 
+    fun onAppVisibilityChanged(visible: Boolean) = foreground.visibilityChanged(visible)
+
+    fun foregroundRevalidationToken(): Long? = foreground.revalidationToken()
+
+    suspend fun completeForegroundRevalidation(token: Long) {
+        if (foreground.completeRevalidation(token)) submit(Command::Foreground)
+    }
+
+    suspend fun settleAppBackground() = submit(Command::Background)
+
     suspend fun onAppDidEnterBackground() {
-        foreground.set(false)
+        foreground.visibilityChanged(false)
         submit(Command::Background)
     }
 
     suspend fun onAppWillEnterForeground() {
-        foreground.set(true)
+        foreground.activate()
         submit(Command::Foreground)
     }
 
@@ -769,17 +780,19 @@ internal class JourneyService(
         event: StoredEvent,
         admittedGeneration: Long,
     ): Boolean {
-        val directlyRoutedRunId = directlyRoutedRunByEventId.remove(event.id)
         if (event.distinctId != identity.distinctId()) return false
         if (event.name == JourneyEventNames.LEG_STARTED ||
             event.name == JourneyEventNames.LEG_COMPLETED
         ) return true
         if (!initialized) return false
+        // The durable route must survive until the visible host has current authority.
+        if (foreground.isRevalidating()) return false
         if (journal?.distinctId != event.distinctId) return false
+        val directlyRoutedRunId = directlyRoutedRunByEventId.remove(event.id)
         resumePresentationActionOutcome(event, excludingRunId = directlyRoutedRunId)
         val state = currentState() ?: return currentProfilePublished
         resumeParkedRuns(state, event, excludingRunId = directlyRoutedRunId)
-        if (!isCurrent(state) || admittedGeneration != state.generation) {
+        if (!isCurrent(state) || admittedGeneration != eventAdmissionGeneration()) {
             scheduleNextWake()
             return false
         }
@@ -891,12 +904,11 @@ internal class JourneyService(
     }
 
     private fun backgroundNow() {
-        foreground.set(false)
         cancelWake()
     }
 
     private suspend fun foregroundNow() {
-        foreground.set(true)
+        if (!foreground.get()) return
         foregroundReceiptResetCustomers.remove(identity.distinctId())
         resetForegroundReceiptsIfNeeded()
         val state = currentState() ?: return
@@ -1029,6 +1041,7 @@ internal class JourneyService(
     }
 
     private suspend fun reconcileNow(generation: Long) {
+        if (foreground.isRevalidating()) return
         val state = currentState()?.takeIf { it.generation == generation } ?: return
         if (!ensureJournal(state.distinctId)) return
         if (!settleLivePresentationPublications(state)) {

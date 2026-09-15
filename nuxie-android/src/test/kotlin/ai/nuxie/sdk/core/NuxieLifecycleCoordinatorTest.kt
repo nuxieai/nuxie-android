@@ -29,6 +29,36 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 class NuxieLifecycleCoordinatorTest {
     @Test
+    fun visibilityFencesDoNotWaitForSuspendedForegroundRecovery() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val visibility = CopyOnWriteArrayList<Boolean>()
+        val context = RuntimeEnvironment.getApplication()
+        val coordinator = NuxieLifecycleCoordinator(
+            tracker = AppLifecycleTracker(
+                preferences = context.getSharedPreferences("visibility-fence", Context.MODE_PRIVATE),
+                appVersionProvider = { "1" }, nowMillis = { 100_000L }, emit = { _, _ -> },
+            ),
+            sessions = SessionService { 100_000L }, scope = scope,
+            onVisibilityChanged = { visibility += it },
+            onForeground = { entered.complete(Unit); release.await() },
+        )
+        val activity = Robolectric.buildActivity(Activity::class.java).get()
+        try {
+            coordinator.onActivityStarted(activity)
+            withTimeout(3_000) { entered.await() }
+            coordinator.onActivityStopped(activity)
+            coordinator.onActivityStarted(activity)
+            assertEquals(listOf(true, false, true), visibility)
+        } finally {
+            release.complete(Unit)
+            coordinator.close()
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun checkoutActivityTracksVisibleResumedOwnerWithoutRetainingStoppedHosts() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val context = RuntimeEnvironment.getApplication()

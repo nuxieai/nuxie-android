@@ -469,8 +469,9 @@ internal class NuxieCore(
         lifecycleTracker,
         sessions,
         scope,
+        onVisibilityChanged = journeys::onAppVisibilityChanged,
         onBackground = {
-            journeys.onAppDidEnterBackground()
+            journeys.settleAppBackground()
         },
         afterBackground = {
             delivery.flushAll()
@@ -479,8 +480,9 @@ internal class NuxieCore(
             // Profile reconciliation is the server-authoritative refund and
             // revocation lane. A failed revalidation leaves the authenticated
             // cached authority in place for offline execution.
+            val token = journeys.foregroundRevalidationToken()
             profile.refreshAndWait()
-            journeys.onAppWillEnterForeground()
+            if (token != null) journeys.completeForegroundRevalidation(token)
             // Purchase recovery handles still-active Play evidence.
             purchases.recover()
             featureUsage.recover()
@@ -525,6 +527,10 @@ internal class NuxieCore(
         // Subscriber registration precedes recovery, while the synchronous
         // enqueue keeps every later capture behind initialization in its FIFO.
         journeys.enqueueInitialization()
+        if (registerLifecycle) {
+            (appContext as? Application)?.registerActivityLifecycleCallbacks(lifecycleCoordinator)
+            initialActivity?.let(lifecycleCoordinator::admitVisibleActivity)
+        }
         if (requestInitialProfileRefresh) {
             profile.requestRefresh()
         }
@@ -534,10 +540,6 @@ internal class NuxieCore(
         }
         lifecycleTracker.trackAppLaunchEvents()
         if (!testStoreEnabled) billing.connect()
-        if (registerLifecycle) {
-            (appContext as? Application)?.registerActivityLifecycleCallbacks(lifecycleCoordinator)
-            initialActivity?.let(lifecycleCoordinator::admitVisibleActivity)
-        }
     }
 
     /** Every caller awaits one independently owned teardown; cancelling a waiter cannot cancel it. */
