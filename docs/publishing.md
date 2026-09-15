@@ -23,7 +23,9 @@ the debug Test Store gate and rejects unconditional enablement. Generated app
 sources and logs remain under `build/maven-consumer`.
 
 The `--repository` option accepts another repository URL for qualification of a
-published candidate. Local staging is not evidence that an artifact is available
+published candidate. The SDK coordinate resolves exclusively from that repository;
+the test proves an empty selected repository fails even with a populated fallback.
+Local staging is not evidence that an artifact is available
 on Maven Central. An actual Central deployment and a public-repository consumer
 run remain required before announcing availability.
 
