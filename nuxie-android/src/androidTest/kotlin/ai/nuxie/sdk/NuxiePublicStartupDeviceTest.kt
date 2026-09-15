@@ -40,10 +40,22 @@ class NuxiePublicStartupDeviceTest {
     @Test fun immediatelyAvailableProfileStillAdmitsThePublicTrigger() =
         exercise(eventEntry = true, holdInitialProfile = false)
 
+    @Test fun processDeathRetainsThePublicTriggerUntilSignedProfileAdmission() {
+        val arguments = InstrumentationRegistry.getArguments()
+        val phase = arguments.getString("nuxie_process_phase")
+        org.junit.Assume.assumeTrue("Run with scripts/test-startup-process-death.py", phase != null)
+        require(phase == "seed" || phase == "recover")
+        val run = checkNotNull(arguments.getString("nuxie_process_run"))
+        require(run.matches(Regex("[a-f0-9-]{36}")))
+        exercise(eventEntry = true, processPhase = phase, processRun = run)
+    }
+
     private fun exercise(
         eventEntry: Boolean,
         backgroundDuringRefresh: Boolean = false,
         holdInitialProfile: Boolean = true,
+        processPhase: String? = null,
+        processRun: String? = null,
     ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
@@ -73,7 +85,19 @@ class NuxiePublicStartupDeviceTest {
         val profileEntered = CountDownLatch(1)
         val releaseProfile = CountDownLatch(1)
         val profile = profile(entry, descriptor.getValue("leg").jsonObject.getValue("entryCondition").jsonObject)
-        val directory = File(context.cacheDir, "public-startup-${UUID.randomUUID()}").apply { mkdirs() }
+        val directory = if (processPhase == null) {
+            File(context.cacheDir, "public-startup-${UUID.randomUUID()}").apply { mkdirs() }
+        } else {
+            File(context.filesDir, "process-startup-$processRun").apply { mkdirs() }
+        }
+        val markerFile = File(directory, "ready.json")
+        val previous = if (processPhase == "recover") {
+            Json.parseToJsonElement(markerFile.readText()).jsonObject.also {
+                assertNotEquals("Recovery must use a new OS process", android.os.Process.myPid(),
+                    it.getValue("pid").jsonPrimitive.int)
+                assertTrue(File(directory, "events.db").isFile)
+            }
+        } else null
         val transport = HttpTransport { request ->
             val path = request.url.path.trimStart('/')
             when {
@@ -99,7 +123,10 @@ class NuxiePublicStartupDeviceTest {
         instrumentation.addMonitor(monitor)
         var host = instrumentation.startActivitySync(Intent(context, SurfaceCompatibilityHostActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        val identity = IdentityService(context).apply { setDistinctId("public-startup-${UUID.randomUUID()}") }
+        val identity = IdentityService(context).apply {
+            if (previous == null) setDistinctId("public-startup-${processRun ?: UUID.randomUUID()}")
+            else assertEquals(previous.getValue("owner").jsonPrimitive.content, distinctId())
+        }
         Nuxie.overridesForTesting = NuxieCore.Overrides(
             identity = identity,
             transport = transport,
@@ -116,13 +143,26 @@ class NuxiePublicStartupDeviceTest {
                 })
             }
             assertTrue("Public setup starts the initial profile request", profileEntered.await(10, TimeUnit.SECONDS))
-            Nuxie.trigger("startup_probe")
+            if (processPhase != "recover") Nuxie.trigger("startup_probe")
             val core = checkNotNull(Nuxie.core)
             val owner = Nuxie.distinctId
             runBlocking { withTimeout(10_000) { core.eventLog.awaitBarrier() } }
             if (holdInitialProfile) assertEquals(0, monitor.hits)
             if (eventEntry && holdInitialProfile) runBlocking {
                 assertEquals(1, core.store.queryPendingLocalRoutes(owner).count { it.name == "startup_probe" })
+            }
+            if (processPhase == "seed") {
+                val captured = runBlocking { core.store.queryPendingLocalRoutes(owner).single { it.name == "startup_probe" } }
+                val marker = buildJsonObject {
+                    put("pid", android.os.Process.myPid())
+                    put("owner", owner)
+                    put("eventId", captured.id)
+                }
+                val temporaryMarker = File(directory, "ready.tmp")
+                temporaryMarker.writeText(marker.toString())
+                check(temporaryMarker.renameTo(markerFile))
+                // The external driver kills this exact process here; no shutdown/finally is run.
+                check(CountDownLatch(1).await(60, TimeUnit.SECONDS)) { "Process-death driver did not kill the seed process" }
             }
             if (backgroundDuringRefresh) {
                 assertNotNull(core.journeys.foregroundRevalidationToken())
@@ -186,6 +226,10 @@ class NuxiePublicStartupDeviceTest {
                 val events = core.store.pendingBatch(200)
                 assertEquals(if (backgroundDuringRefresh) 3 else 1, events.count { it.name == "startup_probe" && it.distinctId == owner })
                 assertEquals(1, events.count { it.name == "script_control_activated" && it.distinctId == owner })
+                previous?.let {
+                    assertEquals(it.getValue("eventId").jsonPrimitive.content,
+                        events.single { event -> event.name == "startup_probe" }.id)
+                }
                 assertTrue(core.store.queryPendingLocalRoutes(owner).none { it.name == "startup_probe" })
             }
             val journal = JourneyRunJournal(File(context.filesDir, "nuxie"), owner, JourneyStorageScope(
