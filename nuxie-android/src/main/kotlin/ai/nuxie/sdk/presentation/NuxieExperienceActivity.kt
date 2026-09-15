@@ -431,7 +431,7 @@ internal class NuxieExperienceActivity : Activity() {
                             acquiringScreen = pending
                             // A failed/slow acquisition must always permit leaving the native shell.
                             dismissible = true
-                            contentRoot = FrameLayout(this@NuxieExperienceActivity).apply { setBackgroundColor(content.screen.clearColor) }
+                            contentRoot = ExperienceFocusRoot(this@NuxieExperienceActivity).apply { setBackgroundColor(content.screen.clearColor) }
                             setContentView(shellView(contentRoot, content.screen.shell))
                             contentRoot.setBackgroundColor(content.screen.clearColor)
                             loadingView = ExperienceLoadingView(this@NuxieExperienceActivity, content.screen.clearColor).also {
@@ -507,7 +507,7 @@ internal class NuxieExperienceActivity : Activity() {
 
     private fun ensureNativeRecoveryShell(id: String, prepared: PreparedPresentation) {
         if (!::contentRoot.isInitialized) {
-            contentRoot = FrameLayout(this).apply { setBackgroundColor(prepared.clearColor) }
+            contentRoot = ExperienceFocusRoot(this).apply { setBackgroundColor(prepared.clearColor) }
             setContentView(shellView(contentRoot, prepared.shell))
             loadingView = ExperienceLoadingView(this, prepared.clearColor).also {
                 contentRoot.addView(it, FrameLayout.LayoutParams(-1, -1))
@@ -589,7 +589,7 @@ internal class NuxieExperienceActivity : Activity() {
         dismissible = true
         try {
             val newRoot = !::contentRoot.isInitialized
-            if (newRoot) contentRoot = FrameLayout(this)
+            if (newRoot) contentRoot = ExperienceFocusRoot(this)
             contentRoot.addView(screen.mount().apply { alpha = 0f }, 0, FrameLayout.LayoutParams(-1, -1))
             if (newRoot) setContentView(shellView(contentRoot, prepared.shell))
             contentRoot.setBackgroundColor(prepared.clearColor)
@@ -784,7 +784,7 @@ internal class NuxieExperienceActivity : Activity() {
         host.layoutParams = FrameLayout.LayoutParams(-1, -1)
         if (shell is PresentationShell.FullScreen) return host
 
-        val root = FrameLayout(this)
+        val root = ExperienceFocusRoot(this)
         val scrim = View(this).apply {
             setBackgroundColor(SCRIM_COLOR)
             if (shell.dismissible) {

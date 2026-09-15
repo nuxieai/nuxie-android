@@ -27,6 +27,92 @@ import org.robolectric.annotation.GraphicsMode
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [30])
 class ExperienceAccessibilityProviderTest {
+    @Test fun `keyboard restoration works without accessibility and yields to a new native owner`() = withHost { host ->
+        Shadows.shadowOf(host.context.getSystemService(AccessibilityManager::class.java)).setEnabled(false)
+        val provider = provider(host)
+        val tree = NuxieSemanticTree(1, 1, listOf(node(), node().copy(id = 43, siblingIndex = 1, label = "Second")))
+        provider.publish(tree)
+        assertTrue(provider.performAction(2, AccessibilityNodeInfo.ACTION_FOCUS, null))
+        provider.withdraw()
+        provider.withdraw()
+        provider.publish(tree)
+        assertEquals("Second", provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+
+        provider.withdraw()
+        val root = host.parent as ExperienceFocusRoot
+        val shell = android.widget.EditText(host.context)
+        root.addView(shell)
+        shell.layout(0, 0, 200, 50)
+        assertTrue(shell.requestFocus())
+        provider.publish(tree)
+        assertNull(provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT))
+        assertTrue(shell.hasFocus())
+    }
+
+    @Test fun `withdrawn native editor restores current control and retirement cancels restoration`() = withHost { host ->
+        val provider = provider(host)
+        val root = host.parent as ExperienceFocusRoot
+        val old = android.widget.EditText(host.context)
+        root.addView(old)
+        old.layout(0, 0, 100, 50)
+        val tree = NuxieSemanticTree(1, 1, listOf(node().copy(role = 6)))
+        provider.publish(tree, mapOf(42L to old))
+        assertTrue(old.requestFocus())
+        provider.withdraw()
+        root.removeView(old)
+        val replacement = android.widget.EditText(host.context)
+        root.addView(replacement)
+        replacement.layout(0, 0, 100, 50)
+        provider.publish(tree, mapOf(42L to replacement))
+        assertTrue(replacement.hasFocus())
+        provider.withdraw()
+        provider.retire()
+        root.removeView(replacement)
+        provider.publish(NuxieSemanticTree(2, 2, listOf(node())))
+        assertNull(provider.findFocus(AccessibilityNodeInfo.FOCUS_INPUT))
+    }
+
+    @Test @Config(sdk = [23, 30, 36])
+    fun `shared focus scenarios preserve owned targets and respect native shell focus`() = withHost { host ->
+        val fixture = Json.parseToJsonElement(File("../fixtures/accessibility/focus-restoration.json").readText()).jsonObject
+        assertEquals(1, fixture.getValue("schemaVersion").jsonPrimitive.int)
+        val root = host.parent as ExperienceFocusRoot
+        Shadows.shadowOf(host.context.getSystemService(AccessibilityManager::class.java)).setTouchExplorationEnabled(true)
+        val shell = android.widget.Button(host.context).apply { text = "Recovery" }
+        root.addView(shell)
+        shell.layout(0, 0, 100, 50)
+        for (item in fixture.getValue("cases").jsonArray) {
+            shell.performAccessibilityAction(AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS, null)
+            val scenario = item.jsonObject
+            val provider = provider(host)
+            for (raw in scenario.getValue("steps").jsonArray) {
+                val step = raw.jsonObject
+                when (step.getValue("op").jsonPrimitive.content) {
+                    "publish" -> provider.publish(NuxieSemanticTree(1, 1,
+                        step.getValue("nodes").jsonArray.mapIndexed { index, id -> node().copy(
+                            id = id.jsonPrimitive.int.toLong(), siblingIndex = index, label = id.jsonPrimitive.content) }))
+                    "focus" -> {
+                        val label = step.getValue("target").jsonPrimitive.content
+                        val virtual = (1..64).first { provider.createAccessibilityNodeInfo(it)?.text?.toString() == label }
+                        assertTrue(provider.performAction(virtual, AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null))
+                    }
+                    "withdraw" -> {
+                        provider.withdraw()
+                        assertNull(provider.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY))
+                    }
+                    "resume" -> Unit // Only the next presented tree can restore Android targets.
+                    "shell" -> assertTrue(shell.performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null))
+                    else -> error("Unknown shared focus operation")
+                }
+            }
+            val actual = provider.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)?.text?.toString()
+                ?: if (shell.isAccessibilityFocused) "shell" else "none"
+            assertEquals(scenario.getValue("id").jsonPrimitive.content,
+                scenario.getValue("expectedFocus").jsonPrimitive.content, actual)
+            provider.retire()
+        }
+    }
+
     @Test fun `Android nodes expose authored labels geometry and exact actions`() = withHost { host ->
         val requests = mutableListOf<Triple<Long, Long, Int>>()
         val provider = provider(host) { tree, id, action -> requests += Triple(tree.renderRevision, id, action); true }
@@ -346,7 +432,7 @@ class ExperienceAccessibilityProviderTest {
             val activity = controller.get()
             Shadows.shadowOf(activity.getSystemService(AccessibilityManager::class.java)).setEnabled(true)
             val host = View(activity).apply { isFocusableInTouchMode = true }
-            activity.setContentView(host)
+            activity.setContentView(ExperienceFocusRoot(activity).apply { addView(host) })
             host.layout(0, 0, 300, 300)
             assertTrue(host.isShown)
             block(host)
