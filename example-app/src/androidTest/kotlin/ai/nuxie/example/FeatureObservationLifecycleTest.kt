@@ -38,9 +38,9 @@ class FeatureObservationLifecycleTest {
       override fun onActivityDestroyed(activity: Activity) = Unit
     }
     runBlocking { Nuxie.shutdownAndAwait() }
-    app.registerActivityLifecycleCallbacks(callbacks)
     var activity: Activity? = null
     FeatureServer().use { server ->
+      app.registerActivityLifecycleCallbacks(callbacks)
       try {
         val launch = Intent(app, MainActivity::class.java)
           .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -96,10 +96,16 @@ class FeatureObservationLifecycleTest {
         await("new customer waiting panel") { displayed() == "Waiting for exports access for the current customer." }
         assertSame(host, app.currentActivity)
       } finally {
-        activity?.let { host -> instrumentation.runOnMainSync { host.finish() } }
-        instrumentation.waitForIdleSync()
-        runBlocking { Nuxie.shutdownAndAwait() }
-        app.unregisterActivityLifecycleCallbacks(callbacks)
+        try {
+          activity?.let { host -> instrumentation.runOnMainSync { host.finish() } }
+          instrumentation.waitForIdleSync()
+        } finally {
+          try {
+            runBlocking { Nuxie.shutdownAndAwait() }
+          } finally {
+            app.unregisterActivityLifecycleCallbacks(callbacks)
+          }
+        }
       }
     }
   }
