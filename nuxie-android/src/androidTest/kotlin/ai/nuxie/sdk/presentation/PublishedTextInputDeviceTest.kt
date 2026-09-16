@@ -2290,7 +2290,17 @@ class PublishedTextInputDeviceTest {
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.SLIDER_HOME_RETURN)
     }
 
-    private enum class AuthoredRoleProbe { COMPLETE, HEADING_ENTRY, EDITOR_ENTRY, EDITOR_HOME_RETURN, SLIDER_HOME_RETURN }
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun signedSliderKeyboardMatchesNativeSeekBarInLtr() =
+        exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.KEYBOARD_LTR)
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun signedSliderKeyboardMatchesNativeSeekBarInRtl() =
+        exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.KEYBOARD_RTL)
+
+    private enum class AuthoredRoleProbe { COMPLETE, HEADING_ENTRY, EDITOR_ENTRY, EDITOR_HOME_RETURN, SLIDER_HOME_RETURN, KEYBOARD_LTR, KEYBOARD_RTL }
 
     private enum class PublishedBehavior { TEXT_INPUT, SCRIPT, SEMANTIC_SCRIPT, SEMANTIC_ROLES }
 
@@ -2702,6 +2712,12 @@ class PublishedTextInputDeviceTest {
             SystemClock.sleep(20)
         }
         assertEquals(expectedLabels.sorted(), published.mapNotNull { label(it) }.sorted())
+        if (roleProbe == AuthoredRoleProbe.KEYBOARD_LTR || roleProbe == AuthoredRoleProbe.KEYBOARD_RTL) {
+            assertSliderKeyboardDirection(instrumentation, activity, accepted,
+                roleProbe == AuthoredRoleProbe.KEYBOARD_RTL)
+            assertTrue("Keyboard traversal without editing must not commit responses", responses().isEmpty())
+            return
+        }
         var talkBackInput: TalkBackEmulatorInput? = null
         if (useTalkBack) {
             val manager = activity.getSystemService(android.view.accessibility.AccessibilityManager::class.java)
@@ -2833,6 +2849,105 @@ class PublishedTextInputDeviceTest {
         assertFalse(nodes().any { it.text?.toString() == "typed-password" || it.contentDescription?.toString() == "typed-password" })
         assertEquals(1, nodes().count { it.isEditable })
         assertEquals(null, accepted.poll(300, TimeUnit.MILLISECONDS))
+    }
+
+    private fun assertSliderKeyboardDirection(
+        instrumentation: Instrumentation,
+        activity: Activity,
+        accepted: LinkedBlockingQueue<JourneyScreenEmissionBatch>,
+        rtl: Boolean,
+    ) {
+        val direction = if (rtl) View.LAYOUT_DIRECTION_RTL else View.LAYOUT_DIRECTION_LTR
+        val automation = instrumentation.uiAutomation
+        lateinit var oracle: android.widget.SeekBar
+        lateinit var surface: ExperienceSurfaceHost
+        fun settle() {
+            instrumentation.waitForIdleSync()
+            automation.waitForIdle(100, 5000)
+        }
+        fun focusedLabel(): String? = automation.rootInActiveWindow
+            ?.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
+            ?.let { it.text?.toString() ?: it.hintText?.toString() }
+        fun awaitFocus(label: String) {
+            val deadline = SystemClock.uptimeMillis() + 5000
+            var observed = focusedLabel()
+            while (observed != label && SystemClock.uptimeMillis() < deadline) {
+                SystemClock.sleep(20)
+                observed = focusedLabel()
+            }
+            assertEquals("Keyboard must follow authored order in layout direction $direction", label, observed)
+        }
+        instrumentation.runOnMainSync {
+            activity.window.decorView.layoutDirection = direction
+            fun find(view: View): ExperienceSurfaceHost? = if (view is ExperienceSurfaceHost) view
+                else if (view is ViewGroup) (0 until view.childCount).firstNotNullOfOrNull { find(view.getChildAt(it)) } else null
+            surface = checkNotNull(find(activity.window.decorView))
+            oracle = android.widget.SeekBar(activity).apply {
+                layoutDirection = direction
+                max = 10
+                progress = 5
+                keyProgressIncrement = 1
+                isFocusableInTouchMode = true
+            }
+            activity.addContentView(oracle, android.widget.FrameLayout.LayoutParams(300, 100))
+            assertTrue(oracle.requestFocus())
+        }
+        settle()
+        val expectedActions = mutableListOf<Pair<Int, String>>()
+        try {
+            instrumentation.runOnMainSync {
+                assertEquals(direction, oracle.layoutDirection)
+                assertEquals(direction, surface.layoutDirection)
+            }
+            for (key in listOf(android.view.KeyEvent.KEYCODE_DPAD_LEFT, android.view.KeyEvent.KEYCODE_DPAD_RIGHT)) {
+                var before = 0
+                instrumentation.runOnMainSync { before = oracle.progress }
+                instrumentation.sendKeyDownUpSync(key)
+                settle()
+                instrumentation.runOnMainSync {
+                    assertTrue("Native SeekBar must respond to a real key", oracle.progress != before)
+                    expectedActions += key to if (oracle.progress > before) "seat_increased" else "seat_decreased"
+                }
+            }
+            assertEquals(if (rtl) listOf("seat_increased", "seat_decreased") else listOf("seat_decreased", "seat_increased"),
+                expectedActions.map { it.second })
+        } finally {
+            instrumentation.runOnMainSync { (oracle.parent as? ViewGroup)?.removeView(oracle) }
+        }
+        settle()
+        assertTrue("The native oracle must not emit Journey actions", accepted.isEmpty())
+        val seats = checkNotNull(automation.rootInActiveWindow).findAccessibilityNodeInfosByText("Seats")
+            .single { it.text?.toString() == "Seats" }
+        if (!seats.isFocused) {
+            var hostState = ""
+            instrumentation.runOnMainSync {
+                hostState = "focusable=${surface.isFocusable} touch=${surface.isFocusableInTouchMode} enabled=${surface.isEnabled} shown=${surface.isShown} focused=${surface.hasFocus()} current=${activity.currentFocus}"
+            }
+            assertTrue("Slider focus request failed: $hostState clientFocus=${focusedLabel()}",
+                seats.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_FOCUS))
+        }
+        awaitFocus("Seats")
+        for ((key, expected) in expectedActions) {
+            instrumentation.sendKeyDownUpSync(key)
+            val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS)) { "Keyboard action must reach the durable Journey: $expected" }
+            assertEquals(listOf(expected), batch.emissions.map { it.name })
+            assertEquals("One key must produce one ordered authored action", null, accepted.poll(300, TimeUnit.MILLISECONDS))
+        }
+        instrumentation.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_TAB)
+        awaitFocus("Password")
+        val editor = awaitEditor(instrumentation, activity, "text-input/screen_1/password")
+        instrumentation.runOnMainSync {
+            assertTrue(editor.hasFocus())
+            assertEquals(direction, editor.layoutDirection)
+            assertEquals("", editor.text.toString())
+        }
+        val now = SystemClock.uptimeMillis()
+        for (action in listOf(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.ACTION_UP)) {
+            instrumentation.sendKeySync(android.view.KeyEvent(now, now, action, android.view.KeyEvent.KEYCODE_TAB,
+                0, android.view.KeyEvent.META_SHIFT_ON))
+        }
+        awaitFocus("Seats")
+        assertEquals("Focus movement must not emit authored actions", null, accepted.poll(300, TimeUnit.MILLISECONDS))
     }
 
     private fun composedSurface(instrumentation: Instrumentation, surface: TextureView, fixedBounds: Rect? = null): Bitmap {

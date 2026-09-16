@@ -163,3 +163,35 @@ The source remains usable by the existing navigation-recovery contract; these te
 `--scenario native-close` exercises `talkBackClosesInitialNativeRetryDuringDrain`. After native failure, the test holds the real renderer lane ahead of retirement, activates Retry through TalkBack, then activates Close while retirement is pending. The terminal outcome starts before the lane is released, but presentation remains pending and the lease remains owned. Release permits cleanup exactly once, with one terminal outcome, no shown event and no unseen-screen dismissal checkpoint. The deliberate queue barrier qualifies ownership and accessibility during drain; it does not simulate a graphics-driver deadlock.
 
 Both tests pass on API 36 ARM64 SwiftShader with TalkBack 16.0.0.738667889 and public runtime 0.3.12. Hardware swipes and double-taps outside focused-control bounds use the shared recovery oracle; the driver restores and verifies accessibility settings and notification permission/flags. Speech, other shell modes, actual driver faults, physical devices and full parity remain separately unqualified.
+
+## LTR and RTL slider keyboard behavior
+
+`PublishedTextInputDeviceTest.signedSliderKeyboardMatchesNativeSeekBarInLtr` and
+`signedSliderKeyboardMatchesNativeSeekBarInRtl` compare the signed authored slider
+with a real Android `SeekBar` in the same Activity. Both receive injected Left and
+Right key events. Each native progress change determines the expected authored
+increase/decrease event; the signed scene must deliver that single event through
+its normal durable Journey admission. Tab reaches the actual secure EditText and
+Shift+Tab returns to the slider in authored order, without editing or committing a
+response. Native and rendered controls must resolve the requested layout direction.
+
+The instrumentation application enables `supportsRtl`; each test sets the
+Activity decor's layout direction, leaving system locale and settings untouched.
+This qualifies keyboard direction and mixed native/virtual focus in an RTL view
+hierarchy. It does not qualify Arabic/Hebrew shaping, locale changes, TalkBack RTL
+traversal, font scaling, physical keyboards or the full scene capability.
+
+After installing the SDK instrumentation APK, run:
+
+```bash
+adb -s "$ANDROID_SERIAL" shell am instrument -w \
+  -e class 'ai.nuxie.sdk.presentation.PublishedTextInputDeviceTest#signedSliderKeyboardMatchesNativeSeekBarInLtr,ai.nuxie.sdk.presentation.PublishedTextInputDeviceTest#signedSliderKeyboardMatchesNativeSeekBarInRtl' \
+  ai.nuxie.sdk.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Require `OK (2 tests)`; instrumentation exit status alone does not prove success.
+The API 36 ARM64 host-graphics qualification uses public runtime 0.3.12 and the
+existing signed semantic roles fixture with test-only capability admission. A
+mutation removing RTL arrow reversal passes the LTR control and fails RTL with
+`seat_decreased` where native Android requires `seat_increased`. Production code
+is restored after that diagnostic; capability admission remains disabled.
