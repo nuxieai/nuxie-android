@@ -55,29 +55,6 @@ internal data class ExperienceTextInput(
         return EffectiveMetrics(size, height)
     }
 
-    data class Geometry(
-        val x: Float,
-        val y: Float,
-        val width: Float,
-        val height: Float,
-        val rotation: Float,
-        val scaleX: Float,
-        val scaleY: Float,
-    )
-
-    fun geometry(snapshot: NuxieViewModelSnapshot): Geometry? {
-        fun number(key: String) = geometryPaths[key]?.let(snapshot::resolveGeometryNumber)
-        return Geometry(
-            number("xPath") ?: return null,
-            number("yPath") ?: return null,
-            number("widthPath")?.takeIf { it > 0f } ?: return null,
-            number("heightPath")?.takeIf { it > 0f } ?: return null,
-            number("rotationPath") ?: return null,
-            number("scaleXPath") ?: return null,
-            number("scaleYPath") ?: return null,
-        )
-    }
-
     companion object {
         /** Schema validation precedes this projection; ambiguous IDs are never activated. */
         fun forScreen(descriptor: JsonObject?, screenId: String?): List<ExperienceTextInput> {

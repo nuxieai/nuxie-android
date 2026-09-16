@@ -152,7 +152,7 @@ internal class ExperienceTextInputOverlay(
         binding.editor.semanticNode?.let { it.id to binding.editor }
     }.toMap()
 
-    fun update(snapshot: NuxieViewModelSnapshot, geometry: NuxieTextGeometryCapture? = null) {
+    fun update(snapshot: NuxieViewModelSnapshot, geometry: NuxieTextGeometryCapture) {
         if (closed || !session.isCurrent()) return
         this.snapshot = snapshot
         geometryCapture = geometry
@@ -284,63 +284,24 @@ internal class ExperienceTextInputOverlay(
                 continue
             }
             val metrics = input.effectiveMetrics(snapshot)
-            val captured = geometryCapture
-            if (captured != null) {
-                val field = (captured as? NuxieTextGeometryCapture.Captured)?.fields?.get(input.runName)
-                binding.geometryAvailable = field != null && metrics != null && placeCapturedField(input, metrics, editor, container, field, scale, left, top)
-                val node = semanticFields?.get(input.id)
-                val enabled = binding.geometryAvailable && inputEnabled &&
-                    (semanticFields == null || node != null && node.stateFlags and NativeSemanticState.DISABLED == 0)
-                if (enabled && !editor.isEnabled) {
-                    session.read(input.id)?.let { retained ->
-                        editor.setText(retained.text)
-                        val length = editor.text?.length ?: 0
-                        editor.setSelection(retained.selectionStart.coerceIn(0, length), retained.selectionEnd.coerceIn(0, length))
-                    }
+            val field = (geometryCapture as? NuxieTextGeometryCapture.Captured)?.fields?.get(input.runName)
+            binding.geometryAvailable = field != null && metrics != null && placeCapturedField(input, metrics, editor, container, field, scale, left, top)
+            val node = semanticFields?.get(input.id)
+            val enabled = binding.geometryAvailable && inputEnabled &&
+                (semanticFields == null || node != null && node.stateFlags and NativeSemanticState.DISABLED == 0)
+            if (enabled && !editor.isEnabled) {
+                session.read(input.id)?.let { retained ->
+                    editor.setText(retained.text)
+                    val length = editor.text?.length ?: 0
+                    editor.setSelection(retained.selectionStart.coerceIn(0, length), retained.selectionEnd.coerceIn(0, length))
                 }
-                editor.isEnabled = enabled
-                if (!binding.geometryAvailable) {
-                    // Fence late IME callbacks before clearing focus on a missing field.
-                    if (editor.hasFocus()) clearEditorFocus()
-                    editor.visibility = View.INVISIBLE
-                }
-                continue
             }
-            val geometry = input.geometry(snapshot)
-            if (metrics == null || geometry == null || geometry.scaleX <= 0 || geometry.scaleY <= 0) {
+            editor.isEnabled = enabled
+            if (!binding.geometryAvailable) {
+                // Fence late IME callbacks before clearing focus on a missing field.
+                if (editor.hasFocus()) clearEditorFocus()
                 editor.visibility = View.INVISIBLE
-                continue
             }
-            val sx = scale * geometry.scaleX
-            val sy = scale * geometry.scaleY
-            val w = geometry.width * sx
-            val h = geometry.height * sy
-            val x = left + geometry.x * scale
-            val y = top + geometry.y * scale
-            if (listOf(w, h, x, y).any { !it.isFinite() } || w > Int.MAX_VALUE || h > Int.MAX_VALUE) {
-                editor.visibility = View.INVISIBLE
-                continue
-            }
-            val params = editor.layoutParams as LayoutParams
-            val targetWidth = w.roundToInt().coerceAtLeast(1)
-            val targetHeight = h.roundToInt().coerceAtLeast(1)
-            if (params.width != targetWidth || params.height != targetHeight) {
-                params.width = targetWidth
-                params.height = targetHeight
-                editor.layoutParams = params
-            }
-            editor.x = x
-            editor.y = y
-            editor.rotation = Math.toDegrees(geometry.rotation.toDouble()).toFloat()
-            editor.setTextSize(TypedValue.COMPLEX_UNIT_PX, metrics.fontSize * sy)
-            editor.letterSpacing = input.style.letterSpacing * sx / editor.textSize
-            // -1 means native font-natural height, not a negative pixel value.
-            // Explicit height is the baseline interval, so subtract actual font
-            // metrics rather than nominal text size (which excludes leading).
-            val extraLineSpacing = if (metrics.lineHeight == -1f) 0f
-                else metrics.lineHeight * sy - editor.paint.getFontMetricsInt(null)
-            editor.setLineSpacing(extraLineSpacing, 1f)
-            editor.visibility = View.VISIBLE
         }
         avoidKeyboard()
     }

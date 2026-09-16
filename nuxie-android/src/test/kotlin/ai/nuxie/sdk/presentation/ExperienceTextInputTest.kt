@@ -61,7 +61,7 @@ class ExperienceTextInputTest {
             })
             host.layout(0, 0, 400, 400)
             overlay.layout(0, 0, 400, 400)
-            overlay.update(snapshot())
+            overlay.update(snapshot(), capturedGeometry())
             val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
             fun present() {
                 overlay.updateSemantics(mapOf("name" to node))
@@ -100,7 +100,7 @@ class ExperienceTextInputTest {
                 0f, 0f, 100f, 30f, "Your name", "", "Use your full name")
             controller.get().setContentView(overlay)
             overlay.layout(0, 0, 400, 400)
-            overlay.update(snapshot())
+            overlay.update(snapshot(), capturedGeometry())
             overlay.updateSemantics(mapOf("name" to node))
             assertTrue(editor.requestFocus())
             val info = editor.createAccessibilityNodeInfo()
@@ -171,7 +171,7 @@ class ExperienceTextInputTest {
         try {
             controller.get().setContentView(overlay)
             overlay.layout(0, 0, 400, 400)
-            overlay.update(snapshot())
+            overlay.update(snapshot(), capturedGeometry())
             val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
             val group = ai.nuxie.sdk.runtime.NativeSemanticNode(10, -1, 0, 9, 0, 0, 0, 0,
                 0f, 0f, 200f, 100f, "Group", "", "")
@@ -287,7 +287,7 @@ class ExperienceTextInputTest {
         try {
             controller.get().setContentView(overlay)
             overlay.layout(0, 0, 400, 400)
-            overlay.update(snapshot())
+            overlay.update(snapshot(), capturedGeometry())
             val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
             val node = ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 6, 0, 0, 0, 0,
                 10f, 20f, 90f, 40f, "Your name", "", "")
@@ -298,7 +298,7 @@ class ExperienceTextInputTest {
             val count = writes.size
             assertEquals(View.INVISIBLE, editor.visibility)
             assertFalse(editor.hasFocus())
-            overlay.update(snapshot())
+            overlay.update(snapshot(), capturedGeometry())
             assertEquals(View.INVISIBLE, editor.visibility)
             editor.setText("zz")
             assertEquals(count, writes.size)
@@ -371,6 +371,11 @@ class ExperienceTextInputTest {
             val beforeLateIme = writes
             editor.setText("late IME write")
             assertEquals("Missing geometry must fence writes", beforeLateIme, writes)
+            overlay.update(snapshot(), capturedGeometry())
+            assertEquals(View.VISIBLE, editor.visibility)
+            assertTrue(editor.isEnabled)
+            assertEquals("draft", editor.text.toString())
+            assertEquals("Restoring geometry cannot emit text transactions", beforeLateIme, writes)
         } finally { overlay.close(); controller.pause().stop().destroy() }
     }
 
@@ -382,16 +387,18 @@ class ExperienceTextInputTest {
             listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
         activity.setContentView(overlay)
         overlay.layout(0, 0, 400, 400)
-        overlay.update(snapshot())
+        overlay.update(snapshot(), capturedGeometry())
         val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
         assertEquals("ab", editor.text.toString())
         assertEquals(View.VISIBLE, editor.visibility)
-        assertEquals(20f, editor.x)
-        assertEquals(140f, editor.y)
+        val origin = floatArrayOf(0f, 0f)
+        editor.matrix.mapPoints(origin)
+        (editor.parent as View).matrix.mapPoints(origin)
+        assertArrayEquals(floatArrayOf(20f, 140f), origin, 0.002f)
         assertEquals(160, editor.layoutParams.width)
         assertEquals(40, editor.layoutParams.height)
         assertEquals(Color.TRANSPARENT, editor.currentTextColor)
-        overlay.update(snapshot(width = Float.NaN))
+        overlay.update(snapshot(), capturedGeometry(width = Float.NaN))
         assertEquals(View.INVISIBLE, editor.visibility)
         overlay.close()
         assertEquals(0, overlay.childCount)
@@ -408,7 +415,7 @@ class ExperienceTextInputTest {
             }, { throw it })
         activity.setContentView(overlay)
         overlay.layout(0, 0, 400, 400)
-        overlay.update(snapshot())
+        overlay.update(snapshot(), capturedGeometry())
         val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
         editor.requestFocus()
         val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
@@ -436,7 +443,7 @@ class ExperienceTextInputTest {
         try {
             controller.get().setContentView(overlay)
             overlay.layout(0, 0, 400, 400)
-            overlay.update(snapshot())
+            overlay.update(snapshot(), capturedGeometry())
             val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
             assertTrue(editor.requestFocus())
             val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
@@ -473,7 +480,7 @@ class ExperienceTextInputTest {
             }, { throw it })
         activity.setContentView(overlay)
         overlay.layout(0, 0, 400, 400)
-        overlay.update(snapshot())
+        overlay.update(snapshot(), capturedGeometry())
         val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
         assertEquals("abc" to false, writes.last())
         assertEquals(Color.TRANSPARENT, editor.currentTextColor)
@@ -636,6 +643,15 @@ class ExperienceTextInputTest {
         assertTrue(coordinator.publishTextCommit("name", "ab"))
         assertEquals(0, publications)
         coordinator.close()
+    }
+
+    private fun capturedGeometry(width: Float = 80f): NuxieTextGeometryCapture {
+        val transform = NuxieTextRunGeometry.Transform(1f, 0f, 0f, 1f, 10f, 20f)
+        val bounds = NuxieTextRunGeometry.Bounds(0f, 0f, width, 20f)
+        return NuxieTextGeometryCapture.Captured(mapOf("headline" to NuxieTextRunGeometry(
+            1uL, transform, transform, bounds,
+            NuxieTextRunGeometry.Layout(transform, bounds), null,
+        )))
     }
 
     private fun snapshot(width: Float = 80f): NuxieViewModelSnapshot =

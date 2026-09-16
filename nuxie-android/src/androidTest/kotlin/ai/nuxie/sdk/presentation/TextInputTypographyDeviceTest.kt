@@ -1,6 +1,8 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.runtime.NativeViewModelSnapshot
+import ai.nuxie.sdk.runtime.NuxieTextGeometryCapture
+import ai.nuxie.sdk.runtime.NuxieTextRunGeometry
 import ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance
 import ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue
 import ai.nuxie.sdk.runtime.NuxieViewModelPropertyKind
@@ -55,7 +57,7 @@ class TextInputTypographyDeviceTest {
                     current.measure(View.MeasureSpec.makeMeasureSpec(size, View.MeasureSpec.EXACTLY),
                         View.MeasureSpec.makeMeasureSpec(size, View.MeasureSpec.EXACTLY))
                     current.layout(0, 0, size, size)
-                    current.update(geometry(geometryScale))
+                    current.update(geometry(geometryScale), capturedGeometry(geometryScale))
                     val editor = current.findViewWithTag<EditText>("nuxie-text-input-answer")
                     val oracle = EditText(activity).apply {
                         background = null
@@ -65,9 +67,9 @@ class TextInputTypographyDeviceTest {
                         inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
                         gravity = Gravity.TOP or Gravity.START
                         typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-                        setTextSize(TypedValue.COMPLEX_UNIT_PX, item.getDouble("expectedFontSize").toFloat())
+                        setTextSize(TypedValue.COMPLEX_UNIT_PX, item.getDouble("expectedFontSize").toFloat() / geometryScale)
                         if (!item.isNull("expectedBaselineDistance")) {
-                            setLineHeight(item.getDouble("expectedBaselineDistance").toInt())
+                            setLineHeight((item.getDouble("expectedBaselineDistance") / geometryScale).toInt())
                         }
                         setText(text)
                     }
@@ -81,18 +83,27 @@ class TextInputTypographyDeviceTest {
                     layout(editor)
                     layout(oracle)
                     assertEquals(name, 3, editor.layout.lineCount)
-                    assertEquals(name, item.getDouble("expectedFontSize").toFloat(), editor.textSize, 0.01f)
+                    assertEquals(name, item.getDouble("expectedFontSize").toFloat(), editor.textSize * geometryScale, 0.01f)
                     for (line in 1..2) {
-                        val expected = oracle.layout.getLineBaseline(line) - oracle.layout.getLineBaseline(line - 1)
-                        val actual = editor.layout.getLineBaseline(line) - editor.layout.getLineBaseline(line - 1)
-                        assertEquals("$name baseline $line", expected, actual)
+                        // Shape at field-local size, then project the measured native
+                        // baselines through the same public View coordinate boundary.
+                        val expected = (oracle.layout.getLineBaseline(line) - oracle.layout.getLineBaseline(line - 1)) * geometryScale
+                        val points = floatArrayOf(0f, editor.layout.getLineBaseline(line - 1).toFloat(),
+                            0f, editor.layout.getLineBaseline(line).toFloat())
+                        editor.matrix.mapPoints(points)
+                        (editor.parent as View).matrix.mapPoints(points)
+                        assertEquals("$name baseline $line", expected, points[3] - points[1], 0.01f)
+                        if (!item.isNull("expectedBaselineDistance")) {
+                            assertEquals("$name authored baseline $line",
+                                item.getDouble("expectedBaselineDistance").toFloat(), points[3] - points[1], 0.01f)
+                        }
                     }
                     editor.setSelection(1, 4)
                     val connection = requireNotNull(editor.onCreateInputConnection(EditorInfo()))
                     assertTrue(connection.setComposingRegion(1, 4))
                     assertEquals("$name composition precondition", 1, BaseInputConnection.getComposingSpanStart(editor.text))
                     val before = writes
-                    current.update(geometry(geometryScale))
+                    current.update(geometry(geometryScale), capturedGeometry(geometryScale))
                     layout(editor)
                     assertEquals(name, text, editor.text.toString())
                     assertEquals(name, 1, editor.selectionStart)
@@ -109,6 +120,14 @@ class TextInputTypographyDeviceTest {
                 try { overlay?.close() } finally { activity.finish() }
             }
         }
+    }
+
+    private fun capturedGeometry(scale: Float): NuxieTextGeometryCapture {
+        val transform = NuxieTextRunGeometry.Transform(scale, 0f, 0f, scale, 10f, 10f)
+        val bounds = NuxieTextRunGeometry.Bounds(0f, 0f, 240f, 180f)
+        return NuxieTextGeometryCapture.Captured(mapOf("run" to NuxieTextRunGeometry(
+            1uL, transform, transform, bounds, NuxieTextRunGeometry.Layout(transform, bounds), null,
+        )))
     }
 
     private fun geometry(scale: Float) = NuxieViewModelSnapshot.fromNative(
