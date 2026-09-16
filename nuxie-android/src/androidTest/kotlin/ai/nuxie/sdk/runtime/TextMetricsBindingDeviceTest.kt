@@ -18,9 +18,10 @@ class TextMetricsBindingDeviceTest {
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         val directory = "runtime/font-metrics-binding"
         val bytes = assets.open("$directory/screen.riv").use { it.readBytes() }
-        val cases = assets.open("$directory/expectations.json").bufferedReader().use {
-            Json.parseToJsonElement(it.readText()).jsonObject.getValue("cases").jsonArray
+        val contract = assets.open("$directory/expectations.json").bufferedReader().use {
+            Json.parseToJsonElement(it.readText()).jsonObject
         }
+        val cases = contract.getValue("cases").jsonArray
         val runtime = NuxieRuntime.shared
         assertTrue("Pinned native runtime must load", runtime.isAvailable)
         val expectedAssets = checkNotNull(runtime.inspectFileAssets(bytes))
@@ -54,6 +55,14 @@ class TextMetricsBindingDeviceTest {
                             assertEquals(lineHeight, checkNotNull(snapshot.resolveGeometryNumber("observedLineHeight")), 0f)
                             assertEquals(18f, checkNotNull(snapshot.resolveGeometryNumber("fixedFontSize")), 0f)
                             assertEquals(24f, checkNotNull(snapshot.resolveGeometryNumber("fixedLineHeight")), 0f)
+                            for (field in contract.getValue("geometry").jsonArray) {
+                                val geometry = field.jsonObject
+                                val path = geometry.getValue("path").jsonPrimitive.content
+                                for (metric in listOf("x", "y", "width", "height")) {
+                                    assertEquals("Artboard geometry $path/$metric", geometry.getValue(metric).jsonPrimitive.float,
+                                        checkNotNull(snapshot.resolveGeometryNumber("$path/$metric")), 0.001f)
+                                }
+                            }
                             val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
                             assertEquals(390, frame.width)
                             assertEquals(844, frame.height)
