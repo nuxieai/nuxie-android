@@ -114,7 +114,9 @@ internal object JourneyRenderSchema {
         for (path in paths) id(geometry[path], 512)
         val style = exact(value["style"], setOf("fontFamily", "fontWeight", "fontStyle", "fontSize", "lineHeight", "letterSpacing", "color", "fontAssetRiveUniqueName"), setOf("textAlign"))
         id(style["fontFamily"]); id(style["fontWeight"], 32); oneOf(style["fontStyle"], "normal", "italic")
-        positive(style["fontSize"], 2048.0); positive(style["lineHeight"], 8192.0)
+        positive(style["fontSize"], 2048.0)
+        val lineHeight = number(style["lineHeight"], -1.0, 8192.0)
+        if (lineHeight != -1.0 && lineHeight <= 0.0) fail("natural or positive line height")
         number(style["letterSpacing"], -2048.0, 2048.0); integer(style["color"], maximum = 0xffffffffL)
         releaseId(style["fontAssetRiveUniqueName"]); style["textAlign"]?.let { id(it, 32) }
     }

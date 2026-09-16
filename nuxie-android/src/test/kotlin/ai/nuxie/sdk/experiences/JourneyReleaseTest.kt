@@ -48,6 +48,32 @@ class JourneyReleaseTest {
         }
     }
 
+    @Test fun `shared native line height admission accepts only natural or positive bounded values`() {
+        val typography = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/text-input-typography.json").readText()).jsonObject
+        val navigation = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/text-input-navigation.json").readText()).jsonObject
+        val envelope = navigation.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        for (item in typography.getValue("lineHeightAdmission").jsonArray) {
+            val case = item.jsonObject
+            val render = source.getValue("render").jsonObject
+            val inputs = render.getValue("textInputs").jsonArray.toMutableList()
+            val input = inputs.first().jsonObject
+            val style = JsonObject(input.getValue("style").jsonObject + ("lineHeight" to case.getValue("value")))
+            inputs[0] = JsonObject(input + ("style" to style))
+            val root = JsonObject(source + ("render" to JsonObject(render +
+                ("textInputs" to kotlinx.serialization.json.JsonArray(inputs)))))
+            val name = case.getValue("name").jsonPrimitive.content
+            if (case.getValue("valid").jsonPrimitive.content == "true") {
+                try { JourneySchemaValidator.validate(root) } catch (error: Exception) { throw AssertionError(name, error) }
+            } else {
+                assertThrows(name, JourneyReleaseAuthenticationException::class.java) { JourneySchemaValidator.validate(root) }
+            }
+        }
+    }
+
     @Test fun `admits signed local programs with and without a render closure`() {
         for (key in listOf("entry", "renderedEntry")) {
             val entry = fixture.getValue(key).jsonObject
