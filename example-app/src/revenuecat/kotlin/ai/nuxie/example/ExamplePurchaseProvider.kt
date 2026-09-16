@@ -4,7 +4,6 @@ import ai.nuxie.example.revenuecat.NuxieRevenueCatPurchaseDelegate
 import ai.nuxie.sdk.NuxieConfiguration
 import ai.nuxie.sdk.billing.PurchaseHandlingMode
 import com.revenuecat.purchases.Purchases
-import com.revenuecat.purchases.awaitLogOut
 import com.revenuecat.purchases.PurchasesConfiguration
 
 internal object ExamplePurchaseProvider {
@@ -14,9 +13,12 @@ internal object ExamplePurchaseProvider {
   const val supportsAnonymousReset = false
   private var configuredCustomer: String? = null
 
-  suspend fun logout(purchases: Purchases = Purchases.sharedInstance) {
-    purchases.awaitLogOut()
-    configuredCustomer = null
+  fun logoutOperation(expectedCustomer: String, purchases: Purchases = Purchases.sharedInstance): suspend () -> Unit {
+    val operation = RevenueCatLogoutOperation(purchases, expectedCustomer)
+    return {
+      operation.logout()
+      configuredCustomer = null
+    }
   }
 
   fun configure(app: ExampleApplication, key: String?, customer: String?, configuration: NuxieConfiguration) {

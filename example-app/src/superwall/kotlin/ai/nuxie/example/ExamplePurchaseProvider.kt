@@ -8,7 +8,9 @@ import com.superwall.sdk.identity.identify
 
 internal object ExamplePurchaseProvider {
   const val supportsLogout = false
-  suspend fun logout(): Unit = error("Coordinated logout is not available for this provider.")
+  fun logoutOperation(expectedCustomer: String): suspend () -> Unit = {
+    error("Coordinated logout is not available for this provider.")
+  }
 
   const val name = "Superwall-owned Play"
   const val supportsAnonymousReset = false
