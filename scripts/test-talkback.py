@@ -20,7 +20,7 @@ def main():
     parser.add_argument("--serial", required=True)
     parser.add_argument("--input-device", required=True)
     parser.add_argument("--repeat", type=int, default=1)
-    parser.add_argument("--scenario", choices=("recovery-retry", "recovery-close", "entry", "entry-after-editor", "home-return", "virtual-home-return", "roles", "activation", "activation-error", "native-slider", "virtual-slider"), default="roles")
+    parser.add_argument("--scenario", choices=("navigation-retry", "navigation-close", "recovery-retry", "recovery-close", "entry", "entry-after-editor", "home-return", "virtual-home-return", "roles", "activation", "activation-error", "native-slider", "virtual-slider"), default="roles")
     args = parser.parse_args()
     if not re.fullmatch(r"emulator-[0-9]+", args.serial):
         parser.error("Use a dedicated rooted emulator, not a physical or user device")
@@ -70,6 +70,8 @@ def main():
             time.sleep(0.2)
         environment = dict(os.environ, ANDROID_SERIAL=args.serial)
         method = {
+            "navigation-retry": "talkBackRetriesOutgoingAcquisitionAndNativeFailure",
+            "navigation-close": "talkBackClosesOutgoingNativeFailure",
             "recovery-retry": "talkBackRetriesFailedAcquisitionInTheSameActivity",
             "recovery-close": "talkBackClosesSlowAcquisitionWithoutReveal",
             "virtual-home-return": "signedAuthoredRolesRestoreTalkBackSliderAfterHome",
