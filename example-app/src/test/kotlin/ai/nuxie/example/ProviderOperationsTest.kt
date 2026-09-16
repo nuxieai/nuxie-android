@@ -6,6 +6,7 @@ import ai.nuxie.sdk.billing.RestoreResult
 import ai.nuxie.sdk.billing.StoreProduct
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
@@ -16,6 +17,23 @@ import org.mockito.Mockito.mock
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ProviderOperationsTest {
+  @Test fun alreadyCancelledCallerCannotStartProviderWork() = runTest {
+    var calls = 0
+    val delegate = object : NuxiePurchaseDelegate {
+      override suspend fun purchase(product: StoreProduct) = PurchaseResult.Cancelled
+      override suspend fun restorePurchases(): RestoreResult { calls++; return RestoreResult.NoPurchases }
+    }
+    val owner = ProviderOperations(delegate, StandardTestDispatcher(testScheduler))
+    val caller = launch( start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+      kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]!!.cancel()
+      owner.restorePurchases()
+    }
+    caller.join()
+    testScheduler.runCurrent()
+    owner.closeAndAwait()
+    assertEquals(0, calls)
+  }
+
   @Test fun cancellationCannotReleaseOwnershipAndCloseRejectsNewWork() = runTest {
     val release = CompletableDeferred<Unit>()
     var calls = 0
