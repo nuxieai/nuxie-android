@@ -125,6 +125,81 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun remoteCheckRejectsAnIdentityChangeFromItsPublicationObserver() =
+        assertCheckCancelledByPublicationIdentityChange(cacheFirst = false, returnToOriginal = false)
+
+    @Test
+    fun cacheFirstMissRejectsAnIdentityChangeFromItsPublicationObserver() =
+        assertCheckCancelledByPublicationIdentityChange(cacheFirst = true, returnToOriginal = false)
+
+    @Test
+    fun remoteCheckRejectsAnIdentityRoundTripFromItsPublicationObserver() =
+        assertCheckCancelledByPublicationIdentityChange(cacheFirst = false, returnToOriginal = true)
+
+    @Test
+    fun remoteCheckRejectsIdentityChangeWhileWaitingForPublication() = runBlocking {
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    HttpTransport.Response(200, featureResponse(core.identity.distinctId(), "credits", 1.0).encodeToByteArray())
+                } else profileResponse("[]")
+            }
+        }
+        core = core(transport)
+        val originalId = core.identity.distinctId()
+        val barrier = core.features.stagePublicationBarrier()
+        val check = async(Dispatchers.Default) { runCatching { core.features.check("credits") } }
+        try {
+            kotlinx.coroutines.withTimeout(5_000) {
+                while (core.features.getCached("credits", null) == null) kotlinx.coroutines.yield()
+            }
+            assertFalse("The query must wait for its reserved publication", check.isCompleted)
+            core.identity.setDistinctId("customer-b")
+            core.featureInfo.publish(core.features.handleUserChange(originalId, "customer-b"))
+        } finally {
+            core.featureInfo.publish(barrier)
+        }
+        val result = kotlinx.coroutines.withTimeout(5_000) { check.await() }
+        assertTrue("An old query must not return after queued publication", result.exceptionOrNull() is CancellationException)
+        assertEquals(null, core.featureInfo.all.value["credits"])
+        assertEquals(null, core.features.getCached("credits", null))
+    }
+
+    private fun assertCheckCancelledByPublicationIdentityChange(cacheFirst: Boolean, returnToOriginal: Boolean) = runBlocking {
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    HttpTransport.Response(200, featureResponse(core.identity.distinctId(), "credits", 1.0).encodeToByteArray())
+                } else profileResponse("[]")
+            }
+        }
+        core = core(transport)
+        val originalId = core.identity.distinctId()
+        core.featureInfo.onFeatureChange = { featureId, _, access, _ ->
+            if (featureId == "credits" && access.allowed) {
+                core.identity.setDistinctId("customer-b")
+                core.featureInfo.publish(core.features.handleUserChange(originalId, "customer-b"))
+                if (returnToOriginal) {
+                    core.identity.setDistinctId(originalId)
+                    core.featureInfo.publish(core.features.handleUserChange("customer-b", originalId))
+                }
+            }
+        }
+
+        val result = runCatching {
+            if (cacheFirst) core.features.checkWithCache("credits") else core.features.check("credits")
+        }
+
+        assertEquals(if (returnToOriginal) originalId else "customer-b", core.identity.distinctId())
+        assertEquals(null, core.featureInfo.all.value["credits"])
+        assertTrue("An obsolete identity generation must not return access after publication", result.exceptionOrNull() is CancellationException)
+        core.featureInfo.onFeatureChange = { _, _, _, _ -> }
+        assertTrue("A fresh query for the current identity must still succeed", core.features.check("credits").allowed)
+    }
+
+    @Test
     fun aggregateProfileCannotDecideEntityAccess() = runBlocking {
         for (aggregateUnlimited in listOf(false, true)) {
             lateinit var core: NuxieCore

@@ -700,6 +700,10 @@ internal class FeatureService(
                     commitAuthoritativeAccessLocked(updates, entityId)
             }
             publication?.let { featureInfo.publish(it) }
+            // Publication can suspend or invoke an identity-changing observer.
+            // Its snapshot fence protects the cache, but the returned access
+            // must still belong to the generation that started this request.
+            synchronized(lock) { validateCheckScope(distinctId, requestGeneration) }
             checked
         }
     }
