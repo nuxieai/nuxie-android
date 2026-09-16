@@ -231,8 +231,40 @@ re-identification even when no logout intent exists. Markers contain no customer
 identifiers or purchase tokens. They detect unfinished work; they do not reconcile
 store outcomes or authorize replaying checkout.
 
-After building and installing the default example and its test APK, qualify the
-startup guard from a fresh process at every checkpoint:
+After building and installing the default example and its test APK, qualify
+Activity recreation during a coordinated transition in a fresh instrumentation
+process:
+
+```bash
+adb -s "$ANDROID_SERIAL" shell am instrument -w \
+  -e class ai.nuxie.example.SessionLogoutLifecycleTest \
+  -e sessionLifecycle true \
+  ai.nuxie.example.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Run this opt-in class alone: its completed application owner intentionally stays
+closed until process exit. It requires no pre-existing logout or operation
+recovery record and restores both records in `finally`. A controlled delegate is
+installed through the public SDK configuration, and public `restorePurchases()`
+enters the real application owner. The test holds restore completion, cancels the
+original waiter and a logout waiter, and recreates the Activity. It checks the
+original identity, one retained owner/transition, durable pending ownership,
+rejected new calls and disabled controls. It then recreates during held provider
+logout, after a controlled failure, and after explicit retry completes. SDK
+teardown precedes provider logout; old launch extras never restart the SDK. The
+replacement Activity displays closing, retry and signed-out state. Created
+Activities are finished, held callbacks released, transition work awaited and SDK
+shutdown awaited during cleanup.
+
+API 36 ARM64 qualification passes 1/1. Disabling the session-state collector
+makes the test fail on the missing closing status after recreation; restoring
+production makes it pass. This exercises real Activity lifecycle, public Nuxie
+entry points and durable journals with controlled loopback HTTP and a fake
+provider. It does not exercise real RevenueCat/Superwall/Play callbacks, a logout
+button, physical devices, process-death reconciliation or new-session admission.
+
+Qualify the startup guard from a fresh process at every checkpoint:
+
 
 ```bash
 for stage in REQUESTED DRAINED SDK_RESET SDK_RETIRED COMPLETE; do
