@@ -26,6 +26,7 @@ android {
   buildFeatures { buildConfig = true }
   testOptions { unitTests.isIncludeAndroidResources = true }
   sourceSets.getByName("main").java.srcDir("src/$purchaseProvider/kotlin")
+  sourceSets.getByName("test").java.srcDir("src/${purchaseProvider}Test/kotlin")
 
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_17
@@ -40,6 +41,8 @@ android {
 dependencies {
   androidTestImplementation(libs.androidx.test.runner)
   androidTestImplementation(libs.junit)
+  testImplementation(libs.kotlinx.coroutines.test)
+  testImplementation("org.mockito:mockito-core:5.18.0")
   testImplementation(libs.junit)
   testImplementation(libs.robolectric)
   implementation(project(":nuxie-android"))
