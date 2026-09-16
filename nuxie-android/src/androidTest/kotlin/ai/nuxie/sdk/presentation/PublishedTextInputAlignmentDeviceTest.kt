@@ -58,7 +58,16 @@ class PublishedTextInputAlignmentDeviceTest {
                         val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
                         assertEquals(390, frame.width)
                         assertEquals(844, frame.height)
-                        for (item in contract.getValue("cases").jsonArray) {
+                        val authoredCases = contract.getValue("cases").jsonArray
+                        val metricContract = assets.open("journeys/planes/text-input-effective-metrics.json")
+                            .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject }
+                        val subPointCases = metricContract.getValue("cases").jsonArray.mapNotNull { item ->
+                            val expectedMetrics = item.jsonObject["expected"] as? JsonObject
+                            val size = expectedMetrics?.get("fontSize")?.jsonPrimitive?.floatOrNull
+                            if (size != null && size > 0f && size < 1f) expectedMetrics else null
+                        }
+                        assertTrue("Shared contract must exercise sub-point sizes", subPointCases.isNotEmpty())
+                        for (item in authoredCases.dropLast(1) + subPointCases + authoredCases.takeLast(1)) {
                             val size = item.jsonObject.getValue("fontSize").jsonPrimitive.float
                             val height = item.jsonObject.getValue("lineHeight").jsonPrimitive.float
                             assertTrue(artboard.setDefaultViewModelValue("requestedFontSize", NuxieViewModelScalarValue.NumberValue(size.toDouble())))
@@ -114,6 +123,26 @@ class PublishedTextInputAlignmentDeviceTest {
                         View.MeasureSpec.makeMeasureSpec(844, View.MeasureSpec.EXACTLY))
                     current.layout(0, 0, 390, 844)
                 }
+                // Password glyph layout is platform-owned. At sub-pixel sizes its
+                // measured baseline can differ from Paint.fontMetricsInt.ascent.
+                fun nativePasswordBaseline(size: Float, width: Int, height: Int): Float {
+                    val native = EditText(activity).apply {
+                        background = null
+                        setPadding(0, 0, 0, 0)
+                        includeFontPadding = false
+                        setSingleLine(true)
+                        inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                            android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                        gravity = android.view.Gravity.TOP or android.view.Gravity.START
+                        typeface = android.graphics.Typeface.createFromFile(fontFile)
+                        setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, size)
+                        setText("AAAAA")
+                    }
+                    native.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY))
+                    native.layout(0, 0, width, height)
+                    return native.baseline.toFloat()
+                }
                 layout()
                 current.update(snapshot, capture)
                 layout()
@@ -133,7 +162,7 @@ class PublishedTextInputAlignmentDeviceTest {
                     (editor.parent as View).matrix.mapPoints(point)
                     val geometry = capture.fields.getValue(input.runName)
                     if (input.secure) assertNull("Secure runtime text stays blank", geometry.firstBaseline)
-                    val baseline = if (input.secure) -editor.paint.fontMetricsInt.ascent.toFloat()
+                    val baseline = if (input.secure) nativePasswordBaseline(editor.textSize, editor.width, editor.height)
                         else checkNotNull(geometry.firstBaseline)
                     val expectedY = geometry.contentTransform.ty + geometry.contentTransform.d * baseline
                     assertEquals("${input.id} native baseline vs published text", expectedY, point[1], 0.5f)
@@ -182,7 +211,7 @@ class PublishedTextInputAlignmentDeviceTest {
                         editor.matrix.mapPoints(point)
                         (editor.parent as View).matrix.mapPoints(point)
                         if (input.secure) assertNull("Secure runtime text stays blank", captured.firstBaseline)
-                        val baseline = if (input.secure) -editor.paint.fontMetricsInt.ascent.toFloat()
+                        val baseline = if (input.secure) nativePasswordBaseline(editor.textSize, editor.width, editor.height)
                             else checkNotNull(captured.firstBaseline)
                         assertEquals("${input.id} baseline after effective metric change",
                             captured.contentTransform.ty + captured.contentTransform.d * baseline, point[1], 0.5f)
