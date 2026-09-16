@@ -2308,6 +2308,21 @@ class PublishedTextInputDeviceTest {
             }
             assertEquals("Repeated labels must retain distinct TalkBack identities", expectedLabels.size, visited.distinct().size)
             assertEquals(expectedLabels, visited.mapNotNull { label(it) })
+            var previous = visited.last()
+            for (expected in visited.dropLast(1).asReversed()) {
+                input.swipeBackward()
+                val focusDeadline = SystemClock.uptimeMillis() + 2_000
+                var current = focused()
+                while ((current == null || current == previous) && SystemClock.uptimeMillis() < focusDeadline) {
+                    SystemClock.sleep(20)
+                    current = focused()
+                }
+                val next = checkNotNull(current) { "Backward swipe lost TalkBack focus before ${label(expected)}" }
+                assertFalse("Every backward swipe must change the focused identity", next == previous)
+                assertEquals("Backward traversal must return to the exact authored identity", expected, next)
+                assertEquals("Backward traversal must preserve the authored label", label(expected), label(next))
+                previous = next
+            }
         }
         fun named(name: String) = checkNotNull(nodes().singleOrNull { label(it) == name })
         val selected = named("Annual plan")

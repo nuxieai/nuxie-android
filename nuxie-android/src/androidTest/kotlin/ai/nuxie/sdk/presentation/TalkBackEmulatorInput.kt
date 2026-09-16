@@ -26,7 +26,11 @@ internal class TalkBackEmulatorInput(private val automation: UiAutomation, priva
         require(name == "virtio_input_multi_touch_1") { "Select the primary virtio emulator touchscreen" }
     }
 
-    fun swipeForward() {
+    fun swipeForward() = swipe(startX = 9000, deltaX = 1500)
+
+    fun swipeBackward() = swipe(startX = 24000, deltaX = -1500)
+
+    private fun swipe(startX: Int, deltaX: Int) {
         // Framework-injected events bypassed TalkBack in the Settings control probe.
         // Feed evdev instead, so the ordinary Android accessibility input filter sees the swipe.
         val pipes = automation.executeShellCommandRwe("su 0 tee $device")
@@ -43,14 +47,14 @@ internal class TalkBackEmulatorInput(private val automation: UiAutomation, priva
                 fun sync() { event(EV_SYN, SYN_REPORT, 0); output.flush() }
                 absolute(ABS_MT_SLOT, 0)
                 absolute(ABS_MT_TRACKING_ID, 51)
-                absolute(ABS_MT_POSITION_X, 9000)
+                absolute(ABS_MT_POSITION_X, startX)
                 absolute(ABS_MT_POSITION_Y, 16000)
                 absolute(ABS_MT_PRESSURE, 800)
                 sync()
                 try {
-                    for (x in 10500..24000 step 1500) {
+                    for (step in 1..10) {
                         SystemClock.sleep(18)
-                        absolute(ABS_MT_POSITION_X, x)
+                        absolute(ABS_MT_POSITION_X, startX + step * deltaX)
                         sync()
                     }
                 } finally {
