@@ -332,7 +332,7 @@ internal class ExperienceTextInputOverlay(
             editor.x = x
             editor.y = y
             editor.rotation = Math.toDegrees(geometry.rotation.toDouble()).toFloat()
-            editor.setTextSize(TypedValue.COMPLEX_UNIT_PX, (metrics.fontSize * sy).coerceAtLeast(1f))
+            editor.setTextSize(TypedValue.COMPLEX_UNIT_PX, metrics.fontSize * sy)
             editor.letterSpacing = input.style.letterSpacing * sx / editor.textSize
             // -1 means native font-natural height, not a negative pixel value.
             // Explicit height is the baseline interval, so subtract actual font
@@ -383,7 +383,7 @@ internal class ExperienceTextInputOverlay(
         }
         editor.presentedTextOriginY = localBaseline(0f) ?: return false
         editor.presentedFirstBaseline = field.firstBaseline?.let(::localBaseline)
-        editor.setTextSize(TypedValue.COMPLEX_UNIT_PX, (metrics.fontSize * scale).coerceAtLeast(1f))
+        editor.setTextSize(TypedValue.COMPLEX_UNIT_PX, metrics.fontSize * scale)
         editor.letterSpacing = input.style.letterSpacing * scale / editor.textSize
         val extraLineSpacing = if (metrics.lineHeight == -1f) 0f
             else metrics.lineHeight * scale - editor.paint.getFontMetricsInt(null)

@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "a5652121c7242f90dac20c77d203d1e84800f7a2",
+  "sourceCommit": "25c569b1608ab1b5122572c67354412d0372cefd",
   "files": {
     "README.md": "9104a727bef89b388554d25583a6e013531c310f1a93d8f9f81440af8fcf67df",
     "accessibility/control-state.json": "48d1d9ea62bc7890ecd41d69592cbe3f7d137cf7bdb5849f7c64137489a5360c",
@@ -52,7 +52,7 @@
     "journeys/planes/text-input-affine.json": "864e128125a55a32822cd99c556561aa8825fcf00e5d192243a8ddb479506d24",
     "journeys/planes/text-input-composition-android.json": "694ff733eea196ce84bfb3882952e603034a0d613119d6d4f4c20dc530006929",
     "journeys/planes/text-input-edits.json": "323cc0d71359c33d4738ef2ea30c9c99441859004b4adab79364b2af82889c3d",
-    "journeys/planes/text-input-effective-metrics.json": "c0b0cec69253e367da470bd34b8421e5b0eafe62ced13666cb4f3adcb167075b",
+    "journeys/planes/text-input-effective-metrics.json": "2243efd14213801aff77efbffebd4f2744c33efeb491aa2a0ab676d260465af9",
     "journeys/planes/text-input-geometry.json": "4db9f6c82327b31cb25202c8c13231ab857366bf55c6b592526e37495ff30089",
     "journeys/planes/text-input-limits.json": "7e3aa09d75d43b0326f13ff97de1b279e147e8fb8935c68b279640e2428b4137",
     "journeys/planes/text-input-navigation.json": "49760fb0666fce8fb570c5cfda815c5dc579a9a3a5bc7e46f443801ab4257f7b",
