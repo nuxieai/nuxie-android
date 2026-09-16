@@ -2283,9 +2283,17 @@ class PublishedTextInputDeviceTest {
             fun focused() = automation.rootInActiveWindow?.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
             val input = TalkBackEmulatorInput(automation,
                 checkNotNull(InstrumentationRegistry.getArguments().getString("nuxieTalkBackInputDevice")))
-            val visited = mutableListOf<android.view.accessibility.AccessibilityNodeInfo>()
-            repeat(16) {
-                val previous = focused()
+            val initialDeadline = SystemClock.uptimeMillis() + 5_000
+            var initial = focused()
+            while (initial == null && SystemClock.uptimeMillis() < initialDeadline) {
+                SystemClock.sleep(20)
+                initial = focused()
+            }
+            val first = checkNotNull(initial) { "TalkBack must establish initial focus" }
+            assertEquals("TalkBack must enter the scene at its heading", expectedLabels.first(), label(first))
+            val visited = mutableListOf(first)
+            for (expected in expectedLabels.drop(1)) {
+                val previous = visited.last()
                 input.swipeForward()
                 val focusDeadline = SystemClock.uptimeMillis() + 2_000
                 var current = focused()
@@ -2293,14 +2301,13 @@ class PublishedTextInputDeviceTest {
                     SystemClock.sleep(20)
                     current = focused()
                 }
-                if (current != null && label(current) != null && visited.none { it == current }) visited += current
+                val next = checkNotNull(current) { "Forward swipe lost TalkBack focus before $expected" }
+                assertFalse("Every forward swipe must change the focused identity", next == previous)
+                assertEquals("Every forward swipe must reach the next authored element", expected, label(next))
+                visited += next
             }
-            assertEquals("TalkBack swipe traversal must reach every authored identity",
-                expectedLabels.sorted(), visited.mapNotNull { label(it) }.sorted())
-            val labels = visited.mapNotNull { label(it) }
-            val heading = labels.indexOf("Choose your plan")
-            assertEquals("TalkBack must follow authored order across native and virtual elements",
-                expectedLabels, labels.drop(heading) + labels.take(heading))
+            assertEquals("Repeated labels must retain distinct TalkBack identities", expectedLabels.size, visited.distinct().size)
+            assertEquals(expectedLabels, visited.mapNotNull { label(it) })
         }
         fun named(name: String) = checkNotNull(nodes().singleOrNull { label(it) == name })
         val selected = named("Annual plan")
