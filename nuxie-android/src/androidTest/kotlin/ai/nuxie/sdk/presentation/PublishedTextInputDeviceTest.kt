@@ -1511,8 +1511,32 @@ class PublishedTextInputDeviceTest {
     @SdkSuppress(minSdkVersion = 26)
     fun slowAcquisitionShowsRecoveryAndCloseDrainsWithoutReveal() = verifyAcquisitionRecovery(true)
 
-    private fun verifyAcquisitionRecovery(closeWhileSlow: Boolean) {
+    @Test
+    @SdkSuppress(minSdkVersion = 34)
+    fun talkBackRetriesFailedAcquisitionInTheSameActivity() {
+        org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
+        verifyAcquisitionRecovery(false, useTalkBack = true)
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 34)
+    fun talkBackClosesSlowAcquisitionWithoutReveal() {
+        org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
+        verifyAcquisitionRecovery(true, useTalkBack = true)
+    }
+
+    private fun verifyAcquisitionRecovery(closeWhileSlow: Boolean, useTalkBack: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val automation = if (useTalkBack) instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES) else null
+        val input = automation?.let {
+            val manager = instrumentation.targetContext.getSystemService(android.view.accessibility.AccessibilityManager::class.java)
+            assertTrue("Recovery qualification requires enabled TalkBack", manager.getEnabledAccessibilityServiceList(
+                android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK).any {
+                    service -> service.resolveInfo.serviceInfo.packageName == "com.google.android.marvin.talkback"
+                })
+            assertTrue(manager.isTouchExplorationEnabled)
+            TalkBackEmulatorInput(it, checkNotNull(InstrumentationRegistry.getArguments().getString("nuxieTalkBackInputDevice")))
+        }
         assertTrue(NuxieRuntime.shared.isAvailable)
         val fixture = loadPublishedFixture(instrumentation)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -1557,9 +1581,37 @@ class PublishedTextInputDeviceTest {
             assertTrue("Recovery must expose $label", button != null)
             assertEquals(0, shown.get())
             assertFalse(pending.isCompleted)
-            instrumentation.runOnMainSync { assertTrue(checkNotNull(button).performClick()) }
+            if (input == null) {
+                instrumentation.runOnMainSync { assertTrue(checkNotNull(button).performClick()) }
+            } else {
+                val client = checkNotNull(automation)
+                fun focused() = client.rootInActiveWindow?.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+                fun labelOf(node: android.view.accessibility.AccessibilityNodeInfo?) = node?.text?.toString()
+                val entryDeadline = SystemClock.uptimeMillis() + 5_000
+                while (focused() == null && SystemClock.uptimeMillis() < entryDeadline) SystemClock.sleep(20)
+                assertNotNull("TalkBack must enter the recovery window", focused())
+                var remaining = 8
+                while (!labelOf(focused()).equals(label, ignoreCase = true) && remaining-- > 0) {
+                    val before = focused()
+                    input.swipeForward()
+                    val focusDeadline = SystemClock.uptimeMillis() + 2_000
+                    while (focused() == before && SystemClock.uptimeMillis() < focusDeadline) SystemClock.sleep(20)
+                    assertNotEquals("A recovery swipe must advance accessibility focus", before, focused())
+                }
+                val target = checkNotNull(focused())
+                assertTrue("TalkBack must reach $label; reached ${target.text}", labelOf(target).equals(label, ignoreCase = true))
+                assertTrue(target.isEnabled)
+                assertTrue(target.isClickable)
+                input.doubleTap()
+            }
             if (closeWhileSlow) {
-                instrumentation.waitForIdleSync()
+                val closeDeadline = SystemClock.uptimeMillis() + 5_000
+                var finishing = false
+                while (!finishing && SystemClock.uptimeMillis() < closeDeadline) {
+                    instrumentation.runOnMainSync { finishing = activity.isFinishing }
+                    if (!finishing) SystemClock.sleep(20)
+                }
+                assertTrue("Close activation must reach the Activity before releasing acquisition", finishing)
                 assertFalse("Close must still drain cancellation-resistant acquisition", pending.isCompleted)
             } else {
                 val retryDeadline = SystemClock.elapsedRealtime() + 5_000
