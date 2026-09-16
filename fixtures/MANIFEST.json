@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "6420b013f2a8c6c1422546f4f6de88c4120c3f42",
+  "sourceCommit": "0b154b30a6f548429c9b551a5008f18b4d5780b9",
   "files": {
     "README.md": "9104a727bef89b388554d25583a6e013531c310f1a93d8f9f81440af8fcf67df",
     "accessibility/control-state.json": "48d1d9ea62bc7890ecd41d69592cbe3f7d137cf7bdb5849f7c64137489a5360c",
@@ -103,7 +103,7 @@
     "purchases/test-store-preview.json": "dc379fe653fe0c7f71ce170ce620bda21a5ecbda93fda7aa5866d2c2f4198ce3",
     "purchases/test-store.json": "0a6025ef1e3b0c8706544fdbe022fd14cac22644af49a2f0c9d949070dc8e396",
     "runtime/font-metrics-binding/2898476918b21c3f9b5ba22e86853c6d63b544f92da277a92533011a28c93af5.otf": "2898476918b21c3f9b5ba22e86853c6d63b544f92da277a92533011a28c93af5",
-    "runtime/font-metrics-binding/expectations.json": "cfe0a78a0dfe742e89d52fc81af296d1d70bcf430d10958abe0e13f24036cc85",
+    "runtime/font-metrics-binding/expectations.json": "1c966a99e8c21f446541fb9449ebf04dd157a75fbe4bcebc35412684aa8a9dff",
     "runtime/font-metrics-binding/provenance.json": "33b594c3001ce99df97ff4b71d169b5a8e14df15004275177208963cc9e8b16a",
     "runtime/font-metrics-binding/report.json": "ec13393441b9c4ae534f544195c3cf8217fc45ee60222e3fa6935851341ed3b5",
     "runtime/font-metrics-binding/screen.riv": "1a90d3b9017143d557be5a68303c784eab8e74bab7bba625586eedc61a5a2e9a",
