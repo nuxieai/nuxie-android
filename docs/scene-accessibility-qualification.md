@@ -142,7 +142,7 @@ The provider now retains the last virtual focus owner, including its containing 
 
 ## TalkBack acquisition recovery
 
-Run `scripts/test-talkback.py --serial <dedicated-emulator> --input-device /dev/input/event1 --scenario recovery-retry` or `--scenario recovery-close` on the documented API 34+ rooted emulator setup. Both use actual enabled TalkBack, hardware swipes to reach the native control, and a hardware double-tap. They preserve and restore accessibility settings and TalkBack notification permission/flags using the same driver as the authored-control probes.
+Run `scripts/test-talkback.py --serial <dedicated-emulator> --input-device /dev/input/event1 --scenario recovery-retry` or `--scenario recovery-close` on the documented API 34+ rooted emulator setup. Both use actual enabled TalkBack, hardware swipes to reach the native control, and a hardware double-tap at a point verified outside that control’s pointer bounds. They preserve and restore accessibility settings and TalkBack notification permission/flags using the same driver as the authored-control probes.
 
 `PublishedTextInputDeviceTest.talkBackRetriesFailedAcquisitionInTheSameActivity` first fails signed-release artifact acquisition, reaches Retry with TalkBack, and verifies exactly two acquisition attempts, one Activity launch, the same container, and one successful reveal. `talkBackClosesSlowAcquisitionWithoutReveal` reaches Close while acquisition is held, waits for Activity close admission, and proves presentation stays pending until cancellation-resistant acquisition drains; the acquired lease closes once and no Experience-shown event is emitted.
 

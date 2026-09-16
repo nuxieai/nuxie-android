@@ -1602,7 +1602,13 @@ class PublishedTextInputDeviceTest {
                 assertTrue("TalkBack must reach $label; reached ${target.text}", labelOf(target).equals(label, ignoreCase = true))
                 assertTrue(target.isEnabled)
                 assertTrue(target.isClickable)
-                input.doubleTap()
+                val bounds = Rect().also { target.getBoundsInScreen(it) }
+                val display = checkNotNull(client.takeScreenshot())
+                try {
+                    assertFalse("Activation must occur outside the focused control's pointer bounds",
+                        bounds.contains(display.width * 8000 / 32767, display.height * 8000 / 32767))
+                } finally { display.recycle() }
+                input.doubleTap(x = 8000, y = 8000)
             }
             if (closeWhileSlow) {
                 val closeDeadline = SystemClock.uptimeMillis() + 5_000
