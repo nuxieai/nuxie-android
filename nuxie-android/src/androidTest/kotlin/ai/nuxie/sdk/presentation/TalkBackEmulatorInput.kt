@@ -26,11 +26,38 @@ internal class TalkBackEmulatorInput(private val automation: UiAutomation, priva
         require(name == "virtio_input_multi_touch_1") { "Select the primary virtio emulator touchscreen" }
     }
 
-    fun swipeForward() = swipe(startX = 9000, deltaX = 1500)
+    fun awaitAdjustableReadingControl() {
+        // TalkBack changes its contextual reading control after publishing accessibility focus.
+        // Observe that service-owned state before sending the slider gesture; do not mutate it.
+        val deadline = SystemClock.uptimeMillis() + 5_000
+        val expected = "<string name=\"pref_current_selector_setting_key\">ADJUSTABLE_WIDGET</string>"
+        do {
+            val preferences = ParcelFileDescriptor.AutoCloseInputStream(automation.executeShellCommand(
+                "su 0 cat /data/user_de/0/com.google.android.marvin.talkback/shared_prefs/com.google.android.marvin.talkback_preferences.xml",
+            )).bufferedReader().use { it.readText() }
+            if (expected in preferences) return
+            SystemClock.sleep(20)
+        } while (SystemClock.uptimeMillis() < deadline)
+        error("TalkBack must select its adjustable reading control after focusing the slider")
+    }
 
-    fun swipeBackward() = swipe(startX = 24000, deltaX = -1500)
+    fun swipeForward() = swipe(startX = 9000, startY = 16000, deltaX = 1500, deltaY = 0)
 
-    private fun swipe(startX: Int, deltaX: Int) {
+    fun swipeBackward() = swipe(startX = 24000, startY = 16000, deltaX = -1500, deltaY = 0)
+
+    fun swipeUp() = swipe(startX = 16000, startY = 24000, deltaX = 0, deltaY = -1500)
+
+    fun swipeDown() = swipe(startX = 16000, startY = 9000, deltaX = 0, deltaY = 1500)
+
+    private fun swipe(startX: Int, startY: Int, deltaX: Int, deltaY: Int) {
+        automation.executeAndWaitForEvent(
+            { sendSwipe(startX, startY, deltaX, deltaY) },
+            { it.eventType == android.view.accessibility.AccessibilityEvent.TYPE_TOUCH_INTERACTION_END },
+            5_000,
+        ).recycle()
+    }
+
+    private fun sendSwipe(startX: Int, startY: Int, deltaX: Int, deltaY: Int) {
         // Framework-injected events bypassed TalkBack in the Settings control probe.
         // Feed evdev instead, so the ordinary Android accessibility input filter sees the swipe.
         val pipes = automation.executeShellCommandRwe("su 0 tee $device")
@@ -48,13 +75,14 @@ internal class TalkBackEmulatorInput(private val automation: UiAutomation, priva
                 absolute(ABS_MT_SLOT, 0)
                 absolute(ABS_MT_TRACKING_ID, 51)
                 absolute(ABS_MT_POSITION_X, startX)
-                absolute(ABS_MT_POSITION_Y, 16000)
+                absolute(ABS_MT_POSITION_Y, startY)
                 absolute(ABS_MT_PRESSURE, 800)
                 sync()
                 try {
                     for (step in 1..10) {
                         SystemClock.sleep(18)
                         absolute(ABS_MT_POSITION_X, startX + step * deltaX)
+                        absolute(ABS_MT_POSITION_Y, startY + step * deltaY)
                         sync()
                     }
                 } finally {
