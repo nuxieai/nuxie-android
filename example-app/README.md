@@ -201,8 +201,19 @@ teardown, then awaits supported provider logout. Each completed stage is
 persisted; an in-process retry retains completed side effects even if their
 following write failed. UI waiter cancellation does not cancel this work. A
 provider-reported pending payment blocks identity mutation and requires recovery.
-The RevenueCat selection prepares this controller using its public `awaitLogOut`
-completion. Superwall and managed Play do not advertise this capability.
+The RevenueCat selection prepares a session-bound logout operation using public
+`awaitLogOut` completion. It requires the expected non-anonymous customer at
+admission and confirms an anonymous identity at completion. A failed callback can
+arrive after identity reset: RevenueCat 10.21.1
+[resets identity before refreshing customer information](https://github.com/RevenueCat/purchases-android/blob/10.21.1/purchases/src/main/kotlin/com/revenuecat/purchases/PurchasesOrchestrator.kt),
+and [rejects another logout when already anonymous](https://github.com/RevenueCat/purchases-android/blob/10.21.1/purchases/src/main/kotlin/com/revenuecat/purchases/identity/IdentityManager.kt).
+The original attempt still fails. In-process explicit retry retains the exact
+anonymous ID observed after that callback and awaits `awaitCustomerInfo` with
+`FETCH_CURRENT`, checking identity again at completion. Refresh failures remain
+retryable without another logout; changed identities are rejected. The session
+coordinator owns provider identity changes exclusively while this operation is
+active. This is not recovery of an arbitrary already-anonymous session or a
+previous process. Superwall and managed Play do not advertise this capability.
 
 `LogoutJournal` stores synchronous-commit progress. Before starting either SDK
 or identifying the launch customer, the example checks for a previous logout

@@ -173,7 +173,7 @@ class MainActivity : Activity() {
         if (ExamplePurchaseProvider.supportsLogout) {
           val session = listOf(ExamplePurchaseProvider.name, apiKey, Nuxie.distinctId).joinToString("\u0000")
           val digest = MessageDigest.getInstance("SHA-256").digest(session.toByteArray()).joinToString("") { "%02x".format(it) }
-          app.prepareLogout(digest) { ExamplePurchaseProvider.logout() }
+          app.prepareLogout(digest, ExamplePurchaseProvider.logoutOperation(Nuxie.distinctId))
         }
       }
       observeFeatures = true
