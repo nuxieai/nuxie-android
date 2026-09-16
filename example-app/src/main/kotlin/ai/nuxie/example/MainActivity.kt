@@ -141,6 +141,11 @@ class MainActivity : Activity() {
         buttons.forEach { it.isEnabled = false }
         return
       }
+      if (!Nuxie.isSetup && app.providerOperationJournal.hasUnfinished()) {
+        status.text = "Previous purchase activity needs recovery before starting again."
+        buttons.forEach { it.isEnabled = false }
+        return
+      }
       if (!Nuxie.isSetup && app.logoutJournal.read() != null) {
         status.text = if (app.logoutJournal.read()?.stage == LogoutJournal.Stage.COMPLETE) {
           "Signed out. Starting another session requires an explicit sign-in."
@@ -217,7 +222,7 @@ class MainActivity : Activity() {
             SessionLogout.State.CLOSING -> status.text = "Signing out; waiting for current purchases to finish…"
             SessionLogout.State.FAILED -> status.text = "Sign out could not finish. Retry before continuing."
             SessionLogout.State.COMPLETE -> status.text = "Signed out."
-            SessionLogout.State.RECOVERY_REQUIRED -> status.text = "A pending purchase needs recovery before sign out can finish."
+            SessionLogout.State.RECOVERY_REQUIRED -> status.text = "Previous purchase activity needs recovery before sign out can finish."
           }
         }
       }

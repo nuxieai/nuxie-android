@@ -172,16 +172,17 @@ not a production backend, provider logout, process death or store checkout.
 
 Launch configuration and customer extras initialize the app-scoped SDK only when
 it is not already set up. Activity recreation attaches new observers without
-reapplying those initial values. Process restart still reads launch extras;
-persistent logout and coordinated provider transitions remain separate open work.
+reapplying those initial values. Process restart checks the durable operation and
+logout journals before accepting launch extras. A completed session transition
+and deliberate new-session initialization remain separate open work.
 
 Provider selections install an application-owned `ProviderOperations` delegate.
 Purchase and restore callbacks continue in that owner if the original caller is
 cancelled. `closeAndAwait()` permanently closes admission and drains admitted
 calls; concurrent drain callers may wait independently. This is the operation
 ownership portion of [UNIV-3197](https://universe.basis.dev/issue/UNIV-3197). It
-does not perform logout, persist session state, or prove that a provider-reported
-pending payment has completed. Ordinary SDK shutdown alone does not drain this
+does not perform logout or prove that a provider-reported pending payment has
+completed. Ordinary SDK shutdown alone does not drain this
 external owner. The coordinated logout UI and interrupted-operation reconciliation remain
 unimplemented; no automatic provider reset is added. The durable transition and
 startup guard below are groundwork for that UI.
@@ -209,8 +210,15 @@ record. Completed logout remains signed out; interrupted or invalid records keep
 startup closed. The controller deliberately does not resume a previous process's
 ambiguous external side effects. There is currently no logout/sign-in UI or
 reconciliation action: these classes are tested infrastructure, not a completed
-logout integration. In particular, a process that died before logout intent was
-recorded may still have an external pending operation, which remains unqualified.
+logout integration. `ProviderOperationJournal` also commits an opaque operation
+marker before dispatching each wrapped purchase or restore. A successful or
+cancelled result retires that marker; pending payments, returned failures and
+unexpected exceptions retain it. Failed results cannot distinguish a rejection
+before checkout from an ambiguous external outcome. A failed journal write blocks
+dispatch or clean drain. On restart, unfinished markers block provider setup and
+re-identification even when no logout intent exists. Markers contain no customer
+identifiers or purchase tokens. They detect unfinished work; they do not reconcile
+store outcomes or authorize replaying checkout.
 
 After building and installing the default example and its test APK, qualify the
 startup guard from a fresh process at every checkpoint:
@@ -236,3 +244,34 @@ journal record in `finally`. If execution stops between seed and verify, run the
 matching verify invocation to restore the saved record. These are seeded durable
 checkpoint tests, not process-kill tests of an actual store transaction or a
 proof that an interrupted provider operation can be reconciled.
+
+
+To qualify process loss **during** a wrapped restore, use two terminals with the
+same test device. Start the hold phase in the first:
+
+```bash
+adb -s "$ANDROID_SERIAL" shell am instrument -w \
+  -e class ai.nuxie.example.ProviderOperationStartupTest#hold \
+  -e providerPhase hold \
+  ai.nuxie.example.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Wait for `providerJournal=ready` and status code `71` while the instrumentation
+process is still running. Within its two-minute timeout, use the second terminal:
+
+```bash
+adb -s "$ANDROID_SERIAL" shell am force-stop ai.nuxie.example
+adb -s "$ANDROID_SERIAL" shell am instrument -w \
+  -e class ai.nuxie.example.ProviderOperationStartupTest#verify \
+  -e providerPhase verify \
+  ai.nuxie.example.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+The killed hold phase reports a crashed process, never a passed test. Require
+`OK (1 test)` from verify. It checks a different PID, the persisted operation
+without logout intent, blocked SDK initialization and disabled controls, then
+restores the original operation journal in `finally`. Run verify to restore that
+backup if the sequence is interrupted. This executes the real application owner
+with a controlled, suspended restore delegate. Actual RevenueCat/Superwall held
+callbacks are covered by the selected-provider unit suites; external store
+process-death reconciliation remains unqualified.

@@ -25,12 +25,19 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import org.junit.Assert.*
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
 import org.mockito.Mockito.*
 
+@RunWith(RobolectricTestRunner::class)
+@Config(manifest = Config.NONE, sdk = [28])
 @OptIn(ExperimentalCoroutinesApi::class)
 class RevenueCatOperationOwnershipTest {
   @Test fun actualPurchaseCallbackOutlivesWaiterAndHoldsDrain() = runTest {
     val dispatcher = StandardTestDispatcher(testScheduler)
+    val journal = ProviderOperationJournal(RuntimeEnvironment.getApplication().getSharedPreferences("provider-callbacks", 0), dispatcher)
     Dispatchers.setMain(dispatcher)
     try {
       val raw = mock(ProductDetails::class.java, RETURNS_DEEP_STUBS)
@@ -55,10 +62,11 @@ class RevenueCatOperationOwnershipTest {
           else -> RETURNS_DEFAULTS.answer(it)
         }
       }
-      val owner = ProviderOperations(NuxieRevenueCatPurchaseDelegate({ mock(Activity::class.java) }, purchases), dispatcher)
+      val owner = ProviderOperations(NuxieRevenueCatPurchaseDelegate({ mock(Activity::class.java) }, purchases), dispatcher, journal)
       val waiter = async { owner.purchase(product) }
       testScheduler.runCurrent()
       assertEquals(1, calls)
+      assertTrue(journal.hasUnfinished())
       val beforeCompletion = identityReads
       waiter.cancelAndJoin()
       val drain = async { owner.closeAndAwait() }
@@ -68,6 +76,7 @@ class RevenueCatOperationOwnershipTest {
       assertEquals(1, calls)
       callback.onCompleted(mock(StoreTransaction::class.java), mock(CustomerInfo::class.java))
       drain.await()
+      assertFalse(journal.hasUnfinished())
       assertEquals(beforeCompletion + 1, identityReads)
     } finally {
       Dispatchers.resetMain()
