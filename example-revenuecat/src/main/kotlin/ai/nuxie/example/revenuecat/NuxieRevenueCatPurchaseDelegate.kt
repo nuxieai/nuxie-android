@@ -28,16 +28,17 @@ class NuxieRevenueCatPurchaseDelegate(
   private val purchases: Purchases = Purchases.sharedInstance,
   // The host supplies explicit upgrade/downgrade policy here when needed.
   private val configureReplacement: (StoreProduct, PurchaseParams.Builder) -> Unit = { _, _ -> },
+  private val expectedCustomerId: String? = null,
 ) : NuxiePurchaseDelegate {
   override suspend fun purchase(product: StoreProduct): PurchaseResult = withContext(Dispatchers.Main.immediate) {
     try {
+      val owner = currentCustomer()
       val raw = requireNotNull(product.rawProduct) { "Native Play product required." }
       val type = when (raw.productType) {
         BillingClient.ProductType.SUBS -> ProductType.SUBS
         BillingClient.ProductType.INAPP -> ProductType.INAPP
         else -> error("Unsupported Play product type.")
       }
-      val owner = purchases.appUserID
       val candidates = purchases.awaitGetProducts(listOf(product.storeProductId), type)
         .filterIsInstance<GoogleStoreProduct>()
       check(purchases.appUserID == owner) { "RevenueCat identity changed during product lookup." }
@@ -72,7 +73,9 @@ class NuxieRevenueCatPurchaseDelegate(
       }
       configureReplacement(product, builder)
       builder.isPersonalizedPrice(product.isOfferPersonalized)
+      check(purchases.appUserID == owner) { "RevenueCat identity changed before checkout." }
       purchases.awaitPurchase(builder.build())
+      check(purchases.appUserID == owner) { "RevenueCat identity changed during checkout." }
       PurchaseResult.Purchased
     } catch (cancelled: CancellationException) {
       throw cancelled
@@ -82,12 +85,20 @@ class NuxieRevenueCatPurchaseDelegate(
   }
 
   override suspend fun restorePurchases(): RestoreResult = try {
+    val owner = currentCustomer()
     val customer = purchases.awaitRestore()
+    check(purchases.appUserID == owner) { "RevenueCat identity changed during restore." }
     if (customer.entitlements.active.isEmpty()) RestoreResult.NoPurchases else RestoreResult.Restored
   } catch (cancelled: CancellationException) {
     throw cancelled
   } catch (failure: Exception) {
     RestoreResult.Failed(failure)
+  }
+
+  private fun currentCustomer(): String = purchases.appUserID.also {
+    check(expectedCustomerId == null || it == expectedCustomerId) {
+      "RevenueCat has not resolved the expected customer identity."
+    }
   }
 }
 

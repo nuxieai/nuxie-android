@@ -14,6 +14,7 @@ val configuration = NuxieConfiguration(nuxiePublicKey).apply {
   purchaseHandlingMode = PurchaseHandlingMode.APP_MANAGED
   purchaseDelegate = NuxieRevenueCatPurchaseDelegate(
     currentActivity = { resumedActivity },
+    expectedCustomerId = customerId,
   )
 }
 Nuxie.setup(application, configuration)
@@ -26,7 +27,14 @@ Import Nuxie types from `ai.nuxie.sdk` and purchase types from
 Activity lifecycle; do not retain a destroyed Activity. Configure identity at
 the application/session level, keep both SDKs synchronized on login/logout, and
 prevent identity changes while checkout is active. Activity recreation must not
-reconfigure RevenueCat or reset the Nuxie SDK.
+reconfigure RevenueCat or reset the Nuxie SDK. The sample host passes its explicit
+customer to the delegate. A mismatched provider identity fails before product
+lookup, checkout or restore. The delegate also checks the initiating provider
+identity after lookup, before checkout and after successful checkout/restore.
+These checks reject a changed customer at those boundaries; they cannot detect
+an A→B→A change between checks or undo an already-started store operation. The
+host must still serialize account changes with billing and create a delegate
+for the new session.
 
 Trigger an authored Journey through `Nuxie.trigger`. Its Purchase Product step
 invokes the delegate with the resolved product. The adapter re-fetches provider
@@ -75,4 +83,7 @@ Consumption of a published SDK artifact remains pending.
 SDK lint also runs these example checks. The boundary checks the SDK's resolved
 debug and release runtime dependencies for RevenueCat/Superwall leakage; provider
 dependencies remain confined to examples. Tests exercise selection and outcome
-mapping using the pinned provider's real model classes, not a fake provider SDK.
+mapping using the pinned provider's real model classes. Additional delegate tests
+hold the pinned provider's callbacks using test-only mocks, change its customer,
+and verify rejection plus stable-customer purchase/restore controls. They do not
+contact RevenueCat or Google Play.
