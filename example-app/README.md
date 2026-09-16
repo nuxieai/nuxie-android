@@ -174,3 +174,21 @@ Launch configuration and customer extras initialize the app-scoped SDK only when
 it is not already set up. Activity recreation attaches new observers without
 reapplying those initial values. Process restart still reads launch extras;
 persistent logout and coordinated provider transitions remain separate open work.
+
+Provider selections install an application-owned `ProviderOperations` delegate.
+Purchase and restore callbacks continue in that owner if the original caller is
+cancelled. `closeAndAwait()` permanently closes admission and drains admitted
+calls; concurrent drain callers may wait independently. This is the operation
+ownership portion of [UNIV-3197](https://universe.basis.dev/issue/UNIV-3197). It
+does not perform logout, persist session state, or prove that a provider-reported
+pending payment has completed. Ordinary SDK shutdown alone does not drain this
+external owner. The coordinated logout UI and durable restart recovery are still
+unimplemented; no automatic provider reset is added.
+
+Selected-provider unit source sets exercise the real RevenueCat and Superwall
+adapters with held provider purchase/restore callbacks. They cancel the original
+waiter, verify drain remains pending and new operations are rejected, then release
+the provider completion and verify the adapter's completion identity check runs.
+Run these with `-PnuxieExamplePurchaseProvider=revenuecat` or `superwall` and
+`:example-app:testDebugUnitTest :example-app:testReleaseUnitTest`. These are pinned
+provider API tests, not real-store qualification.

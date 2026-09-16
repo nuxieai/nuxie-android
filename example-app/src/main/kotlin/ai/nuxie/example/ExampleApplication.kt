@@ -1,5 +1,6 @@
 package ai.nuxie.example
 
+import ai.nuxie.sdk.NuxieConfiguration
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
@@ -7,6 +8,16 @@ import java.lang.ref.WeakReference
 
 /** Tracks the current host, including Nuxie's Experience Activity, without retaining it. */
 class ExampleApplication : Application(), Application.ActivityLifecycleCallbacks {
+  internal var providerOperations: ProviderOperations? = null
+    private set
+
+  internal fun ownProviderOperations(configuration: NuxieConfiguration) {
+    val delegate = configuration.purchaseDelegate ?: return
+    val owner = providerOperations ?: ProviderOperations(delegate)
+    providerOperations = owner
+    configuration.purchaseDelegate = owner
+  }
+
   private var resumed = WeakReference<Activity>(null)
   val currentActivity: Activity? get() = resumed.get()
 

@@ -144,6 +144,7 @@ class MainActivity : Activity() {
           application as ExampleApplication, intent.getStringExtra("nuxie_provider_key"),
           intent.getStringExtra(EXTRA_DISTINCT_ID), configuration,
         )
+        (application as ExampleApplication).ownProviderOperations(configuration)
         Nuxie.setup(this, configuration)
         intent.getStringExtra(EXTRA_DISTINCT_ID)?.let(Nuxie::identify)
       }
