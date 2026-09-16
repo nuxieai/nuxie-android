@@ -30,10 +30,10 @@ class TalkBackNativeSliderDeviceTest {
         assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val automation = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
-        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
-            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val input = TalkBackEmulatorInput(automation,
             checkNotNull(InstrumentationRegistry.getArguments().getString("nuxieTalkBackInputDevice")))
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         lateinit var slider: SeekBar
         val virtualValue = AtomicInteger(5)
         val labels = listOf("Choose your plan", "Seats", "After")
