@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NuxieTextGeometryCapture
+import ai.nuxie.sdk.runtime.NuxieTextRunGeometry
 import ai.nuxie.sdk.runtime.NativeSemanticState
 import ai.nuxie.sdk.runtime.NativeSemanticNode
 import android.view.accessibility.AccessibilityNodeInfo
@@ -44,10 +46,11 @@ internal class ExperienceTextInputOverlay(
     private val onFailure: (Throwable) -> Unit,
     state: ExperienceTextInputState = ExperienceTextInputState(),
 ) : FrameLayout(context) {
-    private data class Binding(val input: ExperienceTextInput, val editor: Editor)
+    private data class Binding(val input: ExperienceTextInput, val editor: Editor, val container: FrameLayout, var geometryAvailable: Boolean = true)
     private val bindings = mutableListOf<Binding>()
     private val session = state.bind()
     private var snapshot: NuxieViewModelSnapshot? = null
+    private var geometryCapture: NuxieTextGeometryCapture? = null
     private var closed = false
     private var inputEnabled = true
     private var semanticFields: Map<String, NativeSemanticNode>? = null
@@ -71,8 +74,14 @@ internal class ExperienceTextInputOverlay(
             }
             editor.tag = "nuxie-text-input-${input.id}"
             editor.visibility = View.INVISIBLE
-            addView(editor, LayoutParams(1, 1))
-            bindings += Binding(input, editor)
+            val container = FrameLayout(context).apply {
+                importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+                clipChildren = false
+                clipToPadding = false
+            }
+            container.addView(editor, LayoutParams(1, 1))
+            addView(container, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+            bindings += Binding(input, editor, container)
             fun retain(): Boolean = !closed && inputEnabled && editor.isEnabled && session.write(input.id, ExperienceTextInputState.Value(
                 editor.text.toString(), editor.selectionStart, editor.selectionEnd,
             ))
@@ -104,7 +113,7 @@ internal class ExperienceTextInputOverlay(
                 editor.setSelection(retained.selectionStart.coerceIn(0, length), retained.selectionEnd.coerceIn(0, length))
             }
             val node = semanticFields?.get(binding.input.id)
-            editor.isEnabled = enabled && (semanticFields == null || node != null && node.stateFlags and NativeSemanticState.DISABLED == 0)
+            editor.isEnabled = enabled && binding.geometryAvailable && (semanticFields == null || node != null && node.stateFlags and NativeSemanticState.DISABLED == 0)
         }
         inputEnabled = enabled
     }
@@ -117,7 +126,7 @@ internal class ExperienceTextInputOverlay(
             binding.editor.semanticNode = node
             binding.editor.importantForAccessibility = if (node == null) View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 else View.IMPORTANT_FOR_ACCESSIBILITY_YES
-            val enabled = inputEnabled && node != null && node.stateFlags and NativeSemanticState.DISABLED == 0
+            val enabled = inputEnabled && binding.geometryAvailable && node != null && node.stateFlags and NativeSemanticState.DISABLED == 0
             if (enabled && !binding.editor.isEnabled) {
                 // Restore while disabled so TextWatcher/selection callbacks cannot
                 // admit a stale IME draft or emit a second response transaction.
@@ -143,9 +152,10 @@ internal class ExperienceTextInputOverlay(
         binding.editor.semanticNode?.let { it.id to binding.editor }
     }.toMap()
 
-    fun update(snapshot: NuxieViewModelSnapshot) {
+    fun update(snapshot: NuxieViewModelSnapshot, geometry: NuxieTextGeometryCapture? = null) {
         if (closed || !session.isCurrent()) return
         this.snapshot = snapshot
+        geometryCapture = geometry
         layoutEditors()
     }
 
@@ -158,6 +168,7 @@ internal class ExperienceTextInputOverlay(
         removeAllViews()
         bindings.clear()
         snapshot = null
+        geometryCapture = null
     }
 
     override fun onAttachedToWindow() {
@@ -266,9 +277,32 @@ internal class ExperienceTextInputOverlay(
         val scale = min(width / artboardSize.width, height / artboardSize.height)
         val left = (width - artboardSize.width * scale) / 2f
         val top = (height - artboardSize.height * scale) / 2f
-        for ((input, editor) in bindings) {
+        for (binding in bindings) {
+            val (input, editor, container) = binding
             if (semanticFields != null && input.id !in semanticFields.orEmpty()) {
                 editor.visibility = View.INVISIBLE
+                continue
+            }
+            val captured = geometryCapture
+            if (captured != null) {
+                val field = (captured as? NuxieTextGeometryCapture.Captured)?.fields?.get(input.runName)
+                binding.geometryAvailable = field != null && placeCapturedField(input, editor, container, field, scale, left, top)
+                val node = semanticFields?.get(input.id)
+                val enabled = binding.geometryAvailable && inputEnabled &&
+                    (semanticFields == null || node != null && node.stateFlags and NativeSemanticState.DISABLED == 0)
+                if (enabled && !editor.isEnabled) {
+                    session.read(input.id)?.let { retained ->
+                        editor.setText(retained.text)
+                        val length = editor.text?.length ?: 0
+                        editor.setSelection(retained.selectionStart.coerceIn(0, length), retained.selectionEnd.coerceIn(0, length))
+                    }
+                }
+                editor.isEnabled = enabled
+                if (!binding.geometryAvailable) {
+                    // Fence late IME callbacks before clearing focus on a missing field.
+                    if (editor.hasFocus()) clearEditorFocus()
+                    editor.visibility = View.INVISIBLE
+                }
                 continue
             }
             val geometry = input.geometry(snapshot)
@@ -308,6 +342,42 @@ internal class ExperienceTextInputOverlay(
             editor.visibility = View.VISIBLE
         }
         avoidKeyboard()
+    }
+
+    private fun placeCapturedField(
+        input: ExperienceTextInput, editor: Editor, container: FrameLayout,
+        field: NuxieTextRunGeometry, scale: Float, left: Float, top: Float,
+    ): Boolean {
+        val layout = field.layout ?: return false
+        val bounds = layout.bounds
+        val w = (bounds.maxX - bounds.minX) * scale
+        val h = (bounds.maxY - bounds.minY) * scale
+        if (!w.isFinite() || !h.isFinite() || w <= 0 || h <= 0 || w >= Int.MAX_VALUE || h >= Int.MAX_VALUE) return false
+        val targetWidth = w.roundToInt().coerceAtLeast(1)
+        val targetHeight = h.roundToInt().coerceAtLeast(1)
+        val t = layout.transform
+        // Account for integer native bounds without changing the authored field corners.
+        val transform = NuxieTextRunGeometry.Transform(
+            t.a * w / targetWidth, t.b * w / targetWidth,
+            t.c * h / targetHeight, t.d * h / targetHeight,
+            left + scale * (t.tx + t.a * bounds.minX + t.c * bounds.minY),
+            top + scale * (t.ty + t.b * bounds.minX + t.d * bounds.minY),
+        )
+        val placement = ExperienceAffinePlacement.resolve(transform, targetWidth, targetHeight) ?: return false
+        val params = editor.layoutParams
+        if (params.width != targetWidth || params.height != targetHeight) {
+            params.width = targetWidth
+            params.height = targetHeight
+            editor.layoutParams = params
+        }
+        placement.apply(container, editor)
+        editor.setTextSize(TypedValue.COMPLEX_UNIT_PX, (input.style.fontSize * scale).coerceAtLeast(1f))
+        editor.letterSpacing = input.style.letterSpacing * scale / editor.textSize
+        val extraLineSpacing = if (input.style.lineHeight == -1f) 0f
+            else input.style.lineHeight * scale - editor.paint.getFontMetricsInt(null)
+        editor.setLineSpacing(extraLineSpacing, 1f)
+        editor.visibility = View.VISIBLE
+        return true
     }
 
     private inner class Editor(context: Context, private val input: ExperienceTextInput) : EditText(context) {

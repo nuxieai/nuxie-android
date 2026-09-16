@@ -9,6 +9,7 @@ import android.view.accessibility.AccessibilityNodeProvider
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import ai.nuxie.sdk.runtime.NuxieAndroidVulkanRenderer
+import ai.nuxie.sdk.runtime.NuxieTextGeometryCapture
 import ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome
 import ai.nuxie.sdk.runtime.NuxieRuntime
 import ai.nuxie.sdk.runtime.NuxieRuntimeArtboard
@@ -67,7 +68,7 @@ internal class ExperienceSurfaceHost(
         fun onFailure(error: ExperiencePresentationException)
         fun onRuntimeEvent(event: NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {}
         /** UI-thread geometry update, after its frame has been presented. */
-        fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot) {}
+        fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot, geometry: NuxieTextGeometryCapture) {}
         /** Complete visible native-field association map, copied from the same presented capture. */
         fun onSemanticFields(fields: Map<String, NativeSemanticNode>): Map<Long, android.view.View> = emptyMap()
         /** UI-thread callback after native fields and virtual controls share a committed tree. */
@@ -206,6 +207,7 @@ internal class ExperienceSurfaceHost(
     private var pendingPresentation = false
     private data class SubmittedTextSnapshot(
         val snapshot: NuxieViewModelSnapshot,
+        val geometry: NuxieTextGeometryCapture,
         val generation: Long,
         val epoch: Long,
     )
@@ -640,6 +642,7 @@ internal class ExperienceSurfaceHost(
                             elapsedSeconds = elapsedSeconds,
                             pointers = pointerInput.takeBatch(),
                             correlationId = correlationId,
+                            textRunNames = textInputs.values.map { it.runName }.distinct(),
                         )
                     } catch (error: Throwable) {
                         reportFailure(
@@ -668,7 +671,7 @@ internal class ExperienceSurfaceHost(
                     if (outcome.hasPublishableEffects()) {
                         unpublishedSteps.addLast(PublishedStep(correlationId, outcome, viewModelSnapshot))
                     }
-                    submittedSnapshot = viewModelSnapshot?.let { SubmittedTextSnapshot(it, generation, epoch) }
+                    submittedSnapshot = viewModelSnapshot?.let { SubmittedTextSnapshot(it, outcome.textGeometry, generation, epoch) }
                     if (!firstFramePresented) firstFrameUpdateBaseline = surfaceUpdates.get()
                 }
                 val disposition = renderer.renderAndPresent(player, window, clearColor, true)
@@ -695,7 +698,7 @@ internal class ExperienceSurfaceHost(
                             if (!released.get() && running && sceneInputEnabled.get() &&
                                 submitted.generation == frameGeneration.get() &&
                                 submitted.epoch == semanticEpoch.get() && publication == textPublication.get()) {
-                                listener?.onTextInputSnapshot(submitted.snapshot)
+                                listener?.onTextInputSnapshot(submitted.snapshot, submitted.geometry)
                             }
                         }
                     }

@@ -31,7 +31,7 @@ class TextInputLimitDeviceTest {
                     done(Result.success(Unit))
                 }, { throw AssertionError(it) })
             try {
-                val editor = overlay.getChildAt(0) as EditText
+                val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
                 val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
                 assertTrue(connection.setComposingText("abc", 1))
                 assertEquals("abc", editor.text.toString())
@@ -69,7 +69,7 @@ class TextInputLimitDeviceTest {
                 val overlay = ExperienceTextInputOverlay(context, ExperienceArtboardSize(200f, 100f),
                     listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw AssertionError(it) })
                 try {
-                    val editor = overlay.getChildAt(0) as EditText
+                    val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
                     val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
                     editor.setSelection(start, end)
                     assertTrue(connection.commitText(replacement, 1))
@@ -106,7 +106,7 @@ class TextInputLimitDeviceTest {
                         lastWrite = text to commit; done(Result.success(Unit))
                     }, { throw AssertionError(it) })
                 try {
-                    val editor = overlay.getChildAt(0) as EditText
+                    val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
                     editor.visibility = android.view.View.VISIBLE
                     assertTrue(editor.requestFocus())
                     val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))

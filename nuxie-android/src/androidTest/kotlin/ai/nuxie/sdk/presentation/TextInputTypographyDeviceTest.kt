@@ -56,7 +56,7 @@ class TextInputTypographyDeviceTest {
                         View.MeasureSpec.makeMeasureSpec(size, View.MeasureSpec.EXACTLY))
                     current.layout(0, 0, size, size)
                     current.update(geometry(geometryScale))
-                    val editor = current.getChildAt(0) as EditText
+                    val editor = current.findViewWithTag<EditText>("nuxie-text-input-answer")
                     val oracle = EditText(activity).apply {
                         background = null
                         setPadding(0, 0, 0, 0)
