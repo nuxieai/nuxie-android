@@ -160,12 +160,15 @@ class SessionLogoutLifecycleTest {
         try {
           instrumentation.runOnMainSync { created.filterNot { it.isDestroyed }.forEach { it.finish() } }
           instrumentation.waitForIdleSync()
-          Nuxie.shutdownAndAwait()
         } finally {
-          app.unregisterActivityLifecycleCallbacks(callbacks)
-          assertTrue(prefs.edit().putString("logout", savedLogout).putString("provider-operations", savedOperations).commit())
-          assertEquals(savedLogout, prefs.getString("logout", null))
-          assertEquals(savedOperations, prefs.getString("provider-operations", null))
+          try {
+            Nuxie.shutdownAndAwait()
+          } finally {
+            app.unregisterActivityLifecycleCallbacks(callbacks)
+            assertTrue(prefs.edit().putString("logout", savedLogout).putString("provider-operations", savedOperations).commit())
+            assertEquals(savedLogout, prefs.getString("logout", null))
+            assertEquals(savedOperations, prefs.getString("provider-operations", null))
+          }
         }
       }
     }
