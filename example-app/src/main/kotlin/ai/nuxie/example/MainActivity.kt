@@ -20,6 +20,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import java.net.URL
+import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,7 +38,10 @@ class MainActivity : Activity() {
   private lateinit var featureStatus: TextView
   private lateinit var observedFeature: String
   private var observeFeatures = false
+  private var readyForOperations = false
+  private var operationRunning = false
   private var featureObservation: Job? = null
+  private var sessionObservation: Job? = null
   private val listener = object : NuxieListener {
     override fun onAppActionRequested(sdk: Nuxie, action: AppAction) {
       status.text = "App Action requested: ${action.name}"
@@ -131,7 +135,21 @@ class MainActivity : Activity() {
       buttons.forEach { it.isEnabled = false }
       return
     }
+    val app = application as ExampleApplication
     try {
+      if (app.sessionLogout?.state?.value?.let { it != SessionLogout.State.ACTIVE } == true) {
+        buttons.forEach { it.isEnabled = false }
+        return
+      }
+      if (!Nuxie.isSetup && app.logoutJournal.read() != null) {
+        status.text = if (app.logoutJournal.read()?.stage == LogoutJournal.Stage.COMPLETE) {
+          "Signed out. Starting another session requires an explicit sign-in."
+        } else {
+          "A previous sign-out needs recovery before starting again."
+        }
+        buttons.forEach { it.isEnabled = false }
+        return
+      }
       val configuration = NuxieConfiguration(apiKey).apply {
         environment = NuxieEnvironment.DEVELOPMENT
         logLevel = LogLevel.DEBUG
@@ -147,8 +165,14 @@ class MainActivity : Activity() {
         (application as ExampleApplication).ownProviderOperations(configuration)
         Nuxie.setup(this, configuration)
         intent.getStringExtra(EXTRA_DISTINCT_ID)?.let(Nuxie::identify)
+        if (ExamplePurchaseProvider.supportsLogout) {
+          val session = listOf(ExamplePurchaseProvider.name, apiKey, Nuxie.distinctId).joinToString("\u0000")
+          val digest = MessageDigest.getInstance("SHA-256").digest(session.toByteArray()).joinToString("") { "%02x".format(it) }
+          app.prepareLogout(digest) { ExamplePurchaseProvider.logout() }
+        }
       }
       observeFeatures = true
+      readyForOperations = true
       status.text = getString(R.string.setup_status, Nuxie.version) +
         if (configuration.testStoreEnabled) " Test Store enabled; no Play charges." else " ${ExamplePurchaseProvider.name}."
     } catch (_: Exception) {
@@ -160,7 +184,8 @@ class MainActivity : Activity() {
 
   private fun runOperation(message: String, operation: suspend () -> String) {
     status.text = message
-    buttons.forEach { it.isEnabled = false }
+    operationRunning = true
+    updateButtonState()
     scope.launch {
       try {
         status.text = operation()
@@ -169,13 +194,34 @@ class MainActivity : Activity() {
       } catch (_: Exception) {
         status.text = "Request failed. Check connectivity and try again."
       } finally {
-        buttons.forEach { it.isEnabled = true }
+        operationRunning = false
+        updateButtonState()
       }
     }
   }
 
+  private fun updateButtonState() {
+    val state = (application as ExampleApplication).sessionLogout?.state?.value
+    val enabled = readyForOperations && !operationRunning && (state == null || state == SessionLogout.State.ACTIVE)
+    buttons.forEach { it.isEnabled = enabled }
+  }
+
   override fun onStart() {
     super.onStart()
+    (application as ExampleApplication).sessionLogout?.let { session ->
+      sessionObservation = scope.launch {
+        session.state.collect { state ->
+          updateButtonState()
+          when (state) {
+            SessionLogout.State.ACTIVE -> Unit
+            SessionLogout.State.CLOSING -> status.text = "Signing out; waiting for current purchases to finish…"
+            SessionLogout.State.FAILED -> status.text = "Sign out could not finish. Retry before continuing."
+            SessionLogout.State.COMPLETE -> status.text = "Signed out."
+            SessionLogout.State.RECOVERY_REQUIRED -> status.text = "A pending purchase needs recovery before sign out can finish."
+          }
+        }
+      }
+    }
     if (observeFeatures) {
       featureObservation = scope.launch {
         Nuxie.features.snapshot.collect { snapshot ->
@@ -187,6 +233,8 @@ class MainActivity : Activity() {
   }
 
   override fun onStop() {
+    sessionObservation?.cancel()
+    sessionObservation = null
     featureObservation?.cancel()
     featureObservation = null
     super.onStop()
