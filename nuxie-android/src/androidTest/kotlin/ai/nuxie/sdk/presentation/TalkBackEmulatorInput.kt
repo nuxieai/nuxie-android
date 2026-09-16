@@ -66,12 +66,12 @@ internal class TalkBackEmulatorInput(private val automation: UiAutomation, priva
         ).recycle()
     }
 
-    fun doubleTap() {
+    fun doubleTap(x: Int = 16000, y: Int = 16000) {
         automation.executeAndWaitForEvent(
             { writeGesture {
-                contact(16000, 16000) { SystemClock.sleep(50) }
+                contact(x, y) { SystemClock.sleep(50) }
                 SystemClock.sleep(80)
-                contact(16000, 16000) { SystemClock.sleep(50) }
+                contact(x, y) { SystemClock.sleep(50) }
             } },
             { it.eventType == android.view.accessibility.AccessibilityEvent.TYPE_TOUCH_INTERACTION_END },
             5_000,
