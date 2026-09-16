@@ -18,6 +18,8 @@ android {
 dependencies {
   implementation(project(":nuxie-android"))
   api("com.superwall.sdk:superwall-android:2.8.3")
+  testImplementation("org.mockito:mockito-core:5.18.0")
+  testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.junit)
   testImplementation(libs.robolectric)
 }

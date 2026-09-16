@@ -25,12 +25,14 @@ class NuxieSuperwallPurchaseDelegate(
 ) : NuxiePurchaseDelegate {
   override suspend fun purchase(product: StoreProduct): PurchaseResult = withContext(Dispatchers.Main.immediate) {
     try {
-      checkExpectedCustomer()
+      val owner = currentCustomer()
       val exact = exactSuperwallProduct(
         requireNotNull(product.rawProduct) { "Native Play product required." },
         product.basePlanId, product.purchaseOptionId, product.offerId, product.isOfferPersonalized,
       )
-      mapPurchaseResult(superwall.purchase(exact).getOrThrow())
+      val result = superwall.purchase(exact).getOrThrow()
+      check(superwall.userId == owner) { "Superwall identity changed during checkout." }
+      mapPurchaseResult(result)
     } catch (cancelled: CancellationException) {
       throw cancelled
     } catch (failure: Exception) {
@@ -40,8 +42,10 @@ class NuxieSuperwallPurchaseDelegate(
 
   override suspend fun restorePurchases(): RestoreResult = withContext(Dispatchers.Main.immediate) {
     try {
-      checkExpectedCustomer()
-      when (val result = superwall.restorePurchases().getOrThrow()) {
+      val owner = currentCustomer()
+      val result = superwall.restorePurchases().getOrThrow()
+      check(superwall.userId == owner) { "Superwall identity changed during restore." }
+      when (result) {
         is RestorationResult.Restored -> {
           val status = superwall.subscriptionStatus.value
           if (status is SubscriptionStatus.Active && status.entitlements.isNotEmpty()) {
@@ -59,8 +63,8 @@ class NuxieSuperwallPurchaseDelegate(
     }
   }
 
-  private fun checkExpectedCustomer() {
-    check(expectedCustomerId == null || superwall.userId == expectedCustomerId) {
+  private fun currentCustomer(): String = superwall.userId.also {
+    check(expectedCustomerId == null || it == expectedCustomerId) {
       "Superwall has not resolved the expected customer identity."
     }
   }

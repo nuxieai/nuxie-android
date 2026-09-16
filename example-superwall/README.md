@@ -43,8 +43,14 @@ Nuxie Feature.
 
 The runnable host in `example-app` passes `expectedCustomerId` to the delegate.
 That rejects checkout or restore while Superwall's asynchronous identity state
-still exposes a different customer. Use that guard when copying the example;
-it does not make an in-flight account switch safe.
+still exposes a different customer. The delegate snapshots that provider customer
+at operation entry and rechecks it after the suspended provider call, before
+returning a checkout result or reading restored entitlements. This completion
+check also applies when `expectedCustomerId` is omitted. Use the expected-customer
+guard when copying the example so entry is tied to the Nuxie session too.
+These checks cannot detect A→B→A between reads or undo an already-started store
+operation. The host must still serialize account changes with billing; they do
+not implement coordinated logout.
 
 ## Limits and qualification
 
@@ -73,6 +79,8 @@ consumption of a published SDK artifact remains pending.
 ```
 
 The SDK lint task runs these example checks too. Tests use pinned Superwall
-models to verify selected terms and result mappings; they do not perform a
-store transaction. The dependency check rejects Superwall/RevenueCat in the
+models to verify selected terms and result mappings. Additional delegate tests
+hold the pinned provider's suspend completions with test-only mocks, change its
+customer, and verify rejection plus stable purchase/restore controls. They do
+not contact Superwall or perform a store transaction. The dependency check rejects Superwall/RevenueCat in the
 SDK's debug and release runtime dependency graphs.
