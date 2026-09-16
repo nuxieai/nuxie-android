@@ -371,6 +371,17 @@ internal class ExperienceTextInputOverlay(
             editor.layoutParams = params
         }
         placement.apply(container, editor)
+        val content = field.contentTransform
+        val determinant = t.a.toDouble() * t.d - t.b.toDouble() * t.c
+        fun localBaseline(y: Float): Float? {
+            val worldX = content.tx.toDouble() + content.c.toDouble() * y
+            val worldY = content.ty.toDouble() + content.d.toDouble() * y
+            val localY = (-t.b * (worldX - t.tx) + t.a * (worldY - t.ty)) / determinant
+            return ((localY - bounds.minY) * targetHeight / (bounds.maxY - bounds.minY)).toFloat()
+                .takeIf { value -> value.isFinite() && value > -Int.MAX_VALUE && value < Int.MAX_VALUE }
+        }
+        editor.presentedTextOriginY = localBaseline(0f) ?: return false
+        editor.presentedFirstBaseline = field.firstBaseline?.let(::localBaseline)
         editor.setTextSize(TypedValue.COMPLEX_UNIT_PX, (input.style.fontSize * scale).coerceAtLeast(1f))
         editor.letterSpacing = input.style.letterSpacing * scale / editor.textSize
         val extraLineSpacing = if (input.style.lineHeight == -1f) 0f
@@ -382,6 +393,33 @@ internal class ExperienceTextInputOverlay(
 
     private inner class Editor(context: Context, private val input: ExperienceTextInput) : EditText(context) {
         var semanticNode: NativeSemanticNode? = null
+        var presentedTextOriginY: Float = 0f
+            set(value) {
+                if (field == value) return
+                field = value
+                requestLayout()
+            }
+        var presentedFirstBaseline: Float? = null
+            set(value) {
+                if (field == value) return
+                field = value
+                requestLayout()
+            }
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+            // TextView's baseline includes top padding. Measure the actual native layout,
+            // then align that baseline without moving or resizing the published field box.
+            val desired = presentedFirstBaseline
+            // During native editing the runtime run is intentionally blank. Its text
+            // origin remains valid even when it has no shaped first-line baseline.
+            val top = if (desired == null) presentedTextOriginY.roundToInt()
+                else (desired - (baseline - paddingTop)).roundToInt()
+            if (paddingTop != top) {
+                setPadding(paddingLeft, top, paddingRight, paddingBottom)
+                super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+            }
+        }
 
         override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
             super.onInitializeAccessibilityNodeInfo(info)
