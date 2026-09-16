@@ -12,10 +12,11 @@ The adapter consumes the public Android runtime v0.3.12 pinned in `runtime/artif
 | Role/state/secure-value projection, focus, traversal and keyboard navigation | `ExperienceAccessibilityProviderTest` |
 | Visible geometry and host-coordinate conversion | `ExperienceSemanticGeometryTest` |
 | Capture ownership, malformed-copy cleanup and native actions | `NuxieSemanticSnapshotTest`, `NuxieExperiencePlayerTest` |
-| Occurrence/input suspension and stale queued work | `ExperienceSurfaceHostPointerTest` |
+| Occurrence/input suspension, stale queued work, main-thread recovery and environment updates during pending presentation | `ExperienceSurfaceHostPointerTest` |
 | Native editing, semantic visibility, accessible replacement and composition | `ExperienceTextInputTest` |
 | Populated Unicode JNI capture and exact TextValueRun ownership | `NativeSemanticsDeviceTest` |
 | Native/virtual traversal links and injected container keyboard/cursor movement | `SemanticTraversalDeviceTest` |
+| Signed published authored roles, secure native editor and ordered durable adjustable/response emissions | `PublishedTextInputDeviceTest.signedAuthoredRolesExposeSecureEditorAndDurableNativeActions` (two API 36 passes) |
 
 Run full unit, API compatibility, lint and example assembly checks against the public runtime:
 
@@ -30,6 +31,8 @@ ANDROID_SERIAL=emulator-5556 ./gradlew :nuxie-android:connectedDebugAndroidTest 
 ```
 
 These device probes use imported or synthetic semantic fixtures. They establish JNI and framework behavior, not full published-screen or screen-reader behavior.
+
+The signed authored-role case uses the production-published shared fixture, candidate capability admission and the public runtime. It checks labels, selected versus checked state, disabled actions, repeated identities and one secure editor. Accessibility focus/set-text followed by the native IME Done action must save the response after authored increment and decrement emissions, without duplicate batches. It does not run TalkBack.
 
 ## Remaining acceptance work
 
