@@ -80,6 +80,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.fail
 import org.junit.Test
@@ -2074,7 +2075,14 @@ class PublishedTextInputDeviceTest {
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.EDITOR_HOME_RETURN)
     }
 
-    private enum class AuthoredRoleProbe { COMPLETE, HEADING_ENTRY, EDITOR_ENTRY, EDITOR_HOME_RETURN }
+    @Test
+    @SdkSuppress(minSdkVersion = 34)
+    fun signedAuthoredRolesRestoreTalkBackSliderAfterHome() {
+        org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
+        exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.SLIDER_HOME_RETURN)
+    }
+
+    private enum class AuthoredRoleProbe { COMPLETE, HEADING_ENTRY, EDITOR_ENTRY, EDITOR_HOME_RETURN, SLIDER_HOME_RETURN }
 
     private enum class PublishedBehavior { TEXT_INPUT, SCRIPT, SEMANTIC_SCRIPT, SEMANTIC_ROLES }
 
@@ -2393,8 +2401,9 @@ class PublishedTextInputDeviceTest {
         instrumentation: Instrumentation,
         activity: Activity,
         input: TalkBackEmulatorInput,
-        editorBeforeHome: android.view.accessibility.AccessibilityNodeInfo,
-        nextAfterEditor: () -> android.view.accessibility.AccessibilityNodeInfo,
+        targetBeforeHome: android.view.accessibility.AccessibilityNodeInfo,
+        restoredTarget: () -> android.view.accessibility.AccessibilityNodeInfo?,
+        nextAfterTarget: () -> android.view.accessibility.AccessibilityNodeInfo,
     ) {
         val automation = instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
         val stopped = CountDownLatch(1)
@@ -2414,26 +2423,29 @@ class PublishedTextInputDeviceTest {
             assertTrue(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME))
             assertTrue("Home must stop the original Activity", stopped.await(10, TimeUnit.SECONDS))
             val awayDeadline = SystemClock.uptimeMillis() + 5_000
-            while (automation.rootInActiveWindow?.windowId == editorBeforeHome.windowId && SystemClock.uptimeMillis() < awayDeadline) {
+            while (automation.rootInActiveWindow?.windowId == targetBeforeHome.windowId && SystemClock.uptimeMillis() < awayDeadline) {
                 SystemClock.sleep(20)
             }
-            assertNotEquals("Home must remove the Experience from the active accessibility window", editorBeforeHome.windowId,
+            assertNotEquals("Home must remove the Experience from the active accessibility window", targetBeforeHome.windowId,
                 automation.rootInActiveWindow?.windowId)
             instrumentation.targetContext.startActivity(Intent(activity.intent).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             })
             assertTrue("Return must resume the same Activity", resumed.await(10, TimeUnit.SECONDS))
             val focusDeadline = SystemClock.uptimeMillis() + 5_000
+            var expectedRestored = restoredTarget()
             var restored = focused()
-            while (restored != editorBeforeHome && SystemClock.uptimeMillis() < focusDeadline) {
+            while ((expectedRestored == null || restored != expectedRestored) && SystemClock.uptimeMillis() < focusDeadline) {
                 SystemClock.sleep(20)
+                expectedRestored = restoredTarget()
                 restored = focused()
             }
-            assertEquals("TalkBack must restore the exact native editor after Home/return", editorBeforeHome, restored)
-            assertTrue("Restored editor must remain secure", checkNotNull(restored).isPassword)
+            assertNotNull("The authored target must be republished after Home/return", expectedRestored)
+            assertEquals("TalkBack must restore the current authored target after Home/return", expectedRestored, restored)
+            assertEquals("Restored focus must preserve secure-entry semantics", targetBeforeHome.isPassword, checkNotNull(restored).isPassword)
             // Backgrounding withdraws virtual targets. Compare traversal with the
             // newly presented target, not a retired pre-background platform ID.
-            val expectedNext = nextAfterEditor()
+            val expectedNext = nextAfterTarget()
             input.swipeForward()
             val nextDeadline = SystemClock.uptimeMillis() + 2_000
             var next = focused()
@@ -2441,7 +2453,7 @@ class PublishedTextInputDeviceTest {
                 SystemClock.sleep(20)
                 next = focused()
             }
-            assertNotEquals("First resumed swipe must leave the editor", restored, next)
+            assertNotEquals("First resumed swipe must leave the restored target", restored, next)
             assertEquals("Resumed traversal must reach the exact next authored control", expectedNext, next)
             input.swipeBackward()
             val backDeadline = SystemClock.uptimeMillis() + 2_000
@@ -2450,7 +2462,7 @@ class PublishedTextInputDeviceTest {
                 SystemClock.sleep(20)
                 back = focused()
             }
-            assertEquals("Reverse traversal must return to the same editor", restored, back)
+            assertEquals("Reverse traversal must return to the restored target", restored, back)
         } finally {
             activity.application.unregisterActivityLifecycleCallbacks(callbacks)
         }
@@ -2516,11 +2528,26 @@ class PublishedTextInputDeviceTest {
                 assertFalse("Every forward swipe must change the focused identity; expected=$expected previous=${label(previous)} current=${label(next)}", next == previous)
                 assertEquals("Every forward swipe must reach the next authored element", expected, label(next))
                 visited += next
+                if (expected == "Seats" && roleProbe == AuthoredRoleProbe.SLIDER_HOME_RETURN) {
+                    assertEquals("The authored slider must be the focused drawn control", "android.widget.SeekBar", next.className.toString())
+                    repeat(5) { cycle ->
+                        try {
+                            assertTalkBackHomeReturn(instrumentation, activity, input, next,
+                                { nodes().singleOrNull { label(it) == "Seats" } },
+                                { nodes().single { label(it) == "Password" } })
+                        } catch (failure: AssertionError) {
+                            throw AssertionError("Virtual Home/return cycle ${cycle + 1}: ${failure.message}", failure)
+                        }
+                    }
+                    assertTrue("Home/return must not produce authored effects", accepted.isEmpty())
+                    assertTrue("Home/return must not commit a response", responses().isEmpty())
+                    return
+                }
                 if (expected == "Password" && roleProbe in setOf(AuthoredRoleProbe.EDITOR_ENTRY, AuthoredRoleProbe.EDITOR_HOME_RETURN)) {
                     assertTrue("The prior presentation must finish on the native editor", next.isEditable)
                     assertEquals("android.widget.EditText", next.className.toString())
                     if (roleProbe == AuthoredRoleProbe.EDITOR_HOME_RETURN) {
-                        assertTalkBackHomeReturn(instrumentation, activity, input, next) { nodes().single { label(it) == "Unavailable" } }
+                        assertTalkBackHomeReturn(instrumentation, activity, input, next, { next }) { nodes().single { label(it) == "Unavailable" } }
                         assertTrue("Home/return must not produce authored effects", accepted.isEmpty())
                         assertTrue("Home/return must not commit an untouched editor", responses().isEmpty())
                     }
