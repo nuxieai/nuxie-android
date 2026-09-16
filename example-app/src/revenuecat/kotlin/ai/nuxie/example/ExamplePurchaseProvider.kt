@@ -20,6 +20,6 @@ internal object ExamplePurchaseProvider {
     }
     check(configuredCustomer == customer) { "Restart the example before changing customer." }
     configuration.purchaseHandlingMode = PurchaseHandlingMode.APP_MANAGED
-    configuration.purchaseDelegate = NuxieRevenueCatPurchaseDelegate({ app.currentActivity })
+    configuration.purchaseDelegate = NuxieRevenueCatPurchaseDelegate({ app.currentActivity }, expectedCustomerId = customer)
   }
 }

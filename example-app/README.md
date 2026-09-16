@@ -94,8 +94,9 @@ decisions for provider-owned access after Connector cutover.
 
 Provider configuration is retained across Activity recreation. The application
 tracks its current resumed Activity with a weak reference, including Nuxie's
-Experience Activity, for RevenueCat checkout. Superwall checkout and restore
-also require the expected customer to be visible in its identity state. The
+Experience Activity, for RevenueCat checkout. Both provider delegates require the expected customer to be visible in their
+identity state before checkout or restore. RevenueCat also rechecks identity
+after successful completion. The
 provider builds deliberately omit anonymous reset: coordinated logout and
 in-flight identity changes are not implemented by this sample. Restart with a
 different explicit customer to exercise a new session, after all checkout work
