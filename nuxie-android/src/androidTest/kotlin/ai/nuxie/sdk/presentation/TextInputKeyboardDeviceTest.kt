@@ -32,6 +32,32 @@ class TextInputKeyboardDeviceTest {
     @Test
     fun keyboardAvoidanceMovesTheLiveSurfaceAndEditorTogetherWithoutDrift() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        if (android.os.Build.VERSION.SDK_INT < 34) {
+            verifyDockedKeyboardAvoidance(instrumentation)
+            return
+        }
+        // This case requires a docked IME. Gboard handwriting can be visible
+        // with a zero-height inset, so it cannot exercise occlusion avoidance.
+        val key = "stylus_handwriting_enabled"
+        val resolver = instrumentation.targetContext.contentResolver
+        val original = android.provider.Settings.Secure.getString(resolver, key)
+        val automation = instrumentation.uiAutomation
+        fun setHandwriting(value: String?) {
+            automation.adoptShellPermissionIdentity(android.Manifest.permission.WRITE_SECURE_SETTINGS)
+            try {
+                assertTrue(android.provider.Settings.Secure.putString(resolver, key, value))
+                assertEquals(value, android.provider.Settings.Secure.getString(resolver, key))
+            } finally { automation.dropShellPermissionIdentity() }
+        }
+        try {
+            setHandwriting("0")
+            verifyDockedKeyboardAvoidance(instrumentation)
+        } finally {
+            setHandwriting(original)
+        }
+    }
+
+    private fun verifyDockedKeyboardAvoidance(instrumentation: Instrumentation) {
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
         val file = File(context.cacheDir, "keyboard-${UUID.randomUUID()}.riv")
@@ -94,8 +120,18 @@ class TextInputKeyboardDeviceTest {
                 val ime = owner.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
                 assertTrue(ime.showSoftInput(editor, InputMethodManager.SHOW_IMPLICIT))
             }
-            awaitUi(instrumentation, "Keyboard did not open") {
-                editor.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true
+            // IME visibility may become true before its animated inset is nonzero.
+            // Establish real occlusion independently of the SDK's avoidance shift.
+            awaitUi(instrumentation, "Docked keyboard did not occlude the original editor position", diagnosis = {
+                "originalEditorTop=$originalEditorTop, editorHeight=${editor.height}, " +
+                    "rootHeight=${editor.rootView.height}, ime=${editor.rootWindowInsets?.getInsets(WindowInsets.Type.ime())}, " +
+                    "visible=${editor.rootWindowInsets?.isVisible(WindowInsets.Type.ime())}, focused=${editor.hasFocus()}"
+            }) {
+                val root = editor.rootView
+                val insets = root.rootWindowInsets ?: return@awaitUi false
+                val keyboardTop = screenTop(root) + root.height - insets.getInsets(WindowInsets.Type.ime()).bottom
+                insets.isVisible(WindowInsets.Type.ime()) &&
+                    originalEditorTop + editor.height > keyboardTop
             }
             awaitUi(instrumentation, "Focused editor remained under the keyboard", diagnosis = {
                 "shift=${content.translationY}, editorTop=${screenTop(editor)}, editorHeight=${editor.height}, " +
