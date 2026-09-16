@@ -27,6 +27,50 @@ import org.robolectric.annotation.GraphicsMode
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [30])
 class ExperienceAccessibilityProviderTest {
+    @Test fun `service clearing virtual focus before withdrawal preserves the owned restoration target`() = withHost { host ->
+        val provider = provider(host)
+        val tree = NuxieSemanticTree(1, 1, listOf(node(), node().copy(id = 43, siblingIndex = 1, label = "Second")))
+        provider.publish(tree)
+        assertTrue(provider.performAction(2, AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null))
+        assertTrue(provider.performAction(2, AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS, null))
+        assertNull(provider.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY))
+        provider.publish(tree)
+        assertNull("A normal frame must not undo a service clear", provider.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY))
+        provider.withdraw()
+        provider.publish(tree)
+        assertEquals("Second", provider.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)?.text)
+    }
+
+    @Test fun `cleared virtual focus history yields to a native owner before withdrawal`() = withHost { host ->
+        Shadows.shadowOf(host.context.getSystemService(AccessibilityManager::class.java)).setTouchExplorationEnabled(true)
+        val provider = provider(host)
+        val tree = NuxieSemanticTree(1, 1, listOf(node()))
+        provider.publish(tree)
+        assertTrue(provider.performAction(1, AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null))
+        assertTrue(provider.performAction(1, AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS, null))
+        val shell = android.widget.Button(host.context)
+        (host.parent as ExperienceFocusRoot).addView(shell)
+        shell.layout(0, 0, 100, 50)
+        assertTrue(shell.performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null))
+        provider.withdraw()
+        provider.publish(tree)
+        assertNull(provider.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY))
+        assertTrue(shell.isAccessibilityFocused)
+    }
+
+    @Test fun `retirement clears virtual focus history after the service clears focus`() = withHost { host ->
+        val provider = provider(host)
+        val tree = NuxieSemanticTree(1, 1, listOf(node()))
+        provider.publish(tree)
+        assertTrue(provider.performAction(1, AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null))
+        assertTrue(provider.performAction(1, AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS, null))
+        provider.retire()
+        provider.publish(tree)
+        provider.withdraw()
+        provider.publish(tree)
+        assertNull(provider.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY))
+    }
+
     @Test fun `outer sheet recovery focus cancels restoration in nested content root`() = withHost { host ->
         Shadows.shadowOf(host.context.getSystemService(AccessibilityManager::class.java)).setTouchExplorationEnabled(true)
         val inner = host.parent as ExperienceFocusRoot
