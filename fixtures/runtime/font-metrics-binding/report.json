@@ -1,0 +1,117 @@
+{
+  "majorVersion": 7,
+  "minorVersion": 3,
+  "fileId": 1,
+  "recordCount": 132,
+  "outputSizeBytes": 2867,
+  "outputSha256": "1a90d3b9017143d557be5a68303c784eab8e74bab7bba625586eedc61a5a2e9a",
+  "roundtripValidated": true,
+  "builtPackageMetadata": {
+    "artboards": [
+      {
+        "sourceArtboardId": "screen_1",
+        "publishedName": "Paywall",
+        "role": "experience",
+        "width": 390,
+        "height": 844,
+        "authoredOrder": 0
+      }
+    ],
+    "screens": [
+      {
+        "screenId": "screen_1",
+        "artboardId": "screen_1",
+        "artboardName": "Paywall",
+        "width": 390,
+        "height": 844,
+        "authoredOrder": 0,
+        "reportedEventNames": []
+      }
+    ],
+    "assets": {
+      "images": [],
+      "fonts": [
+        {
+          "family": "Fixture Sans",
+          "weight": "400",
+          "style": "normal",
+          "riveAssetId": 0,
+          "riveUniqueName": "font-fixture-sans-400-normal-c3ced8ac-0",
+          "sha256": "2898476918b21c3f9b5ba22e86853c6d63b544f92da277a92533011a28c93af5",
+          "sizeBytes": 192936,
+          "contentType": "font/otf",
+          "format": "otf",
+          "required": true
+        }
+      ]
+    },
+    "textInputs": [
+      {
+        "artboardId": "screen_1",
+        "viewNodeId": "bound",
+        "renderedNodeId": "bound",
+        "riveTextObjectKey": "artboard/screen_1/bound/text",
+        "riveTextRunObjectKey": "artboard/screen_1/bound/text-run",
+        "riveTextName": "bound",
+        "riveTextRunName": "bound Run",
+        "sourceNodeId": "bound",
+        "value": "Alpha\nBravo\nCharlie",
+        "editable": true,
+        "geometry": {
+          "x": 24,
+          "y": 24,
+          "width": 342,
+          "height": 220,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "style": {
+          "fontFamily": "Fixture Sans",
+          "fontWeight": "400",
+          "fontStyle": "normal",
+          "fontSize": 18,
+          "lineHeight": 24,
+          "letterSpacing": 0,
+          "color": 4294967295,
+          "fontAssetRiveUniqueName": "font-fixture-sans-400-normal-c3ced8ac-0",
+          "textAlign": "left"
+        },
+        "multiline": true
+      },
+      {
+        "artboardId": "screen_1",
+        "viewNodeId": "fixed",
+        "renderedNodeId": "fixed",
+        "riveTextObjectKey": "artboard/screen_1/fixed/text",
+        "riveTextRunObjectKey": "artboard/screen_1/fixed/text-run",
+        "riveTextName": "fixed",
+        "riveTextRunName": "fixed Run",
+        "sourceNodeId": "fixed",
+        "value": "Alpha\nBravo\nCharlie",
+        "editable": true,
+        "geometry": {
+          "x": 24,
+          "y": 264,
+          "width": 342,
+          "height": 220,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "style": {
+          "fontFamily": "Fixture Sans",
+          "fontWeight": "400",
+          "fontStyle": "normal",
+          "fontSize": 18,
+          "lineHeight": 24,
+          "letterSpacing": 0,
+          "color": 4294967295,
+          "fontAssetRiveUniqueName": "font-fixture-sans-400-normal-c3ced8ac-0",
+          "textAlign": "left"
+        },
+        "multiline": true
+      }
+    ]
+  }
+}
