@@ -1,5 +1,16 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.Nuxie
+import ai.nuxie.sdk.network.HttpTransport
+import ai.nuxie.sdk.NuxieConfiguration
+import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.billing.NuxiePurchaseDelegate
+import ai.nuxie.sdk.billing.PurchaseHandlingMode
+import ai.nuxie.sdk.billing.PurchaseResult
+import ai.nuxie.sdk.billing.RestoreResult
+import ai.nuxie.sdk.billing.StoreProduct
+import ai.nuxie.sdk.features.FeatureCheckPolicy
+
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
 import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
@@ -87,6 +98,91 @@ import org.junit.Test
 
 /** Real publisher bytes, signed defaults, runtime geometry and runtime text writer. */
 class PublishedTextInputDeviceTest {
+    /** API 23 supports the SDK through the documented non-rendering degradation contract. */
+    @Test
+    @SdkSuppress(maxSdkVersion = 23)
+    fun unavailableRendererRejectsPresentationWithoutDisablingTheSdk() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val directory = File(context.cacheDir, "degraded-sdk-${UUID.randomUUID()}").apply { mkdirs() }
+        val fixture = loadPublishedFixture(instrumentation)
+        val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+        val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
+        var restores = 0
+        assertFalse("The test owns a fresh SDK lifecycle", Nuxie.isSetup)
+        instrumentation.addMonitor(monitor)
+        try {
+            Nuxie.overridesForTesting = NuxieCore.Overrides(
+                eventDatabaseFile = File(directory, "events.db"),
+                profileCacheDirectory = File(directory, "profiles"),
+                requestInitialProfileRefresh = false,
+                transport = HttpTransport { request ->
+                    requests.add(request.url.path)
+                    if (request.url.path == "/entitled") {
+                        val body = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                        val response = JsonObject(mapOf(
+                            "customerId" to body.getValue("customerId"),
+                            "featureId" to body.getValue("featureId"),
+                            "requiredBalance" to body.getValue("requiredBalance"),
+                            "code" to JsonPrimitive("allowed"),
+                            "type" to JsonPrimitive("boolean"),
+                            "allowed" to JsonPrimitive(true),
+                            "unlimited" to JsonPrimitive(true),
+                        ))
+                        HttpTransport.Response(200, response.toString().encodeToByteArray())
+                    } else {
+                        // Preserve pending events for the independent durable-capture assertion.
+                        HttpTransport.Response(503, byteArrayOf())
+                    }
+                },
+            )
+            Nuxie.setup(context, NuxieConfiguration("pk_test_degraded_device").apply {
+                purchaseHandlingMode = PurchaseHandlingMode.APP_MANAGED
+                purchaseDelegate = object : NuxiePurchaseDelegate {
+                    override suspend fun purchase(product: StoreProduct): PurchaseResult =
+                        error("This qualification must not initiate a purchase")
+                    override suspend fun restorePurchases(): RestoreResult {
+                        restores++
+                        return RestoreResult.NoPurchases
+                    }
+                }
+            })
+            assertTrue(Nuxie.isSetup)
+            assertTrue("Engine loading is independent of renderer support", NuxieRuntime.shared.isAvailable)
+            assertFalse("Use the real device capability probe", AndroidRenderCapability.isAvailable())
+            val core = checkNotNull(Nuxie.core)
+            val owner = core.identity.distinctId()
+            repeat(2) {
+                val reservation = checkNotNull(core.presentations.reserveJourney(owner))
+                try {
+                    core.presentations.presentJourney(fixture.release, "screen_1", "degraded-journey", owner,
+                        reservation, acquire = { error("Unsupported rendering must fail before acquiring artifacts") },
+                        onOutcome = { error("A rejected presentation has no screen outcome") })
+                    fail("A device without a renderer must reject presentation")
+                } catch (error: ExperiencePresentationException) {
+                    assertEquals(ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE, error.reason)
+                }
+                // Repeating also proves the rejected presentation releases its reservation.
+                Nuxie.trigger("after_render_rejection_$it")
+                assertTrue(Nuxie.hasFeature("device-feature", policy = FeatureCheckPolicy.REMOTE).allowed)
+                assertEquals(RestoreResult.NoPurchases, Nuxie.restorePurchases())
+            }
+            core.eventLog.awaitBarrier()
+            val captured = core.store.pendingBatch(100).map { it.name }
+            assertTrue(captured.containsAll(listOf("after_render_rejection_0", "after_render_rejection_1")))
+            assertEquals(2, requests.count { it == "/entitled" })
+            assertEquals(2, restores)
+            instrumentation.waitForIdleSync()
+            assertEquals("No Experience Activity may launch", 0, monitor.hits)
+        } finally {
+            Nuxie.shutdownAndAwait()
+            Nuxie.overridesForTesting = null
+            instrumentation.removeMonitor(monitor)
+            directory.deleteRecursively()
+        }
+        assertFalse(Nuxie.isSetup)
+    }
+
     @Test
     @SdkSuppress(minSdkVersion = 26)
     fun signedPublishedCustomTransitionEmitsForwardAndReverseEvents() {
