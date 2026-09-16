@@ -28,9 +28,12 @@ class FeatureObservationLifecycleTest {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     val app = instrumentation.targetContext.applicationContext as Application
     val stopped = AtomicReference<Activity?>()
+    val createdActivities = mutableListOf<Activity>()
     val callbacks = object : Application.ActivityLifecycleCallbacks {
       override fun onActivityStopped(activity: Activity) { stopped.set(activity) }
-      override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
+      override fun onActivityCreated(activity: Activity, state: Bundle?) {
+        if (activity is MainActivity) createdActivities += activity
+      }
       override fun onActivityStarted(activity: Activity) = Unit
       override fun onActivityResumed(activity: Activity) = Unit
       override fun onActivityPaused(activity: Activity) = Unit
@@ -116,7 +119,9 @@ class FeatureObservationLifecycleTest {
         }
       } finally {
         try {
-          activity?.let { host -> instrumentation.runOnMainSync { host.finish() } }
+          instrumentation.runOnMainSync {
+            createdActivities.filterNot { it.isDestroyed }.forEach { it.finish() }
+          }
           instrumentation.waitForIdleSync()
         } finally {
           try {
