@@ -1960,6 +1960,81 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
+    fun semanticSceneEntersAccessibilityOnlyAfterCompletePublication() = exerciseAccessibilityPublication(true)
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun nonSemanticSceneDoesNotWaitForSemanticPublication() = exerciseAccessibilityPublication(false)
+
+    private fun exerciseAccessibilityPublication(candidateSemantics: Boolean) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val automation = instrumentation.uiAutomation
+        val originalFlags = automation.serviceInfo.flags
+        val fixture = loadPublishedFixture(instrumentation,
+            if (candidateSemantics) "journeys/rendered-semantic-roles" else "journeys/rendered-text-input", candidateSemantics)
+        val descriptor = fixture.release.descriptor
+        val authored = descriptor.getValue("render").jsonObject.getValue("screens").jsonArray.first().jsonObject
+        val prepared = PreparedPresentation(fixture.riv, authored.getValue("artboardName").jsonPrimitive.content,
+            0xff000000.toInt(), PresentationShell.FullScreen, authored.getValue("id").jsonPrimitive.content,
+            descriptor, fixture.assets,
+            ExperienceArtboardSize(authored.getValue("width").jsonPrimitive.float, authored.getValue("height").jsonPrimitive.float))
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        lateinit var mounted: ExperienceMountedScreen
+        lateinit var content: android.view.ViewGroup
+        lateinit var probe: android.widget.EditText
+        val failure = AtomicReference<Throwable?>()
+        fun nodes(): List<android.view.accessibility.AccessibilityNodeInfo> {
+            fun collect(node: android.view.accessibility.AccessibilityNodeInfo): List<android.view.accessibility.AccessibilityNodeInfo> =
+                listOf(node) + (0 until node.childCount).mapNotNull(node::getChild).flatMap(::collect)
+            return automation.rootInActiveWindow?.let(::collect).orEmpty()
+        }
+        try {
+            automation.serviceInfo = automation.serviceInfo.apply {
+                flags = flags and android.accessibilityservice.AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS.inv()
+            }
+            instrumentation.runOnMainSync {
+                mounted = ExperienceMountedScreen(activity, prepared, object : ExperienceSurfaceHost.Listener {
+                    override fun onFirstFrame() = Unit
+                    override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
+                }, failure::set)
+                // Hold rendering before mount: native controls exist, but no presented capture can exist.
+                mounted.setVisible(false)
+                content = mounted.mount() as android.view.ViewGroup
+                // A visible native child is the independent oracle for container-level exclusion.
+                probe = android.widget.EditText(activity).apply { hint = "Publication probe" }
+                content.addView(probe, android.widget.FrameLayout.LayoutParams(300, 100))
+                activity.setContentView(content)
+                mounted.observeWindow()
+            }
+            automation.waitForIdle(100, 5_000)
+            if (!candidateSemantics) {
+                assertTrue("Ordinary screens must not wait for a capability they do not use", nodes().any { it.isEditable })
+                return
+            }
+            assertFalse("A native editor must not enter accessibility before its authored scene", nodes().any { it.isEditable })
+            instrumentation.runOnMainSync { content.removeView(probe); mounted.setVisible(true) }
+            val deadline = SystemClock.uptimeMillis() + 10_000
+            var published = nodes()
+            while (SystemClock.uptimeMillis() < deadline &&
+                !(published.any { it.text?.toString() == "Choose your plan" } && published.any { it.isEditable })) {
+                failure.get()?.let { throw AssertionError("Semantic publication failed", it) }
+                SystemClock.sleep(20)
+                published = nodes()
+            }
+            assertTrue("The heading must become accessible after publication", published.any { it.text?.toString() == "Choose your plan" })
+            assertEquals("The same publication exposes exactly one native editor", 1, published.count { it.isEditable })
+        } finally {
+            val closed = CountDownLatch(1)
+            instrumentation.runOnMainSync { mounted.close(false, closed::countDown) }
+            assertTrue(closed.await(10, TimeUnit.SECONDS))
+            instrumentation.runOnMainSync { activity.finish() }
+            automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags }
+        }
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
     fun signedAuthoredRolesExposeSecureEditorAndDurableNativeActions() =
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES)
 
