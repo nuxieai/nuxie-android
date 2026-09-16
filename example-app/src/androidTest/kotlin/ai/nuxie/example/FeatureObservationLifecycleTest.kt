@@ -50,21 +50,21 @@ class FeatureObservationLifecycleTest {
           .putExtra("nuxie_test_store", true)
         activity = instrumentation.startActivitySync(launch)
         val host = activity!!
-        fun panel(): TextView {
+        fun panel(target: Activity = host): TextView {
           var result: TextView? = null
           instrumentation.runOnMainSync {
             fun find(view: View) {
               if (view is TextView && view.accessibilityLiveRegion == View.ACCESSIBILITY_LIVE_REGION_POLITE) result = view
               if (view is ViewGroup) for (index in 0 until view.childCount) find(view.getChildAt(index))
             }
-            find(host.window.decorView)
+            find(target.window.decorView)
           }
           return requireNotNull(result)
         }
         val status = panel()
-        fun displayed(): String {
+        fun displayed(view: TextView = status): String {
           var text = ""
-          instrumentation.runOnMainSync { text = status.text.toString() }
+          instrumentation.runOnMainSync { text = view.text.toString() }
           return text
         }
         await("initial profile and panel") {
@@ -95,6 +95,25 @@ class FeatureObservationLifecycleTest {
           .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
         await("new customer waiting panel") { displayed() == "Waiting for exports access for the current customer." }
         assertSame(host, app.currentActivity)
+        val switchedCustomer = Nuxie.distinctId
+        instrumentation.runOnMainSync { host.recreate() }
+        await("recreated Activity resumed") { app.currentActivity is MainActivity && app.currentActivity !== host }
+        activity = app.currentActivity
+        assertEquals("Recreation must preserve the current customer", switchedCustomer, Nuxie.distinctId)
+        instrumentation.runOnMainSync { Nuxie.reset() }
+        val anonymousCustomer = Nuxie.distinctId
+        assertNotEquals(switchedCustomer, anonymousCustomer)
+        val beforeResetRecreation = activity!!
+        instrumentation.runOnMainSync { beforeResetRecreation.recreate() }
+        await("anonymous Activity recreated") {
+          app.currentActivity is MainActivity && app.currentActivity !== beforeResetRecreation
+        }
+        activity = app.currentActivity
+        assertEquals("Recreation must preserve anonymous reset", anonymousCustomer, Nuxie.distinctId)
+        val recreatedStatus = panel(activity!!)
+        await("recreated observer attached to anonymous session") {
+          displayed(recreatedStatus) == "Waiting for exports access for the current customer."
+        }
       } finally {
         try {
           activity?.let { host -> instrumentation.runOnMainSync { host.finish() } }
