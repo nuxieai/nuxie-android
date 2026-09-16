@@ -5,3 +5,7 @@
 
 # Native semantic snapshots construct immutable copied nodes through JNI.
 -keep class ai.nuxie.sdk.runtime.NativeSemanticNode { *; }
+
+# Settled text geometry is copied into these value objects by JNI.
+-keep class ai.nuxie.sdk.runtime.NativeTextRunGeometry { *; }
+-keep class ai.nuxie.sdk.runtime.NativeTextGeometryCapture { *; }

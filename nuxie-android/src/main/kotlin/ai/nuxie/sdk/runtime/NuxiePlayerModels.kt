@@ -203,6 +203,7 @@ internal data class NuxiePlayerStepOutcome(
     val events: List<NuxieRuntimeEvent>,
     val hostCommands: List<NuxieHostCommand>,
     val viewModelChanges: List<NuxieViewModelChange>,
+    val textGeometry: NuxieTextGeometryCapture = NuxieTextGeometryCapture.NotRequested,
 )
 
 /** JNI construction shapes copied from one owned `NuxPlayerStepResult`. */
@@ -212,6 +213,7 @@ internal data class NativePlayerStepOutcome(
     val events: Array<NativeRuntimeEvent>,
     val hostCommands: Array<NativeHostCommand>,
     val viewModelChanges: Array<NativeViewModelChange>,
+    val textGeometry: NativeTextGeometryCapture? = null,
 )
 
 internal data class NativeHostCommand(
@@ -310,6 +312,7 @@ internal fun NativePlayerStepOutcome.toPlayerStepOutcome(): NuxiePlayerStepOutco
                 value = change.toViewModelValue(),
             )
         },
+        textGeometry = textGeometry.toTextGeometryCapture(),
     )
 
 private fun NativeHostValue.toHostValue(): NuxieHostValue = when (kind) {
