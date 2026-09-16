@@ -109,7 +109,13 @@ class TextInputKeyboardDeviceTest {
             }
             instrumentation.runOnMainSync {
                 val shift = content.translationY
-                assertTrue("The low editor must require a shift", shift < 0f)
+                assertTrue("The low editor must require a shift: shift=$shift, " +
+                    "originalHost=$originalHostTop, originalEditor=$originalEditorTop, " +
+                    "hostTop=${screenTop(host)}, editorTop=${screenTop(editor)}, editorHeight=${editor.height}, " +
+                    "rootTop=${screenTop(editor.rootView)}, rootHeight=${editor.rootView.height}, " +
+                    "contentHeight=${content.height}, overlayHeight=${overlay!!.height}, " +
+                    "ime=${editor.rootWindowInsets?.getInsets(WindowInsets.Type.ime())}, " +
+                    "visible=${editor.rootWindowInsets?.isVisible(WindowInsets.Type.ime())}, focused=${editor.hasFocus()}", shift < 0f)
                 assertEquals(originalHostTop + shift, screenTop(host).toFloat(), 2f)
                 assertEquals(originalEditorTop + shift, screenTop(editor).toFloat(), 2f)
                 repeat(10) { overlay!!.update(snapshot) }
