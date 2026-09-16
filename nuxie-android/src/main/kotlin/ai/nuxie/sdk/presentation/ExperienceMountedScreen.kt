@@ -36,6 +36,10 @@ internal class ExperienceMountedScreen(
     private val lifecycle = prepared.screenLifecycle
     val transitionEvents = ExperienceScreenExitHandshake()
     private var reduceMotionEnabled = false
+    private var content: View? = null
+    private var awaitingSemanticPublication =
+        ((prepared.descriptor?.get("requirements") as? JsonObject)?.get("requiredCapabilities") as? JsonArray)
+            .orEmpty().any { (it as? JsonPrimitive)?.content == "scene-semantics-v1" }
     val surface = ExperienceSurfaceHost(
         context = activity,
         lane = lane,
@@ -49,6 +53,13 @@ internal class ExperienceMountedScreen(
             override fun onSemanticFields(fields: Map<String, ai.nuxie.sdk.runtime.NativeSemanticNode>): Map<Long, View> {
                 textOverlay?.updateSemantics(fields)
                 return textOverlay?.semanticViews().orEmpty()
+            }
+            override fun onSemanticTreePublished() {
+                if (awaitingSemanticPublication) {
+                    // Reveal the native and virtual hierarchy together, once this occurrence is complete.
+                    content?.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+                    awaitingSemanticPublication = false
+                }
             }
             override fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot) {
                 textOverlay?.update(snapshot)
@@ -73,6 +84,9 @@ internal class ExperienceMountedScreen(
             textInputs = inputs,
         )
         return ExperienceInputContainer(activity, surface::dispatchSemanticKeyEvent, surface::semanticKeyboardEntry).apply {
+            if (awaitingSemanticPublication) {
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            }
             setBackgroundColor(prepared.clearColor)
             addView(surface, FrameLayout.LayoutParams(-1, -1))
             inputSize?.let { size ->
@@ -81,7 +95,7 @@ internal class ExperienceMountedScreen(
                 textOverlay = overlay
                 addView(overlay, FrameLayout.LayoutParams(-1, -1))
             }
-        }
+        }.also { content = it }
     }
 
     /** Install after attaching content, so projection uses the real window geometry. */
@@ -134,6 +148,7 @@ internal class ExperienceMountedScreen(
 
     /** Completion follows native handle release, so the owner can release its artifact lease. */
     fun close(changingConfigurations: Boolean, completion: () -> Unit) {
+        content = null
         transitionEvents.close()
         reducedMotion?.close()
         windowInsets?.close()

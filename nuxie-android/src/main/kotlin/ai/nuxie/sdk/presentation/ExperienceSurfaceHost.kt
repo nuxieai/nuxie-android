@@ -70,6 +70,8 @@ internal class ExperienceSurfaceHost(
         fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot) {}
         /** Complete visible native-field association map, copied from the same presented capture. */
         fun onSemanticFields(fields: Map<String, NativeSemanticNode>): Map<Long, android.view.View> = emptyMap()
+        /** UI-thread callback after native fields and virtual controls share a committed tree. */
+        fun onSemanticTreePublished() {}
         /** Runtime-lane callback ordered with writes and renderer publications. */
         fun onTextCommitted(inputId: String, text: String) {}
     }
@@ -183,6 +185,7 @@ internal class ExperienceSurfaceHost(
                 try {
                     val nativeFields = listener?.onSemanticFields(fields).orEmpty()
                     accessibility.publish(tree, nativeFields)
+                    listener?.onSemanticTreePublished()
                 } catch (error: Exception) {
                     retireSemantics()
                     reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Experience semantic publication failed", error)
