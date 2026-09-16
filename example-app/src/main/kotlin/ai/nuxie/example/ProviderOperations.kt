@@ -12,6 +12,8 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.joinAll
 
@@ -46,7 +48,9 @@ internal class ProviderOperations(
   }
 
   private suspend fun <T : Any> submit(operation: suspend () -> T): T? {
+    val caller = currentCoroutineContext()
     val job = synchronized(lock) {
+      caller.ensureActive()
       if (closed) return null
       // Register before dispatch so close cannot miss an admitted operation.
       scope.async(start = CoroutineStart.LAZY) { operation() }.also { pending += it }
