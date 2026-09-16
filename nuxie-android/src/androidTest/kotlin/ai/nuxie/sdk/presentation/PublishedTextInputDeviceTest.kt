@@ -1680,8 +1680,23 @@ class PublishedTextInputDeviceTest {
     @SdkSuppress(minSdkVersion = 26)
     fun nativeRetryHostDismissalWaitsForTheOriginalRuntimeLane() = verifyNativeRecovery(false, "host")
 
-    private fun verifyNativeRecovery(recreate: Boolean, drainAction: String? = null) {
+    @Test
+    @SdkSuppress(minSdkVersion = 34)
+    fun talkBackRetriesInitialNativeFailure() {
+        org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
+        verifyNativeRecovery(false, useTalkBack = true)
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 34)
+    fun talkBackClosesInitialNativeRetryDuringDrain() {
+        org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
+        verifyNativeRecovery(false, "close", useTalkBack = true)
+    }
+
+    private fun verifyNativeRecovery(recreate: Boolean, drainAction: String? = null, useTalkBack: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val input = if (useTalkBack) recoveryTalkBackInput(instrumentation) else null
         assertTrue(NuxieRuntime.shared.isAvailable)
         val fixture = loadPublishedFixture(instrumentation)
         val validBytes = fixture.riv.readBytes()
@@ -1766,10 +1781,16 @@ class PublishedTextInputDeviceTest {
                 assertTrue("Failure must still own a real native renderer", ownsRenderer.get())
             }
             fixture.riv.writeBytes(validBytes)
-            instrumentation.runOnMainSync { assertTrue(checkNotNull(retry).performClick()) }
+            if (input == null) {
+                instrumentation.runOnMainSync { assertTrue(checkNotNull(retry).performClick()) }
+            } else {
+                activateRecoveryWithTalkBack(instrumentation, input, "Retry")
+            }
             if (drainAction != null) {
                 val id = checkNotNull(activity.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
-                instrumentation.waitForIdleSync()
+                val retryDeadline = SystemClock.uptimeMillis() + 5_000
+                while (PresentationRegistry.nativeProgress(id)?.phase != AcquisitionProgress.Phase.RETRYING &&
+                    SystemClock.uptimeMillis() < retryDeadline) SystemClock.sleep(20)
                 assertEquals(AcquisitionProgress.Phase.RETRYING, PresentationRegistry.nativeProgress(id)?.phase)
                 assertEquals(2L, PresentationRegistry.nativeProgress(id)?.generation)
                 assertFalse(pending.isCompleted)
@@ -1798,10 +1819,14 @@ class PublishedTextInputDeviceTest {
                         if (drainAction == "identity") service.shutdownOwnedBy("native-recovery-owner")
                         else service.dismissFromHost("native-recovery-owner")
                     } else {
-                        instrumentation.runOnMainSync {
-                            val close = descendants(checkNotNull(root)).filterIsInstance<android.widget.Button>()
-                                .single { it.text == "Close" }
-                            assertTrue(close.performClick())
+                        if (input == null) {
+                            instrumentation.runOnMainSync {
+                                val close = descendants(checkNotNull(root)).filterIsInstance<android.widget.Button>()
+                                    .single { it.text == "Close" }
+                                assertTrue(close.performClick())
+                            }
+                        } else {
+                            activateRecoveryWithTalkBack(instrumentation, input, "Close")
                         }
                         null
                     }
