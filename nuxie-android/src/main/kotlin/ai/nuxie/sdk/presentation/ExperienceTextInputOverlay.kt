@@ -56,6 +56,8 @@ internal class ExperienceTextInputOverlay(
 
     init {
         isFocusableInTouchMode = true
+        // Focus parking is a keyboard concern; only the authored editor children are semantic controls.
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
         setOnApplyWindowInsetsListener { _, insets ->
             post { if (!closed) avoidKeyboard() }
             insets
