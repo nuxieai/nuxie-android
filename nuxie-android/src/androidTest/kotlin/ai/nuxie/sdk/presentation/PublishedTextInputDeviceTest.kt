@@ -2255,11 +2255,14 @@ class PublishedTextInputDeviceTest {
         accepted: LinkedBlockingQueue<JourneyScreenEmissionBatch>,
         responses: () -> JsonObject,
     ) {
+        val useTalkBack = InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true"
+        val automation = if (useTalkBack) instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+            else instrumentation.uiAutomation
         val expectedLabels = listOf("Choose your plan", "Continue", "Annual plan", "Seats", "Password", "Unavailable", "Plan option", "Plan option")
         fun nodes(): List<android.view.accessibility.AccessibilityNodeInfo> {
             fun collect(node: android.view.accessibility.AccessibilityNodeInfo): List<android.view.accessibility.AccessibilityNodeInfo> =
                 listOf(node) + (0 until node.childCount).mapNotNull { node.getChild(it) }.flatMap { collect(it) }
-            return instrumentation.uiAutomation.rootInActiveWindow?.let { collect(it) }.orEmpty()
+            return automation.rootInActiveWindow?.let { collect(it) }.orEmpty()
         }
         fun label(node: android.view.accessibility.AccessibilityNodeInfo): String? =
             listOf(node.text, node.contentDescription, node.hintText).firstOrNull { it?.toString() in expectedLabels }?.toString()
@@ -2271,6 +2274,34 @@ class PublishedTextInputDeviceTest {
             SystemClock.sleep(20)
         }
         assertEquals(expectedLabels.sorted(), published.mapNotNull { label(it) }.sorted())
+        if (useTalkBack) {
+            val manager = activity.getSystemService(android.view.accessibility.AccessibilityManager::class.java)
+            assertTrue("Qualification requires the actual enabled TalkBack service",
+                manager.getEnabledAccessibilityServiceList(android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+                    .any { it.resolveInfo.serviceInfo.packageName == "com.google.android.marvin.talkback" })
+            assertTrue("TalkBack touch exploration must be active", manager.isTouchExplorationEnabled)
+            fun focused() = automation.rootInActiveWindow?.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+            val input = TalkBackEmulatorInput(automation,
+                checkNotNull(InstrumentationRegistry.getArguments().getString("nuxieTalkBackInputDevice")))
+            val visited = mutableListOf<android.view.accessibility.AccessibilityNodeInfo>()
+            repeat(16) {
+                val previous = focused()
+                input.swipeForward()
+                val focusDeadline = SystemClock.uptimeMillis() + 2_000
+                var current = focused()
+                while ((current == null || current == previous) && SystemClock.uptimeMillis() < focusDeadline) {
+                    SystemClock.sleep(20)
+                    current = focused()
+                }
+                if (current != null && label(current) != null && visited.none { it == current }) visited += current
+            }
+            assertEquals("TalkBack swipe traversal must reach every authored identity",
+                expectedLabels.sorted(), visited.mapNotNull { label(it) }.sorted())
+            val labels = visited.mapNotNull { label(it) }
+            val heading = labels.indexOf("Choose your plan")
+            assertEquals("TalkBack must follow authored order across native and virtual elements",
+                expectedLabels, labels.drop(heading) + labels.take(heading))
+        }
         fun named(name: String) = checkNotNull(nodes().singleOrNull { label(it) == name })
         val selected = named("Annual plan")
         assertTrue(selected.isCheckable)
