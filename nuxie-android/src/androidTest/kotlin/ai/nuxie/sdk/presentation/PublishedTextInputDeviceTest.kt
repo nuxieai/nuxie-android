@@ -2046,9 +2046,29 @@ class PublishedTextInputDeviceTest {
     fun signedAuthoredRolesExposeSecureEditorAndDurableNativeActions() =
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES)
 
+    @Test
+    @SdkSuppress(minSdkVersion = 34)
+    fun signedAuthoredRolesEnterAtHeadingWithTalkBack() {
+        org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
+        exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, entryFocusTarget = "Choose your plan")
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 34)
+    fun signedAuthoredRolesEnterAtHeadingAfterNativeEditor() {
+        org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
+        repeat(2) { iteration ->
+            try {
+                exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, entryFocusTarget = "Password")
+            } catch (failure: AssertionError) {
+                throw AssertionError("Entry presentation ${iteration + 1}: ${failure.message}", failure)
+            }
+        }
+    }
+
     private enum class PublishedBehavior { TEXT_INPUT, SCRIPT, SEMANTIC_SCRIPT, SEMANTIC_ROLES }
 
-    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false) {
+    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, entryFocusTarget: String? = null) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
@@ -2162,7 +2182,7 @@ class PublishedTextInputDeviceTest {
             val first = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
             if (behavior == PublishedBehavior.SEMANTIC_ROLES) {
                 assertTrue("Authored roles require a revealed presentation", initiallyRevealed.await(10, TimeUnit.SECONDS))
-                assertAuthoredRoles(instrumentation, first, accepted) { journalRun().context.getValue("responses").jsonObject }
+                assertAuthoredRoles(instrumentation, first, accepted, entryFocusTarget) { journalRun().context.getValue("responses").jsonObject }
                 assertEquals(artifactFiles.keys, downloaded.toSet())
                 return
             }
@@ -2225,18 +2245,45 @@ class PublishedTextInputDeviceTest {
                     } finally { first.application.unregisterActivityLifecycleCallbacks(callbacks) }
                 }
                 if (behavior == PublishedBehavior.SEMANTIC_SCRIPT) {
-                    instrumentation.uiAutomation.waitForIdle(100, 5000)
+                    val useTalkBack = InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true"
+                    val automation = if (useTalkBack) instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+                        else instrumentation.uiAutomation
+                    automation.waitForIdle(100, 5000)
                     val semanticDeadline = SystemClock.uptimeMillis() + 5_000
                     var publishedButton: android.view.accessibility.AccessibilityNodeInfo? = null
                     while (publishedButton == null && SystemClock.uptimeMillis() < semanticDeadline) {
-                        publishedButton = instrumentation.uiAutomation.rootInActiveWindow
+                        publishedButton = automation.rootInActiveWindow
                             ?.findAccessibilityNodeInfosByText("Choose Pro")
                             ?.singleOrNull { it.text?.toString() == "Choose Pro" }
                         if (publishedButton == null) SystemClock.sleep(20)
                     }
                     val button = checkNotNull(publishedButton) { "The signed control must reach the accessibility client" }
                     assertTrue(button.isClickable)
-                    assertTrue(button.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK))
+                    if (useTalkBack) {
+                        val manager = first.getSystemService(android.view.accessibility.AccessibilityManager::class.java)
+                        assertTrue("Actual TalkBack must remain enabled", manager.getEnabledAccessibilityServiceList(
+                            android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK,
+                        ).any { it.resolveInfo.serviceInfo.packageName == "com.google.android.marvin.talkback" })
+                        assertTrue(manager.isTouchExplorationEnabled)
+                        val input = TalkBackEmulatorInput(automation,
+                            checkNotNull(InstrumentationRegistry.getArguments().getString("nuxieTalkBackInputDevice")))
+                        val focusDeadline = SystemClock.uptimeMillis() + 5_000
+                        var focused = automation.rootInActiveWindow?.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+                        while (focused == null && SystemClock.uptimeMillis() < focusDeadline) {
+                            SystemClock.sleep(20)
+                            focused = automation.rootInActiveWindow?.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+                        }
+                        assertEquals("TalkBack must focus the authored control before activation", button, focused)
+                        val controlBounds = Rect().also { button.getBoundsInScreen(it) }
+                        val display = checkNotNull(automation.takeScreenshot())
+                        try {
+                            assertFalse("The hardware tap must be outside the button, proving TalkBack activation",
+                                controlBounds.contains(display.width * 16000 / 32767, display.height * 16000 / 32767))
+                        } finally { display.recycle() }
+                        input.doubleTap()
+                    } else {
+                        assertTrue(button.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK))
+                    }
                 } else {
                     dispatch(MotionEvent.ACTION_DOWN)
                     dispatch(MotionEvent.ACTION_UP)
@@ -2336,6 +2383,7 @@ class PublishedTextInputDeviceTest {
         instrumentation: Instrumentation,
         activity: Activity,
         accepted: LinkedBlockingQueue<JourneyScreenEmissionBatch>,
+        entryFocusTarget: String? = null,
         responses: () -> JsonObject,
     ) {
         val useTalkBack = InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true"
@@ -2370,12 +2418,13 @@ class PublishedTextInputDeviceTest {
             talkBackInput = input
             val initialDeadline = SystemClock.uptimeMillis() + 5_000
             var initial = focused()
-            while (initial == null && SystemClock.uptimeMillis() < initialDeadline) {
+            while ((initial == null || label(initial) == null) && SystemClock.uptimeMillis() < initialDeadline) {
                 SystemClock.sleep(20)
                 initial = focused()
             }
             val first = checkNotNull(initial) { "TalkBack must establish initial focus" }
-            assertEquals("TalkBack must enter the scene at its heading", expectedLabels.first(), label(first))
+            assertEquals("TalkBack must enter the scene at its heading; class=${first.className} visible=${first.isVisibleToUser} editable=${first.isEditable} inputFocused=${first.isFocused} loading=${first.contentDescription?.toString() == "Experience loading"}", expectedLabels.first(), label(first))
+            if (entryFocusTarget == expectedLabels.first()) return
             val visited = mutableListOf(first)
             for (expected in expectedLabels.drop(1)) {
                 val previous = visited.last()
@@ -2387,9 +2436,14 @@ class PublishedTextInputDeviceTest {
                     current = focused()
                 }
                 val next = checkNotNull(current) { "Forward swipe lost TalkBack focus before $expected" }
-                assertFalse("Every forward swipe must change the focused identity", next == previous)
+                assertFalse("Every forward swipe must change the focused identity; expected=$expected previous=${label(previous)} current=${label(next)}", next == previous)
                 assertEquals("Every forward swipe must reach the next authored element", expected, label(next))
                 visited += next
+                if (entryFocusTarget == expected) {
+                    assertTrue("The prior presentation must finish on the native editor", next.isEditable)
+                    assertEquals("android.widget.EditText", next.className.toString())
+                    return
+                }
             }
             assertEquals("Repeated labels must retain distinct TalkBack identities", expectedLabels.size, visited.distinct().size)
             assertEquals(expectedLabels, visited.mapNotNull { label(it) })
