@@ -204,6 +204,7 @@ internal class ExperienceSurfaceHost(
     private var submittedSnapshot: NuxieViewModelSnapshot? = null
     private var textInputs: Map<String, ExperienceTextInput> = emptyMap()
     private val runtimeValues = linkedMapOf<String, NuxieViewModelScalarValue>()
+    private var runtimeValuesPending = false
     private val reportedStatePaths = mutableSetOf<String>()
 
     /** UI entry point; values submitted before loading are applied to the bound root before player creation. */
@@ -213,7 +214,8 @@ internal class ExperienceSurfaceHost(
         lane.enqueue {
             if (released.get()) return@enqueue
             runtimeValues.putAll(copied)
-            applyRuntimeValues(copied)
+            if (pendingPresentation) runtimeValuesPending = true
+            else applyRuntimeValues(copied)
         }
     }
 
@@ -601,6 +603,12 @@ internal class ExperienceSurfaceHost(
                 // a type-level guard, never a reachable behavior change.
                 val window = window ?: return@enqueue
                 if (!pendingPresentation) {
+                    // A submitted frame owns its model revision through completion and semantic capture.
+                    // Coalesce newer environment values and apply them before advancing the next frame.
+                    if (runtimeValuesPending) {
+                        applyRuntimeValues(runtimeValues)
+                        runtimeValuesPending = false
+                    }
                     // Keep the clock on the lane: a resize queued ahead of this
                     // tick may have retired its pending submission. Polling does
                     // not consume time, and visibility generations reset it.
