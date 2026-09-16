@@ -12,10 +12,16 @@ import java.io.File
 
 /** Uses published runtime geometry and the exact external font consumed by its renderer. */
 class PublishedTextInputAlignmentDeviceTest {
-    @Test fun publishedFontAndNativeEditorShareThePresentedFirstBaseline() {
+    @Test fun publishedFontAndNativeEditorShareThePresentedFirstBaseline() =
+        verifyPublishedEditors("font-metrics-binding", singleLine = false)
+
+    @Test fun publishedSingleLineAndSecureEditorsPreserveNativeTypography() =
+        verifyPublishedEditors("text-input-single-line", singleLine = true)
+
+    private fun verifyPublishedEditors(fixture: String, singleLine: Boolean) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val assets = instrumentation.context.assets
-        val directory = "runtime/font-metrics-binding"
+        val directory = "runtime/$fixture"
         fun json(name: String) = assets.open("$directory/$name").bufferedReader().use {
             Json.parseToJsonElement(it.readText()).jsonObject
         }
@@ -63,7 +69,9 @@ class PublishedTextInputAlignmentDeviceTest {
                             metricFrames += MetricsFrame(metricsSnapshot, step.textGeometry as NuxieTextGeometryCapture.Captured, size, height)
                         }
                         expected.forEach { field ->
-                            assertTrue(artboard.setTextRun(field.jsonObject.getValue("runName").jsonPrimitive.content, ""))
+                            val changed = artboard.setTextRun(field.jsonObject.getValue("runName").jsonPrimitive.content, "")
+                            assertEquals("An already-empty secure run is a successful no-op",
+                                field.jsonObject["secure"]?.jsonPrimitive?.booleanOrNull != true, changed)
                         }
                         blankCapture = player.stepTyped(elapsedSeconds = 0.0, textRunNames = capture.fields.keys.toList())
                             .textGeometry as NuxieTextGeometryCapture.Captured
@@ -88,14 +96,17 @@ class PublishedTextInputAlignmentDeviceTest {
                     val prefix = expected[index].jsonObject.getValue("path").jsonPrimitive.content
                     ExperienceTextInput(record.getValue("viewNodeId").jsonPrimitive.content,
                         record.getValue("riveTextRunName").jsonPrimitive.content,
-                        record.getValue("value").jsonPrimitive.content, null, null, null, false, true, null,
+                        record.getValue("value").jsonPrimitive.content, null, null, null,
+                        record["secureTextEntry"]?.jsonPrimitive?.booleanOrNull ?: false,
+                        record.getValue("multiline").jsonPrimitive.boolean, null,
                         listOf("x", "y", "width", "height", "rotation", "scaleX", "scaleY").associate { "${it}Path" to "$prefix/$it" },
                         ExperienceTextInput.Style(string("fontFamily"), string("fontWeight"), false,
                             style.getValue("fontSize").jsonPrimitive.float, style.getValue("lineHeight").jsonPrimitive.float,
                             0f, style.getValue("color").jsonPrimitive.long.toInt(), string("fontAssetRiveUniqueName"), "left"))
                 }
+                var writes = 0
                 val current = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(390f, 844f), inputs,
-                    inputs.associate { it.style.fontAssetName to fontFile }, { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
+                    inputs.associate { it.style.fontAssetName to fontFile }, { _, _, _, done -> writes += 1; done(Result.success(Unit)) }, { throw it })
                 overlay = current
                 activity.setContentView(current)
                 fun layout() {
@@ -109,11 +120,22 @@ class PublishedTextInputAlignmentDeviceTest {
                 inputs.forEach { input ->
                     val editor = current.findViewWithTag<EditText>("nuxie-text-input-${input.id}")
                     assertEquals(View.VISIBLE, editor.visibility)
+                    if (input.secure) {
+                        assertEquals("", input.value)
+                        assertEquals("", editor.text.toString())
+                        assertTrue(editor.transformationMethod is android.text.method.PasswordTransformationMethod)
+                        val connection = checkNotNull(editor.onCreateInputConnection(android.view.inputmethod.EditorInfo()))
+                        assertTrue(connection.commitText("AAAAA", 1))
+                        layout()
+                    }
                     val point = floatArrayOf(0f, editor.baseline.toFloat())
                     editor.matrix.mapPoints(point)
                     (editor.parent as View).matrix.mapPoints(point)
                     val geometry = capture.fields.getValue(input.runName)
-                    val expectedY = geometry.contentTransform.ty + geometry.contentTransform.d * checkNotNull(geometry.firstBaseline)
+                    if (input.secure) assertNull("Secure runtime text stays blank", geometry.firstBaseline)
+                    val baseline = if (input.secure) -editor.paint.fontMetricsInt.ascent.toFloat()
+                        else checkNotNull(geometry.firstBaseline)
+                    val expectedY = geometry.contentTransform.ty + geometry.contentTransform.d * baseline
                     assertEquals("${input.id} native baseline vs published text", expectedY, point[1], 0.5f)
                     val baselineBefore = editor.baseline
                     editor.setSelection(1, 4)
@@ -138,18 +160,19 @@ class PublishedTextInputAlignmentDeviceTest {
                     current.update(snapshot, capture)
                     layout()
                 }
+                val writesBeforeFrames = writes
                 for (frame in metricFrames) {
                     current.update(frame.snapshot, frame.geometry)
                     layout()
                     inputs.forEachIndexed { index, input ->
                         val editor = current.findViewWithTag<EditText>("nuxie-text-input-${input.id}")
-                        assertEquals(if (index == 0) frame.fontSize else 18f, editor.textSize, 0.001f)
-                        val effectiveHeight = if (index == 0) frame.lineHeight else 24f
-                        assertEquals(3, editor.layout.lineCount)
+                        assertEquals(if (singleLine || index == 0) frame.fontSize else 18f, editor.textSize, 0.001f)
+                        val effectiveHeight = if (singleLine || index == 0) frame.lineHeight else 24f
+                        assertEquals(if (singleLine) 1 else 3, editor.layout.lineCount)
                         if (effectiveHeight == -1f) {
                             assertEquals("Natural height has no added spacing", 0f, editor.lineSpacingExtra, 0f)
                         } else {
-                            for (line in 1..2) {
+                            for (line in 1 until editor.layout.lineCount) {
                                 assertEquals("${input.id} effective baseline interval",
                                     effectiveHeight, (editor.layout.getLineBaseline(line) - editor.layout.getLineBaseline(line - 1)).toFloat(), 0.5f)
                             }
@@ -158,8 +181,12 @@ class PublishedTextInputAlignmentDeviceTest {
                         val point = floatArrayOf(0f, editor.baseline.toFloat())
                         editor.matrix.mapPoints(point)
                         (editor.parent as View).matrix.mapPoints(point)
+                        if (input.secure) assertNull("Secure runtime text stays blank", captured.firstBaseline)
+                        val baseline = if (input.secure) -editor.paint.fontMetricsInt.ascent.toFloat()
+                            else checkNotNull(captured.firstBaseline)
                         assertEquals("${input.id} baseline after effective metric change",
-                            captured.contentTransform.ty + captured.contentTransform.d * checkNotNull(captured.firstBaseline), point[1], 0.5f)
+                            captured.contentTransform.ty + captured.contentTransform.d * baseline, point[1], 0.5f)
+                        assertEquals("Metric frames are not user edits", writesBeforeFrames, writes)
                         assertEquals(1, editor.selectionStart)
                         assertEquals(4, editor.selectionEnd)
                         assertEquals(1, android.view.inputmethod.BaseInputConnection.getComposingSpanStart(editor.text))
