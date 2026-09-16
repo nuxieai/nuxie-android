@@ -187,6 +187,50 @@ class SemanticTraversalDeviceTest {
         } finally { instrumentation.runOnMainSync { activity.finish() } }
     }
 
+    @Test fun nativeFieldTraversalRefreshesAfterAuthoredOrderChanges() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val automation = instrumentation.uiAutomation
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        lateinit var host: SemanticView
+        lateinit var field: EditText
+        fun publish(reversed: Boolean) {
+            host.semantics.publish(NuxieSemanticTree(if (reversed) 2 else 1, 1, listOf(
+                node(1, if (reversed) 2 else 0, 1, 0f, "Before"),
+                node(2, 1, 6, 100f, "Field"),
+                node(3, if (reversed) 0 else 2, 1, 200f, "After"),
+            )), mapOf(2L to field))
+        }
+        fun settle() {
+            instrumentation.waitForIdleSync()
+            automation.waitForIdle(100, 5000)
+        }
+        try {
+            instrumentation.runOnMainSync {
+                host = SemanticView(activity).apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES }
+                field = EditText(activity).apply { setText("Cached native field") }
+                activity.setContentView(FrameLayout(activity).apply {
+                    addView(host, FrameLayout.LayoutParams(400, 400))
+                    addView(field, FrameLayout.LayoutParams(300, 80).apply { topMargin = 100 })
+                })
+                publish(false)
+            }
+            settle()
+            val original = checkNotNull(automation.rootInActiveWindow)
+                .findAccessibilityNodeInfosByText("Cached native field").single { it.isEditable }
+            assertEquals("Before", original.traversalAfter?.text?.toString())
+            assertEquals("After", original.traversalBefore?.text?.toString())
+            val parent = checkNotNull(original.parent)
+            val position = (0 until parent.childCount).single { parent.getChild(it) == original }
+            instrumentation.runOnMainSync { publish(true) }
+            settle()
+            // Requery through the existing parent so framework cache invalidation is exercised.
+            val refreshed = checkNotNull(parent.getChild(position))
+            assertEquals("After", refreshed.traversalAfter?.text?.toString())
+            assertEquals("Before", refreshed.traversalBefore?.text?.toString())
+        } finally { instrumentation.runOnMainSync { activity.finish() } }
+    }
+
     @Test fun injectedKeyboardTraversesContainerEditorsAndExternalControls() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,

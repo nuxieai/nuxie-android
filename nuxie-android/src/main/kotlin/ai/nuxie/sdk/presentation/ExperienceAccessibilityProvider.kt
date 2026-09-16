@@ -470,10 +470,13 @@ internal class ExperienceAccessibilityProvider(
         if (!manager.isEnabled) return
         val event = AccessibilityEvent.obtain(type)
         event.packageName = host.context.packageName
-        event.setSource(host, id)
+        // Native editors are siblings of the renderer; their traversal metadata shares this update.
+        val source = if (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED && id == HOST_VIEW_ID)
+            host.parent as? View ?: host else host
+        if (source === host) event.setSource(host, id) else event.setSource(source)
         if (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
             event.contentChangeTypes = AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE
         }
-        host.parent?.requestSendAccessibilityEvent(host, event)
+        source.parent?.requestSendAccessibilityEvent(source, event)
     }
 }
