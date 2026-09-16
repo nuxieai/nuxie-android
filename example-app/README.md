@@ -148,3 +148,22 @@ Validate the app and its Test Store release gate with:
 ```bash
 ./gradlew :example-app:assembleDebug :example-app:lintDebug :example-app:lintRelease
 ```
+
+The default managed selection also has a device lifecycle test:
+
+```bash
+./gradlew :example-app:assembleDebug :example-app:assembleDebugAndroidTest
+adb -s "$ANDROID_SERIAL" install -r example-app/build/outputs/apk/debug/example-app-debug.apk
+adb -s "$ANDROID_SERIAL" install -r example-app/build/outputs/apk/androidTest/debug/example-app-debug-androidTest.apk
+adb -s "$ANDROID_SERIAL" shell am instrument -w -e class ai.nuxie.example.FeatureObservationLifecycleTest ai.nuxie.example.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+`FeatureObservationLifecycleTest` uses loopback HTTP and public SDK APIs with
+unique test identities. It sends the real Activity Home, updates access while
+stopped, and returns to the same Activity to verify the latest balance. A second
+Home/return switches customer while profile requests fail and verifies that the
+panel shows Unknown instead of the previous customer's balance. The hidden view
+must remain unchanged while stopped. The test shuts down the SDK and closes its
+local server; external provider selections skip it because they require their own
+credentials. This qualifies Activity observation with controlled HTTP responses,
+not a production backend, provider logout, process death or store checkout.
