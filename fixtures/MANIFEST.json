@@ -1,8 +1,8 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "0a5ea0bfb55dfceb43dc529f08c27fa62f18c9f6",
+  "sourceCommit": "3771b7c9bd37fd4e48096cc4e95d3480cc3bea39",
   "files": {
-    "README.md": "4363d6a79ac9828364a6a02bf400d98c0852b771062258c409a744dd1a5016e7",
+    "README.md": "9104a727bef89b388554d25583a6e013531c310f1a93d8f9f81440af8fcf67df",
     "accessibility/control-state.json": "48d1d9ea62bc7890ecd41d69592cbe3f7d137cf7bdb5849f7c64137489a5360c",
     "accessibility/focus-restoration.json": "65b3d626a9229eab9ce215513b12d1d1cc5e79c51339bc05b0c5d5633826933e",
     "encodings/activity-identity.json": "6f6c5010911fac834706a986f4a94d7d7a63c7f34bfb7cdf7f616246b1f896a2",
@@ -54,6 +54,7 @@
     "journeys/planes/text-input-geometry.json": "4db9f6c82327b31cb25202c8c13231ab857366bf55c6b592526e37495ff30089",
     "journeys/planes/text-input-limits.json": "7e3aa09d75d43b0326f13ff97de1b279e147e8fb8935c68b279640e2428b4137",
     "journeys/planes/text-input-navigation.json": "49760fb0666fce8fb570c5cfda815c5dc579a9a3a5bc7e46f443801ab4257f7b",
+    "journeys/planes/text-input-typography.json": "1abbdb61651d3ccf9b2153cadc8cb427328a18c251246f9ff671dd85b72e5d1c",
     "journeys/planes/values.json": "e6f7b54cb33bb8d024638760c54221e858124affcbe182b4593924bfcca47bee",
     "journeys/rendered-custom-transition/assets/sha256/3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d.png": "3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d",
     "journeys/rendered-custom-transition/assets/sha256/4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf.ttf": "4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf",
@@ -123,8 +124,5 @@
     "unicode/GraphemeBreakTest-16.0.0.txt": "ee2b9354d270ac061b29f09662cafea06341d77e704b8cc6bd72aaeeda363cb5",
     "unicode/LICENSE.txt": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96",
     "unicode/grapheme-properties-16.0.0.json": "84c942f0030116e6341c2fb3cd57a8d619b8cf82f613860766493b8b99498cf4"
-  },
-  "sourceCommitOverrides": {
-    "encodings/activity-identity.json": "5369e7c06ef986fcea666a92ced816c90530aa95"
   }
 }
