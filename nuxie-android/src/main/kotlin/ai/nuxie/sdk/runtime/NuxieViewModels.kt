@@ -146,7 +146,13 @@ internal class NuxieViewModelSnapshot private constructor(
     private val instancesById = instances.associateBy(Instance::id)
 
     /** Authored geometry paths may include the root view-model label. */
-    fun resolveGeometryNumber(path: String): Float? {
+    fun resolveGeometryNumber(path: String): Float? =
+        (resolveGeometryValue(path) as? Value.NumberValue)?.value?.takeIf(Float::isFinite)
+
+    /** Distinguishes absent legacy outputs from present but invalid typed values. */
+    fun hasGeometryValue(path: String): Boolean = resolveGeometryValue(path) != null
+
+    private fun resolveGeometryValue(path: String): Value? {
         val segments = path.split('/').filter(String::isNotEmpty)
         if (segments.isEmpty()) return null
         val root = instancesById[rootInstanceId] ?: return null
@@ -160,8 +166,7 @@ internal class NuxieViewModelSnapshot private constructor(
             val reference = instance.values[segment] as? Value.Reference ?: return null
             instance = instancesById[reference.instanceId] ?: return null
         }
-        return (instance.values[resolvedSegments.last()] as? Value.NumberValue)?.value
-            ?.takeIf(Float::isFinite)
+        return instance.values[resolvedSegments.last()]
     }
 
     /** Resolve a `/`- or `.`-separated path through nested view-model references. */

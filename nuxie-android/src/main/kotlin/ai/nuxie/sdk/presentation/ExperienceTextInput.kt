@@ -35,6 +35,26 @@ internal data class ExperienceTextInput(
         val textAlign: String?,
     )
 
+    data class EffectiveMetrics(val fontSize: Float, val lineHeight: Float)
+
+    fun effectiveMetrics(snapshot: NuxieViewModelSnapshot): EffectiveMetrics? {
+        val authored = EffectiveMetrics(style.fontSize, style.lineHeight)
+        val parent = geometryPaths["xPath"]?.substringBeforeLast('/', "").orEmpty()
+        val components = parent.split('/').filter(String::isNotEmpty)
+        // Only the publisher-owned field object defines these outputs. An unrelated
+        // authored property named fontSize must not alter a legacy native control.
+        if (components.size !in 2..3 || components[components.size - 2] != "nuxieTextInputs") return authored
+        val sizePath = "$parent/fontSize"
+        val heightPath = "$parent/lineHeight"
+        val hasSize = snapshot.hasGeometryValue(sizePath)
+        val hasHeight = snapshot.hasGeometryValue(heightPath)
+        if (!hasSize && !hasHeight) return authored
+        if (!hasSize || !hasHeight) return null
+        val size = snapshot.resolveGeometryNumber(sizePath)?.takeIf { it > 0f } ?: return null
+        val height = snapshot.resolveGeometryNumber(heightPath)?.takeIf { it == -1f || it > 0f } ?: return null
+        return EffectiveMetrics(size, height)
+    }
+
     data class Geometry(
         val x: Float,
         val y: Float,

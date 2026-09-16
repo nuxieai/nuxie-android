@@ -74,6 +74,10 @@ class TextMetricsBindingDeviceTest {
                                 assertEquals(x, geometry.worldTransform.tx, 0.001f)
                                 assertEquals(y + 1.0458984f, geometry.worldTransform.ty, 0.001f)
                                 val effectiveSize = if (fieldIndex == 0) size else 18f
+                                val prefix = expected.getValue("path").jsonPrimitive.content
+                                assertEquals(effectiveSize, checkNotNull(snapshot.resolveGeometryNumber("$prefix/fontSize")), 0f)
+                                assertEquals(if (fieldIndex == 0) lineHeight else 24f,
+                                    checkNotNull(snapshot.resolveGeometryNumber("$prefix/lineHeight")), 0f)
                                 assertEquals(1929f / 2048f * effectiveSize, checkNotNull(geometry.firstBaseline), 0.001f)
                                 if (index == 0 && fieldIndex == 0) retainedGeometry = geometry
                             }
