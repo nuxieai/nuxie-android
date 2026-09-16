@@ -20,7 +20,7 @@ def main():
     parser.add_argument("--serial", required=True)
     parser.add_argument("--input-device", required=True)
     parser.add_argument("--repeat", type=int, default=1)
-    parser.add_argument("--scenario", choices=("entry", "entry-after-editor", "roles", "activation", "activation-error", "native-slider", "virtual-slider"), default="roles")
+    parser.add_argument("--scenario", choices=("entry", "entry-after-editor", "home-return", "roles", "activation", "activation-error", "native-slider", "virtual-slider"), default="roles")
     args = parser.parse_args()
     if not re.fullmatch(r"emulator-[0-9]+", args.serial):
         parser.error("Use a dedicated rooted emulator, not a physical or user device")
@@ -70,6 +70,7 @@ def main():
             time.sleep(0.2)
         environment = dict(os.environ, ANDROID_SERIAL=args.serial)
         method = {
+            "home-return": "signedAuthoredRolesRestoreTalkBackEditorAfterHome",
             "entry-after-editor": "signedAuthoredRolesEnterAtHeadingAfterNativeEditor",
             "entry": "signedAuthoredRolesEnterAtHeadingWithTalkBack",
             "native-slider": "nativeSliderAcceptsTalkBackAdjustmentsAfterRepeatedTraversal",

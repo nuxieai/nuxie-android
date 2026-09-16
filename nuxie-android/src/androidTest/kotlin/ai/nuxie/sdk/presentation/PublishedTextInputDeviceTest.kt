@@ -77,6 +77,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
@@ -2050,7 +2051,7 @@ class PublishedTextInputDeviceTest {
     @SdkSuppress(minSdkVersion = 34)
     fun signedAuthoredRolesEnterAtHeadingWithTalkBack() {
         org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
-        exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, entryFocusTarget = "Choose your plan")
+        exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.HEADING_ENTRY)
     }
 
     @Test
@@ -2059,16 +2060,25 @@ class PublishedTextInputDeviceTest {
         org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
         repeat(2) { iteration ->
             try {
-                exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, entryFocusTarget = "Password")
+                exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.EDITOR_ENTRY)
             } catch (failure: AssertionError) {
                 throw AssertionError("Entry presentation ${iteration + 1}: ${failure.message}", failure)
             }
         }
     }
 
+    @Test
+    @SdkSuppress(minSdkVersion = 34)
+    fun signedAuthoredRolesRestoreTalkBackEditorAfterHome() {
+        org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
+        exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.EDITOR_HOME_RETURN)
+    }
+
+    private enum class AuthoredRoleProbe { COMPLETE, HEADING_ENTRY, EDITOR_ENTRY, EDITOR_HOME_RETURN }
+
     private enum class PublishedBehavior { TEXT_INPUT, SCRIPT, SEMANTIC_SCRIPT, SEMANTIC_ROLES }
 
-    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, entryFocusTarget: String? = null) {
+    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
@@ -2182,7 +2192,7 @@ class PublishedTextInputDeviceTest {
             val first = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
             if (behavior == PublishedBehavior.SEMANTIC_ROLES) {
                 assertTrue("Authored roles require a revealed presentation", initiallyRevealed.await(10, TimeUnit.SECONDS))
-                assertAuthoredRoles(instrumentation, first, accepted, entryFocusTarget) { journalRun().context.getValue("responses").jsonObject }
+                assertAuthoredRoles(instrumentation, first, accepted, roleProbe) { journalRun().context.getValue("responses").jsonObject }
                 assertEquals(artifactFiles.keys, downloaded.toSet())
                 return
             }
@@ -2379,11 +2389,78 @@ class PublishedTextInputDeviceTest {
         }
     }
 
+    private fun assertTalkBackHomeReturn(
+        instrumentation: Instrumentation,
+        activity: Activity,
+        input: TalkBackEmulatorInput,
+        editorBeforeHome: android.view.accessibility.AccessibilityNodeInfo,
+        nextAfterEditor: () -> android.view.accessibility.AccessibilityNodeInfo,
+    ) {
+        val automation = instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+        val stopped = CountDownLatch(1)
+        val resumed = CountDownLatch(1)
+        val callbacks = object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityStopped(candidate: Activity) { if (candidate === activity) stopped.countDown() }
+            override fun onActivityResumed(candidate: Activity) { if (candidate === activity) resumed.countDown() }
+            override fun onActivityCreated(candidate: Activity, state: Bundle?) = Unit
+            override fun onActivityStarted(candidate: Activity) = Unit
+            override fun onActivityPaused(candidate: Activity) = Unit
+            override fun onActivitySaveInstanceState(candidate: Activity, state: Bundle) = Unit
+            override fun onActivityDestroyed(candidate: Activity) = Unit
+        }
+        fun focused() = automation.rootInActiveWindow?.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+        activity.application.registerActivityLifecycleCallbacks(callbacks)
+        try {
+            assertTrue(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME))
+            assertTrue("Home must stop the original Activity", stopped.await(10, TimeUnit.SECONDS))
+            val awayDeadline = SystemClock.uptimeMillis() + 5_000
+            while (automation.rootInActiveWindow?.windowId == editorBeforeHome.windowId && SystemClock.uptimeMillis() < awayDeadline) {
+                SystemClock.sleep(20)
+            }
+            assertNotEquals("Home must remove the Experience from the active accessibility window", editorBeforeHome.windowId,
+                automation.rootInActiveWindow?.windowId)
+            instrumentation.targetContext.startActivity(Intent(activity.intent).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            })
+            assertTrue("Return must resume the same Activity", resumed.await(10, TimeUnit.SECONDS))
+            val focusDeadline = SystemClock.uptimeMillis() + 5_000
+            var restored = focused()
+            while (restored != editorBeforeHome && SystemClock.uptimeMillis() < focusDeadline) {
+                SystemClock.sleep(20)
+                restored = focused()
+            }
+            assertEquals("TalkBack must restore the exact native editor after Home/return", editorBeforeHome, restored)
+            assertTrue("Restored editor must remain secure", checkNotNull(restored).isPassword)
+            // Backgrounding withdraws virtual targets. Compare traversal with the
+            // newly presented target, not a retired pre-background platform ID.
+            val expectedNext = nextAfterEditor()
+            input.swipeForward()
+            val nextDeadline = SystemClock.uptimeMillis() + 2_000
+            var next = focused()
+            while ((next == null || next == restored) && SystemClock.uptimeMillis() < nextDeadline) {
+                SystemClock.sleep(20)
+                next = focused()
+            }
+            assertNotEquals("First resumed swipe must leave the editor", restored, next)
+            assertEquals("Resumed traversal must reach the exact next authored control", expectedNext, next)
+            input.swipeBackward()
+            val backDeadline = SystemClock.uptimeMillis() + 2_000
+            var back = focused()
+            while (back != restored && SystemClock.uptimeMillis() < backDeadline) {
+                SystemClock.sleep(20)
+                back = focused()
+            }
+            assertEquals("Reverse traversal must return to the same editor", restored, back)
+        } finally {
+            activity.application.unregisterActivityLifecycleCallbacks(callbacks)
+        }
+    }
+
     private fun assertAuthoredRoles(
         instrumentation: Instrumentation,
         activity: Activity,
         accepted: LinkedBlockingQueue<JourneyScreenEmissionBatch>,
-        entryFocusTarget: String? = null,
+        roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE,
         responses: () -> JsonObject,
     ) {
         val useTalkBack = InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true"
@@ -2424,7 +2501,7 @@ class PublishedTextInputDeviceTest {
             }
             val first = checkNotNull(initial) { "TalkBack must establish initial focus" }
             assertEquals("TalkBack must enter the scene at its heading; class=${first.className} visible=${first.isVisibleToUser} editable=${first.isEditable} inputFocused=${first.isFocused} loading=${first.contentDescription?.toString() == "Experience loading"}", expectedLabels.first(), label(first))
-            if (entryFocusTarget == expectedLabels.first()) return
+            if (roleProbe == AuthoredRoleProbe.HEADING_ENTRY) return
             val visited = mutableListOf(first)
             for (expected in expectedLabels.drop(1)) {
                 val previous = visited.last()
@@ -2439,9 +2516,14 @@ class PublishedTextInputDeviceTest {
                 assertFalse("Every forward swipe must change the focused identity; expected=$expected previous=${label(previous)} current=${label(next)}", next == previous)
                 assertEquals("Every forward swipe must reach the next authored element", expected, label(next))
                 visited += next
-                if (entryFocusTarget == expected) {
+                if (expected == "Password" && roleProbe in setOf(AuthoredRoleProbe.EDITOR_ENTRY, AuthoredRoleProbe.EDITOR_HOME_RETURN)) {
                     assertTrue("The prior presentation must finish on the native editor", next.isEditable)
                     assertEquals("android.widget.EditText", next.className.toString())
+                    if (roleProbe == AuthoredRoleProbe.EDITOR_HOME_RETURN) {
+                        assertTalkBackHomeReturn(instrumentation, activity, input, next) { nodes().single { label(it) == "Unavailable" } }
+                        assertTrue("Home/return must not produce authored effects", accepted.isEmpty())
+                        assertTrue("Home/return must not commit an untouched editor", responses().isEmpty())
+                    }
                     return
                 }
             }
