@@ -175,10 +175,13 @@ class PublishedTextInputDeviceTest {
             instrumentation.waitForIdleSync()
             assertEquals("No Experience Activity may launch", 0, monitor.hits)
         } finally {
-            Nuxie.shutdownAndAwait()
-            Nuxie.overridesForTesting = null
-            instrumentation.removeMonitor(monitor)
-            directory.deleteRecursively()
+            try {
+                Nuxie.shutdownAndAwait()
+            } finally {
+                Nuxie.overridesForTesting = null
+                instrumentation.removeMonitor(monitor)
+                directory.deleteRecursively()
+            }
         }
         assertFalse(Nuxie.isSetup)
     }
