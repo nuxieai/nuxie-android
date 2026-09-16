@@ -144,6 +144,16 @@ class PublishedTextInputAlignmentDeviceTest {
                     inputs.forEachIndexed { index, input ->
                         val editor = current.findViewWithTag<EditText>("nuxie-text-input-${input.id}")
                         assertEquals(if (index == 0) frame.fontSize else 18f, editor.textSize, 0.001f)
+                        val effectiveHeight = if (index == 0) frame.lineHeight else 24f
+                        assertEquals(3, editor.layout.lineCount)
+                        if (effectiveHeight == -1f) {
+                            assertEquals("Natural height has no added spacing", 0f, editor.lineSpacingExtra, 0f)
+                        } else {
+                            for (line in 1..2) {
+                                assertEquals("${input.id} effective baseline interval",
+                                    effectiveHeight, (editor.layout.getLineBaseline(line) - editor.layout.getLineBaseline(line - 1)).toFloat(), 0.5f)
+                            }
+                        }
                         val captured = frame.geometry.fields.getValue(input.runName)
                         val point = floatArrayOf(0f, editor.baseline.toFloat())
                         editor.matrix.mapPoints(point)
