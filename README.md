@@ -19,9 +19,30 @@ pending; local publication does not establish a public release.
 - Android minSdk 23
 - Kotlin
 
+SDK setup, event capture, Features, and commerce remain available on devices
+without a compatible Vulkan renderer. Experiences require that renderer: the
+SDK rejects presentation with `RUNTIME_UNAVAILABLE` before downloading artifacts
+or opening an Experience Activity. Android API 23 uses this graceful degradation
+contract; it does not render Experiences. Later API levels also require a
+compatible device driver.
+
+The API 23 device test
+`PublishedTextInputDeviceTest#unavailableRendererRejectsPresentationWithoutDisablingTheSdk`
+checks the real renderer probe, repeated signed-release rejection, durable event
+capture, remote Feature checks, delegated restore, and shutdown. Its transport
+and purchase delegate are test doubles; real Play behavior requires separate
+store qualification. Run it on an API 23 device after building and installing
+`:nuxie-android:assembleDebugAndroidTest`:
+
+```bash
+adb -s "$ANDROID_SERIAL" shell am instrument -w -r \
+  -e class ai.nuxie.sdk.presentation.PublishedTextInputDeviceTest#unavailableRendererRejectsPresentationWithoutDisablingTheSdk \
+  ai.nuxie.sdk.test/androidx.test.runner.AndroidJUnitRunner
+```
+
 ## Runtime artifact
 
-Gradle fetches and SHA-256 verifies the published Android runtime v0.3.10 pinned
+Gradle fetches and SHA-256 verifies the published Android runtime pinned
 in `runtime/artifact.json`. It contains the native surface-presentation APIs used
 by this SDK. Ordinary builds and tests use that artifact automatically:
 
