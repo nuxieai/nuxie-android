@@ -26,9 +26,14 @@ internal class ProviderOperations(
   private val lock = Any()
   private val pending = mutableSetOf<Deferred<*>>()
   private var closed = false
+  private var pendingPayment = false
 
   override suspend fun purchase(product: StoreProduct): PurchaseResult =
-    submit { delegate.purchase(product) } ?: PurchaseResult.Failed(closedFailure())
+    submit {
+      delegate.purchase(product).also { result ->
+        if (result == PurchaseResult.Pending) synchronized(lock) { pendingPayment = true }
+      }
+    } ?: PurchaseResult.Failed(closedFailure())
 
   override suspend fun restorePurchases(): RestoreResult =
     submit { delegate.restorePurchases() } ?: RestoreResult.Failed(closedFailure())
@@ -38,6 +43,8 @@ internal class ProviderOperations(
    * may join this drain; cancelling one caller leaves ownership intact.
    * This does not log out the provider or certify finality of a pending payment.
    */
+  fun closeAdmission() { synchronized(lock) { closed = true } }
+
   suspend fun closeAndAwait() {
     val admitted = synchronized(lock) {
       closed = true
@@ -45,6 +52,7 @@ internal class ProviderOperations(
     }
     admitted.joinAll()
     scope.cancel()
+    if (synchronized(lock) { pendingPayment }) throw ProviderRecoveryRequired()
   }
 
   private suspend fun <T : Any> submit(operation: suspend () -> T): T? {
@@ -69,3 +77,5 @@ internal class ProviderOperations(
 
   private fun closedFailure() = IllegalStateException("Provider session is closing.")
 }
+
+internal class ProviderRecoveryRequired : IllegalStateException("Pending payment requires reconciliation.")

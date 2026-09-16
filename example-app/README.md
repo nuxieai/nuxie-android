@@ -182,8 +182,9 @@ calls; concurrent drain callers may wait independently. This is the operation
 ownership portion of [UNIV-3197](https://universe.basis.dev/issue/UNIV-3197). It
 does not perform logout, persist session state, or prove that a provider-reported
 pending payment has completed. Ordinary SDK shutdown alone does not drain this
-external owner. The coordinated logout UI and durable restart recovery are still
-unimplemented; no automatic provider reset is added.
+external owner. The coordinated logout UI and interrupted-operation reconciliation remain
+unimplemented; no automatic provider reset is added. The durable transition and
+startup guard below are groundwork for that UI.
 
 Selected-provider unit source sets exercise the real RevenueCat and Superwall
 adapters with held provider purchase/restore callbacks. They cancel the original
@@ -192,3 +193,46 @@ the provider completion and verify the adapter's completion identity check runs.
 Run these with `-PnuxieExamplePurchaseProvider=revenuecat` or `superwall` and
 `:example-app:testDebugUnitTest :example-app:testReleaseUnitTest`. These are pinned
 provider API tests, not real-store qualification.
+
+`SessionLogout` owns one in-process logout transition. It closes provider
+admission, persists intent, drains admitted callbacks, resets Nuxie, awaits SDK
+teardown, then awaits supported provider logout. Each completed stage is
+persisted; an in-process retry retains completed side effects even if their
+following write failed. UI waiter cancellation does not cancel this work. A
+provider-reported pending payment blocks identity mutation and requires recovery.
+The RevenueCat selection prepares this controller using its public `awaitLogOut`
+completion. Superwall and managed Play do not advertise this capability.
+
+`LogoutJournal` stores synchronous-commit progress. Before starting either SDK
+or identifying the launch customer, the example checks for a previous logout
+record. Completed logout remains signed out; interrupted or invalid records keep
+startup closed. The controller deliberately does not resume a previous process's
+ambiguous external side effects. There is currently no logout/sign-in UI or
+reconciliation action: these classes are tested infrastructure, not a completed
+logout integration. In particular, a process that died before logout intent was
+recorded may still have an external pending operation, which remains unqualified.
+
+After building and installing the default example and its test APK, qualify the
+startup guard from a fresh process at every checkpoint:
+
+```bash
+for stage in REQUESTED DRAINED SDK_RESET SDK_RETIRED COMPLETE; do
+  adb -s "$ANDROID_SERIAL" shell am instrument -w \
+    -e class ai.nuxie.example.LogoutStartupTest#seed \
+    -e logoutPhase seed -e logoutStage "$stage" \
+    ai.nuxie.example.test/androidx.test.runner.AndroidJUnitRunner
+  adb -s "$ANDROID_SERIAL" shell am force-stop ai.nuxie.example
+  adb -s "$ANDROID_SERIAL" shell am instrument -w \
+    -e class ai.nuxie.example.LogoutStartupTest#verify \
+    -e logoutPhase verify -e logoutStage "$stage" \
+    ai.nuxie.example.test/androidx.test.runner.AndroidJUnitRunner
+done
+```
+
+Require `OK (1 test)` for each seed and verify run; instrumentation can return
+exit zero for a failed test. The verify test requires a different PID, proves the
+SDK stayed unconfigured and controls stayed disabled, and restores the prior
+journal record in `finally`. If execution stops between seed and verify, run the
+matching verify invocation to restore the saved record. These are seeded durable
+checkpoint tests, not process-kill tests of an actual store transaction or a
+proof that an interrupted provider operation can be reconciled.

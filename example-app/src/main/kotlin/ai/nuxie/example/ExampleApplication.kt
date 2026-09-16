@@ -1,6 +1,9 @@
 package ai.nuxie.example
 
 import ai.nuxie.sdk.NuxieConfiguration
+import ai.nuxie.sdk.Nuxie
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
@@ -16,6 +19,22 @@ class ExampleApplication : Application(), Application.ActivityLifecycleCallbacks
     val owner = providerOperations ?: ProviderOperations(delegate)
     providerOperations = owner
     configuration.purchaseDelegate = owner
+  }
+
+  internal val logoutJournal by lazy { LogoutJournal(getSharedPreferences("example-session", MODE_PRIVATE)) }
+  internal var sessionLogout: SessionLogout? = null
+    private set
+
+  internal fun prepareLogout(session: String, logoutProvider: suspend () -> Unit) {
+    if (sessionLogout != null) return
+    val owner = requireNotNull(providerOperations)
+    sessionLogout = SessionLogout(
+      owner,
+      persist = { stage -> withContext(Dispatchers.IO) { logoutJournal.write(LogoutJournal.Record(session, stage)) } },
+      resetSdk = { Nuxie.reset() },
+      retireSdk = { Nuxie.shutdownAndAwait() },
+      logoutProvider = logoutProvider,
+    )
   }
 
   private var resumed = WeakReference<Activity>(null)
