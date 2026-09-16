@@ -418,6 +418,7 @@ class NuxieOwnedRuntimeTest {
             pointers: List<NativePlayerPointer>,
             elapsedSeconds: Float,
             correlationId: Long,
+            textRunNames: List<String>,
         ): NativeCallResult<NativePlayerStepOutcome> {
             typedFrameSteps += elapsedSeconds
             typedPointers = pointers

@@ -254,6 +254,7 @@ internal object NuxieRuntimeBridge {
         pointerTimestamps: FloatArray,
         elapsedSeconds: Float,
         correlationId: Long,
+        textRunNames: Array<ByteArray>,
         statusOut: IntArray,
     ): NativePlayerStepOutcome?
 

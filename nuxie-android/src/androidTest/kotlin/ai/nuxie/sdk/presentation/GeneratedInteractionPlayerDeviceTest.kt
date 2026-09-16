@@ -3,6 +3,7 @@ package ai.nuxie.sdk.presentation
 import ai.nuxie.sdk.runtime.NuxiePlayerPointerEvent
 import ai.nuxie.sdk.runtime.NuxiePlayerPointerKind
 import ai.nuxie.sdk.runtime.NuxieRuntime
+import ai.nuxie.sdk.runtime.NuxieTextGeometryCapture
 import ai.nuxie.sdk.runtime.NuxieRuntimeCallException
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.serialization.json.*
@@ -26,7 +27,7 @@ class GeneratedInteractionPlayerDeviceTest {
         try {
             val file = checkNotNull(runtime.importFile(renderer, bytes, checkNotNull(runtime.inspectFileAssets(bytes))))
             try {
-                fun exercise(experience: Boolean): Pair<List<String>, ByteArray> {
+                fun exercise(experience: Boolean, missingGeometry: Boolean = false): Pair<List<String>, ByteArray> {
                     val artboardName = contract.getValue("artboard").jsonPrimitive.content
                     val artboard = checkNotNull(file.newArtboard(artboardName))
                     try {
@@ -37,8 +38,13 @@ class GeneratedInteractionPlayerDeviceTest {
                             val position = contract.getValue("pointer").jsonObject
                             fun pointer(kind: NuxiePlayerPointerKind) = NuxiePlayerPointerEvent(kind,
                                 position.getValue("x").jsonPrimitive.float, position.getValue("y").jsonPrimitive.float, 1, 0f)
-                            val down = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(pointer(NuxiePlayerPointerKind.DOWN)))
-                            val up = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(pointer(NuxiePlayerPointerKind.UP)))
+                            val requestedRuns = if (missingGeometry) listOf("missing geometry run") else emptyList()
+                            val down = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(pointer(NuxiePlayerPointerKind.DOWN)), textRunNames = requestedRuns)
+                            val up = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(pointer(NuxiePlayerPointerKind.UP)), textRunNames = requestedRuns)
+                            if (missingGeometry) {
+                                assertEquals(NuxieTextGeometryCapture.Failed(3), down.textGeometry)
+                                assertEquals(NuxieTextGeometryCapture.Failed(3), up.textGeometry)
+                            }
                             assertTrue(player.stepTyped(elapsedSeconds = 0.25).hostCommands.isEmpty())
                             return (down.hostCommands + up.hostCommands).map { it.name } to initial
                         } finally { player.close() }
@@ -48,6 +54,8 @@ class GeneratedInteractionPlayerDeviceTest {
                 val experience = exercise(true)
                 assertEquals(contract.getValue("defaultHostCommands").jsonArray.map { it.jsonPrimitive.content }, default.first)
                 assertEquals(contract.getValue("experienceHostCommands").jsonArray.map { it.jsonPrimitive.content }, experience.first)
+                assertEquals("Geometry failure preserves exactly-once authored commands", experience.first,
+                    exercise(true, missingGeometry = true).first)
                 assertArrayEquals("Adding generated interaction must preserve initial authored pixels", default.second, experience.second)
             } finally { file.close() }
         } finally { renderer.close() }

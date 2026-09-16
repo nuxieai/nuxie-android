@@ -381,6 +381,7 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         pointers: List<NativePlayerPointer>,
         elapsedSeconds: Float,
         correlationId: Long,
+        textRunNames: List<String> = emptyList(),
     ): NativeCallResult<NativePlayerStepOutcome> = error("stepPlayer is not implemented")
 
     fun freeViewModel(handle: Long): Int = error("freeViewModel is not implemented")
@@ -606,6 +607,7 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         pointers: List<NativePlayerPointer>,
         elapsedSeconds: Float,
         correlationId: Long,
+        textRunNames: List<String>,
     ): NativeCallResult<NativePlayerStepOutcome> {
         val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
         val outcome = NuxieRuntimeBridge.nativePlayerStepTyped(
@@ -623,6 +625,7 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
                 .toFloatArray(),
             elapsedSeconds = elapsedSeconds,
             correlationId = correlationId,
+            textRunNames = textRunNames.map { it.encodeToByteArray() }.toTypedArray(),
             statusOut = status,
         )
         return NativeCallResult(status.single(), outcome)

@@ -2071,6 +2071,127 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStep(
   return (jint)status;
 }
 
+static jfloatArray new_float_values(JNIEnv *env, const float *values, jsize count) {
+  jfloatArray result = (*env)->NewFloatArray(env, count);
+  if (clear_jni_exception(env) || result == NULL) return NULL;
+  (*env)->SetFloatArrayRegion(env, result, 0, count, values);
+  if (clear_jni_exception(env)) {
+    (*env)->DeleteLocalRef(env, result);
+    return NULL;
+  }
+  return result;
+}
+
+static jobject copy_text_geometry_field(
+    JNIEnv *env, struct NuxPlayer *player, struct NuxPlayerStepResult *step,
+    jbyteArray encoded_name, jclass field_class, jmethodID constructor,
+    NuxStatus *status) {
+  *status = NUX_STATUS_RUNTIME_ERROR;
+  if ((*env)->PushLocalFrame(env, 12) < 0) {
+    clear_jni_exception(env);
+    return NULL;
+  }
+  jobject copied = NULL;
+  jbyte *bytes = NULL;
+  if (encoded_name == NULL) {
+    *status = NUX_STATUS_NULL_ARGUMENT;
+    goto geometry_field_done;
+  }
+  jsize length = (*env)->GetArrayLength(env, encoded_name);
+  if (clear_jni_exception(env)) goto geometry_field_done;
+  if (length == 0) {
+    *status = NUX_STATUS_INVALID_ARGUMENT;
+    goto geometry_field_done;
+  }
+  bytes = (*env)->GetByteArrayElements(env, encoded_name, NULL);
+  if (clear_jni_exception(env) || bytes == NULL) goto geometry_field_done;
+  struct NuxStringView name = {(const char *)bytes, (size_t)length};
+  struct NuxTextRunGeometry raw;
+  memset(&raw, 0, sizeof(raw));
+  raw.struct_size = (uint32_t)sizeof(raw);
+  *status = nux_player_text_run_geometry(player, step, name, &raw);
+  if (*status != NUX_STATUS_OK) goto geometry_field_done;
+
+  float bounds[] = {raw.min_x, raw.min_y, raw.max_x, raw.max_y};
+  float layout_bounds[] = {raw.layout_ancestor_min_x, raw.layout_ancestor_min_y,
+                          raw.layout_ancestor_max_x, raw.layout_ancestor_max_y};
+  jstring copied_name = new_string_view(env, name);
+  jfloatArray world = new_float_values(env, raw.world_transform, 6);
+  jfloatArray content = new_float_values(env, raw.content_transform, 6);
+  jfloatArray text_bounds = new_float_values(env, bounds, 4);
+  jfloatArray layout = new_float_values(env, raw.layout_ancestor_transform, 6);
+  jfloatArray layout_box = new_float_values(env, layout_bounds, 4);
+  if (copied_name == NULL || world == NULL || content == NULL ||
+      text_bounds == NULL || layout == NULL || layout_box == NULL) {
+    *status = NUX_STATUS_RUNTIME_ERROR;
+    goto geometry_field_done;
+  }
+  copied = (*env)->NewObject(
+      env, field_class, constructor, copied_name, (jlong)raw.render_revision,
+      world, content, text_bounds, (jboolean)(raw.has_layout_ancestor == 1),
+      layout, layout_box, (jboolean)(raw.has_first_baseline == 1), raw.first_baseline);
+  if (clear_jni_exception(env) || copied == NULL) {
+    *status = NUX_STATUS_RUNTIME_ERROR;
+    copied = NULL;
+  }
+
+geometry_field_done:
+  if (bytes != NULL)
+    (*env)->ReleaseByteArrayElements(env, encoded_name, bytes, JNI_ABORT);
+  return (*env)->PopLocalFrame(env, copied);
+}
+
+/* Capture failures are data, not failures of the already-committed step. */
+static jobject copy_text_geometry(
+    JNIEnv *env, struct NuxPlayer *player, struct NuxPlayerStepResult *step,
+    jobjectArray names, int *failed) {
+  jsize count = (*env)->GetArrayLength(env, names);
+  if (clear_jni_exception(env)) { *failed = 1; return NULL; }
+  if (count == 0) return NULL;
+  if ((*env)->PushLocalFrame(env, 8) < 0) {
+    clear_jni_exception(env);
+    *failed = 1;
+    return NULL;
+  }
+  jobject capture = NULL;
+  jclass field_class = (*env)->FindClass(env, "ai/nuxie/sdk/runtime/NativeTextRunGeometry");
+  if (clear_jni_exception(env) || field_class == NULL) goto geometry_done;
+  jclass capture_class = (*env)->FindClass(env, "ai/nuxie/sdk/runtime/NativeTextGeometryCapture");
+  if (clear_jni_exception(env) || capture_class == NULL) goto geometry_done;
+  jmethodID field_constructor = (*env)->GetMethodID(
+      env, field_class, "<init>", "(Ljava/lang/String;J[F[F[FZ[F[FZF)V");
+  if (clear_jni_exception(env) || field_constructor == NULL) goto geometry_done;
+  jmethodID capture_constructor = (*env)->GetMethodID(
+      env, capture_class, "<init>", "(I[Lai/nuxie/sdk/runtime/NativeTextRunGeometry;)V");
+  if (clear_jni_exception(env) || capture_constructor == NULL) goto geometry_done;
+  jobjectArray fields = (*env)->NewObjectArray(env, count, field_class, NULL);
+  if (clear_jni_exception(env) || fields == NULL) goto geometry_done;
+  NuxStatus status = NUX_STATUS_OK;
+  for (jsize index = 0; index < count; index++) {
+    jbyteArray name = (jbyteArray)(*env)->GetObjectArrayElement(env, names, index);
+    if (clear_jni_exception(env)) goto geometry_done;
+    jobject field = copy_text_geometry_field(
+        env, player, step, name, field_class, field_constructor, &status);
+    if (name != NULL) (*env)->DeleteLocalRef(env, name);
+    if (status != NUX_STATUS_OK) {
+      (*env)->DeleteLocalRef(env, fields);
+      fields = (*env)->NewObjectArray(env, 0, field_class, NULL);
+      if (clear_jni_exception(env) || fields == NULL) goto geometry_done;
+      break;
+    }
+    if (field == NULL) goto geometry_done;
+    (*env)->SetObjectArrayElement(env, fields, index, field);
+    (*env)->DeleteLocalRef(env, field);
+    if (clear_jni_exception(env)) goto geometry_done;
+  }
+  capture = (*env)->NewObject(env, capture_class, capture_constructor, (jint)status, fields);
+  if (clear_jni_exception(env)) capture = NULL;
+
+geometry_done:
+  if (capture == NULL) *failed = 1;
+  return (*env)->PopLocalFrame(env, capture);
+}
+
 JNIEXPORT jobject JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     JNIEnv *env, jobject self, jlong player, jintArray input_kind_array,
@@ -2078,7 +2199,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     jfloatArray input_number_array, jintArray pointer_kind_array,
     jfloatArray pointer_x_array, jfloatArray pointer_y_array,
     jintArray pointer_id_array, jfloatArray pointer_timestamp_array,
-    jfloat elapsed_seconds, jlong correlation_id, jintArray status_out) {
+    jfloat elapsed_seconds, jlong correlation_id, jobjectArray text_run_names,
+    jintArray status_out) {
   (void)self;
   NuxStatus reported_status = NUX_STATUS_RUNTIME_ERROR;
   if (status_out == NULL) return NULL;
@@ -2086,7 +2208,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
       input_bool_array == NULL || input_number_array == NULL ||
       pointer_kind_array == NULL || pointer_x_array == NULL ||
       pointer_y_array == NULL || pointer_id_array == NULL ||
-      pointer_timestamp_array == NULL) {
+      pointer_timestamp_array == NULL || text_run_names == NULL) {
     set_status_out(env, status_out, NUX_STATUS_NULL_ARGUMENT);
     return NULL;
   }
@@ -2113,6 +2235,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
   jintArray pointer_hits = NULL;
   jobjectArray events = NULL;
   jobjectArray host_commands = NULL;
+  jobject text_geometry = NULL;
   jobjectArray changes = NULL;
   jobject outcome = NULL;
   int failed = 0;
@@ -2419,7 +2542,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
       env, outcome_class, "<init>",
       "(Z[I[Lai/nuxie/sdk/runtime/NativeRuntimeEvent;"
       "[Lai/nuxie/sdk/runtime/NativeHostCommand;"
-      "[Lai/nuxie/sdk/runtime/NativeViewModelChange;)V");
+      "[Lai/nuxie/sdk/runtime/NativeViewModelChange;"
+      "Lai/nuxie/sdk/runtime/NativeTextGeometryCapture;)V");
   if (clear_jni_exception(env) || outcome_constructor == NULL) {
     failed = 1;
     goto typed_step_cleanup;
@@ -2711,10 +2835,14 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
   }
 
   if (!failed) {
+    text_geometry = copy_text_geometry(env, (struct NuxPlayer *)from_handle(player),
+                                       step_result, text_run_names, &failed);
+  }
+  if (!failed) {
     outcome = (*env)->NewObject(
         env, outcome_class, outcome_constructor,
         (jboolean)(info.keep_going ? JNI_TRUE : JNI_FALSE), pointer_hits,
-        events, host_commands, changes);
+        events, host_commands, changes, text_geometry);
     if (clear_jni_exception(env) || outcome == NULL) failed = 1;
   }
 
@@ -2723,6 +2851,7 @@ typed_step_cleanup:
     NuxStatus free_status = nux_player_step_result_free(step_result);
     log_cleanup_failure("player_step_result_free", free_status);
   }
+  if (text_geometry != NULL) (*env)->DeleteLocalRef(env, text_geometry);
   if (changes != NULL) (*env)->DeleteLocalRef(env, changes);
   if (host_commands != NULL) (*env)->DeleteLocalRef(env, host_commands);
   if (events != NULL) (*env)->DeleteLocalRef(env, events);

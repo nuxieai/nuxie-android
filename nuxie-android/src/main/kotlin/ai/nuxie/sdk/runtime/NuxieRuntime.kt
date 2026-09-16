@@ -499,6 +499,7 @@ internal class NuxieRuntimePlayer internal constructor(
         pointers: List<NuxiePlayerPointerEvent> = emptyList(),
         elapsedSeconds: Double,
         correlationId: ULong = 0uL,
+        textRunNames: List<String> = emptyList(),
     ): NuxiePlayerStepOutcome {
         require(elapsedSeconds.isFinite() && elapsedSeconds >= 0.0) {
             "Player elapsed seconds must be finite and nonnegative"
@@ -507,11 +508,13 @@ internal class NuxieRuntimePlayer internal constructor(
         require(nativeElapsed.isFinite()) { "Player elapsed seconds exceed the native Float range" }
         requireHandle()
         val auxiliary = interactionPlayer
-        if (auxiliary == null) return stepSingle(inputs, pointers, nativeElapsed, correlationId)
+        if (auxiliary == null) return stepSingle(inputs, pointers, nativeElapsed, correlationId, textRunNames)
         try {
-            val primary = stepSingle(emptyList(), pointers, nativeElapsed, correlationId)
-            if (!interactionStepPending && inputs.isEmpty() && pointers.isEmpty()) return primary
-            val interaction = auxiliary.stepTyped(inputs, pointers, 0.0, correlationId)
+            val stepsInteraction = interactionStepPending || inputs.isNotEmpty() || pointers.isNotEmpty()
+            val primary = stepSingle(emptyList(), pointers, nativeElapsed, correlationId,
+                if (stepsInteraction) emptyList() else textRunNames)
+            if (!stepsInteraction) return primary
+            val interaction = auxiliary.stepTyped(inputs, pointers, 0.0, correlationId, textRunNames)
             interactionStepPending = false
             return NuxiePlayerStepOutcome(
                 keepGoing = primary.keepGoing || interaction.keepGoing,
@@ -522,6 +525,7 @@ internal class NuxieRuntimePlayer internal constructor(
                 events = primary.events + interaction.events,
                 hostCommands = primary.hostCommands + interaction.hostCommands,
                 viewModelChanges = primary.viewModelChanges + interaction.viewModelChanges,
+                textGeometry = interaction.textGeometry,
             )
         } catch (error: Throwable) {
             // Native mutations cannot be rolled back after a partial composite step.
@@ -536,6 +540,7 @@ internal class NuxieRuntimePlayer internal constructor(
         pointers: List<NuxiePlayerPointerEvent>,
         nativeElapsed: Float,
         correlationId: ULong,
+        textRunNames: List<String>,
     ): NuxiePlayerStepOutcome {
         val result = native.stepPlayer(
             playerHandle = owned.require(),
@@ -543,6 +548,7 @@ internal class NuxieRuntimePlayer internal constructor(
             pointers = encodePlayerPointers(pointers),
             elapsedSeconds = nativeElapsed,
             correlationId = correlationId.toLong(),
+            textRunNames = textRunNames,
         )
         if (result.status != NUX_STATUS_OK) {
             throw NuxieRuntimeCallException("step player", result.status)

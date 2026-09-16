@@ -124,7 +124,7 @@ class NuxieExperiencePlayerTest {
         override fun freePlayer(handle: Long) { freed += handle }
         override fun freeArtboard(handle: Long) { freed += handle }
         override fun freeFile(handle: Long) { freed += handle }
-        override fun stepPlayer(playerHandle: Long, inputs: List<NativePlayerInput>, pointers: List<NativePlayerPointer>, elapsedSeconds: Float, correlationId: Long): NativeCallResult<NativePlayerStepOutcome> {
+        override fun stepPlayer(playerHandle: Long, inputs: List<NativePlayerInput>, pointers: List<NativePlayerPointer>, elapsedSeconds: Float, correlationId: Long, textRunNames: List<String>): NativeCallResult<NativePlayerStepOutcome> {
             steps += Step(playerHandle, elapsedSeconds, inputs.map { it.name }, pointers.size, correlationId)
             if (playerHandle == 11L && failAuxiliaryStep) return NativeCallResult(4, null)
             return NativeCallResult(0, NativePlayerStepOutcome(

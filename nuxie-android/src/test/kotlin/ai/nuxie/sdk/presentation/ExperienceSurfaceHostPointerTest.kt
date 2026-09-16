@@ -911,6 +911,7 @@ class ExperienceSurfaceHostPointerTest {
             pointers: List<NativePlayerPointer>,
             elapsedSeconds: Float,
             correlationId: Long,
+            textRunNames: List<String>,
         ): NativeCallResult<NativePlayerStepOutcome> {
             pointerSteps += pointers
             elapsedSteps += elapsedSeconds
