@@ -283,10 +283,11 @@ internal class ExperienceTextInputOverlay(
                 editor.visibility = View.INVISIBLE
                 continue
             }
+            val metrics = input.effectiveMetrics(snapshot)
             val captured = geometryCapture
             if (captured != null) {
                 val field = (captured as? NuxieTextGeometryCapture.Captured)?.fields?.get(input.runName)
-                binding.geometryAvailable = field != null && placeCapturedField(input, editor, container, field, scale, left, top)
+                binding.geometryAvailable = field != null && metrics != null && placeCapturedField(input, metrics, editor, container, field, scale, left, top)
                 val node = semanticFields?.get(input.id)
                 val enabled = binding.geometryAvailable && inputEnabled &&
                     (semanticFields == null || node != null && node.stateFlags and NativeSemanticState.DISABLED == 0)
@@ -306,7 +307,7 @@ internal class ExperienceTextInputOverlay(
                 continue
             }
             val geometry = input.geometry(snapshot)
-            if (geometry == null || geometry.scaleX <= 0 || geometry.scaleY <= 0) {
+            if (metrics == null || geometry == null || geometry.scaleX <= 0 || geometry.scaleY <= 0) {
                 editor.visibility = View.INVISIBLE
                 continue
             }
@@ -331,13 +332,13 @@ internal class ExperienceTextInputOverlay(
             editor.x = x
             editor.y = y
             editor.rotation = Math.toDegrees(geometry.rotation.toDouble()).toFloat()
-            editor.setTextSize(TypedValue.COMPLEX_UNIT_PX, (input.style.fontSize * sy).coerceAtLeast(1f))
+            editor.setTextSize(TypedValue.COMPLEX_UNIT_PX, (metrics.fontSize * sy).coerceAtLeast(1f))
             editor.letterSpacing = input.style.letterSpacing * sx / editor.textSize
             // -1 means native font-natural height, not a negative pixel value.
             // Explicit height is the baseline interval, so subtract actual font
             // metrics rather than nominal text size (which excludes leading).
-            val extraLineSpacing = if (input.style.lineHeight == -1f) 0f
-                else input.style.lineHeight * sy - editor.paint.getFontMetricsInt(null)
+            val extraLineSpacing = if (metrics.lineHeight == -1f) 0f
+                else metrics.lineHeight * sy - editor.paint.getFontMetricsInt(null)
             editor.setLineSpacing(extraLineSpacing, 1f)
             editor.visibility = View.VISIBLE
         }
@@ -345,7 +346,7 @@ internal class ExperienceTextInputOverlay(
     }
 
     private fun placeCapturedField(
-        input: ExperienceTextInput, editor: Editor, container: FrameLayout,
+        input: ExperienceTextInput, metrics: ExperienceTextInput.EffectiveMetrics, editor: Editor, container: FrameLayout,
         field: NuxieTextRunGeometry, scale: Float, left: Float, top: Float,
     ): Boolean {
         val layout = field.layout ?: return false
@@ -382,10 +383,10 @@ internal class ExperienceTextInputOverlay(
         }
         editor.presentedTextOriginY = localBaseline(0f) ?: return false
         editor.presentedFirstBaseline = field.firstBaseline?.let(::localBaseline)
-        editor.setTextSize(TypedValue.COMPLEX_UNIT_PX, (input.style.fontSize * scale).coerceAtLeast(1f))
+        editor.setTextSize(TypedValue.COMPLEX_UNIT_PX, (metrics.fontSize * scale).coerceAtLeast(1f))
         editor.letterSpacing = input.style.letterSpacing * scale / editor.textSize
-        val extraLineSpacing = if (input.style.lineHeight == -1f) 0f
-            else input.style.lineHeight * scale - editor.paint.getFontMetricsInt(null)
+        val extraLineSpacing = if (metrics.lineHeight == -1f) 0f
+            else metrics.lineHeight * scale - editor.paint.getFontMetricsInt(null)
         editor.setLineSpacing(extraLineSpacing, 1f)
         editor.visibility = View.VISIBLE
         return true

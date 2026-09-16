@@ -19,7 +19,11 @@ class PublishedTextInputAlignmentDeviceTest {
         fun json(name: String) = assets.open("$directory/$name").bufferedReader().use {
             Json.parseToJsonElement(it.readText()).jsonObject
         }
-        val expected = json("expectations.json").getValue("geometry").jsonArray
+        val contract = json("expectations.json")
+        val expected = contract.getValue("geometry").jsonArray
+        data class MetricsFrame(val snapshot: NuxieViewModelSnapshot, val geometry: NuxieTextGeometryCapture.Captured,
+            val fontSize: Float, val lineHeight: Float)
+        val metricFrames = mutableListOf<MetricsFrame>()
         val metadata = json("report.json").getValue("builtPackageMetadata").jsonObject.getValue("textInputs").jsonArray
         val bytes = assets.open("$directory/screen.riv").use { it.readBytes() }
         val fontBytes = assets.open("$directory/2898476918b21c3f9b5ba22e86853c6d63b544f92da277a92533011a28c93af5.otf")
@@ -48,6 +52,16 @@ class PublishedTextInputAlignmentDeviceTest {
                         val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
                         assertEquals(390, frame.width)
                         assertEquals(844, frame.height)
+                        for (item in contract.getValue("cases").jsonArray) {
+                            val size = item.jsonObject.getValue("fontSize").jsonPrimitive.float
+                            val height = item.jsonObject.getValue("lineHeight").jsonPrimitive.float
+                            assertTrue(artboard.setDefaultViewModelValue("requestedFontSize", NuxieViewModelScalarValue.NumberValue(size.toDouble())))
+                            assertTrue(artboard.setDefaultViewModelValue("requestedLineHeight", NuxieViewModelScalarValue.NumberValue(height.toDouble())))
+                            val step = player.stepTyped(elapsedSeconds = 0.0, textRunNames = capture.fields.keys.toList())
+                            val metricsSnapshot = checkNotNull(artboard.defaultViewModelSnapshot())
+                            renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                            metricFrames += MetricsFrame(metricsSnapshot, step.textGeometry as NuxieTextGeometryCapture.Captured, size, height)
+                        }
                         expected.forEach { field ->
                             assertTrue(artboard.setTextRun(field.jsonObject.getValue("runName").jsonPrimitive.content, ""))
                         }
@@ -123,6 +137,24 @@ class PublishedTextInputAlignmentDeviceTest {
                     assertEquals("${input.id} caret geometry stays stable", cursorBefore, cursorAfter)
                     current.update(snapshot, capture)
                     layout()
+                }
+                for (frame in metricFrames) {
+                    current.update(frame.snapshot, frame.geometry)
+                    layout()
+                    inputs.forEachIndexed { index, input ->
+                        val editor = current.findViewWithTag<EditText>("nuxie-text-input-${input.id}")
+                        assertEquals(if (index == 0) frame.fontSize else 18f, editor.textSize, 0.001f)
+                        val captured = frame.geometry.fields.getValue(input.runName)
+                        val point = floatArrayOf(0f, editor.baseline.toFloat())
+                        editor.matrix.mapPoints(point)
+                        (editor.parent as View).matrix.mapPoints(point)
+                        assertEquals("${input.id} baseline after effective metric change",
+                            captured.contentTransform.ty + captured.contentTransform.d * checkNotNull(captured.firstBaseline), point[1], 0.5f)
+                        assertEquals(1, editor.selectionStart)
+                        assertEquals(4, editor.selectionEnd)
+                        assertEquals(1, android.view.inputmethod.BaseInputConnection.getComposingSpanStart(editor.text))
+                        assertEquals(4, android.view.inputmethod.BaseInputConnection.getComposingSpanEnd(editor.text))
+                    }
                 }
             }
         } finally {

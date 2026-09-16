@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "1de61139811cfd5e8def40c5612226d9d2885de2",
+  "sourceCommit": "00a608f8a3c8d78049762843aecb2fd246627188",
   "files": {
     "README.md": "9104a727bef89b388554d25583a6e013531c310f1a93d8f9f81440af8fcf67df",
     "accessibility/control-state.json": "48d1d9ea62bc7890ecd41d69592cbe3f7d137cf7bdb5849f7c64137489a5360c",
@@ -52,6 +52,7 @@
     "journeys/planes/text-input-affine.json": "864e128125a55a32822cd99c556561aa8825fcf00e5d192243a8ddb479506d24",
     "journeys/planes/text-input-composition-android.json": "694ff733eea196ce84bfb3882952e603034a0d613119d6d4f4c20dc530006929",
     "journeys/planes/text-input-edits.json": "323cc0d71359c33d4738ef2ea30c9c99441859004b4adab79364b2af82889c3d",
+    "journeys/planes/text-input-effective-metrics.json": "c0b0cec69253e367da470bd34b8421e5b0eafe62ced13666cb4f3adcb167075b",
     "journeys/planes/text-input-geometry.json": "4db9f6c82327b31cb25202c8c13231ab857366bf55c6b592526e37495ff30089",
     "journeys/planes/text-input-limits.json": "7e3aa09d75d43b0326f13ff97de1b279e147e8fb8935c68b279640e2428b4137",
     "journeys/planes/text-input-navigation.json": "49760fb0666fce8fb570c5cfda815c5dc579a9a3a5bc7e46f443801ab4257f7b",
@@ -105,9 +106,9 @@
     "purchases/test-store.json": "0a6025ef1e3b0c8706544fdbe022fd14cac22644af49a2f0c9d949070dc8e396",
     "runtime/font-metrics-binding/2898476918b21c3f9b5ba22e86853c6d63b544f92da277a92533011a28c93af5.otf": "2898476918b21c3f9b5ba22e86853c6d63b544f92da277a92533011a28c93af5",
     "runtime/font-metrics-binding/expectations.json": "1c966a99e8c21f446541fb9449ebf04dd157a75fbe4bcebc35412684aa8a9dff",
-    "runtime/font-metrics-binding/provenance.json": "33b594c3001ce99df97ff4b71d169b5a8e14df15004275177208963cc9e8b16a",
-    "runtime/font-metrics-binding/report.json": "ec13393441b9c4ae534f544195c3cf8217fc45ee60222e3fa6935851341ed3b5",
-    "runtime/font-metrics-binding/screen.riv": "1a90d3b9017143d557be5a68303c784eab8e74bab7bba625586eedc61a5a2e9a",
+    "runtime/font-metrics-binding/provenance.json": "dc2a2ea91eb7c54e4bf0af45bc09ca92a57a67355077afa5b8f0828680f3e14c",
+    "runtime/font-metrics-binding/report.json": "3ad4e5fe18972dd7d45b61fb39a72cf0003952a032f17d8924b9f9ca0a912f7b",
+    "runtime/font-metrics-binding/screen.riv": "3d95580b477c44c73d2502fdce3787f4a6477e36a5a5dec0447171ebf18cc545",
     "runtime/font-metrics-binding/snapshot.json": "6c169bce1c2809c514d1784fe1b7d653cdd1778e286e6e10364f058a8feec05c",
     "runtime/screen-control-error/action.luau": "b886b79f82b7d893c2a8e7440eb97ed5c04e0e83412677627d26019141f40456",
     "runtime/screen-control-error/provenance.json": "94e6747f4814acb4bd82ed7deb66f812cbae714969676d86ab2ef361df59c167",
