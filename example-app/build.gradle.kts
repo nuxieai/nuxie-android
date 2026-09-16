@@ -18,6 +18,7 @@ android {
     applicationId = "ai.nuxie.example"
     minSdk = 23
     targetSdk = 36
+    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     versionCode = 11
     versionName = "0.1.10"
   }
@@ -37,6 +38,8 @@ android {
 }
 
 dependencies {
+  androidTestImplementation(libs.androidx.test.runner)
+  androidTestImplementation(libs.junit)
   testImplementation(libs.junit)
   testImplementation(libs.robolectric)
   implementation(project(":nuxie-android"))
