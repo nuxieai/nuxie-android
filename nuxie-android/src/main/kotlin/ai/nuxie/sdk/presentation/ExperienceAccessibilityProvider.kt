@@ -35,6 +35,7 @@ internal class ExperienceAccessibilityProvider(
     private var hovered: Int? = null
     private data class SavedFocus(val nodeId: Long, val position: Int, val root: ExperienceFocusRoot, val revision: Long)
     private var savedAccessibilityFocus: SavedFocus? = null
+    private var lastOwnedAccessibilityFocus: SavedFocus? = null
     private var savedInputFocus: SavedFocus? = null
     private val keyboardIndicator = ExperienceKeyboardFocusDrawable(host.resources.displayMetrics.density)
 
@@ -70,6 +71,7 @@ internal class ExperienceAccessibilityProvider(
     }
 
     fun retire() {
+        lastOwnedAccessibilityFocus = null
         savedAccessibilityFocus = null
         savedInputFocus = null
         removeTree(preserveHostFocus = false)
@@ -85,7 +87,12 @@ internal class ExperienceAccessibilityProvider(
                 ?: accessibilityFocus?.let { index.entries[it]?.node?.id }
             val inputId = nativeViews.entries.firstOrNull { it.value.hasFocus() }?.key
                 ?: inputFocus?.let { index.entries[it]?.node?.id }
+            // TalkBack can clear virtual focus before Activity.onStop withdraws
+            // the tree. Keep its last owned target unless another control took focus.
             savedAccessibilityFocus = save(accessibilityId, root?.accessibilityRevision ?: 0)
+                ?: lastOwnedAccessibilityFocus?.takeIf {
+                    root === it.root && root.accessibilityRevision == it.revision
+                }
             savedInputFocus = save(inputId, root?.inputRevision ?: 0)
         }
         removeTree(preserveHostFocus = true)
@@ -257,6 +264,9 @@ internal class ExperienceAccessibilityProvider(
                 clearAccessibilityFocus()
                 accessibilityFocus = virtualViewId
                 send(virtualViewId, AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED)
+                lastOwnedAccessibilityFocus = ExperienceFocusRoot.containing(host)?.let { root ->
+                    SavedFocus(entry.node.id, index.readingOrder.indexOf(entry.node.id), root, root.accessibilityRevision)
+                }
                 host.invalidate()
                 return true
             }
