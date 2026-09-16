@@ -2274,6 +2274,7 @@ class PublishedTextInputDeviceTest {
             SystemClock.sleep(20)
         }
         assertEquals(expectedLabels.sorted(), published.mapNotNull { label(it) }.sorted())
+        var talkBackInput: TalkBackEmulatorInput? = null
         if (useTalkBack) {
             val manager = activity.getSystemService(android.view.accessibility.AccessibilityManager::class.java)
             assertTrue("Qualification requires the actual enabled TalkBack service",
@@ -2283,6 +2284,7 @@ class PublishedTextInputDeviceTest {
             fun focused() = automation.rootInActiveWindow?.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
             val input = TalkBackEmulatorInput(automation,
                 checkNotNull(InstrumentationRegistry.getArguments().getString("nuxieTalkBackInputDevice")))
+            talkBackInput = input
             val initialDeadline = SystemClock.uptimeMillis() + 5_000
             var initial = focused()
             while (initial == null && SystemClock.uptimeMillis() < initialDeadline) {
@@ -2345,9 +2347,26 @@ class PublishedTextInputDeviceTest {
             val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS)) { "Authored native action must reach durable Journey admission: $name" }
             assertEquals(listOf(name), batch.emissions.map { it.name })
         }
-        assertTrue(named("Seats").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_FORWARD))
+        val hardwareInput = talkBackInput
+        if (hardwareInput != null) {
+            for (expected in expectedLabels.drop(1).take(3)) {
+                hardwareInput.swipeForward()
+                val focusDeadline = SystemClock.uptimeMillis() + 2_000
+                var current = automation.rootInActiveWindow?.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+                while ((current == null || label(current) != expected) && SystemClock.uptimeMillis() < focusDeadline) {
+                    SystemClock.sleep(20)
+                    current = automation.rootInActiveWindow?.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+                }
+                assertEquals(expected, label(checkNotNull(current)))
+            }
+            hardwareInput.awaitAdjustableReadingControl()
+            hardwareInput.swipeUp()
+        } else {
+            assertTrue(named("Seats").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_FORWARD))
+        }
         awaitEmission("seat_increased")
-        assertTrue(named("Seats").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD))
+        if (hardwareInput != null) hardwareInput.swipeDown()
+        else assertTrue(named("Seats").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD))
         awaitEmission("seat_decreased")
         val arguments = Bundle().apply {
             putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "typed-password")
