@@ -389,6 +389,42 @@ class ExperienceSurfaceHostPointerTest {
     }
 
     @Test
+    fun `environment updates wait for pending presentation and apply before the next step`() {
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
+        val texture = SurfaceTexture(0)
+        try {
+            host.updateRuntimeValues(mapOf("safeArea/top" to NuxieViewModelScalarValue.NumberValue(12.0)))
+            host.loadArtboard(byteArrayOf(1), null, viewModelProjection =
+                NuxieViewModelListProjection("Root", "products", null, "Product", emptyList()))
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            native.presentation = 4
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.updateRuntimeValues(mapOf("safeArea/top" to NuxieViewModelScalarValue.NumberValue(18.0)))
+            host.updateRuntimeValues(mapOf("safeArea/top" to NuxieViewModelScalarValue.NumberValue(30.0)))
+            drain(lane)
+            assertEquals("Pending pixels retain their original model revision", listOf(12f), native.stateWrites)
+            native.presentation = 1
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            assertEquals(listOf(12f), native.stateWrites)
+            host.onSurfaceTextureUpdated(texture)
+            host.doFrame(1_032_000_000L)
+            drain(lane)
+            assertEquals(listOf(12f, 30f), native.stateWrites)
+            assertEquals(listOf(12f, 30f), native.stateAtSteps)
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
+    @Test
     fun `resume cancels a delivered press before the next gesture reaches the retained player`() {
         val native = RecordingNative()
         val lane = NuxieRuntimeLane()
@@ -822,6 +858,7 @@ class ExperienceSurfaceHostPointerTest {
         var boundStateFreed = false
         val stateWrites = mutableListOf<Float>()
         val stateAtPlayerCreation = mutableListOf<Float>()
+        val stateAtSteps = mutableListOf<Float>()
         override fun viewModelCatalog(fileHandle: Long) = NativeCallResult(0, NativeViewModelCatalog(
             arrayOf(NativeViewModelSchema(0, "Root", 0, 2, 0, 0, -1, false),
                 NativeViewModelSchema(1, "Product", 2, 0, 0, 0, -1, false)),
@@ -878,6 +915,7 @@ class ExperienceSurfaceHostPointerTest {
             pointerSteps += pointers
             elapsedSteps += elapsedSeconds
             order += "frame:${pointers.size}"
+            stateWrites.lastOrNull()?.let(stateAtSteps::add)
             return NativeCallResult(
                 0,
                 NativePlayerStepOutcome(
