@@ -299,7 +299,12 @@ internal class ExperienceTextInputOverlay(
             editor.rotation = Math.toDegrees(geometry.rotation.toDouble()).toFloat()
             editor.setTextSize(TypedValue.COMPLEX_UNIT_PX, (input.style.fontSize * sy).coerceAtLeast(1f))
             editor.letterSpacing = input.style.letterSpacing * sx / editor.textSize
-            editor.setLineSpacing(input.style.lineHeight * sy - editor.textSize, 1f)
+            // -1 means native font-natural height, not a negative pixel value.
+            // Explicit height is the baseline interval, so subtract actual font
+            // metrics rather than nominal text size (which excludes leading).
+            val extraLineSpacing = if (input.style.lineHeight == -1f) 0f
+                else input.style.lineHeight * sy - editor.paint.getFontMetricsInt(null)
+            editor.setLineSpacing(extraLineSpacing, 1f)
             editor.visibility = View.VISIBLE
         }
         avoidKeyboard()
