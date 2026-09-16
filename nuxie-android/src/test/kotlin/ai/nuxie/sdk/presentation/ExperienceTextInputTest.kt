@@ -1,5 +1,8 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NuxieTextGeometryCapture
+import ai.nuxie.sdk.runtime.NuxieTextRunGeometry
+import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.runtime.NativeViewModelSnapshot
 import ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance
 import ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue
@@ -14,6 +17,11 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.float
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.*
@@ -54,7 +62,7 @@ class ExperienceTextInputTest {
             host.layout(0, 0, 400, 400)
             overlay.layout(0, 0, 400, 400)
             overlay.update(snapshot())
-            val editor = overlay.getChildAt(0) as EditText
+            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
             fun present() {
                 overlay.updateSemantics(mapOf("name" to node))
                 provider.publish(tree, overlay.semanticViews())
@@ -87,7 +95,7 @@ class ExperienceTextInputTest {
         val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
         try {
-            val editor = overlay.getChildAt(0) as EditText
+            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
             val node = ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 6, 0, 0, 0, 0,
                 0f, 0f, 100f, 30f, "Your name", "", "Use your full name")
             controller.get().setContentView(overlay)
@@ -134,7 +142,7 @@ class ExperienceTextInputTest {
         val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, text, _, done -> writes += text; done(Result.success(Unit)) }, { throw it }, state)
         try {
-            val editor = overlay.getChildAt(0) as EditText
+            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
             val node = ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 6, 4096, 0, 0, 0,
                 0f, 0f, 100f, 30f, "Password", "", "")
             overlay.updateSemantics(mapOf("name" to node))
@@ -164,7 +172,7 @@ class ExperienceTextInputTest {
             controller.get().setContentView(overlay)
             overlay.layout(0, 0, 400, 400)
             overlay.update(snapshot())
-            val editor = overlay.getChildAt(0) as EditText
+            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
             val group = ai.nuxie.sdk.runtime.NativeSemanticNode(10, -1, 0, 9, 0, 0, 0, 0,
                 0f, 0f, 200f, 100f, "Group", "", "")
             val field = group.copy(id = 42, parentId = 10, role = 6, label = "Name")
@@ -209,7 +217,7 @@ class ExperienceTextInputTest {
         val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, text, _, done -> writes += text; done(Result.success(Unit)) },
             { throw it }, state)
-        val editor = overlay.getChildAt(0) as EditText
+        val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
         editor.setText(value("initialDraft"))
         val target = state.copyForPreparation()
         editor.setText(value("latestDraft"))
@@ -246,13 +254,13 @@ class ExperienceTextInputTest {
             listOf(input), emptyMap(), { _, value, _, done -> writes += value; callbacks += done },
             failures::add, state)
         val first = overlay()
-        val oldEditor = first.getChildAt(0) as EditText
+        val oldEditor = first.findViewWithTag<EditText>("nuxie-text-input-name")
         oldEditor.setText("Iris")
         oldEditor.setSelection(1, 3)
         val staleCompletion = callbacks.last()
         // Activity attachment may overlap its predecessor's asynchronous teardown.
         val second = overlay()
-        val editor = second.getChildAt(0) as EditText
+        val editor = second.findViewWithTag<EditText>("nuxie-text-input-name")
         assertEquals("Iris", editor.text.toString())
         assertEquals(1, editor.selectionStart)
         assertEquals(3, editor.selectionEnd)
@@ -265,7 +273,7 @@ class ExperienceTextInputTest {
         first.close()
         second.close()
         val third = overlay()
-        assertEquals("Iris", (third.getChildAt(0) as EditText).text.toString())
+        assertEquals("Iris", (third.findViewWithTag<EditText>("nuxie-text-input-name")).text.toString())
         third.close()
     }
 
@@ -280,7 +288,7 @@ class ExperienceTextInputTest {
             controller.get().setContentView(overlay)
             overlay.layout(0, 0, 400, 400)
             overlay.update(snapshot())
-            val editor = overlay.getChildAt(0) as EditText
+            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
             val node = ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 6, 0, 0, 0, 0,
                 10f, 20f, 90f, 40f, "Your name", "", "")
             overlay.updateSemantics(mapOf("name" to node))
@@ -305,6 +313,68 @@ class ExperienceTextInputTest {
     }
 
     @Test
+    fun `settled affine fields ignore local channels and retain active composition`() {
+        val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/text-input-affine.json").readText()).jsonObject
+        val controller = Robolectric.buildActivity(Activity::class.java).setup().visible()
+        val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(maxLength = null)
+        var writes = 0
+        val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
+            listOf(input), emptyMap(), { _, _, _, done -> writes++; done(Result.success(Unit)) }, { throw it })
+        try {
+            controller.get().setContentView(overlay)
+            val spec = View.MeasureSpec.makeMeasureSpec(400, View.MeasureSpec.EXACTLY)
+            overlay.measure(spec, spec)
+            overlay.layout(0, 0, 400, 400)
+            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+            var composing = false
+            for (entry in contract.getValue("cases").jsonArray) {
+                val item = entry.jsonObject
+                val coefficients = item.getValue("transform").jsonArray.map { it.jsonPrimitive.float }
+                val transform = NuxieTextRunGeometry.Transform(coefficients[0], coefficients[1], coefficients[2],
+                    coefficients[3], coefficients[4], coefficients[5])
+                val field = NuxieTextRunGeometry(1uL, transform, transform,
+                    NuxieTextRunGeometry.Bounds(0f, 0f, 10f, 20f),
+                    NuxieTextRunGeometry.Layout(transform, NuxieTextRunGeometry.Bounds(0f, 0f, 10f, 20f)), 12f)
+                overlay.update(snapshot(width = Float.NaN), NuxieTextGeometryCapture.Captured(mapOf(input.runName to field)))
+                overlay.measure(spec, spec)
+                overlay.layout(0, 0, 400, 400)
+                if (item.getValue("corners") == JsonNull) {
+                    assertEquals(View.INVISIBLE, editor.visibility)
+                    continue
+                }
+                assertEquals(View.VISIBLE, editor.visibility)
+                val corners = floatArrayOf(0f, 0f, editor.width.toFloat(), 0f,
+                    editor.width.toFloat(), editor.height.toFloat(), 0f, editor.height.toFloat())
+                editor.matrix.mapPoints(corners)
+                (editor.parent as View).matrix.mapPoints(corners)
+                item.getValue("corners").jsonArray.forEachIndexed { index, value ->
+                    assertEquals(item.getValue("name").jsonPrimitive.content,
+                        value.jsonPrimitive.float * 2f + if (index % 2 == 1) 100f else 0f, corners[index], 0.002f)
+                }
+                if (!composing) {
+                    assertTrue(editor.requestFocus())
+                    assertTrue(checkNotNull(editor.onCreateInputConnection(EditorInfo())).setComposingText("draft", 1))
+                    composing = true
+                }
+                val before = writes
+                val selection = editor.selectionStart
+                overlay.update(snapshot(), NuxieTextGeometryCapture.Captured(mapOf(input.runName to field)))
+                assertEquals("draft", editor.text.toString())
+                assertEquals(selection, editor.selectionStart)
+                assertTrue(android.view.inputmethod.BaseInputConnection.getComposingSpanStart(editor.text) >= 0)
+                assertEquals("Placement cannot emit text transactions", before, writes)
+            }
+            overlay.update(snapshot(), NuxieTextGeometryCapture.Failed(3))
+            assertEquals("Failure cannot restore local-channel placement", View.INVISIBLE, editor.visibility)
+            assertFalse(editor.isEnabled)
+            val beforeLateIme = writes
+            editor.setText("late IME write")
+            assertEquals("Missing geometry must fence writes", beforeLateIme, writes)
+        } finally { overlay.close(); controller.pause().stop().destroy() }
+    }
+
+    @Test
     fun `geometry uses renderer contain fit and invalid geometry hides editor`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(value = "abcd")
@@ -313,7 +383,7 @@ class ExperienceTextInputTest {
         activity.setContentView(overlay)
         overlay.layout(0, 0, 400, 400)
         overlay.update(snapshot())
-        val editor = overlay.getChildAt(0) as EditText
+        val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
         assertEquals("ab", editor.text.toString())
         assertEquals(View.VISIBLE, editor.visibility)
         assertEquals(20f, editor.x)
@@ -339,7 +409,7 @@ class ExperienceTextInputTest {
         activity.setContentView(overlay)
         overlay.layout(0, 0, 400, 400)
         overlay.update(snapshot())
-        val editor = overlay.getChildAt(0) as EditText
+        val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
         editor.requestFocus()
         val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
         connection.setComposingText("abc", 1)
@@ -367,7 +437,7 @@ class ExperienceTextInputTest {
             controller.get().setContentView(overlay)
             overlay.layout(0, 0, 400, 400)
             overlay.update(snapshot())
-            val editor = overlay.getChildAt(0) as EditText
+            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
             assertTrue(editor.requestFocus())
             val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
             assertTrue(connection.setComposingText("abc", 1))
@@ -404,7 +474,7 @@ class ExperienceTextInputTest {
         activity.setContentView(overlay)
         overlay.layout(0, 0, 400, 400)
         overlay.update(snapshot())
-        val editor = overlay.getChildAt(0) as EditText
+        val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
         assertEquals("abc" to false, writes.last())
         assertEquals(Color.TRANSPARENT, editor.currentTextColor)
         editor.requestFocus()
@@ -432,7 +502,7 @@ class ExperienceTextInputTest {
         val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
         activity.setContentView(overlay)
-        val editor = overlay.getChildAt(0) as EditText
+        val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
         val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
         editor.setSelection(1)
         connection.commitText("X", 1)
@@ -453,7 +523,7 @@ class ExperienceTextInputTest {
         val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
         activity.setContentView(overlay)
-        val editor = overlay.getChildAt(0) as EditText
+        val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
         val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
         editor.setSelection(1, 2)
         connection.setComposingText("XYZ", 1)

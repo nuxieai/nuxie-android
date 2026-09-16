@@ -61,8 +61,8 @@ internal class ExperienceMountedScreen(
                     awaitingSemanticPublication = false
                 }
             }
-            override fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot) {
-                textOverlay?.update(snapshot)
+            override fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot, geometry: ai.nuxie.sdk.runtime.NuxieTextGeometryCapture) {
+                textOverlay?.update(snapshot, geometry)
             }
         },
     )

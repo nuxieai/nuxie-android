@@ -108,7 +108,7 @@ class TextInputKeyboardDeviceTest {
                     { throw AssertionError(it) })
                 content.addView(overlay, FrameLayout.LayoutParams(-1, -1))
                 overlay!!.update(snapshot)
-                editor = overlay!!.getChildAt(0) as EditText
+                editor = overlay!!.findViewWithTag<EditText>("nuxie-text-input-name")
             }
             awaitUi(instrumentation, "Editor did not receive its authored layout") { editor.isShown && editor.height > 1 }
             var originalHostTop = 0

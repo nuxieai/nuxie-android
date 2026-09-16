@@ -31,7 +31,7 @@ class TextInputAccessibilityDeviceTest {
                     listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) },
                     { throw AssertionError(it) })
                 activity.setContentView(overlay)
-                editor = overlay!!.getChildAt(0) as EditText
+                editor = overlay!!.findViewWithTag<EditText>("nuxie-text-input-name")
                 // Independent native geometry isolates focus parking from the renderer.
                 editor.layoutParams = FrameLayout.LayoutParams(300, 100)
                 editor.visibility = View.VISIBLE

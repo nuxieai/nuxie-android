@@ -823,16 +823,19 @@ class ExperienceSurfaceHostPointerTest {
     }
 
     @Test fun `text snapshots cannot cross hide resize input suspension or retirement`() {
-        for (boundary in listOf("current", "hide", "resize", "input", "release", "pending-hide", "newer")) {
+        for (boundary in listOf("current", "hide", "resize", "input", "release", "pending-hide", "pending-current", "newer")) {
             val controller = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
-            val native = RecordingNative()
+            val native = RecordingNative().apply { geometryStatus = 3 }
             val lane = NuxieRuntimeLane()
             var delivered = 0
             val host = ExperienceSurfaceHost(controller.get(), lane, runtime = NuxieRuntime(native),
                 listener = object : ExperienceSurfaceHost.Listener {
                     override fun onFirstFrame() = Unit
                     override fun onFailure(error: ExperiencePresentationException) { throw error }
-                    override fun onTextInputSnapshot(snapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot) { delivered++ }
+                    override fun onTextInputSnapshot(snapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot, geometry: ai.nuxie.sdk.runtime.NuxieTextGeometryCapture) {
+                        delivered++
+                        assertEquals(ai.nuxie.sdk.runtime.NuxieTextGeometryCapture.Failed(3), geometry)
+                    }
                 })
             controller.get().setContentView(host)
             host.layout(0, 0, 100, 100)
@@ -843,15 +846,22 @@ class ExperienceSurfaceHostPointerTest {
                     textInputs = ExperienceTextInput.forScreen(textInputDescriptor(), "survey"))
                 host.onSurfaceTextureAvailable(texture, 100, 100)
                 drain(lane)
-                if (boundary == "pending-hide") native.presentation = 4
+                if (boundary.startsWith("pending-")) native.presentation = 4
                 host.doFrame(1_000_000_000L)
                 drain(lane)
                 assertEquals("Delivery stays on the UI queue", 0, delivered)
+                assertEquals(ExperienceTextInput.forScreen(textInputDescriptor(), "survey").map { it.runName },
+                    native.requestedTextRuns.single())
                 when (boundary) {
                     "hide" -> { host.setPresentationVisible(false); host.setPresentationVisible(true) }
                     "resize" -> host.onSurfaceTextureSizeChanged(texture, 200, 100)
                     "input" -> { host.setInputEnabled(false); host.setInputEnabled(true) }
                     "release" -> host.release()
+                    "pending-current" -> {
+                        native.geometryStatus = 4
+                        native.presentation = 1
+                        host.doFrame(1_016_000_000L)
+                    }
                     "pending-hide" -> {
                         host.setPresentationVisible(false)
                         host.setPresentationVisible(true)
@@ -867,7 +877,7 @@ class ExperienceSurfaceHostPointerTest {
                 drain(lane)
                 android.view.Choreographer.getInstance().removeFrameCallback(host)
                 org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-                assertEquals("Queued snapshot at $boundary", if (boundary == "current" || boundary == "newer") 1 else 0, delivered)
+                assertEquals("Queued snapshot at $boundary", if (boundary == "current" || boundary == "pending-current" || boundary == "newer") 1 else 0, delivered)
             } finally {
                 host.release()
                 lane.shutdown()
@@ -888,6 +898,8 @@ class ExperienceSurfaceHostPointerTest {
         MotionEvent.obtain(0, eventTime, action, x, y, 0)
 
     private class RecordingNative : NuxieTypedRuntimeNative {
+        var geometryStatus: Int? = null
+        val requestedTextRuns = mutableListOf<List<String>>()
         var semanticsEnabled = 0
         var semanticCaptures = 0
         var semanticCaptureStatus = 0
@@ -972,6 +984,7 @@ class ExperienceSurfaceHostPointerTest {
             correlationId: Long,
             textRunNames: List<String>,
         ): NativeCallResult<NativePlayerStepOutcome> {
+            requestedTextRuns += textRunNames
             pointerSteps += pointers
             elapsedSteps += elapsedSeconds
             order += "frame:${pointers.size}"
@@ -984,6 +997,7 @@ class ExperienceSurfaceHostPointerTest {
                     events = events.also { events = emptyArray() },
                     hostCommands = emptyArray(),
                     viewModelChanges = emptyArray(),
+                    textGeometry = geometryStatus?.let { ai.nuxie.sdk.runtime.NativeTextGeometryCapture(it, emptyArray()) },
                 ),
             )
         }
