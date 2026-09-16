@@ -37,3 +37,18 @@ The signed authored-role case uses the production-published shared fixture, cand
 ## Remaining acceptance work
 
 The shared accessibility spec in the parent repository remains authoritative. Full published-scene control activation and ordered effects, directional entry from outside the scene, rotation/RTL/keyboard avoidance, transition focus handoff and rollback, loading/retry and identity withdrawal must be qualified. TalkBack, switch access, physical input and the UIKit/VoiceOver adapter remain required. Capability admission and publisher rollout must wait for cross-platform qualification; merging internal adapter infrastructure does not waive those requirements.
+
+
+## Actual TalkBack emulator traversal
+
+The opt-in probe runs the installed TalkBack service alongside UiAutomation and checks that forward swipes visit all eight signed authored identities in order, including both repeated labels and the single secure native editor. The remaining increment/decrement and edit/Done assertions use direct accessibility/native editor calls; they do not establish TalkBack activation or spoken-output correctness.
+
+Use a dedicated rooted 64-bit API 34+ emulator with TalkBack installed and its primary virtio touchscreen (0..32767 axes). Inspect `adb -s emulator-5556 shell su 0 cat /sys/class/input/event1/device/name`; the selected event must report `virtio_input_multi_touch_1`. The event number may differ across emulators.
+
+```sh
+python3 scripts/test-talkback.py --serial emulator-5556 --input-device /dev/input/event1 --repeat 2
+```
+
+The driver temporarily enables TalkBack and restores/read-checks all three accessibility settings in a `finally` block, including failed test runs. UiAutomation uses `FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES`. Framework-injected keys/swipes did not advance TalkBack in the Android Settings control probe; timed evdev input did. The test therefore writes a hardware swipe to the explicitly validated emulator device, captures writer errors, and observes focus from the real service. This helper is not a physical-device input driver.
+
+[UiAutomation shell descriptors](https://developer.android.com/reference/android/app/UiAutomation#executeShellCommandRwe(java.lang.String)) and [TalkBack navigation gestures](https://support.google.com/accessibility/android/answer/6006598) describe the underlying APIs and interaction. Physical TalkBack exploration, speech, activation, backward traversal, editing and transition/focus recovery remain separate acceptance work.
