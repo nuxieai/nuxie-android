@@ -138,13 +138,15 @@ class MainActivity : Activity() {
         testStoreEnabled = BuildConfig.DEBUG && intent.getBooleanExtra(EXTRA_TEST_STORE, false)
         intent.getStringExtra(EXTRA_API_ENDPOINT)?.let { testingOverrides.apiEndpoint = URL(it) }
       }
-      ExamplePurchaseProvider.configure(
-        application as ExampleApplication, intent.getStringExtra("nuxie_provider_key"),
-        intent.getStringExtra(EXTRA_DISTINCT_ID), configuration,
-      )
       Nuxie.listener = listener
-      Nuxie.setup(this, configuration)
-      intent.getStringExtra(EXTRA_DISTINCT_ID)?.let(Nuxie::identify)
+      if (!Nuxie.isSetup) {
+        ExamplePurchaseProvider.configure(
+          application as ExampleApplication, intent.getStringExtra("nuxie_provider_key"),
+          intent.getStringExtra(EXTRA_DISTINCT_ID), configuration,
+        )
+        Nuxie.setup(this, configuration)
+        intent.getStringExtra(EXTRA_DISTINCT_ID)?.let(Nuxie::identify)
+      }
       observeFeatures = true
       status.text = getString(R.string.setup_status, Nuxie.version) +
         if (configuration.testStoreEnabled) " Test Store enabled; no Play charges." else " ${ExamplePurchaseProvider.name}."
