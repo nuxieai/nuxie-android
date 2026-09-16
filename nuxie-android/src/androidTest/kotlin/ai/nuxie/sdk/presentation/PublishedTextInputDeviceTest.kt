@@ -2079,7 +2079,7 @@ class PublishedTextInputDeviceTest {
             val first = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
             if (behavior == PublishedBehavior.SEMANTIC_ROLES) {
                 assertTrue("Authored roles require a revealed presentation", initiallyRevealed.await(10, TimeUnit.SECONDS))
-                assertAuthoredRoles(instrumentation, accepted) { journalRun().context.getValue("responses").jsonObject }
+                assertAuthoredRoles(instrumentation, first, accepted) { journalRun().context.getValue("responses").jsonObject }
                 assertEquals(artifactFiles.keys, downloaded.toSet())
                 return
             }
@@ -2251,6 +2251,7 @@ class PublishedTextInputDeviceTest {
 
     private fun assertAuthoredRoles(
         instrumentation: Instrumentation,
+        activity: Activity,
         accepted: LinkedBlockingQueue<JourneyScreenEmissionBatch>,
         responses: () -> JsonObject,
     ) {
@@ -2273,7 +2274,8 @@ class PublishedTextInputDeviceTest {
         fun named(name: String) = checkNotNull(nodes().singleOrNull { label(it) == name })
         val selected = named("Annual plan")
         assertTrue(selected.isCheckable)
-        assertTrue(selected.isChecked)
+        assertTrue(selected.isSelected)
+        assertFalse("Selection must not invent a checked state", selected.isChecked)
         val disabled = named("Unavailable")
         assertFalse(disabled.isEnabled)
         assertFalse(disabled.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK))
@@ -2282,7 +2284,10 @@ class PublishedTextInputDeviceTest {
         assertTrue(field.isEditable)
         assertTrue(field.isPassword)
         assertEquals(1, nodes().count { it.isEditable })
-        assertTrue(field.text.isNullOrEmpty())
+        val editor = awaitEditor(instrumentation, activity, "text-input/screen_1/password")
+        instrumentation.runOnMainSync { assertEquals("", editor.text.toString()) }
+        assertTrue("An empty Android editor may expose its placeholder", field.text.isNullOrEmpty() || field.isShowingHintText)
+        assertEquals("Password", field.hintText?.toString())
         fun awaitEmission(name: String) {
             val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS)) { "Authored native action must reach durable Journey admission: $name" }
             assertEquals(listOf(name), batch.emissions.map { it.name })
@@ -2294,7 +2299,9 @@ class PublishedTextInputDeviceTest {
         val arguments = Bundle().apply {
             putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "typed-password")
         }
+        assertTrue(named("Password").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_FOCUS))
         assertTrue(named("Password").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, arguments))
+        instrumentation.runOnMainSync { editor.onEditorAction(android.view.inputmethod.EditorInfo.IME_ACTION_DONE) }
         awaitEmission("\$response_set")
         assertEquals("typed-password", responses().getValue("password").jsonPrimitive.content)
         assertFalse(nodes().any { it.text?.toString() == "typed-password" || it.contentDescription?.toString() == "typed-password" })
