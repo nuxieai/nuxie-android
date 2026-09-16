@@ -822,6 +822,62 @@ class ExperienceSurfaceHostPointerTest {
         }
     }
 
+    @Test fun `text snapshots cannot cross hide resize input suspension or retirement`() {
+        for (boundary in listOf("current", "hide", "resize", "input", "release", "pending-hide", "newer")) {
+            val controller = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+            val native = RecordingNative()
+            val lane = NuxieRuntimeLane()
+            var delivered = 0
+            val host = ExperienceSurfaceHost(controller.get(), lane, runtime = NuxieRuntime(native),
+                listener = object : ExperienceSurfaceHost.Listener {
+                    override fun onFirstFrame() = Unit
+                    override fun onFailure(error: ExperiencePresentationException) { throw error }
+                    override fun onTextInputSnapshot(snapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot) { delivered++ }
+                })
+            controller.get().setContentView(host)
+            host.layout(0, 0, 100, 100)
+            val texture = SurfaceTexture(0)
+            try {
+                host.loadArtboard(byteArrayOf(1), null,
+                    viewModelProjection = NuxieViewModelListProjection("Root", "products", null, "Product", emptyList()),
+                    textInputs = ExperienceTextInput.forScreen(textInputDescriptor(), "survey"))
+                host.onSurfaceTextureAvailable(texture, 100, 100)
+                drain(lane)
+                if (boundary == "pending-hide") native.presentation = 4
+                host.doFrame(1_000_000_000L)
+                drain(lane)
+                assertEquals("Delivery stays on the UI queue", 0, delivered)
+                when (boundary) {
+                    "hide" -> { host.setPresentationVisible(false); host.setPresentationVisible(true) }
+                    "resize" -> host.onSurfaceTextureSizeChanged(texture, 200, 100)
+                    "input" -> { host.setInputEnabled(false); host.setInputEnabled(true) }
+                    "release" -> host.release()
+                    "pending-hide" -> {
+                        host.setPresentationVisible(false)
+                        host.setPresentationVisible(true)
+                        native.presentation = 1
+                        host.doFrame(1_016_000_000L)
+                    }
+                    "newer" -> {
+                        host.onSurfaceTextureUpdated(texture)
+                        drain(lane)
+                        host.doFrame(1_016_000_000L)
+                    }
+                }
+                drain(lane)
+                android.view.Choreographer.getInstance().removeFrameCallback(host)
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                assertEquals("Queued snapshot at $boundary", if (boundary == "current" || boundary == "newer") 1 else 0, delivered)
+            } finally {
+                host.release()
+                lane.shutdown()
+                assertTrue(lane.awaitQuiescence(2_000))
+                texture.release()
+                controller.pause().stop().destroy()
+            }
+        }
+    }
+
     private fun drain(lane: NuxieRuntimeLane) {
         val drained = CountDownLatch(1)
         assertTrue(lane.enqueue { drained.countDown() })
@@ -866,6 +922,9 @@ class ExperienceSurfaceHostPointerTest {
                 NativeViewModelProperty(0, 1, "products", 8, 1, emptyArray())), emptyArray(),
         ))
         override fun newDefaultViewModel(artboardHandle: Long) = NativeCallResult(0, 40L)
+        override fun snapshotViewModel(viewModelHandle: Long) = NativeCallResult(0,
+            ai.nuxie.sdk.runtime.NativeViewModelSnapshot(40L,
+                arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(40L, 0L)), emptyArray()))
         override fun bindViewModel(artboardHandle: Long, viewModelHandle: Long) = 0
         override fun freeViewModel(handle: Long): Int { boundStateFreed = true; return 0 }
         override fun mutateViewModel(handle: Long, write: NativeViewModelWrite): Int {

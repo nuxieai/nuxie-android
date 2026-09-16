@@ -204,7 +204,13 @@ internal class ExperienceSurfaceHost(
     // SUBMITTED retains the exact frame until native completion. Polling must
     // neither step the player nor publish effects from its unfinished frame.
     private var pendingPresentation = false
-    private var submittedSnapshot: NuxieViewModelSnapshot? = null
+    private data class SubmittedTextSnapshot(
+        val snapshot: NuxieViewModelSnapshot,
+        val generation: Long,
+        val epoch: Long,
+    )
+    private var submittedSnapshot: SubmittedTextSnapshot? = null
+    private val textPublication = AtomicLong()
     private var textInputs: Map<String, ExperienceTextInput> = emptyMap()
     private val runtimeValues = linkedMapOf<String, NuxieViewModelScalarValue>()
     private var runtimeValuesPending = false
@@ -662,7 +668,7 @@ internal class ExperienceSurfaceHost(
                     if (outcome.hasPublishableEffects()) {
                         unpublishedSteps.addLast(PublishedStep(correlationId, outcome, viewModelSnapshot))
                     }
-                    submittedSnapshot = viewModelSnapshot
+                    submittedSnapshot = viewModelSnapshot?.let { SubmittedTextSnapshot(it, generation, epoch) }
                     if (!firstFramePresented) firstFrameUpdateBaseline = surfaceUpdates.get()
                 }
                 val disposition = renderer.renderAndPresent(player, window, clearColor, true)
@@ -678,11 +684,19 @@ internal class ExperienceSurfaceHost(
                         reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Experience semantic capture failed", error)
                         return@enqueue
                     }
-                    val viewModelSnapshot = submittedSnapshot
+                    val submitted = submittedSnapshot
                     submittedSnapshot = null
-                    if (textInputs.isNotEmpty() && viewModelSnapshot != null) {
+                    val publication = textPublication.incrementAndGet()
+                    if (textInputs.isNotEmpty() && submitted != null) {
                         post {
-                            if (!released.get()) listener?.onTextInputSnapshot(viewModelSnapshot)
+                            // A delayed completion keeps the submission's lifecycle identity.
+                            // Hide/resize/input changes invalidate it even if the host resumes
+                            // before this UI callback executes; newer delivered frames supersede it.
+                            if (!released.get() && running && sceneInputEnabled.get() &&
+                                submitted.generation == frameGeneration.get() &&
+                                submitted.epoch == semanticEpoch.get() && publication == textPublication.get()) {
+                                listener?.onTextInputSnapshot(submitted.snapshot)
+                            }
                         }
                     }
                     if (!firstFramePresented) {
