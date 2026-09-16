@@ -1,7 +1,7 @@
 # Android integration example
 
 This app demonstrates public SDK setup, optional identification, an authored
-trigger, Feature access, restore, identity reset and activity forwarding to a
+trigger, reactive Feature access, restore, identity reset and activity forwarding to a
 bounded local analytics sink. It does not show an Experience directly: the
 configured Journey decides whether a trigger presents anything.
 
@@ -49,6 +49,13 @@ in this app.
 
 - **Send event** submits a trigger; its return does not acknowledge durable
   capture or guarantee a matching Journey.
+- **Current Feature access** observes `Nuxie.features.snapshot` while the Activity
+  is started. It reads readiness and access from the same publication: Unknown
+  waits for hydration, Reconciling shows pending server confirmation, and Ready
+  displays denied, allowed, metered balance or unlimited access. The collector
+  stops with the Activity and receives the latest snapshot when it starts again;
+  identity reset does not retain a separate copy of the old customer's access.
+  This display does not authorize an action or reserve metered quota.
 - **Check access** calls suspend `Nuxie.hasFeature` from an Activity-owned
   coroutine and displays the access/balance decision. It does not consume usage.
   A cached access check is not an atomic quota reservation for a protected action.

@@ -24,6 +24,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
@@ -32,6 +34,10 @@ class MainActivity : Activity() {
   private val buttons = mutableListOf<Button>()
   private lateinit var status: TextView
   private lateinit var analytics: TextView
+  private lateinit var featureStatus: TextView
+  private lateinit var observedFeature: String
+  private var observeFeatures = false
+  private var featureObservation: Job? = null
   private val listener = object : NuxieListener {
     override fun onAppActionRequested(sdk: Nuxie, action: AppAction) {
       status.text = "App Action requested: ${action.name}"
@@ -47,8 +53,13 @@ class MainActivity : Activity() {
     super.onCreate(savedInstanceState)
     val event = intent.getStringExtra(EXTRA_TRIGGER_EVENT) ?: "example_opened"
     val feature = intent.getStringExtra(EXTRA_FEATURE_ID) ?: "exports"
+    observedFeature = feature
     status = TextView(this).apply { gravity = Gravity.CENTER_HORIZONTAL }
     analytics = TextView(this).apply { text = "Analytics sink: local only" }
+    featureStatus = TextView(this).apply {
+      text = "Feature access will appear after setup."
+      accessibilityLiveRegion = android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE
+    }
     val content = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
       gravity = Gravity.CENTER_HORIZONTAL
@@ -60,6 +71,7 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 28) isAccessibilityHeading = true
       })
       addView(status)
+      addView(featureStatus)
     }
     fun button(label: String, action: () -> Unit) {
       val control = Button(this).apply { text = label; setOnClickListener { action() } }
@@ -133,6 +145,7 @@ class MainActivity : Activity() {
       Nuxie.listener = listener
       Nuxie.setup(this, configuration)
       intent.getStringExtra(EXTRA_DISTINCT_ID)?.let(Nuxie::identify)
+      observeFeatures = true
       status.text = getString(R.string.setup_status, Nuxie.version) +
         if (configuration.testStoreEnabled) " Test Store enabled; no Play charges." else " ${ExamplePurchaseProvider.name}."
     } catch (_: Exception) {
@@ -156,6 +169,24 @@ class MainActivity : Activity() {
         buttons.forEach { it.isEnabled = true }
       }
     }
+  }
+
+  override fun onStart() {
+    super.onStart()
+    if (observeFeatures) {
+      featureObservation = scope.launch {
+        Nuxie.features.snapshot.collect { snapshot ->
+          val summary = featureAccessSummary(observedFeature, snapshot)
+          if (featureStatus.text.toString() != summary) featureStatus.text = summary
+        }
+      }
+    }
+  }
+
+  override fun onStop() {
+    featureObservation?.cancel()
+    featureObservation = null
+    super.onStop()
   }
 
   override fun onDestroy() {
