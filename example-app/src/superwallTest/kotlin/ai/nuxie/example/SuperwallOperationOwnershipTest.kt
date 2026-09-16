@@ -26,6 +26,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.*
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -34,6 +35,7 @@ import org.robolectric.annotation.Config
 class SuperwallOperationOwnershipTest {
   @Test fun actualPurchaseContinuationOutlivesWaiterAndHoldsDrain() = runTest {
     val dispatcher = StandardTestDispatcher(testScheduler)
+    val journal = ProviderOperationJournal(RuntimeEnvironment.getApplication().getSharedPreferences("provider-callbacks", 0), dispatcher)
     Dispatchers.setMain(dispatcher)
     try {
       val constructor = ProductDetails::class.java.getDeclaredConstructor(String::class.java)
@@ -57,10 +59,11 @@ class SuperwallOperationOwnershipTest {
           else -> RETURNS_DEFAULTS.answer(it)
         }
       }
-      val owner = ProviderOperations(NuxieSuperwallPurchaseDelegate(superwall), dispatcher)
+      val owner = ProviderOperations(NuxieSuperwallPurchaseDelegate(superwall), dispatcher, journal)
       val waiter = async { owner.purchase(product) }
       testScheduler.runCurrent()
       assertEquals(1, calls)
+      assertTrue(journal.hasUnfinished())
       val beforeCompletion = identityReads
       waiter.cancelAndJoin()
       val drain = async { owner.closeAndAwait() }
@@ -70,6 +73,7 @@ class SuperwallOperationOwnershipTest {
       assertEquals(1, calls)
       continuation.resume(Result.success(SuperwallPurchaseResult.Purchased()))
       drain.await()
+      assertFalse(journal.hasUnfinished())
       assertEquals(beforeCompletion + 1, identityReads)
     } finally {
       Dispatchers.resetMain()

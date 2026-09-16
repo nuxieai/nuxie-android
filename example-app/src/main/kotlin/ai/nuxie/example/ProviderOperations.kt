@@ -21,30 +21,27 @@ import kotlinx.coroutines.joinAll
 internal class ProviderOperations(
   private val delegate: NuxiePurchaseDelegate,
   dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
+  private val journal: ProviderOperationJournal? = null,
 ) : NuxiePurchaseDelegate {
   private val scope = CoroutineScope(SupervisorJob() + dispatcher)
   private val lock = Any()
   private val pending = mutableSetOf<Deferred<*>>()
   private var closed = false
-  private var pendingPayment = false
+  private var requiresRecovery = false
 
   override suspend fun purchase(product: StoreProduct): PurchaseResult =
-    submit {
-      delegate.purchase(product).also { result ->
-        if (result == PurchaseResult.Pending) synchronized(lock) { pendingPayment = true }
-      }
-    } ?: PurchaseResult.Failed(closedFailure())
+    submit { delegate.purchase(product) } ?: PurchaseResult.Failed(closedFailure())
 
   override suspend fun restorePurchases(): RestoreResult =
     submit { delegate.restorePurchases() } ?: RestoreResult.Failed(closedFailure())
+
+  fun closeAdmission() { synchronized(lock) { closed = true } }
 
   /**
    * Permanently close admission and await admitted callbacks. Concurrent callers
    * may join this drain; cancelling one caller leaves ownership intact.
    * This does not log out the provider or certify finality of a pending payment.
    */
-  fun closeAdmission() { synchronized(lock) { closed = true } }
-
   suspend fun closeAndAwait() {
     val admitted = synchronized(lock) {
       closed = true
@@ -52,7 +49,7 @@ internal class ProviderOperations(
     }
     admitted.joinAll()
     scope.cancel()
-    if (synchronized(lock) { pendingPayment }) throw ProviderRecoveryRequired()
+    if (synchronized(lock) { requiresRecovery } || journal?.hasUnfinished() == true) throw ProviderRecoveryRequired()
   }
 
   private suspend fun <T : Any> submit(operation: suspend () -> T): T? {
@@ -61,10 +58,23 @@ internal class ProviderOperations(
       caller.ensureActive()
       if (closed) return null
       // Register before dispatch so close cannot miss an admitted operation.
-      scope.async(start = CoroutineStart.LAZY) { operation() }.also { pending += it }
+      scope.async(start = CoroutineStart.LAZY) {
+        val marker = journal?.begin()
+        val result = operation()
+        val paymentPending = result == PurchaseResult.Pending
+        // Failed results do not distinguish rejection before dispatch from an
+        // ambiguous outcome after checkout. Preserve ownership in either case.
+        val failed = result is PurchaseResult.Failed || result is RestoreResult.Failed
+        if (paymentPending || failed) synchronized(lock) { requiresRecovery = true }
+        if (marker != null && !failed) requireNotNull(journal).finish(marker, paymentPending)
+        result
+      }.also { pending += it }
     }
     job.invokeOnCompletion { failure ->
-      synchronized(lock) { pending -= job }
+      synchronized(lock) {
+        pending -= job
+        if (failure != null) requiresRecovery = true
+      }
       if (failure != null) {
         // A cancelled waiter may no longer observe this failure. Never log
         // provider exception messages, which may contain customer data.
@@ -78,4 +88,4 @@ internal class ProviderOperations(
   private fun closedFailure() = IllegalStateException("Provider session is closing.")
 }
 
-internal class ProviderRecoveryRequired : IllegalStateException("Pending payment requires reconciliation.")
+internal class ProviderRecoveryRequired : IllegalStateException("Unfinished provider activity requires reconciliation.")

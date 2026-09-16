@@ -16,11 +16,12 @@ class ExampleApplication : Application(), Application.ActivityLifecycleCallbacks
 
   internal fun ownProviderOperations(configuration: NuxieConfiguration) {
     val delegate = configuration.purchaseDelegate ?: return
-    val owner = providerOperations ?: ProviderOperations(delegate)
+    val owner = providerOperations ?: ProviderOperations(delegate, journal = providerOperationJournal)
     providerOperations = owner
     configuration.purchaseDelegate = owner
   }
 
+  internal val providerOperationJournal by lazy { ProviderOperationJournal(getSharedPreferences("example-session", MODE_PRIVATE)) }
   internal val logoutJournal by lazy { LogoutJournal(getSharedPreferences("example-session", MODE_PRIVATE)) }
   internal var sessionLogout: SessionLogout? = null
     private set
