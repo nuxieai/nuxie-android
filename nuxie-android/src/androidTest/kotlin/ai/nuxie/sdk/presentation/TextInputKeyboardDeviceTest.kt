@@ -1,6 +1,8 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.runtime.NativeViewModelSnapshot
+import ai.nuxie.sdk.runtime.NuxieTextGeometryCapture
+import ai.nuxie.sdk.runtime.NuxieTextRunGeometry
 import ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance
 import ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue
 import ai.nuxie.sdk.runtime.NuxieRuntime
@@ -107,7 +109,7 @@ class TextInputKeyboardDeviceTest {
                     listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) },
                     { throw AssertionError(it) })
                 content.addView(overlay, FrameLayout.LayoutParams(-1, -1))
-                overlay!!.update(snapshot)
+                overlay!!.update(snapshot, capturedGeometry())
                 editor = overlay!!.findViewWithTag<EditText>("nuxie-text-input-name")
             }
             awaitUi(instrumentation, "Editor did not receive its authored layout") { editor.isShown && editor.height > 1 }
@@ -154,10 +156,10 @@ class TextInputKeyboardDeviceTest {
                     "visible=${editor.rootWindowInsets?.isVisible(WindowInsets.Type.ime())}, focused=${editor.hasFocus()}", shift < 0f)
                 assertEquals(originalHostTop + shift, screenTop(host).toFloat(), 2f)
                 assertEquals(originalEditorTop + shift, screenTop(editor).toFloat(), 2f)
-                repeat(10) { overlay!!.update(snapshot) }
+                repeat(10) { overlay!!.update(snapshot, capturedGeometry()) }
                 assertEquals("Repeated geometry updates must not accumulate a keyboard shift", shift, content.translationY, 2f)
                 val rotated = geometry(rotation = (Math.PI / 2).toFloat(), y = 700f)
-                overlay!!.update(rotated)
+                overlay!!.update(rotated, capturedGeometry(rotation = (Math.PI / 2).toFloat(), y = 700f))
                 val rotatedBounds = Rect()
                 assertTrue(editor.getGlobalVisibleRect(rotatedBounds))
                 assertEquals("Rotated field must not be clipped", editor.width.toFloat(), rotatedBounds.height().toFloat(), 2f)
@@ -165,7 +167,7 @@ class TextInputKeyboardDeviceTest {
                 val keyboardTop = screenTop(root) + root.height - root.rootWindowInsets.getInsets(WindowInsets.Type.ime()).bottom
                 assertTrue("Rotated field remained under keyboard", rotatedBounds.bottom <= keyboardTop)
                 val rotatedShift = content.translationY
-                repeat(10) { overlay!!.update(rotated) }
+                repeat(10) { overlay!!.update(rotated, capturedGeometry(rotation = (Math.PI / 2).toFloat(), y = 700f)) }
                 assertEquals(rotatedShift, content.translationY, 2f)
                 val ime = owner.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
                 ime.hideSoftInputFromWindow(editor.windowToken, 0)
@@ -202,6 +204,18 @@ class TextInputKeyboardDeviceTest {
         var details = ""
         instrumentation.runOnMainSync { details = diagnosis() }
         fail("$message $details")
+    }
+
+    private fun capturedGeometry(rotation: Float = 0f, y: Float = 900f): NuxieTextGeometryCapture {
+        val c = kotlin.math.cos(rotation)
+        val s = kotlin.math.sin(rotation)
+        // Rotate the fixture around its center so its entire field stays on screen.
+        val transform = NuxieTextRunGeometry.Transform(c, s, -s, c,
+            110f - c * 100f + s * 30f, y + 30f - s * 100f - c * 30f)
+        val bounds = NuxieTextRunGeometry.Bounds(0f, 0f, 200f, 60f)
+        return NuxieTextGeometryCapture.Captured(mapOf("headline" to NuxieTextRunGeometry(
+            1uL, transform, transform, bounds, NuxieTextRunGeometry.Layout(transform, bounds), null,
+        )))
     }
 
     private fun geometry(rotation: Float = 0f, y: Float = 900f): NuxieViewModelSnapshot = NuxieViewModelSnapshot.fromNative(

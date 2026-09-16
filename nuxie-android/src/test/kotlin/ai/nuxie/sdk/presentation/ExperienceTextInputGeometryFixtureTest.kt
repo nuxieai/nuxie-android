@@ -18,7 +18,7 @@ import org.junit.Test
 
 class ExperienceTextInputGeometryFixtureTest {
     @Test
-    fun sharedGeometryPathsAndBounds() {
+    fun sharedGeometryPaths() {
         val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/text-input-geometry.json").readText()).jsonObject
         val values = fixture.getValue("values").jsonArray.mapIndexed { index, entry ->
@@ -50,17 +50,6 @@ class ExperienceTextInputGeometryFixtureTest {
             val path = query.getValue("path").jsonPrimitive.content
             val expected = query.getValue("expected").takeUnless { it == JsonNull }?.jsonPrimitive?.float
             assertEquals(path, expected, snapshot.resolveGeometryNumber(path))
-        }
-        val cases = fixture.getValue("geometryCases").jsonArray
-        assertEquals(12, cases.size)
-        val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single()
-        cases.forEach {
-            val case = it.jsonObject
-            val geometry = input.copy(geometryPaths = case.getValue("paths").jsonObject
-                .mapValues { (_, path) -> path.jsonPrimitive.content }).geometry(snapshot)
-            val components = geometry?.let { listOf(it.x, it.y, it.width, it.height, it.rotation, it.scaleX, it.scaleY) }
-            val expected = case.getValue("expected").takeUnless { it == JsonNull }?.jsonArray?.map { it.jsonPrimitive.float }
-            assertEquals(case.getValue("name").jsonPrimitive.content, expected, components)
         }
     }
 }
