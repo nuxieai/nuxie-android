@@ -500,6 +500,19 @@ internal class NuxieRuntimePlayer internal constructor(
     private var interactionStepPending = true
     private var stepFailed = false
 
+    fun videoClock(component: Long, monotonicSeconds: Double, clock: NuxieVideoClock) {
+        require(component >= 0 && monotonicSeconds.isFinite() && monotonicSeconds >= 0)
+        require(clock.seconds.isFinite() && clock.seconds >= 0 && clock.rate.isFinite() && clock.rate >= 0)
+        val status = native.videoClock(requireHandle(), component, monotonicSeconds, clock)
+        if (status != NUX_STATUS_OK) throw NuxieRuntimeCallException("video clock", status)
+    }
+
+    fun videoPresent(renderer: NuxieAndroidVulkanRenderer, component: Long, frame: NuxieVideoFrame) {
+        require(component >= 0)
+        val status = native.videoPresent(renderer.requireHandle(), requireHandle(), component, frame)
+        if (status != NUX_STATUS_OK) throw NuxieRuntimeCallException("video frame", status)
+    }
+
     fun videos(): List<NuxieVideoOccurrence> = native.videoOccurrences(requireHandle())
 
     fun videoCommand(component: Long, kind: Int, value: Double = 0.0, reason: Int = 0) {

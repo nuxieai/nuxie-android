@@ -358,6 +358,9 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         videoEnabled: Boolean = false,
     ): Long = error("newFile is not implemented")
 
+    fun videoClock(player: Long, component: Long, monotonicSeconds: Double, clock: NuxieVideoClock): Int = error("videoClock is not implemented")
+    fun videoPresent(renderer: Long, player: Long, component: Long, frame: NuxieVideoFrame): Int = error("videoPresent is not implemented")
+
     fun videoOccurrences(player: Long): List<NuxieVideoOccurrence> = error("videoOccurrences is not implemented")
     fun videoCommand(player: Long, component: Long, kind: Int, value: Double, reason: Int): Int = error("videoCommand is not implemented")
     fun videoStep(player: Long, component: Long, observation: Int, generation: Long, value: Double): List<NuxieVideoAction> = error("videoStep is not implemented")
@@ -503,6 +506,14 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         imageDecoder,
         videoEnabled,
     )
+
+    override fun videoClock(player: Long, component: Long, monotonicSeconds: Double, clock: NuxieVideoClock): Int =
+        NuxieRuntimeBridge.nativeVideoClock(player, component, monotonicSeconds, clock.generation,
+            clock.seconds, clock.rate, clock.playing, clock.available)
+
+    override fun videoPresent(renderer: Long, player: Long, component: Long, frame: NuxieVideoFrame): Int =
+        NuxieRuntimeBridge.nativeVideoPresent(renderer, player, component, frame.generation,
+            frame.seconds, frame.width, frame.height, frame.rgba)
 
     override fun videoOccurrences(player: Long): List<NuxieVideoOccurrence> {
         val status = intArrayOf(-1)

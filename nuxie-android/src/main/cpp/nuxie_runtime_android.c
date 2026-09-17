@@ -12,6 +12,7 @@
 #endif
 #include <jni.h>
 #include <limits.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -3385,4 +3386,49 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoStep(
       nux_player_video_step(from_handle(player), (size_t)component, (uint32_t)observation,
           (uint64_t)generation, value, video_action_callback, &c);
   return video_collector_finish(&c, status, status_out);
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoClock(
+    JNIEnv *env, jobject self, jlong player, jlong component, jdouble monotonic_seconds,
+    jlong generation, jdouble seconds, jdouble rate, jboolean playing, jboolean available) {
+  (void)env; (void)self;
+  if (component < 0) return NUX_STATUS_INVALID_ARGUMENT;
+  struct NuxVideoClockSample clock = {
+      .generation = (uint64_t)generation, .seconds = seconds, .rate = rate,
+      .playing = playing ? 1u : 0u, .available = available ? 1u : 0u};
+  return nux_player_video_report_clock(from_handle(player), (size_t)component, monotonic_seconds, &clock);
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoPresent(
+    JNIEnv *env, jobject self, jlong renderer, jlong player, jlong component,
+    jlong generation, jdouble seconds, jint width, jint height, jbyteArray rgba) {
+  (void)self;
+  if (component < 0 || width <= 0 || height <= 0 || width > 8192 || height > 8192 ||
+      !isfinite(seconds) || seconds < 0 || rgba == NULL) return NUX_STATUS_INVALID_ARGUMENT;
+  uint64_t pixels = (uint64_t)width * (uint64_t)height;
+  if (pixels > 16777216u) return NUX_STATUS_LIMIT_EXCEEDED;
+  jsize count = (*env)->GetArrayLength(env, rgba);
+  if (clear_jni_exception(env)) return NUX_STATUS_RUNTIME_ERROR;
+  if ((uint64_t)count != pixels * 4u) return NUX_STATUS_INVALID_ARGUMENT;
+  jbyte *bytes = (*env)->GetByteArrayElements(env, rgba, NULL);
+  if (clear_jni_exception(env) || bytes == NULL) {
+    if (bytes != NULL) (*env)->ReleaseByteArrayElements(env, rgba, bytes, JNI_ABORT);
+    return NUX_STATUS_RUNTIME_ERROR;
+  }
+  struct NuxVideoFrame frame;
+  memset(&frame, 0, sizeof(frame));
+  frame.struct_size = (uint32_t)sizeof(frame);
+  frame.generation = (uint64_t)generation;
+  frame.presentation_seconds = seconds;
+  frame.width = (uint32_t)width;
+  frame.height = (uint32_t)height;
+  frame.row_bytes = (uint32_t)width * 4u;
+  frame.pixels.data = (const uint8_t *)bytes;
+  frame.pixels.len = (size_t)count;
+  NuxStatus status = nux_player_video_present_android_vulkan(
+      from_handle(renderer), from_handle(player), (size_t)component, &frame);
+  (*env)->ReleaseByteArrayElements(env, rgba, bytes, JNI_ABORT);
+  return status;
 }

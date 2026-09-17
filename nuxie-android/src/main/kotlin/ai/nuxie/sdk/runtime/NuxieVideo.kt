@@ -14,3 +14,19 @@ internal data class NuxieVideoOccurrence(
 )
 
 internal data class NuxieVideoAction(val kind: Int, val value: Double, val generation: Long)
+
+internal data class NuxieVideoClock(
+    val generation: Long, val seconds: Double, val rate: Double,
+    val playing: Boolean, val available: Boolean,
+)
+
+internal data class NuxieVideoFrame(
+    val generation: Long, val seconds: Double, val width: Int, val height: Int, val rgba: ByteArray,
+) {
+    init {
+        require(width in 1..8192 && height in 1..8192)
+        val pixels = width.toLong() * height
+        require(pixels <= 16_777_216 && rgba.size.toLong() == pixels * 4)
+        require(seconds.isFinite() && seconds >= 0)
+    }
+}
