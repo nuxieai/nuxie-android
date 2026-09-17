@@ -53,6 +53,8 @@ class PurchaseScopeDeviceTest {
                     val player = file.newExperiencePlayer(artboard, "Purchase")
                     try {
                         player.stepTyped(elapsedSeconds = 0.0)
+                        repeat(20) { player.stepTyped(elapsedSeconds = 0.016) }
+                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
                         for (x in listOf(80f, 240f)) {
                             val down = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
                                 NuxiePlayerPointerEvent(NuxiePlayerPointerKind.DOWN, x, 50f, 1, 0f)))
