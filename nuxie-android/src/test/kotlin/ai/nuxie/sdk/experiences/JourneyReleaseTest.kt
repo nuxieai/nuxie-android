@@ -155,7 +155,7 @@ class JourneyReleaseTest {
             val render = JsonObject(oldRender - "riv" + mapOf(
                 "renderer" to JsonPrimitive(renderer), sceneField to scene,
                 "assets" to JsonArray(listOf(asset)),
-            ))
+            ) + (case["videoElements"]?.let { mapOf("videoElements" to it) } ?: emptyMap()))
             val requirements = JsonObject(source.getValue("requirements").jsonObject +
                 ("requiredCapabilities" to (case["capabilities"] ?: JsonArray(listOf(JsonPrimitive("video.playback.v1"))))))
             val root = JsonObject(source + mapOf("render" to render, "requirements" to requirements))
