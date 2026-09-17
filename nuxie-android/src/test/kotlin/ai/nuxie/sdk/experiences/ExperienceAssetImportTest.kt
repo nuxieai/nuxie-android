@@ -13,6 +13,39 @@ import org.junit.Test
 
 class ExperienceAssetImportTest {
     @Test
+    fun `input font identity and typography must match before resolving device bytes`() {
+        val catalog = listOf(ExpectedFileAsset(0, FileAssetKind.FONT, 10, "native", "ttf", false, false, 3))
+        var resolutions = 0
+        fun bind(family: String, weight: String, style: String, name: String) =
+            ExperienceAssetImportBuilder.build(buildJsonObject {
+                put("render", buildJsonObject {
+                    put("assets", buildJsonArray { add(buildJsonObject {
+                        put("kind", "font"); put("location", "system"); put("family", "System")
+                        put("weight", "700"); put("style", "normal"); put("riveAssetId", 10)
+                        put("riveUniqueName", "native-10"); put("required", true)
+                    }) })
+                    put("textInputs", buildJsonArray { add(buildJsonObject {
+                        put("style", buildJsonObject {
+                            put("fontFamily", family); put("fontWeight", weight)
+                            put("fontStyle", style); put("fontAssetRiveUniqueName", name)
+                        })
+                    }) })
+                })
+            }, emptyMap(), catalog) { resolutions++; byteArrayOf(1) }
+        for ((family, weight, style, name) in listOf(
+            listOf("Inter", "700", "normal", "native-10"),
+            listOf("System", "400", "normal", "native-10"),
+            listOf("System", "700", "italic", "native-10"),
+            listOf("System", "700", "normal", "unknown-10"),
+        )) {
+            assertThrows(IllegalArgumentException::class.java) { bind(family, weight, style, name) }
+            assertEquals(0, resolutions)
+        }
+        bind("System", "700", "normal", "native-10")
+        assertEquals(1, resolutions)
+    }
+
+    @Test
     fun `system and CDN fonts bind distinct ordinals after complete catalog validation`() {
         val system = buildJsonObject {
             put("kind", "font")

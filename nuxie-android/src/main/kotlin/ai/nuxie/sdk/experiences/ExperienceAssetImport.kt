@@ -40,6 +40,21 @@ internal object ExperienceAssetImportBuilder {
         require(declarations.distinctBy(Declaration::identity).size == declarations.size) {
             "Signed Experience assets contain duplicate authored identities"
         }
+        val systemFonts = declarations.mapNotNull { (it.source as? Source.System)?.requirement }
+            .associateBy { it.uniqueName }
+        val inputs = (descriptor["render"] as? JsonObject)?.get("textInputs") as? JsonArray
+        inputs?.forEach { value ->
+            val style = (value as? JsonObject)?.get("style") as? JsonObject
+                ?: error("Experience text input style is missing")
+            val system = systemFonts[style.string("fontAssetRiveUniqueName")]
+            require(if (system != null) {
+                style.string("fontFamily") == "System" &&
+                    style.string("fontWeight") == system.weight.toString() &&
+                    style.string("fontStyle") == system.style
+            } else style.string("fontFamily") != "System") {
+                "Experience text input does not match its System font declaration"
+            }
+        }
         val bindings = mutableListOf<Pair<ExpectedFileAsset, Declaration>>()
         inspectedCatalog.forEach { asset ->
             val declarationIndex = declarations.indexOfFirst { declaration ->
