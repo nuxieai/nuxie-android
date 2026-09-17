@@ -37,6 +37,9 @@ android {
     targetSdk = 36
     unitTests.isReturnDefaultValues = true
     unitTests.isIncludeAndroidResources = true
+    // Native font qualification adds a Robolectric graphics sandbox; the full
+    // suite exhausts the default worker heap even though isolated tests pass.
+    unitTests.all { it.maxHeapSize = "1g" }
   }
 
   // The engine (.so) is fetched and verified from runtime/artifact.json by
