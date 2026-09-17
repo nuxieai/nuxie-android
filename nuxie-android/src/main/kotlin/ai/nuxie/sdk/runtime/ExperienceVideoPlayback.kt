@@ -105,6 +105,9 @@ internal class ExperienceVideoPlayback(
         }
     }
 
+    fun captionSnapshot(): Map<Long, NuxieVideoCaption> =
+        if (hidden || closed) emptyMap() else entries.filterValues { !it.failed }.keys.associateWith(player::videoCaption)
+
     override fun close() {
         if (closed) return
         closed = true

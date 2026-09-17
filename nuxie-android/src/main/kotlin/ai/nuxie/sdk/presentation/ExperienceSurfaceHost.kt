@@ -63,6 +63,7 @@ internal class ExperienceSurfaceHost(
 ) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
     private val mainHandler = Handler(Looper.getMainLooper())
     interface Listener {
+        fun onVideoCaptions(captions: Map<Long, ai.nuxie.sdk.runtime.NuxieVideoCaption>) {}
         fun onFirstFrame()
         fun onRuntimeStep(
             outcome: NuxiePlayerStepOutcome,
@@ -220,6 +221,13 @@ internal class ExperienceSurfaceHost(
         val generation: Long,
         val epoch: Long,
     )
+    private data class SubmittedCaptions(
+        val captions: Map<Long, ai.nuxie.sdk.runtime.NuxieVideoCaption>,
+        val generation: Long,
+        val epoch: Long,
+    )
+    private var submittedCaptions: SubmittedCaptions? = null
+    private val captionPublication = AtomicLong()
     private var submittedSnapshot: SubmittedTextSnapshot? = null
     private val textPublication = AtomicLong()
     private var retainedViewModel: java.util.concurrent.atomic.AtomicReference<NuxieViewModelSnapshot?>? = null
@@ -488,7 +496,11 @@ internal class ExperienceSurfaceHost(
 
     /** UI-thread visibility input; a paused but visible Activity remains active. */
     fun setPresentationVisible(visible: Boolean) {
-        if (!visible) retireSemantics(preserveFocus = true)
+        if (!visible) {
+            captionPublication.incrementAndGet()
+            listener?.onVideoCaptions(emptyMap())
+            retireSemantics(preserveFocus = true)
+        }
         presentationVisible = visible
         updateFrameScheduling()
     }
@@ -553,6 +565,7 @@ internal class ExperienceSurfaceHost(
             if (attached) {
                 pendingPresentation = false
                 submittedSnapshot = null
+                submittedCaptions = null
                 val status = renderer?.resize(
                     width.coerceAtLeast(1),
                     height.coerceAtLeast(1),
@@ -569,6 +582,8 @@ internal class ExperienceSurfaceHost(
     }
 
     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+        captionPublication.incrementAndGet()
+        listener?.onVideoCaptions(emptyMap())
         retireSemantics(preserveFocus = true)
         surfaceAvailable = false
         updateFrameScheduling()
@@ -582,6 +597,7 @@ internal class ExperienceSurfaceHost(
                 attached = false
                 pendingPresentation = false
                 submittedSnapshot = null
+                submittedCaptions = null
                 try {
                     renderer?.detachSurface()
                 } finally {
@@ -719,6 +735,7 @@ internal class ExperienceSurfaceHost(
                     if (outcome.hasPublishableEffects()) {
                         unpublishedSteps.addLast(PublishedStep(correlationId, outcome, viewModelSnapshot))
                     }
+                    submittedCaptions = SubmittedCaptions(videoPlayback?.captionSnapshot().orEmpty(), generation, epoch)
                     submittedSnapshot = viewModelSnapshot?.let { SubmittedTextSnapshot(it, outcome.textGeometry, generation, epoch) }
                     if (!firstFramePresented) firstFrameUpdateBaseline = surfaceUpdates.get()
                 }
@@ -735,8 +752,17 @@ internal class ExperienceSurfaceHost(
                         reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Experience semantic capture failed", error)
                         return@enqueue
                     }
+                    val captions = submittedCaptions
+                    val captionVersion = captionPublication.incrementAndGet()
+                    post {
+                        if (captions != null && !released.get() && running && captions.generation == frameGeneration.get() &&
+                            captions.epoch == semanticEpoch.get() && captionVersion == captionPublication.get()) {
+                            listener?.onVideoCaptions(captions.captions)
+                        }
+                    }
                     val submitted = submittedSnapshot
                     submittedSnapshot = null
+                    submittedCaptions = null
                     val publication = textPublication.incrementAndGet()
                     if (textInputs.isNotEmpty() && submitted != null) {
                         post {
@@ -790,6 +816,8 @@ internal class ExperienceSurfaceHost(
     /** Release every native handle. The host is not reusable afterwards. */
     fun release(finalState: Map<String, NuxieViewModelScalarValue> = emptyMap()) {
         if (!released.compareAndSet(false, true)) return
+        captionPublication.incrementAndGet()
+        listener?.onVideoCaptions(emptyMap())
         retireSemantics()
         val finalValues = finalState.toMap()
         pointerInput.release()
@@ -821,6 +849,7 @@ internal class ExperienceSurfaceHost(
             unpublishedSteps.clear()
             pendingPresentation = false
             submittedSnapshot = null
+            submittedCaptions = null
             closeHandles.forEach { close ->
                 try {
                     close()
@@ -838,6 +867,9 @@ internal class ExperienceSurfaceHost(
         cause: Throwable? = null,
     ) {
         if (!failureReported.compareAndSet(false, true)) return
+        captionPublication.incrementAndGet()
+        lane.enqueue { videoPlayback?.setVisible(false) }
+        mainHandler.post { listener?.onVideoCaptions(emptyMap()) }
         val failure = ExperiencePresentationException(reason, message, cause)
         if (Looper.myLooper() == Looper.getMainLooper()) {
             if (!released.get()) listener?.onFailure(failure)
