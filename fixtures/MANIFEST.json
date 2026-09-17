@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "c4189a2e2608c74730a717d62a62cca3cd3815ae",
+  "sourceCommit": "a3bfc02d983f66ca349b53ee017dafdb5cbb430b",
   "files": {
     "README.md": "9104a727bef89b388554d25583a6e013531c310f1a93d8f9f81440af8fcf67df",
     "accessibility/control-state.json": "48d1d9ea62bc7890ecd41d69592cbe3f7d137cf7bdb5849f7c64137489a5360c",
@@ -120,10 +120,10 @@
     "runtime/font-scale-policy/screen.riv": "074347cd17b4a875837c5585d30ccc43dd9ed84cc3792211782d0e622ac7fcb3",
     "runtime/font-scale-policy/snapshot.json": "bed73a9ca365acd77ebc011464150a364e2feb6bd24eaa1c4462cdd62ebcc96a",
     "runtime/purchase-scopes/README.md": "4e58c85d6a1a8f41598a146e4b9307187086042976e448ce94a63fc759742d9e",
-    "runtime/purchase-scopes/provenance.json": "a979340b2361c0b2555284b66dd1caef08837bc205a5f294035ea2bc4a238927",
-    "runtime/purchase-scopes/report.json": "cb309e9ed4e0f79eb8f21d8b0d3f979ae4613021db0d6a87f62b658632419554",
-    "runtime/purchase-scopes/screen.riv": "c3d6e19a151005228bac72f8959c3702db9d828d7ba88375fee62ebf4b299b82",
-    "runtime/purchase-scopes/snapshot.json": "cdceb53d7e8e96543037e52d7299fb918d0e59a1f77c21dff369c7c2e21620d5",
+    "runtime/purchase-scopes/provenance.json": "23fcbd1c926e37a2709ba85dbdfb3397b683cb562e7ef29a604920c55cb41152",
+    "runtime/purchase-scopes/report.json": "60d7e226e3351e85cd3b6475af04336ecf66f3ebcaba8aed59ca9d1f3f26797c",
+    "runtime/purchase-scopes/screen.riv": "8f6fb28383c4e73b4dfd56216711371831132ae7be06406e23c22731096f4e51",
+    "runtime/purchase-scopes/snapshot.json": "d838849fdddff84fbc994c36fbebea9aca348f17ee7dbf8811b87fbb56882e3f",
     "runtime/screen-control-error/action.luau": "b886b79f82b7d893c2a8e7440eb97ed5c04e0e83412677627d26019141f40456",
     "runtime/screen-control-error/provenance.json": "94e6747f4814acb4bd82ed7deb66f812cbae714969676d86ab2ef361df59c167",
     "runtime/screen-control-error/screen.riv": "906bcd5aed60801553ed32c12833767e6d2bc75c555cd8fb583cab1d6f3a9ad7",

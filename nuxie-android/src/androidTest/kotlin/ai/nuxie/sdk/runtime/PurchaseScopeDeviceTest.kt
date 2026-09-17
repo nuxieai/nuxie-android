@@ -23,9 +23,22 @@ class PurchaseScopeDeviceTest {
                         NuxieViewModelInstanceBinding("PurchaseRoot", "purchase.root", "first", "plan.first", "Plan"),
                         NuxieViewModelInstanceBinding("PurchaseRoot", "purchase.root", "second", "plan.second", "Plan"),
                     ))
-                    val player = checkNotNull(artboard.newPlayer())
+                    val player = file.newExperiencePlayer(artboard, "Purchase")
                     try {
                         player.stepTyped(elapsedSeconds = 0.0)
+                        for (x in listOf(80f, 240f)) {
+                            player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
+                                NuxiePlayerPointerEvent(NuxiePlayerPointerKind.DOWN, x, 50f, 1, 0f)))
+                            val tapped = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
+                                NuxiePlayerPointerEvent(NuxiePlayerPointerKind.UP, x, 50f, 1, 0.1f)))
+                            val details = tapped.events.map { event -> event.name to event.properties.map { property ->
+                                property.name to when (val value = property.value) {
+                                    is NuxieRuntimeEventPropertyValue.Bytes -> value.value.decodeToString()
+                                    else -> value.toString()
+                                }
+                            } }
+                            assertTrue("A purchase button tap at x=$x must emit an interaction: $details", tapped.events.isNotEmpty())
+                        }
                         val before = checkNotNull(artboard.defaultViewModelSnapshot())
                         assertEquals("plan:monthly", before.resolveString("first.placementId"))
                         assertEquals("plan:annual", before.resolveString("second.placementId"))
