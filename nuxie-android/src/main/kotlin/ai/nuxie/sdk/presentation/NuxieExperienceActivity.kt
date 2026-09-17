@@ -577,7 +577,9 @@ internal class NuxieExperienceActivity : Activity() {
         ).also { contentRoot.addView(it, FrameLayout.LayoutParams(-1, -1)) }
     }
 
-    private fun mountReadyScreen(id: String, prepared: PreparedPresentation) {
+    private suspend fun mountReadyScreen(id: String, prepared: PreparedPresentation) {
+        // Recreation must consume the prior renderer's final authored state before import.
+        PresentationRegistry.drainRetiredScreens(id)
         val screen = Screen(id, prepared)
         if (!PresentationRegistry.attach(id, screen)) {
             finish()
