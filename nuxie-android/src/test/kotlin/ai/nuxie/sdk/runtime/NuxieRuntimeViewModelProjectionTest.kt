@@ -7,6 +7,36 @@ import org.junit.Test
 
 class NuxieRuntimeViewModelProjectionTest {
     @Test
+    fun `projected authored identity tracks its native instance and rejects detachment`() {
+        val native = ProjectionNative()
+        val state = NuxieRuntime(native).bindViewModelList(
+            NuxieRuntimeFile(10, native),
+            NuxieRuntimeArtboard(20, native) { error("Projection owns catalog loading") },
+            NuxieViewModelListProjection("Runtime", "paywall/products", "paywall/selectedProduct",
+                "PaywallProduct", listOf(NuxieViewModelListProjection.Item(
+                    "Pro", 0, true, emptyMap(), instanceId = "product:pro")),
+                defaultInstanceId = "screen:root"),
+        )
+        try {
+            val before = state.snapshot()
+            assertEquals("9.99", before.resolveScopedString("price", "PaywallProduct", "product:pro"))
+            assertEquals("9.99", before.resolveScopedString("price", "PaywallProduct", null))
+            assertNull(before.resolveScopedString("price", "Runtime", "product:pro"))
+            assertNull(before.resolveScopedString("price", null, "41"))
+            native.productPrice = "12.99"
+            val changed = state.snapshot()
+            assertEquals("12.99", changed.resolveScopedString("price", null, "product:pro"))
+            assertEquals("9.99", before.resolveScopedString("price", null, "product:pro"))
+            native.productAttached = false
+            assertNull(state.snapshot().resolveScopedString("price", null, "product:pro"))
+            assertEquals(1, native.calls.count { it == "snapshot:41" })
+        } finally {
+            state.close()
+        }
+        assertEquals(listOf("free:40", "free:41"), native.calls.takeLast(2))
+    }
+
+    @Test
     fun `a list without a declared item schema binds projected values before the root`() {
         val native = ProjectionNative()
         val runtime = NuxieRuntime(native)
@@ -199,6 +229,24 @@ class NuxieRuntimeViewModelProjectionTest {
         private val selectedReferencedSchemaIndex: Long = 2,
     ) : NuxieTypedRuntimeNative {
         val calls = mutableListOf<String>()
+        var productPrice = "9.99"
+        var productAttached = true
+
+        override fun snapshotViewModel(viewModelHandle: Long): NativeCallResult<NativeViewModelSnapshot> {
+            calls += "snapshot:$viewModelHandle"
+            val childOnly = viewModelHandle == 41L
+            val includeChild = childOnly || productAttached
+            val instances = buildList {
+                if (!childOnly) add(NativeViewModelSnapshotInstance(1000, 0))
+                if (includeChild) add(NativeViewModelSnapshotInstance(9001, 2))
+            }
+            val values = if (includeChild) arrayOf(NativeViewModelSnapshotValue(
+                9001, 3, "price", NuxieViewModelPropertyKind.STRING.nativeValue,
+                productPrice.encodeToByteArray(), 0)) else emptyArray()
+            return NativeCallResult(0, NativeViewModelSnapshot(
+                if (childOnly) 9001 else 1000, instances.toTypedArray(), values))
+        }
+
 
         override fun viewModelCatalog(fileHandle: Long): NativeCallResult<NativeViewModelCatalog> {
             calls += "catalog"
