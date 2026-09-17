@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "4916df3d35cff57400643f6476144585eee1fd56",
+  "sourceCommit": "6aa4fd5b3ef5a6c4e1dd5b9df1e929fda2497644",
   "files": {
     "README.md": "9104a727bef89b388554d25583a6e013531c310f1a93d8f9f81440af8fcf67df",
     "accessibility/control-state.json": "48d1d9ea62bc7890ecd41d69592cbe3f7d137cf7bdb5849f7c64137489a5360c",
@@ -153,6 +153,11 @@
     "runtime/text-input-single-line/report.json": "86130f61c8869446cb0a946bfc48d0aeaed4eb8a2069fc5891b087b7bf2f1fad",
     "runtime/text-input-single-line/screen.riv": "a8785bd11c921248a6e2840e1e816e0727aac6e5beb5af7079da9a93aabf145c",
     "runtime/text-input-single-line/snapshot.json": "25de3b52d60c0a5bc963306bc53466bce7d43cd624fd2dd0cca891ee674ebd45",
+    "runtime/view-model-retention/assets/sha256/d39025e0a27e2c6251d563eae7dfacfa3db232cbd5c15780933d3d6cee715a61.png": "d39025e0a27e2c6251d563eae7dfacfa3db232cbd5c15780933d3d6cee715a61",
+    "runtime/view-model-retention/provenance.json": "95aad729065875cb9865444d9d7669181a5a22f1912f869967c9ab06659c397c",
+    "runtime/view-model-retention/report.json": "a5fecb21bf1e3de502bc608570b9745dec41dcbfae5e119176d11e9c015212b8",
+    "runtime/view-model-retention/screen.riv": "7aa13dce483116aeeaee0273d2141f31e8d0d95c71385516c8f82b8beb777ec7",
+    "runtime/view-model-retention/snapshot.json": "bdae9c28ca7ff26410741be30fdc03846613f7b6d019d0442f1d4fa11cd02660",
     "sdk/android-foreground-admission.json": "382dc4fc7e55db672234c761bc5b32966d84eac0c6d611b7e1d9895a87f88c00",
     "sdk/android-provider-checkout-terms.json": "79897c560d7dd1b5c78df1b32a0cdb468c2cc4bf38a63e85af9249125d03da74",
     "sdk/interaction-player.json": "21ce49e151920c6c443d9c7a4d558e8962483c2018da04301e8a83e256737718",
