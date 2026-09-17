@@ -63,6 +63,7 @@
     "journeys/planes/text-input-navigation.json": "49760fb0666fce8fb570c5cfda815c5dc579a9a3a5bc7e46f443801ab4257f7b",
     "journeys/planes/text-input-typography.json": "dc268c90b8bbe972cf85c37652f067ed75da9b9d96e3f056f5ddc14759a02e21",
     "journeys/planes/values.json": "e6f7b54cb33bb8d024638760c54221e858124affcbe182b4593924bfcca47bee",
+    "journeys/planes/video-admission.json": "ff55ac8e141f0b458ce478aa58f0f0daea4de9c8a769fbe34f676dc81f79e877",
     "journeys/rendered-custom-transition/assets/sha256/3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d.png": "3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d",
     "journeys/rendered-custom-transition/assets/sha256/4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf.ttf": "4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf",
     "journeys/rendered-custom-transition/provenance.json": "205b956a6a464f367d47d9ae547451436c06fad6c82463acd6e2d226a26728ea",
@@ -204,6 +205,12 @@
     "sdk/warm-start-recovery.json": "9bdcf0b8f3761ac3199e75945ca1aae1759fd7a34aec9d4a3d10b630bed21988",
     "unicode/GraphemeBreakTest-16.0.0.txt": "ee2b9354d270ac061b29f09662cafea06341d77e704b8cc6bd72aaeeda363cb5",
     "unicode/LICENSE.txt": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96",
-    "unicode/grapheme-properties-16.0.0.json": "84c942f0030116e6341c2fb3cd57a8d619b8cf82f613860766493b8b99498cf4"
+    "unicode/grapheme-properties-16.0.0.json": "84c942f0030116e6341c2fb3cd57a8d619b8cf82f613860766493b8b99498cf4",
+    "video/README.md": "427bbeef28999b8e87583e395c311c13d119363b42e15c5f6b4cd02a024f2a3e",
+    "video/captions.mp4": "927dea0603713eb68586b050cb640b9379952753b0b6d60b17395b321a0f3b41",
+    "video/captions.srt": "afbc920c5ebb7e09ceddd8f286afcf759e31cdbcd58d23ba8a681a83bf935a94",
+    "video/greeting.mp4": "f0a65563c100506c0f98c138e8be1ae333c9879bb77237fbada60bddcfa78669",
+    "video/greeting.nux": "2501d826b7df51e645dc69ab12b0919499183066ee78d2b9976c28513f291dba",
+    "video/inventory.json": "05014e8a8047ee3cf71850e49e186f66631dd0c1cceb31bd0ce77980c84a82e4"
   }
 }

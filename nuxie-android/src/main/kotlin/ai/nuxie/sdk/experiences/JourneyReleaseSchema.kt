@@ -87,6 +87,11 @@ internal object JourneyReleaseSchema {
             if (systemFonts && "system-fonts" !in ids(record(root["requirements"])["requiredCapabilities"], 256)) {
                 fail("System font capability required")
             }
+            val render = record(root["render"])
+            val hasVideo = array(render["assets"]).any { text(record(it)["kind"]) == "video" }
+            if (hasVideo && "video.playback.v1" !in ids(record(root["requirements"])["requiredCapabilities"])) {
+                fail("video capability missing")
+            }
         }
     }
 

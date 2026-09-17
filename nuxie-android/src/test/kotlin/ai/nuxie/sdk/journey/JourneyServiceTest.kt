@@ -2134,7 +2134,7 @@ class JourneyServiceTest {
                 release.descriptorSha256 to AcquiredJourneyRelease(
                     identity = release.identity,
                     artifactsByKey = mapOf("renders/fixture.riv" to riv),
-                    rivFile = riv,
+                    sceneFile = riv,
                     artifactDigests = setOf(ARTIFACT_DIGEST),
                     protection = Closeable { closes.incrementAndGet() },
                 ),

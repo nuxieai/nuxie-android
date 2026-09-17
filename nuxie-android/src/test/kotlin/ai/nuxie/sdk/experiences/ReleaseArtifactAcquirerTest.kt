@@ -83,6 +83,39 @@ class JourneyReleaseArtifactAcquirerTest {
     }
 
     @Test
+    fun nuxAndVideoUseVerifiedFilesAcrossColdWarmAndOfflineAcquisition() = runTest {
+        val sceneBytes = "published-nux-scene".encodeToByteArray()
+        val videoBytes = ByteArray(100_000) { (it % 251).toByte() }
+        val scene = artifact("renders/sha256/${sha256(sceneBytes)}.nux", sceneBytes, "application/vnd.nuxie.scene")
+        val video = artifact("assets/sha256/${sha256(videoBytes)}.mp4", videoBytes, "video/mp4", kind = "video")
+        var requests = 0
+        var offline = false
+        val directory = temporaryFolder.newFolder("nux-video")
+        val cache = JourneyReleaseArtifactCache(RuntimeEnvironment.getApplication(), HttpTransport { request ->
+            check(!offline) { "Offline acquisition must reuse verified files" }
+            requests += 1
+            val isVideo = request.url.path.endsWith(".mp4")
+            HttpTransport.Response(statusCode = 200, body = if (isVideo) videoBytes else sceneBytes,
+                headers = mapOf("Content-Type" to if (isVideo) "video/mp4" else "application/vnd.nuxie.scene"))
+        }, maxTotalBytes = 0, cacheDirectory = directory)
+        val acquirer = JourneyReleaseArtifactAcquirer(cache)
+        val release = release(scene, assets = listOf(video), renderer = "nux")
+        val first = acquirer.acquire(release, delivery())
+        try {
+            assertArrayEquals(sceneBytes, first.sceneFile.readBytes())
+            val videoFile = first.artifactsByKey.getValue(video.getValue("key").jsonPrimitive.content)
+            assertArrayEquals(videoBytes, videoFile.readBytes())
+            offline = true
+            acquirer.acquire(release, delivery()).use { second ->
+                assertEquals(first.sceneFile, second.sceneFile)
+                assertEquals(videoFile, second.artifactsByKey.getValue(video.getValue("key").jsonPrimitive.content))
+            }
+            assertTrue("Active lease must protect video despite a zero cache budget", videoFile.isFile)
+            assertEquals(2, requests)
+        } finally { first.close() }
+    }
+
+    @Test
     fun successfulDownloadPublishesVerifiedFilesAndCacheHitSkipsRequest() = runTest {
         val rivBytes = "verified-riv".encodeToByteArray()
         val riv = artifact(
@@ -113,15 +146,15 @@ class JourneyReleaseArtifactAcquirerTest {
             assertEquals(1, requestCount)
             assertEquals(TEST_IDENTITY, first.identity)
             assertSame(
-                first.rivFile,
+                first.sceneFile,
                 first.artifactsByKey.getValue(riv.getValue("key").jsonPrimitive.content),
             )
-            assertArrayEquals(rivBytes, first.rivFile.readBytes())
-            assertEquals(first.rivFile, second.rivFile)
+            assertArrayEquals(rivBytes, first.sceneFile.readBytes())
+            assertEquals(first.sceneFile, second.sceneFile)
             assertEquals(setOf(sha256(rivBytes)), first.artifactDigests)
             acquirer.retainForRun("journey-run", first.artifactDigests)
             assertEquals(first.artifactDigests, acquirer.retainedRunDigests("journey-run"))
-            assertTrue(first.rivFile.delete())
+            assertTrue(first.sceneFile.delete())
             assertNull(acquirer.retainedRunDigests("journey-run"))
             acquirer.releaseRun("journey-run")
         } finally {
@@ -153,13 +186,13 @@ class JourneyReleaseArtifactAcquirerTest {
         )
         val acquirer = JourneyReleaseArtifactAcquirer(cache)
         val cachedFile = acquirer.acquire(release(riv), delivery()).use { acquired ->
-            acquired.rivFile
+            acquired.sceneFile
         }
         cachedFile.writeBytes(ByteArray(rivBytes.size) { 0x7f })
 
         acquirer.acquire(release(riv), delivery()).use { repaired ->
             assertEquals(2, requestCount)
-            assertArrayEquals(rivBytes, repaired.rivFile.readBytes())
+            assertArrayEquals(rivBytes, repaired.sceneFile.readBytes())
         }
     }
 
@@ -1061,8 +1094,8 @@ class JourneyReleaseArtifactAcquirerTest {
         val results = awaitAll(first, second)
         try {
             assertEquals(1, requestCount.get())
-            assertEquals(results[0].rivFile, results[1].rivFile)
-            assertArrayEquals(rivBytes, results[0].rivFile.readBytes())
+            assertEquals(results[0].sceneFile, results[1].sceneFile)
+            assertArrayEquals(rivBytes, results[0].sceneFile.readBytes())
         } finally {
             results.forEach(AcquiredJourneyRelease::close)
         }
@@ -1136,19 +1169,19 @@ class JourneyReleaseArtifactAcquirerTest {
         val acquired = JourneyReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
         cache.retainForRun("customer/journey/generation", listOf(sha256(retainedBytes))).close()
         acquired.close()
-        acquired.rivFile.setLastModified(System.currentTimeMillis() - 60_000)
+        acquired.sceneFile.setLastModified(System.currentTimeMillis() - 60_000)
 
         var outsider = "outsider".encodeToByteArray()
         val restarted = JourneyReleaseArtifactCache(RuntimeEnvironment.getApplication(), HttpTransport {
             HttpTransport.Response(200, outsider)
         }, maxTotalBytes = 12, cacheDirectory = cacheDirectory)
         restarted.acquire("first", sha256(outsider), 8, 8, "https://cdn.nuxie.test/")
-        assertArrayEquals(retainedBytes, acquired.rivFile.readBytes())
+        assertArrayEquals(retainedBytes, acquired.sceneFile.readBytes())
 
         restarted.releaseRun("customer/journey/generation")
         outsider = "another!".encodeToByteArray()
         restarted.acquire("second", sha256(outsider), 8, 8, "https://cdn.nuxie.test/")
-        assertEquals(false, acquired.rivFile.exists())
+        assertEquals(false, acquired.sceneFile.exists())
     }
 
     @Test
@@ -1184,7 +1217,7 @@ class JourneyReleaseArtifactAcquirerTest {
 
         val acquired = JourneyReleaseArtifactAcquirer(releaseCache).acquire(release(riv), delivery())
         try {
-            acquired.rivFile.setLastModified(System.currentTimeMillis() - 60_000)
+            acquired.sceneFile.setLastModified(System.currentTimeMillis() - 60_000)
             pruningCache.acquire(
                 "outsider-one",
                 sha256(firstOutsiderBytes),
@@ -1192,7 +1225,7 @@ class JourneyReleaseArtifactAcquirerTest {
                 firstOutsiderBytes.size.toLong(),
                 "https://cdn.nuxie.test/",
             )
-            assertTrue(acquired.rivFile.exists())
+            assertTrue(acquired.sceneFile.exists())
 
             acquired.close()
             outsiderBytes = secondOutsiderBytes
@@ -1204,7 +1237,7 @@ class JourneyReleaseArtifactAcquirerTest {
                 "https://cdn.nuxie.test/",
             )
 
-            assertEquals(false, acquired.rivFile.exists())
+            assertEquals(false, acquired.sceneFile.exists())
         } finally {
             acquired.close()
         }
@@ -1355,7 +1388,7 @@ class JourneyReleaseArtifactAcquirerTest {
         acquirer.acquire(release(riv), delivery()).use { acquired ->
             assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.TRANSPORT, failure.reason)
             assertEquals(2, requestCount)
-            assertArrayEquals(rivBytes, acquired.rivFile.readBytes())
+            assertArrayEquals(rivBytes, acquired.sceneFile.readBytes())
             assertEquals(1, cacheDirectory.list()?.size)
         }
     }
@@ -1507,8 +1540,8 @@ class JourneyReleaseArtifactAcquirerTest {
         }
         yield()
         assertTrue(assetRequestStarted.await(5, TimeUnit.SECONDS))
-        val rivFile = requireNotNull(releaseCache.cachedFile(sha256(rivBytes)))
-        rivFile.setLastModified(System.currentTimeMillis() - 60_000)
+        val sceneFile = requireNotNull(releaseCache.cachedFile(sha256(rivBytes)))
+        sceneFile.setLastModified(System.currentTimeMillis() - 60_000)
         try {
             pruningCache.acquire(
                 key = "outsider",
@@ -1517,13 +1550,13 @@ class JourneyReleaseArtifactAcquirerTest {
                 maxBytes = outsiderBytes.size.toLong(),
                 signedBaseUrl = "https://cdn.nuxie.test/",
             )
-            assertTrue(rivFile.exists())
+            assertTrue(sceneFile.exists())
         } finally {
             completeAssetRequest.countDown()
         }
         val acquired = acquisition.await()
         try {
-            assertTrue(acquired.rivFile.exists())
+            assertTrue(acquired.sceneFile.exists())
         } finally {
             acquired.close()
         }
@@ -1533,6 +1566,7 @@ class JourneyReleaseArtifactAcquirerTest {
         riv: JsonObject,
         assets: List<JsonObject> = emptyList(),
         scripts: List<JsonObject> = emptyList(),
+        renderer: String = "rive",
     ) = TestJourneyRelease(
         identity = TEST_IDENTITY,
         descriptor = buildJsonObject {
@@ -1550,8 +1584,8 @@ class JourneyReleaseArtifactAcquirerTest {
                 }
             })
             put("render", buildJsonObject {
-                put("renderer", JsonPrimitive("rive"))
-                put("riv", riv)
+                put("renderer", JsonPrimitive(renderer))
+                put(if (renderer == "nux") "nux" else "riv", riv)
                 put("screens", buildJsonArray { })
                 put("transitions", buildJsonArray { })
                 put("textInputs", buildJsonArray { })
