@@ -21,6 +21,7 @@ internal fun interface HttpTransport {
         val body: ByteArray,
         val method: String = "POST",
         val followRedirects: Boolean = true,
+        val cancellation: HttpCancellation? = null,
     )
 
     class Response(
@@ -50,7 +51,9 @@ internal fun interface HttpTransport {
 
         fun header(name: String): String? = headers[name.lowercase()]
 
+        private val closed = java.util.concurrent.atomic.AtomicBoolean()
         override fun close() {
+            if (!closed.compareAndSet(false, true)) return
             runCatching { body.close() }
             closeAction()
         }
@@ -95,8 +98,11 @@ internal class HttpUrlConnectionTransport(
     }
 
     override fun open(request: HttpTransport.Request): HttpTransport.StreamingResponse {
+        request.cancellation?.checkActive()
         val connection = request.url.openConnection() as HttpURLConnection
+        val registration = request.cancellation?.register(connection::disconnect)
         try {
+            request.cancellation?.checkActive()
             connection.requestMethod = request.method
             connection.instanceFollowRedirects = request.followRedirects
             connection.doOutput = request.body.isNotEmpty() || request.method == "POST"
@@ -133,9 +139,10 @@ internal class HttpUrlConnectionTransport(
                         .firstOrNull { it.key.equals("content-length", ignoreCase = true) }
                         ?.value?.toLongOrNull()
                 },
-                closeAction = connection::disconnect,
+                closeAction = { registration?.close(); connection.disconnect() },
             )
         } catch (error: Throwable) {
+            registration?.close()
             connection.disconnect()
             throw error
         }

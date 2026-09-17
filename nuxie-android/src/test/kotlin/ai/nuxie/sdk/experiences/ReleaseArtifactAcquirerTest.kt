@@ -156,7 +156,7 @@ class JourneyReleaseArtifactAcquirerTest {
                         check(resume.await(5, TimeUnit.SECONDS))
                         return super.read(target, offset, length)
                     }
-                    override fun close() { closed = true; super.close() }
+                    override fun close() { closed = true; resume.countDown(); super.close() }
                 }, mapOf("Content-Type" to "application/vnd.nuxie.scene"), request.url,
             )
         }
@@ -167,7 +167,6 @@ class JourneyReleaseArtifactAcquirerTest {
         try {
             assertTrue(entered.await(5, TimeUnit.SECONDS))
             pending.cancel()
-            resume.countDown()
             pending.join()
             assertTrue(pending.isCancelled)
             assertTrue(closed)

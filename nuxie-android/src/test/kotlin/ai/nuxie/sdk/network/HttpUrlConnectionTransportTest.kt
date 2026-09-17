@@ -17,6 +17,53 @@ import java.util.zip.GZIPOutputStream
 
 class HttpUrlConnectionTransportTest {
     @Test
+    fun cancellationDisconnectsWhileWaitingForHeaders() {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val disconnected = java.util.concurrent.CountDownLatch(1)
+        val signal = HttpCancellation()
+        val handler = object : URLStreamHandler() {
+            override fun openConnection(url: URL): URLConnection = object : HttpURLConnection(url) {
+                override fun connect() = Unit
+                override fun usingProxy() = false
+                override fun disconnect() { disconnected.countDown() }
+                override fun getResponseCode(): Int {
+                    entered.countDown()
+                    check(disconnected.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                    throw IOException("Disconnected")
+                }
+            }
+        }
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        try {
+            val future = executor.submit<Boolean> {
+                assertThrows(IOException::class.java) {
+                    HttpUrlConnectionTransport().open(HttpTransport.Request(URL(null, "https://unit.test/slow", handler),
+                        emptyMap(), ByteArray(0), method = "GET", cancellation = signal))
+                }
+                true
+            }
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            signal.cancel()
+            assertTrue(future.get(5, java.util.concurrent.TimeUnit.SECONDS))
+        } finally { signal.cancel(); executor.shutdownNow() }
+    }
+
+    @Test
+    fun cancellationHandlesLateAndRemovedResourcesAndContinuesAfterAbortFailure() {
+        val signal = HttpCancellation()
+        var calls = 0
+        signal.register { error("abort failure") }
+        signal.register { calls++ }.close()
+        signal.register { calls++ }
+        signal.cancel()
+        signal.cancel()
+        assertEquals(1, calls)
+        signal.register { calls++ }
+        assertEquals(2, calls)
+        assertThrows(java.util.concurrent.CancellationException::class.java) { signal.checkActive() }
+    }
+
+    @Test
     fun executeDecodesGzipAndPreservesSuccessMetadata() {
         val json = """{"customerId":"customer-1"}"""
         val compressed = gzip(json)
