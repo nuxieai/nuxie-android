@@ -126,6 +126,7 @@ internal interface PreparedScreenNavigation {
 }
 
 internal interface PresentationScreenHandle {
+    suspend fun applyVideoCommand(action: ai.nuxie.sdk.experiences.JourneyVideoAction): Boolean = false
     val rendererEffects: RendererEffectLifetime? get() = null
     val nativeAttemptGeneration: Long? get() = null
 
@@ -1228,6 +1229,15 @@ internal class ExperiencePresentationService(
             current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) }
         } ?: return JourneyPresentationActionResult.NoPresentation
         return when (JourneyActionType.from(action)) {
+            JourneyActionType.VIDEO -> {
+                val command = runCatching { ai.nuxie.sdk.experiences.JourneyVideoAction.parse(action) }.getOrNull()
+                    ?: return JourneyPresentationActionResult.Failed
+                val screen = PresentationRegistry.currentScreen(active.id)
+                    ?: return JourneyPresentationActionResult.NoPresentation
+                if (screen.applyVideoCommand(command) && synchronized(stateLock) { current === active }) {
+                    JourneyPresentationActionResult.Advanced("next")
+                } else JourneyPresentationActionResult.Failed
+            }
             JourneyActionType.BACK -> prepareBackNavigation(owner, active, action)
             JourneyActionType.PURCHASE -> {
                 val placementId = action.string("placementId")

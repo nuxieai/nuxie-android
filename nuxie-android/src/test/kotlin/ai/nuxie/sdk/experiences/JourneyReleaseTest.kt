@@ -10,6 +10,8 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.double
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -23,6 +25,26 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyReleaseTest {
+    @Test fun `video commands match shared wire grammar and runtime operation codes`() {
+        val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/video-actions.json").readText()).jsonObject
+        for (item in corpus.getValue("cases").jsonArray) {
+            val case = item.jsonObject
+            val action = case.getValue("action")
+            if (case.getValue("valid").jsonPrimitive.boolean) {
+                JourneyGrammar.action(action, emptySet(), emptySet())
+                val parsed = JourneyVideoAction.parse(action)
+                assertEquals(case.getValue("kind").jsonPrimitive.int, parsed.commandKind)
+                assertEquals(case.getValue("value").jsonPrimitive.double, parsed.commandValue, 0.0)
+                assertEquals("frame", parsed.artboardId)
+                assertEquals("greeting", parsed.viewNodeId)
+            } else {
+                assertThrows(case.getValue("name").jsonPrimitive.content, Exception::class.java) {
+                    JourneyGrammar.action(action, emptySet(), emptySet())
+                }
+            }
+        }
+    }
     private val fixture = Json.parseToJsonElement(
         FixtureRunner.fixturesRoot().resolve("journeys/planes/release.json").readText()).jsonObject
     private val keys = mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(
@@ -158,7 +180,14 @@ class JourneyReleaseTest {
             ) + (case["videoElements"]?.let { mapOf("videoElements" to it) } ?: emptyMap()))
             val requirements = JsonObject(source.getValue("requirements").jsonObject +
                 ("requiredCapabilities" to (case["capabilities"] ?: JsonArray(listOf(JsonPrimitive("video.playback.v1"))))))
-            val root = JsonObject(source + mapOf("render" to render, "requirements" to requirements))
+            var root = JsonObject(source + mapOf("render" to render, "requirements" to requirements))
+            case["action"]?.let { action ->
+                val leg = root.getValue("leg").jsonObject
+                val steps = leg.getValue("steps").jsonArray.toMutableList()
+                val index = steps.indexOfFirst { it.jsonObject["kind"]?.jsonPrimitive?.content == "action" }
+                steps[index] = JsonObject(steps[index].jsonObject + ("action" to action))
+                root = JsonObject(root + ("leg" to JsonObject(leg + ("steps" to JsonArray(steps)))))
+            }
             val name = case.getValue("name").jsonPrimitive.content
             if (case.getValue("valid").jsonPrimitive.content == "true") {
                 try { JourneySchemaValidator.validate(root) } catch (error: Exception) { throw AssertionError(name, error) }

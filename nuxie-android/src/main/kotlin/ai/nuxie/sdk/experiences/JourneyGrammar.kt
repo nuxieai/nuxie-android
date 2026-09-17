@@ -18,7 +18,7 @@ import kotlinx.serialization.json.JsonPrimitive
 
 /** Lowered actions carry selectors and local outlets, never nested programs. */
 internal object JourneyGrammar {
-    val presenting = setOf("navigate", "back", "purchase", "restore", "request_notifications",
+    val presenting = setOf("navigate", "back", "video", "purchase", "restore", "request_notifications",
         "request_permission", "request_tracking", "open_link", "dismiss")
 
     fun action(input: JsonElement?, screens: Set<String>, placements: Set<String>) {
@@ -26,6 +26,7 @@ internal object JourneyGrammar {
         fun shape(vararg required: String, optional: Set<String> = emptySet()) =
             exact(action, setOf("type", *required), optional)
         when (text(action["type"])) {
+            "video" -> { JourneyVideoAction.parse(action) }
             "navigate" -> {
                 shape("screenId", optional = setOf("transition"))
                 if (journeyId(action["screenId"]) !in screens) fail("screen closure")

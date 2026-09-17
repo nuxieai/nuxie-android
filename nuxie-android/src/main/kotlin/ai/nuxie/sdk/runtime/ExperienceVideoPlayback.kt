@@ -1,6 +1,8 @@
 package ai.nuxie.sdk.runtime
 
 import ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding
+import ai.nuxie.sdk.experiences.ExperienceVideoElement
+import ai.nuxie.sdk.experiences.JourneyVideoAction
 import android.content.Context
 
 /** Runtime-lane owner. Acquisition retains the files until this owner closes. */
@@ -8,6 +10,7 @@ internal class ExperienceVideoPlayback(
     private val context: Context,
     private val player: NuxieRuntimePlayer,
     bindings: List<ExperienceVideoAssetBinding>,
+    private val targets: List<ExperienceVideoElement> = emptyList(),
 ) : AutoCloseable {
     private class Entry(val binding: ExperienceVideoAssetBinding) {
         var decoder: AndroidVideoDecoder? = null
@@ -25,6 +28,14 @@ internal class ExperienceVideoPlayback(
     private val captions = mutableMapOf<Pair<String, Int>, List<NuxieVideoCaptionCue>>()
     private var hidden = true
     private var closed = false
+
+    fun apply(action: JourneyVideoAction) {
+        check(!closed)
+        val matches = targets.filter { it.artboardId == action.artboardId && it.viewNodeId == action.viewNodeId }
+        val live = player.videos().map { it.componentId }.toSet()
+        require(matches.isNotEmpty() && matches.all { it.componentId in live }) { "Video target is not mounted in this screen" }
+        for (target in matches) player.videoCommand(target.componentId, action.commandKind, action.commandValue)
+    }
 
     /** Stop audio immediately even when a submitted Vulkan frame is still pending. */
     fun setVisible(visible: Boolean) {

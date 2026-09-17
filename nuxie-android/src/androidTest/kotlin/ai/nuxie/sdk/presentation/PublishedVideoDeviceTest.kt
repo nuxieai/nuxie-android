@@ -14,6 +14,8 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.serialization.json.*
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -40,7 +42,7 @@ class PublishedVideoDeviceTest {
             }) },
         ))
         val descriptor = buildJsonObject {
-            put("render", JsonObject(inventory + ("assets" to JsonArray(listOf(asset)))))
+            put("render", JsonObject(inventory + mapOf("renderer" to JsonPrimitive("nux"), "assets" to JsonArray(listOf(asset)))))
             put("leg", buildJsonObject { put("screens", buildJsonArray { add(buildJsonObject { put("id", "screen") }) }) })
         }
         val prepared = PreparedPresentation(scene, "Video Frame", Color.BLACK, PresentationShell.FullScreen,
@@ -129,6 +131,35 @@ class PublishedVideoDeviceTest {
             assertTrue("Accessibility tree captions: $accessibleCaptions", accessibleCaptions.any { it == "Hello 👋" || it == "Welcome" })
             assertTrue("Screenshot captured", screenshotSaved)
             assertTrue("Caption layout must be measured", layoutChecks > 0)
+            fun command(type: String, extra: String = "", view: String = "clip-view"): Boolean = runBlocking {
+                withTimeout(5_000) {
+                    mounted.surface.applyVideoCommand(ai.nuxie.sdk.experiences.JourneyVideoAction.parse(
+                        Json.parseToJsonElement("""{"type":"video","target":{"artboardId":"screen","viewNodeId":"$view"},"command":{"type":"$type"$extra}}""")))
+                }
+            }
+            fun pixelIsRed(): Boolean {
+                var red = false
+                instrumentation.runOnMainSync {
+                    mounted.surface.bitmap?.let { bitmap ->
+                        val scale = minOf(bitmap.width / 320f, bitmap.height / 640f)
+                        val x = ((bitmap.width - 320 * scale) / 2 + 100 * scale).toInt()
+                        val y = ((bitmap.height - 640 * scale) / 2 + 80 * scale).toInt()
+                        val pixel = bitmap.getPixel(x, y)
+                        red = Color.red(pixel) > 180 && Color.blue(pixel) < 70
+                        bitmap.recycle()
+                    }
+                }
+                return red
+            }
+            assertFalse("Unknown targets must fail without affecting playback", command("pause", view = "missing"))
+            assertTrue("Pause must acknowledge native application", command("pause"))
+            assertTrue("Seek must acknowledge native application", command("seek", ",\"seconds\":0.1"))
+            val seekDeadline = SystemClock.elapsedRealtime() + 3_000
+            while (!pixelIsRed() && SystemClock.elapsedRealtime() < seekDeadline) Thread.sleep(20)
+            assertTrue("Paused seek must present its red frame", pixelIsRed())
+            Thread.sleep(1_200)
+            assertTrue("Paused video must retain its frame", pixelIsRed())
+            assertTrue("Play must acknowledge native application", command("play"))
             instrumentation.runOnMainSync { mounted.setVisible(false) }
             Thread.sleep(250)
             instrumentation.runOnMainSync { assertTrue(labels(content).none { it.visibility == View.VISIBLE && it.text.isNotEmpty() }) }
