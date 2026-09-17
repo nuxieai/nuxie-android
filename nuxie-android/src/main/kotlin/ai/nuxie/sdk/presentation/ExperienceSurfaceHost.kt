@@ -2,6 +2,7 @@ package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
 import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
+import ai.nuxie.sdk.experiences.SystemFontCache
 import ai.nuxie.sdk.runtime.NativeSemanticNode
 import ai.nuxie.sdk.runtime.NuxieSemanticSnapshot
 import ai.nuxie.sdk.runtime.NuxieSemanticTree
@@ -56,6 +57,7 @@ internal class ExperienceSurfaceHost(
     private val listener: Listener? = null,
     private val artboardSize: ExperienceArtboardSize? = null,
     private val runtime: NuxieRuntime = NuxieRuntime.shared,
+    private val systemFontCache: SystemFontCache = SystemFontCache.shared,
 ) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
     private val mainHandler = Handler(Looper.getMainLooper())
     interface Listener {
@@ -319,11 +321,15 @@ internal class ExperienceSurfaceHost(
                     onLoaded?.invoke(false)
                     return@enqueue
                 }
+                val systemFonts = mutableListOf<SystemFontCache.Lease>()
                 val import = runCatching {
                     ExperienceAssetImportBuilder.build(
                         descriptor = descriptor,
                         artifactsByKey = artifactsByKey,
                         inspectedCatalog = inspectedCatalog,
+                        systemFontBytes = { requirement ->
+                            systemFontCache.prepare(requirement).also(systemFonts::add).candidate.bytes
+                        },
                     )
                 }.getOrElse { error ->
                     Log.w(LOG_TAG, "Experience asset preparation failed", error)
@@ -335,12 +341,20 @@ internal class ExperienceSurfaceHost(
                     onLoaded?.invoke(false)
                     return@enqueue
                 }
-                runtime.importFile(
-                    renderer = activeRenderer,
-                    bytes = rivBytes,
-                    expectedAssets = import.expectedAssets,
-                    externalAssets = import.externalAssets,
-                )
+                try {
+                    runtime.importFile(
+                        renderer = activeRenderer,
+                        bytes = rivBytes,
+                        expectedAssets = import.expectedAssets,
+                        externalAssets = import.externalAssets,
+                    ).also { imported ->
+                        if (imported == null) systemFontCache.didFailImport(systemFonts)
+                        else systemFontCache.didImport(systemFonts)
+                    }
+                } catch (error: Throwable) {
+                    systemFontCache.didFailImport(systemFonts)
+                    throw error
+                }
             }
             val loadedFile = file
             if (loadedFile == null) {

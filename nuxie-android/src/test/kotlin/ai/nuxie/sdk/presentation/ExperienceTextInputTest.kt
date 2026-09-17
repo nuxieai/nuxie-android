@@ -43,6 +43,26 @@ internal fun textInputDescriptor(value: String = ""): JsonObject = Json.parseToJ
 
 @RunWith(RobolectricTestRunner::class)
 class ExperienceTextInputTest {
+    @Test
+    @org.robolectric.annotation.Config(sdk = [35])
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `System inputs preserve all nine authored weights without a downloaded font`() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        try {
+            val original = ExperienceTextInput.forScreen(textInputDescriptor("ok"), "survey").single()
+            for (weight in 100..900 step 100) {
+                val input = original.copy(style = original.style.copy(fontFamily = "System", fontWeight = "$weight"))
+                val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
+                    listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
+                val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+                assertEquals(weight, editor.typeface.weight)
+                assertFalse(editor.typeface.isItalic)
+            }
+        } finally {
+            controller.pause().stop().destroy()
+        }
+    }
+
     @Test fun `semantic native focus survives overlay withdrawal and input rollback`() {
         val controller = Robolectric.buildActivity(Activity::class.java).setup().visible()
         val activity = controller.get()

@@ -9,6 +9,8 @@ import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import android.content.Context
 import android.graphics.Color
 import android.graphics.Rect
+import ai.nuxie.sdk.experiences.SystemFontProvider
+import ai.nuxie.sdk.experiences.SystemFontRequirement
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
@@ -442,7 +444,12 @@ internal class ExperienceTextInputOverlay(
                 "right", "end" -> Gravity.END
                 else -> Gravity.START
             }
-            typeface = fonts[input.style.fontAssetName]?.let { runCatching { Typeface.createFromFile(it) }.getOrNull() }
+            typeface = if (input.style.fontFamily == "System") {
+                SystemFontProvider.typeface(SystemFontRequirement(
+                    input.style.fontAssetName, input.style.fontWeight.toIntOrNull() ?: 0,
+                    if (input.style.italic) "italic" else "normal",
+                ))
+            } else fonts[input.style.fontAssetName]?.let { runCatching { Typeface.createFromFile(it) }.getOrNull() }
                 ?: Typeface.create(input.style.fontFamily, when {
                     input.style.italic && (input.style.fontWeight.toIntOrNull() ?: 400) >= 600 -> Typeface.BOLD_ITALIC
                     input.style.italic -> Typeface.ITALIC
