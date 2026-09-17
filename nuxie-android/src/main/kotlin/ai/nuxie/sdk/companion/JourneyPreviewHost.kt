@@ -59,7 +59,9 @@ internal class JourneyPreviewSession(
     private val environment: NuxieEnvironment,
     private val transport: HttpTransport = HttpUrlConnectionTransport(),
     private val supportedRuntime: () -> JourneyReleaseSupportedRuntime? = {
-        supportedRuntimeForEmbeddedRuntime(nuxieRuntimeSourceRevision())
+        if (NuxieRuntime.shared.isAvailable) {
+            supportedRuntimeForEmbeddedRuntime(nuxieRuntimeSourceRevision())
+        } else null
     },
 ) {
     private val context = context.applicationContext ?: context
