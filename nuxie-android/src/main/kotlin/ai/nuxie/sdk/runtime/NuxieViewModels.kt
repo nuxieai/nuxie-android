@@ -355,7 +355,12 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         expectedAssets: List<ExpectedFileAsset>,
         externalAssets: Map<Int, ByteArray>,
         imageDecoder: NuxImageDecoder,
+        videoEnabled: Boolean = false,
     ): Long = error("newFile is not implemented")
+
+    fun videoOccurrences(player: Long): List<NuxieVideoOccurrence> = error("videoOccurrences is not implemented")
+    fun videoCommand(player: Long, component: Long, kind: Int, value: Double, reason: Int): Int = error("videoCommand is not implemented")
+    fun videoStep(player: Long, component: Long, observation: Int, generation: Long, value: Double): List<NuxieVideoAction> = error("videoStep is not implemented")
 
     fun freeFile(handle: Long): Unit = error("freeFile is not implemented")
 
@@ -489,13 +494,32 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         expectedAssets: List<ExpectedFileAsset>,
         externalAssets: Map<Int, ByteArray>,
         imageDecoder: NuxImageDecoder,
+        videoEnabled: Boolean,
     ): Long = NuxieRuntimeBridge.fileNew(
         rendererHandle,
         bytes,
         expectedAssets,
         externalAssets,
         imageDecoder,
+        videoEnabled,
     )
+
+    override fun videoOccurrences(player: Long): List<NuxieVideoOccurrence> {
+        val status = intArrayOf(-1)
+        val values = NuxieRuntimeBridge.nativeVideoOccurrences(player, status)
+        if (status[0] != NUX_STATUS_OK) throw NuxieRuntimeCallException("video occurrences", status[0])
+        return checkNotNull(values).toList()
+    }
+
+    override fun videoCommand(player: Long, component: Long, kind: Int, value: Double, reason: Int): Int =
+        NuxieRuntimeBridge.nativeVideoCommand(player, component, kind, value, reason)
+
+    override fun videoStep(player: Long, component: Long, observation: Int, generation: Long, value: Double): List<NuxieVideoAction> {
+        val status = intArrayOf(-1)
+        val values = NuxieRuntimeBridge.nativeVideoStep(player, component, observation, generation, value, status)
+        if (status[0] != NUX_STATUS_OK) throw NuxieRuntimeCallException("video step", status[0])
+        return checkNotNull(values).toList()
+    }
 
     override fun freeFile(handle: Long) {
         NuxieRuntimeBridge.nativeFileFree(handle)

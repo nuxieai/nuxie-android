@@ -370,6 +370,7 @@ class NuxieOwnedRuntimeTest {
             expectedAssets: List<ExpectedFileAsset>,
             externalAssets: Map<Int, ByteArray>,
             imageDecoder: NuxImageDecoder,
+            videoEnabled: Boolean,
         ): Long {
             importedRendererHandle = rendererHandle
             importedExpectedAssets = expectedAssets
