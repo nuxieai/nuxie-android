@@ -927,6 +927,75 @@ class ExperienceSurfaceHostPointerTest {
         }
     }
 
+    @Test fun `late native edit cannot write through unresolved modal scope`() {
+        val native = RecordingNative().apply { semanticRole = 6; textWritesInvalidateCapture = true }
+        val commits = mutableListOf<String>()
+        val controller = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+        val editor = android.widget.EditText(controller.get())
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(controller.get(), lane, runtime = NuxieRuntime(native),
+            listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() {}
+                override fun onFailure(error: ExperiencePresentationException) { throw error }
+                override fun onTextCommitted(inputId: String, text: String) { commits += text }
+                override fun onSemanticFields(fields: Map<String, ai.nuxie.sdk.runtime.NativeSemanticNode>) =
+                    fields.values.associate { it.id to editor }
+            })
+        controller.get().setContentView(host)
+        host.layout(0, 0, 100, 100)
+        val texture = SurfaceTexture(0)
+        val descriptor = Json.parseToJsonElement("""{
+            "requirements":{"requiredCapabilities":["experience-accessibility"]},
+            "render":{"assets":[],"screens":[{"id":"screen","artboardName":"Main"}]},
+            "leg":{"screens":[{"id":"screen"}]}
+        }""").jsonObject
+        try {
+            host.loadArtboard(byteArrayOf(1), null, descriptor,
+                textInputs = ExperienceTextInput.forScreen(textInputDescriptor(), "survey"))
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            fun present(time: Long) {
+                host.doFrame(time)
+                drain(lane)
+                host.onSurfaceTextureUpdated(texture)
+                drain(lane)
+                android.view.Choreographer.getInstance().removeFrameCallback(host)
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            }
+            present(1_000_000_000L)
+            host.writeText("name", "okay", false) {}
+            drain(lane)
+            assertEquals("An exposed editable field must accept its write", 1,
+                native.order.count { it.startsWith("write:") })
+            host.writeText("name", "hi", true) {}
+            drain(lane)
+            assertTrue("Commit waits for fresh native admission", commits.isEmpty())
+            present(1_016_000_000L)
+            assertEquals("Rapid edits survive their predecessor invalidating the capture", 2,
+                native.order.count { it.startsWith("write:") })
+            assertEquals(listOf("hi"), commits)
+            host.writeText("name", "no", true) {}
+            drain(lane)
+            native.semanticModalScope = 2
+            native.semanticTreeVersion++
+            present(1_032_000_000L)
+            assertEquals("Modal withdrawal retires the pending response", listOf("hi"), commits)
+            assertEquals(2, native.order.count { it.startsWith("write:") })
+            assertTrue("Capture must exercise modal admission", native.semanticCaptures > 0)
+            val writesBefore = native.order.count { it.startsWith("write:") }
+            host.writeText("name", "late edit", true) {}
+            drain(lane)
+            assertEquals("A withdrawn native field must not mutate runtime text", writesBefore,
+                native.order.count { it.startsWith("write:") })
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+            controller.pause().stop().destroy()
+        }
+    }
+
     private fun drain(lane: NuxieRuntimeLane) {
         val drained = CountDownLatch(1)
         assertTrue(lane.enqueue { drained.countDown() })
@@ -944,14 +1013,20 @@ class ExperienceSurfaceHostPointerTest {
         var semanticCaptureStatus = 0
         var semanticRevision = 1L
         var semanticTreeVersion = 1L
+        var semanticModalScope = 0L
+        var semanticRole = 1
+        var textWritesInvalidateCapture = false
+        private var capturedSemanticRevision = 0L
         val semanticFreed = mutableListOf<Long>()
         val semanticActions = mutableListOf<Pair<Long, Int>>()
         override fun inspectFileAssets(bytes: ByteArray) = emptyList<ai.nuxie.sdk.runtime.ExpectedFileAsset>()
         override fun enableSemantics(player: Long): Int { semanticsEnabled++; return 0 }
-        override fun captureSemantics(player: Long): NativeCallResult<Long> { semanticCaptures++; return NativeCallResult(semanticCaptureStatus, if (semanticCaptureStatus == 0) 99L else null) }
-        override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(semanticRevision, semanticTreeVersion, 1))
+        override fun captureSemantics(player: Long): NativeCallResult<Long> { semanticCaptures++; capturedSemanticRevision = semanticRevision; return NativeCallResult(semanticCaptureStatus, if (semanticCaptureStatus == 0) 99L else null) }
+        override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(semanticRevision, semanticTreeVersion, 1, semanticModalScope, 0))
         override fun semanticNode(snapshot: Long, index: Int) = NativeCallResult(0,
-            ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 1, 0, 0, 0, 1, 10f, 10f, 80f, 80f, "Continue", "", ""))
+            ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, semanticRole, 0, 0, 0, 1, 10f, 10f, 80f, 80f, "Continue", "", ""))
+        override fun semanticNodeForTextRun(player: Long, snapshot: Long, name: String) = NativeCallResult(0, 42L)
+        override fun validateSemantics(player: Long, snapshot: Long) = if (capturedSemanticRevision == semanticRevision) 0 else 9
         override fun freeSemantics(snapshot: Long): Int { semanticFreed += snapshot; return 0 }
         override fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int): Int {
             semanticActions += nodeId to action; return 0
@@ -989,6 +1064,7 @@ class ExperienceSurfaceHostPointerTest {
 
         override fun setTextRun(handle: Long, name: String, text: String): NativeCallResult<Boolean> {
             order += "write:$name:$text"
+            if (textWritesInvalidateCapture) semanticRevision++
             return NativeCallResult(0, true)
         }
 

@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NativeSemanticModalScope
 import ai.nuxie.sdk.runtime.NativeSemanticRole
 import ai.nuxie.sdk.runtime.NativeSemanticTrait
 import ai.nuxie.sdk.runtime.NativeSemanticState
@@ -38,11 +39,21 @@ internal class ExperienceAccessibilityProvider(
     private var savedAccessibilityFocus: SavedFocus? = null
     private var lastOwnedAccessibilityFocus: SavedFocus? = null
     private var savedInputFocus: SavedFocus? = null
+    private data class ModalFrame(val nodeId: Long, val returnId: Long?)
+    private var modalFrames: List<ModalFrame> = emptyList()
+    private val excludedNativeImportance = mutableMapOf<View, Int>()
     private val keyboardIndicator = ExperienceKeyboardFocusDrawable(host.resources.displayMetrics.density)
 
     fun publish(tree: NuxieSemanticTree, nativeFields: Map<Long, View> = emptyMap()) {
-        val oldNodes = index.tree?.nodes
+        val oldTree = index.tree
+        val root = ExperienceFocusRoot.containing(host)
+        val ownedFocus = nativeViews.entries.firstOrNull { it.value.isAccessibilityFocused }?.key?.let { id ->
+            root?.let { SavedFocus(id, index.readingOrder.indexOf(id), it, it.accessibilityRevision) }
+        } ?: listOfNotNull(lastOwnedAccessibilityFocus, savedAccessibilityFocus).firstOrNull {
+            root === it.root && root.accessibilityRevision == it.revision
+        }
         index.update(tree, nativeFields.keys)
+        updateExcludedNativeFields(nativeFields, index.readingOrder.toSet())
         nativeNodes = tree.nodes.filter { it.id in nativeFields }.associateBy { it.id }
         virtualIds = index.entries.values.associate { it.node.id to it.virtualId }
         nativeViews.values.filter { it !in nativeFields.values }.forEach { it.accessibilityDelegate = null }
@@ -64,8 +75,52 @@ internal class ExperienceAccessibilityProvider(
         host.isFocusable = index.entries.keys.any(::isKeyboardTarget)
         refreshKeyboardIndicator()
         if (hovered !in index.entries) updateHover(null)
-        if (oldNodes != tree.nodes) send(HOST_VIEW_ID, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+        if (oldTree?.nodes != tree.nodes || oldTree?.modalScope != tree.modalScope) {
+            send(HOST_VIEW_ID, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+        }
+        val path = modalPath(tree)
+        if (path != modalFrames.map { it.nodeId }) {
+            val common = modalFrames.map { it.nodeId }.zip(path).takeWhile { it.first == it.second }.size
+            val replacing = common < modalFrames.size
+            val returnId = if (replacing) modalFrames[common].returnId else ownedFocus?.nodeId
+            modalFrames = modalFrames.take(common) + path.drop(common).mapIndexed { index, id ->
+                ModalFrame(id, returnId.takeIf { index == 0 })
+            }
+            val target = if (common < path.size) index.readingOrder.firstOrNull()
+                else returnId?.takeIf { it in index.readingOrder } ?: index.readingOrder.firstOrNull()
+            if (root != null && (ownedFocus != null || root.accessibilityRevision == 0L) && target != null) {
+                savedAccessibilityFocus = SavedFocus(target, index.readingOrder.indexOf(target), root, root.accessibilityRevision)
+            }
+        }
         restoreFocus()
+    }
+
+    private fun modalPath(tree: NuxieSemanticTree): List<Long> {
+        val active = when (val scope = tree.modalScope) {
+            NativeSemanticModalScope.None -> return emptyList()
+            NativeSemanticModalScope.Unresolved -> return modalFrames.map { it.nodeId }
+            is NativeSemanticModalScope.Active -> scope.nodeId
+        }
+        val byId = tree.nodes.associateBy { it.id }
+        val path = mutableListOf<Long>()
+        var current = byId[active]
+        while (current != null) {
+            if (current.stateFlags and NativeSemanticState.MODAL != 0 &&
+                current.role in setOf(NativeSemanticRole.DIALOG, NativeSemanticRole.ALERT_DIALOG)) path += current.id
+            current = if (current.parentId == -1) null else byId[current.parentId.toLong() and 0xffff_ffffL]
+        }
+        return path.asReversed()
+    }
+
+    private fun updateExcludedNativeFields(fields: Map<Long, View>, allowed: Set<Long>) {
+        val excluded = fields.filterKeys { it !in allowed }.values.toSet()
+        for (view in excludedNativeImportance.keys.toList()) if (view !in excluded) {
+            view.importantForAccessibility = excludedNativeImportance.remove(view)!!
+        }
+        for (view in excluded) {
+            excludedNativeImportance.putIfAbsent(view, view.importantForAccessibility)
+            view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        }
     }
 
     fun invalidateState() {
@@ -74,6 +129,7 @@ internal class ExperienceAccessibilityProvider(
     }
 
     fun retire() {
+        modalFrames = emptyList()
         lastOwnedAccessibilityFocus = null
         savedAccessibilityFocus = null
         savedInputFocus = null
@@ -126,6 +182,7 @@ internal class ExperienceAccessibilityProvider(
     }
 
     private fun removeTree(preserveHostFocus: Boolean) {
+        updateExcludedNativeFields(emptyMap(), emptySet())
         clearAccessibilityFocus()
         updateHover(null)
         clearInputFocus()

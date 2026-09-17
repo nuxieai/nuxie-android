@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NativeSemanticModalScope
 import ai.nuxie.sdk.runtime.NativeSemanticRole
 import ai.nuxie.sdk.runtime.NativeSemanticState
 import ai.nuxie.sdk.runtime.NativeSemanticNode
@@ -32,10 +33,10 @@ internal class ExperienceSemanticIndex {
         val byId = incoming.nodes.associateBy { it.id }
         require(byId.size == incoming.nodes.size) { "Duplicate semantic node identity" }
         require(incoming.nodes.all { it.id in 0..0xffff_ffffL }) { "Invalid semantic node identity" }
-        require(incoming.nodes.filter { it.role == NativeSemanticRole.TEXT_FIELD }.all { it.id in nativeFieldIds }) {
+        require(incoming.nodes.filter { it.role == NativeSemanticRole.TEXT_FIELD && it.id in incoming.exposedNodeIds }.all { it.id in nativeFieldIds }) {
             "Semantic text fields require an associated native editable control"
         }
-        data class Placement(val hidden: Boolean, val represented: Boolean, val parent: Long?)
+        data class Placement(val hidden: Boolean, val inScope: Boolean, val represented: Boolean, val parent: Long?)
         val placements = mutableMapOf<Long, Placement>()
         // Resolve ancestors iteratively, once per node: deep authored groups must not
         // overflow the UI stack or turn every frame into a quadratic traversal.
@@ -55,11 +56,16 @@ internal class ExperienceSemanticIndex {
                 val parentId = if (item.parentId == -1) null else item.parentId.toLong() and 0xffff_ffffL
                 val parent = parentId?.let { placements.getValue(it) }
                 val hidden = item.stateFlags and NativeSemanticState.HIDDEN != 0 || parent?.hidden == true
-                placements[item.id] = Placement(hidden, !hidden && item.id !in nativeFieldIds,
+                val inScope = when (val scope = incoming.modalScope) {
+                    NativeSemanticModalScope.None -> true
+                    NativeSemanticModalScope.Unresolved -> false
+                    is NativeSemanticModalScope.Active -> item.id == scope.nodeId || parent?.inScope == true
+                }
+                placements[item.id] = Placement(hidden, inScope, !hidden && inScope && item.id !in nativeFieldIds,
                     if (parent?.represented == true) parentId else parent?.parent)
             }
         }
-        val visible = byId.filterKeys { !placements.getValue(it).hidden }
+        val visible = byId.filterKeys { !placements.getValue(it).hidden && placements.getValue(it).inScope }
         val pendingIdentities = identities.filterKeys { it in byId }.toMutableMap()
         var pendingNext = nextId
         for (id in visible.keys) if (id !in pendingIdentities) {
@@ -76,7 +82,11 @@ internal class ExperienceSemanticIndex {
         }
         val order = mutableListOf<Long>()
         val pending = ArrayDeque<NativeSemanticNode>()
-        orderedChildren[-1].orEmpty().asReversed().forEach(pending::addLast)
+        val roots = when (val scope = incoming.modalScope) {
+            is NativeSemanticModalScope.Active -> listOfNotNull(visible[scope.nodeId])
+            else -> orderedChildren[-1].orEmpty()
+        }
+        roots.asReversed().forEach(pending::addLast)
         while (pending.isNotEmpty()) {
             val node = pending.removeLast()
             order += node.id

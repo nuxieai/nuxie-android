@@ -51,18 +51,83 @@ class NuxieSemanticSnapshotTest {
         } finally { snapshot.close() }
     }
 
+    @Test fun `unresolved modal withdraws native editable association`() {
+        val native = RecordingNative().apply {
+            role = NativeSemanticRole.TEXT_FIELD
+            info = longArrayOf(7, 8, 1, 2, 0)
+        }
+        val snapshot = NuxieSemanticSnapshot.capture(10, native)
+        try {
+            assertNull(snapshot.nodeForTextRun(10, "authored-run"))
+        } finally { snapshot.close() }
+    }
+
+    @Test fun `native scope includes only visible descendants of the active dialog`() {
+        fun node(id: Long, parent: Int = -1, role: Int = NativeSemanticRole.TEXT_FIELD, flags: Int = 0) =
+            NativeSemanticNode(id, parent, 0, role, flags, 0, 0, 0,
+                0f, 0f, 10f, 10f, "Field", "", "")
+        val nodes = listOf(node(4, 3), node(3, 2), node(1),
+            node(2, role = NativeSemanticRole.DIALOG, flags = NativeSemanticState.MODAL),
+            node(5, 2, flags = NativeSemanticState.HIDDEN), node(6, 5))
+        assertEquals(setOf(2L, 3L, 4L),
+            NuxieSemanticTree(1, 1, nodes, NativeSemanticModalScope.Active(2)).exposedNodeIds)
+        assertEquals(setOf(1L, 2L, 3L, 4L), NuxieSemanticTree(1, 1, nodes).exposedNodeIds)
+        assertTrue(NuxieSemanticTree(1, 1, nodes, NativeSemanticModalScope.Unresolved).exposedNodeIds.isEmpty())
+    }
+
+    @Test fun `capture owns full modal identity and unresolved scope`() {
+        for ((value, expected) in listOf(
+            0L to NativeSemanticModalScope.None,
+            1L to NativeSemanticModalScope.Active(0xffff_ffffL),
+            2L to NativeSemanticModalScope.Unresolved,
+        )) {
+            val native = RecordingNative().apply {
+                info = longArrayOf(7, 8, 1, value, 0xffff_ffffL)
+                role = NativeSemanticRole.DIALOG
+                flags = NativeSemanticState.MODAL
+            }
+            val capture = NuxieSemanticSnapshot.capture(10, native)
+            native.info[3] = 0
+            assertEquals(expected, capture.tree.modalScope)
+            capture.close()
+        }
+    }
+
+    @Test fun `malformed modal scope releases the entire capture`() {
+        for (metadata in listOf(
+            longArrayOf(7, 8, 1),
+            longArrayOf(7, 8, 1, 3, 0),
+            longArrayOf(7, 8, 1, 1, 42),
+            longArrayOf(7, 8, 1, 1, -1),
+            longArrayOf(7, 8, 1, 1, 0xffff_ffffL), // Captured node is a button.
+        )) {
+            val native = RecordingNative().apply { info = metadata }
+            assertThrows(RuntimeException::class.java) { NuxieSemanticSnapshot.capture(10, native) }
+            assertEquals(listOf(99L), native.freed)
+        }
+        val hidden = RecordingNative().apply {
+            info = longArrayOf(7, 8, 1, 1, 0xffff_ffffL)
+            role = NativeSemanticRole.DIALOG
+            flags = NativeSemanticState.MODAL or NativeSemanticState.HIDDEN
+        }
+        assertThrows(IllegalArgumentException::class.java) { NuxieSemanticSnapshot.capture(10, hidden) }
+        assertEquals(listOf(99L), hidden.freed)
+    }
+
     private class RecordingNative : NuxieSemanticNative {
         var failNode = false
         var role = 1
+        var flags = 0
+        var info = longArrayOf(7, 8, 1, 0, 0)
         var associationStatus = 0
         override fun semanticNodeForTextRun(player: Long, snapshot: Long, name: String) =
             NativeCallResult(associationStatus, 0xffff_ffffL.takeIf { associationStatus == 0 })
         val freed = mutableListOf<Long>()
         override fun captureSemantics(player: Long) = NativeCallResult(0, 99L)
-        override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(7, 8, 1))
+        override fun semanticInfo(snapshot: Long) = NativeCallResult(0, info)
         override fun semanticNode(snapshot: Long, index: Int): NativeCallResult<NativeSemanticNode> =
             if (failNode) NativeCallResult(4, null) else NativeCallResult(0,
-                NativeSemanticNode(0xffff_ffffL, -1, 0, role, 0, 0, 0, 1,
+                NativeSemanticNode(0xffff_ffffL, -1, 0, role, flags, 0, 0, 1,
                     10f, 20f, 30f, 40f, "Continue", "", "Next step"))
         override fun freeSemantics(snapshot: Long): Int { freed += snapshot; return 0 }
         override fun validateSemantics(player: Long, snapshot: Long) = 0

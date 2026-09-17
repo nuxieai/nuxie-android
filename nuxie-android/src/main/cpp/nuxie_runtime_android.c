@@ -2030,10 +2030,11 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeSemanticSnapshotInfo(
       (const struct NuxSemanticSnapshot *)from_handle(snapshot), &info);
   jlongArray result = NULL;
   if (status == NUX_STATUS_OK) {
-    result = (*env)->NewLongArray(env, 3);
+    result = (*env)->NewLongArray(env, 5);
     if (result != NULL) {
-      jlong values[] = {(jlong)info.render_revision, (jlong)info.tree_version, (jlong)info.node_count};
-      (*env)->SetLongArrayRegion(env, result, 0, 3, values);
+      jlong values[] = {(jlong)info.render_revision, (jlong)info.tree_version, (jlong)info.node_count,
+                        (jlong)info.modal_scope, (jlong)info.modal_node_id};
+      (*env)->SetLongArrayRegion(env, result, 0, 5, values);
     } else status = NUX_STATUS_RUNTIME_ERROR;
   }
   if (!set_status_out(env, status_out, status)) {

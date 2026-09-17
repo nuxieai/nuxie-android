@@ -4,6 +4,7 @@ import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
 import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
 import ai.nuxie.sdk.experiences.SystemFontCache
 import ai.nuxie.sdk.runtime.NativeSemanticNode
+import ai.nuxie.sdk.runtime.NativeSemanticState
 import ai.nuxie.sdk.runtime.NuxieSemanticSnapshot
 import ai.nuxie.sdk.runtime.NuxieSemanticTree
 import android.view.accessibility.AccessibilityNodeProvider
@@ -88,6 +89,9 @@ internal class ExperienceSurfaceHost(
     private var viewModelState: NuxieRuntimeViewModelState? = null
     @Volatile private var semanticsEnabled = false
     private var semanticSnapshot: NuxieSemanticSnapshot? = null
+    private var publishedSemanticTree: NuxieSemanticTree? = null
+    private var publishedSemanticFields: Map<String, NativeSemanticNode> = emptyMap()
+    private val pendingTextWrites = ArrayDeque<PendingTextWrite>()
     private var semanticSnapshotEpoch = -1L
     private var semanticFields: Map<String, NativeSemanticNode> = emptyMap()
     private var queuedSemanticAction: QueuedSemanticAction? = null
@@ -137,6 +141,7 @@ internal class ExperienceSurfaceHost(
             if (!running || !sceneInputEnabled.get() || released.get() ||
                 request.generation != frameGeneration.get() || request.epoch != semanticEpoch.get() ||
                 capture.tree.treeVersion != request.tree.treeVersion ||
+                capture.tree.modalScope != request.tree.modalScope ||
                 capture.tree.nodes != request.tree.nodes) return
             // A completed frame may replace the render revision without changing
             // the accessibility tree. Preserve the exact node intent and submit
@@ -156,12 +161,15 @@ internal class ExperienceSurfaceHost(
 
     /** UI invalidation precedes queued native teardown, excluding already-posted old publications. */
     private fun retireSemantics(preserveFocus: Boolean = false) {
+        publishedSemanticTree = null
+        publishedSemanticFields = emptyMap()
         semanticEpoch.incrementAndGet()
         if (preserveFocus) accessibility.withdraw() else accessibility.retire()
         if (semanticsEnabled) listener?.onSemanticFields(emptyMap())
         lane.enqueue {
             semanticSnapshot?.close()
             semanticSnapshot = null
+            while (pendingTextWrites.isNotEmpty()) pendingTextWrites.removeFirst().complete(Result.success(Unit))
             queuedSemanticAction = null
             semanticActionPending.set(false)
         }
@@ -184,12 +192,15 @@ internal class ExperienceSurfaceHost(
         semanticSnapshot = next
         semanticSnapshotEpoch = epoch
         postSemanticTree(next.tree, fields, generation, epoch)
+        drainTextWrites()
     }
 
     private fun postSemanticTree(tree: NuxieSemanticTree, fields: Map<String, NativeSemanticNode>, generation: Long, epoch: Long) {
         post {
             if (!released.get() && running && sceneInputEnabled.get() && firstFrameComposed && generation == frameGeneration.get() && epoch == semanticEpoch.get()) {
                 try {
+                    publishedSemanticTree = tree
+                    publishedSemanticFields = fields
                     val nativeFields = listener?.onSemanticFields(fields).orEmpty()
                     accessibility.publish(tree, nativeFields)
                     listener?.onSemanticTreePublished()
@@ -447,6 +458,20 @@ internal class ExperienceSurfaceHost(
             complete(Result.failure(IllegalStateException("Experience surface is released")))
             return
         }
+        if (semanticsEnabled) {
+            val tree = publishedSemanticTree
+            val field = publishedSemanticFields[inputId]
+            if (tree == null || field == null || !sceneInputEnabled.get()) {
+                complete(Result.success(Unit))
+                return
+            }
+            val request = PendingTextWrite(inputId, text, commit, field.id, tree.modalScope,
+                semanticEpoch.get(), ::complete)
+            if (!lane.enqueue { pendingTextWrites.addLast(request); drainTextWrites() }) {
+                complete(Result.failure(IllegalStateException("Runtime lane is shut down")))
+            }
+            return
+        }
         val accepted = lane.enqueue {
             val result = runCatching {
                 check(!released.get()) { "Experience surface is released" }
@@ -459,6 +484,46 @@ internal class ExperienceSurfaceHost(
             complete(result)
         }
         if (!accepted) complete(Result.failure(IllegalStateException("Runtime lane is shut down")))
+    }
+
+    private data class PendingTextWrite(
+        val inputId: String,
+        val text: String,
+        val commit: Boolean,
+        val fieldId: Long,
+        val modalScope: ai.nuxie.sdk.runtime.NativeSemanticModalScope,
+        val epoch: Long,
+        val complete: (Result<Unit>) -> Unit,
+    )
+
+    /** Earlier text writes invalidate a capture; retain later edits until a fresh frame arrives. */
+    private fun drainTextWrites() {
+        if (pendingPresentation) return
+        while (pendingTextWrites.isNotEmpty()) {
+            val request = pendingTextWrites.first()
+            val capture = semanticSnapshot
+            val active = player
+            val field = semanticFields[request.inputId]
+            if (released.get() || !sceneInputEnabled.get() || request.epoch != semanticEpoch.get() ||
+                capture == null || active == null || field == null || field.id != request.fieldId ||
+                capture.tree.modalScope != request.modalScope || field.id !in capture.tree.exposedNodeIds ||
+                field.stateFlags and (NativeSemanticState.DISABLED or NativeSemanticState.HIDDEN or NativeSemanticState.READ_ONLY) != 0) {
+                pendingTextWrites.removeFirst().complete(Result.success(Unit))
+                continue
+            }
+            val status = capture.validate(active.requireHandle())
+            if (status == 9) return // Stale capture: retry after presentation, without acknowledging the edit.
+            pendingTextWrites.removeFirst()
+            val result = runCatching {
+                check(status == 0) { "Native text capture validation failed: $status" }
+                val input = checkNotNull(textInputs[request.inputId]) { "Text input is not declared for this screen" }
+                val limited = ExperienceTextInputLimit.apply(request.text, input.maxLength)
+                checkNotNull(artboard) { "Experience artboard is unavailable" }
+                    .setTextRun(input.runName, if (input.secure) "" else limited)
+                if (request.commit) listener?.onTextCommitted(request.inputId, limited)
+            }
+            request.complete(result)
+        }
     }
 
     /** Suspend scene actions during navigation while allowing authored exit animation to render. */

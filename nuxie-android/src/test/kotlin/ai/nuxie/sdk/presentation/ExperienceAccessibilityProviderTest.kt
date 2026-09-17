@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NativeSemanticModalScope
 import ai.nuxie.sdk.runtime.NativeSemanticNode
 import ai.nuxie.sdk.runtime.NuxieSemanticTree
 import java.io.File
@@ -209,6 +210,97 @@ class ExperienceAccessibilityProviderTest {
                 scenario.getValue("expectedFocus").jsonPrimitive.content, actual)
             provider.retire()
         }
+    }
+
+    @Test fun `shared modal scopes fence traversal and restore the original invoker`() = withHost { host ->
+        val fixture = Json.parseToJsonElement(File("../fixtures/accessibility/modal-focus.json").readText()).jsonObject
+        assertEquals(1, fixture.getValue("schemaVersion").jsonPrimitive.int)
+        val definitions = fixture.getValue("nodes").jsonArray.associate { raw ->
+            val definition = raw.jsonObject
+            definition.getValue("id").jsonPrimitive.int.toLong() to definition
+        }
+        for (item in fixture.getValue("cases").jsonArray) {
+            val scenario = item.jsonObject
+            val provider = provider(host)
+            fun virtual(id: Long) = (1..64).first { provider.createAccessibilityNodeInfo(it)?.text?.toString() == id.toString() }
+            for (raw in scenario.getValue("steps").jsonArray) {
+                val step = raw.jsonObject
+                val nodes = step.getValue("nodes").jsonArray.mapIndexed { index, rawId ->
+                    val id = rawId.jsonPrimitive.int.toLong()
+                    val definition = definitions.getValue(id)
+                    node().copy(id = id, parentId = definition["parent"]?.jsonPrimitive?.intOrNull ?: -1,
+                        role = definition.getValue("role").jsonPrimitive.int,
+                        stateFlags = definition.getValue("flags").jsonPrimitive.int,
+                        siblingIndex = index, label = id.toString())
+                }
+                val scope = when (step.getValue("scope").jsonPrimitive.content) {
+                    "none" -> NativeSemanticModalScope.None
+                    "active" -> NativeSemanticModalScope.Active(step.getValue("activeModal").jsonPrimitive.int.toLong())
+                    "unresolved" -> NativeSemanticModalScope.Unresolved
+                    else -> error("Unknown shared modal scope")
+                }
+                provider.publish(NuxieSemanticTree(1, 1, nodes, scope))
+                val exposed = (1..64).mapNotNull { provider.createAccessibilityNodeInfo(it)?.text?.toString() }
+                assertEquals(scenario.getValue("id").jsonPrimitive.content,
+                    step.getValue("expectedExposed").jsonArray.map { it.jsonPrimitive.content }, exposed)
+                step["expectedFocus"]?.let { expected ->
+                    assertEquals(scenario.getValue("id").jsonPrimitive.content, expected.jsonPrimitive.content,
+                        provider.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)?.text?.toString())
+                }
+                step["focusAfter"]?.let { target ->
+                    assertTrue(provider.performAction(virtual(target.jsonPrimitive.int.toLong()),
+                        AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null))
+                }
+                if (step["clearFocusAfter"]?.jsonPrimitive?.booleanOrNull == true) {
+                    val focused = provider.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)?.text?.toString()?.toLong()
+                    if (focused != null) provider.performAction(virtual(focused), AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS, null)
+                }
+            }
+            provider.retire()
+        }
+    }
+
+    @Test fun `modal after withdrawal returns to native invoker despite older virtual focus history`() = withHost { host ->
+        Shadows.shadowOf(host.context.getSystemService(AccessibilityManager::class.java)).setTouchExplorationEnabled(true)
+        val root = host.parent as ExperienceFocusRoot
+        val field = android.widget.EditText(host.context)
+        root.addView(field)
+        field.layout(0, 0, 100, 50)
+        val provider = provider(host)
+        val background = listOf(node().copy(id = 1), node().copy(id = 2, role = 6))
+        provider.publish(NuxieSemanticTree(1, 1, background), mapOf(2L to field))
+        assertTrue(provider.performAction(1, AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null))
+        assertTrue(field.performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null))
+        provider.withdraw()
+        root.removeView(field)
+        val replacement = android.widget.EditText(host.context)
+        root.addView(replacement)
+        replacement.layout(0, 0, 100, 50)
+        val dialog = node().copy(id = 10, label = "Dialog", role = 14, stateFlags = 1 shl 11)
+        provider.publish(NuxieSemanticTree(2, 2, background + dialog, NativeSemanticModalScope.Active(10)), mapOf(2L to replacement))
+        assertEquals("Dialog", provider.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)?.text?.toString())
+        provider.publish(NuxieSemanticTree(3, 3, background), mapOf(2L to replacement))
+        assertTrue("Return to the surviving native invoker", replacement.isAccessibilityFocused)
+    }
+
+    @Test fun `modal scope excludes native fields and restores their original setting`() = withHost { host ->
+        val field = android.widget.EditText(host.context).apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES }
+        (host.parent as ExperienceFocusRoot).addView(field)
+        val provider = provider(host)
+        val background = listOf(node().copy(id = 1), node().copy(id = 2, role = 6))
+        provider.publish(NuxieSemanticTree(1, 1, background), mapOf(2L to field))
+        val oldVirtual = (1..64).first { provider.createAccessibilityNodeInfo(it) != null }
+        val dialog = node().copy(id = 10, role = 14, stateFlags = 1 shl 11)
+        provider.publish(NuxieSemanticTree(2, 2, background + dialog, NativeSemanticModalScope.Active(10)), mapOf(2L to field))
+        assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS, field.importantForAccessibility)
+        assertNull(provider.createAccessibilityNodeInfo(oldVirtual))
+        assertFalse(provider.performAction(oldVirtual, AccessibilityNodeInfo.ACTION_CLICK, null))
+        provider.publish(NuxieSemanticTree(3, 3, background), mapOf(2L to field))
+        assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_YES, field.importantForAccessibility)
+        field.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        provider.publish(NuxieSemanticTree(4, 4, background + dialog, NativeSemanticModalScope.Active(10)), mapOf(2L to field))
+        provider.retire()
+        assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_NO, field.importantForAccessibility)
     }
 
     @Test fun `Android nodes expose authored labels geometry and exact actions`() = withHost { host ->

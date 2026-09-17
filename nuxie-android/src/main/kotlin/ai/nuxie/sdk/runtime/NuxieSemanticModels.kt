@@ -11,6 +11,8 @@ internal object NativeSemanticRole {
     const val TEXT = 7
     const val IMAGE = 8
     const val LIST = 10
+    const val DIALOG = 14
+    const val ALERT_DIALOG = 15
     const val RADIO_GROUP = 16
     const val RADIO_BUTTON = 17
 }
@@ -25,6 +27,7 @@ internal object NativeSemanticState {
     const val READ_ONLY = 1 shl 10
     const val DISABLED = 1 shl 6
     const val HIDDEN = 1 shl 8
+    const val MODAL = 1 shl 11
     const val OBSCURED = 1 shl 12
 }
 
@@ -65,40 +68,81 @@ internal interface NuxieSemanticNative {
     fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int): Int = error("queueSemanticAction is not implemented")
 }
 
+/** Selection from the runtime's actual rendered occurrence order. */
+internal sealed interface NativeSemanticModalScope {
+    data object None : NativeSemanticModalScope
+    data class Active(val nodeId: Long) : NativeSemanticModalScope
+    data object Unresolved : NativeSemanticModalScope
+}
+
 /** UI-safe data only. The native capture that authorizes actions stays on the runtime lane. */
 internal class NuxieSemanticTree(
     val renderRevision: Long,
     val treeVersion: Long,
     nodes: List<NativeSemanticNode>,
+    val modalScope: NativeSemanticModalScope = NativeSemanticModalScope.None,
 ) {
     // Native captures retain each node's own flags. Native editors bypass semantic
-    // action admission, so every consumer needs the same ancestor-disabled state.
-    val nodes: List<NativeSemanticNode> = inheritDisabledState(nodes)
+    // action admission, so consumers need effective ancestor visibility and state.
+    val nodes: List<NativeSemanticNode> = inheritState(nodes)
 
-    private fun inheritDisabledState(nodes: List<NativeSemanticNode>): List<NativeSemanticNode> {
+    /** Native editors must obey the same captured modal boundary as virtual controls. */
+    val exposedNodeIds: Set<Long> by lazy {
+        val candidates = when (val scope = modalScope) {
+            NativeSemanticModalScope.None -> this.nodes
+            NativeSemanticModalScope.Unresolved -> emptyList()
+            is NativeSemanticModalScope.Active -> {
+                val children = this.nodes.groupBy { it.parentId.toLong() and 0xffff_ffffL }
+                val pending = ArrayDeque<NativeSemanticNode>()
+                pending.add(this.nodes.single { it.id == scope.nodeId })
+                buildList {
+                    while (pending.isNotEmpty()) {
+                        val node = pending.removeLast()
+                        add(node)
+                        pending.addAll(children[node.id].orEmpty().filter { it.parentId != -1 })
+                    }
+                }
+            }
+        }
+        candidates.filter { it.stateFlags and NativeSemanticState.HIDDEN == 0 }.map { it.id }.toSet()
+    }
+
+    init {
+        if (modalScope is NativeSemanticModalScope.Active) {
+            val modal = this.nodes.singleOrNull { it.id == modalScope.nodeId }
+            require(modalScope.nodeId in 0..0xffff_ffffL && modal != null &&
+                modal.stateFlags and NativeSemanticState.HIDDEN == 0 &&
+                modal.stateFlags and NativeSemanticState.MODAL != 0 &&
+                modal.role in setOf(NativeSemanticRole.DIALOG, NativeSemanticRole.ALERT_DIALOG)) {
+                "Active modal must identify a visible captured dialog"
+            }
+        }
+    }
+
+    private fun inheritState(nodes: List<NativeSemanticNode>): List<NativeSemanticNode> {
         require(nodes.size <= 16_384) { "Semantic tree exceeds native node limit" }
         val byId = nodes.associateBy { it.id }
         require(byId.size == nodes.size) { "Duplicate semantic node identity" }
-        val disabled = mutableMapOf<Long, Boolean>()
+        val inheritedFlags = mutableMapOf<Long, Int>()
+        val inheritedMask = NativeSemanticState.DISABLED or NativeSemanticState.HIDDEN
         for (node in nodes) {
             val path = mutableListOf<NativeSemanticNode>()
             val visiting = mutableSetOf<Long>()
             var current: NativeSemanticNode? = node
-            while (current != null && current.id !in disabled) {
+            while (current != null && current.id !in inheritedFlags) {
                 require(visiting.add(current.id)) { "Cyclic semantic hierarchy" }
                 path += current
                 current = if (current.parentId == -1) null else
                     requireNotNull(byId[current.parentId.toLong() and 0xffff_ffffL]) { "Missing semantic ancestor" }
             }
-            var inherited = current?.let { disabled.getValue(it.id) } ?: false
+            var inherited = current?.let { inheritedFlags.getValue(it.id) } ?: 0
             for (item in path.asReversed()) {
-                inherited = inherited || item.stateFlags and NativeSemanticState.DISABLED != 0
-                disabled[item.id] = inherited
+                inherited = inherited or (item.stateFlags and inheritedMask)
+                inheritedFlags[item.id] = inherited
             }
         }
         return nodes.map { node ->
-            if (disabled.getValue(node.id)) node.copy(stateFlags = node.stateFlags or NativeSemanticState.DISABLED)
-            else node
+            node.copy(stateFlags = node.stateFlags or inheritedFlags.getValue(node.id))
         }
     }
 }
@@ -122,7 +166,7 @@ internal class NuxieSemanticSnapshot private constructor(
         val id = checkNotNull(result.value) { "Native semantic association returned no identity" }
         return checkNotNull(tree.nodes.singleOrNull { it.id == id && it.role == NativeSemanticRole.TEXT_FIELD }) {
             "Native semantic association returned an absent or non-field node"
-        }
+        }.takeIf { it.id in tree.exposedNodeIds }
     }
 
     fun close() {
@@ -139,11 +183,17 @@ internal class NuxieSemanticSnapshot private constructor(
             val handle = native.captureSemantics(player).required("capture semantics")
             try {
                 val info = native.semanticInfo(handle).required("read semantic info")
-                check(info.size == 3 && info[2] in 0..16_384) { "Invalid semantic snapshot dimensions" }
+                check(info.size == 5 && info[2] in 0..16_384) { "Invalid semantic snapshot dimensions" }
                 val nodes = List(info[2].toInt()) { index ->
                     native.semanticNode(handle, index).required("read semantic node")
                 }
-                return NuxieSemanticSnapshot(handle, native, NuxieSemanticTree(info[0], info[1], nodes))
+                val scope = when (info[3]) {
+                    0L -> NativeSemanticModalScope.None
+                    1L -> NativeSemanticModalScope.Active(info[4])
+                    2L -> NativeSemanticModalScope.Unresolved
+                    else -> error("Unknown semantic modal scope")
+                }
+                return NuxieSemanticSnapshot(handle, native, NuxieSemanticTree(info[0], info[1], nodes, scope))
             } catch (error: Throwable) {
                 try {
                     val status = native.freeSemantics(handle)

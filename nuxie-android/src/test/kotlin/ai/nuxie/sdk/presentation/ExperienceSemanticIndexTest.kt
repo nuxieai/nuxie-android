@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NativeSemanticModalScope
 import ai.nuxie.sdk.runtime.NativeSemanticNode
 import ai.nuxie.sdk.runtime.NuxieSemanticTree
 import org.junit.Assert.*
@@ -70,6 +71,37 @@ class ExperienceSemanticIndexTest {
         assertFalse(index.entries.values.any { it.node.id == 3L || it.node.id == 9L })
         index.clearOccurrence()
         assertTrue(index.readingOrder.isEmpty())
+    }
+
+    @Test fun `modal selection fences traversal and preserves surviving virtual identities`() {
+        val index = ExperienceSemanticIndex()
+        val nodes = listOf(node(1), node(10).copy(role = 14, stateFlags = 1 shl 11),
+            node(11).copy(parentId = 10), node(12).copy(parentId = 10, role = 6, siblingIndex = 1),
+            node(20).copy(role = 14, stateFlags = 1 shl 11, siblingIndex = 1), node(21).copy(parentId = 20))
+        index.update(NuxieSemanticTree(1, 1, nodes), setOf(12))
+        val original = index.entries.values.associate { it.node.id to it.virtualId }
+        for ((scope, exposed) in listOf(
+            NativeSemanticModalScope.Active(10) to listOf(10L, 11L, 12L),
+            NativeSemanticModalScope.Active(20) to listOf(20L, 21L),
+            NativeSemanticModalScope.Unresolved to emptyList(),
+            NativeSemanticModalScope.Active(10) to listOf(10L, 11L, 12L),
+            NativeSemanticModalScope.None to listOf(1L, 10L, 11L, 12L, 20L, 21L),
+        )) {
+            index.update(NuxieSemanticTree(2, 1, nodes, scope), setOf(12))
+            assertEquals(exposed, index.readingOrder)
+            assertEquals(exposed.filter { it != 12L }.toSet(), index.entries.values.map { it.node.id }.toSet())
+            for (entry in index.entries.values) assertEquals(original[entry.node.id], entry.virtualId)
+            if (scope is NativeSemanticModalScope.Active) assertEquals(scope.nodeId, index.children(null).single().node.id)
+        }
+    }
+
+    @Test fun `nested active modal becomes an accessible root without its excluded ancestors`() {
+        val index = ExperienceSemanticIndex()
+        val nodes = listOf(node(1), node(10).copy(role = 14, stateFlags = 1 shl 11),
+            node(20).copy(parentId = 10, role = 15, stateFlags = 1 shl 11), node(21).copy(parentId = 20))
+        index.update(NuxieSemanticTree(1, 1, nodes, NativeSemanticModalScope.Active(20)))
+        assertEquals(listOf(20L, 21L), index.readingOrder)
+        assertEquals(20L, index.children(null).single().node.id)
     }
 
     private fun tree(vararg nodes: NativeSemanticNode) = NuxieSemanticTree(1, 1, nodes.toList())

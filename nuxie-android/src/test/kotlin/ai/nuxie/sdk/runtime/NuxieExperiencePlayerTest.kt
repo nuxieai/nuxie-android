@@ -103,7 +103,7 @@ class NuxieExperiencePlayerTest {
     private class RecordingNative : NuxieTypedRuntimeNative {
         var semanticActionStatus = 0
         override fun captureSemantics(player: Long) = NativeCallResult(0, 99L)
-        override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(1, 1, 0))
+        override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(1, 1, 0, 0, 0))
         override fun freeSemantics(snapshot: Long) = 0
         override fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int) = semanticActionStatus
         var machines = listOf("Generated Nuxie Pressable Interaction")
