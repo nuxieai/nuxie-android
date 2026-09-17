@@ -53,7 +53,7 @@ class EventLogTest {
     }
 
     private class RecordingStore : EventStore {
-        val pending = mutableListOf<StoredEvent>()
+        val pending = java.util.concurrent.CopyOnWriteArrayList<StoredEvent>()
         val stableDrops = mutableListOf<String>()
         val delivered = mutableListOf<StoredEvent>()
         val pendingLocalRoutes = linkedSetOf<String>()
@@ -388,31 +388,28 @@ class EventLogTest {
 
     @Test
     fun committedSubscribersRunInSubscriptionOrderAfterPersistence() = runBlocking {
-        val store = RecordingStore()
-        val eventLog = log(store)
-        val observed = mutableListOf<String>()
+        repeat(20) {
+            val store = RecordingStore()
+            val eventLog = log(store)
+            val observed = mutableListOf<String>()
 
-        eventLog.subscribeCommitted { event ->
-            // Persistence-before-announcement: the store already holds it.
-            assertTrue(store.pending.any { it.id == event.id })
-            observed.add("first:${event.name}")
+            eventLog.subscribeCommitted { event ->
+                // Persistence-before-announcement: the store already holds it.
+                assertTrue(store.pending.any { it.id == event.id })
+                observed.add("first:${event.name}")
+            }
+            eventLog.subscribeCommitted { event -> observed.add("second:${event.name}") }
+
+            repeat(100) { eventLog.capture("event-$it") }
+            eventLog.awaitBarrier()
+
+            assertEquals(
+                (0 until 100).flatMap { listOf("first:event-$it", "second:event-$it") },
+                observed,
+            )
+            assertEquals((0 until 100).map { "event-$it" }, store.pending.map { it.name })
+            eventLog.close()
         }
-        eventLog.subscribeCommitted { event -> observed.add("second:${event.name}") }
-
-        eventLog.capture("one")
-        eventLog.capture("two")
-        eventLog.capture("three")
-        eventLog.awaitBarrier()
-
-        assertEquals(
-            listOf(
-                "first:one", "second:one",
-                "first:two", "second:two",
-                "first:three", "second:three",
-            ),
-            observed,
-        )
-        assertEquals(listOf("one", "two", "three"), store.pending.map { it.name })
     }
 
     @Test
