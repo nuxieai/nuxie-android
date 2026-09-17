@@ -353,7 +353,13 @@ internal class ExperienceSurfaceHost(
                     }
                 } catch (error: Throwable) {
                     systemFontCache.didFailImport(systemFonts)
-                    throw error
+                    reportFailure(
+                        ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                        "Runtime could not import the prepared Experience content",
+                        error,
+                    )
+                    onLoaded?.invoke(false)
+                    return@enqueue
                 }
             }
             val loadedFile = file
