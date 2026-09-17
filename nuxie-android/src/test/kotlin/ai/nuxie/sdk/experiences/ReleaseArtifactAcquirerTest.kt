@@ -83,6 +83,60 @@ class JourneyReleaseArtifactAcquirerTest {
     }
 
     @Test
+    fun cancellationWhileHashingWarmCacheDoesNotDeleteVerifiedBytes() {
+        val bytes = ByteArray(200_000) { (it % 251).toByte() }
+        val digest = sha256(bytes)
+        val key = "assets/sha256/$digest.mp4"
+        var requests = 0
+        val cache = JourneyReleaseArtifactCache(RuntimeEnvironment.getApplication(), HttpTransport {
+            requests++
+            HttpTransport.Response(200, bytes, mapOf("Content-Type" to "video/mp4"))
+        }, cacheDirectory = temporaryFolder.newFolder("cancel-warm"))
+        fun acquire(check: () -> Unit = {}) = cache.acquire(key, digest, bytes.size.toLong(), bytes.size.toLong(),
+            delivery().assetBaseUrl, "video/mp4", checkActive = check)
+        val original = acquire()
+        var checks = 0
+        org.junit.Assert.assertThrows(CancellationException::class.java) {
+            acquire { if (++checks == 4) throw CancellationException("cancel hash") }
+        }
+        assertEquals(4, checks)
+        assertEquals(original, cache.cachedFile(digest))
+        assertArrayEquals(bytes, original.readBytes())
+        assertEquals(original, acquire())
+        assertEquals(1, requests)
+        assertEquals(0, cache.digestLockCount())
+    }
+
+    @Test
+    fun cancelledDispatcherHandoffClosesUndeliveredAcquisitionLease() = runTest {
+        val queue = java.util.concurrent.LinkedBlockingQueue<Runnable>()
+        val dispatcher = object : kotlinx.coroutines.CoroutineDispatcher() {
+            override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) { queue.add(block) }
+        }
+        val bytes = "verified scene".encodeToByteArray()
+        val digest = sha256(bytes)
+        val key = "renders/sha256/$digest.nux"
+        val cache = JourneyReleaseArtifactCache(RuntimeEnvironment.getApplication(), HttpTransport {
+            HttpTransport.Response(200, bytes, mapOf("Content-Type" to "application/vnd.nuxie.scene"))
+        }, cacheDirectory = temporaryFolder.newFolder("cancel-handoff"))
+        val acquirer = JourneyReleaseArtifactAcquirer(cache)
+        val release = release(artifact(key, bytes, "application/vnd.nuxie.scene"), renderer = "nux")
+        val pending = async(dispatcher) { acquirer.acquire(release, delivery()) }
+        checkNotNull(queue.poll(5, TimeUnit.SECONDS)).run()
+        // Hold the completed IO result at its return-dispatch boundary.
+        val returnToCaller = checkNotNull(queue.poll(5, TimeUnit.SECONDS))
+        assertEquals(1, cache.protectionCount(digest))
+        assertArrayEquals(bytes, checkNotNull(cache.cachedFile(digest)).readBytes())
+        pending.cancel()
+        returnToCaller.run()
+        pending.join()
+        assertTrue(pending.isCancelled)
+        assertEquals(0, cache.protectionCount(digest))
+        assertEquals(0, cache.digestLockCount())
+        assertArrayEquals(bytes, checkNotNull(cache.cachedFile(digest)).readBytes())
+    }
+
+    @Test
     fun cancellationDuringArtifactReadClosesStreamAndRemovesTemporaryAndProtection() = runTest {
         val bytes = ByteArray(100_000) { 7 }
         val digest = sha256(bytes)
