@@ -806,21 +806,24 @@ class ExperienceSurfaceHostPointerTest {
             assertTrue(native.semanticActions.isEmpty())
             assertFalse("Only one activation may wait for presentation", host.accessibilityNodeProvider.performAction(1,
                 android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK, null))
+            native.semanticRevision = 2
             native.presentation = 1
             host.doFrame(1_019_000_000L)
             drain(lane)
-            assertEquals(listOf(42L to 0), native.semanticActions)
+            assertEquals("A new frame with the same accessibility tree must preserve the accepted action",
+                listOf(42L to 0), native.semanticActions)
             native.presentation = 4
             host.doFrame(1_020_000_000L)
             drain(lane)
             assertTrue(host.accessibilityNodeProvider.performAction(1,
                 android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK, null))
             drain(lane)
-            native.semanticRevision = 2
+            native.semanticRevision = 3
+            native.semanticTreeVersion = 2
             native.presentation = 1
             host.doFrame(1_021_000_000L)
             drain(lane)
-            assertEquals("Deferred activation cannot rebind to a changed capture", listOf(42L to 0), native.semanticActions)
+            assertEquals("Deferred activation cannot rebind to changed accessibility state", listOf(42L to 0), native.semanticActions)
             val blocked = CountDownLatch(1)
             val resume = CountDownLatch(1)
             lane.enqueue { blocked.countDown(); check(resume.await(5, TimeUnit.SECONDS)) }
@@ -940,12 +943,13 @@ class ExperienceSurfaceHostPointerTest {
         var semanticCaptures = 0
         var semanticCaptureStatus = 0
         var semanticRevision = 1L
+        var semanticTreeVersion = 1L
         val semanticFreed = mutableListOf<Long>()
         val semanticActions = mutableListOf<Pair<Long, Int>>()
         override fun inspectFileAssets(bytes: ByteArray) = emptyList<ai.nuxie.sdk.runtime.ExpectedFileAsset>()
         override fun enableSemantics(player: Long): Int { semanticsEnabled++; return 0 }
         override fun captureSemantics(player: Long): NativeCallResult<Long> { semanticCaptures++; return NativeCallResult(semanticCaptureStatus, if (semanticCaptureStatus == 0) 99L else null) }
-        override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(semanticRevision, 1, 1))
+        override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(semanticRevision, semanticTreeVersion, 1))
         override fun semanticNode(snapshot: Long, index: Int) = NativeCallResult(0,
             ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 1, 0, 0, 0, 1, 10f, 10f, 80f, 80f, "Continue", "", ""))
         override fun freeSemantics(snapshot: Long): Int { semanticFreed += snapshot; return 0 }

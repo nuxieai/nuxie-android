@@ -134,8 +134,12 @@ internal class ExperienceSurfaceHost(
             val active = player ?: return
             if (!running || !sceneInputEnabled.get() || released.get() ||
                 request.generation != frameGeneration.get() || request.epoch != semanticEpoch.get() ||
-                capture.tree.renderRevision != request.tree.renderRevision ||
-                capture.tree.treeVersion != request.tree.treeVersion) return
+                capture.tree.treeVersion != request.tree.treeVersion ||
+                capture.tree.nodes != request.tree.nodes) return
+            // A completed frame may replace the render revision without changing
+            // the accessibility tree. Preserve the exact node intent and submit
+            // against that fresh capture; native validation still owns current
+            // membership, supported actions and ancestor eligibility.
             active.queueSemanticAction(capture, request.nodeId, request.action)
         } finally { semanticActionPending.set(false) }
     }
