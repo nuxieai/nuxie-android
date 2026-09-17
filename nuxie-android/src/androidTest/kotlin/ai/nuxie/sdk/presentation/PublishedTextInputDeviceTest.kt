@@ -2372,9 +2372,15 @@ class PublishedTextInputDeviceTest {
             purchaseNavigationFixture = true, recreateAfterSelection = true, delayFinalCapture = true)
     }
 
+    @Test
+    fun signedConditionReadsResponseAndEventFromTheSameNativeEmission() {
+        exerciseDurableNativeEmission(PublishedBehavior.SCRIPT, conditionGate = true)
+        exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_SCRIPT, conditionGate = true)
+    }
+
     private enum class PublishedBehavior { TEXT_INPUT, SCRIPT, SEMANTIC_SCRIPT, SEMANTIC_ROLES, PURCHASE }
 
-    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f, selectPlan: Boolean = false, purchaseRoundTrip: Boolean = false, purchaseNavigationFixture: Boolean = purchaseRoundTrip, recreateAfterSelection: Boolean = false, delayFinalCapture: Boolean = false) {
+    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f, selectPlan: Boolean = false, purchaseRoundTrip: Boolean = false, purchaseNavigationFixture: Boolean = purchaseRoundTrip, recreateAfterSelection: Boolean = false, delayFinalCapture: Boolean = false, conditionGate: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
@@ -2383,7 +2389,7 @@ class PublishedTextInputDeviceTest {
         val releaseOldLane = CountDownLatch(1)
         val scripted = behavior == PublishedBehavior.SCRIPT || behavior == PublishedBehavior.SEMANTIC_SCRIPT
         val candidateSemantics = behavior == PublishedBehavior.SEMANTIC_SCRIPT || behavior == PublishedBehavior.SEMANTIC_ROLES
-        val fixturePath = if (purchaseNavigationFixture) "journeys/rendered-purchase-navigation" else if (purchasing) "journeys/rendered-purchase-scopes" else if (behavior == PublishedBehavior.SEMANTIC_ROLES) "journeys/rendered-semantic-roles"
+        val fixturePath = if (conditionGate) "journeys/rendered-${if (candidateSemantics) "semantic-" else ""}screen-control-condition" else if (purchaseNavigationFixture) "journeys/rendered-purchase-navigation" else if (purchasing) "journeys/rendered-purchase-scopes" else if (behavior == PublishedBehavior.SEMANTIC_ROLES) "journeys/rendered-semantic-roles"
             else if (candidateSemantics) "journeys/rendered-semantic-screen-control${if (failScript) "-error" else ""}"
             else if (failScript) "journeys/rendered-screen-control-error" else if (scripted) "journeys/rendered-screen-control" else "journeys/rendered-text-input"
         val fixture = loadPublishedFixture(instrumentation, fixturePath, candidateSemantics)
@@ -2584,6 +2590,8 @@ class PublishedTextInputDeviceTest {
                     }
                     assertEquals(3, presentationCount.get())
                 }
+                assertTrue("Native selection must not implicitly create Journey response fields",
+                    journalRun().context.getValue("responses").jsonObject.isEmpty())
                 dispatch(MotionEvent.ACTION_DOWN)
                 awaitDeliveredPointer(target)
                 dispatch(MotionEvent.ACTION_UP)
