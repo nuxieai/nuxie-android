@@ -18,10 +18,31 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonNull
 
 internal object JourneyRenderSchema {
+    fun videoElements(render: JsonObject): List<ExperienceVideoElement> {
+        val value = render["videoElements"] ?: return emptyList()
+        val targets = mutableSetOf<Pair<String, String>>()
+        val slots = mutableSetOf<Pair<String, Long>>()
+        return array(value, 4096).map { entry ->
+            if (text(render["renderer"]) != "nux") fail("video element requires nux renderer")
+            val element = exact(entry, setOf("artboardId", "viewNodeId", "renderedNodeId", "componentId", "readinessTimeoutSeconds", "optional"))
+            val artboard = releaseId(element["artboardId"])
+            val viewNode = releaseId(element["viewNodeId"])
+            val renderedNode = releaseId(element["renderedNodeId"])
+            val component = integer(element["componentId"], 1, 0xffff_ffffL)
+            val timeout = number(element["readinessTimeoutSeconds"], 0.0, 60.0)
+            val optional = boolean(element["optional"])
+            if (!targets.add(artboard to renderedNode) || !slots.add(artboard to component)) {
+                fail("duplicate video element target")
+            }
+            ExperienceVideoElement(artboard, viewNode, renderedNode, component, timeout, optional)
+        }
+    }
+
     fun validate(input: JsonObject) {
         val renderer = oneOf(input["renderer"], "rive", "nux")
         val sceneField = if (renderer == "nux") "nux" else "riv"
-        val render = exact(input, setOf("renderer", sceneField, "screens", "transitions", "textInputs", "assets"))
+        val render = exact(input, setOf("renderer", sceneField, "screens", "transitions", "textInputs", "assets"), setOf("videoElements"))
+        videoElements(render)
         val scene = exact(render[sceneField], setOf("key", "sha256", "sizeBytes", "contentType"))
         val sha = hash(scene["sha256"])
         if (text(scene["key"]) != "renders/sha256/$sha.$sceneField") fail("render artifact key")

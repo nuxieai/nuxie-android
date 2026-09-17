@@ -17,6 +17,17 @@ internal data class ExperienceAssetImport(
     val expectedAssets: List<ExpectedFileAsset>,
     val externalAssets: Map<Int, ByteArray>,
     val videos: List<ExperienceVideoAssetBinding> = emptyList(),
+    val videoElements: List<ExperienceVideoElement> = emptyList(),
+)
+
+/** Authored identity and local component slot in this exact signed scene. */
+internal data class ExperienceVideoElement(
+    val artboardId: String,
+    val viewNodeId: String,
+    val renderedNodeId: String,
+    val componentId: Long,
+    val readinessTimeoutSeconds: Double,
+    val optional: Boolean,
 )
 
 /** Verified file-backed video; never copied into the image/font byte provider. */
@@ -115,6 +126,7 @@ internal object ExperienceAssetImportBuilder {
             expectedAssets = inspectedCatalog.toList(),
             externalAssets = externalAssets.toMap(),
             videos = videos.toList(),
+            videoElements = JourneyRenderSchema.videoElements(descriptor["render"] as JsonObject),
         )
     }
 
