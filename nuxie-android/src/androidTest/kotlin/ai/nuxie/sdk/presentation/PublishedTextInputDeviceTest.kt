@@ -2345,9 +2345,14 @@ class PublishedTextInputDeviceTest {
         exerciseDurableNativeEmission(PublishedBehavior.PURCHASE, purchaseX = 240f)
     }
 
+    @Test
+    fun signedPurchaseUsesAuthoredSelectionWithoutResponseCommand() {
+        exerciseDurableNativeEmission(PublishedBehavior.PURCHASE, purchaseX = 240f, selectPlan = true)
+    }
+
     private enum class PublishedBehavior { TEXT_INPUT, SCRIPT, SEMANTIC_SCRIPT, SEMANTIC_ROLES, PURCHASE }
 
-    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f) {
+    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f, selectPlan: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
@@ -2480,19 +2485,26 @@ class PublishedTextInputDeviceTest {
                 }
                 val target = checkNotNull(surface)
                 val downTime = SystemClock.uptimeMillis()
-                fun dispatch(action: Int) = instrumentation.runOnMainSync {
+                fun dispatch(action: Int, authoredY: Float = 30f) = instrumentation.runOnMainSync {
                     val scale = minOf(target.width / 320f, target.height / 100f)
                     val x = (target.width - 320f * scale) / 2f + purchaseX * scale
-                    val y = (target.height - 100f * scale) / 2f + 50f * scale
+                    val y = (target.height - 100f * scale) / 2f + authoredY * scale
                     val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
                     try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }
+                }
+                if (selectPlan) {
+                    dispatch(MotionEvent.ACTION_DOWN, 65f)
+                    awaitDeliveredPointer(target)
+                    dispatch(MotionEvent.ACTION_UP, 65f)
+                    awaitDeliveredPointer(target)
+                    assertTrue("Selection must not dispatch a purchase", purchases.isEmpty())
                 }
                 dispatch(MotionEvent.ACTION_DOWN)
                 awaitDeliveredPointer(target)
                 dispatch(MotionEvent.ACTION_UP)
                 val dispatched = purchases.poll(10, TimeUnit.SECONDS)
                 assertEquals("batches=${accepted.map { it.source to it.emissions.map { emission -> emission.name } }} outcomes=$terminalOutcomes errors=$errorDismissals",
-                    if (purchaseX == 80f) "plan:monthly" else "plan:annual", dispatched)
+                    if (selectPlan) "plan:lifetime" else if (purchaseX == 80f) "plan:monthly" else "plan:annual", dispatched)
                 val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS))
                 assertEquals(if (purchaseX == 80f) "plan.first" else "plan.second", batch.source.instanceId)
                 assertEquals(listOf("purchase_requested"), batch.emissions.map { it.name })
