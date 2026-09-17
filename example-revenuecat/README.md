@@ -1,6 +1,6 @@
 # RevenueCat purchase delegate example
 
-This source example compiles against RevenueCat Android **10.21.1**. It is a
+This source example compiles against RevenueCat Android **10.22.1**. It is a
 separate verification module with no publication plugin, not a dependency of the
 Nuxie SDK or the base example app. Copy the delegate into a host that already
 uses RevenueCat, or depend on this project locally while developing.
@@ -42,8 +42,8 @@ products and requires the exact Play product/base-plan/offer/token plus matching
 subscription pricing phases. It forwards `isOfferPersonalized`. Missing,
 ambiguous or changed terms fail so the host can refresh the Experience; they do
 not fall back to a provider-selected offer. The reference APIs are
-[PurchaseParams](https://github.com/RevenueCat/purchases-android/blob/10.21.1/purchases/src/main/kotlin/com/revenuecat/purchases/PurchaseParams.kt)
-and [GoogleSubscriptionOption](https://github.com/RevenueCat/purchases-android/blob/10.21.1/purchases/src/main/kotlin/com/revenuecat/purchases/models/GoogleSubscriptionOption.kt).
+[PurchaseParams](https://github.com/RevenueCat/purchases-android/blob/10.22.1/purchases/src/main/kotlin/com/revenuecat/purchases/PurchaseParams.kt)
+and [GoogleSubscriptionOption](https://github.com/RevenueCat/purchases-android/blob/10.22.1/purchases/src/main/kotlin/com/revenuecat/purchases/models/GoogleSubscriptionOption.kt).
 
 For upgrades/downgrades, supply `configureReplacement` and explicitly set the
 provider's old product and replacement mode. The example does not infer a
@@ -61,11 +61,11 @@ to Nuxie Feature authority.
 ## Supported scope and outstanding qualification
 
 The source supports ordinary Play subscriptions with exact offers, and legacy
-one-time products without an explicit purchase option. RevenueCat 10.21.1 has no
+one-time products without an explicit purchase option. RevenueCat 10.22.1 has no
 explicit one-time purchase-option constructor in PurchaseParams; this adapter
 rejects those Nuxie products and any one-time offer token rather than purchasing
 different terms. The pinned provider's
-[BillingWrapper](https://github.com/RevenueCat/purchases-android/blob/10.21.1/purchases/src/main/kotlin/com/revenuecat/purchases/google/BillingWrapper.kt)
+[BillingWrapper](https://github.com/RevenueCat/purchases-android/blob/10.22.1/purchases/src/main/kotlin/com/revenuecat/purchases/google/BillingWrapper.kt)
 builds one-time checkout without forwarding an offer token. Modern
 one-time options, real Play checkout, pending-payment recovery across process
 death, account switches during provider checkout, upgrade/downgrade orchestration,
@@ -87,3 +87,5 @@ mapping using the pinned provider's real model classes. Additional delegate test
 hold the pinned provider's callbacks using test-only mocks, change its customer,
 and verify rejection plus stable-customer purchase/restore controls. They do not
 contact RevenueCat or Google Play.
+
+The 10.22.1 pin includes [RevenueCat’s customer-info identity fix](https://github.com/RevenueCat/purchases-android/pull/4257): results remain associated with the requesting customer when configure/login or receipt posting overlaps an identity change. The example retains its own admission and completion identity checks.

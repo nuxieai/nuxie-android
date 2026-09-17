@@ -17,7 +17,7 @@ android {
 
 dependencies {
   implementation(project(":nuxie-android"))
-  api("com.revenuecat.purchases:purchases:10.21.1")
+  api("com.revenuecat.purchases:purchases:10.22.1")
   testImplementation("org.mockito:mockito-core:5.18.0")
   testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.junit)

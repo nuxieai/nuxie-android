@@ -62,7 +62,7 @@ class NuxieRevenueCatPurchaseDelegate(
       } else {
         // This provider version has no explicit one-time purchase-option API.
         check(product.purchaseOptionId == null && product.offerId == null) {
-          "RevenueCat 10.21.1 cannot preserve an explicit one-time purchase option."
+          "RevenueCat 10.22.1 cannot preserve an explicit one-time purchase option."
         }
         val candidate = candidates.singleOrNull { it.productId == product.storeProductId && it.type == type }
           ?: error("The displayed one-time product is unavailable or ambiguous.")
@@ -111,7 +111,7 @@ internal fun subscriptionTerms(offer: ProductDetails.SubscriptionOfferDetails): 
 internal fun oneTimeTerms(product: ProductDetails): List<Any?> {
   val offer = requireNotNull(product.oneTimePurchaseOfferDetails) { "One-time price unavailable." }
   check(offer.offerToken.isNullOrEmpty()) {
-    "RevenueCat 10.21.1 cannot forward a one-time offer token."
+    "RevenueCat 10.22.1 cannot forward a one-time offer token."
   }
   return listOf(offer.priceAmountMicros, offer.priceCurrencyCode, offer.formattedPrice, offer.offerToken)
 }
