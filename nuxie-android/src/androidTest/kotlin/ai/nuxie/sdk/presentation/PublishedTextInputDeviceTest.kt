@@ -3298,7 +3298,7 @@ class PublishedTextInputDeviceTest {
                 authenticate(runtimeForFixture(false))
                 fail("Production admission must reject the unqualified semantic capability")
             } catch (expected: ai.nuxie.sdk.experiences.JourneyReleaseAuthenticationException) {
-                assertTrue(expected.message.orEmpty().contains("unsupported capabilities"))
+                assertTrue(expected.message, expected.message.orEmpty().contains("unsupported capabilities"))
             }
         }
         val release = authenticate(runtimeForFixture(candidateSemantics))
