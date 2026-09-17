@@ -368,9 +368,12 @@ internal class ExperienceSurfaceHost(
                         projection = viewModelProjection,
                     )
                 } else {
-                    descriptor?.let {
-                        ExperienceViewModelBinding.defaultSchemaName(it, artboardName)
-                    }?.let(loadedArtboard::bindDefaultViewModel)
+                    descriptor?.let { signed ->
+                        ExperienceViewModelBinding.defaultSchemaName(signed, artboardName)?.let { name ->
+                            loadedArtboard.bindDefaultViewModel(name,
+                                ExperienceViewModelBinding.defaultInstanceId(signed, artboardName))
+                        }
+                    }
                 }
             } catch (error: Exception) {
                 // Do not retain a partially bound graph after a signed state

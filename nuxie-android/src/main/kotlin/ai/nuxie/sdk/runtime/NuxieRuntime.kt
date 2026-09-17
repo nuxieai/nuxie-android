@@ -96,6 +96,7 @@ internal class NuxieRuntime(
         )
         val children = mutableListOf<Long>()
         val usedAuthoredInstances = mutableSetOf<Int>()
+        val instanceIds = mutableMapOf<String, Long>()
         try {
             projection.items.forEach { item ->
                 val authored = catalog.authoredInstances.firstOrNull {
@@ -112,6 +113,14 @@ internal class NuxieRuntime(
                     "create projected item view model",
                 )
                 children += child
+                item.instanceId?.let { id ->
+                    require(id.isNotEmpty() && id != projection.defaultInstanceId && id !in instanceIds) {
+                        "Projected view-model instance identity is empty or duplicated"
+                    }
+                    instanceIds[id] = requireNativeValue(
+                        native.snapshotViewModel(child), "identify projected view model",
+                    ).rootInstanceId
+                }
                 item.values.forEach { (path, value) ->
                     val property = catalog.propertyAtPath(itemSchema.index, path)
                     val write = value.toNativeWrite(path, property.kind, property.enumLabels)
@@ -150,7 +159,8 @@ internal class NuxieRuntime(
                 native.bindViewModel(artboard.requireHandle(), root),
                 "bind projected default view model",
             )
-            return NuxieRuntimeViewModelState(root, children, native, catalog, rootSchema.index)
+            return NuxieRuntimeViewModelState(root, children, native, catalog, rootSchema.index,
+                instanceIds, projection.defaultInstanceId)
         } catch (error: Throwable) {
             freeViewModelHandles(root, children, native)
             throw error
@@ -225,6 +235,7 @@ internal class NuxieRuntimeArtboard internal constructor(
     private val owned = NuxieOwnedHandle(handle, "artboard", native::freeArtboard)
     private var defaultViewModel: NuxieOwnedHandle? = null
     private var boundDefaultSchemaName: String? = null
+    private var boundDefaultInstanceId: String? = null
     private var boundCatalog: NuxieViewModelCatalog? = null
     private var boundRootSchemaIndex: Int? = null
 
@@ -248,10 +259,11 @@ internal class NuxieRuntimeArtboard internal constructor(
     fun defaultViewModelSnapshot(): NuxieViewModelSnapshot? {
         owned.require()
         val model = defaultViewModel ?: return null
-        return NuxieViewModelSnapshot.fromNative(requireNativeValue(
-            native.snapshotViewModel(model.require()),
-            "snapshot default view model",
-        ))
+        return NuxieViewModelSnapshot.fromNative(
+            requireNativeValue(native.snapshotViewModel(model.require()), "snapshot default view model"),
+            schemaNames = checkNotNull(boundCatalog).schemas.associate { it.index.toLong() to it.name },
+            defaultInstanceId = boundDefaultInstanceId,
+        )
     }
 
     /**
@@ -261,11 +273,11 @@ internal class NuxieRuntimeArtboard internal constructor(
      * A missing declared default is an error; absence is handled by the caller.
      * This artboard owns the returned view-model handle.
      */
-    fun bindDefaultViewModel(expectedSchemaName: String) {
+    fun bindDefaultViewModel(expectedSchemaName: String, defaultInstanceId: String? = null) {
         val artboard = owned.require()
         require(expectedSchemaName.isNotEmpty()) { "Declared default view-model name is empty" }
         if (defaultViewModel != null) {
-            check(boundDefaultSchemaName == expectedSchemaName) {
+            check(boundDefaultSchemaName == expectedSchemaName && boundDefaultInstanceId == defaultInstanceId) {
                 "Artboard already has a different declared default view model"
             }
             return
@@ -311,6 +323,7 @@ internal class NuxieRuntimeArtboard internal constructor(
         }
         defaultViewModel = viewModel
         boundDefaultSchemaName = expectedSchemaName
+        boundDefaultInstanceId = defaultInstanceId
     }
 
     fun newPlayer(stateMachineName: String? = null): NuxieRuntimePlayer? {
@@ -344,6 +357,8 @@ internal class NuxieRuntimeViewModelState(
     private val native: NuxieTypedRuntimeNative,
     private val catalog: NuxieViewModelCatalog,
     private val rootSchemaIndex: Int,
+    private val instanceIds: Map<String, Long> = emptyMap(),
+    private val defaultInstanceId: String? = null,
 ) {
     private val children = children.toMutableList()
 
@@ -361,6 +376,9 @@ internal class NuxieRuntimeViewModelState(
                 native.snapshotViewModel(rootHandle),
                 "snapshot view model",
             ),
+            schemaNames = catalog.schemas.associate { it.index.toLong() to it.name },
+            instanceIds = instanceIds,
+            defaultInstanceId = defaultInstanceId,
         )
     }
 
