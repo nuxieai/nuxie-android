@@ -3255,6 +3255,33 @@ class PublishedTextInputDeviceTest {
         return checkNotNull(editor) { "Published input must obtain visible live geometry" }
     }
 
+    /** Run alone in a fresh instrumentation process: no fixture helper may pre-load JNI. */
+    @Test fun companionPreviewLoadsTheRuntimeBeforeReadingCompatibility() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val base = "journeys/rendered-purchase-navigation"
+        val entry = Json.parseToJsonElement(instrumentation.context.assets.open("$base/release-entry.json")
+            .bufferedReader().use { it.readText() }).jsonObject
+        val ready = CountDownLatch(1)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ai.nuxie.sdk.companion.JourneyPreviewSession(context, ai.nuxie.sdk.NuxieEnvironment.DEVELOPMENT,
+            ai.nuxie.sdk.network.HttpTransport { request ->
+                val key = request.url.path.trimStart('/')
+                ai.nuxie.sdk.network.HttpTransport.Response(200,
+                    instrumentation.context.assets.open("$base/$key").use { it.readBytes() },
+                    mapOf("Content-Type" to "application/vnd.rive"))
+            })
+        val result = scope.async {
+            session.present(profileFor(entry).toString().encodeToByteArray()) { ready.countDown() }
+        }
+        try {
+            assertTrue("Cold Companion preview must reach its first native frame", ready.await(20, TimeUnit.SECONDS))
+        } finally {
+            runBlocking { kotlinx.coroutines.withTimeout(15_000) { result.cancel(); result.join() } }
+            scope.cancel()
+        }
+    }
+
     @Test fun companionPreviewRendersExactReleaseAndDrainsBeforeReplacement() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
