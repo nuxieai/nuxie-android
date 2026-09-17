@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "a8a58a853120c9e0e17f05c6e093d9fb8d16cb09",
+  "sourceCommit": "ffffcebdf1d9d765019ffad3af0b2bd2add48e75",
   "files": {
     "README.md": "9104a727bef89b388554d25583a6e013531c310f1a93d8f9f81440af8fcf67df",
     "accessibility/control-state.json": "6a4e35c6c2f55575344f4a26a2bdb5f22728a41845464c3beeb93251082e97f2",
@@ -63,7 +63,8 @@
     "journeys/planes/text-input-navigation.json": "49760fb0666fce8fb570c5cfda815c5dc579a9a3a5bc7e46f443801ab4257f7b",
     "journeys/planes/text-input-typography.json": "dc268c90b8bbe972cf85c37652f067ed75da9b9d96e3f056f5ddc14759a02e21",
     "journeys/planes/values.json": "e6f7b54cb33bb8d024638760c54221e858124affcbe182b4593924bfcca47bee",
-    "journeys/planes/video-admission.json": "26f1e7ae523743ed03cb7f0185f933dbf06952994923ecdb5e82f2e2983cf1b4",
+    "journeys/planes/video-actions.json": "846f8cec51cf49304d0284cac4421fc0b633f0a73df5c28a3ae33cd3cc1a01e5",
+    "journeys/planes/video-admission.json": "6a48100b4057988cba93d9852de6d469f2db8189ee09d2ab3bec31f3d938602f",
     "journeys/rendered-custom-transition/assets/sha256/3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d.png": "3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d",
     "journeys/rendered-custom-transition/assets/sha256/4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf.ttf": "4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf",
     "journeys/rendered-custom-transition/provenance.json": "205b956a6a464f367d47d9ae547451436c06fad6c82463acd6e2d226a26728ea",
@@ -211,6 +212,6 @@
     "video/captions.srt": "afbc920c5ebb7e09ceddd8f286afcf759e31cdbcd58d23ba8a681a83bf935a94",
     "video/greeting.mp4": "f0a65563c100506c0f98c138e8be1ae333c9879bb77237fbada60bddcfa78669",
     "video/greeting.nux": "978d3f83eb4ee5abb2836630cad6dda323d5fa57708a0fff777346d92fd5eaeb",
-    "video/inventory.json": "05014e8a8047ee3cf71850e49e186f66631dd0c1cceb31bd0ce77980c84a82e4"
+    "video/inventory.json": "c260873a92a24c27a5479e01ba689771d68d019106120ade7c232bc9dea4ab54"
   }
 }

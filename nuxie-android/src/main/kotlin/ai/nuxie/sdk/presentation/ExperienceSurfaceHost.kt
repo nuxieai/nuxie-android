@@ -2,6 +2,9 @@ package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.runtime.ExperienceVideoPlayback
 import ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding
+import ai.nuxie.sdk.experiences.ExperienceVideoElement
+import ai.nuxie.sdk.experiences.JourneyVideoAction
+import kotlinx.coroutines.CompletableDeferred
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
 import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
 import ai.nuxie.sdk.experiences.SystemFontCache
@@ -87,6 +90,31 @@ internal class ExperienceSurfaceHost(
     private var window: NuxieRuntimeWindow? = null
     private var player: NuxieRuntimePlayer? = null
     private var videoPlayback: ExperienceVideoPlayback? = null
+    private data class VideoCommand(val action: JourneyVideoAction, val generation: Long, val result: CompletableDeferred<Boolean>)
+    private val videoCommands = ArrayDeque<VideoCommand>()
+
+    suspend fun applyVideoCommand(action: JourneyVideoAction): Boolean {
+        val result = CompletableDeferred<Boolean>()
+        val generation = frameGeneration.get()
+        if (!lane.enqueue {
+            if (released.get() || failureReported.get() || videoCommands.size >= 64) result.complete(false)
+            else {
+                videoCommands.addLast(VideoCommand(action, generation, result))
+                drainVideoCommands()
+            }
+        }) return false
+        return try { result.await() } finally { result.cancel() }
+    }
+
+    private fun drainVideoCommands() {
+        if (pendingPresentation) return
+        while (videoCommands.isNotEmpty()) {
+            val command = videoCommands.removeFirst()
+            val applied = command.result.isActive && !released.get() && !failureReported.get() && command.generation == frameGeneration.get() &&
+                runCatching { checkNotNull(videoPlayback).apply(command.action) }.isSuccess
+            command.result.complete(applied)
+        }
+    }
     private var file: NuxieRuntimeFile? = null
     private var artboard: NuxieRuntimeArtboard? = null
     private var viewModelState: NuxieRuntimeViewModelState? = null
@@ -321,6 +349,7 @@ internal class ExperienceSurfaceHost(
                 return@enqueue
             }
             var videoBindings: List<ExperienceVideoAssetBinding> = emptyList()
+            var videoTargets: List<ExperienceVideoElement> = emptyList()
             file = if (descriptor == null) {
                 runtime.importFile(activeRenderer, rivBytes)
             } else {
@@ -354,6 +383,11 @@ internal class ExperienceSurfaceHost(
                     return@enqueue
                 }
                 videoBindings = import.videos
+                val render = descriptor["render"] as? JsonObject
+                val screen = (render?.get("screens") as? JsonArray)?.mapNotNull { it as? JsonObject }
+                    ?.singleOrNull { (it["artboardName"] as? JsonPrimitive)?.content == artboardName }
+                val artboardId = (screen?.get("artboardId") as? JsonPrimitive)?.content
+                videoTargets = import.videoElements.filter { it.artboardId == artboardId }
                 try {
                     runtime.importFile(
                         renderer = activeRenderer,
@@ -441,7 +475,7 @@ internal class ExperienceSurfaceHost(
                 player = loadedFile.newExperiencePlayer(loadedArtboard, artboardName)
                 if (semanticsEnabled) checkNotNull(player).enableSemantics()
                 if (videoBindings.isNotEmpty()) {
-                    videoPlayback = ExperienceVideoPlayback(context.applicationContext, checkNotNull(player), videoBindings)
+                    videoPlayback = ExperienceVideoPlayback(context.applicationContext, checkNotNull(player), videoBindings, videoTargets)
                     videoPlayback?.setVisible(running)
                 }
             } catch (error: Exception) {
@@ -577,6 +611,7 @@ internal class ExperienceSurfaceHost(
                         "Experience renderer resize failed with status $status",
                     )
                 }
+                drainVideoCommands()
             }
         }
     }
@@ -604,6 +639,7 @@ internal class ExperienceSurfaceHost(
                     window?.close()
                     window = null
                 }
+                drainVideoCommands()
             } finally {
                 releaseTexture()
             }
@@ -781,9 +817,11 @@ internal class ExperienceSurfaceHost(
                     }
                     publishSteps()
                     drainSemanticAction()
+                    drainVideoCommands()
                 }
             } finally {
                 framePending.set(false)
+                drainVideoCommands()
             }
         }
         if (!accepted) framePending.set(false)
@@ -848,6 +886,7 @@ internal class ExperienceSurfaceHost(
             renderer = null
             unpublishedSteps.clear()
             pendingPresentation = false
+            drainVideoCommands()
             submittedSnapshot = null
             submittedCaptions = null
             closeHandles.forEach { close ->
@@ -868,7 +907,10 @@ internal class ExperienceSurfaceHost(
     ) {
         if (!failureReported.compareAndSet(false, true)) return
         captionPublication.incrementAndGet()
-        lane.enqueue { videoPlayback?.setVisible(false) }
+        lane.enqueue {
+            while (videoCommands.isNotEmpty()) videoCommands.removeFirst().result.complete(false)
+            videoPlayback?.setVisible(false)
+        }
         mainHandler.post { listener?.onVideoCaptions(emptyMap()) }
         val failure = ExperiencePresentationException(reason, message, cause)
         if (Looper.myLooper() == Looper.getMainLooper()) {

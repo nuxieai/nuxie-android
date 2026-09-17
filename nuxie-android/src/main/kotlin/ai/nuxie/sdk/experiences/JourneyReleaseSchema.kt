@@ -76,6 +76,19 @@ internal object JourneyReleaseSchema {
             if (scripts.put(sha, bytes)?.let { it != bytes } == true) fail("conflicting script size")
         }
         if (scripts.values.sum() > JourneyReleaseLimits.SCRIPT_ARTIFACT_AGGREGATE_BYTES) fail("script byte budget")
+        val videoActions = array(record(root["leg"])["steps"]).map(::record)
+            .filter { text(it["kind"]) == "action" }
+            .map { record(it["action"]) }.filter { text(it["type"]) == "video" }
+            .map(JourneyVideoAction::parse)
+        if (videoActions.isNotEmpty()) {
+            val elements = JourneyRenderSchema.videoElements(record(root["render"]))
+            if ("video.playback.v1" !in ids(record(root["requirements"])["requiredCapabilities"])) fail("video capability missing")
+            for (action in videoActions) {
+                if (elements.none { it.artboardId == action.artboardId && it.viewNodeId == action.viewNodeId }) {
+                    fail("video command target missing from signed scene")
+                }
+            }
+        }
         if (root["render"] != JsonNull) {
             JourneyRenderSchema.validate(record(root["render"]))
             requirements(root["requirements"])

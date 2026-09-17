@@ -131,9 +131,13 @@ class ConfiguredImportSmokeTest {
                     val player = checkNotNull(artboard.newPlayer())
                     try {
                         val initial = player.videos().single()
+                        val inventory = kotlinx.serialization.json.Json.parseToJsonElement(
+                            instrumentation.context.assets.open("video/inventory.json").bufferedReader().use { it.readText() }) as kotlinx.serialization.json.JsonObject
+                        val targets = ai.nuxie.sdk.experiences.JourneyRenderSchema.videoElements(
+                            kotlinx.serialization.json.JsonObject(inventory + ("renderer" to kotlinx.serialization.json.JsonPrimitive("nux"))))
                         val playback = ExperienceVideoPlayback(instrumentation.targetContext, player,
                             listOf(ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding(0, initial.assetId, initial.sourceKey, local, true,
-                                listOf(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(2, "en")))))
+                                listOf(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(2, "en")))), targets)
                         try {
                             playback.setVisible(true)
                             val deadline = android.os.SystemClock.elapsedRealtime() + 15_000
@@ -164,6 +168,17 @@ class ConfiguredImportSmokeTest {
                             }
                             assertTrue(seenCaptions.containsAll(listOf("Hello 👋", "Welcome")))
                             assertEquals("Decoded frames must repeat through native loop commands", listOf(true, false, true, false), colors)
+                            fun command(type: String, view: String = "clip-view") = ai.nuxie.sdk.experiences.JourneyVideoAction.parse(
+                                kotlinx.serialization.json.Json.parseToJsonElement("""{"type":"video","target":{"artboardId":"screen","viewNodeId":"$view"},"command":{"type":"$type"}}"""))
+                            assertThrows(IllegalArgumentException::class.java) { playback.apply(command("pause", "missing")) }
+                            playback.apply(command("pause"))
+                            playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                            assertEquals(false, player.videos().single().wantsPlay)
+                            playback.setVisible(false)
+                            playback.apply(command("play"))
+                            playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                            assertTrue(player.videos().single().wantsPlay)
+                            assertTrue(player.videos().single().state != 2)
                         } finally { playback.close() }
                     } finally { player.close() }
                 } finally { artboard.close() }
