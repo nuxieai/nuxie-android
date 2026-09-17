@@ -129,12 +129,14 @@ internal data class NuxieViewModelListProjection(
     val selectedItemPath: String?,
     val itemSchemaName: String,
     val items: List<Item>,
+    val defaultInstanceId: String? = null,
 ) {
     data class Item(
         val authoredInstanceName: String,
         val listIndex: Int,
         val selected: Boolean,
         val values: Map<String, NuxieViewModelScalarValue>,
+        val instanceId: String? = null,
     )
 }
 
@@ -142,6 +144,7 @@ internal data class NuxieViewModelListProjection(
 internal class NuxieViewModelSnapshot private constructor(
     private val rootInstanceId: Long,
     instances: List<Instance>,
+    private val instanceIds: Map<String, Long>,
 ) {
     private val instancesById = instances.associateBy(Instance::id)
 
@@ -172,14 +175,26 @@ internal class NuxieViewModelSnapshot private constructor(
     /** Resolve a `/`- or `.`-separated path through nested view-model references. */
     fun resolveString(path: String): String? = (resolveValue(path) as? Value.StringValue)?.value
 
+    /** Resolve an authored scope without substituting another model or instance. */
+    fun resolveScopedString(path: String, viewModelName: String?, instanceId: String?): String? {
+        val root = instancesById[rootInstanceId] ?: return null
+        val selected = when {
+            instanceId != null -> instanceIds[instanceId]?.let(instancesById::get)
+            viewModelName == null || viewModelName == root.schemaName -> root
+            else -> instancesById.values.singleOrNull { it.schemaName == viewModelName }
+        } ?: return null
+        if (viewModelName != null && selected.schemaName != viewModelName) return null
+        return (resolveValue(path, selected) as? Value.StringValue)?.value
+    }
+
     fun resolveBoolean(path: String): Boolean? = (resolveValue(path) as? Value.BooleanValue)?.value
 
     fun resolveEnumOrdinal(path: String): Long? = (resolveValue(path) as? Value.EnumValue)?.ordinal
 
-    private fun resolveValue(path: String): Value? {
+    private fun resolveValue(path: String, start: Instance? = instancesById[rootInstanceId]): Value? {
         val segments = path.split('/', '.')
         if (segments.isEmpty() || segments.any(String::isEmpty)) return null
-        var instance = instancesById[rootInstanceId] ?: return null
+        var instance = start ?: return null
         segments.dropLast(1).forEach { segment ->
             val reference = instance.values[segment] as? Value.Reference ?: return null
             instance = instancesById[reference.instanceId] ?: return null
@@ -189,6 +204,7 @@ internal class NuxieViewModelSnapshot private constructor(
 
     private data class Instance(
         val id: Long,
+        val schemaName: String?,
         val values: Map<String, Value>,
     )
 
@@ -202,10 +218,16 @@ internal class NuxieViewModelSnapshot private constructor(
     }
 
     companion object {
-        internal fun fromNative(snapshot: NativeViewModelSnapshot): NuxieViewModelSnapshot {
+        internal fun fromNative(
+            snapshot: NativeViewModelSnapshot,
+            schemaNames: Map<Long, String> = emptyMap(),
+            instanceIds: Map<String, Long> = emptyMap(),
+            defaultInstanceId: String? = null,
+        ): NuxieViewModelSnapshot {
             check(snapshot.rootInstanceId != 0L) {
                 "Native view-model snapshot has no root instance"
             }
+            val schemaByInstance = snapshot.instances.associate { it.id to it.schemaIndex }
             val valuesByInstance = linkedMapOf<Long, LinkedHashMap<String, Value>>()
             snapshot.instances.forEach { instance ->
                 check(instance.id != 0L) { "Native view-model snapshot has a zero instance id" }
@@ -248,8 +270,11 @@ internal class NuxieViewModelSnapshot private constructor(
             return NuxieViewModelSnapshot(
                 rootInstanceId = snapshot.rootInstanceId,
                 instances = valuesByInstance.map { (id, values) ->
-                    Instance(id, values.toMap())
+                    val schemaIndex = schemaByInstance.getValue(id)
+                    Instance(id, schemaNames[schemaIndex], values.toMap())
                 },
+                instanceIds = instanceIds.toMap() + if (defaultInstanceId == null) emptyMap()
+                    else mapOf(defaultInstanceId to snapshot.rootInstanceId),
             )
         }
     }

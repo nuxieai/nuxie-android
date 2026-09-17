@@ -1159,20 +1159,23 @@ internal class ExperiencePresentationService(
             current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) }
         } ?: return null
         if (JourneyActionType.from(action) != JourneyActionType.PURCHASE) return action
+        if (source != null && source.screenId != active.journey.screenId) return null
         val placement = action["placementId"] ?: return null
         val placementId = when (placement) {
             is JsonPrimitive -> placement.takeIf(JsonPrimitive::isString)?.content
-            is JsonObject -> {
-                (placement["literal"] as? JsonPrimitive)
-                    ?.takeIf(JsonPrimitive::isString)
-                    ?.content
-                    ?: (placement["ref"] as? JsonObject)
-                        ?.let { reference ->
-                            (reference["path"] as? JsonPrimitive)
-                                ?.takeIf(JsonPrimitive::isString)
-                                ?.content
-                        }
-                        ?.let { path -> active.latestViewModelSnapshot.get()?.resolveString(path) }
+            is JsonObject -> when (placement.keys) {
+                setOf("literal") -> (placement["literal"] as? JsonPrimitive)
+                    ?.takeIf(JsonPrimitive::isString)?.content
+                setOf("ref") -> {
+                    val reference = placement["ref"] as? JsonObject ?: return null
+                    if (reference.string("kind") != "path") return null
+                    val path = reference.string("path") ?: return null
+                    val model = reference["viewModelName"]?.let {
+                        (it as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content ?: return null
+                    }
+                    active.latestViewModelSnapshot.get()?.resolveScopedString(path, model, source?.instanceId)
+                }
+                else -> null
             }
             else -> null
         }?.takeIf(String::isNotEmpty) ?: return null

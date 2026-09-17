@@ -75,6 +75,7 @@ internal object GooglePlayProductViewModelProjection {
             }
             NuxieViewModelListProjection.Item(
                 authoredInstanceName = authoredName,
+                instanceId = group.first().instanceId,
                 listIndex = listIndex,
                 selected = group.optionalBoolean("isSelected") == true,
                 values = liveValues,
@@ -87,6 +88,10 @@ internal object GooglePlayProductViewModelProjection {
             selectedItemPath = SELECTED_PRODUCT_PATH,
             itemSchemaName = PRODUCT_VIEW_MODEL,
             items = projected,
+            defaultInstanceId = ((descriptor["leg"] as? JsonObject)?.get("screens") as? JsonArray)
+                ?.mapNotNull { it as? JsonObject }
+                ?.singleOrNull { it.string("id") == screenId }
+                ?.string("defaultInstanceId"),
         )
     }
 

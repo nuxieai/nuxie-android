@@ -6,7 +6,17 @@ import kotlinx.serialization.json.JsonPrimitive
 
 /** Selects the signed Journey declaration, never a schema inferred from the native file. */
 internal object ExperienceViewModelBinding {
-    fun defaultSchemaName(descriptor: JsonObject, artboardName: String?): String? {
+    fun defaultSchemaName(descriptor: JsonObject, artboardName: String?): String? =
+        declaration(descriptor, artboardName).let { screen ->
+            if (screen.containsKey("defaultViewModelName")) screen.requiredString("defaultViewModelName") else null
+        }
+
+    fun defaultInstanceId(descriptor: JsonObject, artboardName: String?): String? =
+        declaration(descriptor, artboardName).let { screen ->
+            if (screen.containsKey("defaultInstanceId")) screen.requiredString("defaultInstanceId") else null
+        }
+
+    private fun declaration(descriptor: JsonObject, artboardName: String?): JsonObject {
         val renderScreens = screens(descriptor, "render")
         renderScreens.forEach { it.requiredString("artboardName", 256, rejectNul = false) }
         val renderScreen = if (artboardName == null) {
@@ -23,11 +33,7 @@ internal object ExperienceViewModelBinding {
             it.requiredString("id") == screenId
         }) { "Experience Journey has no screen '$screenId'" }
 
-        // iOS opens a bound session only when this field is present. A declared
-        // default that native code cannot create/bind must fail at the caller;
-        // absence does not authorize activating another schema from the file.
-        if (!journeyScreen.containsKey("defaultViewModelName")) return null
-        return journeyScreen.requiredString("defaultViewModelName")
+        return journeyScreen
     }
 
     private fun screens(descriptor: JsonObject, section: String): List<JsonObject> {
