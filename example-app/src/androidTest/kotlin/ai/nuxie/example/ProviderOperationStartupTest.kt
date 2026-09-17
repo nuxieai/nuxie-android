@@ -40,13 +40,17 @@ class ProviderOperationStartupTest {
       purchaseDelegate = object : NuxiePurchaseDelegate {
         override suspend fun purchase(product: StoreProduct) = PurchaseResult.Cancelled
         override suspend fun restorePurchases(): RestoreResult {
-          assertTrue("Marker must precede provider dispatch", app.providerOperationJournal.hasUnfinished())
+          val marker = app.providerOperationJournal.snapshot().single()
+          assertEquals("a".repeat(64), marker.session)
+          assertEquals(ProviderOperationJournal.Kind.RESTORE, marker.kind)
+          assertNull(marker.productId)
+          assertEquals("active", marker.state)
           entered.complete(Unit)
           awaitCancellation()
         }
       }
     }
-    app.ownProviderOperations(configuration)
+    app.ownProviderOperations(configuration, "a".repeat(64))
     val caller = async { requireNotNull(configuration.purchaseDelegate).restorePurchases() }
     entered.await()
     assertFalse("Provider call must still be running", caller.isCompleted)
@@ -67,7 +71,14 @@ class ProviderOperationStartupTest {
     try {
       assertTrue("Hold must save the original record", prefs.getBoolean("operation-test-backup-present", false))
       assertNotEquals("Must be a fresh process", prefs.getInt("operation-test-pid", -1), Process.myPid())
-      assertTrue("Unfinished operation must survive process death", ProviderOperationJournal(prefs).hasUnfinished())
+      val journal = ProviderOperationJournal(prefs)
+      val marker = journal.snapshot().single()
+      assertEquals("a".repeat(64), marker.session)
+      assertEquals(ProviderOperationJournal.Kind.RESTORE, marker.kind)
+      assertNull(marker.productId)
+      assertEquals("active", marker.state)
+      assertEquals(ProviderOperationJournal.Recovery.RESTORE, journal.recoveryFor("a".repeat(64)))
+      assertEquals(ProviderOperationJournal.Recovery.OTHER_SESSION, journal.recoveryFor("b".repeat(64)))
       assertNull("Recovery must work without logout intent", prefs.getString("logout", null))
       assertFalse(Nuxie.isSetup)
       activity = instrumentation.startActivitySync(Intent(context, MainActivity::class.java)

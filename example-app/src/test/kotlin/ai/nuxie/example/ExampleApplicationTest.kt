@@ -9,6 +9,7 @@ import kotlinx.coroutines.runBlocking
 import android.app.Activity
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -26,11 +27,12 @@ class ExampleApplicationTest {
       override suspend fun restorePurchases() = RestoreResult.NoPurchases
     }
     val first = NuxieConfiguration("pk_test_owner").apply { purchaseDelegate = delegate }
-    app.ownProviderOperations(first)
+    app.ownProviderOperations(first, "a".repeat(64))
     assertSame(app.providerOperations, first.purchaseDelegate)
     val retry = NuxieConfiguration("pk_test_owner").apply { purchaseDelegate = delegate }
-    app.ownProviderOperations(retry)
+    app.ownProviderOperations(retry, "a".repeat(64))
     assertSame(first.purchaseDelegate, retry.purchaseDelegate)
+    assertThrows(IllegalStateException::class.java) { app.ownProviderOperations(retry, "b".repeat(64)) }
     runBlocking { requireNotNull(app.providerOperations).closeAndAwait() }
   }
 

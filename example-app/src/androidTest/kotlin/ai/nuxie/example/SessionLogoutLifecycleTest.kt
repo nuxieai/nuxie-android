@@ -80,7 +80,7 @@ class SessionLogoutLifecycleTest {
           }
         }
         instrumentation.runOnMainSync {
-          app.ownProviderOperations(configuration)
+          app.ownProviderOperations(configuration, "a".repeat(64))
           Nuxie.setup(app, configuration)
           Nuxie.identify(customer)
         }

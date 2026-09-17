@@ -55,13 +55,13 @@ class SessionSignInLifecycleTest {
           .putExtra("nuxie_distinct_id", customer).putExtra("nuxie_api_endpoint", server.url)
         host = instrumentation.startActivitySync(launch)
         assertFalse(Nuxie.isSetup)
-        val interrupted = app.providerOperationJournal.begin()
+        val interrupted = app.providerOperationJournal.begin("a".repeat(64), ProviderOperationJournal.Kind.RESTORE)
         click(requireNotNull(host), "Sign in with launch customer")
         await { owner.state.value == SessionSignIn.State.FAILED }
         assertEquals(0, providerCalls)
         assertTrue(app.providerOperationJournal.hasUnfinished())
         assertNull(app.logoutJournal.pendingSession())
-        app.providerOperationJournal.finish(interrupted, false)
+        app.providerOperationJournal.finish(interrupted, "a".repeat(64), false)
         click(requireNotNull(host), "Sign in with launch customer")
         await { owner.state.value == SessionSignIn.State.RUNNING && providerCalls == 1 }
         assertEquals(session, app.logoutJournal.pendingSession())

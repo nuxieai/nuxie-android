@@ -22,6 +22,7 @@ internal class ProviderOperations(
   private val delegate: NuxiePurchaseDelegate,
   dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
   private val journal: ProviderOperationJournal? = null,
+  val session: String? = null,
 ) : NuxiePurchaseDelegate {
   private val scope = CoroutineScope(SupervisorJob() + dispatcher)
   private val lock = Any()
@@ -30,10 +31,10 @@ internal class ProviderOperations(
   private var requiresRecovery = false
 
   override suspend fun purchase(product: StoreProduct): PurchaseResult =
-    submit { delegate.purchase(product) } ?: PurchaseResult.Failed(closedFailure())
+    submit(ProviderOperationJournal.Kind.PURCHASE, product.storeProductId) { delegate.purchase(product) } ?: PurchaseResult.Failed(closedFailure())
 
   override suspend fun restorePurchases(): RestoreResult =
-    submit { delegate.restorePurchases() } ?: RestoreResult.Failed(closedFailure())
+    submit(ProviderOperationJournal.Kind.RESTORE, null) { delegate.restorePurchases() } ?: RestoreResult.Failed(closedFailure())
 
   fun closeAdmission() { synchronized(lock) { closed = true } }
 
@@ -52,21 +53,21 @@ internal class ProviderOperations(
     if (synchronized(lock) { requiresRecovery } || journal?.hasUnfinished() == true) throw ProviderRecoveryRequired()
   }
 
-  private suspend fun <T : Any> submit(operation: suspend () -> T): T? {
+  private suspend fun <T : Any> submit(kind: ProviderOperationJournal.Kind, productId: String?, operation: suspend () -> T): T? {
     val caller = currentCoroutineContext()
     val job = synchronized(lock) {
       caller.ensureActive()
       if (closed) return null
       // Register before dispatch so close cannot miss an admitted operation.
       scope.async(start = CoroutineStart.LAZY) {
-        val marker = journal?.begin()
+        val marker = journal?.begin(checkNotNull(session) { "Provider session ownership is required." }, kind, productId)
         val result = operation()
         val paymentPending = result == PurchaseResult.Pending
         // Failed results do not distinguish rejection before dispatch from an
         // ambiguous outcome after checkout. Preserve ownership in either case.
         val failed = result is PurchaseResult.Failed || result is RestoreResult.Failed
         if (paymentPending || failed) synchronized(lock) { requiresRecovery = true }
-        if (marker != null && !failed) requireNotNull(journal).finish(marker, paymentPending)
+        if (marker != null && !failed) requireNotNull(journal).finish(marker, checkNotNull(session), paymentPending)
         result
       }.also { pending += it }
     }

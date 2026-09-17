@@ -62,11 +62,15 @@ class RevenueCatOperationOwnershipTest {
           else -> RETURNS_DEFAULTS.answer(it)
         }
       }
-      val owner = ProviderOperations(NuxieRevenueCatPurchaseDelegate({ mock(Activity::class.java) }, purchases), dispatcher, journal)
+      val owner = ProviderOperations(NuxieRevenueCatPurchaseDelegate({ mock(Activity::class.java) }, purchases), dispatcher, journal, "a".repeat(64))
       val waiter = async { owner.purchase(product) }
       testScheduler.runCurrent()
       assertEquals(1, calls)
       assertTrue(journal.hasUnfinished())
+      val retained = journal.snapshot().single()
+      assertEquals("a".repeat(64), retained.session)
+      assertEquals(ProviderOperationJournal.Kind.PURCHASE, retained.kind)
+      assertEquals("tip", retained.productId)
       val beforeCompletion = identityReads
       waiter.cancelAndJoin()
       val drain = async { owner.closeAndAwait() }

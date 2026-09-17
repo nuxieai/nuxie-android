@@ -183,7 +183,12 @@ class MainActivity : Activity() {
         return
       }
       if (!Nuxie.isSetup && app.providerOperationJournal.hasUnfinished()) {
-        status.text = "Previous purchase activity needs recovery before starting again."
+        status.text = when (app.providerOperationJournal.recoveryFor(requestedSession)) {
+          ProviderOperationJournal.Recovery.LEGACY -> "Previous purchase activity needs recovery; its original session is unknown."
+          ProviderOperationJournal.Recovery.OTHER_SESSION -> "Previous purchase activity needs recovery in its original session."
+          ProviderOperationJournal.Recovery.RESTORE -> "Previous restore activity needs recovery before starting again."
+          else -> "Previous purchase activity needs recovery before starting again."
+        }
         buttons.forEach { it.isEnabled = false }
         return
       }
@@ -199,7 +204,7 @@ class MainActivity : Activity() {
           application as ExampleApplication, intent.getStringExtra("nuxie_provider_key"),
           intent.getStringExtra(EXTRA_DISTINCT_ID), configuration,
         )
-        (application as ExampleApplication).ownProviderOperations(configuration)
+        (application as ExampleApplication).ownProviderOperations(configuration, requestedSession)
         Nuxie.setup(this, configuration)
         intent.getStringExtra(EXTRA_DISTINCT_ID)?.let(Nuxie::identify)
         if (ExamplePurchaseProvider.supportsLogout) {
