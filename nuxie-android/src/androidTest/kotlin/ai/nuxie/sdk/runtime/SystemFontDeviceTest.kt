@@ -7,6 +7,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
+import java.nio.ByteBuffer
 
 @SdkSuppress(minSdkVersion = 31)
 class SystemFontDeviceTest {
@@ -44,7 +45,31 @@ class SystemFontDeviceTest {
             assertTrue("Authored bold increases glyph coverage", ink(bold) > ink(regular))
             assertFalse("Authored weight changes rendered pixels", regular.contentEquals(bold))
             assertArrayEquals("Reserialized production scene preserves rendering", regular, render("optical-baseline", 400))
+            val font = SystemFontProvider.prepare(SystemFontRequirement("system", 400, "normal"))
+            val optical = render("optical-control", 400)
+            val axes = variationAxes(font.bytes)
+            if ("opsz" in axes) {
+                assertFalse("Supported authored optical size changes glyphs", regular.contentEquals(optical))
+            } else {
+                assertArrayEquals("Unsupported optical axis preserves the device face", regular, optical)
+            }
+            android.util.Log.i("SystemFontDeviceTest", "Selected font variation axes: $axes")
         } finally { renderer.close() }
+    }
+
+    /** Read the standard SFNT fvar directory independently of the provider's extraction. */
+    private fun variationAxes(bytes: ByteArray): Set<String> {
+        val data = ByteBuffer.wrap(bytes)
+        val count = data.getShort(4).toInt() and 0xffff
+        val record = (0 until count).map { 12 + it * 16 }
+            .firstOrNull { String(bytes, it, 4, Charsets.US_ASCII) == "fvar" } ?: return emptySet()
+        val offset = data.getInt(record + 8)
+        val axesOffset = data.getShort(offset + 4).toInt() and 0xffff
+        val axesCount = data.getShort(offset + 8).toInt() and 0xffff
+        val axesSize = data.getShort(offset + 10).toInt() and 0xffff
+        return (0 until axesCount).map {
+            String(bytes, offset + axesOffset + it * axesSize, 4, Charsets.US_ASCII)
+        }.toSet()
     }
 
     @Test fun mixedDeviceAndDownloadedFontsRenderAndRequiredFontsRejectInvalidBytes() {
