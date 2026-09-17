@@ -2350,9 +2350,19 @@ class PublishedTextInputDeviceTest {
         exerciseDurableNativeEmission(PublishedBehavior.PURCHASE, purchaseX = 240f, selectPlan = true)
     }
 
+    @Test
+    fun signedPurchaseKeepsAuthoredSelectionAcrossForwardAndBackNavigation() {
+        exerciseDurableNativeEmission(PublishedBehavior.PURCHASE, purchaseX = 240f, selectPlan = true, purchaseRoundTrip = true)
+    }
+
+    @Test
+    fun signedNavigationFixtureUsesAuthoredSelectionBeforeNavigation() {
+        exerciseDurableNativeEmission(PublishedBehavior.PURCHASE, purchaseX = 240f, selectPlan = true, purchaseNavigationFixture = true)
+    }
+
     private enum class PublishedBehavior { TEXT_INPUT, SCRIPT, SEMANTIC_SCRIPT, SEMANTIC_ROLES, PURCHASE }
 
-    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f, selectPlan: Boolean = false) {
+    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f, selectPlan: Boolean = false, purchaseRoundTrip: Boolean = false, purchaseNavigationFixture: Boolean = purchaseRoundTrip) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
@@ -2360,7 +2370,7 @@ class PublishedTextInputDeviceTest {
         val purchases = LinkedBlockingQueue<String>()
         val scripted = behavior == PublishedBehavior.SCRIPT || behavior == PublishedBehavior.SEMANTIC_SCRIPT
         val candidateSemantics = behavior == PublishedBehavior.SEMANTIC_SCRIPT || behavior == PublishedBehavior.SEMANTIC_ROLES
-        val fixturePath = if (purchasing) "journeys/rendered-purchase-scopes" else if (behavior == PublishedBehavior.SEMANTIC_ROLES) "journeys/rendered-semantic-roles"
+        val fixturePath = if (purchaseNavigationFixture) "journeys/rendered-purchase-navigation" else if (purchasing) "journeys/rendered-purchase-scopes" else if (behavior == PublishedBehavior.SEMANTIC_ROLES) "journeys/rendered-semantic-roles"
             else if (candidateSemantics) "journeys/rendered-semantic-screen-control${if (failScript) "-error" else ""}"
             else if (failScript) "journeys/rendered-screen-control-error" else if (scripted) "journeys/rendered-screen-control" else "journeys/rendered-text-input"
         val fixture = loadPublishedFixture(instrumentation, fixturePath, candidateSemantics)
@@ -2376,6 +2386,7 @@ class PublishedTextInputDeviceTest {
         val presentationCount = java.util.concurrent.atomic.AtomicInteger()
         val navigationPresented = CountDownLatch(1)
         val initiallyRevealed = CountDownLatch(1)
+        val revealedScreens = LinkedBlockingQueue<String>()
         val terminalOutcomes = LinkedBlockingQueue<JourneySurfaceOutcome>()
         val errorDismissals = LinkedBlockingQueue<JourneyScreenDismissalResult>()
         val failureCheckpointResponses = AtomicReference<JsonObject?>()
@@ -2441,6 +2452,7 @@ class PublishedTextInputDeviceTest {
                     }, onPresentationRevealed = { id ->
                         request.onPresentationRevealed(id)
                         initiallyRevealed.countDown()
+                        revealedScreens.add(id)
                     }, onOutcome = { outcome ->
                         request.onOutcome(outcome)
                         terminalOutcomes.add(outcome)
@@ -2473,22 +2485,32 @@ class PublishedTextInputDeviceTest {
             val first = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
             if (purchasing) {
                 assertTrue("Purchase requires revealed signed presentation", initiallyRevealed.await(10, TimeUnit.SECONDS))
-                var surface: ExperienceSurfaceHost? = null
-                val deadline = SystemClock.uptimeMillis() + 10_000
-                while (surface == null && SystemClock.uptimeMillis() < deadline) {
-                    instrumentation.runOnMainSync {
-                        fun find(view: View): ExperienceSurfaceHost? = if (view is ExperienceSurfaceHost) view
-                            else if (view is ViewGroup) (0 until view.childCount).firstNotNullOfOrNull { find(view.getChildAt(it)) } else null
-                        surface = find(first.window.decorView)?.takeIf { it.isShown && it.isAvailable && it.width > 1 && it.height > 1 }
+                fun awaitSurface(previous: ExperienceSurfaceHost? = null): ExperienceSurfaceHost {
+                    var surface: ExperienceSurfaceHost? = null
+                    val deadline = SystemClock.uptimeMillis() + 10_000
+                    while (surface == null && SystemClock.uptimeMillis() < deadline) {
+                        instrumentation.runOnMainSync {
+                            fun find(view: View): ExperienceSurfaceHost? = when {
+                                view is ExperienceSurfaceHost -> view.takeIf {
+                                    it !== previous && it.isShown && it.isAvailable && it.width > 1 && it.height > 1
+                                }
+                                view is ViewGroup -> (0 until view.childCount).firstNotNullOfOrNull { find(view.getChildAt(it)) }
+                                else -> null
+                            }
+                            surface = find(first.window.decorView)
+                        }
+                        if (surface == null) SystemClock.sleep(20)
                     }
-                    if (surface == null) SystemClock.sleep(20)
+                    return checkNotNull(surface) { "Expected a ready purchase surface after navigation" }
                 }
-                val target = checkNotNull(surface)
-                val downTime = SystemClock.uptimeMillis()
+                var target = awaitSurface()
+                var downTime = SystemClock.uptimeMillis()
                 fun dispatch(action: Int, authoredY: Float = 30f) = instrumentation.runOnMainSync {
-                    val scale = minOf(target.width / 320f, target.height / 100f)
+                    if (action == MotionEvent.ACTION_DOWN) downTime = SystemClock.uptimeMillis()
+                    val authoredHeight = if (purchaseNavigationFixture) 150f else 100f
+                    val scale = minOf(target.width / 320f, target.height / authoredHeight)
                     val x = (target.width - 320f * scale) / 2f + purchaseX * scale
-                    val y = (target.height - 100f * scale) / 2f + authoredY * scale
+                    val y = (target.height - authoredHeight * scale) / 2f + authoredY * scale
                     val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
                     try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }
                 }
@@ -2496,8 +2518,23 @@ class PublishedTextInputDeviceTest {
                     dispatch(MotionEvent.ACTION_DOWN, 65f)
                     awaitDeliveredPointer(target)
                     dispatch(MotionEvent.ACTION_UP, 65f)
-                    awaitDeliveredPointer(target)
+                    awaitDeliveredPointer(target, down = false)
                     assertTrue("Selection must not dispatch a purchase", purchases.isEmpty())
+                }
+                if (purchaseRoundTrip) {
+                    assertEquals("screen", revealedScreens.poll(10, TimeUnit.SECONDS))
+                    for ((screenId, eventName) in listOf("details" to "details_requested", "screen" to "return_requested")) {
+                        val previous = target
+                        dispatch(MotionEvent.ACTION_DOWN, 120f)
+                        awaitDeliveredPointer(target)
+                        dispatch(MotionEvent.ACTION_UP, 120f)
+                        assertEquals("Navigation must reveal its signed destination", screenId, revealedScreens.poll(10, TimeUnit.SECONDS))
+                        target = awaitSurface(previous)
+                        val navigationBatch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS))
+                        assertEquals(listOf(eventName), navigationBatch.emissions.map { it.name })
+                        assertTrue("Navigation must not dispatch checkout", purchases.isEmpty())
+                    }
+                    assertEquals(3, presentationCount.get())
                 }
                 dispatch(MotionEvent.ACTION_DOWN)
                 awaitDeliveredPointer(target)
@@ -3224,7 +3261,7 @@ class PublishedTextInputDeviceTest {
         return if (candidateSemantics) current.copy(supportedCapabilities = current.supportedCapabilities + "scene-semantics-v1") else current
     }
 
-    private fun awaitDeliveredPointer(surface: ExperienceSurfaceHost) {
+    private fun awaitDeliveredPointer(surface: ExperienceSurfaceHost, down: Boolean = true) {
         // Observe only the precondition on its owning lane. Durable output is the oracle.
         val lane = ExperienceSurfaceHost::class.java.getDeclaredField("lane").apply { isAccessible = true }
             .get(surface) as NuxieRuntimeLane
@@ -3236,14 +3273,14 @@ class PublishedTextInputDeviceTest {
             val result = java.util.concurrent.atomic.AtomicBoolean()
             val read = CountDownLatch(1)
             assertTrue(lane.enqueue {
-                result.set((delivered.get(queue) as Map<*, *>).isNotEmpty())
+                result.set((delivered.get(queue) as Map<*, *>).isNotEmpty() == down)
                 read.countDown()
             })
             assertTrue("Pointer precondition must settle on native lane", read.await(10, TimeUnit.SECONDS))
             if (result.get()) return
             SystemClock.sleep(20)
         }
-        throw AssertionError("DOWN must be delivered before lifecycle interruption")
+        throw AssertionError("Pointer ${if (down) "DOWN" else "UP"} must be delivered before continuing")
     }
 
     @Suppress("DEPRECATION")
