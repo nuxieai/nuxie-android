@@ -36,6 +36,33 @@ class LogoutJournalTest {
     }
   }
 
+  @Test fun explicitNextSessionSurvivesRestartAndRejectsOldOrDifferentLaunches() {
+    val prefs = RuntimeEnvironment.getApplication().getSharedPreferences("next-session", Context.MODE_PRIVATE)
+    val journal = LogoutJournal(prefs)
+    val next = "b".repeat(64)
+    journal.write(LogoutJournal.Record(session, LogoutJournal.Stage.REQUESTED))
+    assertThrows(IllegalStateException::class.java) { journal.beginSession(next) }
+    journal.write(LogoutJournal.Record(session, LogoutJournal.Stage.COMPLETE))
+    assertFalse(journal.admits(next))
+    journal.beginSession(next)
+    val restarted = LogoutJournal(prefs)
+    assertEquals(next, restarted.pendingSession())
+    assertFalse(restarted.admits(next))
+    assertFalse(restarted.admits(session))
+    assertThrows(IllegalStateException::class.java) { restarted.beginSession(session) }
+    assertThrows(IllegalStateException::class.java) { restarted.completeSession(session) }
+    restarted.beginSession(next)
+    restarted.completeSession(next)
+    restarted.completeSession(next) // Re-persist an uncertain completion without changing identity.
+    val completed = LogoutJournal(prefs)
+    assertNull(completed.read())
+    assertNull(completed.pendingSession())
+    assertTrue(completed.admits(next))
+    assertFalse(completed.admits(session))
+    completed.write(LogoutJournal.Record(next, LogoutJournal.Stage.REQUESTED))
+    assertFalse(completed.admits(next))
+  }
+
   @Test fun failedCommitIsAnError() {
     val prefs = mock(SharedPreferences::class.java)
     val editor = mock(SharedPreferences.Editor::class.java, RETURNS_SELF)

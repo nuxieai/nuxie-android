@@ -28,6 +28,7 @@ class ExampleApplication : Application(), Application.ActivityLifecycleCallbacks
 
   internal fun prepareLogout(session: String, logoutProvider: suspend () -> Unit) {
     if (sessionLogout != null) return
+    sessionSignIn = null
     val owner = requireNotNull(providerOperations)
     sessionLogout = SessionLogout(
       owner,
@@ -36,6 +37,30 @@ class ExampleApplication : Application(), Application.ActivityLifecycleCallbacks
       retireSdk = { Nuxie.shutdownAndAwait() },
       logoutProvider = logoutProvider,
     )
+  }
+
+  internal var sessionSignIn: SessionSignIn? = null
+    private set
+
+  internal fun prepareSignIn(session: String, authenticate: suspend () -> Unit): SessionSignIn {
+    sessionSignIn?.let {
+      check(it.session == session) { "Another sign-in is already owned by the application." }
+      return it
+    }
+    return SessionSignIn(
+      session,
+      begin = {
+        check(!Nuxie.isSetup) { "Previous SDK session is still running." }
+        check(!providerOperationJournal.hasUnfinished()) { "Previous purchases need recovery." }
+        withContext(Dispatchers.IO) { logoutJournal.beginSession(session) }
+      },
+      authenticate = authenticate,
+      complete = {
+        withContext(Dispatchers.IO) { logoutJournal.completeSession(session) }
+        providerOperations = null
+        sessionLogout = null
+      },
+    ).also { sessionSignIn = it }
   }
 
   private var resumed = WeakReference<Activity>(null)

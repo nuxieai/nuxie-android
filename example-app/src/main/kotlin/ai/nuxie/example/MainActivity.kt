@@ -34,6 +34,10 @@ class MainActivity : Activity() {
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private val buttons = mutableListOf<Button>()
   private lateinit var logoutButton: Button
+  private lateinit var signInButton: Button
+  private var allowSignIn = false
+  private var launchKeyValid = false
+  private var signInObservation: Job? = null
   private lateinit var status: TextView
   private lateinit var analytics: TextView
   private lateinit var featureStatus: TextView
@@ -121,6 +125,12 @@ class MainActivity : Activity() {
       }
     }
     content.addView(logoutButton, ViewGroup.LayoutParams(-1, -2))
+    signInButton = Button(this).apply {
+      text = "Sign in with launch customer"
+      visibility = android.view.View.GONE
+      setOnClickListener { startSignIn() }
+    }
+    content.addView(signInButton, ViewGroup.LayoutParams(-1, -2))
     content.addView(analytics)
     val scroll = ScrollView(this).apply {
       addView(content, ViewGroup.LayoutParams(-1, -2))
@@ -146,23 +156,34 @@ class MainActivity : Activity() {
       buttons.forEach { it.isEnabled = false }
       return
     }
+    launchKeyValid = true
     val app = application as ExampleApplication
     try {
+      val requestedSession = requestedSession(apiKey)
+      if (app.sessionSignIn?.state?.value?.let { it != SessionSignIn.State.COMPLETE } == true) {
+        allowSignIn = true
+        buttons.forEach { it.isEnabled = false }
+        return
+      }
+      val previousLogout = app.logoutJournal.read()
+      if (previousLogout?.stage == LogoutJournal.Stage.COMPLETE || app.logoutJournal.pendingSession() != null) {
+        allowSignIn = !app.providerOperationJournal.hasUnfinished()
+        status.text = if (allowSignIn) "Signed out. Sign in explicitly to start another session."
+          else "Previous purchase activity needs recovery before starting again."
+        buttons.forEach { it.isEnabled = false }
+        return
+      }
+      if (!app.logoutJournal.admits(requestedSession)) {
+        status.text = "This launch does not match the admitted session, or sign-out needs recovery."
+        buttons.forEach { it.isEnabled = false }
+        return
+      }
       if (app.sessionLogout?.state?.value?.let { it != SessionLogout.State.ACTIVE } == true) {
         buttons.forEach { it.isEnabled = false }
         return
       }
       if (!Nuxie.isSetup && app.providerOperationJournal.hasUnfinished()) {
         status.text = "Previous purchase activity needs recovery before starting again."
-        buttons.forEach { it.isEnabled = false }
-        return
-      }
-      if (!Nuxie.isSetup && app.logoutJournal.read() != null) {
-        status.text = if (app.logoutJournal.read()?.stage == LogoutJournal.Stage.COMPLETE) {
-          "Signed out. Starting another session requires an explicit sign-in."
-        } else {
-          "A previous sign-out needs recovery before starting again."
-        }
         buttons.forEach { it.isEnabled = false }
         return
       }
@@ -198,6 +219,48 @@ class MainActivity : Activity() {
     }
   }
 
+  private fun requestedSession(apiKey: String): String {
+    val values = listOf(ExamplePurchaseProvider.name, apiKey, intent.getStringExtra("nuxie_provider_key"),
+      intent.getStringExtra(EXTRA_DISTINCT_ID), intent.getStringExtra(EXTRA_API_ENDPOINT))
+    val bytes = org.json.JSONArray(values).toString().toByteArray(Charsets.UTF_8)
+    return MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+  }
+
+  private fun startSignIn() {
+    if (!launchKeyValid || !ExamplePurchaseProvider.supportsLogout) return
+    val app = application as ExampleApplication
+    val customer = intent.getStringExtra(EXTRA_DISTINCT_ID)?.takeIf { it.isNotBlank() } ?: return
+    val apiKey = intent.getStringExtra(EXTRA_API_KEY) ?: getString(R.string.nuxie_api_key)
+    try {
+      val key = intent.getStringExtra("nuxie_provider_key")
+      val owner = app.prepareSignIn(requestedSession(apiKey)) { ExamplePurchaseProvider.signIn(app, key, customer) }
+      readyForOperations = false
+      observeFeatures = false
+      featureObservation?.cancel()
+      updateButtonState()
+      observeSignIn()
+      scope.launch { owner.signIn() }
+    } catch (_: Exception) {
+      status.text = "Sign-in cannot start. Resolve the previous session before continuing."
+    }
+  }
+
+  private fun observeSignIn() {
+    signInObservation?.cancel()
+    val owner = (application as ExampleApplication).sessionSignIn ?: return
+    signInObservation = scope.launch {
+      owner.state.collect { state ->
+        signInButton.isEnabled = state != SessionSignIn.State.RUNNING && state != SessionSignIn.State.COMPLETE
+        when (state) {
+          SessionSignIn.State.READY -> Unit
+          SessionSignIn.State.RUNNING -> status.text = "Signing in…"
+          SessionSignIn.State.FAILED -> status.text = "Sign-in failed. Retry with the same launch customer."
+          SessionSignIn.State.COMPLETE -> recreate()
+        }
+      }
+    }
+  }
+
   private fun runOperation(message: String, operation: suspend () -> String) {
     status.text = message
     operationRunning = true
@@ -227,13 +290,19 @@ class MainActivity : Activity() {
     buttons.forEach { it.isEnabled = enabled }
     logoutButton.visibility = if (state == null) android.view.View.GONE else android.view.View.VISIBLE
     logoutButton.text = if (state == SessionLogout.State.FAILED) "Retry sign out" else "Sign out"
+    val canSignIn = launchKeyValid && ExamplePurchaseProvider.supportsLogout &&
+      !intent.getStringExtra(EXTRA_DISTINCT_ID).isNullOrBlank() && (allowSignIn || state == SessionLogout.State.COMPLETE)
+    signInButton.visibility = if (canSignIn) android.view.View.VISIBLE else android.view.View.GONE
+    signInButton.isEnabled = canSignIn && (application as ExampleApplication).sessionSignIn?.state?.value != SessionSignIn.State.RUNNING
     logoutButton.isEnabled = (readyForOperations && state == SessionLogout.State.ACTIVE) ||
       state == SessionLogout.State.FAILED
   }
 
   override fun onStart() {
     super.onStart()
-    (application as ExampleApplication).sessionLogout?.let { session ->
+    updateButtonState()
+    if (allowSignIn) observeSignIn()
+    if (!allowSignIn) (application as ExampleApplication).sessionLogout?.let { session ->
       sessionObservation = scope.launch {
         session.state.collect { state ->
           updateButtonState()
@@ -258,6 +327,8 @@ class MainActivity : Activity() {
   }
 
   override fun onStop() {
+    signInObservation?.cancel()
+    signInObservation = null
     sessionObservation?.cancel()
     sessionObservation = null
     featureObservation?.cancel()
