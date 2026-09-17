@@ -41,7 +41,22 @@ The shared accessibility spec in the parent repository remains authoritative. Fu
 
 ## Actual TalkBack emulator traversal
 
-The opt-in probe runs the installed TalkBack service alongside UiAutomation and checks that forward swipes visit all eight signed authored identities in order, including both repeated labels and the single secure native editor. Seven backward swipes must then return through those exact identities in reverse order; every swipe must change focus. The combined traversal passed twice on API 36 with TalkBack 16.0.0.738667889. After traversal, hardware swipes return focus to Seats and real upward/downward TalkBack gestures must produce exactly one durable increment/decrement emission in order. The edit/Done assertions still use direct accessibility/native editor calls; assistive editing and spoken-output correctness remain unqualified. Signed button activation is covered below.
+The opt-in probe runs the installed TalkBack service alongside UiAutomation. The
+production-published fixture from publisher commit `b172c73b10` and canonical iOS
+fixture commit `66e5d23e` passed on API 36 with TalkBack 16.0.0.738667889 and public
+runtime `android-runtime-v0.4.0`. Forward swipes visited all ten authored identities
+in order, including both repeated labels and the single secure native editor;
+nine backward swipes returned through the exact identities. Every swipe changed
+focus. Real upward/downward TalkBack gestures on Seats produced exactly one
+durable increment/decrement emission in order.
+
+The same run verified native heading, independent selected/checked state, required
+mixed state description, ordinary Text, and authored slider value. These attribute
+checks do not prove spoken output or heading-specific navigation. Editing and Done
+still use direct accessibility/native editor calls, so assistive editing remains
+unqualified. This evidence covers these fixture bytes and the pinned runtime;
+qualification must be repeated after final runtime/SDK artifact adoption. Signed
+button activation is covered below.
 
 Use a dedicated rooted 64-bit API 34+ emulator with TalkBack installed and its primary virtio touchscreen (0..32767 axes). Inspect `adb -s emulator-5556 shell su 0 cat /sys/class/input/event1/device/name`; the selected event must report `virtio_input_multi_touch_1`. The event number may differ across emulators.
 
