@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import ai.nuxie.sdk.runtime.NuxieHostCommand
 import ai.nuxie.sdk.runtime.NuxieHostValue
 import ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome
@@ -90,12 +91,12 @@ internal class JourneyRuntimeEmissionCoordinator(
         }
     }
 
-    suspend fun publish(outcome: NuxiePlayerStepOutcome, correlationId: ULong, lifetime: RendererEffectLifetime? = null): Boolean {
+    suspend fun publish(outcome: NuxiePlayerStepOutcome, correlationId: ULong, lifetime: RendererEffectLifetime? = null, snapshot: NuxieViewModelSnapshot? = null): Boolean {
         if (!awaitReveal(lifetime)) return true
         return gate.withLock {
             if (closed) return@withLock false
             if (lifetime?.isRetired == true) return@withLock true
-            val projected = project(outcome, correlationId)
+            val projected = project(outcome, correlationId, snapshot)
             projected.links.forEach { link ->
                 runCatching { onOpenLink(link.url, link.target) }
                     .onFailure { error ->
@@ -214,6 +215,7 @@ internal class JourneyRuntimeEmissionCoordinator(
     private fun project(
         outcome: NuxiePlayerStepOutcome,
         correlationId: ULong,
+        snapshot: NuxieViewModelSnapshot?,
     ): Projection {
         val drafts = mutableListOf<Draft>()
         val links = mutableListOf<OpenLink>()
@@ -230,7 +232,16 @@ internal class JourneyRuntimeEmissionCoordinator(
                 "elementId",
                 "element_id",
             )
-            val instanceId = properties.string("instanceId", "instance_id")
+            val declaredInstanceId = properties.string("instanceId", "instance_id")
+            val instanceId = if (event.sourceViewModelInstanceId != 0L) {
+                val captured = checkNotNull(snapshot?.authoredInstanceId(event.sourceViewModelInstanceId)) {
+                    "Runtime event source has no unique authenticated instance in the current frame"
+                }
+                check(declaredInstanceId == null || declaredInstanceId == captured) {
+                    "Runtime event source conflicts with its declared instance"
+                }
+                captured
+            } else declaredInstanceId
             val actionId = controlActionId(event, properties)
             if (event.name == GENERATED_INTERACTION_EVENT && actionId == null) {
                 return@forEach

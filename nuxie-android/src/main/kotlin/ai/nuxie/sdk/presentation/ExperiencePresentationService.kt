@@ -1055,7 +1055,7 @@ internal class ExperiencePresentationService(
                             onOutcome = { reason -> attemptOutcome(pending, reason) },
                             onRuntimeStep = { outcome, correlationId, snapshot, lifetime ->
                                 pending.latestViewModelSnapshot.set(snapshot)
-                                runtimeStep(pending, outcome, correlationId, lifetime)
+                                runtimeStep(pending, outcome, correlationId, lifetime, snapshot)
                             },
                             onTextCommitted = { inputId, text, lifetime ->
                                 publishScreenEffects(pending) {
@@ -1499,8 +1499,9 @@ internal class ExperiencePresentationService(
         outcome: NuxiePlayerStepOutcome,
         correlationId: ULong,
         lifetime: RendererEffectLifetime?,
+        snapshot: NuxieViewModelSnapshot?,
     ) {
-        publishScreenEffects(active) { active.journey.emissions.publish(outcome, correlationId, lifetime) }
+        publishScreenEffects(active) { active.journey.emissions.publish(outcome, correlationId, lifetime, snapshot) }
     }
 
     private fun publishScreenEffects(active: ActivePresentation, publish: suspend () -> Boolean) {
