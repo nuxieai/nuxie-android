@@ -51,6 +51,66 @@ class JourneyReleaseTest {
         }
     }
 
+    @Test fun `current SDK authenticates signed System release and unsupported consumers reject it`() {
+        val supported = requireNotNull(ai.nuxie.sdk.core.supportedRuntimeForEmbeddedRuntime("native"))
+        val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/system-font-declarations.json").readText()).jsonObject
+        val capabilities = corpus.getValue("consumerCapabilities").jsonArray
+        val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val luau = supported.supportedLuauRevisions.entries.single()
+        val requirements = buildJsonObject {
+            put("minimumSdkVersion", supported.currentSdkVersion)
+            put("runtimeRevision", supported.supportedRuntimeRevisions.single())
+            put("luau", buildJsonObject {
+                put("revision", luau.key)
+                put("bytecodeVersions", JsonArray(luau.value.sorted().map(::JsonPrimitive)))
+            })
+            put("sceneFormat", buildJsonObject {
+                put("major", supported.sceneFormatMajor); put("minor", supported.sceneFormatMinor)
+            })
+            put("timezoneData", buildJsonObject {
+                put("format", "iana-tzdb"); put("revision", supported.timezoneDataRevision)
+                put("sha256", supported.timezoneDataSha256)
+            })
+            put("requiredCapabilities", capabilities)
+        }
+        val root = JsonObject(source + mapOf(
+            "requirements" to requirements,
+            "render" to JsonObject(source.getValue("render").jsonObject +
+                ("assets" to corpus.getValue("cases").jsonArray.first().jsonObject.getValue("assets"))),
+        ))
+        val bytes = root.toString().encodeToByteArray()
+        val pair = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val signature = java.security.Signature.getInstance("Ed25519").run {
+            initSign(pair.private)
+            update(JourneyReleaseLimits.SIGNATURE_DOMAIN.encodeToByteArray() + bytes)
+            sign()
+        }
+        val signed = JsonObject(envelope + mapOf(
+            "descriptorBytesBase64" to JsonPrimitive(Base64.encodeToString(bytes, Base64.NO_WRAP)),
+            "descriptorSizeBytes" to JsonPrimitive(bytes.size),
+            "descriptorSha256" to JsonPrimitive(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(bytes).joinToString("") { "%02x".format(it) }),
+            "signature" to buildJsonObject {
+                put("version", 1); put("algorithm", "ed25519"); put("keyId", "TEST_ONLY_SYSTEM_FONT")
+                put("signatureBase64", Base64.encodeToString(signature, Base64.NO_WRAP))
+            },
+        )).toString().encodeToByteArray()
+        val keys = mapOf("TEST_ONLY_SYSTEM_FONT" to pair.public.encoded.takeLast(32).toByteArray())
+        val identity = requireNotNull(JourneyReleaseIdentity.fromJson(root.getValue("identity").jsonObject))
+        val legId = root.getValue("leg").jsonObject.getValue("id").jsonPrimitive.content
+        assertArrayEquals(bytes, JourneyReleaseVerifier.authenticate(signed, keys, identity, legId,
+            supported, JourneyReleaseReplayPolicy.Active(0)).descriptorBytes)
+        val error = assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneyReleaseVerifier.authenticate(signed, keys, identity, legId,
+                supported.copy(supportedCapabilities = supported.supportedCapabilities - "system-fonts"),
+                JourneyReleaseReplayPolicy.Active(0))
+        }
+        assertEquals("unsupported capabilities: [system-fonts]", error.message)
+    }
+
     @Test fun `shared System font declarations preserve the source contract`() {
         val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/system-font-declarations.json").readText()).jsonObject
