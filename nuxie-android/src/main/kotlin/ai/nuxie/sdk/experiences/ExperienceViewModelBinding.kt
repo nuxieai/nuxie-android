@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.experiences
 
+import ai.nuxie.sdk.runtime.NuxieViewModelInstanceBinding
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -15,6 +16,49 @@ internal object ExperienceViewModelBinding {
         declaration(descriptor, artboardName).let { screen ->
             if (screen.containsKey("defaultInstanceId")) screen.requiredString("defaultInstanceId") else null
         }
+
+    fun instanceBindings(descriptor: JsonObject): List<NuxieViewModelInstanceBinding> {
+        val values = (descriptor["viewModelValues"] as? JsonArray).orEmpty().map {
+            requireNotNull(it as? JsonObject) { "Signed view-model value is invalid" }
+        }
+        val models = mutableMapOf<String, String>()
+        values.forEach { value ->
+            if (value.containsKey("instanceId")) {
+                val id = value.requiredString("instanceId")
+                val name = value.requiredString("viewModelName")
+                require(models.putIfAbsent(id, name).let { it == null || it == name }) {
+                    "Signed instance identity names multiple models"
+                }
+            }
+        }
+        return values.mapNotNull { value ->
+            val path = value.requiredString("path", 4096)
+            val envelope = value["value"] as? JsonObject
+            val suffix = listOf("/vmInstanceId", "/instanceId").firstOrNull(path::endsWith)
+            val target = when {
+                suffix != null -> value.requiredString("value")
+                envelope?.containsKey("vmInstanceId") == true -> envelope.requiredString("vmInstanceId")
+                envelope?.containsKey("instanceId") == true -> envelope.requiredString("instanceId")
+                else -> return@mapNotNull null
+            }
+            if (envelope?.containsKey("vmInstanceId") == true && envelope.containsKey("instanceId")) {
+                require(envelope.requiredString("instanceId") == target) { "Signed reference identities conflict" }
+            }
+            val explicitModel = if (envelope?.containsKey("viewModelId") == true)
+                envelope.requiredString("viewModelId") else null
+            val declaredModel = models[target]
+            require(explicitModel == null || declaredModel == null || explicitModel == declaredModel) {
+                "Signed referenced instance model declarations conflict"
+            }
+            NuxieViewModelInstanceBinding(
+                ownerModelName = value.requiredString("viewModelName"),
+                ownerInstanceId = if (value.containsKey("instanceId")) value.requiredString("instanceId") else null,
+                path = if (suffix == null) path else path.removeSuffix(suffix),
+                instanceId = target,
+                modelName = explicitModel ?: declaredModel,
+            )
+        }
+    }
 
     private fun declaration(descriptor: JsonObject, artboardName: String?): JsonObject {
         val renderScreens = screens(descriptor, "render")

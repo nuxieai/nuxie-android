@@ -18,6 +18,32 @@ import org.junit.Test
 
 class ExperienceViewModelBindingTest {
     @Test
+    fun `flattened and envelope references preserve signed owner and target models`() {
+        val descriptor = Json.parseToJsonElement("""{"viewModelValues":[
+            {"viewModelName":"Root","instanceId":"root","path":"first/vmInstanceId","value":"first"},
+            {"viewModelName":"Root","instanceId":"root","path":"second","value":{"vmInstanceId":"second"}},
+            {"viewModelName":"Plan","instanceId":"first","path":"placementId","value":"monthly"},
+            {"viewModelName":"Plan","instanceId":"second","path":"placementId","value":"annual"}
+        ]}""").jsonObject
+        val bindings = ExperienceViewModelBinding.instanceBindings(descriptor)
+        assertEquals(listOf("first", "second"), bindings.map { it.instanceId })
+        assertEquals(listOf("first", "second"), bindings.map { it.path })
+        assertEquals(listOf("root", "root"), bindings.map { it.ownerInstanceId })
+        assertEquals(listOf("Plan", "Plan"), bindings.map { it.modelName })
+    }
+
+    @Test
+    fun `conflicting signed target identities are rejected`() {
+        val descriptor = Json.parseToJsonElement("""{"viewModelValues":[
+            {"viewModelName":"Root","instanceId":"root","path":"child",
+             "value":{"vmInstanceId":"first","instanceId":"second"}}
+        ]}""").jsonObject
+        assertThrows(IllegalArgumentException::class.java) {
+            ExperienceViewModelBinding.instanceBindings(descriptor)
+        }
+    }
+
+    @Test
     fun `shared iOS descriptor selects its declared default without reinterpreting instance id`() {
         val envelope = Json.parseToJsonElement(
             File(FixtureRunner.fixturesRoot(), "journeys/planes/release.json").readText(),

@@ -141,6 +141,14 @@ internal data class NuxieViewModelListProjection(
 }
 
 /** Immutable, JVM-owned copy of one bound runtime view-model graph. */
+internal data class NuxieViewModelInstanceBinding(
+    val ownerModelName: String,
+    val ownerInstanceId: String?,
+    val path: String,
+    val instanceId: String,
+    val modelName: String?,
+)
+
 internal class NuxieViewModelSnapshot private constructor(
     private val rootInstanceId: Long,
     instances: List<Instance>,
@@ -185,6 +193,36 @@ internal class NuxieViewModelSnapshot private constructor(
         } ?: return null
         if (viewModelName != null && selected.schemaName != viewModelName) return null
         return (resolveValue(path, selected) as? Value.StringValue)?.value
+    }
+
+    /** Capture stable aliases before playback; never reassign them when a reference changes. */
+    fun captureInstanceIds(bindings: List<NuxieViewModelInstanceBinding>): Map<String, Long> {
+        val aliases = instanceIds.toMutableMap()
+        val pending = bindings.toMutableList()
+        var progressed: Boolean
+        do {
+            progressed = false
+            val iterator = pending.iterator()
+            while (iterator.hasNext()) {
+                val binding = iterator.next()
+                val owner = if (binding.ownerInstanceId == null) {
+                    instancesById[rootInstanceId]?.takeIf { it.schemaName == binding.ownerModelName }
+                } else aliases[binding.ownerInstanceId]?.let(instancesById::get)
+                if (owner == null) continue
+                require(owner.schemaName == binding.ownerModelName) { "Signed instance owner model mismatch" }
+                val reference = resolveValue(binding.path, owner) as? Value.Reference
+                    ?: error("Signed instance reference is absent from the native graph")
+                val target = checkNotNull(instancesById[reference.instanceId])
+                require(binding.modelName == null || target.schemaName == binding.modelName) {
+                    "Signed referenced instance model mismatch"
+                }
+                val previous = aliases.putIfAbsent(binding.instanceId, target.id)
+                require(previous == null || previous == target.id) { "Signed instance identity maps to multiple native instances" }
+                iterator.remove()
+                progressed = true
+            }
+        } while (progressed && pending.isNotEmpty())
+        return aliases.toMap()
     }
 
     fun resolveBoolean(path: String): Boolean? = (resolveValue(path) as? Value.BooleanValue)?.value
