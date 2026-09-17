@@ -39,7 +39,7 @@ internal class ExperienceMountedScreen(
     private var content: View? = null
     private var awaitingSemanticPublication =
         ((prepared.descriptor?.get("requirements") as? JsonObject)?.get("requiredCapabilities") as? JsonArray)
-            .orEmpty().any { (it as? JsonPrimitive)?.content == "scene-semantics-v1" }
+            .orEmpty().any { (it as? JsonPrimitive)?.content == "experience-accessibility" }
     val surface = ExperienceSurfaceHost(
         context = activity,
         lane = lane,

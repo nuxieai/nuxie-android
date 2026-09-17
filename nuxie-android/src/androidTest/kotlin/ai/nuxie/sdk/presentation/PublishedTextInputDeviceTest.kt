@@ -3321,7 +3321,7 @@ class PublishedTextInputDeviceTest {
     /** Candidate qualification only; the production registry must continue to reject this capability. */
     private fun runtimeForFixture(candidateSemantics: Boolean): ai.nuxie.sdk.experiences.JourneyReleaseSupportedRuntime {
         val current = checkNotNull(supportedRuntimeForEmbeddedRuntime(nuxieRuntimeSourceRevision()))
-        return if (candidateSemantics) current.copy(supportedCapabilities = current.supportedCapabilities + "scene-semantics-v1") else current
+        return if (candidateSemantics) current.copy(supportedCapabilities = current.supportedCapabilities + "experience-accessibility") else current
     }
 
     private fun awaitDeliveredPointer(surface: ExperienceSurfaceHost, down: Boolean = true) {
