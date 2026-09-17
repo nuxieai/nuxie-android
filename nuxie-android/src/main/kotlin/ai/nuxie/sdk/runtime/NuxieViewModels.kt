@@ -222,8 +222,8 @@ internal class NuxieViewModelSnapshot private constructor(
                 require(binding.modelName == null || target.schemaName == binding.modelName) {
                     "Signed referenced instance model mismatch"
                 }
-                val previous = aliases.putIfAbsent(binding.instanceId, target.id)
-                require(previous == null || previous == target.id) { "Signed instance identity maps to multiple native instances" }
+                val resolved = aliases.getOrPut(binding.instanceId) { target.id }
+                require(resolved == target.id) { "Signed instance identity maps to multiple native instances" }
                 iterator.remove()
                 progressed = true
             }
