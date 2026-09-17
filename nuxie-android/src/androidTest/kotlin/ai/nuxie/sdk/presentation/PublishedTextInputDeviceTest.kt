@@ -2360,9 +2360,15 @@ class PublishedTextInputDeviceTest {
         exerciseDurableNativeEmission(PublishedBehavior.PURCHASE, purchaseX = 240f, selectPlan = true, purchaseNavigationFixture = true)
     }
 
+    @Test
+    fun signedPurchaseKeepsAuthoredSelectionAcrossActivityRecreation() {
+        exerciseDurableNativeEmission(PublishedBehavior.PURCHASE, purchaseX = 240f, selectPlan = true,
+            purchaseNavigationFixture = true, recreateAfterSelection = true)
+    }
+
     private enum class PublishedBehavior { TEXT_INPUT, SCRIPT, SEMANTIC_SCRIPT, SEMANTIC_ROLES, PURCHASE }
 
-    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f, selectPlan: Boolean = false, purchaseRoundTrip: Boolean = false, purchaseNavigationFixture: Boolean = purchaseRoundTrip) {
+    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f, selectPlan: Boolean = false, purchaseRoundTrip: Boolean = false, purchaseNavigationFixture: Boolean = purchaseRoundTrip, recreateAfterSelection: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
@@ -2482,7 +2488,7 @@ class PublishedTextInputDeviceTest {
                     journeys.profileDidCommit(checkNotNull(catalog.snapshot(owner)), authority, owner, 1)
                 }
             }
-            val first = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
+            var first = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
             if (purchasing) {
                 assertTrue("Purchase requires revealed signed presentation", initiallyRevealed.await(10, TimeUnit.SECONDS))
                 fun awaitSurface(previous: ExperienceSurfaceHost? = null): ExperienceSurfaceHost {
@@ -2520,6 +2526,20 @@ class PublishedTextInputDeviceTest {
                     dispatch(MotionEvent.ACTION_UP, 65f)
                     awaitDeliveredPointer(target, down = false)
                     assertTrue("Selection must not dispatch a purchase", purchases.isEmpty())
+                }
+                if (recreateAfterSelection) {
+                    val original = first
+                    val previous = target
+                    instrumentation.runOnMainSync { original.recreate() }
+                    val deadline = SystemClock.elapsedRealtime() + 10_000
+                    var replacement: Activity? = null
+                    while (replacement == null && SystemClock.elapsedRealtime() < deadline) {
+                        replacement = monitor.waitForActivityWithTimeout(500)?.takeUnless { it === original }
+                    }
+                    first = checkNotNull(replacement) { "Recreation must provide a distinct Activity" }
+                    target = awaitSurface(previous)
+                    assertTrue("Recreation must not dispatch checkout", purchases.isEmpty())
+                    assertEquals("Recreation must keep the same Journey screen", 1, presentationCount.get())
                 }
                 if (purchaseRoundTrip) {
                     assertEquals("screen", revealedScreens.poll(10, TimeUnit.SECONDS))
