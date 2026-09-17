@@ -1,0 +1,124 @@
+package ai.nuxie.sdk.presentation
+
+import ai.nuxie.sdk.runtime.NuxieRuntime
+import android.content.Intent
+import android.graphics.Color
+import android.os.SystemClock
+import android.view.View
+import android.view.ViewGroup
+import android.widget.TextView
+import androidx.test.platform.app.InstrumentationRegistry
+import java.io.File
+import java.security.MessageDigest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.serialization.json.*
+import org.junit.Assert.*
+import org.junit.Test
+
+class PublishedVideoDeviceTest {
+    @Test
+    fun mountedPublishedVideoPresentsPixelsCaptionsAndRetiresThemWhenHidden() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val directory = File(instrumentation.targetContext.cacheDir, "published-video-test").apply { mkdirs() }
+        fun copy(name: String) = File(directory, name).also { file ->
+            instrumentation.context.assets.open("video/$name").use { input -> file.outputStream().use { input.copyTo(it) } }
+        }
+        val scene = copy("greeting.nux")
+        val video = copy("captions.mp4")
+        val digest = MessageDigest.getInstance("SHA-256").digest(video.readBytes()).joinToString("") { "%02x".format(it) }
+        val key = "assets/sha256/$digest.mp4"
+        val inventory = instrumentation.context.assets.open("video/inventory.json").bufferedReader().use {
+            Json.parseToJsonElement(it.readText()).jsonObject
+        }
+        val asset = JsonObject(inventory.getValue("assets").jsonArray.single().jsonObject + mapOf(
+            "key" to JsonPrimitive(key), "sha256" to JsonPrimitive(digest), "sizeBytes" to JsonPrimitive(video.length()),
+            "captionTracks" to buildJsonArray { add(buildJsonObject {
+                put("streamIndex", 2); put("codec", "mov_text"); put("language", "en"); put("title", JsonNull)
+            }) },
+        ))
+        val descriptor = buildJsonObject {
+            put("render", JsonObject(inventory + ("assets" to JsonArray(listOf(asset)))))
+            put("leg", buildJsonObject { put("screens", buildJsonArray { add(buildJsonObject { put("id", "screen") }) }) })
+        }
+        val prepared = PreparedPresentation(scene, "Video Frame", Color.BLACK, PresentationShell.FullScreen,
+            "screen", descriptor, mapOf(key to video), ExperienceArtboardSize(320f, 640f))
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val failure = AtomicReference<Throwable?>()
+        val first = CountDownLatch(1)
+        val closed = CountDownLatch(1)
+        var created = false
+        lateinit var mounted: ExperienceMountedScreen
+        lateinit var content: View
+        fun labels(view: View): List<TextView> = if (view is TextView) listOf(view)
+            else if (view is ViewGroup) (0 until view.childCount).flatMap { labels(view.getChildAt(it)) } else emptyList()
+        try {
+            instrumentation.runOnMainSync {
+                mounted = ExperienceMountedScreen(activity, prepared, object : ExperienceSurfaceHost.Listener {
+                    override fun onFirstFrame() { first.countDown() }
+                    override fun onFailure(error: ExperiencePresentationException) { failure.set(error); first.countDown() }
+                }, failure::set)
+                created = true
+                content = mounted.mount()
+                activity.setContentView(content)
+                mounted.observeWindow()
+            }
+            assertTrue("First presented frame", first.await(15, TimeUnit.SECONDS))
+            val colors = mutableListOf<Boolean>()
+            val captions = mutableSetOf<String>()
+            val accessibleCaptions = mutableSetOf<String>()
+            var screenshotSaved = false
+            fun collectAccessibility(node: android.view.accessibility.AccessibilityNodeInfo) {
+                node.text?.toString()?.let { accessibleCaptions += it }
+                for (index in 0 until node.childCount) node.getChild(index)?.let(::collectAccessibility)
+            }
+            val deadline = SystemClock.elapsedRealtime() + 15_000
+            while (SystemClock.elapsedRealtime() < deadline && (colors.size < 4 || captions.size < 2)) {
+                failure.get()?.let { throw AssertionError("Mounted playback failed", it) }
+                instrumentation.runOnMainSync {
+                    mounted.surface.bitmap?.let { bitmap ->
+                        val scale = minOf(bitmap.width / 320f, bitmap.height / 640f)
+                        val x = ((bitmap.width - 320 * scale) / 2 + 100 * scale).toInt()
+                        val y = ((bitmap.height - 640 * scale) / 2 + 80 * scale).toInt()
+                        val pixel = bitmap.getPixel(x, y)
+                        if (Color.red(pixel) > 180 && Color.blue(pixel) < 70 && colors.lastOrNull() != true) colors += true
+                        if (Color.blue(pixel) > 180 && Color.red(pixel) < 70 && colors.lastOrNull() != false) colors += false
+                        bitmap.recycle()
+                    }
+                    labels(content).filter { it.visibility == View.VISIBLE && it.text.isNotEmpty() }.forEach {
+                        assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_YES, it.importantForAccessibility)
+                        captions += it.text.toString()
+                    }
+                }
+                instrumentation.uiAutomation.rootInActiveWindow?.let(::collectAccessibility)
+                if (!screenshotSaved && colors.size >= 2 && captions.contains("Welcome")) {
+                    instrumentation.uiAutomation.takeScreenshot()?.let { bitmap ->
+                        File(instrumentation.targetContext.getExternalFilesDir(null), "task3b-video-caption.png").outputStream().use {
+                            bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+                        }
+                        bitmap.recycle()
+                        screenshotSaved = true
+                    }
+                }
+                Thread.sleep(30)
+            }
+            assertEquals(listOf(true, false, true, false), colors.take(4))
+            assertTrue("Visible captions: $captions", captions.containsAll(listOf("Hello 👋", "Welcome")))
+            assertTrue("Accessibility tree captions: $accessibleCaptions", accessibleCaptions.any { it == "Hello 👋" || it == "Welcome" })
+            assertTrue("Screenshot captured", screenshotSaved)
+            instrumentation.runOnMainSync { mounted.setVisible(false) }
+            Thread.sleep(250)
+            instrumentation.runOnMainSync { assertTrue(labels(content).none { it.visibility == View.VISIBLE && it.text.isNotEmpty() }) }
+        } finally {
+            instrumentation.runOnMainSync {
+                if (created) mounted.close(false) { closed.countDown() } else closed.countDown()
+                activity.finish()
+            }
+            assertTrue("Decoder and renderer teardown", closed.await(10, TimeUnit.SECONDS))
+            directory.deleteRecursively()
+        }
+    }
+}
