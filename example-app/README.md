@@ -104,10 +104,11 @@ tracks its current resumed Activity with a weak reference, including Nuxie's
 Experience Activity, for RevenueCat checkout. Both provider delegates require the expected customer to be visible in their
 identity state before checkout or restore, and recheck identity before returning
 successful completion. The
-provider builds deliberately omit anonymous reset: coordinated logout and
-in-flight identity changes are not implemented by this sample. Restart with a
-different explicit customer to exercise a new session, after all checkout work
-has finished. Do not copy a one-SDK reset into a two-SDK production session.
+provider builds omit the one-SDK anonymous reset. RevenueCat exposes **Sign out**
+through the application-owned transition below. Superwall does not expose sign-out
+because supported completion is unavailable. Starting a new customer after completed
+logout requires a deliberate new-session flow, which remains unimplemented. Do not
+copy a one-SDK reset into a two-SDK production session.
 
 Build and check every selection separately, returning to the default build last:
 
@@ -183,9 +184,9 @@ calls; concurrent drain callers may wait independently. This is the operation
 ownership portion of [UNIV-3197](https://universe.basis.dev/issue/UNIV-3197). It
 does not perform logout or prove that a provider-reported pending payment has
 completed. Ordinary SDK shutdown alone does not drain this
-external owner. The coordinated logout UI and interrupted-operation reconciliation remain
-unimplemented; no automatic provider reset is added. The durable transition and
-startup guard below are groundwork for that UI.
+external owner. The sign-out control uses the durable transition below. Interrupted-operation
+reconciliation remains unimplemented; pending or ambiguous store outcomes keep
+admission closed.
 
 Selected-provider unit source sets exercise the real RevenueCat and Superwall
 adapters with held provider purchase/restore callbacks. They cancel the original
@@ -219,9 +220,14 @@ previous process. Superwall and managed Play do not advertise this capability.
 or identifying the launch customer, the example checks for a previous logout
 record. Completed logout remains signed out; interrupted or invalid records keep
 startup closed. The controller deliberately does not resume a previous process's
-ambiguous external side effects. There is currently no logout/sign-in UI or
-reconciliation action: these classes are tested infrastructure, not a completed
-logout integration. `ProviderOperationJournal` also commits an opaque operation
+ambiguous external side effects. The RevenueCat example exposes **Sign out** while
+active, including during a held
+purchase/restore. **Retry sign out** is the only enabled operation after an in-process
+failure. Both controls invoke the same application-owned transition; recreating the
+Activity cancels its UI waiter without cancelling logout. Signing out, recovery-required,
+and completed states disable every operation. Sign-in after completion and recovery
+of a previous process remain unimplemented. `ProviderOperationJournal` also commits
+an opaque operation
 marker before dispatching each wrapped purchase or restore. A successful or
 cancelled result retires that marker; pending payments, returned failures and
 unexpected exceptions retain it. Failed results cannot distinguish a rejection
@@ -246,8 +252,9 @@ Run this opt-in class alone: its completed application owner intentionally stays
 closed until process exit. It requires no pre-existing logout or operation
 recovery record and restores both records in `finally`. A controlled delegate is
 installed through the public SDK configuration, and public `restorePurchases()`
-enters the real application owner. The test holds restore completion, cancels the
-original waiter and a logout waiter, and recreates the Activity. It checks the
+enters the real application owner. The test holds restore completion and cancels the
+Activity-owned restore and logout waiters by recreating the Activity. It invokes
+Restore, Sign out and Retry through the visible buttons. It checks the
 original identity, one retained owner/transition, durable pending ownership,
 rejected new calls and disabled controls. It then recreates during held provider
 logout, after a controlled failure, and after explicit retry completes. SDK
@@ -255,6 +262,9 @@ teardown precedes provider logout; old launch extras never restart the SDK. The
 replacement Activity displays closing, retry and signed-out state. Created
 Activities are finished, held callbacks released, transition work awaited and SDK
 shutdown awaited during cleanup.
+
+Add `-e sessionScreenshots true` to save active, retry and completed screens as
+`logout-{active,retry,complete}.png` under the target app external files directory.
 
 API 36 ARM64 qualification passes 1/1. Disabling the session-state collector
 makes the test fail on the missing closing status after recreation; restoring

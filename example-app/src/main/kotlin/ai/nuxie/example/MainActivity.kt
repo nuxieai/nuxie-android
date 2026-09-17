@@ -33,6 +33,7 @@ import kotlinx.coroutines.launch
 class MainActivity : Activity() {
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private val buttons = mutableListOf<Button>()
+  private lateinit var logoutButton: Button
   private lateinit var status: TextView
   private lateinit var analytics: TextView
   private lateinit var featureStatus: TextView
@@ -110,6 +111,16 @@ class MainActivity : Activity() {
       Nuxie.reset()
       status.text = "Using an anonymous identity."
     }
+    logoutButton = Button(this).apply {
+      text = "Sign out"
+      isEnabled = false
+      visibility = android.view.View.GONE
+      setOnClickListener {
+        val session = (application as ExampleApplication).sessionLogout ?: return@setOnClickListener
+        scope.launch { session.logout() }
+      }
+    }
+    content.addView(logoutButton, ViewGroup.LayoutParams(-1, -2))
     content.addView(analytics)
     val scroll = ScrollView(this).apply {
       addView(content, ViewGroup.LayoutParams(-1, -2))
@@ -193,11 +204,11 @@ class MainActivity : Activity() {
     updateButtonState()
     scope.launch {
       try {
-        status.text = operation()
+        showOperationStatus(operation())
       } catch (cancelled: CancellationException) {
         throw cancelled
       } catch (_: Exception) {
-        status.text = "Request failed. Check connectivity and try again."
+        showOperationStatus("Request failed. Check connectivity and try again.")
       } finally {
         operationRunning = false
         updateButtonState()
@@ -205,10 +216,19 @@ class MainActivity : Activity() {
     }
   }
 
+  private fun showOperationStatus(message: String) {
+    val state = (application as ExampleApplication).sessionLogout?.state?.value
+    if (state == null || state == SessionLogout.State.ACTIVE) status.text = message
+  }
+
   private fun updateButtonState() {
     val state = (application as ExampleApplication).sessionLogout?.state?.value
     val enabled = readyForOperations && !operationRunning && (state == null || state == SessionLogout.State.ACTIVE)
     buttons.forEach { it.isEnabled = enabled }
+    logoutButton.visibility = if (state == null) android.view.View.GONE else android.view.View.VISIBLE
+    logoutButton.text = if (state == SessionLogout.State.FAILED) "Retry sign out" else "Sign out"
+    logoutButton.isEnabled = (readyForOperations && state == SessionLogout.State.ACTIVE) ||
+      state == SessionLogout.State.FAILED
   }
 
   override fun onStart() {

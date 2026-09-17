@@ -22,9 +22,6 @@ import androidx.test.platform.app.InstrumentationRegistry
 import java.net.URL
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.*
@@ -88,14 +85,6 @@ class SessionLogoutLifecycleTest {
           Nuxie.identify(customer)
         }
         val owner = requireNotNull(app.providerOperations)
-        val original = instrumentation.startActivitySync(Intent(app, MainActivity::class.java)
-          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-          .putExtra("nuxie_api_key", "pk_test_session_lifecycle_${SystemClock.elapsedRealtime()}")
-          .putExtra("nuxie_api_endpoint", server.url)
-          .putExtra("nuxie_distinct_id", customer)
-          .putExtra("nuxie_test_store", true))
-        assertTrue(Nuxie.isSetup)
-        assertEquals(customer, Nuxie.distinctId)
         instrumentation.runOnMainSync {
           app.prepareLogout(sessionKey) {
             assertFalse("SDK teardown must precede provider logout", Nuxie.isSetup)
@@ -107,14 +96,21 @@ class SessionLogoutLifecycleTest {
             }
           }
         }
+        val original = instrumentation.startActivitySync(Intent(app, MainActivity::class.java)
+          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+          .putExtra("nuxie_api_key", "pk_test_session_lifecycle_${SystemClock.elapsedRealtime()}")
+          .putExtra("nuxie_api_endpoint", server.url)
+          .putExtra("nuxie_distinct_id", customer)
+          .putExtra("nuxie_test_store", true))
+        assertTrue(Nuxie.isSetup)
+        assertEquals(customer, Nuxie.distinctId)
         val session = requireNotNull(app.sessionLogout)
         sessionForCleanup = session
-        val caller = async(Dispatchers.Default) { Nuxie.restorePurchases() }
+        capture("active")
+        click(original, "Restore purchases")
         withTimeout(15_000) { entered.await() }
-        caller.cancelAndJoin()
-        val first = async(Dispatchers.Default) { session.logout() }
+        click(original, "Sign out")
         await("held drain persisted") { app.logoutJournal.read()?.stage == LogoutJournal.Stage.REQUESTED }
-        first.cancelAndJoin()
         val drainingHost = recreate(original)
         assertSame(owner, app.providerOperations)
         assertSame(session, app.sessionLogout)
@@ -139,15 +135,18 @@ class SessionLogoutLifecycleTest {
         val retryHost = recreate(providerHost)
         assertSame(session, app.sessionLogout)
         assertFalse("Recreation cannot replay old launch setup", Nuxie.isSetup)
-        assertBlocked(retryHost, "Retry before continuing")
+        assertBlocked(retryHost, "Retry before continuing", retryEnabled = true)
+        capture("retry")
         assertEquals(LogoutJournal.Stage.SDK_RETIRED, app.logoutJournal.read()?.stage)
-        assertEquals(SessionLogout.State.COMPLETE, withTimeout(15_000) { session.logout() })
+        click(retryHost, "Retry sign out")
+        await("explicit retry completion") { session.state.value == SessionLogout.State.COMPLETE }
         assertEquals(2, logoutCalls.get())
         assertEquals(LogoutJournal.Record(sessionKey, LogoutJournal.Stage.COMPLETE), app.logoutJournal.read())
         val completedHost = recreate(retryHost)
         assertSame(session, app.sessionLogout)
         assertFalse(Nuxie.isSetup)
         assertBlocked(completedHost, "Signed out")
+        capture("complete")
         assertTrue(owner.restorePurchases() is RestoreResult.Failed)
         assertEquals(1, restoreCalls.get())
       }
@@ -183,7 +182,31 @@ class SessionLogoutLifecycleTest {
     return requireNotNull(app.currentActivity)
   }
 
-  private fun assertBlocked(activity: Activity, expectedStatus: String) {
+  private fun capture(state: String) {
+    if (InstrumentationRegistry.getArguments().getString("sessionScreenshots") != "true") return
+    val instrumentation = InstrumentationRegistry.getInstrumentation()
+    instrumentation.waitForIdleSync()
+    val bitmap = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
+    try {
+      val file = java.io.File(instrumentation.targetContext.getExternalFilesDir(null), "logout-$state.png")
+      file.outputStream().use { check(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)) }
+    } finally { bitmap.recycle() }
+  }
+
+  private fun click(activity: Activity, label: String) {
+    InstrumentationRegistry.getInstrumentation().runOnMainSync {
+      fun find(view: View): Button? {
+        if (view is Button && view.text.toString() == label) return view
+        if (view is ViewGroup) for (index in 0 until view.childCount) find(view.getChildAt(index))?.let { return it }
+        return null
+      }
+      val button = requireNotNull(find(activity.window.decorView)) { "Missing $label control" }
+      assertTrue("$label must be visible and enabled", button.isShown && button.isEnabled)
+      assertTrue(button.performClick())
+    }
+  }
+
+  private fun assertBlocked(activity: Activity, expectedStatus: String, retryEnabled: Boolean = false) {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     instrumentation.runOnMainSync {
       val buttons = mutableListOf<Button>()
@@ -195,7 +218,10 @@ class SessionLogoutLifecycleTest {
       }
       visit(activity.window.decorView)
       assertTrue(buttons.isNotEmpty())
-      assertTrue("Every operation control must remain disabled", buttons.all { !it.isEnabled })
+      assertTrue("Every operation control must remain disabled", buttons.all {
+        if (retryEnabled && it.text.toString() == "Retry sign out") it.isEnabled else !it.isEnabled
+      })
+      if (retryEnabled) assertEquals(1, buttons.count { it.isEnabled })
       assertTrue("Expected $expectedStatus in $text", text.any { it.contains(expectedStatus) })
     }
   }
