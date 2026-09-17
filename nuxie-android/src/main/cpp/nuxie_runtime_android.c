@@ -632,8 +632,16 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileInspectAssets(
   struct NuxRenderCallbacks callbacks;
   memset(&callbacks, 0, sizeof(callbacks));
   callbacks.struct_size = (uint32_t)sizeof(callbacks);
-  NuxStatus status =
-      nux_file_import((const uint8_t *)data, (size_t)length, &callbacks, &file);
+  /* Inspection is script-inert and never opens a decoder. Admit external
+   * video definitions so the signed inventory can be checked before playback. */
+  struct NuxVideoPlaybackCapabilities video;
+  memset(&video, 0, sizeof(video));
+  video.struct_size = (uint32_t)sizeof(video);
+  video.playback_available = 1;
+  struct NuxCapiResult *import_result = NULL;
+  NuxStatus status = nux_file_import_with_video_capabilities(
+      (const uint8_t *)data, (size_t)length, &callbacks, &video, &file, &import_result);
+  log_and_free_result("inspect_file_assets", status, import_result);
   (*env)->ReleaseByteArrayElements(env, bytes, data, JNI_ABORT);
   if (status != NUX_STATUS_OK || file == NULL) return NULL;
 

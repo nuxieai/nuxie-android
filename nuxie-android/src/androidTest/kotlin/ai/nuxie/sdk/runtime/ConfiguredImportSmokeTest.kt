@@ -2,10 +2,24 @@ package ai.nuxie.sdk.runtime
 
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /** Exercises the scripted import path on the device architecture. */
 class ConfiguredImportSmokeTest {
+    @Test
+    fun publishedVideoCatalogCanBeInspectedWithoutStartingPlayback() {
+        val bytes = InstrumentationRegistry.getInstrumentation().context.assets
+            .open("video/greeting.nux").use { it.readBytes() }
+        val runtime = NuxieRuntime.shared
+        assertTrue(runtime.isAvailable)
+        val video = checkNotNull(runtime.inspectFileAssets(bytes)).single { it.kind == FileAssetKind.VIDEO }
+        assertEquals(0L, video.authoredId)
+        assertEquals("video-clip-5afb4ece", video.name)
+        assertEquals(4, video.requiredProviderFlags)
+        assertEquals(false, video.isEmbedded)
+    }
+
     @Test
     fun scriptedFileImportsThroughTheConfiguredRuntime() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

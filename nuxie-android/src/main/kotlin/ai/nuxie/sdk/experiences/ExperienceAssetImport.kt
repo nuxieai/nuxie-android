@@ -16,10 +16,20 @@ internal data class SystemFontRequirement(val uniqueName: String, val weight: In
 internal data class ExperienceAssetImport(
     val expectedAssets: List<ExpectedFileAsset>,
     val externalAssets: Map<Int, ByteArray>,
+    val videos: List<ExperienceVideoAssetBinding> = emptyList(),
+)
+
+/** Verified file-backed video; never copied into the image/font byte provider. */
+internal data class ExperienceVideoAssetBinding(
+    val ordinal: Int,
+    val authoredId: Long,
+    val sourceAssetKey: String,
+    val file: File?,
+    val required: Boolean,
 )
 
 /**
- * Binds the signed release declarations and acquired files to the RIV's
+ * Binds the signed release declarations and acquired files to the scene's
  * complete, file-order catalog. The native configured import validates the
  * same catalog again before invoking any provider hook.
  */
@@ -75,6 +85,7 @@ internal object ExperienceAssetImportBuilder {
 
         // Resolve bytes only after the entire signed catalog has matched.
         val externalAssets = linkedMapOf<Int, ByteArray>()
+        val videos = mutableListOf<ExperienceVideoAssetBinding>()
         bindings.forEach { (asset, declaration) ->
             when (val source = declaration.source) {
                 is Source.System -> externalAssets[asset.ordinal] = systemFontBytes(source.requirement)
@@ -84,7 +95,13 @@ internal object ExperienceAssetImportBuilder {
                         require(!declaration.required) {
                             "Required Experience asset was not acquired: ${source.key}"
                         }
-                    } else {
+                    }
+                    if (asset.kind == FileAssetKind.VIDEO) {
+                        require(asset.requiredProviderFlags == 4) { "Video provider contract mismatch" }
+                        require(file == null || file.isFile) { "Video file is unavailable" }
+                        videos += ExperienceVideoAssetBinding(asset.ordinal, declaration.authoredId,
+                            requireNotNull(declaration.sourceAssetKey), file, declaration.required)
+                    } else if (file != null) {
                         externalAssets[asset.ordinal] = file.readBytes()
                     }
                 }
@@ -94,6 +111,7 @@ internal object ExperienceAssetImportBuilder {
         return ExperienceAssetImport(
             expectedAssets = inspectedCatalog.toList(),
             externalAssets = externalAssets.toMap(),
+            videos = videos.toList(),
         )
     }
 
@@ -108,6 +126,7 @@ internal object ExperienceAssetImportBuilder {
             val kind = when (asset.string("kind")) {
                 "image" -> FileAssetKind.IMAGE
                 "font" -> FileAssetKind.FONT
+                "video" -> FileAssetKind.VIDEO
                 // Script and shader bytes remain authenticated in-band. They
                 // are represented by the complete native catalog but have no
                 // external provider entry in the authoritative iOS binding.
@@ -136,6 +155,11 @@ internal object ExperienceAssetImportBuilder {
                     Source.Download(asset.string("key")
                         ?: error("Journey release asset $index has no artifact key"))
                 },
+                sourceAssetKey = if (kind == FileAssetKind.VIDEO) {
+                    asset.string("sourceAssetKey")?.takeIf {
+                        it.length <= 128 && it.matches(Regex("^asset:[A-Za-z0-9_-]+$"))
+                    } ?: error("Journey video asset $index has an invalid source identity")
+                } else null,
                 required = (asset["required"] as? JsonPrimitive)?.booleanOrNull
                     ?: error("Journey release asset $index has no required flag"),
             )
@@ -152,6 +176,7 @@ internal object ExperienceAssetImportBuilder {
         val authoredId: Long,
         val uniqueName: String,
         val source: Source,
+        val sourceAssetKey: String?,
         val required: Boolean,
     ) {
         fun identity(): Triple<FileAssetKind, Long, String> =
