@@ -176,7 +176,16 @@ internal class ExperienceAccessibilityProvider(
             if (Build.VERSION.SDK_INT < 26) {
                 contentDescription = listOf(node.label, node.hint).filter(String::isNotEmpty).joinToString(", ")
             }
-            if (Build.VERSION.SDK_INT >= 28) isHeading = node.headingLevel > 0
+            if (Build.VERSION.SDK_INT >= 28) {
+                isHeading = node.headingLevel > 0
+            } else {
+                // AccessibilityNodeInfoCompat heading protocol for API 19–27.
+                // https://github.com/androidx/androidx/blob/androidx-main/core/core/src/main/java/androidx/core/view/accessibility/AccessibilityNodeInfoCompat.java
+                val key = "androidx.view.accessibility.AccessibilityNodeInfoCompat.BOOLEAN_PROPERTY_KEY"
+                val headingFlag = 0x2
+                val flags = extras.getInt(key, 0) and headingFlag.inv()
+                extras.putInt(key, flags or if (node.headingLevel > 0) headingFlag else 0)
+            }
             isEnabled = host.isEnabled && node.stateFlags and NativeSemanticState.DISABLED == 0
             isSelected = node.stateFlags and NativeSemanticState.SELECTED != 0
             isCheckable = ExperienceAccessibilityStateDescription.isCheckable(node)

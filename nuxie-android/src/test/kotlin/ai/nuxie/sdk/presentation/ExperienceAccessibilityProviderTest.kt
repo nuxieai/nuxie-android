@@ -27,6 +27,22 @@ import org.robolectric.annotation.GraphicsMode
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [30])
 class ExperienceAccessibilityProviderTest {
+    @Test @Config(sdk = [23, 27, 28, 36])
+    fun `heading declaration survives publication and can be removed on supported versions`() = withHost { host ->
+        val provider = provider(host)
+        for ((revision, level) in listOf(0, 2, 0).withIndex()) {
+            provider.publish(NuxieSemanticTree(1, revision.toLong(), listOf(node().copy(role = 7, headingLevel = level))))
+            val info = checkNotNull(provider.createAccessibilityNodeInfo(1))
+            val heading = if (Build.VERSION.SDK_INT >= 28) info.isHeading else {
+                // External AndroidX wire contract, consumed by accessibility services.
+                info.extras.getInt("androidx.view.accessibility.AccessibilityNodeInfoCompat.BOOLEAN_PROPERTY_KEY", 0) and 0x2 != 0
+            }
+            assertEquals("heading level $level on API ${Build.VERSION.SDK_INT}", level > 0, heading)
+            assertEquals("Continue", info.text?.toString())
+            assertNull("A heading does not invent collection membership", info.collectionItemInfo)
+        }
+    }
+
     @Test fun `service clearing virtual focus before withdrawal preserves the owned restoration target`() = withHost { host ->
         val provider = provider(host)
         val tree = NuxieSemanticTree(1, 1, listOf(node(), node().copy(id = 43, siblingIndex = 1, label = "Second")))

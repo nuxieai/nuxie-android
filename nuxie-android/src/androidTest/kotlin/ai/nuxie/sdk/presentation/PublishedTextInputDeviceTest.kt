@@ -2998,7 +2998,7 @@ class PublishedTextInputDeviceTest {
         assertTrue(selected.isCheckable)
         assertTrue(selected.isSelected)
         assertTrue("The authored checked state is independent of selection", selected.isChecked)
-        assertTrue("Authored heading must support heading navigation", named("Choose your plan").isHeading)
+        assertTrue("Authored heading must expose the native heading property", named("Choose your plan").isHeading)
         val mixed = named("Optional extras")
         assertTrue(mixed.isCheckable)
         assertFalse("Mixed must not imply selection", mixed.isSelected)
