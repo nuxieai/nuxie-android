@@ -50,6 +50,7 @@ class PurchaseScopeDeviceTest {
                         NuxieViewModelInstanceBinding("PurchaseRoot", "purchase.root", "first", "plan.first", "Plan"),
                         NuxieViewModelInstanceBinding("PurchaseRoot", "purchase.root", "second", "plan.second", "Plan"),
                     ))
+                    artboard.setDefaultViewModelValue("fontScale", NuxieViewModelScalarValue.NumberValue(1.0))
                     val player = file.newExperiencePlayer(artboard, "Purchase")
                     try {
                         player.stepTyped(elapsedSeconds = 0.0)
