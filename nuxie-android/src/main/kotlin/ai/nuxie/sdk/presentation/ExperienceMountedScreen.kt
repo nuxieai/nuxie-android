@@ -17,7 +17,7 @@ internal class ExperienceMountedScreen(
     private val onFailure: (Throwable) -> Unit,
 ) {
     // Validate synchronous inputs before allocating a native lane or observers.
-    private val rivBytes = prepared.rivFile.readBytes()
+    private val rivBytes = prepared.sceneFile.readBytes()
     private val inputs = ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId)
     private val inputSize = if (inputs.isEmpty()) null else requireNotNull(prepared.artboardSize) {
         "Editable Experience has no authored artboard extent"

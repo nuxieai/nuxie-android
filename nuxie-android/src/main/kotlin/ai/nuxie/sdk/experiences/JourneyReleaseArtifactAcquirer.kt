@@ -17,7 +17,7 @@ import kotlinx.serialization.json.longOrNull
 internal class AcquiredJourneyRelease(
     val identity: JourneyReleaseIdentity,
     val artifactsByKey: Map<String, File>,
-    val rivFile: File,
+    val sceneFile: File,
     val artifactDigests: Set<String> = emptySet(),
     private val protection: Closeable,
 ) : Closeable {
@@ -101,13 +101,20 @@ internal class JourneyReleaseArtifactAcquirer(
     ): AcquiredJourneyRelease = withContext(Dispatchers.IO) {
         val render = descriptor["render"] as? JsonObject
             ?: invalidDescriptor("<render>", "release render is missing")
-        val riv = artifact(render["riv"] as? JsonObject, "<riv>", ArtifactRole.RIV)
-        if (render.string("renderer") != "rive") {
-            invalidDescriptor(riv.key, "unsupported release renderer")
+        val sceneField = when (render.string("renderer")) {
+            "rive" -> "riv"
+            "nux" -> "nux"
+            else -> invalidDescriptor("<render>", "unsupported release renderer")
+        }
+        val scene = artifact(render[sceneField] as? JsonObject, "<$sceneField>", ArtifactRole.SCENE)
+        val sceneMime = if (sceneField == "nux") "application/vnd.nuxie.scene" else "application/vnd.rive"
+        if (scene.key != "renders/sha256/${scene.sha256}.$sceneField" || scene.contentType != sceneMime ||
+            (sceneField == "nux" && scene.sizeBytes == 0L)) {
+            invalidDescriptor(scene.key, "scene artifact differs from renderer")
         }
         REQUIRED_RENDER_ARRAYS.forEach { field ->
             if (render[field] !is JsonArray) {
-                invalidDescriptor(riv.key, "release $field are missing")
+                invalidDescriptor(scene.key, "release $field are missing")
             }
         }
         val assets = (render["assets"] as? JsonArray)
@@ -125,7 +132,7 @@ internal class JourneyReleaseArtifactAcquirer(
                     requiresKind = true,
                 )
             }
-            ?: invalidDescriptor(riv.key, "release assets are missing")
+            ?: invalidDescriptor(scene.key, "release assets are missing")
         val scripts = (descriptor["screenBehaviors"] as? JsonArray)
             ?.mapIndexedNotNull { index, value ->
                 val behavior = value as? JsonObject
@@ -139,8 +146,8 @@ internal class JourneyReleaseArtifactAcquirer(
                     ArtifactRole.SCRIPT,
                 )
             }
-            ?: invalidDescriptor(riv.key, "release screen behaviors are missing")
-        val references = listOf(riv) + assets + scripts
+            ?: invalidDescriptor(scene.key, "release screen behaviors are missing")
+        val references = listOf(scene) + assets + scripts
         references.forEach { item ->
             if (item.sizeBytes > item.role.maximumBytes) {
                 invalidDescriptor(item.key, "artifact exceeds size limit")
@@ -185,8 +192,8 @@ internal class JourneyReleaseArtifactAcquirer(
             aggregateBytes += item.sizeBytes
         }
 
-        cache.validateJourneyReleaseDeliveryOrigin(riv.key, delivery.renderBaseUrl)
-        references.firstOrNull { it.role != ArtifactRole.RIV }?.let { external ->
+        cache.validateJourneyReleaseDeliveryOrigin(scene.key, delivery.renderBaseUrl)
+        references.firstOrNull { it.role != ArtifactRole.SCENE }?.let { external ->
             cache.validateJourneyReleaseDeliveryOrigin(external.key, delivery.assetBaseUrl)
         }
 
@@ -222,7 +229,7 @@ internal class JourneyReleaseArtifactAcquirer(
             AcquiredJourneyRelease(
                 identity = identity,
                 artifactsByKey = files.toMap(),
-                rivFile = files.getValue(riv.key),
+                sceneFile = files.getValue(scene.key),
                 artifactDigests = files.values.mapTo(linkedSetOf()) { file -> file.name },
                 protection = protection,
             )
@@ -278,7 +285,7 @@ internal class JourneyReleaseArtifactAcquirer(
         )
 
     private fun deliveryOrigin(role: ArtifactRole, delivery: JourneyReleaseDelivery): String =
-        if (role == ArtifactRole.RIV) delivery.renderBaseUrl else delivery.assetBaseUrl
+        if (role == ArtifactRole.SCENE) delivery.renderBaseUrl else delivery.assetBaseUrl
 
     private fun JourneyReleaseArtifactAcquisitionException.isSafeOptionalFailure(): Boolean =
         reason == JourneyReleaseArtifactAcquisitionException.Reason.DIGEST_MISMATCH ||
@@ -311,13 +318,13 @@ internal class JourneyReleaseArtifactAcquirer(
     private enum class ArtifactRole(
         val maximumBytes: Long,
     ) {
-        RIV(JourneyReleaseLimits.RIV_ARTIFACT_BYTES.toLong()),
+        SCENE(JourneyReleaseLimits.RIV_ARTIFACT_BYTES.toLong()),
         ASSET(JourneyReleaseLimits.EXTERNAL_ASSET_BYTES.toLong()),
         SCRIPT(JourneyReleaseLimits.EXTERNAL_ASSET_BYTES.toLong()),
         ;
 
         fun accepts(key: String, sha256: String): Boolean = when (this) {
-            RIV -> key == "renders/sha256/$sha256.riv"
+            SCENE -> key == "renders/sha256/$sha256.riv" || key == "renders/sha256/$sha256.nux"
             ASSET -> {
                 val prefix = "assets/sha256/$sha256."
                 key.startsWith(prefix) && key.removePrefix(prefix) in ASSET_EXTENSIONS
@@ -328,6 +335,6 @@ internal class JourneyReleaseArtifactAcquirer(
 
     private companion object {
         val REQUIRED_RENDER_ARRAYS = listOf("screens", "transitions", "textInputs", "assets")
-        val ASSET_EXTENSIONS = setOf("png", "jpg", "webp", "ttf", "otf", "bin")
+        val ASSET_EXTENSIONS = setOf("png", "jpg", "webp", "ttf", "otf", "bin", "mp4")
     }
 }

@@ -1995,7 +1995,7 @@ class ExperiencePresentationServiceTest {
         return AcquiredJourneyRelease(
             identity = identity,
             artifactsByKey = mapOf("renders/main.riv" to file) + extraArtifacts,
-            rivFile = file,
+            sceneFile = file,
             protection = lease,
         )
     }

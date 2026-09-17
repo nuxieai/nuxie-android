@@ -79,7 +79,7 @@ internal class ExperiencePresentationException(
 
 /** Prepared content remains service-owned; only its opaque id crosses the Activity boundary. */
 internal data class PreparedPresentation(
-    val rivFile: File,
+    val sceneFile: File,
     val artboardName: String?,
     val clearColor: Int,
     val shell: PresentationShell,
@@ -892,7 +892,7 @@ internal class ExperiencePresentationService(
                     val lifecycle = lifecycles[journey.screenId]?.let { if (isolated) it.copyForPreparation() else it } ?: ExperienceScreenLifecycle()
                     val retained = if (existing?.acquired?.identity == source.identity)
                         existing.journey.viewModelsByScreen[journey.screenId]?.get() else null
-                    return PreparedPresentation(source.acquired.rivFile, source.screen.artboardName, source.screen.clearColor,
+                    return PreparedPresentation(source.acquired.sceneFile, source.screen.artboardName, source.screen.clearColor,
                         source.screen.shell, source.screen.screenId, source.descriptor, source.acquired.artifactsByKey,
                         source.screen.artboardSize, source.viewModelProjection, text, lifecycle, transition,
                         AtomicReference(retained))

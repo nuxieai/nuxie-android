@@ -15,16 +15,18 @@ import ai.nuxie.sdk.experiences.JourneyReleaseJson.sortedUnique
 import ai.nuxie.sdk.experiences.JourneyReleaseJson.text
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 
 internal object JourneyRenderSchema {
     fun validate(input: JsonObject) {
-        val render = exact(input, setOf("renderer", "riv", "screens", "transitions", "textInputs", "assets"))
-        oneOf(render["renderer"], "rive")
-        val riv = exact(render["riv"], setOf("key", "sha256", "sizeBytes", "contentType"))
-        val sha = hash(riv["sha256"])
-        if (text(riv["key"]) != "renders/sha256/$sha.riv") fail("render artifact key")
-        oneOf(riv["contentType"], "application/vnd.rive")
-        integer(riv["sizeBytes"], maximum = JourneyReleaseLimits.RIV_ARTIFACT_BYTES.toLong())
+        val renderer = oneOf(input["renderer"], "rive", "nux")
+        val sceneField = if (renderer == "nux") "nux" else "riv"
+        val render = exact(input, setOf("renderer", sceneField, "screens", "transitions", "textInputs", "assets"))
+        val scene = exact(render[sceneField], setOf("key", "sha256", "sizeBytes", "contentType"))
+        val sha = hash(scene["sha256"])
+        if (text(scene["key"]) != "renders/sha256/$sha.$sceneField") fail("render artifact key")
+        oneOf(scene["contentType"], if (renderer == "nux") "application/vnd.nuxie.scene" else "application/vnd.rive")
+        integer(scene["sizeBytes"], if (renderer == "nux") 1 else 0, JourneyReleaseLimits.RIV_ARTIFACT_BYTES.toLong())
         val screens = array(render["screens"], 256).map { input ->
             val screen = exact(input, setOf("id", "artboardId", "artboardName", "width", "height"), setOf("exit"))
             releaseId(screen["artboardId"]); id(screen["artboardName"])
@@ -54,6 +56,13 @@ internal object JourneyRenderSchema {
         val assets = array(render["assets"], 1024)
         val keys = assets.map(::asset)
         sortedUnique(keys)
+        val nativeAssets = assets.map(::record).filter { text(it["kind"]) in setOf("image", "font", "video") }
+        for (field in listOf("riveAssetId", "riveUniqueName")) {
+            if (nativeAssets.map { it[field] }.toSet().size != nativeAssets.size) fail("duplicate native asset identity")
+        }
+        val videos = nativeAssets.filter { text(it["kind"]) == "video" }
+        if (videos.isNotEmpty() && renderer != "nux") fail("video requires nux renderer")
+        if (videos.map { it["sourceAssetKey"] }.toSet().size != videos.size) fail("duplicate video source")
     }
 
     private fun asset(input: JsonElement): String {
@@ -81,6 +90,28 @@ internal object JourneyRenderSchema {
                     "image/jpeg" -> "jpg"
                     else -> "webp"
                 }
+            }
+            "video" -> {
+                exact(asset, common + setOf("sourceAssetKey", "riveAssetId", "riveUniqueName", "width", "height",
+                    "durationMs", "videoCodec", "audioCodec", "captionTracks"))
+                integer(asset["sizeBytes"], 1, JourneyReleaseLimits.EXTERNAL_ASSET_BYTES.toLong())
+                integer(asset["riveAssetId"]); releaseId(asset["riveUniqueName"])
+                val source = id(asset["sourceAssetKey"], 128)
+                if (!source.matches(Regex("^asset:[A-Za-z0-9_-]+$"))) fail("video source identity")
+                integer(asset["width"], 1, 8192); integer(asset["height"], 1, 8192)
+                integer(asset["durationMs"], 1)
+                if (!text(asset["videoCodec"]).matches(Regex("^avc[13]\\.[0-9a-fA-F]{6}$"))) fail("video codec")
+                if (asset["audioCodec"] != JsonNull) oneOf(asset["audioCodec"], "mp4a.40.2")
+                val streams = array(asset["captionTracks"], 16).map { input ->
+                    val track = exact(input, setOf("streamIndex", "codec", "language", "title"))
+                    oneOf(track["codec"], "mov_text")
+                    if (track["language"] != JsonNull && text(track["language"]).length > 128) fail("caption language")
+                    if (track["title"] != JsonNull && text(track["title"]).length > 512) fail("caption title")
+                    integer(track["streamIndex"])
+                }
+                if (streams != streams.sorted() || streams.toSet().size != streams.size) fail("caption ordering or duplicate")
+                oneOf(asset["contentType"], "video/mp4")
+                "mp4"
             }
             "font" -> {
                 exact(asset, common + setOf("location", "riveAssetId", "riveUniqueName", "family", "weight", "style", "format"))

@@ -134,6 +134,40 @@ class JourneyReleaseTest {
         }
     }
 
+    @Test fun `shared video admission cases match publisher and Apple contract`() {
+        val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/video-admission.json").readText()).jsonObject
+        val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        for (item in corpus.getValue("cases").jsonArray) {
+            val case = item.jsonObject
+            val renderer = case["renderer"]?.jsonPrimitive?.content ?: "nux"
+            val sceneField = if (renderer == "nux") "nux" else "riv"
+            val oldRender = source.getValue("render").jsonObject
+            val oldScene = oldRender.getValue("riv").jsonObject
+            val digest = oldScene.getValue("sha256").jsonPrimitive.content
+            val scene = JsonObject(oldScene + mapOf(
+                "key" to JsonPrimitive("renders/sha256/$digest.$sceneField"),
+                "contentType" to JsonPrimitive(if (renderer == "nux") "application/vnd.nuxie.scene" else "application/vnd.rive"),
+            ))
+            val asset = JsonObject(corpus.getValue("videoAsset").jsonObject + (case["assetPatch"]?.jsonObject ?: emptyMap()))
+            val render = JsonObject(oldRender - "riv" + mapOf(
+                "renderer" to JsonPrimitive(renderer), sceneField to scene,
+                "assets" to JsonArray(listOf(asset)),
+            ))
+            val requirements = JsonObject(source.getValue("requirements").jsonObject +
+                ("requiredCapabilities" to (case["capabilities"] ?: JsonArray(listOf(JsonPrimitive("video.playback.v1"))))))
+            val root = JsonObject(source + mapOf("render" to render, "requirements" to requirements))
+            val name = case.getValue("name").jsonPrimitive.content
+            if (case.getValue("valid").jsonPrimitive.content == "true") {
+                try { JourneySchemaValidator.validate(root) } catch (error: Exception) { throw AssertionError(name, error) }
+            } else {
+                assertThrows(name, JourneyReleaseAuthenticationException::class.java) { JourneySchemaValidator.validate(root) }
+            }
+        }
+    }
+
     @Test fun `signed behavior ordering matches the wire contract`() {
         val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/behavior-ordering.json").readText()).jsonObject
