@@ -28,6 +28,30 @@ class JourneyReleaseTest {
     private val keys = mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(
         fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))
 
+    @Test fun `signed behavior ordering matches the wire contract`() {
+        val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/behavior-ordering.json").readText()).jsonObject
+        val trusted = mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(corpus.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))
+        for (item in corpus.getValue("cases").jsonArray) {
+            val case = item.jsonObject
+            val name = case.getValue("name").jsonPrimitive.content
+            val entry = case.getValue("entry").jsonObject
+            val envelope = entry.getValue("envelope").jsonObject.toString().encodeToByteArray()
+            // Prove every malformed case has an authentic signature before testing schema admission.
+            val bytes = JourneyReleaseEnvelope.authenticate(envelope, trusted).descriptorBytes
+            val source = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
+            val identity = requireNotNull(JourneyReleaseIdentity.fromJson(source.getValue("identity").jsonObject))
+            val legId = source.getValue("leg").jsonObject.getValue("id").jsonPrimitive.content
+            fun authenticate() = JourneyReleaseVerifier.authenticate(envelope, trusted, identity, legId,
+                runtime(source), JourneyReleaseReplayPolicy.Active(0))
+            if (case.getValue("valid").jsonPrimitive.content == "true") {
+                assertArrayEquals(name, bytes, authenticate().descriptorBytes)
+            } else {
+                assertThrows(name, JourneyReleaseAuthenticationException::class.java) { authenticate() }
+            }
+        }
+    }
+
     @Test fun `shared admission cases reject invalid local programs before execution`() {
         val cases = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/admission.json").readText()).jsonObject.getValue("cases").jsonArray
@@ -142,7 +166,7 @@ class JourneyReleaseTest {
         val render = source.getValue("render").jsonObject
         val legScreen = leg.getValue("screens").jsonArray.single().jsonObject
         val renderScreen = render.getValue("screens").jsonArray.single().jsonObject
-        val names = listOf("screen_welcome", "screen_2", "screen_3", "screen_4", "screen_5")
+        val names = listOf("screen_welcome", "screen_2", "screen_3", "screen_4", "screen_5").sorted()
         val scripts = names.map { name -> Json.parseToJsonElement("""{
             "screenId":"$name", "controls":[{"actionId":"continue", "behavior":{"kind":"script"}}],
             "script":{"protocol":"screen-actions", "exportedActionIds":["continue"],
