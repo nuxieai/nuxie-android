@@ -14,6 +14,83 @@ import org.junit.Test
 
 class TextMetricsBindingDeviceTest {
     @Test
+    fun publishedFontScalePolicyAfterOneStep() {
+        val assets = InstrumentationRegistry.getInstrumentation().context.assets
+        val directory = "runtime/font-scale-policy"
+        fun document(name: String) = assets.open("$directory/$name").bufferedReader().use {
+            Json.parseToJsonElement(it.readText()).jsonObject
+        }
+        val contract = document("cases.json")
+        val cases = contract.getValue("cases").jsonArray
+        val fontHash = document("provenance.json").getValue("fontSha256").jsonPrimitive.content
+        val bytes = assets.open("$directory/screen.riv").use { it.readBytes() }
+        val fontBytes = assets.open("$directory/$fontHash.otf").use { it.readBytes() }
+        val runtime = NuxieRuntime.shared
+        assertTrue("Pinned public runtime must load", runtime.isAvailable)
+        val expectedAssets = checkNotNull(runtime.inspectFileAssets(bytes))
+        val font = expectedAssets.single { it.kind == FileAssetKind.FONT }
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(390, 844))
+        try {
+            val file = checkNotNull(runtime.importFile(renderer, bytes, expectedAssets, mapOf(font.ordinal to fontBytes)))
+            try {
+                val artboard = checkNotNull(file.newArtboard("Paywall"))
+                try {
+                    artboard.bindDefaultViewModel("metrics")
+                    val player = checkNotNull(artboard.newPlayer())
+                    try {
+                        player.enableSemantics()
+                        var baseline: ByteArray? = null
+                        val runNames = listOf("bound Run", "fixed Run", "natural Run")
+                        cases.forEachIndexed { index, item ->
+                            val values = item.jsonObject
+                            val scale = values.getValue("scale").jsonPrimitive.float
+                            assertTrue(artboard.setDefaultViewModelValue(
+                                contract.getValue("fontScalePath").jsonPrimitive.content,
+                                NuxieViewModelScalarValue.NumberValue(scale.toDouble()),
+                            ))
+                            val step = player.stepTyped(elapsedSeconds = 0.0, textRunNames = runNames)
+                            val captured = step.textGeometry as NuxieTextGeometryCapture.Captured
+                            assertEquals(runNames.toSet(), captured.fields.keys)
+                            assertEquals(1, captured.fields.values.map { it.renderRevision }.toSet().size)
+                            val snapshot = checkNotNull(artboard.defaultViewModelSnapshot())
+                            values.getValue("expected").jsonObject.forEach { (name, expected) ->
+                                assertEquals("$name at scale $scale", expected.jsonPrimitive.float,
+                                    checkNotNull(snapshot.resolveGeometryNumber(name)), 0.0001f)
+                            }
+                            runNames.forEach { name ->
+                                val size = if (name == "fixed Run") 18f else 18f * scale
+                                assertEquals(1929f / 2048f * size,
+                                    checkNotNull(captured.fields.getValue(name).firstBaseline), 0.001f)
+                            }
+                            val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                            val semantics = player.captureSemantics()
+                            try {
+                                captured.fields.values.forEach {
+                                    assertEquals(semantics.tree.renderRevision.toULong(), it.renderRevision)
+                                }
+                            } finally { semantics.close() }
+                            val first = baseline
+                            if (first == null) {
+                                baseline = frame.rgba
+                            } else {
+                                val start = 264 * 390 * 4
+                                val end = 484 * 390 * 4
+                                assertArrayEquals("Fixed field pixels stay unchanged", first.copyOfRange(start, end),
+                                    frame.rgba.copyOfRange(start, end))
+                                if (index == cases.lastIndex) {
+                                    assertArrayEquals("Scale reset restores the frame", first, frame.rgba)
+                                } else {
+                                    assertFalse("System scaling changes pixels", first.contentEquals(frame.rgba))
+                                }
+                            }
+                        }
+                    } finally { player.close() }
+                } finally { artboard.close() }
+            } finally { file.close() }
+        } finally { renderer.close() }
+    }
+
+    @Test
     fun publishedMetricsReverseBindAfterOneStepAndChangeRenderedText() {
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         val directory = "runtime/font-metrics-binding"
