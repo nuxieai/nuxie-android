@@ -1,0 +1,11 @@
+<resources>
+    <string name="nuxie_accessibility_mixed">Partiellement coché</string>
+    <string name="nuxie_accessibility_expanded">Développé</string>
+    <string name="nuxie_accessibility_collapsed">Réduit</string>
+    <string name="nuxie_accessibility_required">Obligatoire</string>
+    <string name="nuxie_accessibility_read_only">Lecture seule</string>
+    <string name="nuxie_accessibility_on">Activé</string>
+    <string name="nuxie_accessibility_off">Désactivé</string>
+    <string name="nuxie_accessibility_checked">Coché</string>
+    <string name="nuxie_accessibility_unchecked">Non coché</string>
+</resources>

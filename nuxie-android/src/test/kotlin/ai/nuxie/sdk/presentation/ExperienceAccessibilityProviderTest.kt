@@ -264,9 +264,13 @@ class ExperienceAccessibilityProviderTest {
     @Test @Config(sdk = [23]) fun `older Android exposes values and hints while omitting secure values`() = withHost { host ->
         val provider = provider(host)
         provider.publish(NuxieSemanticTree(1, 1, listOf(node().copy(value = "50 percent"))))
-        assertEquals("Continue, 50 percent, More information", provider.createAccessibilityNodeInfo(1)?.contentDescription)
+        val publicInfo = checkNotNull(provider.createAccessibilityNodeInfo(1))
+        assertEquals("Continue, More information", publicInfo.contentDescription)
+        assertEquals("50 percent", publicInfo.extras.getCharSequence(ExperienceAccessibilityStateDescription.STATE_DESCRIPTION_KEY))
         provider.publish(NuxieSemanticTree(2, 2, listOf(node().copy(stateFlags = 4096, value = "secret"))))
-        assertEquals("Continue, More information", provider.createAccessibilityNodeInfo(1)?.contentDescription)
+        val secureInfo = checkNotNull(provider.createAccessibilityNodeInfo(1))
+        assertEquals("Continue, More information", secureInfo.contentDescription)
+        assertNull(secureInfo.extras.getCharSequence(ExperienceAccessibilityStateDescription.STATE_DESCRIPTION_KEY))
     }
 
     @Test @Config(sdk = [23, 30]) fun `keyboard follows authored order skips disabled nodes and leaves at edges`() = withHost { host ->
@@ -476,10 +480,11 @@ class ExperienceAccessibilityProviderTest {
             fun bool(key: String) = case.getValue(key).jsonPrimitive.boolean
             fun text(key: String) = case.getValue(key).jsonPrimitive.content
             val id = text("id")
+            val field = if (int("role") == 6) android.widget.EditText(host.context).apply { setText("Native text") } else null
             provider.publish(NuxieSemanticTree(index.toLong(), index.toLong(), listOf(node().copy(
                 role = int("role"), traitFlags = int("traits"), stateFlags = int("state"), value = text("value"),
-            ))))
-            val info = checkNotNull(provider.createAccessibilityNodeInfo(1))
+            ))), field?.let { mapOf(42L to it) } ?: emptyMap())
+            val info = checkNotNull(field?.createAccessibilityNodeInfo() ?: provider.createAccessibilityNodeInfo(1))
             assertEquals(id, bool("checkable"), info.isCheckable)
             if (Build.VERSION.SDK_INT >= 36) {
                 assertEquals(id, when {
@@ -495,11 +500,52 @@ class ExperienceAccessibilityProviderTest {
             } else {
                 assertEquals(id, bool("checked") && !bool("mixed"), info.isChecked)
             }
-            if (Build.VERSION.SDK_INT >= 30) {
-                val expected = text("value").takeIf { it.isNotEmpty() && int("state") and 4096 == 0 }
-                assertEquals(id, expected, info.stateDescription?.toString())
+            val expected = when (id) {
+                "authored-checkable-mixed" -> if (Build.VERSION.SDK_INT < 36) "Partially checked" else null
+                "localized-value" -> "Activé, On"
+                "expanded" -> if (Build.VERSION.SDK_INT < 36) "Expanded" else null
+                "collapsed" -> if (Build.VERSION.SDK_INT < 36) "Collapsed" else null
+                "mixed-with-value" -> "2 of 3, Partially checked"
+                "required-read-only" -> "Required, Read only"
+                "required-toggle-on" -> "On, Required"
+                "expanded-required-with-value" -> if (Build.VERSION.SDK_INT < 36) "Details, Expanded, Required" else "Details, Required"
+                else -> null
             }
+            val description = if (Build.VERSION.SDK_INT >= 30) info.stateDescription
+                else info.extras.getCharSequence(ExperienceAccessibilityStateDescription.STATE_DESCRIPTION_KEY)
+            assertEquals(id, expected, description?.toString())
+            if (field != null) assertEquals("Native text", field.text.toString())
+
         }
+    }
+
+    @Test @Config(sdk = [23, 30, 36])
+    fun `native field descriptions update without replacing text or exposing captured values`() = withHost { host ->
+        val provider = provider(host)
+        val field = android.widget.EditText(host.context).apply {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setText("Native secret")
+        }
+        val semantic = node().copy(role = 6, stateFlags = 4096 or 32 or 1024, value = "Captured secret")
+        provider.publish(NuxieSemanticTree(1, 1, listOf(semantic)), mapOf(42L to field))
+        fun description(): CharSequence? {
+            val info = field.createAccessibilityNodeInfo()
+            return if (Build.VERSION.SDK_INT >= 30) info.stateDescription
+                else info.extras.getCharSequence(ExperienceAccessibilityStateDescription.STATE_DESCRIPTION_KEY)
+        }
+        assertEquals("Required, Read only", description()?.toString())
+        assertEquals("Native secret", field.text.toString())
+        provider.publish(NuxieSemanticTree(1, 2, listOf(semantic.copy(stateFlags = 4096))), mapOf(42L to field))
+        assertNull(description())
+        assertEquals("Native secret", field.text.toString())
+    }
+
+    @Test @Config(sdk = [30], qualifiers = "fr")
+    fun `mixed state words use packaged French resources`() = withHost { host ->
+        val provider = provider(host)
+        provider.publish(NuxieSemanticTree(1, 1, listOf(node().copy(role = 3, stateFlags = 8 or 32))))
+        val info = checkNotNull(provider.createAccessibilityNodeInfo(1))
+        assertEquals("Partiellement coché, Obligatoire", info.stateDescription?.toString())
     }
 
     private fun provider(host: View, dispatch: (NuxieSemanticTree, Long, Int) -> Boolean = { _, _, _ -> true }) =
