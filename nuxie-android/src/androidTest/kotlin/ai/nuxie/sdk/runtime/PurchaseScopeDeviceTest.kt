@@ -58,9 +58,9 @@ class PurchaseScopeDeviceTest {
                         renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
                         for (x in listOf(80f, 240f)) {
                             val down = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
-                                NuxiePlayerPointerEvent(NuxiePlayerPointerKind.DOWN, x, 50f, 1, 0f)))
+                                NuxiePlayerPointerEvent(NuxiePlayerPointerKind.DOWN, x, 30f, 1, 0f)))
                             val tapped = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
-                                NuxiePlayerPointerEvent(NuxiePlayerPointerKind.UP, x, 50f, 1, 0.1f)))
+                                NuxiePlayerPointerEvent(NuxiePlayerPointerKind.UP, x, 30f, 1, 0.1f)))
                             val settled = player.stepTyped(elapsedSeconds = 0.016)
                             val emitted = down.events + tapped.events + settled.events
                             val details = emitted.map { event -> event.name to event.properties.map { property ->
@@ -84,9 +84,15 @@ class PurchaseScopeDeviceTest {
                         assertEquals("root:yearly", before.resolveScopedString("placementId", "PurchaseRoot", "purchase.root"))
                         assertNull(before.resolveScopedString("placementId", "MissingModel", null))
                         assertNull(before.resolveScopedString("placementId", "Plan", null))
-                        assertTrue(artboard.setDefaultViewModelValue("second/placementId",
-                            NuxieViewModelScalarValue.StringValue("plan:lifetime")))
-                        player.stepTyped(elapsedSeconds = 0.0)
+                        val selectionDown = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
+                            NuxiePlayerPointerEvent(NuxiePlayerPointerKind.DOWN, 240f, 65f, 1, 0f)))
+                        val selectionUp = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
+                            NuxiePlayerPointerEvent(NuxiePlayerPointerKind.UP, 240f, 65f, 1, 0.1f)))
+                        val selectionSettled = player.stepTyped(elapsedSeconds = 0.016)
+                        for (outcome in listOf(selectionDown, selectionUp, selectionSettled)) {
+                            assertTrue("Selection is a native state write, not a host command", outcome.hostCommands.isEmpty())
+                            assertTrue("Selection must not purchase", outcome.events.isEmpty())
+                        }
                         val after = checkNotNull(artboard.defaultViewModelSnapshot())
                         assertEquals("plan:monthly", after.resolveString("first.placementId"))
                         assertEquals("plan:lifetime", after.resolveString("second.placementId"))
