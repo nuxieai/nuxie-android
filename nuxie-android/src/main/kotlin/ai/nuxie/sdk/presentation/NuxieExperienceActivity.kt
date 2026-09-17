@@ -6,6 +6,7 @@ import android.Manifest
 import android.app.Activity
 import android.app.NotificationManager
 import android.content.Context
+import android.content.res.Configuration
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -597,6 +598,14 @@ internal class NuxieExperienceActivity : Activity() {
         } catch (error: Throwable) {
             screen.fail(error)
             return
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Keep incoming and outgoing screens synchronized during navigation.
+        screens.forEach { screen ->
+            if (!screen.rendererEffects.isRetired) screen.mounted?.refreshFontScale(newConfig.fontScale)
         }
     }
 

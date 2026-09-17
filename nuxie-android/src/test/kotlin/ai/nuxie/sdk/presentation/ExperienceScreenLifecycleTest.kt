@@ -13,6 +13,29 @@ import org.junit.Test
 
 class ExperienceScreenLifecycleTest {
     @Test
+    fun `font scale follows canonical cases without changing lifecycle or prepared copies`() {
+        val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("runtime/font-scale-policy/cases.json").readText()).jsonObject
+        val source = ExperienceScreenLifecycle()
+        source.move(ExperienceScreenLifecycle.Phase.ENTERING)
+        source.move(ExperienceScreenLifecycle.Phase.ACTIVE)
+        for (item in contract.getValue("cases").jsonArray) {
+            val scale = item.jsonObject.getValue("scale").jsonPrimitive.double.toFloat()
+            val values = source.updateFontScale(scale)
+            assertEquals(NuxieViewModelScalarValue.NumberValue(scale.toDouble()), values["fontScale"])
+            assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, source.phase)
+            assertEquals(1uL, source.appearances)
+            val target = source.copyForPreparation()
+            assertEquals(values["fontScale"], target.snapshot()["fontScale"])
+            target.updateFontScale(4f)
+            assertEquals(values["fontScale"], source.snapshot()["fontScale"])
+        }
+        for (invalid in listOf(Float.NaN, Float.POSITIVE_INFINITY, 0f, -1f)) {
+            assertEquals(NuxieViewModelScalarValue.NumberValue(1.0), source.updateFontScale(invalid)["fontScale"])
+        }
+    }
+
+    @Test
     fun `same screen preparation enters anew without changing the outgoing lifecycle`() {
         val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/navigation-input-handoff-android.json").readText()).jsonObject
@@ -47,6 +70,7 @@ class ExperienceScreenLifecycleTest {
                 "screen/appearances" to NuxieViewModelScalarValue.NumberValue(step.getValue("appearances").jsonPrimitive.double),
                 "screen/transition" to NuxieViewModelScalarValue.StringValue(transition),
                 "env/reduceMotion" to NuxieViewModelScalarValue.BooleanValue(reduced),
+                "fontScale" to NuxieViewModelScalarValue.NumberValue(1.0),
             ), values)
         }
     }
