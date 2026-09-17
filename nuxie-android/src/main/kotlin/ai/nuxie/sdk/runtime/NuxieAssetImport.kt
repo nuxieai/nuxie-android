@@ -13,6 +13,7 @@ internal enum class FileAssetKind(val nativeValue: Int) {
     BLOB(3),
     SCRIPT(4),
     SHADER(5),
+    VIDEO(6),
     ;
 
     companion object {

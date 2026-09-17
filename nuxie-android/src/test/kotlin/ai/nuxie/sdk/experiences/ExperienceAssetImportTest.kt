@@ -108,6 +108,43 @@ class ExperienceAssetImportTest {
     }
 
     @Test
+    fun `video binding retains file and exact identity without provider bytes`() {
+        val file = File.createTempFile("video-binding-", ".mp4")
+        try {
+            val key = "assets/sha256/${"b".repeat(64)}.mp4"
+            fun descriptor(required: Boolean = true, source: String = "asset:greeting") = buildJsonObject {
+                put("render", buildJsonObject {
+                    put("assets", buildJsonArray {
+                        add(buildJsonObject {
+                            put("kind", "video"); put("key", key)
+                            put("riveAssetId", 2); put("riveUniqueName", "greeting-2")
+                            put("sourceAssetKey", source); put("required", required)
+                        })
+                    })
+                })
+            }
+            val catalog = ExpectedFileAsset(0, FileAssetKind.VIDEO, 2, "greeting", "mp4", false, false, 4)
+            val binding = ExperienceAssetImportBuilder.build(descriptor(), mapOf(key to file), listOf(catalog))
+            assertEquals(emptyMap<Int, ByteArray>(), binding.externalAssets)
+            assertEquals(listOf(ExperienceVideoAssetBinding(0, 2, "asset:greeting", file, true)), binding.videos)
+            for (invalid in listOf(catalog.copy(isEmbedded = true), catalog.copy(authoredId = 3),
+                catalog.copy(requiredProviderFlags = 3), catalog.copy(name = "other"))) {
+                assertThrows(IllegalArgumentException::class.java) {
+                    ExperienceAssetImportBuilder.build(descriptor(), mapOf(key to file), listOf(invalid))
+                }
+            }
+            assertThrows(IllegalArgumentException::class.java) {
+                ExperienceAssetImportBuilder.build(descriptor(), emptyMap(), listOf(catalog))
+            }
+            assertThrows(IllegalStateException::class.java) {
+                ExperienceAssetImportBuilder.build(descriptor(source = "https://provider.example/video"), mapOf(key to file), listOf(catalog))
+            }
+            val optional = ExperienceAssetImportBuilder.build(descriptor(required = false), emptyMap(), listOf(catalog))
+            assertEquals(listOf(ExperienceVideoAssetBinding(0, 2, "asset:greeting", null, false)), optional.videos)
+        } finally { file.delete() }
+    }
+
+    @Test
     fun `synthetic release builds the complete expected catalog and ordinal payloads`() {
         val digest = "a".repeat(64)
         val imageKey = "assets/sha256/$digest.png"
