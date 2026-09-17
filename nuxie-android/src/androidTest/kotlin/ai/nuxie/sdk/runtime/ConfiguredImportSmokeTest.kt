@@ -42,6 +42,9 @@ class ConfiguredImportSmokeTest {
                     try {
                         val video = player.videos().single()
                         assertEquals("asset:clip", video.sourceKey)
+                        assertEquals("Video", video.componentName)
+                        assertEquals(0, video.priority)
+                        assertEquals(0, video.readiness)
                         assertEquals(false, video.embedded)
                         player.videoSetCaptions(video.componentId, "en", listOf(
                             NuxieVideoCaptionCue(0.0, 0.9, "Hello 👋"),

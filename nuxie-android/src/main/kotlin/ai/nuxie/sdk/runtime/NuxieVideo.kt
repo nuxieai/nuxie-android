@@ -11,6 +11,9 @@ internal data class NuxieVideoOccurrence(
     val sourceKey: String,
     val contentType: String,
     val embedded: Boolean,
+    val componentName: String = "",
+    val priority: Int = 0,
+    val readiness: Int = 0,
 )
 
 internal data class NuxieVideoAction(val kind: Int, val value: Double, val generation: Long)
