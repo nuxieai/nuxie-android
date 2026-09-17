@@ -175,13 +175,15 @@ class EventLogTest {
     }
 
     @Test
-    fun textSizeDevicePropertyTracksConfigurationChangesWithoutRecreatingBuilder() {
+    fun textSizeDevicePropertyTracksConfigurationChangesWithoutRecreatingBuilder() = runBlocking {
         val fixture = Json.parseToJsonElement(java.io.File(FixtureRunner.fixturesRoot(),
             "encodings/text-size-device-properties.json").readText()).jsonObject.getValue("android").jsonObject
         val key = fixture.getValue("property").jsonPrimitive.content
         val resources = org.robolectric.RuntimeEnvironment.getApplication().resources
         val original = android.content.res.Configuration(resources.configuration)
         val builder = contextBuilder()
+        val store = RecordingStore()
+        val eventLog = log(store)
         try {
             fixture.getValue("values").jsonArray.forEach { value ->
                 val scale = value.jsonPrimitive.content.toFloat()
@@ -189,9 +191,16 @@ class EventLogTest {
                 @Suppress("DEPRECATION")
                 resources.updateConfiguration(configuration, resources.displayMetrics)
                 assertEquals(scale, builder.buildEnrichedProperties(emptyMap())[key])
+                eventLog.capture(SystemEventNames.EXPERIENCE_SHOWN)
+                eventLog.awaitBarrier()
+                assertEquals(scale, store.pending.last().properties.getValue(key).jsonPrimitive.content.toFloat())
             }
             assertEquals(1.75f, builder.buildEnrichedProperties(mapOf(key to 1.75f))[key])
+            eventLog.capture(SystemEventNames.EXPERIENCE_DISMISSED, mapOf(key to 1.75f))
+            eventLog.awaitBarrier()
+            assertEquals(1.75f, store.pending.last().properties.getValue(key).jsonPrimitive.content.toFloat())
         } finally {
+            eventLog.close()
             @Suppress("DEPRECATION")
             resources.updateConfiguration(original, resources.displayMetrics)
         }
