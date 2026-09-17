@@ -3432,3 +3432,71 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoPresent(
   (*env)->ReleaseByteArrayElements(env, rgba, bytes, JNI_ABORT);
   return status;
 }
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoSetCaptions(
+    JNIEnv *env, jobject self, jlong player, jlong component, jbyteArray language,
+    jdoubleArray times, jintArray lengths, jbyteArray text) {
+  (void)self;
+  if (component < 0 || !language || !times || !lengths || !text) return NUX_STATUS_INVALID_ARGUMENT;
+  jsize count = (*env)->GetArrayLength(env, lengths);
+  jsize language_len = (*env)->GetArrayLength(env, language);
+  jsize text_len = (*env)->GetArrayLength(env, text);
+  if (clear_jni_exception(env)) return NUX_STATUS_RUNTIME_ERROR;
+  if (count > 100000 || language_len > 128 || text_len > 8388608) return NUX_STATUS_LIMIT_EXCEEDED;
+  if ((*env)->GetArrayLength(env, times) != count * 2) return NUX_STATUS_INVALID_ARGUMENT;
+  struct NuxVideoCaptionCue *cues = calloc(count ? (size_t)count : 1, sizeof(*cues));
+  double *time_values = calloc(count ? (size_t)count * 2 : 1, sizeof(double));
+  jint *sizes = calloc(count ? (size_t)count : 1, sizeof(jint));
+  char *content = malloc(text_len ? (size_t)text_len : 1);
+  char lang[128];
+  NuxStatus status = NUX_STATUS_RUNTIME_ERROR;
+  if (!cues || !time_values || !sizes || !content) goto captions_cleanup;
+  if (language_len) (*env)->GetByteArrayRegion(env, language, 0, language_len, (jbyte *)lang);
+  if (clear_jni_exception(env)) goto captions_cleanup;
+  if (text_len) (*env)->GetByteArrayRegion(env, text, 0, text_len, (jbyte *)content);
+  if (clear_jni_exception(env)) goto captions_cleanup;
+  if (count) (*env)->GetDoubleArrayRegion(env, times, 0, count * 2, time_values);
+  if (clear_jni_exception(env)) goto captions_cleanup;
+  if (count) (*env)->GetIntArrayRegion(env, lengths, 0, count, sizes);
+  if (clear_jni_exception(env)) goto captions_cleanup;
+  status = NUX_STATUS_INVALID_ARGUMENT;
+  if (!is_valid_utf8(lang, (size_t)language_len)) goto captions_cleanup;
+  size_t offset = 0;
+  for (jsize i = 0; i < count; i++) {
+    if (sizes[i] < 0 || sizes[i] > 1048576 || (size_t)sizes[i] > (size_t)text_len - offset ||
+        !is_valid_utf8(content + offset, (size_t)sizes[i])) goto captions_cleanup;
+    cues[i].start_seconds = time_values[i * 2];
+    cues[i].end_seconds = time_values[i * 2 + 1];
+    cues[i].text = (struct NuxStringView){content + offset, (size_t)sizes[i]};
+    offset += (size_t)sizes[i];
+  }
+  if (offset != (size_t)text_len) goto captions_cleanup;
+  status = nux_player_video_set_captions(from_handle(player), (size_t)component,
+      (struct NuxStringView){lang, (size_t)language_len}, cues, (size_t)count);
+captions_cleanup:
+  free(content); free(sizes); free(time_values); free(cues);
+  return status;
+}
+
+static void video_caption_callback(void *context, struct NuxStringView language, struct NuxStringView text) {
+  struct video_jni_collector *c = context;
+  if (c->failed || language.len > 128 || text.len > 8388608) { c->failed = 1; return; }
+  video_collector_add(c, new_string_view(c->env, language));
+  if (!c->failed) video_collector_add(c, new_string_view(c->env, text));
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoCaption(
+    JNIEnv *env, jobject self, jlong player, jlong component, jintArray status_out) {
+  (void)self;
+  struct video_jni_collector c;
+  if (!video_collector_init(&c, env, "java/lang/String", "()V")) {
+    c.failed = 1;
+    return video_collector_finish(&c, NUX_STATUS_RUNTIME_ERROR, status_out);
+  }
+  NuxStatus status = component < 0 ? NUX_STATUS_INVALID_ARGUMENT :
+      nux_player_video_caption(from_handle(player), (size_t)component, video_caption_callback, &c);
+  if (status == NUX_STATUS_OK && c.count != 2) c.failed = 1;
+  return video_collector_finish(&c, status, status_out);
+}

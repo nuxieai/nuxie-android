@@ -30,3 +30,6 @@ internal data class NuxieVideoFrame(
         require(seconds.isFinite() && seconds >= 0)
     }
 }
+
+internal data class NuxieVideoCaptionCue(val startSeconds: Double, val endSeconds: Double, val text: String)
+internal data class NuxieVideoCaption(val language: String, val text: String)

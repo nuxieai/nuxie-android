@@ -358,6 +358,8 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         videoEnabled: Boolean = false,
     ): Long = error("newFile is not implemented")
 
+    fun videoSetCaptions(player: Long, component: Long, language: String, cues: List<NuxieVideoCaptionCue>): Int = error("videoSetCaptions is not implemented")
+    fun videoCaption(player: Long, component: Long): NuxieVideoCaption = error("videoCaption is not implemented")
     fun videoClock(player: Long, component: Long, monotonicSeconds: Double, clock: NuxieVideoClock): Int = error("videoClock is not implemented")
     fun videoPresent(renderer: Long, player: Long, component: Long, frame: NuxieVideoFrame): Int = error("videoPresent is not implemented")
 
@@ -506,6 +508,34 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         imageDecoder,
         videoEnabled,
     )
+
+    override fun videoSetCaptions(player: Long, component: Long, language: String, cues: List<NuxieVideoCaptionCue>): Int {
+        require(cues.size <= 100_000)
+        val languageBytes = language.toByteArray(Charsets.UTF_8)
+        require(languageBytes.size <= 128)
+        val times = DoubleArray(cues.size * 2)
+        val lengths = IntArray(cues.size)
+        val text = java.io.ByteArrayOutputStream()
+        cues.forEachIndexed { index, cue ->
+            require(cue.startSeconds.isFinite() && cue.endSeconds.isFinite() &&
+                cue.startSeconds >= 0 && cue.endSeconds > cue.startSeconds)
+            val bytes = cue.text.toByteArray(Charsets.UTF_8)
+            require(bytes.size <= 1024 * 1024 && text.size().toLong() + bytes.size <= 8 * 1024 * 1024)
+            times[index * 2] = cue.startSeconds
+            times[index * 2 + 1] = cue.endSeconds
+            lengths[index] = bytes.size
+            text.write(bytes)
+        }
+        return NuxieRuntimeBridge.nativeVideoSetCaptions(player, component, languageBytes, times, lengths, text.toByteArray())
+    }
+
+    override fun videoCaption(player: Long, component: Long): NuxieVideoCaption {
+        val status = intArrayOf(-1)
+        val result = NuxieRuntimeBridge.nativeVideoCaption(player, component, status)
+        if (status[0] != NUX_STATUS_OK) throw NuxieRuntimeCallException("video caption", status[0])
+        val values = checkNotNull(result)
+        return NuxieVideoCaption(values[0], values[1])
+    }
 
     override fun videoClock(player: Long, component: Long, monotonicSeconds: Double, clock: NuxieVideoClock): Int =
         NuxieRuntimeBridge.nativeVideoClock(player, component, monotonicSeconds, clock.generation,
