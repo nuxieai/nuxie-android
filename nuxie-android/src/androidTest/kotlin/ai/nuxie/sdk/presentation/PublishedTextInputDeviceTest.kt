@@ -2893,7 +2893,7 @@ class PublishedTextInputDeviceTest {
         val useTalkBack = InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true"
         val automation = if (useTalkBack) instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
             else instrumentation.uiAutomation
-        val expectedLabels = listOf("Choose your plan", "Continue", "Annual plan", "Seats", "Password", "Unavailable", "Plan option", "Plan option")
+        val expectedLabels = listOf("Choose your plan", "Continue", "Annual plan", "Seats", "Password", "Unavailable", "Plan option", "Plan option", "Optional extras", "Choose the options that suit you.")
         fun nodes(): List<android.view.accessibility.AccessibilityNodeInfo> {
             fun collect(node: android.view.accessibility.AccessibilityNodeInfo): List<android.view.accessibility.AccessibilityNodeInfo> =
                 listOf(node) + (0 until node.childCount).mapNotNull { node.getChild(it) }.flatMap { collect(it) }
@@ -2997,7 +2997,13 @@ class PublishedTextInputDeviceTest {
         val selected = named("Annual plan")
         assertTrue(selected.isCheckable)
         assertTrue(selected.isSelected)
-        assertFalse("Selection must not invent a checked state", selected.isChecked)
+        assertTrue("The authored checked state is independent of selection", selected.isChecked)
+        assertTrue("Authored heading must support heading navigation", named("Choose your plan").isHeading)
+        val mixed = named("Optional extras")
+        assertTrue(mixed.isCheckable)
+        assertFalse("Mixed must not imply selection", mixed.isSelected)
+        assertEquals("Partially checked, Required", mixed.stateDescription?.toString())
+        assertEquals("3 seats", named("Seats").stateDescription?.toString())
         val disabled = named("Unavailable")
         assertFalse(disabled.isEnabled)
         assertFalse(disabled.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK))
