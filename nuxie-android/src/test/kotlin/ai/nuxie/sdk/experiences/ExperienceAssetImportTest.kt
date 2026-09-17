@@ -119,6 +119,9 @@ class ExperienceAssetImportTest {
                             put("kind", "video"); put("key", key)
                             put("riveAssetId", 2); put("riveUniqueName", "greeting-2")
                             put("sourceAssetKey", source); put("required", required)
+                            put("captionTracks", buildJsonArray { add(buildJsonObject {
+                                put("streamIndex", 2); put("codec", "mov_text"); put("language", "en")
+                            }) })
                         })
                     })
                 })
@@ -126,7 +129,7 @@ class ExperienceAssetImportTest {
             val catalog = ExpectedFileAsset(0, FileAssetKind.VIDEO, 2, "greeting", "mp4", false, false, 4)
             val binding = ExperienceAssetImportBuilder.build(descriptor(), mapOf(key to file), listOf(catalog))
             assertEquals(emptyMap<Int, ByteArray>(), binding.externalAssets)
-            assertEquals(listOf(ExperienceVideoAssetBinding(0, 2, "asset:greeting", file, true)), binding.videos)
+            assertEquals(listOf(ExperienceVideoAssetBinding(0, 2, "asset:greeting", file, true, listOf(ExperienceVideoCaptionTrack(2, "en")))), binding.videos)
             for (invalid in listOf(catalog.copy(isEmbedded = true), catalog.copy(authoredId = 3),
                 catalog.copy(requiredProviderFlags = 3), catalog.copy(name = "other"))) {
                 assertThrows(IllegalArgumentException::class.java) {
@@ -140,7 +143,7 @@ class ExperienceAssetImportTest {
                 ExperienceAssetImportBuilder.build(descriptor(source = "https://provider.example/video"), mapOf(key to file), listOf(catalog))
             }
             val optional = ExperienceAssetImportBuilder.build(descriptor(required = false), emptyMap(), listOf(catalog))
-            assertEquals(listOf(ExperienceVideoAssetBinding(0, 2, "asset:greeting", null, false)), optional.videos)
+            assertEquals(listOf(ExperienceVideoAssetBinding(0, 2, "asset:greeting", null, false, listOf(ExperienceVideoCaptionTrack(2, "en")))), optional.videos)
         } finally { file.delete() }
     }
 

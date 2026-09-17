@@ -26,7 +26,10 @@ internal data class ExperienceVideoAssetBinding(
     val sourceAssetKey: String,
     val file: File?,
     val required: Boolean,
+    val captionTracks: List<ExperienceVideoCaptionTrack> = emptyList(),
 )
+
+internal data class ExperienceVideoCaptionTrack(val streamIndex: Int, val language: String?)
 
 /**
  * Binds the signed release declarations and acquired files to the scene's
@@ -100,7 +103,7 @@ internal object ExperienceAssetImportBuilder {
                         require(asset.requiredProviderFlags == 4) { "Video provider contract mismatch" }
                         require(file == null || file.isFile) { "Video file is unavailable" }
                         videos += ExperienceVideoAssetBinding(asset.ordinal, declaration.authoredId,
-                            requireNotNull(declaration.sourceAssetKey), file, declaration.required)
+                            requireNotNull(declaration.sourceAssetKey), file, declaration.required, declaration.captionTracks)
                     } else if (file != null) {
                         externalAssets[asset.ordinal] = file.readBytes()
                     }
@@ -160,6 +163,13 @@ internal object ExperienceAssetImportBuilder {
                         it.length <= 128 && it.matches(Regex("^asset:[A-Za-z0-9_-]+$"))
                     } ?: error("Journey video asset $index has an invalid source identity")
                 } else null,
+                captionTracks = (asset["captionTracks"] as? JsonArray).orEmpty().map { value ->
+                    val track = value as? JsonObject ?: error("Invalid caption track")
+                    require(track.string("codec") == "mov_text")
+                    val stream = track.long("streamIndex") ?: error("Missing caption stream")
+                    require(stream in 0..Int.MAX_VALUE.toLong())
+                    ExperienceVideoCaptionTrack(stream.toInt(), track.string("language"))
+                },
                 required = (asset["required"] as? JsonPrimitive)?.booleanOrNull
                     ?: error("Journey release asset $index has no required flag"),
             )
@@ -178,6 +188,7 @@ internal object ExperienceAssetImportBuilder {
         val source: Source,
         val sourceAssetKey: String?,
         val required: Boolean,
+        val captionTracks: List<ExperienceVideoCaptionTrack>,
     ) {
         fun identity(): Triple<FileAssetKind, Long, String> =
             Triple(kind, authoredId, uniqueName)
