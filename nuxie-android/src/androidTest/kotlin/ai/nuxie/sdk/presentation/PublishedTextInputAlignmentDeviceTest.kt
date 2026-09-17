@@ -18,19 +18,27 @@ class PublishedTextInputAlignmentDeviceTest {
     @Test fun publishedSingleLineAndSecureEditorsPreserveNativeTypography() =
         verifyPublishedEditors("text-input-single-line", singleLine = true)
 
-    private fun verifyPublishedEditors(fixture: String, singleLine: Boolean) {
+    @Test fun publishedFontScalePreservesFocusedCompositionAndFixedEditor() =
+        verifyPublishedEditors("font-scale-policy", singleLine = false, fontScalePolicy = true)
+
+    private fun verifyPublishedEditors(fixture: String, singleLine: Boolean, fontScalePolicy: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val assets = instrumentation.context.assets
         val directory = "runtime/$fixture"
         fun json(name: String) = assets.open("$directory/$name").bufferedReader().use {
             Json.parseToJsonElement(it.readText()).jsonObject
         }
-        val contract = json("expectations.json")
+        val contract = if (fontScalePolicy) {
+            assets.open("runtime/font-metrics-binding/expectations.json").bufferedReader().use {
+                Json.parseToJsonElement(it.readText()).jsonObject
+            }
+        } else json("expectations.json")
         val expected = contract.getValue("geometry").jsonArray
         data class MetricsFrame(val snapshot: NuxieViewModelSnapshot, val geometry: NuxieTextGeometryCapture.Captured,
             val fontSize: Float, val lineHeight: Float)
         val metricFrames = mutableListOf<MetricsFrame>()
         val metadata = json("report.json").getValue("builtPackageMetadata").jsonObject.getValue("textInputs").jsonArray
+            .let { if (fontScalePolicy) it.take(2) else it }
         val bytes = assets.open("$directory/screen.riv").use { it.readBytes() }
         val fontBytes = assets.open("$directory/2898476918b21c3f9b5ba22e86853c6d63b544f92da277a92533011a28c93af5.otf")
             .use { it.readBytes() }
@@ -58,7 +66,8 @@ class PublishedTextInputAlignmentDeviceTest {
                         val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
                         assertEquals(390, frame.width)
                         assertEquals(844, frame.height)
-                        val authoredCases = contract.getValue("cases").jsonArray
+                        val authoredCases = if (fontScalePolicy) json("cases.json").getValue("cases").jsonArray
+                            else contract.getValue("cases").jsonArray
                         val metricContract = assets.open("journeys/planes/text-input-effective-metrics.json")
                             .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject }
                         val subPointCases = metricContract.getValue("cases").jsonArray.mapNotNull { item ->
@@ -67,11 +76,21 @@ class PublishedTextInputAlignmentDeviceTest {
                             if (size != null && size > 0f && size < 1f) expectedMetrics else null
                         }
                         assertTrue("Shared contract must exercise sub-point sizes", subPointCases.isNotEmpty())
-                        for (item in authoredCases.dropLast(1) + subPointCases + authoredCases.takeLast(1)) {
-                            val size = item.jsonObject.getValue("fontSize").jsonPrimitive.float
-                            val height = item.jsonObject.getValue("lineHeight").jsonPrimitive.float
-                            assertTrue(artboard.setDefaultViewModelValue("requestedFontSize", NuxieViewModelScalarValue.NumberValue(size.toDouble())))
-                            assertTrue(artboard.setDefaultViewModelValue("requestedLineHeight", NuxieViewModelScalarValue.NumberValue(height.toDouble())))
+                        val cases = if (fontScalePolicy) authoredCases
+                            else authoredCases.dropLast(1) + subPointCases + authoredCases.takeLast(1)
+                        for (item in cases) {
+                            val values = item.jsonObject
+                            val size = if (fontScalePolicy) values.getValue("expected").jsonObject.getValue("observedFontSize").jsonPrimitive.float
+                                else values.getValue("fontSize").jsonPrimitive.float
+                            val height = if (fontScalePolicy) values.getValue("expected").jsonObject.getValue("observedLineHeight").jsonPrimitive.float
+                                else values.getValue("lineHeight").jsonPrimitive.float
+                            if (fontScalePolicy) {
+                                assertTrue(artboard.setDefaultViewModelValue("fontScale",
+                                    NuxieViewModelScalarValue.NumberValue(values.getValue("scale").jsonPrimitive.double)))
+                            } else {
+                                assertTrue(artboard.setDefaultViewModelValue("requestedFontSize", NuxieViewModelScalarValue.NumberValue(size.toDouble())))
+                                assertTrue(artboard.setDefaultViewModelValue("requestedLineHeight", NuxieViewModelScalarValue.NumberValue(height.toDouble())))
+                            }
                             val step = player.stepTyped(elapsedSeconds = 0.0, textRunNames = capture.fields.keys.toList())
                             val metricsSnapshot = checkNotNull(artboard.defaultViewModelSnapshot())
                             renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
@@ -189,10 +208,16 @@ class PublishedTextInputAlignmentDeviceTest {
                     current.update(snapshot, capture)
                     layout()
                 }
+                val focused = current.findViewWithTag<EditText>("nuxie-text-input-${inputs.first().id}")
+                if (fontScalePolicy) assertTrue(focused.requestFocus())
                 val writesBeforeFrames = writes
                 for (frame in metricFrames) {
                     current.update(frame.snapshot, frame.geometry)
                     layout()
+                    if (fontScalePolicy) {
+                        assertTrue("Font scaling retains focus", focused.hasFocus())
+                        assertSame(focused, current.findViewWithTag<EditText>("nuxie-text-input-${inputs.first().id}"))
+                    }
                     inputs.forEachIndexed { index, input ->
                         val editor = current.findViewWithTag<EditText>("nuxie-text-input-${input.id}")
                         assertEquals(if (singleLine || index == 0) frame.fontSize else 18f, editor.textSize, 0.001f)
