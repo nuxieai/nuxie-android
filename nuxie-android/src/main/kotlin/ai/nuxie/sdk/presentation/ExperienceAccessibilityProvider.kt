@@ -118,7 +118,7 @@ internal class ExperienceAccessibilityProvider(
             view.importantForAccessibility = excludedNativeImportance.remove(view)!!
         }
         for (view in excluded) {
-            excludedNativeImportance.putIfAbsent(view, view.importantForAccessibility)
+            excludedNativeImportance.getOrPut(view) { view.importantForAccessibility }
             view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
         }
     }
