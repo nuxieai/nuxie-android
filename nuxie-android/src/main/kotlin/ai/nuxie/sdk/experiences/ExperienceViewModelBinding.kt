@@ -26,7 +26,7 @@ internal object ExperienceViewModelBinding {
             if (value.containsKey("instanceId")) {
                 val id = value.requiredString("instanceId")
                 val name = value.requiredString("viewModelName")
-                require(models.putIfAbsent(id, name).let { it == null || it == name }) {
+                require(models.getOrPut(id) { name } == name) {
                     "Signed instance identity names multiple models"
                 }
             }
