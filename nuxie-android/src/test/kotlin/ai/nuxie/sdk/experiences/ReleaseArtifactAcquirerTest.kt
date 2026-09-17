@@ -83,6 +83,49 @@ class JourneyReleaseArtifactAcquirerTest {
     }
 
     @Test
+    fun cancellationDuringArtifactReadClosesStreamAndRemovesTemporaryAndProtection() = runTest {
+        val bytes = ByteArray(100_000) { 7 }
+        val digest = sha256(bytes)
+        val key = "renders/sha256/$digest.nux"
+        val entered = CountDownLatch(1)
+        val resume = CountDownLatch(1)
+        val reads = AtomicInteger()
+        var closed = false
+        val directory = temporaryFolder.newFolder("cancel-stream")
+        val transport = object : HttpTransport {
+            override fun execute(request: HttpTransport.Request): HttpTransport.Response = error("Streaming only")
+            override fun open(request: HttpTransport.Request) = HttpTransport.StreamingResponse(
+                200, object : ByteArrayInputStream(bytes) {
+                    override fun read(target: ByteArray, offset: Int, length: Int): Int {
+                        reads.incrementAndGet()
+                        entered.countDown()
+                        check(resume.await(5, TimeUnit.SECONDS))
+                        return super.read(target, offset, length)
+                    }
+                    override fun close() { closed = true; super.close() }
+                }, mapOf("Content-Type" to "application/vnd.nuxie.scene"), request.url,
+            )
+        }
+        val cache = JourneyReleaseArtifactCache(RuntimeEnvironment.getApplication(), transport, cacheDirectory = directory)
+        val acquirer = JourneyReleaseArtifactAcquirer(cache)
+        val release = release(artifact(key, bytes, "application/vnd.nuxie.scene"), renderer = "nux")
+        val pending = async(Dispatchers.IO) { acquirer.acquire(release, delivery()) }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            pending.cancel()
+            resume.countDown()
+            pending.join()
+            assertTrue(pending.isCancelled)
+            assertTrue(closed)
+            assertEquals(1, reads.get())
+            assertNull(cache.cachedFile(digest))
+            assertEquals(0, cache.protectionCount(digest))
+            assertEquals(0, cache.digestLockCount())
+            assertTrue(directory.walkTopDown().none { it.name.endsWith(".tmp") })
+        } finally { resume.countDown(); pending.cancel(); pending.join() }
+    }
+
+    @Test
     fun nuxAndVideoUseVerifiedFilesAcrossColdWarmAndOfflineAcquisition() = runTest {
         val sceneBytes = "published-nux-scene".encodeToByteArray()
         val videoBytes = ByteArray(100_000) { (it % 251).toByte() }

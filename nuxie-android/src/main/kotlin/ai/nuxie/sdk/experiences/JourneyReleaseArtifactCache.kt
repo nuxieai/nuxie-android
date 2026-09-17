@@ -114,7 +114,9 @@ internal class JourneyReleaseArtifactCache(
         signedBaseUrl: String,
         expectedContentType: String? = null,
         protection: CacheProtectionLease? = null,
+        checkActive: () -> Unit = {},
     ): File {
+        checkActive()
         val baseUrl = validatedBaseUrl(key, signedBaseUrl)
         val sourceUrl = composeUrl(key, baseUrl)
         if (!isDigest(sha256)) fail(key, Reason.INVALID_URL, "invalid artifact digest")
@@ -130,7 +132,8 @@ internal class JourneyReleaseArtifactCache(
             }
             try {
                 synchronized(digestLock.monitor) {
-                    verifiedCachedFile(key, sha256, expectedSizeBytes, protection?.ownerId)
+                    checkActive()
+                    verifiedCachedFile(key, sha256, expectedSizeBytes, protection?.ownerId, checkActive)
                         ?: downloadAndPublish(
                             key = key,
                             sha256 = sha256,
@@ -139,6 +142,7 @@ internal class JourneyReleaseArtifactCache(
                             expectedContentType = expectedContentType,
                             baseUrl = baseUrl,
                             initialUrl = sourceUrl,
+                            checkActive = checkActive,
                         )
                 }
             } finally {
@@ -179,10 +183,12 @@ internal class JourneyReleaseArtifactCache(
         expectedContentType: String?,
         baseUrl: URL,
         initialUrl: URL,
+        checkActive: () -> Unit,
     ): File {
         var requestUrl = initialUrl
         var redirectCount = 0
         while (true) {
+            checkActive()
             val response = try {
                 transport.open(
                     HttpTransport.Request(
@@ -197,6 +203,7 @@ internal class JourneyReleaseArtifactCache(
                 fail(key, Reason.TRANSPORT, "artifact fetch failed", error)
             }
             response.use {
+                checkActive()
                 if (!sameOrigin(response.finalUrl, baseUrl)) {
                     fail(key, Reason.REDIRECT_ESCAPED_ORIGIN, "artifact redirect escaped origin")
                 }
@@ -236,6 +243,7 @@ internal class JourneyReleaseArtifactCache(
                     expectedSizeBytes,
                     maximumBytes,
                     response.body,
+                    checkActive,
                 )
             }
         }
@@ -247,6 +255,7 @@ internal class JourneyReleaseArtifactCache(
         expectedSizeBytes: Long,
         maximumBytes: Long,
         input: InputStream,
+        checkActive: () -> Unit,
     ): File {
         baseDir.mkdirs()
         val temporary = synchronized(cacheScope.lock) {
@@ -271,7 +280,9 @@ internal class JourneyReleaseArtifactCache(
                         } else {
                             (remaining + 1).coerceAtLeast(1).toInt()
                         }
+                        checkActive()
                         val read = input.read(buffer, 0, requestBytes)
+                        checkActive()
                         if (read < 0) break
                         received += read
                         if (received > maximumBytes) {
@@ -302,9 +313,10 @@ internal class JourneyReleaseArtifactCache(
                 )
             }
 
+            checkActive()
             val destination = fileFor(sha256)
             if (!temporary.renameTo(destination)) {
-                verifiedCachedFile(key, sha256, expectedSizeBytes)?.let { return it }
+                verifiedCachedFile(key, sha256, expectedSizeBytes, null, checkActive)?.let { return it }
                 fail(key, Reason.CACHE_IO, "could not publish verified artifact")
             }
             return destination
@@ -322,7 +334,8 @@ internal class JourneyReleaseArtifactCache(
         key: String,
         sha256: String,
         expectedSizeBytes: Long,
-        protectionOwnerId: String? = null,
+        protectionOwnerId: String?,
+        checkActive: () -> Unit,
     ): File? {
         val file = fileFor(sha256)
         if (!file.isFile) return null
@@ -342,13 +355,17 @@ internal class JourneyReleaseArtifactCache(
                 val digest = MessageDigest.getInstance("SHA-256")
                 val buffer = ByteArray(STREAM_BUFFER_BYTES)
                 while (true) {
+                    checkActive()
                     val read = input.read(buffer)
                     if (read < 0) break
                     digest.update(buffer, 0, read)
                 }
                 digest.digest().joinToString("") { "%02x".format(it) } == sha256
             }
-        }.getOrDefault(false)
+        }.getOrElse { error ->
+            if (error is java.util.concurrent.CancellationException) throw error
+            false
+        }
         if (!matchesDigest) {
             deleteInvalidCachedFile(
                 key = key,

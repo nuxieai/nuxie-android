@@ -6,6 +6,8 @@ import java.io.Closeable
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -98,7 +100,23 @@ internal class JourneyReleaseArtifactAcquirer(
         identity: JourneyReleaseIdentity,
         descriptor: JsonObject,
         delivery: JourneyReleaseDelivery,
-    ): AcquiredJourneyRelease = withContext(Dispatchers.IO) {
+    ): AcquiredJourneyRelease {
+        var completed: AcquiredJourneyRelease? = null
+        try {
+            return withContext(Dispatchers.IO) { acquireOnIo(identity, descriptor, delivery).also { completed = it } }
+        } catch (error: Throwable) {
+            // Dispatch back to the caller is cancellable even after acquisition
+            // succeeds. An undelivered result must not retain its cache lease.
+            completed?.close()
+            throw error
+        }
+    }
+
+    private suspend fun acquireOnIo(
+        identity: JourneyReleaseIdentity,
+        descriptor: JsonObject,
+        delivery: JourneyReleaseDelivery,
+    ): AcquiredJourneyRelease {
         val render = descriptor["render"] as? JsonObject
             ?: invalidDescriptor("<render>", "release render is missing")
         val sceneField = when (render.string("renderer")) {
@@ -206,6 +224,8 @@ internal class JourneyReleaseArtifactAcquirer(
             )
         }
 
+        val acquisitionContext = currentCoroutineContext()
+        acquisitionContext.ensureActive()
         val protection = cache.protect(artifacts.map { it.acquisition.sha256 })
         try {
             val files = LinkedHashMap<String, File>(references.size)
@@ -220,13 +240,15 @@ internal class JourneyReleaseArtifactAcquirer(
                         signedBaseUrl = deliveryOrigin(item.role, delivery),
                         expectedContentType = item.contentType,
                         protection = protection,
+                        checkActive = acquisitionContext::ensureActive,
                     )
                     normalized.keys.forEach { key -> files[key] = file }
                 } catch (error: JourneyReleaseArtifactAcquisitionException) {
                     if (normalized.required || !error.isSafeOptionalFailure()) throw error
                 }
             }
-            AcquiredJourneyRelease(
+            acquisitionContext.ensureActive()
+            return AcquiredJourneyRelease(
                 identity = identity,
                 artifactsByKey = files.toMap(),
                 sceneFile = files.getValue(scene.key),
