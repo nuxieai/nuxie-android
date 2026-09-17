@@ -189,10 +189,17 @@ internal class NuxieViewModelSnapshot private constructor(
     fun resolveString(path: String): String? = (resolveValue(path) as? Value.StringValue)?.value
 
     /** Resolve an authored scope without substituting another model or instance. */
-    fun resolveScopedString(path: String, viewModelName: String?, instanceId: String?): String? {
+    fun resolveScopedString(
+        path: String,
+        viewModelName: String?,
+        instanceId: String?,
+        isRelative: Boolean? = null,
+    ): String? {
+        if (isRelative == true && instanceId == null) return null
+        val sourceInstanceId = if (isRelative == false) null else instanceId
         val root = instancesById[rootInstanceId] ?: return null
         val selected = when {
-            instanceId != null -> instanceIds[instanceId]?.let(instancesById::get)
+            sourceInstanceId != null -> instanceIds[sourceInstanceId]?.let(instancesById::get)
             viewModelName == null || viewModelName == root.schemaName -> root
             else -> instancesById.values.singleOrNull { it.schemaName == viewModelName }
         } ?: return null

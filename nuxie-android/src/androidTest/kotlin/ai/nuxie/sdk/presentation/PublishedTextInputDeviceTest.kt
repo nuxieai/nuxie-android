@@ -2346,6 +2346,12 @@ class PublishedTextInputDeviceTest {
     }
 
     @Test
+    fun signedAbsolutePurchaseIgnoresTheTappedOccurrence() {
+        exerciseDurableNativeEmission(PublishedBehavior.PURCHASE, purchaseX = 240f, selectPlan = true,
+            absolutePurchase = true)
+    }
+
+    @Test
     fun signedPurchaseUsesAuthoredSelectionWithoutResponseCommand() {
         exerciseDurableNativeEmission(PublishedBehavior.PURCHASE, purchaseX = 240f, selectPlan = true)
     }
@@ -2380,7 +2386,7 @@ class PublishedTextInputDeviceTest {
 
     private enum class PublishedBehavior { TEXT_INPUT, SCRIPT, SEMANTIC_SCRIPT, SEMANTIC_ROLES, PURCHASE }
 
-    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f, selectPlan: Boolean = false, purchaseRoundTrip: Boolean = false, purchaseNavigationFixture: Boolean = purchaseRoundTrip, recreateAfterSelection: Boolean = false, delayFinalCapture: Boolean = false, conditionGate: Boolean = false) {
+    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f, selectPlan: Boolean = false, purchaseRoundTrip: Boolean = false, purchaseNavigationFixture: Boolean = purchaseRoundTrip, recreateAfterSelection: Boolean = false, delayFinalCapture: Boolean = false, conditionGate: Boolean = false, absolutePurchase: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
@@ -2389,7 +2395,7 @@ class PublishedTextInputDeviceTest {
         val releaseOldLane = CountDownLatch(1)
         val scripted = behavior == PublishedBehavior.SCRIPT || behavior == PublishedBehavior.SEMANTIC_SCRIPT
         val candidateSemantics = behavior == PublishedBehavior.SEMANTIC_SCRIPT || behavior == PublishedBehavior.SEMANTIC_ROLES
-        val fixturePath = if (conditionGate) "journeys/rendered-${if (candidateSemantics) "semantic-" else ""}screen-control-condition" else if (purchaseNavigationFixture) "journeys/rendered-purchase-navigation" else if (purchasing) "journeys/rendered-purchase-scopes" else if (behavior == PublishedBehavior.SEMANTIC_ROLES) "journeys/rendered-semantic-roles"
+        val fixturePath = if (absolutePurchase) "journeys/rendered-purchase-absolute" else if (conditionGate) "journeys/rendered-${if (candidateSemantics) "semantic-" else ""}screen-control-condition" else if (purchaseNavigationFixture) "journeys/rendered-purchase-navigation" else if (purchasing) "journeys/rendered-purchase-scopes" else if (behavior == PublishedBehavior.SEMANTIC_ROLES) "journeys/rendered-semantic-roles"
             else if (candidateSemantics) "journeys/rendered-semantic-screen-control${if (failScript) "-error" else ""}"
             else if (failScript) "journeys/rendered-screen-control-error" else if (scripted) "journeys/rendered-screen-control" else "journeys/rendered-text-input"
         val fixture = loadPublishedFixture(instrumentation, fixturePath, candidateSemantics)
@@ -2597,7 +2603,7 @@ class PublishedTextInputDeviceTest {
                 dispatch(MotionEvent.ACTION_UP)
                 val dispatched = purchases.poll(10, TimeUnit.SECONDS)
                 assertEquals("batches=${accepted.map { it.source to it.emissions.map { emission -> emission.name } }} outcomes=$terminalOutcomes errors=$errorDismissals",
-                    if (selectPlan || delayFinalCapture) "plan:lifetime" else if (purchaseX == 80f) "plan:monthly" else "plan:annual", dispatched)
+                    if (absolutePurchase) "plan:monthly" else if (selectPlan || delayFinalCapture) "plan:lifetime" else if (purchaseX == 80f) "plan:monthly" else "plan:annual", dispatched)
                 val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS))
                 assertEquals(if (purchaseX == 80f) "plan.first" else "plan.second", batch.source.instanceId)
                 assertEquals(listOf("purchase_requested"), batch.emissions.map { it.name })
