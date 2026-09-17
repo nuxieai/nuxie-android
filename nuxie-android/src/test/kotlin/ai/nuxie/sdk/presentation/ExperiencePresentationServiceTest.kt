@@ -1594,6 +1594,61 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `device font recovery emits the shared typed load outcome once and retains ownership until close`() = runTest {
+        val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/system-font-failure-outcomes.json").readText()).jsonObject
+        for (case in contract.getValue("failures").jsonArray.map { it.jsonObject }.filter { "androidReason" in it }) {
+            val release = renderedJourneyRelease()
+            val emitted = mutableListOf<Emitted>()
+            val launched = mutableListOf<String>()
+            val outcomes = mutableListOf<JourneySurfaceOutcome>()
+            val lease = Lease()
+            val service = service(this, launch = launched::add,
+                emit = { name, properties, owner -> emitted += Emitted(name, properties, owner) })
+            val pending = async(SupervisorJob()) {
+                service.presentJourney(release, "screen_welcome", "font-failure", "customer-1",
+                    service.reserveJourney("customer-1"), acquire = { acquired(release.identity, lease) },
+                    onOutcome = outcomes::add)
+            }
+            runCurrent()
+            val id = launched.single()
+            val providerError = ai.nuxie.sdk.experiences.SystemFontException(
+                ai.nuxie.sdk.experiences.SystemFontException.Reason.valueOf(case.getValue("androidReason").jsonPrimitive.content))
+            val error = ExperiencePresentationException(ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                "Experience asset preparation failed", providerError)
+            repeat(2) { assertTrue(PresentationRegistry.recoverNative(id, null, 1, error)) }
+            runCurrent()
+            assertFalse(pending.isCompleted)
+            assertFalse(lease.closed.get())
+            assertTrue(outcomes.isEmpty())
+            assertEquals(AcquisitionProgress.Phase.FAILED, PresentationRegistry.nativeProgress(id)?.phase)
+            val failures = emitted.filter { it.name == contract.getValue("eventName").jsonPrimitive.content }
+            assertEquals(contract.getValue("outcomeCount").jsonPrimitive.int, failures.size)
+            val failure = failures.single()
+            assertEquals(case.getValue("code").jsonPrimitive.content, failure.properties["error_code"])
+            assertEquals(release.identity.experienceId, failure.properties["experience_id"])
+            assertEquals(release.identity.experienceVersionId, failure.properties["experience_version"])
+            assertEquals(release.identity.buildId, failure.properties["artifact_build_id"])
+            assertEquals(release.descriptor.getValue("render").jsonObject.getValue("riv").jsonObject
+                .getValue("sha256").jsonPrimitive.content, failure.properties["artifact_content_hash"])
+            assertEquals("unknown", failure.properties["artifact_source"])
+            assertEquals("customer-1", failure.distinctId)
+            assertFalse(emitted.any { it.name == SystemEventNames.EXPERIENCE_SHOWN })
+            service.dismissFromHost("customer-1")
+            runCurrent()
+            assertTrue(lease.closed.get())
+            assertNull(PresentationRegistry.resolve(id))
+            assertFalse(PresentationRegistry.recoverNative(id, null, 1, error))
+            assertEquals(1, lease.closeCount.get())
+            assertEquals(contract.getValue("outcomeCount").jsonPrimitive.int,
+                emitted.count { it.name == contract.getValue("eventName").jsonPrimitive.content })
+            assertEquals(1, outcomes.size)
+            assertNotNull(service.reserveJourney("customer-1"))
+            pending.cancelAndJoin()
+        }
+    }
+
+    @Test
     fun `native retry drains old attached generation and rejects its late frame and failure`() = runTest {
         val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/presentation-acquisition-recovery-android.json").readText()).jsonObject
