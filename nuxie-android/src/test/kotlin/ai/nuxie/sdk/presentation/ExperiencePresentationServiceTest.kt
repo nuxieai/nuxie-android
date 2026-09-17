@@ -9,6 +9,11 @@ import ai.nuxie.sdk.experiences.JourneyReleaseReplayPolicy
 import ai.nuxie.sdk.experiences.JourneyReleaseSupportedRuntime
 import ai.nuxie.sdk.experiences.JourneyReleaseVerifier
 import ai.nuxie.sdk.fixtures.FixtureRunner
+import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
+import ai.nuxie.sdk.runtime.NativeViewModelSnapshot
+import ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance
+import ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue
+import ai.nuxie.sdk.runtime.NuxieViewModelPropertyKind
 import android.util.Base64
 import java.io.Closeable
 import java.io.File
@@ -81,6 +86,45 @@ class ExperiencePresentationServiceTest {
     @After
     fun tearDown() {
         PresentationRegistry.clearForTesting()
+    }
+
+    @Test
+    fun `purchase reference cannot substitute root value for an unknown model`() = runTest {
+        val release = renderedJourneyRelease()
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val presentation = async {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
+                onOutcome = {})
+        }
+        runCurrent()
+        val id = launched.single()
+        PresentationRegistry.reportFirstFrame(id)
+        presentation.await()
+        val snapshot = NuxieViewModelSnapshot.fromNative(
+            NativeViewModelSnapshot(
+                1,
+                arrayOf(NativeViewModelSnapshotInstance(1, 0)),
+                arrayOf(NativeViewModelSnapshotValue(
+                    1, 0, "placementId", NuxieViewModelPropertyKind.STRING.nativeValue,
+                    "root:yearly".encodeToByteArray(), 0,
+                )),
+            ),
+        )
+        PresentationRegistry.reportRuntimeStep(id,
+            ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome(true, emptyList(), emptyList(), emptyList(), emptyList()),
+            1uL, snapshot)
+        val owner = JourneyPresentationOwner("journey-1", "customer-1")
+        val rootAction = Json.parseToJsonElement(
+            """{"type":"purchase","placementId":{"ref":{"kind":"path","path":"placementId"}}}""",
+        ).jsonObject
+        assertEquals("root:yearly", service.resolveJourneyAction(owner, rootAction, null)
+            ?.get("placementId")?.jsonPrimitive?.content)
+        val unknownModelAction = Json.parseToJsonElement(
+            """{"type":"purchase","placementId":{"ref":{"kind":"path","path":"placementId","viewModelName":"MissingModel"}}}""",
+        ).jsonObject
+        assertNull(service.resolveJourneyAction(owner, unknownModelAction, null))
     }
 
     @Test
