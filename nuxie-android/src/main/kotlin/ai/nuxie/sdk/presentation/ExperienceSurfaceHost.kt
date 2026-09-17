@@ -213,6 +213,7 @@ internal class ExperienceSurfaceHost(
     )
     private var submittedSnapshot: SubmittedTextSnapshot? = null
     private val textPublication = AtomicLong()
+    private var retainedViewModel: java.util.concurrent.atomic.AtomicReference<NuxieViewModelSnapshot?>? = null
     private var textInputs: Map<String, ExperienceTextInput> = emptyMap()
     private val runtimeValues = linkedMapOf<String, NuxieViewModelScalarValue>()
     private var runtimeValuesPending = false
@@ -283,6 +284,7 @@ internal class ExperienceSurfaceHost(
         artifactsByKey: Map<String, File> = emptyMap(),
         viewModelProjection: NuxieViewModelListProjection? = null,
         textInputs: List<ExperienceTextInput> = emptyList(),
+        retainedViewModel: java.util.concurrent.atomic.AtomicReference<NuxieViewModelSnapshot?>? = null,
         onLoaded: ((Boolean) -> Unit)? = null,
     ) {
         retireSemantics()
@@ -291,6 +293,7 @@ internal class ExperienceSurfaceHost(
             semanticsEnabled = (requirements?.get("requiredCapabilities") as? JsonArray).orEmpty()
                 .any { (it as? JsonPrimitive)?.content == "scene-semantics-v1" }
             this.textInputs = textInputs.associateBy(ExperienceTextInput::id)
+            this.retainedViewModel = retainedViewModel
             val activeRenderer = ensureRenderer(1, 1)
             if (activeRenderer == null) {
                 reportFailure(
@@ -361,7 +364,10 @@ internal class ExperienceSurfaceHost(
                 return@enqueue
             }
             try {
-                if (viewModelProjection != null) {
+                val retained = retainedViewModel?.get()
+                if (retained != null) {
+                    viewModelState = runtime.restoreViewModel(loadedFile, loadedArtboard, retained)
+                } else if (viewModelProjection != null) {
                     viewModelState = runtime.bindViewModelList(
                         file = loadedFile,
                         artboard = loadedArtboard,
@@ -673,6 +679,7 @@ internal class ExperienceSurfaceHost(
                     } else {
                         null
                     }
+                    viewModelSnapshot?.let { retainedViewModel?.set(it) }
                     if (outcome.hasPublishableEffects()) {
                         unpublishedSteps.addLast(PublishedStep(correlationId, outcome, viewModelSnapshot))
                     }
@@ -753,6 +760,10 @@ internal class ExperienceSurfaceHost(
         updateFrameScheduling()
         lane.enqueue {
             applyRuntimeValues(finalValues)
+            // Capture on the original lane after input/exit writes and before releasing handles.
+            var firstFailure = retainedViewModel?.let { retained -> runCatching {
+                (viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot())?.let(retained::set)
+            }.exceptionOrNull() }
             attached = false
             val closeHandles = listOfNotNull(
                 renderer?.let { active -> { active.detachSurface(); Unit } },
@@ -772,7 +783,6 @@ internal class ExperienceSurfaceHost(
             unpublishedSteps.clear()
             pendingPresentation = false
             submittedSnapshot = null
-            var firstFailure: Throwable? = null
             closeHandles.forEach { close ->
                 try {
                     close()

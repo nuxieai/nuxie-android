@@ -1366,6 +1366,51 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `authored snapshots remain screen scoped and cannot leak across releases or retired occurrences`() = runTest {
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        val nextBuild = renderedJourneyRelease("text-input-navigation.json", "nextBuildEntry")
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        var first = true
+        suspend fun show(screenId: String, selected: AuthenticatedJourneyRelease = release): PreparedPresentation {
+            val reservation = if (first) service.reserveJourney("customer-1") else null
+            first = false
+            val pending = async {
+                service.presentJourney(release = selected, screenId = screenId, journeyId = "journey-1",
+                    ownerDistinctId = "customer-1", reservation = reservation,
+                    acquire = { acquired(selected.identity, Lease()) }, onOutcome = {})
+            }
+            runCurrent()
+            val presentation = checkNotNull(PresentationRegistry.resolve(launched.last()))
+            PresentationRegistry.reportFirstFrame(launched.last())
+            pending.await()
+            return presentation
+        }
+        fun snapshot(value: String) = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(1,
+            arrayOf(NativeViewModelSnapshotInstance(1, 0)), arrayOf(NativeViewModelSnapshotValue(
+                1, 0, "selection", NuxieViewModelPropertyKind.STRING.nativeValue, value.encodeToByteArray(), 0))),
+            schemaNames = mapOf(0L to "Selection"))
+        val welcome = show("screen_welcome")
+        welcome.retainedViewModel.set(snapshot("first"))
+        val details = show("screen_details")
+        assertNull(details.retainedViewModel.get())
+        details.retainedViewModel.set(snapshot("second"))
+        val returned = show("screen_welcome")
+        assertEquals("first", returned.retainedViewModel.get()?.resolveString("selection"))
+        // A retiring surface may finish late, but owns only its obsolete snapshot cell.
+        welcome.retainedViewModel.set(snapshot("stale"))
+        assertEquals("first", returned.retainedViewModel.get()?.resolveString("selection"))
+        assertEquals("second", show("screen_details").retainedViewModel.get()?.resolveString("selection"))
+        assertEquals("first", show("screen_welcome").retainedViewModel.get()?.resolveString("selection"))
+        assertNull(show("screen_welcome", nextBuild).retainedViewModel.get())
+        assertNull(show("screen_welcome", release).retainedViewModel.get())
+        service.dismissFromHost("customer-1")
+        first = true
+        assertNull(show("screen_welcome").retainedViewModel.get())
+        service.dismissFromHost("customer-1")
+    }
+
+    @Test
     fun `navigation restores independent screen drafts and discards them for a new build`() = runTest {
         val release = renderedJourneyRelease("text-input-navigation.json")
         val nextBuild = renderedJourneyRelease("text-input-navigation.json", "nextBuildEntry")
