@@ -7,7 +7,9 @@ import ai.nuxie.sdk.billing.JourneyCommerceSession
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.experiences.AcquiredJourneyRelease
 import ai.nuxie.sdk.experiences.AuthenticatedJourneyRelease
+import ai.nuxie.sdk.experiences.SystemFontException
 import ai.nuxie.sdk.journey.JourneyActionType
+import ai.nuxie.sdk.journey.JourneyEventNames
 import ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome
 import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
@@ -173,6 +175,7 @@ internal object PresentationRegistry {
         val onOutcome: (CloseReason) -> Unit,
         val onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit,
         val onTextCommitted: (String, String, RendererEffectLifetime?) -> Unit,
+        val onRecovery: (Throwable) -> Unit = {},
     )
 
     private class Entry(initial: PresentationContentState, var callbacks: Callbacks) {
@@ -205,9 +208,10 @@ internal object PresentationRegistry {
             { _, _, _, _ -> },
         onTextCommitted: (String, String, RendererEffectLifetime?) -> Unit = { _, _, _ -> },
         requiresAcquiring: Boolean = false,
+        onRecovery: (Throwable) -> Unit = {},
     ) {
         synchronized(lock) {
-            val callbacks = Callbacks(onFirstFrame, onFailure, onDismissed, onOutcome, onRuntimeStep, onTextCommitted)
+            val callbacks = Callbacks(onFirstFrame, onFailure, onDismissed, onOutcome, onRuntimeStep, onTextCommitted, onRecovery)
             val existing = entries[id]
             if (existing == null) {
                 check(!requiresAcquiring) { "Acquiring presentation was withdrawn" }
@@ -287,19 +291,23 @@ internal object PresentationRegistry {
     }
 
     /** Failure retains the lease and logical outcome owner until Retry or Close. */
-    fun recoverNative(id: String, source: PresentationScreenHandle?, generation: Long?, error: Throwable): Boolean = synchronized(lock) {
-        val entry = entries[id] ?: return@synchronized false
-        val ready = entry.state.value as? PresentationContentState.Ready ?: return@synchronized false
-        val progress = ready.progress ?: return@synchronized false
-        if (entry.visible || entry.dismissalReason != null || entry.terminal.get() ||
-            (generation != null && generation != progress.generation) ||
-            (source != null && entry.latestScreen.get() !== source)) return@synchronized false
-        if (progress.phase == AcquisitionProgress.Phase.RETRYING) return@synchronized true
-        // A timeout may still receive its late frame. A failed native host cannot.
-        if (source != null) source.rendererEffects?.retire()
-        entry.state.value = ready.copy(progress = progress.copy(phase = AcquisitionProgress.Phase.FAILED))
+    fun recoverNative(id: String, source: PresentationScreenHandle?, generation: Long?, error: Throwable): Boolean {
+        val onRecovery = synchronized(lock) {
+            val entry = entries[id] ?: return false
+            val ready = entry.state.value as? PresentationContentState.Ready ?: return false
+            val progress = ready.progress ?: return false
+            if (entry.visible || entry.dismissalReason != null || entry.terminal.get() ||
+                (generation != null && generation != progress.generation) ||
+                (source != null && entry.latestScreen.get() !== source)) return false
+            if (progress.phase == AcquisitionProgress.Phase.RETRYING) return true
+            // A timeout may still receive its late frame. A failed native host cannot.
+            if (source != null) source.rendererEffects?.retire()
+            entry.state.value = ready.copy(progress = progress.copy(phase = AcquisitionProgress.Phase.FAILED))
+            entry.callbacks.onRecovery
+        }
         ai.nuxie.sdk.logging.NuxieLog.w("ExperiencePresentation", "Native presentation requires recovery", error)
-        true
+        onRecovery(error)
+        return true
     }
 
     fun retryNative(id: String, generation: Long): Boolean = synchronized(lock) {
@@ -563,6 +571,7 @@ internal class ExperiencePresentationService(
         val firstFrame: CompletableDeferred<ExperienceRef>,
         val closed: AtomicBoolean = AtomicBoolean(false),
         val shown: AtomicBoolean = AtomicBoolean(false),
+        val fontFailureReported: AtomicBoolean = AtomicBoolean(false),
         val finished: CompletableDeferred<Unit> = CompletableDeferred(),
         // Shown and the run-terminal observation are one fact-pairing decision.
         val factLock: Any = Any(),
@@ -1065,7 +1074,11 @@ internal class ExperiencePresentationService(
                             id = id,
                             content = preparedContent,
                             onFirstFrame = { firstFrame(pending) },
-                            onFailure = { error -> failed(pending, error) },
+                            onFailure = { error ->
+                                recordFontLoadFailure(pending, preparedContent.descriptor, error)
+                                failed(pending, error)
+                            },
+                            onRecovery = { error -> recordFontLoadFailure(pending, preparedContent.descriptor, error) },
                             onDismissed = { reason -> ended(pending, reason) },
                             onOutcome = { reason -> attemptOutcome(pending, reason) },
                             onRuntimeStep = { outcome, correlationId, snapshot, lifetime ->
@@ -1634,6 +1647,23 @@ internal class ExperiencePresentationService(
         }
     }
 
+    private fun recordFontLoadFailure(active: ActivePresentation, descriptor: JsonObject?, error: Throwable) {
+        val code = error.systemFontFailureCode() ?: return
+        if (!active.fontFailureReported.compareAndSet(false, true)) return
+        val render = descriptor?.get("render") as? JsonObject
+        val riv = render?.get("riv") as? JsonObject
+        val properties = linkedMapOf<String, Any?>(
+            "experience_id" to active.ref.experienceId,
+            "experience_version" to active.ref.experienceVersion,
+            "artifact_build_id" to active.acquired.identity.buildId,
+            "artifact_content_hash" to riv?.string("sha256"),
+            "artifact_source" to "unknown",
+            "error_message" to error.message,
+            "error_code" to code,
+        )
+        runCatching { emit(JourneyEventNames.EXPERIENCE_ARTIFACT_LOAD_FAILED, properties, active.ownerDistinctId) }
+    }
+
     private fun emitCloseFact(active: ActivePresentation, reason: CloseReason) {
         val ref = active.ref
         val properties = linkedMapOf<String, Any?>(
@@ -1656,6 +1686,7 @@ internal class ExperiencePresentationService(
             CloseReason.IdentityChanged -> error("identity-change shutdown has no close fact")
             is CloseReason.Error -> {
                 properties["error_message"] = reason.cause.message
+                reason.cause.systemFontFailureCode()?.let { properties["error_code"] = it }
                 SystemEventNames.EXPERIENCE_ERRORED
             }
         }
@@ -1692,3 +1723,13 @@ private fun JsonObject.string(key: String): String? =
     (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
 
 private const val FIRST_FRAME_TIMEOUT_MILLIS = 30_000L
+
+private fun Throwable.systemFontFailureCode(): String? {
+    val visited = Collections.newSetFromMap(IdentityHashMap<Throwable, Boolean>())
+    var error: Throwable? = this
+    while (error != null && visited.add(error)) {
+        if (error is SystemFontException) return error.reason.code
+        error = error.cause
+    }
+    return null
+}
