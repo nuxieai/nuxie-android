@@ -24,6 +24,34 @@ import org.junit.Test
 
 class HostRenderHarnessTest {
     @Test
+    fun `nux renderer resolves declared scene through configured import`() {
+        val native = RecordingNative()
+        val input = prepareInput(renderer = "nux")
+        val output = Files.createTempDirectory("host-render-nux-").toFile()
+        try {
+            val result = HostRenderHarness(NuxieRuntime(native), PASS_THROUGH_DECODER).run(
+                HostRenderOptions(input, output, frameCount = 1))
+            assertEquals(1, result.frames.size)
+            assertEquals(listOf("renderer", "import:4"), native.factoryLifecycle.take(2))
+        } finally { input.deleteRecursively(); output.deleteRecursively() }
+    }
+
+    @Test
+    fun `nux declaration cannot silently load a riv field`() {
+        val input = prepareInput()
+        val descriptor = File(input, "release-descriptor.json")
+        descriptor.writeText(descriptor.readText().replace("\"renderer\":\"rive\"", "\"renderer\":\"nux\""))
+        val output = Files.createTempDirectory("host-render-mismatch-").toFile()
+        val native = RecordingNative()
+        try {
+            assertThrows(IllegalStateException::class.java) {
+                HostRenderHarness(NuxieRuntime(native), PASS_THROUGH_DECODER).run(HostRenderOptions(input, output))
+            }
+            assertEquals(emptyList<String>(), native.factoryLifecycle)
+        } finally { input.deleteRecursively(); output.deleteRecursively() }
+    }
+
+    @Test
     fun `release descriptor drives configured import fixed steps and CPU frame manifest`() {
         val input = prepareInput()
         val output = Files.createTempDirectory("host-render-output-").toFile()
@@ -86,21 +114,22 @@ class HostRenderHarnessTest {
         }
     }
 
-    private fun prepareInput(declaredDefault: Boolean = false): File {
+    private fun prepareInput(declaredDefault: Boolean = false, renderer: String = "rive"): File {
         val input = Files.createTempDirectory("host-render-input-").toFile()
         File(input, "assets/hero.png").apply {
             requireNotNull(parentFile).mkdirs()
             writeBytes(byteArrayOf(1, 2, 3, 4))
         }
-        File(input, "scene.riv").writeBytes(byteArrayOf(82, 73, 86, 69))
+        val extension = if (renderer == "nux") "nux" else "riv"
+        File(input, "scene.$extension").writeBytes(byteArrayOf(82, 73, 86, 69))
         val defaultDeclaration = if (declaredDefault) ",\"defaultViewModelName\":\"Root\"" else ""
         File(input, "release-descriptor.json").writeText(
             """
             {
               "presentation":{"backgroundColor":"#102030FF"},
               "render":{
-                "renderer":"rive",
-                "riv":{"key":"scene.riv"},
+                "renderer":"$renderer",
+                "$extension":{"key":"scene.$extension"},
                 "assets":[{
                   "kind":"image","key":"assets/hero.png","riveAssetId":7,
                   "riveUniqueName":"hero-7","required":true

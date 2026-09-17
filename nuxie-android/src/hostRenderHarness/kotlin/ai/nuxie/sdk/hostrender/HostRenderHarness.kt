@@ -45,10 +45,7 @@ internal class HostRenderHarness(
         val descriptor = Json.parseToJsonElement(descriptorFile.readText()).jsonObject
         val render = descriptor["render"] as? JsonObject
             ?: error("Journey release render is missing")
-        require(render.string("renderer") == "rive") {
-            "Journey release renderer must be rive"
-        }
-        val rivFile = resolveRiv(input, render)
+        val sceneFile = resolveScene(input, render)
         val size = options.size ?: render.defaultSize()
         val artifacts = collectArtifacts(input)
         val clearColor = descriptor.clearColor()
@@ -56,8 +53,8 @@ internal class HostRenderHarness(
         check(runtime.isAvailable) {
             "Nuxie host runtime is unavailable; set NUXIE_HOST_CAPI_LIB to the host nux_capi library"
         }
-        val rivBytes = rivFile.readBytes()
-        val inspected = checkNotNull(runtime.inspectFileAssets(rivBytes)) {
+        val sceneBytes = sceneFile.readBytes()
+        val inspected = checkNotNull(runtime.inspectFileAssets(sceneBytes)) {
             "Runtime could not inspect the Experience asset catalog"
         }
         val prepared = ExperienceAssetImportBuilder.build(descriptor, artifacts, inspected)
@@ -71,7 +68,7 @@ internal class HostRenderHarness(
             file = checkNotNull(
                 runtime.importFile(
                     renderer = renderer,
-                    bytes = rivBytes,
+                    bytes = sceneBytes,
                     expectedAssets = prepared.expectedAssets,
                     externalAssets = wireExternalAssets(prepared.externalAssets),
                     imageDecoder = imageDecoder,
@@ -133,14 +130,20 @@ internal class HostRenderHarness(
         }
     }
 
-    private fun resolveRiv(input: File, render: JsonObject): File {
-        val key = (render["riv"] as? JsonObject)?.string("key")
-            ?: error("Journey release riv key is missing")
+    private fun resolveScene(input: File, render: JsonObject): File {
+        val field = when (render.string("renderer")) {
+            "rive" -> "riv"
+            "nux" -> "nux"
+            else -> error("Journey release renderer is unsupported")
+        }
+        val key = (render[field] as? JsonObject)?.string("key")
+            ?: error("Journey release $field key is missing")
+        require(key.endsWith(".$field")) { "Scene extension differs from release renderer" }
         val declared = File(input, key)
         if (declared.isFile) return declared
         val topLevel = File(input, File(key).name)
         if (topLevel.isFile) return topLevel
-        error("Input must contain the declared .riv file: $key")
+        error("Input must contain the declared .$field file: $key")
     }
 
     private fun collectArtifacts(input: File): Map<String, File> {
