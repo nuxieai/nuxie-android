@@ -322,6 +322,13 @@ internal object PresentationRegistry {
         old.forEach { it.retireForRetry() }
     }
 
+    suspend fun drainRetiredScreens(id: String) {
+        val retired = synchronized(lock) {
+            entries[id]?.attachedScreens?.filter { it.rendererEffects?.isRetired == true }.orEmpty()
+        }
+        retired.forEach { it.retireForRetry() }
+    }
+
     fun nativeRetired(id: String, generation: Long): Boolean = synchronized(lock) {
         val entry = entries[id] ?: return@synchronized false
         val ready = entry.state.value as? PresentationContentState.Ready ?: return@synchronized false

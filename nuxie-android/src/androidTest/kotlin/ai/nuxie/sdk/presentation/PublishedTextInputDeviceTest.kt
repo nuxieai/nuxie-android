@@ -2366,14 +2366,21 @@ class PublishedTextInputDeviceTest {
             purchaseNavigationFixture = true, recreateAfterSelection = true)
     }
 
+    @Test
+    fun signedPurchaseWaitsForFinalStateDuringActivityRecreation() {
+        exerciseDurableNativeEmission(PublishedBehavior.PURCHASE, purchaseX = 240f,
+            purchaseNavigationFixture = true, recreateAfterSelection = true, delayFinalCapture = true)
+    }
+
     private enum class PublishedBehavior { TEXT_INPUT, SCRIPT, SEMANTIC_SCRIPT, SEMANTIC_ROLES, PURCHASE }
 
-    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f, selectPlan: Boolean = false, purchaseRoundTrip: Boolean = false, purchaseNavigationFixture: Boolean = purchaseRoundTrip, recreateAfterSelection: Boolean = false) {
+    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f, selectPlan: Boolean = false, purchaseRoundTrip: Boolean = false, purchaseNavigationFixture: Boolean = purchaseRoundTrip, recreateAfterSelection: Boolean = false, delayFinalCapture: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
         val purchasing = behavior == PublishedBehavior.PURCHASE
         val purchases = LinkedBlockingQueue<String>()
+        val releaseOldLane = CountDownLatch(1)
         val scripted = behavior == PublishedBehavior.SCRIPT || behavior == PublishedBehavior.SEMANTIC_SCRIPT
         val candidateSemantics = behavior == PublishedBehavior.SEMANTIC_SCRIPT || behavior == PublishedBehavior.SEMANTIC_ROLES
         val fixturePath = if (purchaseNavigationFixture) "journeys/rendered-purchase-navigation" else if (purchasing) "journeys/rendered-purchase-scopes" else if (behavior == PublishedBehavior.SEMANTIC_ROLES) "journeys/rendered-semantic-roles"
@@ -2491,9 +2498,9 @@ class PublishedTextInputDeviceTest {
             var first = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
             if (purchasing) {
                 assertTrue("Purchase requires revealed signed presentation", initiallyRevealed.await(10, TimeUnit.SECONDS))
-                fun awaitSurface(previous: ExperienceSurfaceHost? = null): ExperienceSurfaceHost {
+                fun awaitSurface(previous: ExperienceSurfaceHost? = null, timeoutMillis: Long = 10_000): ExperienceSurfaceHost {
                     var surface: ExperienceSurfaceHost? = null
-                    val deadline = SystemClock.uptimeMillis() + 10_000
+                    val deadline = SystemClock.uptimeMillis() + timeoutMillis
                     while (surface == null && SystemClock.uptimeMillis() < deadline) {
                         instrumentation.runOnMainSync {
                             fun find(view: View): ExperienceSurfaceHost? = when {
@@ -2530,6 +2537,17 @@ class PublishedTextInputDeviceTest {
                 if (recreateAfterSelection) {
                     val original = first
                     val previous = target
+                    if (delayFinalCapture) {
+                        val oldLane = ExperienceSurfaceHost::class.java.getDeclaredField("lane").apply { isAccessible = true }.get(previous) as NuxieRuntimeLane
+                        val mutated = CountDownLatch(1)
+                        assertTrue(oldLane.enqueue {
+                            val artboard = ExperienceSurfaceHost::class.java.getDeclaredField("artboard").apply { isAccessible = true }.get(previous) as ai.nuxie.sdk.runtime.NuxieRuntimeArtboard
+                            assertTrue(artboard.setDefaultViewModelValue("second/placementId", NuxieViewModelScalarValue.StringValue("plan:lifetime")))
+                            mutated.countDown()
+                            check(releaseOldLane.await(15, TimeUnit.SECONDS))
+                        })
+                        assertTrue("Mutation must precede recreation", mutated.await(5, TimeUnit.SECONDS))
+                    }
                     instrumentation.runOnMainSync { original.recreate() }
                     val deadline = SystemClock.elapsedRealtime() + 10_000
                     var replacement: Activity? = null
@@ -2537,6 +2555,16 @@ class PublishedTextInputDeviceTest {
                         replacement = monitor.waitForActivityWithTimeout(500)?.takeUnless { it === original }
                     }
                     first = checkNotNull(replacement) { "Recreation must provide a distinct Activity" }
+                    if (delayFinalCapture) {
+                        val earlySurface = runCatching { awaitSurface(previous, timeoutMillis = 500) }.getOrNull()
+                        if (earlySurface != null) {
+                            val newLane = ExperienceSurfaceHost::class.java.getDeclaredField("lane").apply { isAccessible = true }.get(earlySurface) as NuxieRuntimeLane
+                            val mounted = CountDownLatch(1)
+                            assertTrue(newLane.enqueue { mounted.countDown() })
+                            assertTrue(mounted.await(5, TimeUnit.SECONDS))
+                        }
+                        releaseOldLane.countDown()
+                    }
                     target = awaitSurface(previous)
                     assertTrue("Recreation must not dispatch checkout", purchases.isEmpty())
                     assertEquals("Recreation must keep the same Journey screen", 1, presentationCount.get())
@@ -2561,7 +2589,7 @@ class PublishedTextInputDeviceTest {
                 dispatch(MotionEvent.ACTION_UP)
                 val dispatched = purchases.poll(10, TimeUnit.SECONDS)
                 assertEquals("batches=${accepted.map { it.source to it.emissions.map { emission -> emission.name } }} outcomes=$terminalOutcomes errors=$errorDismissals",
-                    if (selectPlan) "plan:lifetime" else if (purchaseX == 80f) "plan:monthly" else "plan:annual", dispatched)
+                    if (selectPlan || delayFinalCapture) "plan:lifetime" else if (purchaseX == 80f) "plan:monthly" else "plan:annual", dispatched)
                 val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS))
                 assertEquals(if (purchaseX == 80f) "plan.first" else "plan.second", batch.source.instanceId)
                 assertEquals(listOf("purchase_requested"), batch.emissions.map { it.name })
@@ -2759,6 +2787,7 @@ class PublishedTextInputDeviceTest {
             assertEquals("screen_2", presentations.journeyScreenId(JourneyPresentationOwner(reopened.journeyId, owner)))
             assertEquals("durable@example.com", journalRun().context.getValue("responses").jsonObject.getValue("email").jsonPrimitive.content)
         } finally {
+            releaseOldLane.countDown()
             runBlocking {
                 presentations.shutdownOwnedBy(owner)
                 scope.coroutineContext[Job]?.cancelAndJoin()
