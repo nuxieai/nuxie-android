@@ -95,44 +95,35 @@ class ConfiguredImportSmokeTest {
                     val player = checkNotNull(artboard.newPlayer())
                     try {
                         val initial = player.videos().single()
-                        val decoder = AndroidVideoDecoder(instrumentation.targetContext, local, initial.generation, 64 * 32 * 4, 1)
+                        val playback = ExperienceVideoPlayback(instrumentation.targetContext, player,
+                            listOf(ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding(0, initial.assetId, initial.sourceKey, local, true)))
                         try {
+                            playback.setVisible(true)
                             val deadline = android.os.SystemClock.elapsedRealtime() + 15_000
-                            var ready = false
-                            var ended = false
+                            var suspended = false
                             val colors = mutableListOf<Boolean>()
                             while (android.os.SystemClock.elapsedRealtime() < deadline && colors.size < 4) {
-                                check(decoder.failure() == null) { "Decoder failed: ${decoder.failure()}" }
-                                val occurrence = player.videos().single()
-                                val observation = when {
-                                    decoder.ready() && !ready -> { ready = true; 1 }
-                                    decoder.ended() && !ended -> { ended = true; 3 }
-                                    decoder.playing() -> { ended = false; 2 }
-                                    else -> 0
-                                }
-                                player.videoStep(occurrence.componentId, observation, occurrence.generation,
-                                    if (observation == 1) decoder.duration() else 0.0).forEach {
-                                    decoder.action(it.kind, it.value, it.generation)
-                                }
-                                decoder.clock()?.let {
-                                    player.videoClock(occurrence.componentId, System.nanoTime() / 1_000_000_000.0,
-                                        NuxieVideoClock(it.generation, it.seconds, it.rate, it.playing, true))
-                                }
-                                decoder.takeFrame()?.let {
-                                    player.videoPresent(renderer, occurrence.componentId,
-                                        NuxieVideoFrame(it.generation, it.seconds, it.width, it.height, it.rgba))
-                                    player.step(0.0)
-                                    val composed = renderer.renderToCpuFrame(player, 0, false)
-                                    val offset = (80 * composed.width + 100) * 4
-                                    val red = composed.rgba[offset].toInt() and 255
-                                    val blue = composed.rgba[offset + 2].toInt() and 255
-                                    if (red > 180 && blue < 70 && colors.lastOrNull() != true) colors.add(true)
-                                    if (blue > 180 && red < 70 && colors.lastOrNull() != false) colors.add(false)
+                                playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                                player.step(0.0)
+                                val composed = renderer.renderToCpuFrame(player, 0, false)
+                                val offset = (80 * composed.width + 100) * 4
+                                val red = composed.rgba[offset].toInt() and 255
+                                val blue = composed.rgba[offset + 2].toInt() and 255
+                                if (red > 180 && blue < 70 && colors.lastOrNull() != true) colors.add(true)
+                                if (blue > 180 && red < 70 && colors.lastOrNull() != false) colors.add(false)
+                                if (!suspended && colors == listOf(true)) {
+                                    playback.setVisible(false)
+                                    playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                                    assertTrue(player.videos().single().wantsPlay)
+                                    assertTrue(player.videos().single().state != 2)
+                                    Thread.sleep(150)
+                                    playback.setVisible(true)
+                                    suspended = true
                                 }
                                 Thread.sleep(16)
                             }
                             assertEquals("Decoded frames must repeat through native loop commands", listOf(true, false, true, false), colors)
-                        } finally { decoder.close() }
+                        } finally { playback.close() }
                     } finally { player.close() }
                 } finally { artboard.close() }
             } finally { file.close() }
