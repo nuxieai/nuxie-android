@@ -7,10 +7,27 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class NuxiePurchaseScopeSnapshotTest {
+    @Test
+    fun `signed reference aliases reject conflicting native identity and model`() {
+        val current = snapshot("root", "secondary")
+        val first = NuxieViewModelInstanceBinding("WelcomeModel", "welcome", "product", "product.first", "Product")
+        val second = NuxieViewModelInstanceBinding("WelcomeModel", "secondary", "product", "product.second", "Product")
+        val aliases = current.captureInstanceIds(listOf(first, second))
+        assertEquals(3L, aliases["product.first"])
+        assertEquals(4L, aliases["product.second"])
+        assertThrows(IllegalArgumentException::class.java) {
+            current.captureInstanceIds(listOf(first, second.copy(instanceId = "product.first")))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            current.captureInstanceIds(listOf(first.copy(modelName = "WelcomeModel")))
+        }
+    }
+
     @Test
     fun `shared purchase scopes use the selected live instance`() {
         val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()

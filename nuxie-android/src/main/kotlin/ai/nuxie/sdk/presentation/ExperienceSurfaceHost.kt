@@ -366,12 +366,14 @@ internal class ExperienceSurfaceHost(
                         file = loadedFile,
                         artboard = loadedArtboard,
                         projection = viewModelProjection,
+                        instanceBindings = descriptor?.let(ExperienceViewModelBinding::instanceBindings).orEmpty(),
                     )
                 } else {
                     descriptor?.let { signed ->
                         ExperienceViewModelBinding.defaultSchemaName(signed, artboardName)?.let { name ->
                             loadedArtboard.bindDefaultViewModel(name,
-                                ExperienceViewModelBinding.defaultInstanceId(signed, artboardName))
+                                ExperienceViewModelBinding.defaultInstanceId(signed, artboardName),
+                                ExperienceViewModelBinding.instanceBindings(signed))
                         }
                     }
                 }

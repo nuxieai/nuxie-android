@@ -53,6 +53,7 @@ internal class NuxieRuntime(
         file: NuxieRuntimeFile,
         artboard: NuxieRuntimeArtboard,
         projection: NuxieViewModelListProjection,
+        instanceBindings: List<NuxieViewModelInstanceBinding> = emptyList(),
     ): NuxieRuntimeViewModelState {
         require(projection.items.map { it.listIndex } == projection.items.indices.toList()) {
             "Projected view-model list indices must be contiguous and ordered"
@@ -159,8 +160,16 @@ internal class NuxieRuntime(
                 native.bindViewModel(artboard.requireHandle(), root),
                 "bind projected default view model",
             )
+            val capturedIds = if (instanceBindings.isEmpty()) instanceIds else {
+                NuxieViewModelSnapshot.fromNative(
+                    requireNativeValue(native.snapshotViewModel(root), "identify projected graph"),
+                    schemaNames = catalog.schemas.associate { it.index.toLong() to it.name },
+                    instanceIds = instanceIds,
+                    defaultInstanceId = projection.defaultInstanceId,
+                ).captureInstanceIds(instanceBindings)
+            }
             return NuxieRuntimeViewModelState(root, children, native, catalog, rootSchema.index,
-                instanceIds, projection.defaultInstanceId)
+                capturedIds, projection.defaultInstanceId)
         } catch (error: Throwable) {
             freeViewModelHandles(root, children, native)
             throw error
@@ -236,6 +245,7 @@ internal class NuxieRuntimeArtboard internal constructor(
     private var defaultViewModel: NuxieOwnedHandle? = null
     private var boundDefaultSchemaName: String? = null
     private var boundDefaultInstanceId: String? = null
+    private var boundInstanceIds: Map<String, Long> = emptyMap()
     private var boundCatalog: NuxieViewModelCatalog? = null
     private var boundRootSchemaIndex: Int? = null
 
@@ -263,6 +273,7 @@ internal class NuxieRuntimeArtboard internal constructor(
             requireNativeValue(native.snapshotViewModel(model.require()), "snapshot default view model"),
             schemaNames = checkNotNull(boundCatalog).schemas.associate { it.index.toLong() to it.name },
             defaultInstanceId = boundDefaultInstanceId,
+            instanceIds = boundInstanceIds,
         )
     }
 
@@ -273,7 +284,11 @@ internal class NuxieRuntimeArtboard internal constructor(
      * A missing declared default is an error; absence is handled by the caller.
      * This artboard owns the returned view-model handle.
      */
-    fun bindDefaultViewModel(expectedSchemaName: String, defaultInstanceId: String? = null) {
+    fun bindDefaultViewModel(
+        expectedSchemaName: String,
+        defaultInstanceId: String? = null,
+        instanceBindings: List<NuxieViewModelInstanceBinding> = emptyList(),
+    ) {
         val artboard = owned.require()
         require(expectedSchemaName.isNotEmpty()) { "Declared default view-model name is empty" }
         if (defaultViewModel != null) {
@@ -311,12 +326,20 @@ internal class NuxieRuntimeArtboard internal constructor(
             check(actualName == expectedSchemaName) {
                 "Declared default view model $expectedSchemaName does not match artboard default $actualName"
             }
+            val instanceIds = if (instanceBindings.isEmpty()) emptyMap() else {
+                NuxieViewModelSnapshot.fromNative(
+                    requireNativeValue(native.snapshotViewModel(viewModel.require()), "identify authored view models"),
+                    schemaNames = catalog.schemas.associate { it.index.toLong() to it.name },
+                    defaultInstanceId = defaultInstanceId,
+                ).captureInstanceIds(instanceBindings)
+            }
             val status = native.bindViewModel(artboard, viewModel.require())
             if (status != NUX_STATUS_OK) {
                 throw NuxieRuntimeCallException("bind default view model", status)
             }
             boundCatalog = catalog
             boundRootSchemaIndex = schemaIndex.toInt()
+            boundInstanceIds = instanceIds
         } catch (error: Throwable) {
             runCatching { viewModel.close() }.exceptionOrNull()?.let(error::addSuppressed)
             throw error
