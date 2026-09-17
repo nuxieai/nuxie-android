@@ -11,6 +11,7 @@ internal class ExperienceScreenLifecycle {
         private set
     private var transition = ""
     private var reduceMotion = false
+    private var fontScale = 1.0
 
     @Synchronized
     fun move(phase: Phase, transition: String = ""): Map<String, NuxieViewModelScalarValue> {
@@ -35,9 +36,16 @@ internal class ExperienceScreenLifecycle {
     }
 
     @Synchronized
+    fun updateFontScale(value: Float): Map<String, NuxieViewModelScalarValue> {
+        fontScale = if (value.isFinite() && value > 0f) value.toDouble() else 1.0
+        return snapshot()
+    }
+
+    @Synchronized
     fun copyForPreparation(): ExperienceScreenLifecycle = ExperienceScreenLifecycle().also {
         it.appearances = appearances
         it.reduceMotion = reduceMotion
+        it.fontScale = fontScale
     }
 
     /** Called only after an unrevealed native attempt has fully drained. */
@@ -54,5 +62,6 @@ internal class ExperienceScreenLifecycle {
         "screen/appearances" to NuxieViewModelScalarValue.NumberValue(appearances.toDouble()),
         "screen/transition" to NuxieViewModelScalarValue.StringValue(transition),
         "env/reduceMotion" to NuxieViewModelScalarValue.BooleanValue(reduceMotion),
+        "fontScale" to NuxieViewModelScalarValue.NumberValue(fontScale),
     )
 }

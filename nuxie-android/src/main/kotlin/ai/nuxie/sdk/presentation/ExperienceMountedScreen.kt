@@ -69,6 +69,7 @@ internal class ExperienceMountedScreen(
     private var reducedMotion: ExperienceReducedMotion? = null
 
     fun mount(): View {
+        lifecycle.updateFontScale(activity.resources.configuration.fontScale)
         surface.updateRuntimeValues(if (lifecycle.phase == ExperienceScreenLifecycle.Phase.HIDDEN)
             lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING) else lifecycle.snapshot())
         reducedMotion = ExperienceReducedMotion(activity) { reduced ->
@@ -109,8 +110,16 @@ internal class ExperienceMountedScreen(
     }
 
     fun setVisible(visible: Boolean) {
-        if (visible) reducedMotion?.refresh()
+        if (visible) {
+            refreshFontScale(activity.resources.configuration.fontScale)
+            reducedMotion?.refresh()
+        }
         surface.setPresentationVisible(visible)
+    }
+
+    /** Queued on the same lane as safe-area updates and frame-qualified native input capture. */
+    fun refreshFontScale(value: Float) {
+        surface.updateRuntimeValues(lifecycle.updateFontScale(value))
     }
 
     val reduceMotion: Boolean get() = reduceMotionEnabled

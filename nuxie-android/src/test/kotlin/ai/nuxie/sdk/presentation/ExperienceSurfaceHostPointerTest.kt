@@ -425,6 +425,42 @@ class ExperienceSurfaceHostPointerTest {
     }
 
     @Test
+    fun `font scale waits for pending pixels and coalesces before the next step`() {
+        val native = RecordingNative("fontScale")
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
+        val texture = SurfaceTexture(0)
+        try {
+            host.updateRuntimeValues(mapOf("fontScale" to NuxieViewModelScalarValue.NumberValue(1.0)))
+            host.loadArtboard(byteArrayOf(1), null, viewModelProjection =
+                NuxieViewModelListProjection("Root", "products", null, "Product", emptyList()))
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            native.presentation = 4
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.updateRuntimeValues(mapOf("fontScale" to NuxieViewModelScalarValue.NumberValue(2.0)))
+            host.updateRuntimeValues(mapOf("fontScale" to NuxieViewModelScalarValue.NumberValue(3.12)))
+            drain(lane)
+            assertEquals("Pending pixels retain their original model revision", listOf(1f), native.stateWrites)
+            native.presentation = 1
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            assertEquals(listOf(1f), native.stateWrites)
+            host.onSurfaceTextureUpdated(texture)
+            host.doFrame(1_032_000_000L)
+            drain(lane)
+            assertEquals(listOf(1f, 3.12f), native.stateWrites)
+            assertEquals(listOf(1f, 3.12f), native.stateAtSteps)
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
+    @Test
     fun `resume cancels a delivered press before the next gesture reaches the retained player`() {
         val native = RecordingNative()
         val lane = NuxieRuntimeLane()
@@ -897,7 +933,7 @@ class ExperienceSurfaceHostPointerTest {
     private fun motion(action: Int, eventTime: Long, x: Float, y: Float): MotionEvent =
         MotionEvent.obtain(0, eventTime, action, x, y, 0)
 
-    private class RecordingNative : NuxieTypedRuntimeNative {
+    private class RecordingNative(private val statePath: String = "safeArea/top") : NuxieTypedRuntimeNative {
         var geometryStatus: Int? = null
         val requestedTextRuns = mutableListOf<List<String>>()
         var semanticsEnabled = 0
@@ -930,7 +966,7 @@ class ExperienceSurfaceHostPointerTest {
         override fun viewModelCatalog(fileHandle: Long) = NativeCallResult(0, NativeViewModelCatalog(
             arrayOf(NativeViewModelSchema(0, "Root", 0, 2, 0, 0, -1, false),
                 NativeViewModelSchema(1, "Product", 2, 0, 0, 0, -1, false)),
-            arrayOf(NativeViewModelProperty(0, 0, "safeArea/top", 2, -1, emptyArray()),
+            arrayOf(NativeViewModelProperty(0, 0, statePath, 2, -1, emptyArray()),
                 NativeViewModelProperty(0, 1, "products", 8, 1, emptyArray())), emptyArray(),
         ))
         override fun newDefaultViewModel(artboardHandle: Long) = NativeCallResult(0, 40L)
@@ -942,7 +978,7 @@ class ExperienceSurfaceHostPointerTest {
         override fun mutateViewModel(handle: Long, write: NativeViewModelWrite): Int {
             assertFalse(boundStateFreed)
             assertEquals(40L, handle)
-            assertEquals("safeArea/top", write.path)
+            assertEquals(statePath, write.path)
             stateWrites += write.numberValue
             return 0
         }
