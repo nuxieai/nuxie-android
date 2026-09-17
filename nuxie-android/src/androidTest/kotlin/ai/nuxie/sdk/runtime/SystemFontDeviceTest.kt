@@ -13,6 +13,40 @@ class SystemFontDeviceTest {
     private fun asset(name: String): ByteArray = InstrumentationRegistry.getInstrumentation()
         .context.assets.open("runtime/system-font-axes/$name").use { it.readBytes() }
 
+    @Test fun authoredRegularAndBoldRenderDistinctDeviceGlyphs() {
+        val runtime = NuxieRuntime.shared
+        assertTrue(runtime.isAvailable)
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(320, 640))
+        fun render(name: String, weight: Int): ByteArray {
+            val bytes = asset("$name.nux")
+            val catalog = checkNotNull(runtime.inspectFileAssets(bytes))
+            val font = catalog.single { it.kind == FileAssetKind.FONT }
+            val device = SystemFontProvider.prepare(SystemFontRequirement("system", weight, "normal"))
+            val file = checkNotNull(runtime.importFile(renderer, bytes, catalog, mapOf(font.ordinal to device.bytes)))
+            try {
+                val artboard = checkNotNull(file.newArtboard("One"))
+                try {
+                    val player = checkNotNull(artboard.newPlayer())
+                    try {
+                        player.step(0.0)
+                        return renderer.renderToCpuFrame(player, 0xff111111.toInt(), false).rgba
+                    } finally { player.close() }
+                } finally { artboard.close() }
+            } finally { file.close() }
+        }
+        fun ink(pixels: ByteArray) = (2 until pixels.size step 4).sumOf {
+            ((pixels[it].toInt() and 255) - 0x11).coerceAtLeast(0)
+        }
+        try {
+            val regular = render("regular", 400)
+            val bold = render("bold", 700)
+            assertTrue("Regular scene contains visible glyphs", ink(regular) > 10_000)
+            assertTrue("Authored bold increases glyph coverage", ink(bold) > ink(regular))
+            assertFalse("Authored weight changes rendered pixels", regular.contentEquals(bold))
+            assertArrayEquals("Reserialized production scene preserves rendering", regular, render("optical-baseline", 400))
+        } finally { renderer.close() }
+    }
+
     @Test fun mixedDeviceAndDownloadedFontsRenderAndRequiredFontsRejectInvalidBytes() {
         val runtime = NuxieRuntime.shared
         assertTrue(runtime.isAvailable)
