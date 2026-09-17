@@ -205,9 +205,9 @@ provider-reported pending payment blocks identity mutation and requires recovery
 The RevenueCat selection prepares a session-bound logout operation using public
 `awaitLogOut` completion. It requires the expected non-anonymous customer at
 admission and confirms an anonymous identity at completion. A failed callback can
-arrive after identity reset: RevenueCat 10.21.1
-[resets identity before refreshing customer information](https://github.com/RevenueCat/purchases-android/blob/10.21.1/purchases/src/main/kotlin/com/revenuecat/purchases/PurchasesOrchestrator.kt),
-and [rejects another logout when already anonymous](https://github.com/RevenueCat/purchases-android/blob/10.21.1/purchases/src/main/kotlin/com/revenuecat/purchases/identity/IdentityManager.kt).
+arrive after identity reset: RevenueCat 10.22.1
+[resets identity before refreshing customer information](https://github.com/RevenueCat/purchases-android/blob/10.22.1/purchases/src/main/kotlin/com/revenuecat/purchases/PurchasesOrchestrator.kt),
+and [rejects another logout when already anonymous](https://github.com/RevenueCat/purchases-android/blob/10.22.1/purchases/src/main/kotlin/com/revenuecat/purchases/identity/IdentityManager.kt).
 The original attempt still fails. In-process explicit retry retains the exact
 anonymous ID observed after that callback and awaits `awaitCustomerInfo` with
 `FETCH_CURRENT`, checking identity again at completion. Refresh failures remain
