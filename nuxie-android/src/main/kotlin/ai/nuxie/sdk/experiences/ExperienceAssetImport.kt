@@ -9,6 +9,9 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.longOrNull
 
+/** Signed device-font request; it deliberately has no downloadable artifact identity. */
+internal data class SystemFontRequirement(val uniqueName: String, val weight: Int, val style: String)
+
 /** Immutable inputs for one configured native file import. */
 internal data class ExperienceAssetImport(
     val expectedAssets: List<ExpectedFileAsset>,
@@ -25,6 +28,9 @@ internal object ExperienceAssetImportBuilder {
         descriptor: JsonObject,
         artifactsByKey: Map<String, File>,
         inspectedCatalog: List<ExpectedFileAsset>,
+        systemFontBytes: (SystemFontRequirement) -> ByteArray = {
+            error("System font provider is unavailable")
+        },
     ): ExperienceAssetImport {
         require(inspectedCatalog.withIndex().all { (index, asset) ->
             asset.ordinal == index
@@ -34,23 +40,14 @@ internal object ExperienceAssetImportBuilder {
         require(declarations.distinctBy(Declaration::identity).size == declarations.size) {
             "Signed Experience assets contain duplicate authored identities"
         }
-        val externalAssets = linkedMapOf<Int, ByteArray>()
+        val bindings = mutableListOf<Pair<ExpectedFileAsset, Declaration>>()
         inspectedCatalog.forEach { asset ->
             val declarationIndex = declarations.indexOfFirst { declaration ->
                 declaration.matches(asset)
             }
             if (declarationIndex >= 0) {
                 val declaration = declarations.removeAt(declarationIndex)
-                if (!asset.isEmbedded) {
-                    val file = artifactsByKey[declaration.artifactKey]
-                    if (file == null) {
-                        require(!declaration.required) {
-                            "Required Experience asset was not acquired: ${declaration.artifactKey}"
-                        }
-                    } else {
-                        externalAssets[asset.ordinal] = file.readBytes()
-                    }
-                }
+                bindings += asset to declaration
             } else {
                 require(asset.mayRemainInBand()) {
                     "Authored Experience asset is not declared: ordinal ${asset.ordinal}"
@@ -59,6 +56,24 @@ internal object ExperienceAssetImportBuilder {
         }
         require(declarations.isEmpty()) {
             "Signed Experience assets do not exactly match the authored catalog"
+        }
+
+        // Resolve bytes only after the entire signed catalog has matched.
+        val externalAssets = linkedMapOf<Int, ByteArray>()
+        bindings.forEach { (asset, declaration) ->
+            when (val source = declaration.source) {
+                is Source.System -> externalAssets[asset.ordinal] = systemFontBytes(source.requirement)
+                is Source.Download -> {
+                    val file = artifactsByKey[source.key]
+                    if (file == null) {
+                        require(!declaration.required) {
+                            "Required Experience asset was not acquired: ${source.key}"
+                        }
+                    } else {
+                        externalAssets[asset.ordinal] = file.readBytes()
+                    }
+                }
+            }
         }
 
         return ExperienceAssetImport(
@@ -92,19 +107,36 @@ internal object ExperienceAssetImportBuilder {
                 uniqueName = asset.string("riveUniqueName")
                     ?.takeIf(String::isNotBlank)
                     ?: error("Journey release asset $index has no unique name"),
-                artifactKey = asset.string("key")
-                    ?: error("Journey release asset $index has no artifact key"),
+                source = if (kind == FileAssetKind.FONT && asset.string("location") == "system") {
+                    require(asset.string("family") == "System" && asset.string("style") == "normal")
+                    val weight = asset.string("weight")
+                    require(weight in (100..900 step 100).map(Int::toString))
+                    require((asset["required"] as? JsonPrimitive)?.booleanOrNull == true)
+                    Source.System(SystemFontRequirement(
+                        uniqueName = asset.string("riveUniqueName")!!,
+                        weight = weight!!.toInt(),
+                        style = "normal",
+                    ))
+                } else {
+                    Source.Download(asset.string("key")
+                        ?: error("Journey release asset $index has no artifact key"))
+                },
                 required = (asset["required"] as? JsonPrimitive)?.booleanOrNull
                     ?: error("Journey release asset $index has no required flag"),
             )
         }
     }
 
+    private sealed interface Source {
+        data class Download(val key: String) : Source
+        data class System(val requirement: SystemFontRequirement) : Source
+    }
+
     private data class Declaration(
         val kind: FileAssetKind,
         val authoredId: Long,
         val uniqueName: String,
-        val artifactKey: String,
+        val source: Source,
         val required: Boolean,
     ) {
         fun identity(): Triple<FileAssetKind, Long, String> =

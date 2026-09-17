@@ -79,6 +79,14 @@ internal object JourneyReleaseSchema {
         if (root["render"] != JsonNull) {
             JourneyRenderSchema.validate(record(root["render"]))
             requirements(root["requirements"])
+            val assets = array(record(root["render"])["assets"])
+            val systemFonts = assets.any {
+                val asset = record(it)
+                text(asset["kind"]) == "font" && asset["location"]?.let(::text) == "system"
+            }
+            if (systemFonts && "system-fonts" !in ids(record(root["requirements"])["requiredCapabilities"], 256)) {
+                fail("System font capability required")
+            }
         }
     }
 

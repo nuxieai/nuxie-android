@@ -28,6 +28,52 @@ class JourneyReleaseTest {
     private val keys = mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(
         fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))
 
+    @Test fun `published font fixtures authenticate with explicit CDN sources`() {
+        for (name in listOf("rendered-text-input", "rendered-custom-transition", "rendered-semantic-roles")) {
+            val directory = FixtureRunner.fixturesRoot().resolve("journeys/$name")
+            val entry = Json.parseToJsonElement(directory.resolve("release-entry.json").readText()).jsonObject
+            val provenance = Json.parseToJsonElement(directory.resolve("provenance.json").readText()).jsonObject
+            val trusted = mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(
+                provenance.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))
+            val envelope = entry.getValue("envelope").jsonObject
+            val encoded = envelope.toString().encodeToByteArray()
+            val bytes = JourneyReleaseEnvelope.authenticate(encoded, trusted).descriptorBytes
+            val source = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
+            val identity = requireNotNull(JourneyReleaseIdentity.fromJson(source.getValue("identity").jsonObject))
+            val legId = source.getValue("leg").jsonObject.getValue("id").jsonPrimitive.content
+            assertArrayEquals(name, bytes, JourneyReleaseVerifier.authenticate(encoded, trusted, identity, legId,
+                runtime(source), JourneyReleaseReplayPolicy.Active(0)).descriptorBytes)
+            assertEquals(provenance.getValue("descriptorSha256"), envelope.getValue("descriptorSha256"))
+            val fonts = source.getValue("render").jsonObject.getValue("assets").jsonArray
+                .filter { it.jsonObject.getValue("kind").jsonPrimitive.content == "font" }
+            assertEquals("$name must exercise font admission", 1, fonts.size)
+            assertEquals("cdn", fonts.single().jsonObject.getValue("location").jsonPrimitive.content)
+        }
+    }
+
+    @Test fun `shared System font declarations preserve the source contract`() {
+        val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/system-font-declarations.json").readText()).jsonObject
+        val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        for (entry in corpus.getValue("cases").jsonArray) {
+            val case = entry.jsonObject
+            val root = JsonObject(source + mapOf(
+                "render" to JsonObject(source.getValue("render").jsonObject + ("assets" to case.getValue("assets"))),
+                "requirements" to JsonObject(source.getValue("requirements").jsonObject +
+                    ("requiredCapabilities" to case.getValue("requiredCapabilities"))),
+            ))
+            if (case.getValue("valid").jsonPrimitive.content == "true") {
+                JourneyReleaseSchema.validate(root)
+            } else {
+                assertThrows(case.getValue("name").jsonPrimitive.content, JourneyReleaseAuthenticationException::class.java) {
+                    JourneyReleaseSchema.validate(root)
+                }
+            }
+        }
+    }
+
     @Test fun `signed behavior ordering matches the wire contract`() {
         val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/behavior-ordering.json").readText()).jsonObject

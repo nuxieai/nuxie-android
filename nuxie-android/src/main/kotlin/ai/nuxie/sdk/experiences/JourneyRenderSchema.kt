@@ -58,6 +58,15 @@ internal object JourneyRenderSchema {
 
     private fun asset(input: JsonElement): String {
         val asset = record(input)
+        if (text(asset["kind"]) == "font" && asset["location"]?.let(::text) == "system") {
+            exact(asset, setOf("kind", "location", "riveAssetId", "riveUniqueName", "family", "weight", "style", "required"))
+            integer(asset["riveAssetId"])
+            oneOf(asset["family"], "System")
+            oneOf(asset["weight"], "100", "200", "300", "400", "500", "600", "700", "800", "900")
+            oneOf(asset["style"], "normal")
+            if (!boolean(asset["required"])) fail("System font is required")
+            return "system-font:${releaseId(asset["riveUniqueName"])}"
+        }
         val common = setOf("kind", "key", "sha256", "sizeBytes", "contentType", "required")
         val digest = hash(asset["sha256"])
         integer(asset["sizeBytes"], maximum = JourneyReleaseLimits.EXTERNAL_ASSET_BYTES.toLong())
@@ -74,7 +83,9 @@ internal object JourneyRenderSchema {
                 }
             }
             "font" -> {
-                exact(asset, common + setOf("riveAssetId", "riveUniqueName", "family", "weight", "style", "format"))
+                exact(asset, common + setOf("location", "riveAssetId", "riveUniqueName", "family", "weight", "style", "format"))
+                oneOf(asset["location"], "cdn")
+                if (text(asset["family"]).trim().lowercase() == "system") fail("System font must use system location")
                 integer(asset["riveAssetId"]); releaseId(asset["riveUniqueName"])
                 id(asset["family"]); id(asset["weight"], 32); oneOf(asset["style"], "normal", "italic")
                 val format = oneOf(asset["format"], "ttf", "otf")

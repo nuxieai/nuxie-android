@@ -111,7 +111,13 @@ internal class JourneyReleaseArtifactAcquirer(
             }
         }
         val assets = (render["assets"] as? JsonArray)
-            ?.mapIndexed { index, value ->
+            ?.mapIndexedNotNull { index, value ->
+                val asset = value as? JsonObject
+                if (asset?.string("kind") == "font" && asset.string("location") == "system") {
+                    // The authenticated descriptor retains the local requirement;
+                    // there is no network/cache object for a device font.
+                    return@mapIndexedNotNull null
+                }
                 artifact(
                     value as? JsonObject,
                     "<asset:$index>",
