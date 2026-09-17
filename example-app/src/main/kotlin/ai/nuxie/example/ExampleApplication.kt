@@ -14,9 +14,10 @@ class ExampleApplication : Application(), Application.ActivityLifecycleCallbacks
   internal var providerOperations: ProviderOperations? = null
     private set
 
-  internal fun ownProviderOperations(configuration: NuxieConfiguration) {
+  internal fun ownProviderOperations(configuration: NuxieConfiguration, session: String) {
     val delegate = configuration.purchaseDelegate ?: return
-    val owner = providerOperations ?: ProviderOperations(delegate, journal = providerOperationJournal)
+    val owner = providerOperations ?: ProviderOperations(delegate, journal = providerOperationJournal, session = session)
+    check(owner.session == session) { "Provider operations cannot change session." }
     providerOperations = owner
     configuration.purchaseDelegate = owner
   }

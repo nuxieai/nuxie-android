@@ -243,8 +243,14 @@ cancelled result retires that marker; pending payments, returned failures and
 unexpected exceptions retain it. Failed results cannot distinguish a rejection
 before checkout from an ambiguous external outcome. A failed journal write blocks
 dispatch or clean drain. On restart, unfinished markers block provider setup and
-re-identification even when no logout intent exists. Markers contain no customer
-identifiers or purchase tokens. They detect unfinished work; they do not reconcile
+re-identification even when no logout intent exists. Version 2 markers contain the launch-session fingerprint, purchase-versus-restore
+kind, and a purchase's public product ID. They contain no raw customer identifiers,
+provider keys or purchase tokens. The application passes the same fingerprint used
+for explicit session admission; another session cannot append to or retire existing
+work. Startup distinguishes a matching restore, purchase, another session and legacy
+records. Version 1 markers remain readable as unknown ownership and cannot be claimed
+by new launch parameters. Invalid or partial context blocks reads. These records
+detect and identify unfinished work; they do not reconcile
 store outcomes or authorize replaying checkout.
 
 After building and installing the default example and its test APK, qualify

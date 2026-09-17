@@ -43,6 +43,7 @@ class SuperwallOperationOwnershipTest {
       val raw = constructor.newInstance("""{"productId":"coins","type":"inapp","title":"Coins","name":"Coins","description":"Coins","oneTimePurchaseOfferDetailsList":[{"purchaseOptionId":"buy","offerIdToken":"buy-base","formattedPrice":"€2.00","priceAmountMicros":2000000,"priceCurrencyCode":"EUR"}]}""")
       val product = mock(StoreProduct::class.java)
       `when`(product.rawProduct).thenReturn(raw)
+      `when`(product.storeProductId).thenReturn("coins")
       `when`(product.purchaseOptionId).thenReturn("buy")
       lateinit var continuation: Continuation<Result<SuperwallPurchaseResult>>
       var calls = 0
@@ -59,11 +60,15 @@ class SuperwallOperationOwnershipTest {
           else -> RETURNS_DEFAULTS.answer(it)
         }
       }
-      val owner = ProviderOperations(NuxieSuperwallPurchaseDelegate(superwall), dispatcher, journal)
+      val owner = ProviderOperations(NuxieSuperwallPurchaseDelegate(superwall), dispatcher, journal, "a".repeat(64))
       val waiter = async { owner.purchase(product) }
       testScheduler.runCurrent()
       assertEquals(1, calls)
       assertTrue(journal.hasUnfinished())
+      val retained = journal.snapshot().single()
+      assertEquals("a".repeat(64), retained.session)
+      assertEquals(ProviderOperationJournal.Kind.PURCHASE, retained.kind)
+      assertEquals("coins", retained.productId)
       val beforeCompletion = identityReads
       waiter.cancelAndJoin()
       val drain = async { owner.closeAndAwait() }
