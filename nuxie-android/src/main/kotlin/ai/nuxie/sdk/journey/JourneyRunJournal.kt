@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.journey
 
+import ai.nuxie.sdk.presentation.JourneyScreenEmissionSource
 import ai.nuxie.sdk.events.TimeBasedEpochGenerator
 import ai.nuxie.sdk.experiences.CacheFilesystemLock
 import ai.nuxie.sdk.experiences.JourneyReleaseDelivery
@@ -46,7 +47,11 @@ internal data class JourneyRun(
     val nextPresentationBatchSequence: Long = 0,
     val nextPresentationEmissionSequence: Long = 0,
     val pendingPresentationPublication: PendingPresentationPublication? = null,
+    val presentationSource: PresentationSource? = null,
 ) {
+    data class PresentationSource(val eventId: String, val source: JourneyScreenEmissionSource) {
+        fun isReplacedBy(eventId: String?): Boolean = eventId == null || this.eventId != eventId
+    }
     data class ExecutionSnapshot(
         val delivery: JourneyReleaseDelivery,
         val assignments: JsonObject,
@@ -335,13 +340,26 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         checkpoint: JourneyControlExecutor.Checkpoint? = null,
         experimentExposure: JourneyRun.ExperimentExposure? = null,
         clearingPresentationPublication: String? = null,
+        presentationEventId: String? = null,
+        clearPresentationSource: Boolean = false,
     ) = update { state ->
         val run = checkNotNull(state.runs[id])
         check(run.startedQueued && run.completion == null)
         val settled = clearingPresentationPublication?.let { invocationId ->
             val pending = checkNotNull(run.pendingPresentationPublication)
             check(pending.invocationId == invocationId)
-            settlePresentationPublication(run, pending)
+            check(pending.items.any { it.eventId == presentationEventId })
+            settlePresentationPublication(run, pending).copy(
+                presentationSource = JourneyRun.PresentationSource(
+                    eventId = checkNotNull(presentationEventId),
+                    source = JourneyScreenEmissionSource(
+                        screenId = pending.sourceScreenId,
+                        actionId = pending.sourceActionId,
+                        componentId = pending.sourceComponentId,
+                        instanceId = pending.sourceInstanceId,
+                    ),
+                ),
+            )
         } ?: run
         val exposures = if (experimentExposure != null &&
             settled.experimentExposures.none {
@@ -355,14 +373,17 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         state.runs[id] = settled.copy(stepId = stepId, context = context,
             park = checkpoint?.let { JourneyRun.Park(it.wakeAtMillis, it.anchorAtMillis) },
             effectReceipts = settled.effectReceipts - settled.stepId,
-            experimentExposures = exposures)
+            experimentExposures = exposures,
+            presentationSource = if (clearPresentationSource) null else settled.presentationSource)
     }
 
-    fun bindExperimentExposures(id: String, screenId: String): JourneyRun? = update { state ->
+    /** Begin a presentation without carrying the previous control invocation into it. */
+    fun preparePresentation(id: String, screenId: String): JourneyRun? = update { state ->
         val run = state.runs[id]
             ?.takeIf { it.startedQueued && it.completion == null }
             ?: return@update null
         run.copy(
+            presentationSource = null,
             experimentExposures = run.experimentExposures.map { exposure ->
                 if (!exposure.queued && exposure.shownAtMillis == null &&
                     exposure.presentationScreenId == null
@@ -651,6 +672,16 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         put("artifactDigests", JsonArray(run.artifactDigests.sorted().map(::JsonPrimitive)))
         put("nextPresentationBatchSequence", JsonPrimitive(run.nextPresentationBatchSequence))
         put("nextPresentationEmissionSequence", JsonPrimitive(run.nextPresentationEmissionSequence))
+        run.presentationSource?.let { routed ->
+            val source = routed.source
+            put("presentationSource", buildJsonObject {
+                put("eventId", JsonPrimitive(routed.eventId))
+                put("screenId", JsonPrimitive(source.screenId))
+                put("actionId", JsonPrimitive(source.actionId))
+                source.componentId?.let { put("componentId", JsonPrimitive(it)) }
+                source.instanceId?.let { put("instanceId", JsonPrimitive(it)) }
+            })
+        }
         run.pendingPresentationPublication?.let {
             put("pendingPresentationPublication", encodePresentationPublication(it))
         }
@@ -699,6 +730,17 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             ?.jsonPrimitive?.long ?: 0,
         nextPresentationEmissionSequence = value["nextPresentationEmissionSequence"]
             ?.jsonPrimitive?.long ?: 0,
+        presentationSource = value["presentationSource"]?.jsonObject?.let { source ->
+            JourneyRun.PresentationSource(
+                eventId = source.text("eventId"),
+                source = JourneyScreenEmissionSource(
+                    screenId = source.text("screenId"),
+                    actionId = source.text("actionId"),
+                    componentId = source["componentId"]?.jsonPrimitive?.content,
+                    instanceId = source["instanceId"]?.jsonPrimitive?.content,
+                ),
+            )
+        },
         pendingPresentationPublication = value["pendingPresentationPublication"]
             ?.jsonObject?.let(::decodePresentationPublication),
     )

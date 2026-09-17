@@ -39,6 +39,7 @@ class JourneyControlExecutorTest {
                 "advance" -> {
                     actual as JourneyControlExecutor.Result.Advance
                     assertEquals(id, expected.text("stepId"), actual.stepId)
+                    assertEquals(id, id == "matching-event-binds-context-and-satisfies-wait", actual.consumedEvent)
                     expected["event"]?.let { assertEquals(id, it, actual.context["event"]) }
                     when (id) {
                         "experiment-uses-durable-assignment" -> {

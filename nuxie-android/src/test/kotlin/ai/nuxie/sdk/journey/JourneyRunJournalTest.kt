@@ -250,6 +250,48 @@ class JourneyRunJournalTest {
             .getValue("answer").jsonPrimitive.content)
     }
 
+    @Test fun `routed component source survives reopen and clears on a new event`() {
+        val journal = JourneyRunJournal(directory, "customer")
+        val run = requireNotNull(journal.admit(arm(), JourneyReentry.EveryTime, "screen", 100))
+        journal.markStartedQueued(run)
+        journal.park(run.id, "screen", null)
+        val publication = JourneyRun.PendingPresentationPublication(
+            invocationId = "buy-first", batchSequence = 0, nextEmissionSequence = 1,
+            sourceScreenId = "screen", sourceActionId = "buy", sourceComponentId = "card",
+            sourceInstanceId = "plan.first", responsesChanged = false,
+            items = listOf(JourneyRun.PendingPresentationPublication.Item(
+                name = "purchase_requested", properties = JsonObject(emptyMap()),
+                eventId = "purchase-event", occurredAtMillis = 101,
+            )),
+        )
+        assertNotNull(journal.stagePresentationPublication(run.id, "screen", run.context, publication))
+        JourneyRunJournal(directory, "customer").transition(
+            run.id, "purchase", run.context, clearingPresentationPublication = "buy-first", presentationEventId = "purchase-event",
+        )
+        val reopened = JourneyRunJournal(directory, "customer")
+        val routed = reopened.runs().single()
+        assertNull(routed.pendingPresentationPublication)
+        assertFalse(checkNotNull(routed.presentationSource).isReplacedBy("purchase-event"))
+        assertTrue(checkNotNull(routed.presentationSource).isReplacedBy("other-event"))
+        assertTrue(checkNotNull(routed.presentationSource).isReplacedBy(null))
+        assertEquals("plan.first", routed.presentationSource?.source?.instanceId)
+        assertEquals("screen", routed.presentationSource?.source?.screenId)
+        assertEquals("buy", routed.presentationSource?.source?.actionId)
+        assertEquals("card", routed.presentationSource?.source?.componentId)
+        reopened.transition(run.id, "delayed-purchase", run.context,
+            JourneyControlExecutor.Checkpoint(101, 201))
+        assertEquals(routed.presentationSource,
+            JourneyRunJournal(directory, "customer").runs().single().presentationSource)
+        reopened.transition(run.id, "other-event", run.context, clearPresentationSource = true)
+        assertNull(JourneyRunJournal(directory, "customer").runs().single().presentationSource)
+        val next = publication.copy(invocationId = "buy-again", batchSequence = 1, nextEmissionSequence = 2)
+        assertNotNull(reopened.stagePresentationPublication(run.id, "other-event", run.context, next))
+        reopened.transition(run.id, "navigate", run.context, clearingPresentationPublication = "buy-again", presentationEventId = "purchase-event")
+        assertNotNull(reopened.runs().single().presentationSource)
+        reopened.preparePresentation(run.id, "another-screen")
+        assertNull(JourneyRunJournal(directory, "customer").runs().single().presentationSource)
+    }
+
     @Test fun `renderer publication survives reopen before advancing sequences`() {
         val fixture = screenEmissionFixture()
         val fixtureRun = fixture.getValue("run").jsonObject
@@ -446,7 +488,7 @@ class JourneyRunJournalTest {
             run.context,
             experimentExposure = exposure,
         )
-        journal.bindExperimentExposures(run.id, "screen_checkout")
+        journal.preparePresentation(run.id, "screen_checkout")
         val captured = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val reporter = JourneyExperimentExposureReporter(
             JourneyRunJournal(directory, "customer"),
