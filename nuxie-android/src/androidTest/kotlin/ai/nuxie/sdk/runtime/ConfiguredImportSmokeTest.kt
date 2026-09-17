@@ -77,6 +77,69 @@ class ConfiguredImportSmokeTest {
     }
 
     @Test
+    fun localMp4DecodesIntoVulkanAcrossTwoLoops() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val local = java.io.File.createTempFile("video-decoder-", ".mp4", instrumentation.targetContext.cacheDir)
+        instrumentation.context.assets.open("video/greeting.mp4").use { input ->
+            local.outputStream().use { input.copyTo(it) }
+        }
+        val bytes = instrumentation.context.assets.open("video/greeting.nux").use { it.readBytes() }
+        val runtime = NuxieRuntime.shared
+        assertTrue(runtime.isAvailable)
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(320, 640))
+        try {
+            val file = checkNotNull(runtime.importFile(renderer, bytes, checkNotNull(runtime.inspectFileAssets(bytes)), videoEnabled = true))
+            try {
+                val artboard = checkNotNull(file.newArtboard("Video Frame"))
+                try {
+                    val player = checkNotNull(artboard.newPlayer())
+                    try {
+                        val initial = player.videos().single()
+                        val decoder = AndroidVideoDecoder(instrumentation.targetContext, local, initial.generation, 64 * 32 * 4, 1)
+                        try {
+                            val deadline = android.os.SystemClock.elapsedRealtime() + 15_000
+                            var ready = false
+                            var ended = false
+                            val colors = mutableListOf<Boolean>()
+                            while (android.os.SystemClock.elapsedRealtime() < deadline && colors.size < 4) {
+                                check(decoder.failure() == null) { "Decoder failed: ${decoder.failure()}" }
+                                val occurrence = player.videos().single()
+                                val observation = when {
+                                    decoder.ready() && !ready -> { ready = true; 1 }
+                                    decoder.ended() && !ended -> { ended = true; 3 }
+                                    decoder.playing() -> { ended = false; 2 }
+                                    else -> 0
+                                }
+                                player.videoStep(occurrence.componentId, observation, occurrence.generation,
+                                    if (observation == 1) decoder.duration() else 0.0).forEach {
+                                    decoder.action(it.kind, it.value, it.generation)
+                                }
+                                decoder.clock()?.let {
+                                    player.videoClock(occurrence.componentId, System.nanoTime() / 1_000_000_000.0,
+                                        NuxieVideoClock(it.generation, it.seconds, it.rate, it.playing, true))
+                                }
+                                decoder.takeFrame()?.let {
+                                    player.videoPresent(renderer, occurrence.componentId,
+                                        NuxieVideoFrame(it.generation, it.seconds, it.width, it.height, it.rgba))
+                                    player.step(0.0)
+                                    val composed = renderer.renderToCpuFrame(player, 0, false)
+                                    val offset = (80 * composed.width + 100) * 4
+                                    val red = composed.rgba[offset].toInt() and 255
+                                    val blue = composed.rgba[offset + 2].toInt() and 255
+                                    if (red > 180 && blue < 70 && colors.lastOrNull() != true) colors.add(true)
+                                    if (blue > 180 && red < 70 && colors.lastOrNull() != false) colors.add(false)
+                                }
+                                Thread.sleep(16)
+                            }
+                            assertEquals("Decoded frames must repeat through native loop commands", listOf(true, false, true, false), colors)
+                        } finally { decoder.close() }
+                    } finally { player.close() }
+                } finally { artboard.close() }
+            } finally { file.close() }
+        } finally { renderer.close(); local.delete() }
+    }
+
+    @Test
     fun publishedVideoCatalogCanBeInspectedWithoutStartingPlayback() {
         val bytes = InstrumentationRegistry.getInstrumentation().context.assets
             .open("video/greeting.nux").use { it.readBytes() }
