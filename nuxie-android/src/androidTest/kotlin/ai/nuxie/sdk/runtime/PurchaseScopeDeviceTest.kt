@@ -50,7 +50,9 @@ class PurchaseScopeDeviceTest {
                         NuxieViewModelInstanceBinding("PurchaseRoot", "purchase.root", "first", "plan.first", "Plan"),
                         NuxieViewModelInstanceBinding("PurchaseRoot", "purchase.root", "second", "plan.second", "Plan"),
                     ))
-                    artboard.setDefaultViewModelValue("fontScale", NuxieViewModelScalarValue.NumberValue(1.0))
+                    assertTrue("Host writes must target an existing authored property",
+                        artboard.setDefaultViewModelValue("placementId",
+                            NuxieViewModelScalarValue.StringValue("root:yearly")))
                     val player = file.newExperiencePlayer(artboard, "Purchase")
                     try {
                         player.stepTyped(elapsedSeconds = 0.0)
