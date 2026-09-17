@@ -1526,7 +1526,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelInstanceSnapshot(
     goto view_model_snapshot_cleanup;
   }
   jmethodID value_constructor = (*env)->GetMethodID(
-      env, value_class, "<init>", "(JJLjava/lang/String;I[BJFZJ)V");
+      env, value_class, "<init>", "(JJLjava/lang/String;I[BJFZJ[J)V");
   if (clear_jni_exception(env) || value_constructor == NULL) {
     status = NUX_STATUS_RUNTIME_ERROR;
     goto view_model_snapshot_cleanup;
@@ -1599,12 +1599,41 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelInstanceSnapshot(
       status = NUX_STATUS_RUNTIME_ERROR;
       goto view_model_snapshot_cleanup;
     }
+    if (view.first_list_item > info.list_item_count ||
+        view.list_item_count > info.list_item_count - view.first_list_item) {
+      (*env)->DeleteLocalRef(env, bytes);
+      (*env)->DeleteLocalRef(env, name);
+      status = NUX_STATUS_RUNTIME_ERROR;
+      goto view_model_snapshot_cleanup;
+    }
+    jlongArray list_items = (*env)->NewLongArray(env, (jsize)view.list_item_count);
+    if (clear_jni_exception(env) || list_items == NULL) {
+      (*env)->DeleteLocalRef(env, bytes);
+      (*env)->DeleteLocalRef(env, name);
+      status = NUX_STATUS_RUNTIME_ERROR;
+      goto view_model_snapshot_cleanup;
+    }
+    for (size_t item = 0; item < view.list_item_count; ++item) {
+      uint64_t identity = 0;
+      status = nux_view_model_snapshot_list_item(snapshot, view.first_list_item + item, &identity);
+      if (status != NUX_STATUS_OK) break;
+      jlong copied = (jlong)identity;
+      (*env)->SetLongArrayRegion(env, list_items, (jsize)item, 1, &copied);
+      if (clear_jni_exception(env)) { status = NUX_STATUS_RUNTIME_ERROR; break; }
+    }
+    if (status != NUX_STATUS_OK) {
+      (*env)->DeleteLocalRef(env, list_items);
+      (*env)->DeleteLocalRef(env, bytes);
+      (*env)->DeleteLocalRef(env, name);
+      goto view_model_snapshot_cleanup;
+    }
     jobject value = (*env)->NewObject(
         env, value_class, value_constructor, (jlong)view.owner_instance_id,
         (jlong)view.property_index, name, (jint)view.kind, bytes,
         (jlong)view.referenced_instance_id, (jfloat)view.number_value,
         (jboolean)(view.bool_value == 1u ? JNI_TRUE : JNI_FALSE),
-        (jlong)view.integer_value);
+        (jlong)view.integer_value, list_items);
+    (*env)->DeleteLocalRef(env, list_items);
     if (clear_jni_exception(env) || value == NULL) {
       if (value != NULL) (*env)->DeleteLocalRef(env, value);
       (*env)->DeleteLocalRef(env, bytes);

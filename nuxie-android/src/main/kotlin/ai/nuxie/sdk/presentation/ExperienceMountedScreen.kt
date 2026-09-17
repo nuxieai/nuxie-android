@@ -83,6 +83,7 @@ internal class ExperienceMountedScreen(
             artifactsByKey = prepared.artifactsByKey,
             viewModelProjection = prepared.viewModelProjection,
             textInputs = inputs,
+            retainedViewModel = prepared.retainedViewModel,
         )
         return ExperienceInputContainer(activity, surface::dispatchSemanticKeyEvent, surface::semanticKeyboardEntry).apply {
             if (awaitingSemanticPublication) {

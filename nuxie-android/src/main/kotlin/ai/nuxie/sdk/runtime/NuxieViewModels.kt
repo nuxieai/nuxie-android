@@ -96,8 +96,11 @@ internal enum class NuxieViewModelMutationKind(val nativeValue: Int) {
     SET_COLOR(3),
     SET_ENUM(4),
     FIRE_TRIGGER(5),
+    SET_LIST_INDEX(6),
     SET_VIEW_MODEL(8),
+    LIST_INSERT(9),
     LIST_SET(13),
+    LIST_CLEAR(14),
 }
 
 /** Fixed Kotlin-side encoding of one ABI-v4 `NuxViewModelMutation`. */
@@ -153,6 +156,7 @@ internal class NuxieViewModelSnapshot private constructor(
     private val rootInstanceId: Long,
     instances: List<Instance>,
     private val instanceIds: Map<String, Long>,
+    internal val retainedGraph: NuxieViewModelArchive,
 ) {
     private val instancesById = instances.associateBy(Instance::id)
 
@@ -313,6 +317,8 @@ internal class NuxieViewModelSnapshot private constructor(
             }
             return NuxieViewModelSnapshot(
                 rootInstanceId = snapshot.rootInstanceId,
+                retainedGraph = NuxieViewModelArchive.capture(snapshot, schemaNames, instanceIds +
+                    if (defaultInstanceId == null) emptyMap() else mapOf(defaultInstanceId to snapshot.rootInstanceId)),
                 instances = valuesByInstance.map { (id, values) ->
                     val schemaIndex = schemaByInstance.getValue(id)
                     Instance(id, schemaNames[schemaIndex], values.toMap())
@@ -1009,6 +1015,7 @@ internal data class NativeViewModelSnapshotValue(
     val numberValue: Float = 0f,
     val boolValue: Boolean = false,
     val integerValue: Long = 0,
+    val listItemIds: LongArray = longArrayOf(),
 )
 
 internal fun NativeViewModelCatalog.toViewModelCatalog(): NuxieViewModelCatalog {

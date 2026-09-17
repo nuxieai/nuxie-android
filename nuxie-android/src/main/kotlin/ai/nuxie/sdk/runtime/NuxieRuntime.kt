@@ -49,6 +49,9 @@ internal class NuxieRuntime(
      * resulting root before player creation. This is synchronous by design:
      * presentation invokes it from the already-confined runtime lane.
      */
+    fun restoreViewModel(file: NuxieRuntimeFile, artboard: NuxieRuntimeArtboard, snapshot: NuxieViewModelSnapshot): NuxieRuntimeViewModelState =
+        snapshot.retainedGraph.restore(native, file, artboard)
+
     fun bindViewModelList(
         file: NuxieRuntimeFile,
         artboard: NuxieRuntimeArtboard,

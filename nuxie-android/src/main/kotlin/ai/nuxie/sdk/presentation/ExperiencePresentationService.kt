@@ -88,6 +88,7 @@ internal data class PreparedPresentation(
     val textInputState: ExperienceTextInputState = ExperienceTextInputState(),
     val screenLifecycle: ExperienceScreenLifecycle = ExperienceScreenLifecycle(),
     val transition: JsonObject? = null,
+    val retainedViewModel: AtomicReference<NuxieViewModelSnapshot?> = AtomicReference(),
 )
 
 internal sealed interface PresentationShell {
@@ -578,6 +579,7 @@ internal class ExperiencePresentationService(
         var navigationHistory: List<String> = emptyList(),
         var lifecycleByScreen: MutableMap<String, ExperienceScreenLifecycle> = mutableMapOf(),
         var textInputsByScreen: MutableMap<String, ExperienceTextInputState> = mutableMapOf(),
+        var viewModelsByScreen: MutableMap<String, AtomicReference<NuxieViewModelSnapshot?>> = mutableMapOf(),
         var commerce: JourneyCommerceSession? = null,
     )
 
@@ -871,9 +873,12 @@ internal class ExperiencePresentationService(
                     val lifecycles = if (sameRelease) existing!!.journey.lifecycleByScreen else journey.lifecycleByScreen
                     val text = texts[journey.screenId]?.let { if (isolated) it.copyForPreparation() else it } ?: ExperienceTextInputState()
                     val lifecycle = lifecycles[journey.screenId]?.let { if (isolated) it.copyForPreparation() else it } ?: ExperienceScreenLifecycle()
+                    val retained = if (existing?.acquired?.identity == source.identity)
+                        existing.journey.viewModelsByScreen[journey.screenId]?.get() else null
                     return PreparedPresentation(source.acquired.rivFile, source.screen.artboardName, source.screen.clearColor,
                         source.screen.shell, source.screen.screenId, source.descriptor, source.acquired.artifactsByKey,
-                        source.screen.artboardSize, source.viewModelProjection, text, lifecycle, transition)
+                        source.screen.artboardSize, source.viewModelProjection, text, lifecycle, transition,
+                        AtomicReference(retained))
                 }
                 data class Destination(val source: PreparedSource, val content: PreparedPresentation, val navigation: PreparedScreenNavigation?)
                 suspend fun acquireInitial(): PreparedSource = try {
@@ -974,6 +979,7 @@ internal class ExperiencePresentationService(
                 }?.let {
                     journey.textInputsByScreen = it.journey.textInputsByScreen
                     journey.lifecycleByScreen = it.journey.lifecycleByScreen
+                    if (it.acquired.identity == source.identity) journey.viewModelsByScreen = it.journey.viewModelsByScreen
                 }
                 val ref = ExperienceRef(source.identity.experienceId, source.identity.experienceVersionId, journeyId)
                 val pending = ActivePresentation(id = id, ref = ref, acquired = source.acquired,
@@ -1043,6 +1049,7 @@ internal class ExperiencePresentationService(
                         if (reservationStillMatches) pendingReservation = null
                         journey.textInputsByScreen[journey.screenId] = preparedContent.textInputState
                         journey.lifecycleByScreen[journey.screenId] = preparedContent.screenLifecycle
+                        journey.viewModelsByScreen[journey.screenId] = preparedContent.retainedViewModel
                         current = pending
                         try {
                             PresentationRegistry.register(
