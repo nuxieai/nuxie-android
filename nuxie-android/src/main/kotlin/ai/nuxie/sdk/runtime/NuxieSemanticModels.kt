@@ -21,6 +21,8 @@ internal object NativeSemanticState {
     const val SELECTED = 1 shl 1
     const val CHECKED = 1 shl 2
     const val TOGGLED = 1 shl 4
+    const val REQUIRED = 1 shl 5
+    const val READ_ONLY = 1 shl 10
     const val DISABLED = 1 shl 6
     const val HIDDEN = 1 shl 8
     const val OBSCURED = 1 shl 12

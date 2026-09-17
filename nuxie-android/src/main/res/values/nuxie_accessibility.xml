@@ -1,0 +1,11 @@
+<resources>
+    <string name="nuxie_accessibility_mixed">Partially checked</string>
+    <string name="nuxie_accessibility_expanded">Expanded</string>
+    <string name="nuxie_accessibility_collapsed">Collapsed</string>
+    <string name="nuxie_accessibility_required">Required</string>
+    <string name="nuxie_accessibility_read_only">Read only</string>
+    <string name="nuxie_accessibility_on">On</string>
+    <string name="nuxie_accessibility_off">Off</string>
+    <string name="nuxie_accessibility_checked">Checked</string>
+    <string name="nuxie_accessibility_unchecked">Not checked</string>
+</resources>

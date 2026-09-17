@@ -27,6 +27,7 @@ internal class ExperienceAccessibilityProvider(
     private val index = ExperienceSemanticIndex()
     private val manager = host.context.getSystemService(AccessibilityManager::class.java)
     private var nativeViews: Map<Long, View> = emptyMap()
+    private var nativeNodes: Map<Long, NativeSemanticNode> = emptyMap()
     private var virtualIds: Map<Long, Int> = emptyMap()
     private var traversalNeighbors: Map<Long, Pair<Long?, Long?>> = emptyMap()
     private var accessibilityFocus: Int? = null
@@ -42,6 +43,7 @@ internal class ExperienceAccessibilityProvider(
     fun publish(tree: NuxieSemanticTree, nativeFields: Map<Long, View> = emptyMap()) {
         val oldNodes = index.tree?.nodes
         index.update(tree, nativeFields.keys)
+        nativeNodes = tree.nodes.filter { it.id in nativeFields }.associateBy { it.id }
         virtualIds = index.entries.values.associate { it.node.id to it.virtualId }
         nativeViews.values.filter { it !in nativeFields.values }.forEach { it.accessibilityDelegate = null }
         for ((id, view) in nativeFields) if (nativeViews[id] !== view) {
@@ -49,6 +51,7 @@ internal class ExperienceAccessibilityProvider(
                 override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
                     super.onInitializeAccessibilityNodeInfo(host, info)
                     applyTraversal(info, id)
+                    nativeNodes[id]?.let { ExperienceAccessibilityStateDescription.apply(info, it, host.resources, nativeEditor = true) }
                 }
             }
         }
@@ -129,6 +132,7 @@ internal class ExperienceAccessibilityProvider(
         index.clearOccurrence()
         nativeViews.values.forEach { it.accessibilityDelegate = null }
         nativeViews = emptyMap()
+        nativeNodes = emptyMap()
         traversalNeighbors = emptyMap()
         virtualIds = emptyMap()
         // A resize withdraws virtual targets without moving the host's keyboard
@@ -168,17 +172,14 @@ internal class ExperienceAccessibilityProvider(
             val obscured = node.stateFlags and NativeSemanticState.OBSCURED != 0
             isPassword = obscured
             if (Build.VERSION.SDK_INT >= 26) hintText = node.hint
-            if (Build.VERSION.SDK_INT >= 30 && !obscured) stateDescription = node.value.takeIf(String::isNotEmpty)
-            if (Build.VERSION.SDK_INT < 30) {
-                contentDescription = listOf(node.label, if (obscured) "" else node.value,
-                    if (Build.VERSION.SDK_INT < 26) node.hint else "")
-                    .filter(String::isNotEmpty).joinToString(", ")
+            ExperienceAccessibilityStateDescription.apply(this, node, host.resources)
+            if (Build.VERSION.SDK_INT < 26) {
+                contentDescription = listOf(node.label, node.hint).filter(String::isNotEmpty).joinToString(", ")
             }
             if (Build.VERSION.SDK_INT >= 28) isHeading = node.headingLevel > 0
             isEnabled = host.isEnabled && node.stateFlags and NativeSemanticState.DISABLED == 0
             isSelected = node.stateFlags and NativeSemanticState.SELECTED != 0
-            isCheckable = node.role in listOf(NativeSemanticRole.CHECKBOX, NativeSemanticRole.SWITCH_CONTROL, NativeSemanticRole.RADIO_BUTTON)
-                || node.traitFlags and (NativeSemanticTrait.CHECKABLE or NativeSemanticTrait.TOGGLEABLE) != 0
+            isCheckable = ExperienceAccessibilityStateDescription.isCheckable(node)
             val mixed = node.stateFlags and NativeSemanticState.MIXED != 0
             val checked = node.stateFlags and (NativeSemanticState.CHECKED or NativeSemanticState.TOGGLED) != 0
             if (Build.VERSION.SDK_INT >= 36) {
