@@ -127,6 +127,7 @@ internal data class NuxieRuntimeEvent(
     val target: String,
     val delay: Float,
     val properties: List<NuxieRuntimeEventProperty>,
+    val sourceViewModelInstanceId: Long = 0,
 )
 
 internal enum class NuxiePlayerPointerHit(val nativeValue: Int) {
@@ -243,6 +244,7 @@ internal data class NativeRuntimeEvent(
     val target: String,
     val delay: Float,
     val properties: Array<NativeRuntimeEventProperty>,
+    val sourceViewModelInstanceId: Long = 0,
 )
 
 internal data class NativeRuntimeEventProperty(
@@ -279,6 +281,7 @@ internal fun NativePlayerStepOutcome.toPlayerStepOutcome(): NuxiePlayerStepOutco
         },
         events = events.map { event ->
             NuxieRuntimeEvent(
+                sourceViewModelInstanceId = event.sourceViewModelInstanceId,
                 localIndex = event.localIndex.checkedNativeIndex("event local index"),
                 coreType = event.coreType,
                 name = event.name,

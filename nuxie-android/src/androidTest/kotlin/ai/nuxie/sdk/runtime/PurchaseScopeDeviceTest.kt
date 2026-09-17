@@ -66,7 +66,12 @@ class PurchaseScopeDeviceTest {
                                     else -> value.toString()
                                 }
                             } }
-                            assertTrue("A purchase button tap at x=$x must emit an interaction: $details; down=${down.pointerHits}, up=${tapped.pointerHits}", emitted.isNotEmpty())
+                            assertEquals("One purchase interaction per tap: $details", 1, emitted.size)
+                            val frame = checkNotNull(artboard.defaultViewModelSnapshot())
+                            val authoredId = frame.authoredInstanceId(emitted.single().sourceViewModelInstanceId)
+                            assertEquals(if (x == 80f) "plan.first" else "plan.second", authoredId)
+                            assertEquals(if (x == 80f) "plan:monthly" else "plan:annual",
+                                frame.resolveScopedString("placementId", "Plan", authoredId))
                         }
                         val before = checkNotNull(artboard.defaultViewModelSnapshot())
                         assertEquals("plan:monthly", before.resolveString("first.placementId"))

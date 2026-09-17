@@ -14,6 +14,7 @@ class NuxiePlayerStepOutcomeTest {
             pointerHits = intArrayOf(0, 2),
             events = arrayOf(
                 NativeRuntimeEvent(
+                    sourceViewModelInstanceId = 912L,
                     localIndex = 7,
                     coreType = 99,
                     name = "checkout",
@@ -67,6 +68,7 @@ class NuxiePlayerStepOutcomeTest {
         assertTrue(outcome.keepGoing)
         assertEquals(listOf(NuxiePlayerPointerHit.NONE, NuxiePlayerPointerHit.HIT_OPAQUE), outcome.pointerHits)
         val event = outcome.events.single()
+        assertEquals(912L, event.sourceViewModelInstanceId)
         assertEquals(7, event.localIndex)
         assertEquals(NuxieRuntimeEventPropertyValue.Number(12.5f), event.properties[0].value)
         assertEquals(NuxieRuntimeEventPropertyValue.Bool(true), event.properties[1].value)

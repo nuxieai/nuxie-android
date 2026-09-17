@@ -2505,7 +2505,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
   jmethodID event_constructor = (*env)->GetMethodID(
       env, event_class, "<init>",
       "(JILjava/lang/String;Ljava/lang/String;Ljava/lang/String;F"
-      "[Lai/nuxie/sdk/runtime/NativeRuntimeEventProperty;)V");
+      "[Lai/nuxie/sdk/runtime/NativeRuntimeEventProperty;J)V");
   if (clear_jni_exception(env) || event_constructor == NULL) {
     failed = 1;
     goto typed_step_cleanup;
@@ -2685,12 +2685,21 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
       (*env)->DeleteLocalRef(env, property_name);
       if (failed) break;
     }
+    uint64_t source_instance_id = 0;
+    if (!failed) {
+      NuxStatus source_status = nux_player_step_result_event_view_model_instance(
+          step_result, event_index, &source_instance_id);
+      if (source_status != NUX_STATUS_OK && source_status != NUX_STATUS_NOT_FOUND) {
+        reported_status = source_status;
+        failed = 1;
+      }
+    }
     jobject event_item = NULL;
     if (!failed) {
       event_item = (*env)->NewObject(
           env, event_class, event_constructor, (jlong)view.event_local_index,
           (jint)view.event_core_type, name, url, target,
-          (jfloat)view.seconds_delay, event_properties);
+          (jfloat)view.seconds_delay, event_properties, (jlong)source_instance_id);
       if (clear_jni_exception(env) || event_item == NULL) {
         failed = 1;
       } else {
