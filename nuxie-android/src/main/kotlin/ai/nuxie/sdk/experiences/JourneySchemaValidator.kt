@@ -102,7 +102,8 @@ internal object JourneySchemaValidator {
             if (rendered.size != rendered.toSet().size || rendered.toSet() != screens.toSet()) fail("render closure")
         }
         val behaviors = array(root["screenBehaviors"]).map { id(record(it)["screenId"]) }
-        if (behaviors.size != behaviors.toSet().size || behaviors.toSet() != screens.toSet()) fail("behavior closure")
+        sortedUnique(behaviors)
+        if (behaviors.toSet() != screens.toSet()) fail("behavior closure")
         for (value in array(root["viewModelValues"])) {
             val binding = exact(value, setOf("viewModelName", "path", "value"), setOf("instanceId", "instanceName"))
             id(binding["viewModelName"]); text(binding["path"])
