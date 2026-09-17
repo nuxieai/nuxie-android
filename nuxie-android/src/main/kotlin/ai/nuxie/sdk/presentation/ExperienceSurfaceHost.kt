@@ -291,7 +291,7 @@ internal class ExperienceSurfaceHost(
         lane.enqueue {
             val requirements = descriptor?.get("requirements") as? JsonObject
             semanticsEnabled = (requirements?.get("requiredCapabilities") as? JsonArray).orEmpty()
-                .any { (it as? JsonPrimitive)?.content == "scene-semantics-v1" }
+                .any { (it as? JsonPrimitive)?.content == "experience-accessibility" }
             this.textInputs = textInputs.associateBy(ExperienceTextInput::id)
             this.retainedViewModel = retainedViewModel
             val activeRenderer = ensureRenderer(1, 1)

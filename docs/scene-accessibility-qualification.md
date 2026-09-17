@@ -1,6 +1,6 @@
 # Scene accessibility qualification
 
-The internal Android adapter projects the runtime's presented semantic tree through an `AccessibilityNodeProvider`, with native EditText controls represented by their real Views. This is implementation work for [UNIV-3172](https://universe.basis.dev/issue/UNIV-3172). The SDK capability registry does not yet admit `scene-semantics-v1`; this document does not declare accessible published Experiences or parity complete.
+The internal Android adapter projects the runtime's presented semantic tree through an `AccessibilityNodeProvider`, with native EditText controls represented by their real Views. This is implementation work for [UNIV-3172](https://universe.basis.dev/issue/UNIV-3172). The SDK capability registry does not yet admit `experience-accessibility`; this document does not declare accessible published Experiences or parity complete.
 
 The adapter consumes the public Android runtime v0.3.12 pinned in `runtime/artifact.json`. Snapshots and exact authored action dispatch remain owned by the runtime lane. The shared tree projects ancestor-disabled state for both virtual controls and real editors. Presented geometry, occurrence retirement and input suspension fence UI publication and actions. The UI action result reports queue admission; native validation can still reject an action later if its capture becomes stale.
 
@@ -59,7 +59,7 @@ The hardware driver waits for Android `TYPE_TOUCH_INTERACTION_END` after each sw
 
 ## Mounted-scene first publication boundary
 
-The mounted screen withholds its whole accessibility subtree until native fields and virtual controls have been published together. The renderer reports completion through an internal listener callback; it does not change its parent's policy. The mounted screen reveals its own container once, leaving later owner policy changes untouched. Ordinary screens without `scene-semantics-v1` do not wait for this callback.
+The mounted screen withholds its whole accessibility subtree until native fields and virtual controls have been published together. The renderer reports completion through an internal listener callback; it does not change its parent's policy. The mounted screen reveals its own container once, leaving later owner policy changes untouched. Ordinary screens without `experience-accessibility` do not wait for this callback.
 
 `PublishedTextInputDeviceTest.semanticSceneEntersAccessibilityOnlyAfterCompletePublication` holds rendering before mount and places a visible native probe child in the real mounted container. The Android accessibility client must not see that child before publication. After removing the probe and starting rendering, it must see the authored heading and exactly one native editor. This container-boundary regression failed on pre-change source and passes on the candidate. A companion ordinary-screen case proves there is no gate for screens without semantic support; the two-case device run passed. A first attempted oracle without the visible probe passed unchanged code because real editors initially lack geometry; that attempt was insufficient and was strengthened. Logs: `/tmp/nuxie-publication-regression-red-probe.log`, `/tmp/nuxie-publication-regression-green.log`, `/tmp/nuxie-publication-regression-pair.log`.
 

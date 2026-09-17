@@ -732,7 +732,7 @@ class ExperienceSurfaceHostPointerTest {
         host.layout(0, 0, 100, 100)
         val texture = SurfaceTexture(0)
         val descriptor = Json.parseToJsonElement("""{
-            "requirements":{"requiredCapabilities":["scene-semantics-v1"]},
+            "requirements":{"requiredCapabilities":["experience-accessibility"]},
             "render":{"assets":[],"screens":[{"id":"screen","artboardName":"Main"}]},
             "leg":{"screens":[{"id":"screen"}]}
         }""").jsonObject
@@ -769,7 +769,7 @@ class ExperienceSurfaceHostPointerTest {
         host.layout(0, 0, 100, 100)
         val texture = SurfaceTexture(0)
         val descriptor = Json.parseToJsonElement("""{
-            "requirements":{"requiredCapabilities":["scene-semantics-v1"]},
+            "requirements":{"requiredCapabilities":["experience-accessibility"]},
             "render":{"assets":[],"screens":[{"id":"screen","artboardName":"Main"}]},
             "leg":{"screens":[{"id":"screen"}]}
         }""").jsonObject
