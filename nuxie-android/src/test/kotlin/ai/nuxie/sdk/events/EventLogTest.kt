@@ -174,6 +174,29 @@ class EventLogTest {
         eventLog.subscribeForwarding(isEnabled = forwardingEnabled) {}
     }
 
+    @Test
+    fun textSizeDevicePropertyTracksConfigurationChangesWithoutRecreatingBuilder() {
+        val fixture = Json.parseToJsonElement(java.io.File(FixtureRunner.fixturesRoot(),
+            "encodings/text-size-device-properties.json").readText()).jsonObject.getValue("android").jsonObject
+        val key = fixture.getValue("property").jsonPrimitive.content
+        val resources = org.robolectric.RuntimeEnvironment.getApplication().resources
+        val original = android.content.res.Configuration(resources.configuration)
+        val builder = contextBuilder()
+        try {
+            fixture.getValue("values").jsonArray.forEach { value ->
+                val scale = value.jsonPrimitive.content.toFloat()
+                val configuration = android.content.res.Configuration(resources.configuration).apply { fontScale = scale }
+                @Suppress("DEPRECATION")
+                resources.updateConfiguration(configuration, resources.displayMetrics)
+                assertEquals(scale, builder.buildEnrichedProperties(emptyMap())[key])
+            }
+            assertEquals(1.75f, builder.buildEnrichedProperties(mapOf(key to 1.75f))[key])
+        } finally {
+            @Suppress("DEPRECATION")
+            resources.updateConfiguration(original, resources.displayMetrics)
+        }
+    }
+
     @After
     fun tearDown() {
         runBlocking { scope.coroutineContext[Job]?.cancelAndJoin() }

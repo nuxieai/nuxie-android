@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "38989f74fb84e244c10bad093b67ad0ec70b64ad",
+  "sourceCommit": "f17e1d9f8210cded0952be011a974967d6487cce",
   "files": {
     "README.md": "9104a727bef89b388554d25583a6e013531c310f1a93d8f9f81440af8fcf67df",
     "accessibility/control-state.json": "48d1d9ea62bc7890ecd41d69592cbe3f7d137cf7bdb5849f7c64137489a5360c",
@@ -10,6 +10,7 @@
     "encodings/feature-consumption.json": "8b34dd248e9f28a0bead3b07f146b3579cb47f1f486489c46afefaf21f914b72",
     "encodings/feature-usage.json": "2606a5062e041237fb7245dd919e921c383d94735d537e509aab429855b17c69",
     "encodings/forwarded-activity.json": "03cf7f05b386b9b96f7bdcc7dab8a4b734b2fd1517a89740f5ff9d708930ace9",
+    "encodings/text-size-device-properties.json": "d39d96c7164111c854c4c2ce0bbb430018018c97db31baae871a3022a031f02f",
     "events/atomic-purchase-sync.json": "00ad8a8acfcc8b5531de8312a6ad9e13cae2ec6fc386a4b3263fde3d574f0764",
     "events/batch-item-encoding.json": "f0ba212c3428ea8efc5defd7dc67c4d97c310dbcdcfd529e9cd9556c237b6172",
     "events/catalog.json": "9aaca640d32ec64168b83516f139f95493751dc51a5e26598e3adeb9bbd3e87b",

@@ -72,6 +72,7 @@ internal class NuxieContextBuilder(
         context["\$screen_width"] = metrics.widthPixels.toFloat() / metrics.density
         context["\$screen_height"] = metrics.heightPixels.toFloat() / metrics.density
         context["\$screen_scale"] = metrics.density
+        context["\$font_scale"] = appContext.resources.configuration.fontScale
 
         val locale = Locale.getDefault()
         context["\$locale"] = locale.toString()
