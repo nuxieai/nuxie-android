@@ -37,25 +37,6 @@ class JourneyReleaseHighWaterStoreTest {
         }
     }
 
-    @Test fun previewAuthorityIsIsolatedFromCustomerAndOtherPreviews() {
-        val customer = JourneyReleaseHighWaterStore(context)
-        customer.admitBatch(mapOf(identity.streamKey to identity.copy(publishedAtSeq = 20)))
-        val preview = JourneyReleaseHighWaterStore.ephemeral()
-        assertEquals(0L, preview.floor(identity.streamKey))
-        preview.admitBatch(mapOf(identity.streamKey to identity))
-        assertEquals(7L, preview.floor(identity.streamKey))
-        assertEquals(20L, JourneyReleaseHighWaterStore(context).floor(identity.streamKey))
-        assertEquals(0L, JourneyReleaseHighWaterStore.ephemeral().floor(identity.streamKey))
-        val other = identity.copy(experienceId = "other")
-        assertThrows(JourneyReleaseAuthenticationException::class.java) {
-            preview.admitBatch(linkedMapOf(other.streamKey to other,
-                identity.streamKey to identity.copy(buildId = "conflict")))
-        }
-        assertEquals(0L, preview.floor(other.streamKey))
-        preview.admitBatch(mapOf(identity.streamKey to identity.copy(publishedAtSeq = 30)))
-        assertEquals(20L, customer.floor(identity.streamKey))
-    }
-
     @Test fun exactPublicationReplaysAcrossInstancesButConflictingFieldsDoNot() {
         JourneyReleaseHighWaterStore(context).admitBatch(mapOf(identity.streamKey to identity))
         val reopened = JourneyReleaseHighWaterStore(context)

@@ -1,18 +1,15 @@
 package ai.nuxie.sdk.experiences
 
 import android.content.Context
-import android.content.SharedPreferences
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 
-/** Publication identity per admission stream. Customer stores persist across SDK instances. */
-internal class JourneyReleaseHighWaterStore private constructor(private val preferences: SharedPreferences?) {
-    constructor(context: Context) : this((context.applicationContext ?: context)
-        .getSharedPreferences("nuxie_journey_release_high_water", Context.MODE_PRIVATE))
-
-    private val ephemeralRecords = mutableMapOf<String, Record>()
+/** Durable publication identity per admission stream, shared across SDK instances. */
+internal class JourneyReleaseHighWaterStore(context: Context) {
+    private val preferences = (context.applicationContext ?: context)
+        .getSharedPreferences("nuxie_journey_release_high_water", Context.MODE_PRIVATE)
 
     private data class Record(val sequence: Long, val identity: JourneyReleaseIdentity?)
 
@@ -32,12 +29,6 @@ internal class JourneyReleaseHighWaterStore private constructor(private val pref
             current == null || candidate.publishedAtSeq > current.sequence
         }
         if (promotions.isEmpty()) return@synchronized
-        if (preferences == null) {
-            promotions.forEach { (key, identity) ->
-                ephemeralRecords[key] = Record(identity.publishedAtSeq, identity)
-            }
-            return@synchronized
-        }
         val editor = preferences.edit()
         for ((key, identity) in promotions) {
             editor.putString(key, buildJsonObject {
@@ -55,7 +46,6 @@ internal class JourneyReleaseHighWaterStore private constructor(private val pref
     }
 
     private fun read(key: String): Record? {
-        if (preferences == null) return ephemeralRecords[key]
         val value = preferences.all[key] ?: return null
         // Sequence-only records cannot prove equal-sequence identity. Preserve
         // their floor and migrate only when a newer authenticated publication arrives.
@@ -69,10 +59,7 @@ internal class JourneyReleaseHighWaterStore private constructor(private val pref
         return Record(identity.publishedAtSeq, identity)
     }
 
-    companion object {
-        /** A preview can admit older releases without reading or advancing customer authority. */
-        fun ephemeral(): JourneyReleaseHighWaterStore = JourneyReleaseHighWaterStore(null)
-
-        private val processLock = Any()
+    private companion object {
+        val processLock = Any()
     }
 }

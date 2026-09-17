@@ -702,15 +702,6 @@ public final class ai/nuxie/sdk/billing/SubscriptionReplacement {
 public final class ai/nuxie/sdk/billing/SubscriptionReplacementRequiredException : java/lang/IllegalStateException {
 }
 
-public final class ai/nuxie/sdk/companion/JourneyPreviewHost {
-	public static final field INSTANCE Lai/nuxie/sdk/companion/JourneyPreviewHost;
-	public final fun present (Landroid/content/Context;[BLai/nuxie/sdk/NuxieEnvironment;Ljava/lang/String;Lkotlin/jvm/functions/Function0;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
-	public static synthetic fun present$default (Lai/nuxie/sdk/companion/JourneyPreviewHost;Landroid/content/Context;[BLai/nuxie/sdk/NuxieEnvironment;Ljava/lang/String;Lkotlin/jvm/functions/Function0;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
-}
-
-public abstract interface annotation class ai/nuxie/sdk/companion/NuxieCompanionApi : java/lang/annotation/Annotation {
-}
-
 public final class ai/nuxie/sdk/features/FeatureAccess {
 	public fun <init> (ZZLjava/lang/Double;Lai/nuxie/sdk/features/FeatureType;)V
 	public final fun component1 ()Z
