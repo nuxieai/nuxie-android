@@ -17,7 +17,7 @@ internal class JourneyControlExecutor(
     private val appDefaultTimezoneIdentifier: String?,
 ) {
     data class Checkpoint(val anchorAtMillis: Long, val wakeAtMillis: Long)
-    data class Event(val name: String, val occurredAtMillis: Long, val properties: JsonObject)
+    data class Event(val name: String, val occurredAtMillis: Long, val properties: JsonObject, val id: String? = null)
     data class Signal(val event: Event? = null, val responsesChanged: Boolean = false)
     data class ExperimentSelection(
         val experimentId: String,
@@ -36,6 +36,7 @@ internal class JourneyControlExecutor(
             val stepId: String,
             val context: JsonObject,
             val experimentSelection: ExperimentSelection? = null,
+            val consumedEvent: Boolean = false,
         ) : Result
         data class Park(val stepId: String, val checkpoint: Checkpoint) : Result
         data class Complete(val outcome: String) : Result
@@ -198,7 +199,10 @@ internal class JourneyControlExecutor(
         val evaluatedContext = if (eventMatches) JsonObject(context + ("event" to event!!.properties)) else context
         if ((eventMatches || responseMatches) &&
             JourneyValues.evaluate(action.getValue("condition").jsonObject, evaluatedContext, customer) == true
-        ) return advance(outlets, "satisfied", evaluatedContext)
+        ) return when (val result = advance(outlets, "satisfied", evaluatedContext)) {
+            is Result.Advance -> result.copy(consumedEvent = eventMatches)
+            else -> result
+        }
         if (nowMillis >= current.wakeAtMillis) return advance(outlets, "timeout", context)
         return Result.Park(step.text("id") ?: return Result.Invalid, current)
     }

@@ -937,7 +937,7 @@ class JourneyServiceTest {
                     selectedAtMillis = 99_000L,
                 ),
             )
-            journal.bindExperimentExposures(run.id, "screen_welcome")
+            journal.preparePresentation(run.id, "screen_welcome")
             val request = requireNotNull(presenter.request)
 
             request.onPresentationRevealed("different_screen")

@@ -1463,7 +1463,7 @@ internal class JourneyService(
                         it.stepId == run.stepId &&
                         it.pendingPresentationPublication == null
                 } ?: return@publishJournalIfCurrent null
-                target.transition(current.id, routeStepId, context)
+                target.transition(current.id, routeStepId, context, clearPresentationSource = true)
                 target.runs().firstOrNull { it.id == current.id }
             }
         }.getOrNull() ?: return PresentationLifecycleResult.REJECTED
@@ -1524,9 +1524,9 @@ internal class JourneyService(
             finish(run, "abandoned", command.release.leg, target)
             return
         }
-        target.transition(run.id, routeStepId, run.context)
+        target.transition(run.id, routeStepId, run.context, clearPresentationSource = true)
         execute(
-            initial = run.copy(stepId = routeStepId, park = null),
+            initial = run.copy(stepId = routeStepId, park = null, presentationSource = null),
             release = command.release,
             executionToken = command.executionFenceToken,
             signal = JourneyControlExecutor.Signal(
@@ -1757,6 +1757,7 @@ internal class JourneyService(
                         route,
                         context,
                         clearingPresentationPublication = publication.invocationId,
+                        presentationEventId = event.id,
                     )
                     target.runs().firstOrNull { it.id == current.id }
                 }
@@ -2108,7 +2109,7 @@ internal class JourneyService(
         transition: JsonObject? = null,
     ): PresentedScreen? {
         val presentation = presenter ?: return null
-        val run = target.bindExperimentExposures(currentRun.id, screenId) ?: run {
+        val run = target.preparePresentation(currentRun.id, screenId) ?: run {
             reservation?.close()
             return null
         }
@@ -2247,6 +2248,8 @@ internal class JourneyService(
                     executionSnapshot.customer,
                 )) {
                     is JourneyControlExecutor.Result.Advance -> {
+                        val clearSource = result.consumedEvent &&
+                            run.presentationSource?.isReplacedBy(executionSignal.event?.id) == true
                         val exposure = result.experimentSelection
                             ?.takeIf { selection ->
                                 run.experimentExposures.none {
@@ -2259,10 +2262,12 @@ internal class JourneyService(
                             result.stepId,
                             result.context,
                             experimentExposure = exposure,
+                            clearPresentationSource = clearSource,
                         )
                         run = run.copy(
                             stepId = result.stepId,
                             context = result.context,
+                            presentationSource = if (clearSource) null else run.presentationSource,
                             park = null,
                             experimentExposures = if (exposure == null) {
                                 run.experimentExposures
@@ -2366,7 +2371,7 @@ internal class JourneyService(
                                 run.context,
                             )
                             val resolved = contextResolved?.let {
-                                presentation.resolveAction(owner, it, null)
+                                presentation.resolveAction(owner, it, run.presentationSource?.source)
                             }
                             if (resolved == null) {
                                 finishExecution(run, "abandoned")
@@ -2614,6 +2619,7 @@ internal class JourneyService(
                     it.name,
                     it.timestampMillis,
                     it.properties,
+                    it.id,
                 ),
             )
         } ?: JourneyControlExecutor.Signal()
