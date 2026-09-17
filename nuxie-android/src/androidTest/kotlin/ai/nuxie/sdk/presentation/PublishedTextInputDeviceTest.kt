@@ -2339,15 +2339,23 @@ class PublishedTextInputDeviceTest {
 
     private enum class AuthoredRoleProbe { COMPLETE, HEADING_ENTRY, EDITOR_ENTRY, EDITOR_HOME_RETURN, SLIDER_HOME_RETURN, KEYBOARD_LTR, KEYBOARD_RTL }
 
-    private enum class PublishedBehavior { TEXT_INPUT, SCRIPT, SEMANTIC_SCRIPT, SEMANTIC_ROLES }
+    @Test
+    fun signedRepeatedPurchaseButtonsDispatchTheirOwnPlacements() {
+        exerciseDurableNativeEmission(PublishedBehavior.PURCHASE, purchaseX = 80f)
+        exerciseDurableNativeEmission(PublishedBehavior.PURCHASE, purchaseX = 240f)
+    }
 
-    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE) {
+    private enum class PublishedBehavior { TEXT_INPUT, SCRIPT, SEMANTIC_SCRIPT, SEMANTIC_ROLES, PURCHASE }
+
+    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
+        val purchasing = behavior == PublishedBehavior.PURCHASE
+        val purchases = LinkedBlockingQueue<String>()
         val scripted = behavior == PublishedBehavior.SCRIPT || behavior == PublishedBehavior.SEMANTIC_SCRIPT
         val candidateSemantics = behavior == PublishedBehavior.SEMANTIC_SCRIPT || behavior == PublishedBehavior.SEMANTIC_ROLES
-        val fixturePath = if (behavior == PublishedBehavior.SEMANTIC_ROLES) "journeys/rendered-semantic-roles"
+        val fixturePath = if (purchasing) "journeys/rendered-purchase-scopes" else if (behavior == PublishedBehavior.SEMANTIC_ROLES) "journeys/rendered-semantic-roles"
             else if (candidateSemantics) "journeys/rendered-semantic-screen-control${if (failScript) "-error" else ""}"
             else if (failScript) "journeys/rendered-screen-control-error" else if (scripted) "journeys/rendered-screen-control" else "journeys/rendered-text-input"
         val fixture = loadPublishedFixture(instrumentation, fixturePath, candidateSemantics)
@@ -2389,8 +2397,13 @@ class PublishedTextInputDeviceTest {
             override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
             override fun resolveAction(owner: JourneyPresentationOwner, action: JsonObject, source: JourneyScreenEmissionSource?) =
                 presentations.resolveJourneyAction(owner, action, source)
-            override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String) =
-                presentations.dispatchJourneyAction(owner, action, effectId)
+            override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String): JourneyPresentationActionResult {
+                if (purchasing && action["type"]?.jsonPrimitive?.content == "purchase") {
+                    purchases.add(action.getValue("placementId").jsonPrimitive.content)
+                    return JourneyPresentationActionResult.AwaitingOutcome
+                }
+                return presentations.dispatchJourneyAction(owner, action, effectId)
+            }
             override fun cancelBackNavigation(owner: JourneyPresentationOwner) = presentations.cancelBackNavigation(owner)
             override suspend fun shutdownOwnedBy(ownerDistinctId: String) = presentations.shutdownOwnedBy(ownerDistinctId)
             override suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) = presentations.shutdownJourney(ownerDistinctId, journeyId)
@@ -2404,7 +2417,7 @@ class PublishedTextInputDeviceTest {
                 presentations.presentJourney(request.release, request.screenId, request.journeyId,
                     request.ownerDistinctId, request.reservation, request.canPresent,
                     acquire = {
-                        if (scripted || candidateSemantics) artifactAcquirer.acquire(request.release, checkNotNull(catalog.snapshot(owner)).profile.delivery)
+                        if (purchasing || scripted || candidateSemantics) artifactAcquirer.acquire(request.release, checkNotNull(catalog.snapshot(owner)).profile.delivery)
                         else AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv, protection = Closeable {})
                     },
                     nextBatchSequence = request.nextBatchSequence, nextEmissionSequence = request.nextEmissionSequence,
@@ -2453,6 +2466,41 @@ class PublishedTextInputDeviceTest {
                 }
             }
             val first = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
+            if (purchasing) {
+                assertTrue("Purchase requires revealed signed presentation", initiallyRevealed.await(10, TimeUnit.SECONDS))
+                var surface: ExperienceSurfaceHost? = null
+                val deadline = SystemClock.uptimeMillis() + 10_000
+                while (surface == null && SystemClock.uptimeMillis() < deadline) {
+                    instrumentation.runOnMainSync {
+                        fun find(view: View): ExperienceSurfaceHost? = if (view is ExperienceSurfaceHost) view
+                            else if (view is ViewGroup) (0 until view.childCount).firstNotNullOfOrNull { find(view.getChildAt(it)) } else null
+                        surface = find(first.window.decorView)?.takeIf { it.isShown && it.isAvailable && it.width > 1 && it.height > 1 }
+                    }
+                    if (surface == null) SystemClock.sleep(20)
+                }
+                val target = checkNotNull(surface)
+                val downTime = SystemClock.uptimeMillis()
+                fun dispatch(action: Int) = instrumentation.runOnMainSync {
+                    val scale = minOf(target.width / 320f, target.height / 100f)
+                    val x = (target.width - 320f * scale) / 2f + purchaseX * scale
+                    val y = (target.height - 100f * scale) / 2f + 50f * scale
+                    val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
+                    try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }
+                }
+                dispatch(MotionEvent.ACTION_DOWN)
+                awaitDeliveredPointer(target)
+                dispatch(MotionEvent.ACTION_UP)
+                val dispatched = purchases.poll(10, TimeUnit.SECONDS)
+                assertEquals("batches=${accepted.map { it.source to it.emissions.map { emission -> emission.name } }} outcomes=$terminalOutcomes errors=$errorDismissals",
+                    if (purchaseX == 80f) "plan:monthly" else "plan:annual", dispatched)
+                val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS))
+                assertEquals(if (purchaseX == 80f) "plan.first" else "plan.second", batch.source.instanceId)
+                assertEquals(listOf("purchase_requested"), batch.emissions.map { it.name })
+                assertEquals("purchase_requested", runBlocking { checkNotNull(store.stableEvent(batch.emissions.single().id)).name })
+                assertEquals(artifactFiles.keys, downloaded.toSet())
+                assertEquals(null, purchases.poll(300, TimeUnit.MILLISECONDS))
+                return
+            }
             if (behavior == PublishedBehavior.SEMANTIC_ROLES) {
                 assertTrue("Authored roles require a revealed presentation", initiallyRevealed.await(10, TimeUnit.SECONDS))
                 assertAuthoredRoles(instrumentation, first, accepted, roleProbe) { journalRun().context.getValue("responses").jsonObject }
