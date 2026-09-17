@@ -1,10 +1,10 @@
 {
-  "release": "android-runtime-v0.4.2",
-  "url": "https://github.com/nuxieai/nuxie-runtime/releases/download/android-runtime-v0.4.2/NuxieRuntimeAndroid.zip",
-  "checksum": "3faf26bb8c663ecd018be89aef3acd69c3b2255073cbbb3ee24a3b9dc5ebdbc9",
+  "release": "android-runtime-v0.4.3",
+  "url": "https://github.com/nuxieai/nuxie-runtime/releases/download/android-runtime-v0.4.3/NuxieRuntimeAndroid.zip",
+  "checksum": "d9cd8f06de104bdfbd2898b978185243f357290e2f0101f340c303762d108329",
   "sourceRepo": "nuxieai/nuxie-runtime",
   "sourceBranch": "main",
-  "sourceCommit": "a95dbcf54c70b5514990bf752082f5023fbeb9e9",
+  "sourceCommit": "a952cc1c38cc8b33cf3d9b56850da2416b163bd2",
   "features": [
     "android-authored-wgsl",
     "android-vulkan",
