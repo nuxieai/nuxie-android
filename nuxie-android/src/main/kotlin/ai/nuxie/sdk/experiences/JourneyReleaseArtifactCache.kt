@@ -2,6 +2,7 @@ package ai.nuxie.sdk.experiences
 
 import ai.nuxie.sdk.experiences.JourneyReleaseArtifactAcquisitionException.Reason
 import ai.nuxie.sdk.network.HttpTransport
+import ai.nuxie.sdk.network.HttpCancellation
 import android.content.Context
 import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.io.Closeable
@@ -115,6 +116,7 @@ internal class JourneyReleaseArtifactCache(
         expectedContentType: String? = null,
         protection: CacheProtectionLease? = null,
         checkActive: () -> Unit = {},
+        cancellation: HttpCancellation? = null,
     ): File {
         checkActive()
         val baseUrl = validatedBaseUrl(key, signedBaseUrl)
@@ -143,6 +145,7 @@ internal class JourneyReleaseArtifactCache(
                             baseUrl = baseUrl,
                             initialUrl = sourceUrl,
                             checkActive = checkActive,
+                            cancellation = cancellation,
                         )
                 }
             } finally {
@@ -184,6 +187,7 @@ internal class JourneyReleaseArtifactCache(
         baseUrl: URL,
         initialUrl: URL,
         checkActive: () -> Unit,
+        cancellation: HttpCancellation?,
     ): File {
         var requestUrl = initialUrl
         var redirectCount = 0
@@ -197,55 +201,59 @@ internal class JourneyReleaseArtifactCache(
                         body = ByteArray(0),
                         method = "GET",
                         followRedirects = false,
+                        cancellation = cancellation,
                     ),
                 )
             } catch (error: IOException) {
                 fail(key, Reason.TRANSPORT, "artifact fetch failed", error)
             }
-            response.use {
-                checkActive()
-                if (!sameOrigin(response.finalUrl, baseUrl)) {
-                    fail(key, Reason.REDIRECT_ESCAPED_ORIGIN, "artifact redirect escaped origin")
-                }
-                if (response.statusCode in 300..399) {
-                    val location = response.header("location")
-                        ?: fail(key, Reason.HTTP_STATUS, "artifact fetch failed: ${response.statusCode}")
-                    val redirected = runCatching { URL(requestUrl, location) }.getOrElse {
-                        fail(key, Reason.REDIRECT_ESCAPED_ORIGIN, "invalid artifact redirect", it)
-                    }
-                    if (!sameOrigin(redirected, baseUrl)) {
+            val abort = cancellation?.register(response::close)
+            try {
+                response.use {
+                    checkActive()
+                    if (!sameOrigin(response.finalUrl, baseUrl)) {
                         fail(key, Reason.REDIRECT_ESCAPED_ORIGIN, "artifact redirect escaped origin")
                     }
-                    redirectCount += 1
-                    if (redirectCount > MAX_REDIRECTS) {
-                        fail(key, Reason.HTTP_STATUS, "too many artifact redirects")
+                    if (response.statusCode in 300..399) {
+                        val location = response.header("location")
+                            ?: fail(key, Reason.HTTP_STATUS, "artifact fetch failed: ${response.statusCode}")
+                        val redirected = runCatching { URL(requestUrl, location) }.getOrElse {
+                            fail(key, Reason.REDIRECT_ESCAPED_ORIGIN, "invalid artifact redirect", it)
+                        }
+                        if (!sameOrigin(redirected, baseUrl)) {
+                            fail(key, Reason.REDIRECT_ESCAPED_ORIGIN, "artifact redirect escaped origin")
+                        }
+                        redirectCount += 1
+                        if (redirectCount > MAX_REDIRECTS) {
+                            fail(key, Reason.HTTP_STATUS, "too many artifact redirects")
+                        }
+                        requestUrl = redirected
+                        return@use
                     }
-                    requestUrl = redirected
-                    return@use
-                }
-                if (response.statusCode !in 200..299) {
-                    fail(
+                    if (response.statusCode !in 200..299) {
+                        fail(
+                            key,
+                            Reason.HTTP_STATUS,
+                            "artifact fetch failed: ${response.statusCode}",
+                            httpStatusCode = response.statusCode,
+                        )
+                    }
+                    validateContentType(key, expectedContentType, response.header("content-type"))
+                    response.declaredContentLength?.let { declared ->
+                        if (declared > maximumBytes) {
+                            fail(key, Reason.SIZE_OVERRUN, "artifact stream exceeds size limit")
+                        }
+                    }
+                    return publishStream(
                         key,
-                        Reason.HTTP_STATUS,
-                        "artifact fetch failed: ${response.statusCode}",
-                        httpStatusCode = response.statusCode,
+                        sha256,
+                        expectedSizeBytes,
+                        maximumBytes,
+                        response.body,
+                        checkActive,
                     )
                 }
-                validateContentType(key, expectedContentType, response.header("content-type"))
-                response.declaredContentLength?.let { declared ->
-                    if (declared > maximumBytes) {
-                        fail(key, Reason.SIZE_OVERRUN, "artifact stream exceeds size limit")
-                    }
-                }
-                return publishStream(
-                    key,
-                    sha256,
-                    expectedSizeBytes,
-                    maximumBytes,
-                    response.body,
-                    checkActive,
-                )
-            }
+            } finally { abort?.close() }
         }
     }
 

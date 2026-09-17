@@ -1,10 +1,16 @@
 package ai.nuxie.sdk.experiences
 
 import ai.nuxie.sdk.network.HttpTransport
+import ai.nuxie.sdk.network.HttpCancellation
 import android.content.Context
 import java.io.Closeable
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -103,7 +109,17 @@ internal class JourneyReleaseArtifactAcquirer(
     ): AcquiredJourneyRelease {
         var completed: AcquiredJourneyRelease? = null
         try {
-            return withContext(Dispatchers.IO) { acquireOnIo(identity, descriptor, delivery).also { completed = it } }
+            return withContext(Dispatchers.IO) {
+                coroutineScope {
+                    val cancellation = HttpCancellation()
+                    val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
+                        try { awaitCancellation() } finally { cancellation.cancel() }
+                    }
+                    try {
+                        acquireOnIo(identity, descriptor, delivery, cancellation).also { completed = it }
+                    } finally { watcher.cancelAndJoin() }
+                }
+            }
         } catch (error: Throwable) {
             // Dispatch back to the caller is cancellable even after acquisition
             // succeeds. An undelivered result must not retain its cache lease.
@@ -116,6 +132,7 @@ internal class JourneyReleaseArtifactAcquirer(
         identity: JourneyReleaseIdentity,
         descriptor: JsonObject,
         delivery: JourneyReleaseDelivery,
+        cancellation: HttpCancellation,
     ): AcquiredJourneyRelease {
         val render = descriptor["render"] as? JsonObject
             ?: invalidDescriptor("<render>", "release render is missing")
@@ -241,6 +258,7 @@ internal class JourneyReleaseArtifactAcquirer(
                         expectedContentType = item.contentType,
                         protection = protection,
                         checkActive = acquisitionContext::ensureActive,
+                        cancellation = cancellation,
                     )
                     normalized.keys.forEach { key -> files[key] = file }
                 } catch (error: JourneyReleaseArtifactAcquisitionException) {
