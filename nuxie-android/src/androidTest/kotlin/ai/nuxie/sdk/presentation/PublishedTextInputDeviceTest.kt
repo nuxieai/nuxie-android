@@ -527,9 +527,22 @@ class PublishedTextInputDeviceTest {
         exerciseBackgroundAndRecreation(rotate = true)
     }
 
-    private fun exerciseBackgroundAndRecreation(rotate: Boolean = false) {
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun systemFontScaleReachesMountedScreenAcrossHomeAndRecreation() {
+        exerciseBackgroundAndRecreation(fontScaleChanges = true)
+    }
+
+    private fun exerciseBackgroundAndRecreation(rotate: Boolean = false, fontScaleChanges: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
+        fun shell(command: String): String = android.os.ParcelFileDescriptor.AutoCloseInputStream(
+            instrumentation.uiAutomation.executeShellCommand(command),
+        ).bufferedReader().use { it.readText().trim() }
+        val originalFontScale = if (fontScaleChanges) shell("settings get system font_scale") else null
+        fun setFontScale(value: Float) {
+            shell("settings put system font_scale $value")
+        }
         assertTrue(NuxieRuntime.shared.isAvailable)
         val fixture = loadPublishedFixture(instrumentation)
         val screen = fixture.release.descriptor.getValue("render").jsonObject
@@ -542,6 +555,15 @@ class PublishedTextInputDeviceTest {
             0xff000000.toInt(), PresentationShell.FullScreen, screen.getValue("id").jsonPrimitive.content,
             fixture.release.descriptor, fixture.assets,
             ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float))
+        fun awaitFontScale(value: Float) {
+            val expected = NuxieViewModelScalarValue.NumberValue(value.toDouble())
+            val deadline = SystemClock.uptimeMillis() + 10_000
+            while (prepared.screenLifecycle.snapshot()["fontScale"] != expected && SystemClock.uptimeMillis() < deadline) {
+                SystemClock.sleep(25)
+            }
+            assertEquals("System preference must reach the mounted screen", expected,
+                prepared.screenLifecycle.snapshot()["fontScale"])
+        }
         var monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         var activity: Activity? = null
@@ -550,6 +572,7 @@ class PublishedTextInputDeviceTest {
         PresentationRegistry.register(id, prepared, onFirstFrame = { approveFixtureFrame(id); firstFrame.countDown() },
             onFailure = { failure.set(it) }, onDismissed = { dismissed.countDown() }, onOutcome = {})
         try {
+            if (fontScaleChanges) setFontScale(1.3f)
             context.startActivity(Intent(context, NuxieExperienceActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, id)
@@ -562,6 +585,13 @@ class PublishedTextInputDeviceTest {
                 original.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
             }
             assertTrue("Initial frame: ${failure.get()}", firstFrame.await(30, TimeUnit.SECONDS))
+            if (fontScaleChanges) {
+                awaitFontScale(1.3f)
+                setFontScale(2f)
+                awaitFontScale(2f)
+                assertSame("Font-scale configuration must preserve the Activity", original,
+                    PresentationRegistry.currentScreen(id)?.purchaseActivity())
+            }
             instrumentation.waitForIdleSync()
             SystemClock.sleep(150)
             val portraitDeadline = SystemClock.elapsedRealtime() + 10_000
@@ -593,11 +623,13 @@ class PublishedTextInputDeviceTest {
                     assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, prepared.screenLifecycle.phase)
                     assertEquals(1uL, prepared.screenLifecycle.appearances)
                 }
+                if (fontScaleChanges) setFontScale(0.85f)
                 context.startActivity(Intent(context, NuxieExperienceActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                     putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, id)
                 })
                 assertTrue("Return must resume the same Activity", resumed.await(10, TimeUnit.SECONDS))
+                if (fontScaleChanges) awaitFontScale(0.85f)
                 instrumentation.waitForIdleSync()
                 SystemClock.sleep(150)
                 val returned = copySurfaceAtSize(checkNotNull(findSurface(original.window.decorView)), before.width, before.height)
@@ -646,6 +678,7 @@ class PublishedTextInputDeviceTest {
             val replacement = if (rotate) original else checkNotNull(monitor.waitForActivityWithTimeout(15_000))
             activity = replacement
             assertEquals("Only explicit recreation replaces the Activity", !rotate, replacement !== original)
+            if (fontScaleChanges) awaitFontScale(0.85f)
             instrumentation.waitForIdleSync()
             assertEquals(!rotate, original.isDestroyed)
             if (rotate) {
@@ -716,6 +749,10 @@ class PublishedTextInputDeviceTest {
             instrumentation.runOnMainSync { activity?.finish() }
             instrumentation.removeMonitor(monitor)
             PresentationRegistry.clearForTesting()
+            if (originalFontScale != null) {
+                if (originalFontScale == "null") shell("settings delete system font_scale")
+                else setFontScale(originalFontScale.toFloat())
+            }
         }
     }
 
