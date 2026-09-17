@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "25c569b1608ab1b5122572c67354412d0372cefd",
+  "sourceCommit": "38989f74fb84e244c10bad093b67ad0ec70b64ad",
   "files": {
     "README.md": "9104a727bef89b388554d25583a6e013531c310f1a93d8f9f81440af8fcf67df",
     "accessibility/control-state.json": "48d1d9ea62bc7890ecd41d69592cbe3f7d137cf7bdb5849f7c64137489a5360c",
@@ -110,6 +110,13 @@
     "runtime/font-metrics-binding/report.json": "3ad4e5fe18972dd7d45b61fb39a72cf0003952a032f17d8924b9f9ca0a912f7b",
     "runtime/font-metrics-binding/screen.riv": "3d95580b477c44c73d2502fdce3787f4a6477e36a5a5dec0447171ebf18cc545",
     "runtime/font-metrics-binding/snapshot.json": "6c169bce1c2809c514d1784fe1b7d653cdd1778e286e6e10364f058a8feec05c",
+    "runtime/font-scale-policy/2898476918b21c3f9b5ba22e86853c6d63b544f92da277a92533011a28c93af5.otf": "2898476918b21c3f9b5ba22e86853c6d63b544f92da277a92533011a28c93af5",
+    "runtime/font-scale-policy/README.md": "5be67439405d3f4e2c86d9846ef959593b43b122ffa64f115b0f38c2f4975042",
+    "runtime/font-scale-policy/cases.json": "fc5d20a782dd20af354c039630c09c90a7d2de829f07b65996acceed3ee659de",
+    "runtime/font-scale-policy/provenance.json": "5d65550fcad7ce2ee1a693970818b77a85460b1ab2b5320dc9a1fff3ace5ffaf",
+    "runtime/font-scale-policy/report.json": "a32b05e380e86b4cf71c9a31d92fb3d2afd77e45e513250bbc11e7b5adf34f25",
+    "runtime/font-scale-policy/screen.riv": "074347cd17b4a875837c5585d30ccc43dd9ed84cc3792211782d0e622ac7fcb3",
+    "runtime/font-scale-policy/snapshot.json": "bed73a9ca365acd77ebc011464150a364e2feb6bd24eaa1c4462cdd62ebcc96a",
     "runtime/screen-control-error/action.luau": "b886b79f82b7d893c2a8e7440eb97ed5c04e0e83412677627d26019141f40456",
     "runtime/screen-control-error/provenance.json": "94e6747f4814acb4bd82ed7deb66f812cbae714969676d86ab2ef361df59c167",
     "runtime/screen-control-error/screen.riv": "906bcd5aed60801553ed32c12833767e6d2bc75c555cd8fb583cab1d6f3a9ad7",
