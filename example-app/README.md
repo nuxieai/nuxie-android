@@ -106,8 +106,8 @@ identity state before checkout or restore, and recheck identity before returning
 successful completion. The
 provider builds omit the one-SDK anonymous reset. RevenueCat exposes **Sign out**
 through the application-owned transition below. Superwall does not expose sign-out
-because supported completion is unavailable. Starting a new customer after completed
-logout requires a deliberate new-session flow, which remains unimplemented. Do not
+because supported completion is unavailable. After completed logout, **Sign in with launch customer** explicitly admits the
+customer supplied through launch extras after RevenueCat confirms login. Do not
 copy a one-SDK reset into a two-SDK production session.
 
 Build and check every selection separately, returning to the default build last:
@@ -225,8 +225,18 @@ active, including during a held
 purchase/restore. **Retry sign out** is the only enabled operation after an in-process
 failure. Both controls invoke the same application-owned transition; recreating the
 Activity cancels its UI waiter without cancelling logout. Signing out, recovery-required,
-and completed states disable every operation. Sign-in after completion and recovery
-of a previous process remain unimplemented. `ProviderOperationJournal` also commits
+and completed states disable purchase/check/restore operations. Completed logout
+allows **Sign in with launch customer**. `SessionSignIn` owns this operation across
+Activity recreation and cancelled UI waiters. It records the requested session
+fingerprint before RevenueCat's public login callback, then atomically records the
+admitted session and removes completed logout only after provider success. A failed
+completion write is retried without repeating a known successful login. A restarted
+process requires an explicit retry with the same launch parameters; stale or different
+parameters cannot reopen the old customer. This example consumes a host-supplied
+customer identity; it does not authenticate end users.
+
+Interrupted purchase/restore markers and incomplete logout still require external
+reconciliation and cannot be cleared by sign-in. `ProviderOperationJournal` also commits
 an opaque operation
 marker before dispatching each wrapped purchase or restore. A successful or
 cancelled result retires that marker; pending payments, returned failures and
@@ -328,3 +338,45 @@ backup if the sequence is interrupted. This executes the real application owner
 with a controlled, suspended restore delegate. Actual RevenueCat/Superwall held
 callbacks are covered by the selected-provider unit suites; external store
 process-death reconciliation remains unqualified.
+
+
+### Explicit sign-in lifecycle qualification
+
+Run the RevenueCat selection on a clean example installation:
+
+```sh
+ANDROID_SERIAL=emulator-5566 ./gradlew -PnuxieExamplePurchaseProvider=revenuecat \
+  :example-app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=ai.nuxie.example.SessionSignInLifecycleTest \
+  -Pandroid.testInstrumentationRunnerArguments.sessionSignIn=true
+```
+
+The test clicks the actual sign-in control, rejects an unfinished provider marker,
+recreates the Activity during a held callback, and completes after the UI waiter has
+been destroyed. A real SDK session with controlled HTTP proves that stale launch
+identity cannot enable operations and the explicitly admitted launch can. Provider
+completion is controlled; RevenueCat callback behavior is separately exercised by
+`RevenueCatSignInTest`. Neither is real-store or external authentication evidence.
+
+`SignInStartupTest` separates actual process loss from Activity recreation. Install
+both APKs from the selected build, then execute seed and verify in separate
+instrumentation processes:
+
+```sh
+adb -s emulator-5566 install -r build/outputs/apk/debug/example-app-debug.apk
+adb -s emulator-5566 install -r build/outputs/apk/androidTest/debug/example-app-debug-androidTest.apk
+adb -s emulator-5566 shell am instrument -w -r \
+  -e class 'ai.nuxie.example.SignInStartupTest#seed' -e signInPhase seed \
+  ai.nuxie.example.test/androidx.test.runner.AndroidJUnitRunner
+adb -s emulator-5566 shell am force-stop ai.nuxie.example
+adb -s emulator-5566 shell am instrument -w -r \
+  -e class 'ai.nuxie.example.SignInStartupTest#verify' -e signInPhase verify \
+  ai.nuxie.example.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+The APK paths above are relative to `example-app`. Seed requires empty example
+session preferences and leaves the controlled provider login suspended after
+persisting intent. Verify requires a different PID and checks both old and requested
+customer launches remain closed without replaying login; it restores the initially
+empty preferences. This proves interrupted sign-in admission, not reconciliation of
+an interrupted purchase or an unrecorded provider logout result.
