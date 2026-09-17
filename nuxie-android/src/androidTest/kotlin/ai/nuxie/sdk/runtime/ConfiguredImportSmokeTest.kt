@@ -139,7 +139,7 @@ class ConfiguredImportSmokeTest {
                             val colors = mutableListOf<Boolean>()
                             while (android.os.SystemClock.elapsedRealtime() < deadline && colors.size < 4) {
                                 playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
-                                seenCaptions += player.videoCaption(initial.componentId).text
+                                seenCaptions += checkNotNull(playback.captionSnapshot()[initial.componentId]).text
                                 player.step(0.0)
                                 val composed = renderer.renderToCpuFrame(player, 0, false)
                                 val offset = (80 * composed.width + 100) * 4
@@ -149,6 +149,7 @@ class ConfiguredImportSmokeTest {
                                 if (blue > 180 && red < 70 && colors.lastOrNull() != false) colors.add(false)
                                 if (!suspended && colors == listOf(true)) {
                                     playback.setVisible(false)
+                                    assertTrue(playback.captionSnapshot().isEmpty())
                                     playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
                                     assertTrue(player.videos().single().wantsPlay)
                                     assertTrue(player.videos().single().state != 2)

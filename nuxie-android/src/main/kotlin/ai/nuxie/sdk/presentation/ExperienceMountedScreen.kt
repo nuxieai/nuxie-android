@@ -31,6 +31,7 @@ internal class ExperienceMountedScreen(
             prepared.artifactsByKey[key]?.let { name to it }
         }.toMap()
     private val lane = NuxieRuntimeLane()
+    private var captionOverlay: ExperienceVideoCaptionOverlay? = null
     private var textOverlay: ExperienceTextInputOverlay? = null
     private var windowInsets: ExperienceWindowInsets? = null
     private val lifecycle = prepared.screenLifecycle
@@ -46,6 +47,10 @@ internal class ExperienceMountedScreen(
         clearColor = prepared.clearColor,
         artboardSize = prepared.artboardSize,
         listener = object : ExperienceSurfaceHost.Listener by listener {
+            override fun onVideoCaptions(captions: Map<Long, ai.nuxie.sdk.runtime.NuxieVideoCaption>) {
+                captionOverlay?.update(captions)
+                listener.onVideoCaptions(captions)
+            }
             override fun onRuntimeEvent(event: ai.nuxie.sdk.runtime.NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {
                 transitionEvents.receive(event.name)
                 listener.onRuntimeEvent(event, viewModelSnapshot)
@@ -91,6 +96,9 @@ internal class ExperienceMountedScreen(
             }
             setBackgroundColor(prepared.clearColor)
             addView(surface, FrameLayout.LayoutParams(-1, -1))
+            captionOverlay = ExperienceVideoCaptionOverlay(activity).also {
+                addView(it, FrameLayout.LayoutParams(-1, -1))
+            }
             inputSize?.let { size ->
                 val overlay = ExperienceTextInputOverlay(activity, size, inputs, fonts,
                     surface::writeText, onFailure, prepared.textInputState)
@@ -163,6 +171,8 @@ internal class ExperienceMountedScreen(
         reducedMotion?.close()
         windowInsets?.close()
         windowInsets = null
+        captionOverlay?.update(emptyMap())
+        captionOverlay = null
         textOverlay?.close()
         textOverlay = null
         val finalState = if (changingConfigurations) lifecycle.snapshot()
