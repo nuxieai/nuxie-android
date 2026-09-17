@@ -21,12 +21,14 @@ internal class NuxieRuntime(
         expectedAssets: List<ExpectedFileAsset> = emptyList(),
         externalAssets: Map<Int, ByteArray> = emptyMap(),
         imageDecoder: NuxImageDecoder = AndroidImageDecoder,
+        videoEnabled: Boolean = false,
     ): NuxieRuntimeFile? = native.newFile(
         renderer.requireHandle(),
         bytes,
         expectedAssets,
         externalAssets,
         imageDecoder,
+        videoEnabled,
     )
         .takeUnless { it == 0L }
         ?.let { NuxieRuntimeFile(it, native) }
@@ -497,6 +499,19 @@ internal class NuxieRuntimePlayer internal constructor(
     private var interactionPlayer: NuxieRuntimePlayer? = null
     private var interactionStepPending = true
     private var stepFailed = false
+
+    fun videos(): List<NuxieVideoOccurrence> = native.videoOccurrences(requireHandle())
+
+    fun videoCommand(component: Long, kind: Int, value: Double = 0.0, reason: Int = 0) {
+        require(component >= 0 && kind >= 0 && value.isFinite() && reason >= 0)
+        val status = native.videoCommand(requireHandle(), component, kind, value, reason)
+        if (status != NUX_STATUS_OK) throw NuxieRuntimeCallException("video command", status)
+    }
+
+    fun videoStep(component: Long, observation: Int, generation: Long, value: Double = 0.0): List<NuxieVideoAction> {
+        require(component >= 0 && observation >= 0 && value.isFinite())
+        return native.videoStep(requireHandle(), component, observation, generation, value)
+    }
 
     fun enableSemantics() {
         val status = native.enableSemantics(requireHandle())

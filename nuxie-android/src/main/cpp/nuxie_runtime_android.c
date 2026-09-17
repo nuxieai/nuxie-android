@@ -735,7 +735,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNewConfigured(
     jobjectArray name_array, jobjectArray extension_array,
     jbooleanArray embedded_array, jbooleanArray contents_array,
     jintArray flags_array, jintArray external_ordinal_array,
-    jobjectArray external_payload_array, jobject decoder) {
+    jobjectArray external_payload_array, jobject decoder, jboolean video_enabled) {
   (void)self;
   if (renderer == 0 || bytes == NULL || ordinal_array == NULL || kind_array == NULL ||
       has_id_array == NULL || id_array == NULL || name_array == NULL ||
@@ -957,6 +957,11 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileNewConfigured(
   config.asset_hooks = &hooks;
   config.expected_assets = expected;
   config.expected_asset_count = (size_t)count;
+  struct NuxVideoPlaybackCapabilities video;
+  memset(&video, 0, sizeof(video));
+  video.struct_size = (uint32_t)sizeof(video);
+  video.playback_available = 1;
+  if (video_enabled) config.video_playback = &video;
 
   jsize file_len = (*env)->GetArrayLength(env, bytes);
   if (clear_jni_exception(env)) goto cleanup_configured_import;
@@ -3249,4 +3254,135 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRuntimeInfo(
            (int)revision_len,
            info.source_revision.data != NULL ? info.source_revision.data : "");
   return (*env)->NewStringUTF(env, buffer);
+}
+
+/* Copy callback views into JVM-owned values before returning to the runtime.
+ * No callback invokes another C API operation. */
+struct video_jni_collector {
+  JNIEnv *env;
+  jclass item_class;
+  jclass list_class;
+  jmethodID constructor;
+  jmethodID add;
+  jobject list;
+  size_t count;
+  int failed;
+};
+
+static int video_collector_init(struct video_jni_collector *c, JNIEnv *env,
+                                const char *name, const char *signature) {
+  memset(c, 0, sizeof(*c));
+  c->env = env;
+  c->item_class = (*env)->FindClass(env, name);
+  if (clear_jni_exception(env) || c->item_class == NULL) return 0;
+  c->list_class = (*env)->FindClass(env, "java/util/ArrayList");
+  if (clear_jni_exception(env) || c->list_class == NULL) return 0;
+  c->constructor = (*env)->GetMethodID(env, c->item_class, "<init>", signature);
+  if (clear_jni_exception(env) || c->constructor == NULL) return 0;
+  jmethodID init = (*env)->GetMethodID(env, c->list_class, "<init>", "()V");
+  if (clear_jni_exception(env) || init == NULL) return 0;
+  c->add = (*env)->GetMethodID(env, c->list_class, "add", "(Ljava/lang/Object;)Z");
+  if (clear_jni_exception(env) || c->add == NULL) return 0;
+  c->list = (*env)->NewObject(env, c->list_class, init);
+  return !clear_jni_exception(env) && c->list != NULL;
+}
+
+static void video_collector_add(struct video_jni_collector *c, jobject item) {
+  JNIEnv *env = c->env;
+  if (clear_jni_exception(env) || item == NULL) { c->failed = 1; return; }
+  (*env)->CallBooleanMethod(env, c->list, c->add, item);
+  if (clear_jni_exception(env)) c->failed = 1;
+  (*env)->DeleteLocalRef(env, item);
+  c->count++;
+}
+
+static jobjectArray video_collector_finish(struct video_jni_collector *c,
+                                           NuxStatus status, jintArray status_out) {
+  JNIEnv *env = c->env;
+  jobjectArray output = NULL;
+  if (c->failed) status = NUX_STATUS_RUNTIME_ERROR;
+  if (status == NUX_STATUS_OK) {
+    jobjectArray seed = (*env)->NewObjectArray(env, (jsize)c->count, c->item_class, NULL);
+    if (clear_jni_exception(env) || seed == NULL) status = NUX_STATUS_RUNTIME_ERROR;
+    else {
+      jmethodID to_array = (*env)->GetMethodID(env, c->list_class, "toArray", "([Ljava/lang/Object;)[Ljava/lang/Object;");
+      if (clear_jni_exception(env) || to_array == NULL) status = NUX_STATUS_RUNTIME_ERROR;
+      else {
+        output = (jobjectArray)(*env)->CallObjectMethod(env, c->list, to_array, seed);
+        if (clear_jni_exception(env) || output == NULL) status = NUX_STATUS_RUNTIME_ERROR;
+      }
+      (*env)->DeleteLocalRef(env, seed);
+    }
+  }
+  if (!set_status_out(env, status_out, status) || status != NUX_STATUS_OK) {
+    if (output != NULL) (*env)->DeleteLocalRef(env, output);
+    output = NULL;
+  }
+  if (c->list != NULL) (*env)->DeleteLocalRef(env, c->list);
+  if (c->list_class != NULL) (*env)->DeleteLocalRef(env, c->list_class);
+  if (c->item_class != NULL) (*env)->DeleteLocalRef(env, c->item_class);
+  return output;
+}
+
+static void video_occurrence_callback(void *context, const struct NuxVideoInfo *video) {
+  struct video_jni_collector *c = context;
+  if (c->failed) return;
+  /* Bound temporary JVM metadata independently from hardware decoder admission. */
+  if (c->count >= 65536 || video->component_id > INT64_MAX) { c->failed = 1; return; }
+  JNIEnv *env = c->env;
+  jstring source = new_string_view(env, video->source_key);
+  jstring mime = source == NULL ? NULL : new_string_view(env, video->content_type);
+  if (source == NULL || mime == NULL) c->failed = 1;
+  else video_collector_add(c, (*env)->NewObject(env, c->item_class, c->constructor,
+      (jlong)video->component_id, (jlong)video->asset_id, (jlong)video->generation,
+      (jint)video->state, (jboolean)(video->wants_play != 0), (jint)video->audio_policy,
+      source, mime, (jboolean)(video->embedded_bytes.len != 0)));
+  if (source != NULL) (*env)->DeleteLocalRef(env, source);
+  if (mime != NULL) (*env)->DeleteLocalRef(env, mime);
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoOccurrences(
+    JNIEnv *env, jobject self, jlong player, jintArray status_out) {
+  (void)self;
+  struct video_jni_collector c;
+  if (!video_collector_init(&c, env, "ai/nuxie/sdk/runtime/NuxieVideoOccurrence",
+      "(JJJIZILjava/lang/String;Ljava/lang/String;Z)V")) {
+    c.failed = 1;
+    return video_collector_finish(&c, NUX_STATUS_RUNTIME_ERROR, status_out);
+  }
+  NuxStatus status = nux_player_visit_videos(from_handle(player), video_occurrence_callback, &c);
+  return video_collector_finish(&c, status, status_out);
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoCommand(
+    JNIEnv *env, jobject self, jlong player, jlong component, jint kind, jdouble value, jint reason) {
+  (void)env; (void)self;
+  if (component < 0 || kind < 0 || reason < 0) return NUX_STATUS_INVALID_ARGUMENT;
+  return nux_player_video_command(from_handle(player), (size_t)component, (uint32_t)kind, value, (uint32_t)reason);
+}
+
+static void video_action_callback(void *context, const struct NuxVideoAction *action) {
+  struct video_jni_collector *c = context;
+  if (c->failed) return;
+  if (c->count >= 65536) { c->failed = 1; return; }
+  video_collector_add(c, (*c->env)->NewObject(c->env, c->item_class, c->constructor,
+      (jint)action->kind, (jdouble)action->value, (jlong)action->generation));
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoStep(
+    JNIEnv *env, jobject self, jlong player, jlong component, jint observation,
+    jlong generation, jdouble value, jintArray status_out) {
+  (void)self;
+  struct video_jni_collector c;
+  if (!video_collector_init(&c, env, "ai/nuxie/sdk/runtime/NuxieVideoAction", "(IDJ)V")) {
+    c.failed = 1;
+    return video_collector_finish(&c, NUX_STATUS_RUNTIME_ERROR, status_out);
+  }
+  NuxStatus status = component < 0 || observation < 0 ? NUX_STATUS_INVALID_ARGUMENT :
+      nux_player_video_step(from_handle(player), (size_t)component, (uint32_t)observation,
+          (uint64_t)generation, value, video_action_callback, &c);
+  return video_collector_finish(&c, status, status_out);
 }

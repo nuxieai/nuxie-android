@@ -73,6 +73,7 @@ class ExperienceSurfaceHostCleanupTest {
             expectedAssets: List<ExpectedFileAsset>,
             externalAssets: Map<Int, ByteArray>,
             imageDecoder: NuxImageDecoder,
+            videoEnabled: Boolean,
         ): Long = 2
         override fun newNamedArtboard(fileHandle: Long, name: String): Long = 3
         override fun newDefaultViewModel(artboardHandle: Long): NativeCallResult<Long> = NativeCallResult(0, 4L)

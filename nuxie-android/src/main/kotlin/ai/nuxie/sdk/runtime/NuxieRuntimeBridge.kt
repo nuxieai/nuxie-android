@@ -104,6 +104,7 @@ internal object NuxieRuntimeBridge {
         externalOrdinals: IntArray,
         externalPayloads: Array<ByteArray>,
         imageDecoder: NuxImageDecoder,
+        videoEnabled: Boolean,
     ): Long
 
     fun inspectFileAssets(bytes: ByteArray): List<ExpectedFileAsset>? =
@@ -126,9 +127,10 @@ internal object NuxieRuntimeBridge {
         expectedAssets: List<ExpectedFileAsset> = emptyList(),
         externalAssets: Map<Int, ByteArray> = emptyMap(),
         imageDecoder: NuxImageDecoder = AndroidImageDecoder,
+        videoEnabled: Boolean = false,
     ): Long {
         if (expectedAssets.isEmpty()) {
-            return if (externalAssets.isEmpty()) nativeFileNew(renderer, bytes) else 0L
+            return if (externalAssets.isEmpty() && !videoEnabled) nativeFileNew(renderer, bytes) else 0L
         }
         if (!expectedAssets.withIndex().all { (index, asset) -> asset.ordinal == index } ||
             !externalAssets.keys.all { it in expectedAssets.indices }
@@ -154,6 +156,7 @@ internal object NuxieRuntimeBridge {
             externalOrdinals = external.keys.toIntArray(),
             externalPayloads = external.values.toTypedArray(),
             imageDecoder = imageDecoder,
+            videoEnabled = videoEnabled,
         )
     }
 
@@ -239,6 +242,11 @@ internal object NuxieRuntimeBridge {
     external fun nativePlayerFree(player: Long)
 
     /** nux_player_step: advance by elapsed seconds; returns a status code. */
+    external fun nativeVideoOccurrences(player: Long, statusOut: IntArray): Array<NuxieVideoOccurrence>?
+    external fun nativeVideoCommand(player: Long, componentId: Long, kind: Int, value: Double, reason: Int): Int
+    external fun nativeVideoStep(player: Long, componentId: Long, observation: Int, generation: Long,
+        value: Double, statusOut: IntArray): Array<NuxieVideoAction>?
+
     external fun nativePlayerStep(player: Long, elapsedSeconds: Double): Int
 
     external fun nativePlayerStepTyped(

@@ -133,6 +133,7 @@ class HostRenderHarnessTest {
             expectedAssets: List<ExpectedFileAsset>,
             externalAssets: Map<Int, ByteArray>,
             imageDecoder: NuxImageDecoder,
+            videoEnabled: Boolean,
         ): Long {
             factoryLifecycle += "import:$rendererHandle"
             this.externalAssets = externalAssets

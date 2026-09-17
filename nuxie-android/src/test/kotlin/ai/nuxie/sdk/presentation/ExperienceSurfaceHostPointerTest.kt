@@ -998,6 +998,7 @@ class ExperienceSurfaceHostPointerTest {
             expectedAssets: List<ai.nuxie.sdk.runtime.ExpectedFileAsset>,
             externalAssets: Map<Int, ByteArray>,
             imageDecoder: ai.nuxie.sdk.runtime.NuxImageDecoder,
+            videoEnabled: Boolean,
         ): Long = 1L
 
         override fun freeFile(handle: Long) = Unit
