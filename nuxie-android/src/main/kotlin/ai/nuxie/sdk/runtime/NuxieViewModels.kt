@@ -97,6 +97,7 @@ internal enum class NuxieViewModelMutationKind(val nativeValue: Int) {
     SET_ENUM(4),
     FIRE_TRIGGER(5),
     SET_LIST_INDEX(6),
+    SET_IMAGE(7),
     SET_VIEW_MODEL(8),
     LIST_INSERT(9),
     LIST_SET(13),

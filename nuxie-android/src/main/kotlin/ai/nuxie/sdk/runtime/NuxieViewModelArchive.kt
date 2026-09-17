@@ -45,6 +45,7 @@ internal class NuxieViewModelArchive private constructor(
                         NuxieViewModelPropertyKind.COLOR -> NuxieViewModelMutationKind.SET_COLOR
                         NuxieViewModelPropertyKind.ENUM -> NuxieViewModelMutationKind.SET_ENUM
                         NuxieViewModelPropertyKind.LIST_INDEX -> NuxieViewModelMutationKind.SET_LIST_INDEX
+                        NuxieViewModelPropertyKind.IMAGE -> NuxieViewModelMutationKind.SET_IMAGE
                         NuxieViewModelPropertyKind.VIEW_MODEL -> {
                             if (stored.referencedInstanceId == 0L) {
                                 val fresh = value(native.snapshotViewModel(handle), "check empty reference").values.single { it.name == stored.name }
@@ -63,8 +64,17 @@ internal class NuxieViewModelArchive private constructor(
                             }
                             continue
                         }
-                        // Triggers are events, not retained values. Resource properties remain file-owned.
-                        else -> continue
+                        NuxieViewModelPropertyKind.TRIGGER -> continue // Never replay an already-consumed event.
+                        else -> {
+                            val freshGraph = value(native.snapshotViewModel(handle), "check retained resource")
+                            val fresh = freshGraph.values.single {
+                                it.propertyIndex == stored.propertyIndex && it.ownerInstanceId == freshGraph.rootInstanceId
+                            }
+                            require(fresh.integerValue == stored.integerValue && fresh.bytesValue.contentEquals(stored.bytesValue)) {
+                                "Native runtime cannot restore changed ${property.kind} property '${stored.name}'"
+                            }
+                            continue
+                        }
                     }
                     write(handle, NativeViewModelWrite(kind, stored.name, stored.bytesValue,
                         stored.numberValue, stored.integerValue, stored.boolValue))

@@ -1739,12 +1739,15 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
     return (jint)NUX_STATUS_NULL_ARGUMENT;
   }
   if (!((kind >= NUX_VIEW_MODEL_MUTATION_KIND_SET_STRING &&
-         kind <= NUX_VIEW_MODEL_MUTATION_KIND_FIRE_TRIGGER) ||
+         kind <= NUX_VIEW_MODEL_MUTATION_KIND_SET_IMAGE) ||
         kind == NUX_VIEW_MODEL_MUTATION_KIND_SET_VIEW_MODEL ||
+        kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_INSERT ||
+        kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_CLEAR ||
         kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_SET)) {
     return (jint)NUX_STATUS_INVALID_ARGUMENT;
   }
   if ((kind == NUX_VIEW_MODEL_MUTATION_KIND_SET_VIEW_MODEL ||
+       kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_INSERT ||
        kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_SET) &&
       related_view_model == 0) {
     return (jint)NUX_STATUS_NULL_ARGUMENT;
