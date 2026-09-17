@@ -1,9 +1,15 @@
 {
-  "publisherSourceCommit": "b172c73b10b184309a4ac3f4d118b2f9a1b2aadc",
+  "publisherSourceCommit": "1f7e477ec03917927c7a39d7491e34fdf2845094",
   "keyId": "TEST_ONLY_DEV_KEYPAIR",
   "publicKeyBase64": "IVL40Zt5HSRFMkLhXy6rbLfP+ntqXtMAl5YOBpiB2xI=",
-  "sourceSnapshotSha256": "442c4b170353a2f5408ee2d8edfb0e33eadc99aa4ef75bea1eb74eabdee96d0f",
-  "publishSnapshotSha256": "75fda1d3ae25dfcfd6f0f534475f3e1bb591720fb224bcb879456b0b01839d48",
-  "descriptorSha256": "d9d6c7b15dca806029e166256ee1672a10253e489b777bc5665b96845ee2b5d0",
-  "qualification": "Production release compiler output inside a test-signed candidate descriptor; SDK and screen-reader qualification remain separate."
+  "sourceSnapshotSha256": "6bb039f9b2bc490f1d666fa95911c350e62da3994e4112045e17c4d7b0978f85",
+  "scriptSourceSha256": "9163301d05fb80588746ce90165d636dd80ba4bdb35bc67cf6d9e8b411ef7390",
+  "publishSnapshotSha256": "3f862c0bc369dedf8255a6f8f1bf7ed30b85cb9b30330159b87569ba8799529f",
+  "descriptorSha256": "834476fcdaab0f9953620da8516b940eeadd215762aca94e7a408f5b69599629",
+  "qualification": "Production release compiler output inside a test-signed candidate descriptor; SDK and screen-reader qualification remain separate.",
+  "descriptorRefresh": {
+    "script": "scripts/refresh-signed-fixtures.mjs",
+    "reason": "Explicit CDN font source declarations; published render and asset bytes unchanged",
+    "previousDescriptorSha256": "04a088c0422b5cad2a5ab25defc8b05c65a77193ac7a7c93b09bf4b56dbf2d88"
+  }
 }

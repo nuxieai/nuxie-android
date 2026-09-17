@@ -45,6 +45,44 @@ class JourneyReleaseArtifactAcquirerTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
+    fun systemFontsCreateNoDownloadOrCacheObjectsIncludingOfflineReload() = runTest {
+        val rivBytes = "system-font-scene".encodeToByteArray()
+        val riv = artifact("renders/sha256/${sha256(rivBytes)}.riv", rivBytes, "application/vnd.rive")
+        val system = buildJsonObject {
+            put("kind", JsonPrimitive("font"))
+            put("location", JsonPrimitive("system"))
+            put("family", JsonPrimitive("System"))
+            put("weight", JsonPrimitive("400"))
+            put("style", JsonPrimitive("normal"))
+            put("riveAssetId", JsonPrimitive(1))
+            put("riveUniqueName", JsonPrimitive("native-1"))
+            put("required", JsonPrimitive(true))
+        }
+        val directory = temporaryFolder.newFolder("system-font-cache")
+        var requests = 0
+        fun acquirer(offline: Boolean) = JourneyReleaseArtifactAcquirer(JourneyReleaseArtifactCache(
+            context = RuntimeEnvironment.getApplication(),
+            cacheDirectory = directory,
+            transport = HttpTransport { request ->
+                check(!offline) { "Offline acquisition attempted a download" }
+                requests += 1
+                assertTrue(request.url.toString().endsWith(riv.getValue("key").jsonPrimitive.content))
+                HttpTransport.Response(200, rivBytes, mapOf("Content-Type" to "application/vnd.rive"))
+            },
+        ))
+        val declaration = release(riv, assets = listOf(system))
+        acquirer(false).acquire(declaration, delivery()).use { acquired ->
+            assertEquals(setOf(riv.getValue("key").jsonPrimitive.content), acquired.artifactsByKey.keys)
+            assertEquals(setOf(sha256(rivBytes)), acquired.artifactDigests)
+        }
+        acquirer(true).acquire(declaration, delivery()).use { acquired ->
+            assertArrayEquals(rivBytes, acquired.rivFile.readBytes())
+            assertEquals(1, acquired.artifactsByKey.size)
+        }
+        assertEquals(1, requests)
+    }
+
+    @Test
     fun successfulDownloadPublishesVerifiedFilesAndCacheHitSkipsRequest() = runTest {
         val rivBytes = "verified-riv".encodeToByteArray()
         val riv = artifact(

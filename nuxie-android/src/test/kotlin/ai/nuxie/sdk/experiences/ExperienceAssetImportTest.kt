@@ -13,6 +13,68 @@ import org.junit.Test
 
 class ExperienceAssetImportTest {
     @Test
+    fun `system and CDN fonts bind distinct ordinals after complete catalog validation`() {
+        val system = buildJsonObject {
+            put("kind", "font")
+            put("location", "system")
+            put("family", "System")
+            put("weight", "700")
+            put("style", "normal")
+            put("riveAssetId", 10)
+            put("riveUniqueName", "native-10")
+            put("required", true)
+        }
+        val cdn = buildJsonObject {
+            put("kind", "font")
+            put("location", "cdn")
+            put("key", "downloaded-font")
+            put("riveAssetId", 20)
+            put("riveUniqueName", "custom-20")
+            put("required", true)
+        }
+        val descriptor = buildJsonObject {
+            put("render", buildJsonObject {
+                put("assets", buildJsonArray { add(system); add(cdn) })
+            })
+        }
+        val catalog = listOf(
+            ExpectedFileAsset(0, FileAssetKind.FONT, 20, "custom", "ttf", false, false, 3),
+            ExpectedFileAsset(1, FileAssetKind.FONT, 10, "native", "ttf", false, false, 3),
+        )
+        val cdnBytes = byteArrayOf(1, 2, 3)
+        val localBytes = byteArrayOf(4, 5, 6)
+        val file = File.createTempFile("cdn-font-", ".ttf").apply { writeBytes(cdnBytes) }
+        try {
+            val requests = mutableListOf<SystemFontRequirement>()
+            val resolver: (SystemFontRequirement) -> ByteArray = { requests += it; localBytes }
+            val bound = ExperienceAssetImportBuilder.build(
+                descriptor, mapOf("downloaded-font" to file), catalog, resolver,
+            )
+            assertEquals(listOf(SystemFontRequirement("native-10", 700, "normal")), requests)
+            assertArrayEquals(cdnBytes, bound.externalAssets.getValue(0))
+            assertArrayEquals(localBytes, bound.externalAssets.getValue(1))
+            requests.clear()
+            assertThrows(IllegalArgumentException::class.java) {
+                ExperienceAssetImportBuilder.build(
+                    descriptor, emptyMap(),
+                    listOf(catalog[1].copy(ordinal = 0), catalog[0].copy(ordinal = 1, name = "wrong")),
+                    resolver,
+                )
+            }
+            assertEquals(emptyList<SystemFontRequirement>(), requests)
+            assertThrows(IllegalArgumentException::class.java) {
+                ExperienceAssetImportBuilder.build(
+                    descriptor, emptyMap(),
+                    listOf(catalog[0], catalog[1].copy(isEmbedded = true)), resolver,
+                )
+            }
+            assertEquals(emptyList<SystemFontRequirement>(), requests)
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
     fun `synthetic release builds the complete expected catalog and ordinal payloads`() {
         val digest = "a".repeat(64)
         val imageKey = "assets/sha256/$digest.png"
