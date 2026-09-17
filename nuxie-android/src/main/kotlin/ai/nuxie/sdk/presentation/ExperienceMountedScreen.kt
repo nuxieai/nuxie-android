@@ -33,6 +33,7 @@ internal class ExperienceMountedScreen(
     private val lane = NuxieRuntimeLane()
     private var captionOverlay: ExperienceVideoCaptionOverlay? = null
     private var textOverlay: ExperienceTextInputOverlay? = null
+    private var captionInsets: ExperienceWindowInsets? = null
     private var windowInsets: ExperienceWindowInsets? = null
     private val lifecycle = prepared.screenLifecycle
     val transitionEvents = ExperienceScreenExitHandshake()
@@ -110,6 +111,10 @@ internal class ExperienceMountedScreen(
 
     /** Install after attaching content, so projection uses the real window geometry. */
     fun observeWindow() {
+        captionInsets?.close()
+        captionInsets = captionOverlay?.let { overlay ->
+            ExperienceWindowInsets(activity, overlay, overlay::updateInsets)
+        }
         windowInsets?.close()
         windowInsets = prepared.artboardSize?.let { size ->
             ExperienceWindowInsets(activity, surface, size) { insets ->
@@ -171,6 +176,8 @@ internal class ExperienceMountedScreen(
         reducedMotion?.close()
         windowInsets?.close()
         windowInsets = null
+        captionInsets?.close()
+        captionInsets = null
         captionOverlay?.update(emptyMap())
         captionOverlay = null
         textOverlay?.close()

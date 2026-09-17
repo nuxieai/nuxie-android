@@ -13,6 +13,19 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 class ExperienceVideoCaptionOverlayTest {
     @Test
+    fun `caption padding incorporates view relative insets`() {
+        val context = RuntimeEnvironment.getApplication()
+        val overlay = ExperienceVideoCaptionOverlay(context)
+        val margin = (16 * context.resources.displayMetrics.density).toInt()
+        overlay.updateInsets(ExperienceSafeAreaInsets(0.0, 120.0, 20.0, 30.0))
+        assertEquals(margin + 120, overlay.paddingBottom)
+        assertEquals(margin + 20, overlay.paddingLeft)
+        assertEquals(margin + 30, overlay.paddingRight)
+        overlay.updateInsets(ExperienceSafeAreaInsets(0.0, 0.0, 0.0, 0.0))
+        assertEquals(margin, overlay.paddingBottom)
+    }
+
+    @Test
     fun `captions preserve accessible labels without intercepting touches and retire cleanly`() {
         val overlay = ExperienceVideoCaptionOverlay(RuntimeEnvironment.getApplication())
         overlay.update(mapOf(3L to NuxieVideoCaption("fr", "Bonjour 👋")))
