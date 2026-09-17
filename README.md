@@ -342,3 +342,21 @@ read. Switching A → B → A does not reactivate activity from the first A sess
 and shutting down the SDK invalidates activities from that SDK session. Stale
 activities are still delivered for analytics, with their original customer ID.
 Activity identity metadata does not change the flat activity name or properties.
+
+### Companion rendering
+
+The Nuxie-owned Companion integration can opt into `NuxieCompanionApi` and call
+`JourneyPreviewHost.present(context, profileData, environment, initialScreenId, onReady)`.
+This accepts the exact signed plane profile, authenticates its single release and
+armed leg with the environment trust roots, and opens the ordinary native renderer.
+An omitted screen selects the signed entry screen. `onReady` runs on the main
+thread after the first native frame is presented.
+
+The suspend call owns the preview until dismissal. Cancel and join its coroutine
+before replacing a preview; teardown drains the native presentation and releases
+artifact leases. Preview uses a separate artifact cache and ephemeral replay
+ledger, without configuring `NuxieSDK`, advancing customer publication authority,
+sending analytics, or invoking purchases. This rendering host does not execute
+Journey routes. It is the SDK seam for the standalone Companion app; pairing,
+refresh, and app-level screen selection belong to that app. Customer integrations
+continue to use triggers.
