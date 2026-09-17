@@ -1,0 +1,61 @@
+package ai.nuxie.sdk.runtime
+
+import ai.nuxie.sdk.experiences.SystemFontProvider
+import ai.nuxie.sdk.experiences.SystemFontRequirement
+import androidx.test.filters.SdkSuppress
+import androidx.test.platform.app.InstrumentationRegistry
+import org.json.JSONObject
+import org.junit.Assert.*
+import org.junit.Test
+
+@SdkSuppress(minSdkVersion = 31)
+class SystemFontDeviceTest {
+    private fun asset(name: String): ByteArray = InstrumentationRegistry.getInstrumentation()
+        .context.assets.open("runtime/system-font-axes/$name").use { it.readBytes() }
+
+    @Test fun mixedDeviceAndDownloadedFontsRenderAndRequiredFontsRejectInvalidBytes() {
+        val runtime = NuxieRuntime.shared
+        assertTrue(runtime.isAvailable)
+        val bytes = asset("mixed.nux")
+        val catalog = checkNotNull(runtime.inspectFileAssets(bytes))
+        assertEquals(2, catalog.size)
+        val scenes = JSONObject(String(asset("provenance.json"))).getJSONArray("scenes")
+        val mixed = (0 until scenes.length()).map(scenes::getJSONObject).single { it.getString("name") == "mixed" }
+        val fonts = mixed.getJSONArray("fonts")
+        val systemID = (0 until fonts.length()).map(fonts::getJSONObject)
+            .single { it.getString("location") == "system" }.getLong("riveAssetId")
+        val device = SystemFontProvider.prepare(SystemFontRequirement("system", 400, "normal"))
+        val cdn = asset("mixed-cdn.ttf")
+        val valid = catalog.associate { it.ordinal to if (it.authoredId == systemID) device.bytes else cdn }
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(320, 640))
+        try {
+            val file = checkNotNull(runtime.importFile(renderer, bytes, catalog, valid))
+            try {
+                val artboard = checkNotNull(file.newArtboard("One"))
+                try {
+                    val player = checkNotNull(artboard.newPlayer())
+                    try {
+                        player.step(0.0)
+                        val frame = renderer.renderToCpuFrame(player, 0xff111111.toInt(), false)
+                        for (rows in listOf(16 until 112, 144 until 240)) {
+                            val ink = rows.sumOf { y -> (0 until 320).sumOf { x ->
+                                ((frame.rgba[(y * 320 + x) * 4 + 2].toInt() and 255) - 0x11).coerceAtLeast(0)
+                            } }
+                            assertTrue("System and CDN rows must both contain visible text", ink > 10_000)
+                        }
+                    } finally { player.close() }
+                } finally { artboard.close() }
+            } finally { file.close() }
+            for (font in catalog) {
+                for (malformed in listOf(false, true)) {
+                    val invalid = valid.toMutableMap()
+                    if (malformed) invalid[font.ordinal] = "not a font".toByteArray()
+                    else invalid.remove(font.ordinal)
+                    val imported = runtime.importFile(renderer, bytes, catalog, invalid)
+                    imported?.close()
+                    assertNull("Required font ${font.name}, malformed=$malformed", imported)
+                }
+            }
+        } finally { renderer.close() }
+    }
+}
