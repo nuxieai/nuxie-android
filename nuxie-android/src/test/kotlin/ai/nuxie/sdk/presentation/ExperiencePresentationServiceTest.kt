@@ -105,12 +105,16 @@ class ExperiencePresentationServiceTest {
         val snapshot = NuxieViewModelSnapshot.fromNative(
             NativeViewModelSnapshot(
                 1,
-                arrayOf(NativeViewModelSnapshotInstance(1, 0)),
+                arrayOf(NativeViewModelSnapshotInstance(1, 0), NativeViewModelSnapshotInstance(2, 0)),
                 arrayOf(NativeViewModelSnapshotValue(
                     1, 0, "placementId", NuxieViewModelPropertyKind.STRING.nativeValue,
                     "root:yearly".encodeToByteArray(), 0,
+                ), NativeViewModelSnapshotValue(
+                    2, 0, "placementId", NuxieViewModelPropertyKind.STRING.nativeValue,
+                    "secondary:monthly".encodeToByteArray(), 0,
                 )),
             ),
+            instanceIds = mapOf("secondary" to 2L),
         )
         PresentationRegistry.reportRuntimeStep(id,
             ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome(true, emptyList(), emptyList(), emptyList(), emptyList()),
@@ -125,6 +129,17 @@ class ExperiencePresentationServiceTest {
             """{"type":"purchase","placementId":{"ref":{"kind":"path","path":"placementId","viewModelName":"MissingModel"}}}""",
         ).jsonObject
         assertNull(service.resolveJourneyAction(owner, unknownModelAction, null))
+        val source = JourneyScreenEmissionSource("screen_welcome", "purchase", instanceId = "secondary")
+        fun scoped(relative: Boolean) = Json.parseToJsonElement(
+            """{"type":"purchase","placementId":{"ref":{"kind":"path","path":"placementId","isRelative":$relative}}}""",
+        ).jsonObject
+        assertEquals("secondary:monthly", service.resolveJourneyAction(owner, rootAction, source)
+            ?.get("placementId")?.jsonPrimitive?.content)
+        assertEquals("secondary:monthly", service.resolveJourneyAction(owner, scoped(true), source)
+            ?.get("placementId")?.jsonPrimitive?.content)
+        assertEquals("root:yearly", service.resolveJourneyAction(owner, scoped(false), source)
+            ?.get("placementId")?.jsonPrimitive?.content)
+        assertNull(service.resolveJourneyAction(owner, scoped(true), null))
     }
 
     @Test

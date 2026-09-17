@@ -44,6 +44,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.booleanOrNull
 
 /** Kotlin analog of the iOS presentation close-reason set. */
 internal sealed interface CloseReason {
@@ -1187,7 +1188,10 @@ internal class ExperiencePresentationService(
                     val model = reference["viewModelName"]?.let {
                         (it as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content ?: return null
                     }
-                    active.latestViewModelSnapshot.get()?.resolveScopedString(path, model, source?.instanceId)
+                    val relative = reference["isRelative"]?.let {
+                        (it as? JsonPrimitive)?.takeUnless(JsonPrimitive::isString)?.booleanOrNull ?: return null
+                    }
+                    active.latestViewModelSnapshot.get()?.resolveScopedString(path, model, source?.instanceId, relative)
                 }
                 else -> null
             }

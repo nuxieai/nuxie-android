@@ -3,6 +3,7 @@ package ai.nuxie.sdk.runtime
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -45,7 +46,8 @@ class NuxiePurchaseScopeSnapshotTest {
                 vector.getValue("expected").jsonPrimitive.contentOrNull,
                 current.resolveScopedString(ref.getValue("path").jsonPrimitive.content,
                     ref["viewModelName"]?.jsonPrimitive?.content,
-                    vector["instanceId"]?.jsonPrimitive?.content))
+                    vector["instanceId"]?.jsonPrimitive?.content,
+                    ref["isRelative"]?.jsonPrimitive?.booleanOrNull))
         }
         assertNull(current.resolveScopedString("product.placementId", null, "retired"))
         assertNull(current.resolveScopedString("placementId", "Product", null))
