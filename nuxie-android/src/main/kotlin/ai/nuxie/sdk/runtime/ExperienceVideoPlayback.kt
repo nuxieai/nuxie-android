@@ -22,6 +22,7 @@ internal class ExperienceVideoPlayback(
         val binding = bindings.single { it.authoredId == video.assetId && it.sourceAssetKey == video.sourceKey }
         video.componentId to Entry(binding)
     }
+    private val captions = mutableMapOf<Pair<String, Int>, List<NuxieVideoCaptionCue>>()
     private var hidden = true
     private var closed = false
 
@@ -45,8 +46,14 @@ internal class ExperienceVideoPlayback(
             val entry = entries[video.componentId] ?: error("Video occurrence changed outside its owning session")
             if (entry.failed) continue
             if (entry.decoder == null && !hidden) {
-                entry.decoder = entry.binding.file?.let {
-                    AndroidVideoDecoder(context, it, video.generation, 64 * 1024 * 1024, video.audioPolicy)
+                entry.decoder = entry.binding.file?.let { file ->
+                    entry.binding.captionTracks.firstOrNull()?.let { track ->
+                        val cues = captions.getOrPut(file.absolutePath to track.streamIndex) {
+                            ExperienceVideoCaptions.read(file, track.streamIndex)
+                        }
+                        player.videoSetCaptions(video.componentId, track.language.orEmpty(), cues)
+                    }
+                    AndroidVideoDecoder(context, file, video.generation, 64 * 1024 * 1024, video.audioPolicy)
                 }
             }
             val decoder = entry.decoder
@@ -108,6 +115,7 @@ internal class ExperienceVideoPlayback(
             }
             entry.decoder = null
         }
+        captions.clear()
         failure?.let { throw it }
     }
 }

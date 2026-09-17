@@ -9,6 +9,24 @@ import org.junit.Test
 /** Exercises the scripted import path on the device architecture. */
 class ConfiguredImportSmokeTest {
     @Test
+    fun captionsAreExtractedFromTheRetainedMp4() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val local = java.io.File.createTempFile("caption-extraction-", ".mp4", instrumentation.targetContext.cacheDir)
+        try {
+            instrumentation.context.assets.open("video/captions.mp4").use { input ->
+                local.outputStream().use { input.copyTo(it) }
+            }
+            val cues = ExperienceVideoCaptions.read(local, 2)
+            assertEquals(listOf("Hello 👋", "Welcome"), cues.map { it.text })
+            assertEquals(0.0, cues[0].startSeconds, 0.001)
+            assertEquals(0.9, cues[0].endSeconds, 0.001)
+            assertEquals(1.0, cues[1].startSeconds, 0.001)
+            assertEquals(1.9, cues[1].endSeconds, 0.001)
+            assertThrows(IllegalArgumentException::class.java) { ExperienceVideoCaptions.read(local, 0) }
+        } finally { local.delete() }
+    }
+
+    @Test
     fun videoCommandsAndDecoderActionsCrossJni() {
         val bytes = InstrumentationRegistry.getInstrumentation().context.assets
             .open("video/greeting.nux").use { it.readBytes() }
@@ -95,7 +113,7 @@ class ConfiguredImportSmokeTest {
     fun localMp4DecodesIntoVulkanAcrossTwoLoops() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val local = java.io.File.createTempFile("video-decoder-", ".mp4", instrumentation.targetContext.cacheDir)
-        instrumentation.context.assets.open("video/greeting.mp4").use { input ->
+        instrumentation.context.assets.open("video/captions.mp4").use { input ->
             local.outputStream().use { input.copyTo(it) }
         }
         val bytes = instrumentation.context.assets.open("video/greeting.nux").use { it.readBytes() }
@@ -111,14 +129,17 @@ class ConfiguredImportSmokeTest {
                     try {
                         val initial = player.videos().single()
                         val playback = ExperienceVideoPlayback(instrumentation.targetContext, player,
-                            listOf(ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding(0, initial.assetId, initial.sourceKey, local, true)))
+                            listOf(ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding(0, initial.assetId, initial.sourceKey, local, true,
+                                listOf(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(2, "en")))))
                         try {
                             playback.setVisible(true)
                             val deadline = android.os.SystemClock.elapsedRealtime() + 15_000
+                            val seenCaptions = mutableSetOf<String>()
                             var suspended = false
                             val colors = mutableListOf<Boolean>()
                             while (android.os.SystemClock.elapsedRealtime() < deadline && colors.size < 4) {
                                 playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                                seenCaptions += player.videoCaption(initial.componentId).text
                                 player.step(0.0)
                                 val composed = renderer.renderToCpuFrame(player, 0, false)
                                 val offset = (80 * composed.width + 100) * 4
@@ -137,6 +158,7 @@ class ConfiguredImportSmokeTest {
                                 }
                                 Thread.sleep(16)
                             }
+                            assertTrue(seenCaptions.containsAll(listOf("Hello 👋", "Welcome")))
                             assertEquals("Decoded frames must repeat through native loop commands", listOf(true, false, true, false), colors)
                         } finally { playback.close() }
                     } finally { player.close() }
