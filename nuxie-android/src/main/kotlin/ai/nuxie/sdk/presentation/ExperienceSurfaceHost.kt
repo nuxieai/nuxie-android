@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.ExperienceVideoPlayback
+import ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
 import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
 import ai.nuxie.sdk.experiences.SystemFontCache
@@ -83,6 +85,7 @@ internal class ExperienceSurfaceHost(
     private var renderer: NuxieAndroidVulkanRenderer? = null
     private var window: NuxieRuntimeWindow? = null
     private var player: NuxieRuntimePlayer? = null
+    private var videoPlayback: ExperienceVideoPlayback? = null
     private var file: NuxieRuntimeFile? = null
     private var artboard: NuxieRuntimeArtboard? = null
     private var viewModelState: NuxieRuntimeViewModelState? = null
@@ -309,6 +312,7 @@ internal class ExperienceSurfaceHost(
                 onLoaded?.invoke(false)
                 return@enqueue
             }
+            var videoBindings: List<ExperienceVideoAssetBinding> = emptyList()
             file = if (descriptor == null) {
                 runtime.importFile(activeRenderer, rivBytes)
             } else {
@@ -341,12 +345,14 @@ internal class ExperienceSurfaceHost(
                     onLoaded?.invoke(false)
                     return@enqueue
                 }
+                videoBindings = import.videos
                 try {
                     runtime.importFile(
                         renderer = activeRenderer,
                         bytes = rivBytes,
                         expectedAssets = import.expectedAssets,
                         externalAssets = import.externalAssets,
+                        videoEnabled = videoBindings.isNotEmpty(),
                     ).also { imported ->
                         if (imported == null) systemFontCache.didFailImport(systemFonts)
                         else systemFontCache.didImport(systemFonts)
@@ -426,6 +432,10 @@ internal class ExperienceSurfaceHost(
             try {
                 player = loadedFile.newExperiencePlayer(loadedArtboard, artboardName)
                 if (semanticsEnabled) checkNotNull(player).enableSemantics()
+                if (videoBindings.isNotEmpty()) {
+                    videoPlayback = ExperienceVideoPlayback(context.applicationContext, checkNotNull(player), videoBindings)
+                    videoPlayback?.setVisible(running)
+                }
             } catch (error: Exception) {
                 val failedPlayer = player
                 player = null
@@ -487,6 +497,7 @@ internal class ExperienceSurfaceHost(
         val shouldRun = surfaceAvailable && presentationVisible && !released.get()
         if (running == shouldRun) return
         running = shouldRun
+        lane.enqueue { videoPlayback?.setVisible(shouldRun) }
         frameGeneration.incrementAndGet()
         if (shouldRun) {
             Choreographer.getInstance().postFrameCallback(this)
@@ -672,6 +683,7 @@ internal class ExperienceSurfaceHost(
                         nextCorrelationId + 1uL
                     }
                     val outcome = try {
+                        videoPlayback?.advance(renderer, frameTimeNanos / 1_000_000_000.0)
                         if (!sceneInputEnabled.get()) pointerInput.reset()
                         player.stepTyped(
                             elapsedSeconds = elapsedSeconds,
@@ -792,6 +804,7 @@ internal class ExperienceSurfaceHost(
             val closeHandles = listOfNotNull(
                 renderer?.let { active -> { active.detachSurface(); Unit } },
                 window?.let { it::close },
+                videoPlayback?.let { it::close },
                 player?.let { it::close },
                 viewModelState?.let { it::close },
                 artboard?.let { it::close },
@@ -800,6 +813,7 @@ internal class ExperienceSurfaceHost(
             )
             window = null
             player = null
+            videoPlayback = null
             viewModelState = null
             artboard = null
             file = null
