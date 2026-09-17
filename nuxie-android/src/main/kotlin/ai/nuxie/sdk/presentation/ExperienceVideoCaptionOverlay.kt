@@ -20,12 +20,11 @@ internal class ExperienceVideoCaptionOverlay(context: Context) : LinearLayout(co
         isFocusable = false
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         setPadding(margin, margin, margin, margin)
-        setOnApplyWindowInsetsListener { _, insets ->
-            @Suppress("DEPRECATION")
-            setPadding(margin + insets.systemWindowInsetLeft, margin,
-                margin + insets.systemWindowInsetRight, margin + insets.systemWindowInsetBottom)
-            insets
-        }
+    }
+
+    fun updateInsets(insets: ExperienceSafeAreaInsets) {
+        setPadding(margin + insets.left.toInt(), margin,
+            margin + insets.right.toInt(), margin + insets.bottom.toInt())
     }
 
     fun update(captions: Map<Long, NuxieVideoCaption>) {
@@ -48,7 +47,8 @@ internal class ExperienceVideoCaptionOverlay(context: Context) : LinearLayout(co
                 }
             }
             if (label.text.toString() != caption.text) label.text = caption.text
-            label.textLocale = if (caption.language.isBlank()) Locale.getDefault() else Locale.forLanguageTag(caption.language)
+            val locale = if (caption.language.isBlank()) Locale.getDefault() else Locale.forLanguageTag(caption.language)
+            if (label.textLocale != locale) label.textLocale = locale
             label.visibility = if (caption.text.isEmpty()) View.GONE else View.VISIBLE
         }
     }

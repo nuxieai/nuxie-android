@@ -71,6 +71,7 @@ class PublishedVideoDeviceTest {
             val captions = mutableSetOf<String>()
             val accessibleCaptions = mutableSetOf<String>()
             var screenshotSaved = false
+            var layoutChecks = 0
             fun collectAccessibility(node: android.view.accessibility.AccessibilityNodeInfo) {
                 node.text?.toString()?.let { accessibleCaptions += it }
                 for (index in 0 until node.childCount) node.getChild(index)?.let(::collectAccessibility)
@@ -90,11 +91,29 @@ class PublishedVideoDeviceTest {
                     }
                     labels(content).filter { it.visibility == View.VISIBLE && it.text.isNotEmpty() }.forEach {
                         assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_YES, it.importantForAccessibility)
+                        if (it.height > 0) {
+                            layoutChecks++
+                            val owner = it.parent as View
+                            assertTrue("Caption bottom padding=${owner.paddingBottom}, density=${it.resources.displayMetrics.density}",
+                                owner.paddingBottom >= (16 * it.resources.displayMetrics.density).toInt())
+                            val visible = android.graphics.Rect()
+                            assertTrue(it.getGlobalVisibleRect(visible))
+                            val windowBounds = android.graphics.Rect()
+                            it.getWindowVisibleDisplayFrame(windowBounds)
+                            val screenPosition = IntArray(2)
+                            it.getLocationOnScreen(screenPosition)
+                            assertTrue("Caption must fit visible screen: y=${screenPosition[1]} height=${it.height} window=$windowBounds",
+                                screenPosition[1] + it.height <= windowBounds.bottom)
+                            assertTrue("Caption must fit visible window: $visible in $windowBounds", visible.bottom <= windowBounds.bottom)
+                            assertEquals("Caption clipped: label top=${it.top} bottom=${it.bottom} owner=${owner.height} padding=${owner.paddingBottom}", it.height, visible.height())
+                            assertTrue("Caption must retain bottom padding: bottom=${it.bottom} owner=${owner.height} padding=${owner.paddingBottom}",
+                                it.bottom <= owner.height - owner.paddingBottom)
+                        }
                         captions += it.text.toString()
                     }
                 }
                 instrumentation.uiAutomation.rootInActiveWindow?.let(::collectAccessibility)
-                if (!screenshotSaved && colors.size >= 2 && captions.contains("Welcome")) {
+                if (!screenshotSaved && layoutChecks >= 3 && colors.size >= 2 && captions.contains("Welcome")) {
                     instrumentation.uiAutomation.takeScreenshot()?.let { bitmap ->
                         File(instrumentation.targetContext.getExternalFilesDir(null), "task3b-video-caption.png").outputStream().use {
                             bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
@@ -109,6 +128,7 @@ class PublishedVideoDeviceTest {
             assertTrue("Visible captions: $captions", captions.containsAll(listOf("Hello 👋", "Welcome")))
             assertTrue("Accessibility tree captions: $accessibleCaptions", accessibleCaptions.any { it == "Hello 👋" || it == "Welcome" })
             assertTrue("Screenshot captured", screenshotSaved)
+            assertTrue("Caption layout must be measured", layoutChecks > 0)
             instrumentation.runOnMainSync { mounted.setVisible(false) }
             Thread.sleep(250)
             instrumentation.runOnMainSync { assertTrue(labels(content).none { it.visibility == View.VISIBLE && it.text.isNotEmpty() }) }
