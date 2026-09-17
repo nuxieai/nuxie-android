@@ -500,6 +500,17 @@ internal class NuxieRuntimePlayer internal constructor(
     private var interactionStepPending = true
     private var stepFailed = false
 
+    fun videoSetCaptions(component: Long, language: String, cues: List<NuxieVideoCaptionCue>) {
+        require(component >= 0)
+        val status = native.videoSetCaptions(requireHandle(), component, language, cues)
+        if (status != NUX_STATUS_OK) throw NuxieRuntimeCallException("video captions", status)
+    }
+
+    fun videoCaption(component: Long): NuxieVideoCaption {
+        require(component >= 0)
+        return native.videoCaption(requireHandle(), component)
+    }
+
     fun videoClock(component: Long, monotonicSeconds: Double, clock: NuxieVideoClock) {
         require(component >= 0 && monotonicSeconds.isFinite() && monotonicSeconds >= 0)
         require(clock.seconds.isFinite() && clock.seconds >= 0 && clock.rate.isFinite() && clock.rate >= 0)

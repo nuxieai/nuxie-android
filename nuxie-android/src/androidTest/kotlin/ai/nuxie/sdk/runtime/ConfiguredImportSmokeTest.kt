@@ -25,6 +25,9 @@ class ConfiguredImportSmokeTest {
                         val video = player.videos().single()
                         assertEquals("asset:clip", video.sourceKey)
                         assertEquals(false, video.embedded)
+                        player.videoSetCaptions(video.componentId, "en", listOf(
+                            NuxieVideoCaptionCue(0.0, 0.9, "Hello 👋"),
+                            NuxieVideoCaptionCue(1.0, 1.9, "Welcome")))
                         val ready = player.videoStep(video.componentId, 1, video.generation, 2.022)
                         assertTrue("Autoplay must produce a decoder play action", ready.any { it.kind == 0 })
                         fun pixels(red: Boolean) = ByteArray(64 * 32 * 4) { index ->
@@ -40,6 +43,15 @@ class ConfiguredImportSmokeTest {
                         }
                         player.videoClock(video.componentId, 1.0,
                             NuxieVideoClock(video.generation, 0.0, 1.0, true, true))
+                        assertEquals(NuxieVideoCaption("en", "Hello 👋"), player.videoCaption(video.componentId))
+                        assertThrows(IllegalArgumentException::class.java) {
+                            player.videoSetCaptions(video.componentId, "en", listOf(NuxieVideoCaptionCue(2.0, 1.0, "bad")))
+                        }
+                        assertTrue(NuxieRuntimeBridge.nativeVideoSetCaptions(player.requireHandle(), video.componentId,
+                            "en".toByteArray(), doubleArrayOf(2.0, 1.0), intArrayOf(3), "bad".toByteArray()) != 0)
+                        assertTrue(NuxieRuntimeBridge.nativeVideoSetCaptions(player.requireHandle(), video.componentId,
+                            "en".toByteArray(), doubleArrayOf(0.0, 1.0), intArrayOf(4), "bad".toByteArray()) != 0)
+                        assertEquals("Hello 👋", player.videoCaption(video.componentId).text)
                         val redBytes = pixels(true)
                         player.videoPresent(renderer, video.componentId, NuxieVideoFrame(video.generation, 0.0, 64, 32, redBytes))
                         redBytes.fill(0)
@@ -67,6 +79,9 @@ class ConfiguredImportSmokeTest {
                             NuxieVideoClock(seek.generation, 1.0, 0.0, false, true))
                         player.videoPresent(renderer, video.componentId, NuxieVideoFrame(seek.generation, 1.0, 64, 32, pixels(false)))
                         assertVideoColor(false)
+                        assertEquals("Welcome", player.videoCaption(video.componentId).text)
+                        player.videoSetCaptions(video.componentId, "", emptyList())
+                        assertEquals("", player.videoCaption(video.componentId).text)
                         player.videoPresent(renderer, video.componentId, NuxieVideoFrame(video.generation, 0.0, 64, 32, pixels(true)))
                         assertVideoColor(false)
 

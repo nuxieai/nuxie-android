@@ -242,6 +242,10 @@ internal object NuxieRuntimeBridge {
     external fun nativePlayerFree(player: Long)
 
     /** nux_player_step: advance by elapsed seconds; returns a status code. */
+    external fun nativeVideoSetCaptions(player: Long, component: Long, language: ByteArray,
+        times: DoubleArray, lengths: IntArray, text: ByteArray): Int
+    external fun nativeVideoCaption(player: Long, component: Long, status: IntArray): Array<String>?
+
     external fun nativeVideoClock(player: Long, componentId: Long, monotonicSeconds: Double,
         generation: Long, seconds: Double, rate: Double, playing: Boolean, available: Boolean): Int
     external fun nativeVideoPresent(renderer: Long, player: Long, componentId: Long, generation: Long,
