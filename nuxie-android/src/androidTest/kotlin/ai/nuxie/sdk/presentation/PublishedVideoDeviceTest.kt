@@ -210,12 +210,29 @@ class PublishedVideoDeviceTest {
                 }
                 return matches
             }
+            fun awaitStablePausedFrame(red: Boolean, label: String) {
+                val started = SystemClock.elapsedRealtime()
+                val deadline = started + 3_000
+                var matchingSince: Long? = null
+                var stable = false
+                while (SystemClock.elapsedRealtime() < deadline) {
+                    // TextureView can return an older queued presentation while the seek
+                    // is in flight. A single matching readback is not completion. Avoid
+                    // asserting on a different sample than the one that ended the wait.
+                    val matches = pixelMatches(red)
+                    val now = SystemClock.elapsedRealtime()
+                    if (now > deadline) break
+                    if (!matches) matchingSince = null
+                    else if (matchingSince == null) matchingSince = now
+                    else if (now - checkNotNull(matchingSince) >= 100) { stable = true; break }
+                    Thread.sleep(20)
+                }
+                assertTrue("$label must retain ${if (red) "red" else "blue"}; elapsedMs=${SystemClock.elapsedRealtime() - started}", stable)
+            }
             assertFalse("Unknown targets must fail without affecting playback", command("pause", view = "missing"))
             assertTrue("Pause must acknowledge native application", command("pause"))
             assertTrue("Seek must acknowledge native application", command("seek", ",\"seconds\":0.1"))
-            val seekDeadline = SystemClock.elapsedRealtime() + 3_000
-            while (!pixelMatches() && SystemClock.elapsedRealtime() < seekDeadline) Thread.sleep(20)
-            assertTrue("Paused seek must present its red frame", pixelMatches())
+            awaitStablePausedFrame(true, "Initial paused seek")
             Thread.sleep(1_200)
             assertTrue("Paused video must retain its frame", pixelMatches())
             val seekIterations = InstrumentationRegistry.getArguments().getString("videoSeekIterations")?.toInt() ?: 60
@@ -225,9 +242,7 @@ class PublishedVideoDeviceTest {
                 val red = index % 2 != 0
                 val seconds = if (red) 0.1 else 1.2
                 assertTrue(command("seek", ",\"seconds\":$seconds"))
-                val deadline = SystemClock.elapsedRealtime() + 3_000
-                while (!pixelMatches(red) && SystemClock.elapsedRealtime() < deadline) Thread.sleep(10)
-                assertTrue("Paused seek $index must present ${if (red) "red" else "blue"}", pixelMatches(red))
+                awaitStablePausedFrame(red, "Paused seek $index")
             }
             assertTrue("Play must acknowledge native application", command("play"))
             if (pool != null) {
