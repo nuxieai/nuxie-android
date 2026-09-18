@@ -212,6 +212,18 @@ class ExperienceAccessibilityProviderTest {
         }
     }
 
+    @Test fun `removal does not resurrect service cleared focus or retarget a stale action`() = withHost { host ->
+        val dispatched = mutableListOf<Long>()
+        val provider = provider(host) { _, id, _ -> dispatched += id; true }
+        provider.publish(NuxieSemanticTree(1, 1, listOf(node(), node().copy(id = 43, siblingIndex = 1))))
+        assertTrue(provider.performAction(1, AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null))
+        assertTrue(provider.performAction(1, AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS, null))
+        provider.publish(NuxieSemanticTree(1, 2, listOf(node().copy(id = 43))))
+        assertNull(provider.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY))
+        assertFalse(provider.performAction(1, AccessibilityNodeInfo.ACTION_CLICK, null))
+        assertTrue(dispatched.isEmpty())
+    }
+
     @Test fun `shared modal scopes fence traversal and restore the original invoker`() = withHost { host ->
         val fixture = Json.parseToJsonElement(File("../fixtures/accessibility/modal-focus.json").readText()).jsonObject
         assertEquals(1, fixture.getValue("schemaVersion").jsonPrimitive.int)

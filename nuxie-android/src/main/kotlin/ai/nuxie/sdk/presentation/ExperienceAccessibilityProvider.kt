@@ -47,12 +47,22 @@ internal class ExperienceAccessibilityProvider(
     fun publish(tree: NuxieSemanticTree, nativeFields: Map<Long, View> = emptyMap()) {
         val oldTree = index.tree
         val root = ExperienceFocusRoot.containing(host)
-        val ownedFocus = nativeViews.entries.firstOrNull { it.value.isAccessibilityFocused }?.key?.let { id ->
+        val nativeFocusId = nativeViews.entries.firstOrNull { it.value.isAccessibilityFocused }?.key
+        val focusedNodeId = nativeFocusId ?: accessibilityFocus?.let { index.entries[it]?.node?.id }
+        val focusedPosition = focusedNodeId?.let { index.readingOrder.indexOf(it) }
+        val ownedFocus = nativeFocusId?.let { id ->
             root?.let { SavedFocus(id, index.readingOrder.indexOf(id), it, it.accessibilityRevision) }
         } ?: listOfNotNull(lastOwnedAccessibilityFocus, savedAccessibilityFocus).firstOrNull {
             root === it.root && root.accessibilityRevision == it.revision
         }
         index.update(tree, nativeFields.keys)
+        // An ordinary presented update can remove the focused item without a
+        // lifecycle withdrawal. Retain the old position only while this root
+        // still owns focus; service-cleared or shell-owned focus must stay put.
+        if (focusedNodeId != null && ownedFocus?.nodeId == focusedNodeId &&
+            focusedNodeId !in index.readingOrder) {
+            savedAccessibilityFocus = ownedFocus.copy(position = checkNotNull(focusedPosition))
+        }
         updateExcludedNativeFields(nativeFields, index.readingOrder.toSet())
         nativeNodes = tree.nodes.filter { it.id in nativeFields }.associateBy { it.id }
         virtualIds = index.entries.values.associate { it.node.id to it.virtualId }
