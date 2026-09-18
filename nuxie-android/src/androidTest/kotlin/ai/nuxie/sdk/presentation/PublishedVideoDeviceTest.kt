@@ -86,7 +86,7 @@ class PublishedVideoDeviceTest {
         val pool = if (sharedCapacity) ExperienceVideoDecoderPool {
             NuxieVideoDecoderBudget(maxPlayers = 1, managedPlayers = 1, hardwarePlayers = 0,
                 managedPixelsPerSecond = 64L * 32 * 31, softwarePixelsPerSecond = 0)
-        } else null
+        } else ExperienceVideoDecoderPool.shared
         var created = false
         lateinit var mounted: ExperienceMountedScreen
         lateinit var content: View
@@ -245,7 +245,7 @@ class PublishedVideoDeviceTest {
                 awaitStablePausedFrame(red, "Paused seek $index")
             }
             assertTrue("Play must acknowledge native application", command("play"))
-            if (pool != null) {
+            if (sharedCapacity) {
                 val otherOwner = UUID.randomUUID()
                 val demand = listOf(NuxieVideoDecoderRequest(id = 100, pixelsPerSecond = 64L * 32 * 31,
                     priority = UInt.MAX_VALUE.toLong(), visible = true))
@@ -295,7 +295,7 @@ class PublishedVideoDeviceTest {
             instrumentation.runOnMainSync { mounted.setVisible(false) }
             Thread.sleep(250)
             instrumentation.runOnMainSync { assertTrue(labels(content).none { it.visibility == View.VISIBLE && it.text.isNotEmpty() }) }
-            if (pool != null) {
+            if (sharedCapacity) {
                 val otherOwner = UUID.randomUUID()
                 val demand = listOf(NuxieVideoDecoderRequest(id = 101, pixelsPerSecond = 64L * 32 * 31,
                     priority = UInt.MAX_VALUE.toLong(), visible = true))

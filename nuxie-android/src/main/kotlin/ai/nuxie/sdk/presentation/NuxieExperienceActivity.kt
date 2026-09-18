@@ -124,6 +124,7 @@ internal class NuxieExperienceActivity : Activity() {
         fun mount(): View {
             val resources = ExperienceMountedScreen(
                 this@NuxieExperienceActivity, prepared, this, ::fail,
+                videoDecoderPool = ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool.shared,
             )
             mounted = resources
             return resources.mount().also { view = it }

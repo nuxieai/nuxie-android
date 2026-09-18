@@ -1,6 +1,6 @@
 package ai.nuxie.sdk.runtime
 
-/** Host-measured limits; platform-managed decoding does not imply hardware acceleration. */
+/** Host-selected workload limits; platform-managed decoding does not imply hardware acceleration. */
 internal data class NuxieVideoDecoderBudget(
     val maxPlayers: Int,
     val managedPlayers: Int,

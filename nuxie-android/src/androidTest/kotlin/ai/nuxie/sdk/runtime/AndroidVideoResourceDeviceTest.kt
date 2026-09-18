@@ -74,6 +74,24 @@ class AndroidVideoResourceDeviceTest {
         }
     }
 
+    @Test fun productionPoolBoundsOverlappingOwnersAndPixelWork() {
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val pool = ExperienceVideoDecoderPool.shared
+        val owners = List(5) { java.util.UUID.randomUUID() }
+        val small = listOf(NuxieVideoDecoderRequest(1, 1920L * 1080L * 31L, 0, true))
+        try {
+            owners.take(4).forEach { assertEquals(setOf(1L), pool.update(it, small)) }
+            assertTrue(pool.update(owners[4], small).isEmpty())
+            pool.remove(owners[0])
+            assertEquals(setOf(1L), pool.update(owners[4], small))
+            owners.forEach(pool::remove)
+            val uhd = listOf(NuxieVideoDecoderRequest(1, 3840L * 2160L * 61L, 0, true))
+            assertEquals(setOf(1L), pool.update(owners[0], uhd))
+            assertTrue("An available slot cannot exceed aggregate pixel workload",
+                pool.update(owners[1], small).isEmpty())
+        } finally { owners.forEach(pool::remove) }
+    }
+
     @Test fun sharedPoolWaitsForDisposalBeforePriorityHandoff() {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(1, 1, 0, 100, 0) }
