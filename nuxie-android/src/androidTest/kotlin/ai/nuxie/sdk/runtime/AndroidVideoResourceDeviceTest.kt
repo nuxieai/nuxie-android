@@ -4,6 +4,46 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AndroidVideoResourceDeviceTest {
+    @Test fun delayedDecoderRetirementRetainsCapacityUntilResourcesAreReleased() {
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        val file = java.io.File.createTempFile("retire-video-", ".mp4", instrumentation.targetContext.cacheDir)
+        instrumentation.context.assets.open("video/captions.mp4").use { input -> file.outputStream().use { input.copyTo(it) } }
+        val decoder = AndroidVideoDecoder(instrumentation.targetContext, file, 0, 64 * 1024 * 1024, 0)
+        val blocked = java.util.concurrent.CountDownLatch(1)
+        val unblock = java.util.concurrent.CountDownLatch(1)
+        val released = java.util.concurrent.CountDownLatch(1)
+        val callbacks = java.util.concurrent.atomic.AtomicInteger()
+        val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(1, 1, 0, 100, 0) }
+        val old = java.util.UUID.randomUUID()
+        val next = java.util.UUID.randomUUID()
+        val demand = listOf(NuxieVideoDecoderRequest(1, 100, 0, true))
+        try {
+            assertEquals(setOf(1L), pool.update(old, demand))
+            // Fault injection blocks the real worker, including its queued release.
+            val field = AndroidVideoDecoder::class.java.getDeclaredField("handler").apply { isAccessible = true }
+            val handler = field.get(decoder) as android.os.Handler
+            assertTrue(handler.post { blocked.countDown(); unblock.await(10, java.util.concurrent.TimeUnit.SECONDS) })
+            assertTrue(blocked.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            decoder.whenReleased { pool.remove(old); callbacks.incrementAndGet(); released.countDown() }
+            try { decoder.close(); fail("The blocked worker must not report successful synchronous release") }
+            catch (_: IllegalStateException) { }
+            assertEquals(0, callbacks.get())
+            assertEquals(emptySet<Long>(), pool.update(next, demand))
+            unblock.countDown()
+            assertTrue(released.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals(1, callbacks.get())
+            assertEquals(setOf(1L), pool.update(next, demand))
+            decoder.close()
+            decoder.whenReleased { callbacks.incrementAndGet() }
+            assertEquals(2, callbacks.get())
+        } finally {
+            unblock.countDown()
+            decoder.close()
+            file.delete()
+        }
+    }
+
     @Test fun sharedPoolWaitsForDisposalBeforePriorityHandoff() {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(1, 1, 0, 100, 0) }
