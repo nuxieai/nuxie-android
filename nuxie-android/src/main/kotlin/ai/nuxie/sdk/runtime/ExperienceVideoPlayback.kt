@@ -16,6 +16,7 @@ internal class ExperienceVideoPlayback(
     private val decoderBudget: (() -> NuxieVideoDecoderBudget)? = null,
     private val decoderPool: ExperienceVideoDecoderPool? = null,
     private val preferredCaptionLanguages: List<String> = ExperienceVideoCaptionSelection.preferredLanguages(context),
+    initialViewport: VideoViewport,
 ) : AutoCloseable {
     private class Entry(val binding: ExperienceVideoAssetBinding) {
         var decoder: AndroidVideoDecoder? = null
@@ -27,6 +28,8 @@ internal class ExperienceVideoPlayback(
         var retiredForVisibility = false
         var rate = 1.0
     }
+    private var viewport = initialViewport
+    private var visibleOccurrences = emptySet<Long>()
     private val decoderOwner = UUID.randomUUID()
     @Volatile private var disposalComplete = false
     private var retirementRequested = false
@@ -41,17 +44,18 @@ internal class ExperienceVideoPlayback(
         val now = nanoTime()
         val elapsed = (now - admissionClock).coerceAtLeast(0) / 1_000_000_000.0
         admissionClock = now
-        if (!hidden) admissions.values.filter { it.decision == 0 }.forEach { it.elapsed += elapsed }
+        if (!hidden) admissions.filter { (id, admission) -> id in visibleOccurrences && admission.decision == 0 }.values.forEach { it.elapsed += elapsed }
     }
 
     fun isReadyForPresentation(): Boolean {
         check(!closed)
         advanceAdmissionClock()
         val videos = player.videos()
+        refreshVisibility(videos)
         val live = videos.map { it.componentId }.toSet()
         admissions.keys.retainAll(live)
         var waiting = false
-        for (video in videos.filter { it.readiness == 1 }) {
+        for (video in videos.filter { it.readiness == 1 && it.componentId in visibleOccurrences }) {
             val target = targets.single {
                 it.sourceArtboardIndex == video.sourceArtboardIndex && it.componentId == video.sourceComponentId
             }
@@ -188,9 +192,20 @@ internal class ExperienceVideoPlayback(
         return player.videos()
     }
 
+    fun setViewport(value: VideoViewport) {
+        advanceAdmissionClock()
+        viewport = value
+        refreshVisibility(player.videos())
+    }
+
+    private fun refreshVisibility(videos: List<NuxieVideoOccurrence>) {
+        visibleOccurrences = videos.filter { player.videoIsVisible(it.componentId, viewport) }.map { it.componentId }.toSet()
+    }
+
     /** Retire all denied owners before opening any replacement; callbacks use a fresh generation. */
     private fun admit(videos: List<NuxieVideoOccurrence>): List<NuxieVideoOccurrence> {
-        if (decoderBudget == null && decoderPool == null) return videos
+        advanceAdmissionClock()
+        refreshVisibility(videos)
         val budget = decoderBudget?.invoke()
         for (video in videos) {
             val entry = checkNotNull(entries[video.componentId])
@@ -218,12 +233,13 @@ internal class ExperienceVideoPlayback(
             val scaled = kotlin.math.ceil(cost * maxOf(1.0, entry.rate))
             val pixels = if (scaled >= Long.MAX_VALUE.toDouble()) Long.MAX_VALUE else scaled.toLong()
             NuxieVideoDecoderRequest(video.componentId, pixels, video.priority.toLong() and 0xffff_ffffL,
-                !hidden && !entry.failed && entry.binding.file != null)
+                !hidden && video.componentId in visibleOccurrences && !entry.failed && entry.binding.file != null)
         }
         val choices = if (decoderPool != null) {
             val admitted = decoderPool.update(decoderOwner, requests)
             videos.map { if (it.componentId in admitted) NuxieVideoAllocation.PlatformManaged else NuxieVideoAllocation.Poster }
-        } else player.videoAllocateDecoders(requests, checkNotNull(budget))
+        } else if (budget != null) player.videoAllocateDecoders(requests, budget)
+        else requests.map { if (it.visible) NuxieVideoAllocation.PlatformManaged else NuxieVideoAllocation.Poster }
         // A failed synchronous close leaves ownership intact and aborts admission.
         for ((index, video) in videos.withIndex()) {
             val entry = checkNotNull(entries[video.componentId])
@@ -255,7 +271,7 @@ internal class ExperienceVideoPlayback(
         return player.videos()
     }
 
-    /** Called only before a new scene step, never while a native frame is submitted. */
+    /** Called after the scene step and before drawing, never while a native frame is submitted. */
     fun advance(renderer: NuxieAndroidVulkanRenderer, monotonicSeconds: Double) {
         check(!closed)
         for (video in admit(restoreVisibleDecoders(reconcile(player.videos())))) {

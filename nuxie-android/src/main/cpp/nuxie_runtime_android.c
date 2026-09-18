@@ -3435,6 +3435,18 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoReclaimDecoder(
 }
 
 JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoIsVisible(
+    JNIEnv *env, jobject self, jlong player, jlong component,
+    jfloat min_x, jfloat min_y, jfloat max_x, jfloat max_y) {
+  (void)env; (void)self;
+  if (component < 0) return -NUX_STATUS_INVALID_ARGUMENT;
+  uint32_t visible = 0;
+  NuxStatus status = nux_player_video_is_visible(from_handle(player), (size_t)component,
+      min_x, min_y, max_x, max_y, &visible);
+  return status == NUX_STATUS_OK ? (jint)visible : -(jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoReadiness(
     JNIEnv *env, jobject self, jlong player, jlong component, jdouble elapsed, jdouble timeout, jboolean optional) {
   (void)env; (void)self;
