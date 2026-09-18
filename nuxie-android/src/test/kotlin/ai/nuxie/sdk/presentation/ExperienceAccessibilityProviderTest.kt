@@ -28,6 +28,37 @@ import org.robolectric.annotation.GraphicsMode
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [30])
 class ExperienceAccessibilityProviderTest {
+    @Test @Config(sdk = [23, 30, 35, 36])
+    fun `list counts preserve logical totals without inventing row geometry`() = withHost { host ->
+        val provider = provider(host)
+        for ((total, expected) in listOf(10L to 10, 0L to 0, null to -1, 0xffff_ffffL to -1)) {
+            val list = node().copy(role = 10, collectionFlags = if (total == null) 0 else 2,
+                collectionCount = total ?: 0)
+            val items = if (total == 10L) (4L..6L).map { position ->
+                node().copy(id = 100 + position, parentId = list.id.toInt(), role = 11,
+                    siblingIndex = position.toInt(), collectionFlags = 5,
+                    collectionOwner = list.id, collectionPosition = position)
+            } else emptyList()
+            provider.publish(NuxieSemanticTree(1, 1, listOf(list) + items))
+            val info = checkNotNull(provider.createAccessibilityNodeInfo(1))
+            assertEquals("android.widget.ListView", info.className.toString())
+            if (Build.VERSION.SDK_INT >= 35) {
+                val collection = checkNotNull(info.collectionInfo)
+                assertEquals(expected, collection.itemCount)
+                assertEquals(-1, collection.rowCount)
+                assertEquals(-1, collection.columnCount)
+                assertEquals(AccessibilityNodeInfo.CollectionInfo.SELECTION_MODE_NONE, collection.selectionMode)
+            } else {
+                assertNull(info.collectionInfo)
+            }
+            assertNull(info.collectionItemInfo)
+            assertEquals(list.label, info.text.toString())
+            assertEquals(if (total == 10L) 3 else 0, info.childCount)
+        }
+        provider.publish(NuxieSemanticTree(1, 2, listOf(node())))
+        assertNull(checkNotNull(provider.createAccessibilityNodeInfo(1)).collectionInfo)
+    }
+
     @Test @Config(sdk = [23, 27, 28, 36])
     fun `heading declaration survives publication and can be removed on supported versions`() = withHost { host ->
         val provider = provider(host)

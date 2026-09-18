@@ -235,6 +235,15 @@ internal class ExperienceAccessibilityProvider(
                 NativeSemanticRole.RADIO_BUTTON -> "android.widget.RadioButton"
                 else -> "android.view.View"
             }
+            // Logical list order does not establish row/column geometry. API 35
+            // represents a total independently; older versions retain list grouping.
+            if (node.role == NativeSemanticRole.LIST && Build.VERSION.SDK_INT >= 35) {
+                collectionInfo = AccessibilityNodeInfo.CollectionInfo.Builder()
+                    .setRowCount(-1)
+                    .setColumnCount(-1)
+                    .setItemCount(node.itemCount?.takeIf { it <= Int.MAX_VALUE }?.toInt() ?: -1)
+                    .build()
+            }
             text = node.label
             val obscured = node.stateFlags and NativeSemanticState.OBSCURED != 0
             isPassword = obscured
