@@ -19,6 +19,8 @@ import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.float
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -61,6 +63,81 @@ class ExperienceTextInputTest {
         } finally {
             controller.pause().stop().destroy()
         }
+    }
+
+    @Test fun `shared response capture cases preserve scalar type and reject unavailable binding state`() {
+        val cases = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/text-input-response-capture.json").readText()).jsonObject.getValue("cases").jsonArray
+        for (item in cases) {
+            val case = item.jsonObject
+            val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(
+                secure = case.getValue("secure").jsonPrimitive.boolean,
+                responseCapture = if (case["mode"]?.jsonPrimitive?.content == "binding")
+                    ExperienceTextInput.ResponseCapture.BINDING else ExperienceTextInput.ResponseCapture.TEXT,
+            )
+            val snapshot = (case["source"] as? JsonPrimitive)?.let(::responseSnapshot)
+            val capture = runCatching { input.captureResponse(case.getValue("text").jsonPrimitive.content, snapshot) }
+            if (case["rejected"]?.jsonPrimitive?.booleanOrNull == true) {
+                assertTrue(case.getValue("name").toString(), capture.isFailure)
+            } else {
+                assertEquals(case.getValue("name").toString(), case["expected"], capture.getOrThrow())
+            }
+        }
+    }
+
+    @Test fun `invalid binding source fails without accepting or deduplicating the edit`() = runTest {
+        val descriptor = Json.parseToJsonElement(textInputDescriptor().toString()
+            .replace("\"responseFieldKey\":", "\"responseCapture\":\"binding\",\"responseFieldKey\":")) as JsonObject
+        val state = ExperienceTextInputState()
+        val batches = mutableListOf<JourneyScreenEmissionBatch>()
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", descriptor, 0, 0,
+            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
+        coordinator.reveal()
+        for (snapshot in listOf(null, responseSnapshot(JsonPrimitive(Float.NaN)))) {
+            assertTrue(runCatching { coordinator.publishTextCommit("name", "50", state, snapshot = snapshot) }.isFailure)
+            assertNull(state.committedValue("name"))
+            assertTrue(batches.isEmpty())
+        }
+        assertTrue(coordinator.publishTextCommit("name", "50", state, snapshot = responseSnapshot(JsonPrimitive(0.5))))
+        assertEquals(JsonPrimitive(0.5), batches.single().emissions.single().payload["value"])
+        coordinator.close()
+    }
+
+    private fun responseSnapshot(value: JsonPrimitive): NuxieViewModelSnapshot {
+        val kind = when {
+            value.isString -> NuxieViewModelPropertyKind.STRING
+            value.booleanOrNull != null -> NuxieViewModelPropertyKind.BOOLEAN
+            else -> NuxieViewModelPropertyKind.NUMBER
+        }
+        return NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(1,
+            arrayOf(NativeViewModelSnapshotInstance(1, 0), NativeViewModelSnapshotInstance(2, 1), NativeViewModelSnapshotInstance(3, 2)),
+            arrayOf(
+                NativeViewModelSnapshotValue(1, 0, "response", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 2),
+                NativeViewModelSnapshotValue(2, 0, "values", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 3),
+                NativeViewModelSnapshotValue(3, 0, "answer", kind.nativeValue, value.content.encodeToByteArray(), 0,
+                    numberValue = if (kind == NuxieViewModelPropertyKind.NUMBER) value.float else 0f,
+                    boolValue = value.booleanOrNull ?: false),
+            )))
+    }
+
+    @Test fun `converted response commits capture evaluated source instead of displayed text`() = runTest {
+        val descriptor = Json.parseToJsonElement(textInputDescriptor().toString()
+            .replace("\"responseFieldKey\":", "\"responseCapture\":\"binding\",\"responseFieldKey\":")) as JsonObject
+        val batches = mutableListOf<JourneyScreenEmissionBatch>()
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", descriptor, 0, 0,
+            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
+        assertTrue(coordinator.reveal())
+        val snapshot = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(1,
+            arrayOf(NativeViewModelSnapshotInstance(1, 0), NativeViewModelSnapshotInstance(2, 1),
+                NativeViewModelSnapshotInstance(3, 2)),
+            arrayOf(
+                NativeViewModelSnapshotValue(1, 0, "response", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 2),
+                NativeViewModelSnapshotValue(2, 0, "values", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 3),
+                NativeViewModelSnapshotValue(3, 0, "answer", NuxieViewModelPropertyKind.NUMBER.nativeValue, byteArrayOf(), 0, numberValue = 0.5f),
+            )))
+        assertTrue(coordinator.publishTextCommit("name", "50", snapshot = snapshot))
+        assertEquals(JsonPrimitive(0.5), batches.single().emissions.single().payload["value"])
+        coordinator.close()
     }
 
     @Test fun `semantic native focus survives overlay withdrawal and input rollback`() {

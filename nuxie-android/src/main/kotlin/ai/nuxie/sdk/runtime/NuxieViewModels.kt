@@ -247,6 +247,23 @@ internal class NuxieViewModelSnapshot private constructor(
 
     fun resolveEnumOrdinal(path: String): Long? = (resolveValue(path) as? Value.EnumValue)?.ordinal
 
+    /** Read an exact root-relative scalar path without splitting authored field names. */
+    fun resolveScalar(segments: List<String>): NuxieViewModelScalarValue? {
+        if (segments.isEmpty() || segments.any(String::isEmpty)) return null
+        var instance = instancesById[rootInstanceId] ?: return null
+        segments.dropLast(1).forEach { segment ->
+            val reference = instance.values[segment] as? Value.Reference ?: return null
+            instance = instancesById[reference.instanceId] ?: return null
+        }
+        return when (val value = instance.values[segments.last()]) {
+            is Value.StringValue -> NuxieViewModelScalarValue.StringValue(value.value)
+            is Value.NumberValue -> value.value.takeIf(Float::isFinite)
+                ?.let { NuxieViewModelScalarValue.NumberValue(it.toDouble()) }
+            is Value.BooleanValue -> NuxieViewModelScalarValue.BooleanValue(value.value)
+            else -> null
+        }
+    }
+
     private fun resolveValue(path: String, start: Instance? = instancesById[rootInstanceId]): Value? {
         val segments = path.split('/', '.')
         if (segments.isEmpty() || segments.any(String::isEmpty)) return null

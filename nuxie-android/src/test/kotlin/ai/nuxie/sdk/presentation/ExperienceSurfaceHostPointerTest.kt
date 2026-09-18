@@ -39,6 +39,67 @@ import kotlinx.serialization.json.long
 
 @RunWith(RobolectricTestRunner::class)
 class ExperienceSurfaceHostPointerTest {
+    @Test fun `converted text settles on the native lane after pending render and before capture`() {
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        val captured = mutableListOf<Double>()
+        val effects = mutableListOf<ULong>()
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
+            runtime = NuxieRuntime(native), listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() = Unit
+                override fun onFailure(error: ExperiencePresentationException) { throw error }
+                override fun onRuntimeStep(outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
+                    correlationId: ULong, viewModelSnapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?) {
+                    effects += correlationId
+                }
+                override fun onTextCommitted(inputId: String, text: String, snapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?) {
+                    native.order += "capture:$text"
+                    captured += (checkNotNull(snapshot).resolveScalar(listOf("result")) as NuxieViewModelScalarValue.NumberValue).value
+                }
+            })
+        val texture = SurfaceTexture(0)
+        try {
+            val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single()
+                .copy(responseCapture = ExperienceTextInput.ResponseCapture.BINDING)
+            host.loadArtboard(byteArrayOf(1), null,
+                viewModelProjection = NuxieViewModelListProjection("Root", "products", null, "Product", emptyList()),
+                textInputs = listOf(input))
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+            native.presentation = 4
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            native.order.clear()
+            host.writeText("name", "50", true) {}
+            drain(lane)
+            assertTrue("Do not mutate the in-flight render", native.order.isEmpty())
+            native.onStep = {
+                native.snapshot = ai.nuxie.sdk.runtime.NativeViewModelSnapshot(40,
+                    arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(40, 0)),
+                    arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue(40, 0, "result", 2,
+                        byteArrayOf(), 0, numberValue = 0.5f)))
+            }
+            native.events = arrayOf(ai.nuxie.sdk.runtime.NativeRuntimeEvent(
+                0, 0, "nx_exit_done:test", "", "", 0f, emptyArray()))
+            native.presentation = 1
+            host.doFrame(1_032_000_000L)
+            drain(lane)
+            assertEquals(listOf("write:headline:50", "frame:0", "capture:50"), native.order)
+            assertEquals(listOf(0.5), captured)
+            assertEquals("The settling step must preserve its runtime effects", 1, effects.size)
+            assertEquals(0f, native.elapsedSteps.last())
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
     @Test
     fun `pending surface submission polls without stepping or publishing effects`() {
         val native = RecordingNative()
@@ -974,9 +1035,10 @@ class ExperienceSurfaceHostPointerTest {
                 NativeViewModelProperty(0, 1, "products", 8, 1, emptyArray())), emptyArray(),
         ))
         override fun newDefaultViewModel(artboardHandle: Long) = NativeCallResult(0, 40L)
-        override fun snapshotViewModel(viewModelHandle: Long) = NativeCallResult(0,
+        var snapshot =
             ai.nuxie.sdk.runtime.NativeViewModelSnapshot(40L,
-                arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(40L, 0L)), emptyArray()))
+                arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(40L, 0L)), emptyArray())
+        override fun snapshotViewModel(viewModelHandle: Long) = NativeCallResult(0, snapshot)
         override fun bindViewModel(artboardHandle: Long, viewModelHandle: Long) = 0
         override fun freeViewModel(handle: Long): Int { boundStateFreed = true; return 0 }
         override fun mutateViewModel(handle: Long, write: NativeViewModelWrite): Int {
@@ -1029,6 +1091,7 @@ class ExperienceSurfaceHostPointerTest {
             pointerSteps += pointers
             elapsedSteps += elapsedSeconds
             order += "frame:${pointers.size}"
+            onStep()
             stateWrites.lastOrNull()?.let(stateAtSteps::add)
             return NativeCallResult(
                 0,
@@ -1044,6 +1107,7 @@ class ExperienceSurfaceHostPointerTest {
         }
 
         var presentation = 1
+        var onStep: () -> Unit = {}
 
         override fun renderAndPresent(
             rendererHandle: Long,

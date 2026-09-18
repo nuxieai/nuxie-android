@@ -175,7 +175,7 @@ internal object PresentationRegistry {
         val onDismissed: (CloseReason) -> Unit,
         val onOutcome: (CloseReason) -> Unit,
         val onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit,
-        val onTextCommitted: (String, String, RendererEffectLifetime?) -> Unit,
+        val onTextCommitted: (String, String, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit,
         val onRecovery: (Throwable) -> Unit = {},
     )
 
@@ -207,7 +207,7 @@ internal object PresentationRegistry {
         onOutcome: (CloseReason) -> Unit,
         onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit =
             { _, _, _, _ -> },
-        onTextCommitted: (String, String, RendererEffectLifetime?) -> Unit = { _, _, _ -> },
+        onTextCommitted: (String, String, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit = { _, _, _, _ -> },
         requiresAcquiring: Boolean = false,
         onRecovery: (Throwable) -> Unit = {},
     ) {
@@ -237,7 +237,7 @@ internal object PresentationRegistry {
         synchronized(lock) {
             check(id !in entries) { "duplicate presentation id" }
             Entry(PresentationContentState.Acquiring(screen), Callbacks({}, { onClosed(CloseReason.Error(it)) }, onClosed,
-                onClosed, { _, _, _, _ -> }, { _, _, _ -> })).also { it.retry = onRetry; entries[id] = it }.detached
+                onClosed, { _, _, _, _ -> }, { _, _, _, _ -> })).also { it.retry = onRetry; entries[id] = it }.detached
         }
 
     fun updateAcquisition(id: String, progress: AcquisitionProgress) = synchronized(lock) {
@@ -478,13 +478,13 @@ internal object PresentationRegistry {
         entries[id]?.latestScreen?.get()
     }
 
-    fun reportTextCommitted(id: String, screen: PresentationScreenHandle, inputId: String, text: String) {
+    fun reportTextCommitted(id: String, screen: PresentationScreenHandle, inputId: String, text: String, snapshot: NuxieViewModelSnapshot? = null) {
         val callback = synchronized(lock) {
             entries[id]?.takeUnless {
                 it.terminal.get() || it.dismissalReason != null || it.latestScreen.get() !== screen || screen.rendererEffects?.isRetired == true
             }?.callbacks?.onTextCommitted
         } ?: return
-        callback(inputId, text, screen.rendererEffects)
+        callback(inputId, text, snapshot, screen.rendererEffects)
     }
 
     fun dismiss(id: String, reason: CloseReason) {
@@ -1086,9 +1086,9 @@ internal class ExperiencePresentationService(
                                 pending.latestViewModelSnapshot.set(snapshot)
                                 runtimeStep(pending, outcome, correlationId, lifetime, snapshot)
                             },
-                            onTextCommitted = { inputId, text, lifetime ->
+                            onTextCommitted = { inputId, text, snapshot, lifetime ->
                                 publishScreenEffects(pending) {
-                                    pending.journey.emissions.publishTextCommit(inputId, text, textInputState, lifetime)
+                                    pending.journey.emissions.publishTextCommit(inputId, text, textInputState, lifetime, snapshot)
                                 }
                             },
                         )

@@ -267,6 +267,33 @@ class JourneyReleaseTest {
         }
     }
 
+    @Test fun `text response capture admission requires an explicit safe binding source`() {
+        val navigation = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/text-input-navigation.json").readText()).jsonObject
+        val envelope = navigation.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        for (mode in listOf("text", "binding", "invalid")) {
+            for (secure in listOf(false, true)) {
+                for (field in listOf(false, true)) {
+                    val render = source.getValue("render").jsonObject
+                    val inputs = render.getValue("textInputs").jsonArray.toMutableList()
+                    val input = inputs.first().jsonObject.toMutableMap()
+                    input["responseCapture"] = JsonPrimitive(mode)
+                    input["secureTextEntry"] = JsonPrimitive(secure)
+                    if (field) input["responseFieldKey"] = JsonPrimitive("answer") else input.remove("responseFieldKey")
+                    inputs[0] = JsonObject(input)
+                    val root = JsonObject(source + ("render" to JsonObject(render + ("textInputs" to JsonArray(inputs)))))
+                    val valid = field && (mode == "text" || (mode == "binding" && !secure))
+                    if (valid) JourneySchemaValidator.validate(root)
+                    else assertThrows("$mode secure=$secure field=$field", JourneyReleaseAuthenticationException::class.java) {
+                        JourneySchemaValidator.validate(root)
+                    }
+                }
+            }
+        }
+    }
+
     @Test fun `admits signed local programs with and without a render closure`() {
         for (key in listOf("entry", "renderedEntry")) {
             val entry = fixture.getValue(key).jsonObject
