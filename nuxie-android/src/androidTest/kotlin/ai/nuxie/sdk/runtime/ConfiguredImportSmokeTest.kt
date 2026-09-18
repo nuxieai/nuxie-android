@@ -2,6 +2,7 @@ package ai.nuxie.sdk.runtime
 
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -113,10 +114,15 @@ class ConfiguredImportSmokeTest {
     }
 
     @Test
-    fun localMp4DecodesIntoVulkanAcrossTwoLoops() {
+    fun localMp4DecodesIntoVulkanAcrossTwoLoops() = verifyDecodedVideo(frenchCaptions = false)
+
+    @Test
+    fun preferredFrenchTrackFollowsActualVideoPlayback() = verifyDecodedVideo(frenchCaptions = true)
+
+    private fun verifyDecodedVideo(frenchCaptions: Boolean) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val local = java.io.File.createTempFile("video-decoder-", ".mp4", instrumentation.targetContext.cacheDir)
-        instrumentation.context.assets.open("video/captions.mp4").use { input ->
+        instrumentation.context.assets.open(if (frenchCaptions) "video/multilingual.mp4" else "video/captions.mp4").use { input ->
             local.outputStream().use { input.copyTo(it) }
         }
         val bytes = instrumentation.context.assets.open("video/greeting.nux").use { it.readBytes() }
@@ -137,10 +143,12 @@ class ConfiguredImportSmokeTest {
                             kotlinx.serialization.json.JsonObject(inventory + ("renderer" to kotlinx.serialization.json.JsonPrimitive("nux"))))
                         var slots = 1
                         val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(slots, slots, 0, 100_000, 0) }
+                        val tracks = mutableListOf(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(2, "eng"))
+                        if (frenchCaptions) tracks.add(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(3, "fra"))
                         val playback = ExperienceVideoPlayback(instrumentation.targetContext, player,
                             listOf(ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding(0, initial.assetId, initial.sourceKey, local, true,
-                                listOf(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(2, "en")))), targets,
-                            decoderPool = pool)
+                                tracks)), targets,
+                            decoderPool = pool, preferredCaptionLanguages = if (frenchCaptions) listOf("fr-CA", "en") else listOf("en"))
                         try {
                             playback.setVisible(true)
                             val deadline = android.os.SystemClock.elapsedRealtime() + 15_000
@@ -169,7 +177,8 @@ class ConfiguredImportSmokeTest {
                                 }
                                 Thread.sleep(16)
                             }
-                            assertTrue(seenCaptions.containsAll(listOf("Hello 👋", "Welcome")))
+                            assertTrue(seenCaptions.containsAll(if (frenchCaptions) listOf("Bonjour 👋", "Bienvenue") else listOf("Hello 👋", "Welcome")))
+                            if (frenchCaptions) assertFalse(seenCaptions.contains("Hello 👋"))
                             assertEquals("Decoded frames must repeat through native loop commands", listOf(true, false, true, false), colors)
                             fun command(type: String, view: String = "clip-view") = ai.nuxie.sdk.experiences.JourneyVideoAction.parse(
                                 kotlinx.serialization.json.Json.parseToJsonElement("""{"type":"video","target":{"artboardId":"screen","viewNodeId":"$view"},"command":{"type":"$type"}}"""))
