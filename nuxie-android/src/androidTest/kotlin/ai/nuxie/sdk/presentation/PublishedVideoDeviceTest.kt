@@ -1,6 +1,10 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.runtime.NuxieRuntime
+import ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool
+import ai.nuxie.sdk.runtime.NuxieVideoDecoderBudget
+import ai.nuxie.sdk.runtime.NuxieVideoDecoderRequest
+import java.util.UUID
 import android.content.Intent
 import android.graphics.Color
 import android.os.SystemClock
@@ -34,8 +38,12 @@ class PublishedVideoDeviceTest {
         verifyPublishedVideo("waiting", "clip-view", 1, 100, 80)
     }
 
+    @Test fun mountedVideoRelinquishesSharedCapacityAndResumes() {
+        verifyPublishedVideo("greeting", "clip-view", 1, 100, 80, sharedCapacity = true)
+    }
+
     private fun verifyPublishedVideo(sceneName: String, viewNodeId: String, expectedOwners: Int,
-        sampleX: Int, sampleY: Int) {
+        sampleX: Int, sampleY: Int, sharedCapacity: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         assertTrue(NuxieRuntime.shared.isAvailable)
         val directory = File(instrumentation.targetContext.cacheDir, "published-video-test").apply { mkdirs() }
@@ -75,6 +83,10 @@ class PublishedVideoDeviceTest {
         val firstContainsVideo = java.util.concurrent.atomic.AtomicBoolean()
         val closed = CountDownLatch(1)
         val ownerCount = java.util.concurrent.atomic.AtomicInteger()
+        val pool = if (sharedCapacity) ExperienceVideoDecoderPool {
+            NuxieVideoDecoderBudget(maxPlayers = 1, managedPlayers = 1, hardwarePlayers = 0,
+                managedPixelsPerSecond = 64L * 32 * 31, softwarePixelsPerSecond = 0)
+        } else null
         var created = false
         lateinit var mounted: ExperienceMountedScreen
         lateinit var content: View
@@ -101,7 +113,7 @@ class PublishedVideoDeviceTest {
                         ownerCount.accumulateAndGet(captions.size, ::maxOf)
                     }
                     override fun onFailure(error: ExperiencePresentationException) { failure.set(error); first.countDown() }
-                }, failure::set)
+                }, failure::set, videoDecoderPool = pool)
                 created = true
                 content = mounted.mount()
                 activity.setContentView(content)
@@ -208,7 +220,8 @@ class PublishedVideoDeviceTest {
             assertTrue("Paused video must retain its frame", pixelMatches())
             val seekIterations = InstrumentationRegistry.getArguments().getString("videoSeekIterations")?.toInt() ?: 60
             require(seekIterations in 1..1_000) { "videoSeekIterations must be within 1..1000" }
-            repeat(seekIterations) { index ->
+            // Resource handoff has its own oracle; the other three tests retain the repeated-seek stress.
+            repeat(if (sharedCapacity) 0 else seekIterations) { index ->
                 val red = index % 2 != 0
                 val seconds = if (red) 0.1 else 1.2
                 assertTrue(command("seek", ",\"seconds\":$seconds"))
@@ -217,6 +230,53 @@ class PublishedVideoDeviceTest {
                 assertTrue("Paused seek $index must present ${if (red) "red" else "blue"}", pixelMatches(red))
             }
             assertTrue("Play must acknowledge native application", command("play"))
+            if (pool != null) {
+                val otherOwner = UUID.randomUUID()
+                val demand = listOf(NuxieVideoDecoderRequest(id = 100, pixelsPerSecond = 64L * 32 * 31,
+                    priority = UInt.MAX_VALUE.toLong(), visible = true))
+                try {
+                    // The mounted screen still owns its decoder: selecting another owner
+                    // cannot reuse capacity before that screen's actual close acknowledgement.
+                    assertTrue("Live mounted decoder keeps its reservation", pool.update(otherOwner, demand).isEmpty())
+                    val retirementDeadline = SystemClock.elapsedRealtime() + 5_000
+                    var acquired = emptySet<Long>()
+                    while (acquired.isEmpty() && SystemClock.elapsedRealtime() < retirementDeadline) {
+                        acquired = pool.update(otherOwner, demand)
+                        Thread.sleep(20)
+                    }
+                    assertEquals("Mounted playback must retire its decoder", setOf(100L), acquired)
+                    val captionDeadline = SystemClock.elapsedRealtime() + 3_000
+                    var captionsHidden = false
+                    while (!captionsHidden && SystemClock.elapsedRealtime() < captionDeadline) {
+                        instrumentation.runOnMainSync {
+                            captionsHidden = labels(content).none { it.visibility == View.VISIBLE && it.text.isNotEmpty() }
+                        }
+                        Thread.sleep(20)
+                    }
+                    assertTrue("Suspended decoder must withdraw captions", captionsHidden)
+                } finally {
+                    pool.remove(otherOwner)
+                }
+                // Requested playback survives revocation. The same mounted screen must
+                // acquire capacity again and supply actual new pixels and caption text.
+                val resumeDeadline = SystemClock.elapsedRealtime() + 8_000
+                var resumedCaption = false
+                var resumedRed = false
+                var resumedBlue = false
+                while (SystemClock.elapsedRealtime() < resumeDeadline && !(resumedCaption && resumedRed && resumedBlue)) {
+                    failure.get()?.let { throw AssertionError("Mounted resumption failed", it) }
+                    resumedRed = resumedRed || pixelMatches(true)
+                    resumedBlue = resumedBlue || pixelMatches(false)
+                    instrumentation.runOnMainSync {
+                        resumedCaption = resumedCaption || labels(content).any {
+                            it.visibility == View.VISIBLE && it.text.toString() in listOf("Hello 👋", "Welcome")
+                        }
+                    }
+                    Thread.sleep(30)
+                }
+                assertTrue("Revoked mounted video resumes red and blue frames with captions",
+                    resumedCaption && resumedRed && resumedBlue)
+            }
             instrumentation.runOnMainSync { mounted.setVisible(false) }
             Thread.sleep(250)
             instrumentation.runOnMainSync { assertTrue(labels(content).none { it.visibility == View.VISIBLE && it.text.isNotEmpty() }) }

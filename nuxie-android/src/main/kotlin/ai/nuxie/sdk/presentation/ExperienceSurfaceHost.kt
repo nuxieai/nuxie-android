@@ -63,6 +63,7 @@ internal class ExperienceSurfaceHost(
     private val artboardSize: ExperienceArtboardSize? = null,
     private val runtime: NuxieRuntime = NuxieRuntime.shared,
     private val systemFontCache: SystemFontCache = SystemFontCache.shared,
+    private val videoDecoderPool: ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool? = null,
 ) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
     private val mainHandler = Handler(Looper.getMainLooper())
     interface Listener {
@@ -475,7 +476,8 @@ internal class ExperienceSurfaceHost(
                 player = loadedFile.newExperiencePlayer(loadedArtboard, artboardName)
                 if (semanticsEnabled) checkNotNull(player).enableSemantics()
                 if (videoBindings.isNotEmpty()) {
-                    videoPlayback = ExperienceVideoPlayback(context.applicationContext, checkNotNull(player), videoBindings, videoTargets)
+                    videoPlayback = ExperienceVideoPlayback(context.applicationContext, checkNotNull(player), videoBindings, videoTargets,
+                        decoderPool = videoDecoderPool)
                     videoPlayback?.setVisible(running)
                 }
             } catch (error: Exception) {
