@@ -364,6 +364,8 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
     fun videoPresent(renderer: Long, player: Long, component: Long, frame: NuxieVideoFrame): Int = error("videoPresent is not implemented")
 
     fun videoOccurrences(player: Long): List<NuxieVideoOccurrence> = error("videoOccurrences is not implemented")
+    fun videoAllocateDecoders(requests: List<NuxieVideoDecoderRequest>, budget: NuxieVideoDecoderBudget): List<NuxieVideoAllocation> = error("videoAllocateDecoders is not implemented")
+    fun videoReclaimDecoder(player: Long, component: Long, blocked: Boolean): Long = error("videoReclaimDecoder is not implemented")
     fun videoReadiness(player: Long, component: Long, elapsed: Double, timeout: Double, optional: Boolean): Int = error("videoReadiness is not implemented")
     fun videoCommand(player: Long, component: Long, kind: Int, value: Double, reason: Int): Int = error("videoCommand is not implemented")
     fun videoStep(player: Long, component: Long, observation: Int, generation: Long, value: Double): List<NuxieVideoAction> = error("videoStep is not implemented")
@@ -551,6 +553,24 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         val values = NuxieRuntimeBridge.nativeVideoOccurrences(player, status)
         if (status[0] != NUX_STATUS_OK) throw NuxieRuntimeCallException("video occurrences", status[0])
         return checkNotNull(values).toList()
+    }
+
+    override fun videoAllocateDecoders(requests: List<NuxieVideoDecoderRequest>, budget: NuxieVideoDecoderBudget): List<NuxieVideoAllocation> {
+        require(requests.size <= 65_536 && requests.map { it.id }.toSet().size == requests.size)
+        val values = LongArray(requests.size * 4)
+        requests.forEachIndexed { index, request -> request.nativeValues().copyInto(values, index * 4) }
+        val status = intArrayOf(-1)
+        val allocations = NuxieRuntimeBridge.nativeVideoAllocateDecoders(values, budget.nativeValues(), status)
+        if (status[0] != NUX_STATUS_OK) throw NuxieRuntimeCallException("video allocation", status[0])
+        check(allocations != null && allocations.size == requests.size) { "Invalid video allocation result" }
+        return allocations.map { value -> NuxieVideoAllocation.entries.getOrNull(value) ?: error("Invalid video allocation") }
+    }
+
+    override fun videoReclaimDecoder(player: Long, component: Long, blocked: Boolean): Long {
+        val status = intArrayOf(-1)
+        val generation = NuxieRuntimeBridge.nativeVideoReclaimDecoder(player, component, blocked, status)
+        if (status[0] != NUX_STATUS_OK) throw NuxieRuntimeCallException("video reclamation", status[0])
+        return generation
     }
 
     override fun videoReadiness(player: Long, component: Long, elapsed: Double, timeout: Double, optional: Boolean): Int {
