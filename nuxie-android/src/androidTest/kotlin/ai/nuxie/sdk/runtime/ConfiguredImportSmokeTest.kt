@@ -9,6 +9,47 @@ import org.junit.Test
 
 /** Exercises the scripted import path on the device architecture. */
 class ConfiguredImportSmokeTest {
+    @Test
+    fun unsignedVideoPrioritiesSurviveOccurrenceEnumeration() {
+        assertTrue("Engine library must load on the test device", NuxieRuntime.shared.isAvailable)
+        val baseline = InstrumentationRegistry.getInstrumentation().context.assets
+            .open("video/greeting.nux").use { it.readBytes() }
+        // RIV varuint property 60008 (priority), with the canonical fixture's zero value.
+        // Change only its value; retain the production publisher's scene and assets.
+        val marker = byteArrayOf(0xe8.toByte(), 0xd4.toByte(), 3, 0)
+        val offsets = (0..baseline.size - marker.size).filter { offset ->
+            marker.indices.all { baseline[offset + it] == marker[it] }
+        }
+        assertEquals("Expected exactly one zero-priority property", 1, offsets.size)
+        val valueOffset = offsets.single() + 3
+        for (priority in listOf(0x8000_0000L, 0xffff_ffffL)) {
+            var remaining = priority
+            val encoded = ArrayList<Byte>()
+            do {
+                val low = (remaining and 127).toInt()
+                remaining = remaining ushr 7
+                encoded.add((low or if (remaining != 0L) 128 else 0).toByte())
+            } while (remaining != 0L)
+            val bytes = baseline.copyOfRange(0, valueOffset) + encoded.toByteArray() +
+                baseline.copyOfRange(valueOffset + 1, baseline.size)
+            val runtime = NuxieRuntime.shared
+            val catalog = checkNotNull(runtime.inspectFileAssets(bytes))
+            val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(320, 640))
+            try {
+                val file = checkNotNull(runtime.importFile(renderer, bytes, catalog, videoEnabled = true))
+                try {
+                    val artboard = checkNotNull(file.newArtboard("Video Frame"))
+                    try {
+                        val player = checkNotNull(artboard.newPlayer())
+                        try {
+                            assertEquals(priority, player.videos().single().priority.toLong() and 0xffff_ffffL)
+                        } finally { player.close() }
+                    } finally { artboard.close() }
+                } finally { file.close() }
+            } finally { renderer.close() }
+        }
+    }
+
     private data class VideoMeasurement(val file: String, val width: Int, val height: Int, val cadence: Int) {
         companion object {
             val HD = VideoMeasurement("captions-720p.mp4", 1280, 720, 31)
