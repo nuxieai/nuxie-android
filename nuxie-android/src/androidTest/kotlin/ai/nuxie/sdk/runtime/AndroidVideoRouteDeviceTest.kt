@@ -48,23 +48,30 @@ class AndroidVideoRouteDeviceTest {
         }
     }
 
-    @Test fun failedCloseRetainsReleaseCallbacksUntilRetryCompletes() {
+    @Test fun failedCloseRetainsReleaseCallbacksUntilRetryCompletes() = checkFailedClose(false)
+
+    @Test fun retiredDecoderCompletesCleanupWithoutAnotherOwnerCall() = checkFailedClose(true)
+
+    private fun checkFailedClose(automaticRetry: Boolean) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val source = File.createTempFile("cleanup-video-", ".mp4", instrumentation.targetContext.cacheDir)
         instrumentation.context.assets.open("video/greeting.mp4").use { input -> source.outputStream().use { input.copyTo(it) } }
         val context = RouteContext(instrumentation.targetContext)
         val decoder = AndroidVideoDecoder(context, source, 1, 64 * 1024 * 1024, 1)
         val callbacks = java.util.concurrent.atomic.AtomicInteger()
+        val released = CountDownLatch(1)
         try {
             val deadline = SystemClock.elapsedRealtime() + 10_000
             while (!decoder.ready() && SystemClock.elapsedRealtime() < deadline) Thread.sleep(5)
             assertTrue("Decoder prepared before teardown fault", decoder.ready())
-            decoder.whenReleased { callbacks.incrementAndGet() }
+            decoder.whenReleased { callbacks.incrementAndGet(); released.countDown() }
             context.failNextUnregister = true
             assertThrows(IllegalStateException::class.java) { decoder.close() }
             assertEquals("Lease and pool callbacks remain held", 0, callbacks.get())
             assertNotNull(context.receiver)
-            decoder.close()
+            if (automaticRetry) {
+                assertTrue("Worker retries cleanup after owner retires", released.await(5, TimeUnit.SECONDS))
+            } else decoder.close()
             assertEquals(1, callbacks.get())
             assertNull(context.receiver)
             decoder.close()
