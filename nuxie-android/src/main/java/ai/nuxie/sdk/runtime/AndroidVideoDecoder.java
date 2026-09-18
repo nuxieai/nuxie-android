@@ -1,6 +1,9 @@
 package ai.nuxie.sdk.runtime;
 
 import android.content.Context;
+import android.content.BroadcastReceiver;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.SurfaceTexture;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
@@ -142,6 +145,23 @@ final class AndroidVideoDecoder {
   private long queuedGeneration;
   private float rate = 1, volume = 0;
   private final AudioManager audio;
+  private final Context application;
+  private boolean routeReceiverRegistered;
+  private final BroadcastReceiver routeReceiver = new BroadcastReceiver() {
+    @Override public void onReceive(Context context, Intent intent) {
+      if (!AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(intent.getAction()) ||
+          closed || volume == 0 || !wantsPlay) return;
+      invalidateClock();
+      wantsPlay = false;
+      playing = false;
+      interrupted = false;
+      permanentLoss.set(true);
+      try {
+        if (ready) player.pause();
+        releaseFocus();
+      } catch (RuntimeException error) { fail("audio route change: " + error); }
+    }
+  };
   private final int audioPolicy;
   private boolean ownsFocus;
   private volatile boolean interrupted;
@@ -188,6 +208,7 @@ final class AndroidVideoDecoder {
         (AudioManager)application.getApplicationContext().getSystemService(
             Context.AUDIO_SERVICE);
     this.audioPolicy = audioPolicy;
+    this.application = application.getApplicationContext();
     this.generation = generation;
     this.maxFrameBytes = maxFrameBytes;
     vertices
@@ -199,6 +220,11 @@ final class AndroidVideoDecoder {
   }
   private void open(java.io.File source) {
     try {
+      // System-only broadcast: delivered on the decoder owner thread. A noisy
+      // transition pauses audible media until a new authored play command.
+      application.registerReceiver(routeReceiver,
+          new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY), null, handler);
+      routeReceiverRegistered = true;
       initGl();
       player = new MediaPlayer();
       player.setVolume(0, 0);
@@ -624,6 +650,12 @@ final class AndroidVideoDecoder {
         latest = null;
         if (!handler.post(() -> {
           try {
+            if (routeReceiverRegistered) {
+              application.unregisterReceiver(routeReceiver);
+              routeReceiverRegistered = false;
+            }
+          } catch (RuntimeException error) { closeFailure = error; }
+          try {
             releaseFocus();
             if (player != null) {
               player.release();
@@ -645,7 +677,8 @@ final class AndroidVideoDecoder {
               EGL14.eglReleaseThread();
             }
           } catch (RuntimeException error) {
-            closeFailure = error;
+            if (closeFailure == null) closeFailure = error;
+            else closeFailure.addSuppressed(error);
           } finally {
             thread.quitSafely();
           }
