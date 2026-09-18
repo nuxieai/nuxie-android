@@ -526,6 +526,17 @@ internal class NuxieRuntimePlayer internal constructor(
 
     fun videos(): List<NuxieVideoOccurrence> = native.videoOccurrences(requireHandle())
 
+    fun videoAllocateDecoders(requests: List<NuxieVideoDecoderRequest>, budget: NuxieVideoDecoderBudget): List<NuxieVideoAllocation> {
+        requireHandle()
+        return native.videoAllocateDecoders(requests, budget)
+    }
+
+    /** The host has closed its decoder and drained commands before this transition. */
+    fun videoReclaimDecoder(component: Long, blocked: Boolean): Long {
+        require(component >= 0)
+        return native.videoReclaimDecoder(requireHandle(), component, blocked)
+    }
+
     fun videoReadiness(component: Long, elapsed: Double, timeout: Double, optional: Boolean): Int {
         require(component >= 0 && elapsed.isFinite() && elapsed >= 0 && timeout.isFinite() && timeout in 0.0..60.0)
         return native.videoReadiness(requireHandle(), component, elapsed, timeout, optional)

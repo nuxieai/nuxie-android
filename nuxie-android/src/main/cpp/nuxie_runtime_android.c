@@ -3371,6 +3371,65 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoCommand(
   return nux_player_video_command(from_handle(player), (size_t)component, (uint32_t)kind, value, (uint32_t)reason);
 }
 
+JNIEXPORT jintArray JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoAllocateDecoders(
+    JNIEnv *env, jobject self, jlongArray requests, jlongArray budget_values, jintArray status_out) {
+  (void)self;
+  if (!set_status_out(env, status_out, NUX_STATUS_INVALID_ARGUMENT)) return NULL;
+  if (requests == NULL || budget_values == NULL) return NULL;
+  jsize length = (*env)->GetArrayLength(env, requests);
+  if ((*env)->GetArrayLength(env, budget_values) != 5 || length % 4 != 0 || length > 65536 * 4) return NULL;
+  jlong limits[5];
+  (*env)->GetLongArrayRegion(env, budget_values, 0, 5, limits);
+  if (clear_jni_exception(env)) return NULL;
+  for (int i = 0; i < 5; i++) if (limits[i] < 0 || (i < 3 && (uint64_t)limits[i] > UINT32_MAX)) return NULL;
+  struct NuxVideoDecoderBudget budget = {
+      .struct_size = sizeof(struct NuxVideoDecoderBudget),
+      .max_players = (uint32_t)limits[0], .managed_players = (uint32_t)limits[1],
+      .hardware_players = (uint32_t)limits[2], .managed_pixels_per_second = (uint64_t)limits[3],
+      .software_pixels_per_second = (uint64_t)limits[4] };
+  size_t count = (size_t)length / 4;
+  struct NuxVideoDecoderRequest *input = count ? calloc(count, sizeof(*input)) : NULL;
+  uint32_t *output = count ? calloc(count, sizeof(*output)) : NULL;
+  if (count && (!input || !output)) {
+    free(input); free(output); set_status_out(env, status_out, NUX_STATUS_RUNTIME_ERROR); return NULL;
+  }
+  NuxStatus status = NUX_STATUS_OK;
+  for (size_t i = 0; i < count; i++) {
+    jlong row[4];
+    (*env)->GetLongArrayRegion(env, requests, (jsize)(i * 4), 4, row);
+    if (clear_jni_exception(env) || row[0] < 0 || row[1] < 0 || row[2] < 0 ||
+        (uint64_t)row[2] > UINT32_MAX || row[3] < 0 || row[3] > 15) {
+      status = NUX_STATUS_INVALID_ARGUMENT; break;
+    }
+    input[i] = (struct NuxVideoDecoderRequest) {
+        .struct_size = sizeof(struct NuxVideoDecoderRequest), .id = (uint64_t)row[0],
+        .pixels_per_second = (uint64_t)row[1], .priority = (uint32_t)row[2], .flags = (uint32_t)row[3] };
+  }
+  if (status == NUX_STATUS_OK) status = nux_video_allocate_decoders(input, count, &budget, output);
+  jintArray result = NULL;
+  if (status == NUX_STATUS_OK) {
+    result = (*env)->NewIntArray(env, (jsize)count);
+    if (result != NULL && count) (*env)->SetIntArrayRegion(env, result, 0, (jsize)count, (const jint *)output);
+    if (clear_jni_exception(env) || result == NULL) { result = NULL; status = NUX_STATUS_RUNTIME_ERROR; }
+  }
+  free(input); free(output);
+  set_status_out(env, status_out, status);
+  return result;
+}
+
+JNIEXPORT jlong JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoReclaimDecoder(
+    JNIEnv *env, jobject self, jlong player, jlong component, jboolean blocked, jintArray status_out) {
+  (void)self;
+  if (!set_status_out(env, status_out, NUX_STATUS_INVALID_ARGUMENT) || component < 0) return 0;
+  uint64_t generation = 0;
+  NuxStatus status = nux_player_video_reclaim_decoder(from_handle(player), (size_t)component,
+      blocked ? 1u : 0u, &generation);
+  set_status_out(env, status_out, status);
+  return (jlong)generation;
+}
+
 JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoReadiness(
     JNIEnv *env, jobject self, jlong player, jlong component, jdouble elapsed, jdouble timeout, jboolean optional) {
