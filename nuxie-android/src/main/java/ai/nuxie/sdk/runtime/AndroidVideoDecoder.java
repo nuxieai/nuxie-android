@@ -614,6 +614,7 @@ final class AndroidVideoDecoder {
   }
   private CloseAttempt closeAttempt;
   private VideoResourceCleanup cleanup;
+  private long cleanupRetryMillis = 1000;
   private boolean resourcesReleased;
   private final java.util.List<Runnable> releaseCallbacks = new java.util.ArrayList<>();
 
@@ -697,18 +698,7 @@ final class AndroidVideoDecoder {
       if (closeAttempt == null || closeAttempt.done.getCount() == 0) {
         closeAttempt = new CloseAttempt();
         final CloseAttempt scheduled = closeAttempt;
-        if (!handler.post(() -> {
-          try {
-            if (cleanup == null) cleanup = cleanupSteps();
-            scheduled.failure = cleanup.release();
-            if (scheduled.failure == null) {
-              thread.quitSafely();
-              notifyReleased();
-            }
-            // Keep the worker available to retry releases that threw. Successful
-            // steps are not repeated, and lease/pool callbacks remain pending.
-          } finally { scheduled.done.countDown(); }
-        })) {
+        if (!handler.post(() -> finishCleanup(scheduled))) {
           scheduled.failure = new IllegalStateException("video teardown worker unavailable");
           scheduled.done.countDown();
         }
@@ -724,5 +714,30 @@ final class AndroidVideoDecoder {
     }
     if (attempt.failure != null)
       throw new IllegalStateException("video decoder teardown failed", attempt.failure);
+  }
+
+  private void finishCleanup(CloseAttempt attempt) {
+    try {
+      if (cleanup == null) cleanup = cleanupSteps();
+      attempt.failure = cleanup.release();
+      if (attempt.failure == null) {
+        thread.quitSafely();
+        notifyReleased();
+      } else {
+        // A screen may already have dropped its reference after asynchronous
+        // retirement. Retain this owner until failed releases eventually finish.
+        long delay = cleanupRetryMillis;
+        cleanupRetryMillis = Math.min(30_000, cleanupRetryMillis * 2);
+        handler.postDelayed(() -> {
+          final CloseAttempt retry;
+          synchronized (this) {
+            if (resourcesReleased || closeAttempt != attempt) return;
+            retry = new CloseAttempt();
+            closeAttempt = retry;
+          }
+          finishCleanup(retry);
+        }, delay);
+      }
+    } finally { attempt.done.countDown(); }
   }
 }
