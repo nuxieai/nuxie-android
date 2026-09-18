@@ -20,6 +20,7 @@ class AndroidVideoRouteDeviceTest {
     private class RouteContext(context: Context) : ContextWrapper(context) {
         @Volatile var receiver: BroadcastReceiver? = null
         @Volatile var scheduler: Handler? = null
+        @Volatile var failNextUnregister = false
         override fun getApplicationContext(): Context = this
         override fun registerReceiver(receiver: BroadcastReceiver?, filter: IntentFilter?, permission: String?, scheduler: Handler?): Intent? {
             val result = super.registerReceiver(receiver, filter, permission, scheduler)
@@ -30,6 +31,10 @@ class AndroidVideoRouteDeviceTest {
             return result
         }
         override fun unregisterReceiver(receiver: BroadcastReceiver?) {
+            if (failNextUnregister) {
+                failNextUnregister = false
+                throw IllegalStateException("injected unregister failure")
+            }
             super.unregisterReceiver(receiver)
             if (this.receiver === receiver) this.receiver = null
         }
@@ -40,6 +45,35 @@ class AndroidVideoRouteDeviceTest {
                 finally { delivered.countDown() }
             }
             assertTrue("Route callback completes on decoder thread", delivered.await(3, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test fun failedCloseRetainsReleaseCallbacksUntilRetryCompletes() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val source = File.createTempFile("cleanup-video-", ".mp4", instrumentation.targetContext.cacheDir)
+        instrumentation.context.assets.open("video/greeting.mp4").use { input -> source.outputStream().use { input.copyTo(it) } }
+        val context = RouteContext(instrumentation.targetContext)
+        val decoder = AndroidVideoDecoder(context, source, 1, 64 * 1024 * 1024, 1)
+        val callbacks = java.util.concurrent.atomic.AtomicInteger()
+        try {
+            val deadline = SystemClock.elapsedRealtime() + 10_000
+            while (!decoder.ready() && SystemClock.elapsedRealtime() < deadline) Thread.sleep(5)
+            assertTrue("Decoder prepared before teardown fault", decoder.ready())
+            decoder.whenReleased { callbacks.incrementAndGet() }
+            context.failNextUnregister = true
+            assertThrows(IllegalStateException::class.java) { decoder.close() }
+            assertEquals("Lease and pool callbacks remain held", 0, callbacks.get())
+            assertNotNull(context.receiver)
+            decoder.close()
+            assertEquals(1, callbacks.get())
+            assertNull(context.receiver)
+            decoder.close()
+            assertEquals("Repeated close must not release ownership twice", 1, callbacks.get())
+            decoder.whenReleased { callbacks.incrementAndGet() }
+            assertEquals("Late observer sees completed teardown", 2, callbacks.get())
+        } finally {
+            decoder.close()
+            source.delete()
         }
     }
 
