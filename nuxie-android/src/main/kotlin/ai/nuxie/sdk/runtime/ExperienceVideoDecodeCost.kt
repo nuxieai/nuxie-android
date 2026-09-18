@@ -21,6 +21,11 @@ internal object ExperienceVideoDecodeCost {
             val format = extractor.getTrackFormat(track)
             val width = format.getInteger(MediaFormat.KEY_WIDTH)
             val height = format.getInteger(MediaFormat.KEY_HEIGHT)
+            // Use the documented extractor keys directly; the corresponding
+            // MediaFormat constants require API 30.
+            val hasAspect = format.containsKey("sar-width") && format.containsKey("sar-height")
+            val aspectWidth = if (hasAspect) format.getInteger("sar-width") else 1
+            val aspectHeight = if (hasAspect) format.getInteger("sar-height") else 1
             val durationUs = format.getLong(MediaFormat.KEY_DURATION)
             require(width in 1..16384 && height in 1..16384 && durationUs > 0) { "Invalid video dimensions or duration" }
             extractor.selectTrack(track)
@@ -32,13 +37,21 @@ internal object ExperienceVideoDecodeCost {
                 timestamps.add(timestamp)
                 if (!extractor.advance()) break
             }
-            return pixelsPerSecond(width, height, durationUs, timestamps)
+            return pixelsPerSecond(width, height, durationUs, timestamps, aspectWidth, aspectHeight)
         } finally { extractor.release() }
     }
 
     /** Shortest presentation interval is conservative for variable-rate and looping clips. */
-    internal fun pixelsPerSecond(width: Int, height: Int, durationUs: Long, timestamps: List<Long>): Long {
+    internal fun pixelsPerSecond(width: Int, height: Int, durationUs: Long, timestamps: List<Long>,
+                                 pixelAspectWidth: Int = 1, pixelAspectHeight: Int = 1): Long {
         require(width in 1..16384 && height in 1..16384 && durationUs > 0)
+        require(pixelAspectWidth > 0 && pixelAspectHeight > 0) { "Invalid video pixel aspect ratio" }
+        // MediaPlayer expands the reported display width for non-square pixels.
+        // Budget both coded decode work and RGBA delivery; never discount coded
+        // work when the display is narrower. Round up before allocating capacity.
+        val displayWidth = (width.toLong() * pixelAspectWidth + pixelAspectHeight - 1) / pixelAspectHeight
+        require(displayWidth in 1..16384) { "Video display dimensions exceed limits" }
+        val workWidth = maxOf(width.toLong(), displayWidth)
         require(timestamps.isNotEmpty() && timestamps.size <= 100_000 && timestamps.all { it >= 0 })
         val sorted = timestamps.sorted()
         val span = sorted.last() - sorted.first()
@@ -50,6 +63,6 @@ internal object ExperienceVideoDecodeCost {
             intervalUs = minOf(intervalUs, delta)
         }
         val rate = ceil(1_000_000.0 / intervalUs).toLong()
-        return Math.multiplyExact(Math.multiplyExact(width.toLong(), height.toLong()), rate)
+        return Math.multiplyExact(Math.multiplyExact(workWidth, height.toLong()), rate)
     }
 }
