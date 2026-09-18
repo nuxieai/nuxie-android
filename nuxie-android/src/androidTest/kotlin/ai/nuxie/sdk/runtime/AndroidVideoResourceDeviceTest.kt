@@ -4,6 +4,36 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AndroidVideoResourceDeviceTest {
+    @Test fun anamorphicBudgetCoversActualDecodedFrame() {
+        val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        val file = java.io.File.createTempFile("anamorphic-video-", ".mp4", instrumentation.targetContext.cacheDir)
+        try {
+            instrumentation.context.assets.open("video/captions-anamorphic.mp4").use { input ->
+                file.outputStream().use { input.copyTo(it) }
+            }
+            val decoder = AndroidVideoDecoder(instrumentation.targetContext, file, 1, 64 * 1024 * 1024, 1)
+            try {
+                val preparedDeadline = android.os.SystemClock.elapsedRealtime() + 10_000
+                while (!decoder.ready() && decoder.failure() == null && android.os.SystemClock.elapsedRealtime() < preparedDeadline) Thread.sleep(5)
+                assertNull(decoder.failure())
+                assertTrue(decoder.ready())
+                decoder.action(2, 0.1, 2)
+                var frame: AndroidVideoDecoder.Frame? = null
+                val deadline = android.os.SystemClock.elapsedRealtime() + 3_000
+                while (frame == null && android.os.SystemClock.elapsedRealtime() < deadline) {
+                    assertNull(decoder.failure())
+                    frame = decoder.takeFrame()?.takeIf { it.generation == 2L }
+                    if (frame == null) Thread.sleep(5)
+                }
+                val decoded = checkNotNull(frame)
+                assertEquals(128, decoded.width)
+                assertEquals(32, decoded.height)
+                assertEquals(128 * 32 * 4, decoded.rgba.size)
+                assertEquals(decoded.width.toLong() * decoded.height * 31, ExperienceVideoDecodeCost.read(file))
+            } finally { decoder.close() }
+        } finally { file.delete() }
+    }
+
     @Test fun delayedDecoderRetirementRetainsCapacityUntilResourcesAreReleased() {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
