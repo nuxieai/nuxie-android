@@ -295,6 +295,42 @@ class PublishedVideoDeviceTest {
             instrumentation.runOnMainSync { mounted.setVisible(false) }
             Thread.sleep(250)
             instrumentation.runOnMainSync { assertTrue(labels(content).none { it.visibility == View.VISIBLE && it.text.isNotEmpty() }) }
+            if (pool != null) {
+                val otherOwner = UUID.randomUUID()
+                val demand = listOf(NuxieVideoDecoderRequest(id = 101, pixelsPerSecond = 64L * 32 * 31,
+                    priority = UInt.MAX_VALUE.toLong(), visible = true))
+                try {
+                    val deadline = SystemClock.elapsedRealtime() + 5_000
+                    var acquired = emptySet<Long>()
+                    while (acquired.isEmpty() && SystemClock.elapsedRealtime() < deadline) {
+                        acquired = pool.update(otherOwner, demand)
+                        Thread.sleep(20)
+                    }
+                    assertEquals("Hidden screen must release capacity without another frame tick", setOf(101L), acquired)
+                } finally {
+                    pool.remove(otherOwner)
+                }
+                instrumentation.runOnMainSync { mounted.setVisible(true) }
+                val deadline = SystemClock.elapsedRealtime() + 8_000
+                var red = false
+                var blue = false
+                while (!(red && blue) && SystemClock.elapsedRealtime() < deadline) {
+                    failure.get()?.let { throw AssertionError("Hidden screen failed to resume", it) }
+                    red = red || pixelMatches(true)
+                    blue = blue || pixelMatches(false)
+                    Thread.sleep(30)
+                }
+                assertTrue("Shown screen reacquires a decoder and resumes actual video", red && blue)
+                assertTrue(command("pause"))
+                assertTrue(command("seek", ",\"seconds\":1.2"))
+                awaitStablePausedFrame(false, "Paused frame before hiding")
+                instrumentation.runOnMainSync { mounted.setVisible(false) }
+                Thread.sleep(250)
+                instrumentation.runOnMainSync { mounted.setVisible(true) }
+                awaitStablePausedFrame(false, "Paused frame after reopening decoder")
+                Thread.sleep(1_200)
+                assertTrue("Hidden decoder retirement preserves paused intent and position", pixelMatches(false))
+            }
         } finally {
             instrumentation.runOnMainSync {
                 if (created) mounted.close(false) { closed.countDown() } else closed.countDown()

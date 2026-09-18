@@ -23,8 +23,8 @@ internal class ExperienceVideoPlayback(
         var ended = false
         var failed = false
         var interrupted = false
-        var pausedByHost = false
         var resourceBlocked = false
+        var retiredForVisibility = false
         var rate = 1.0
     }
     private val decoderOwner = UUID.randomUUID()
@@ -142,13 +142,50 @@ internal class ExperienceVideoPlayback(
         advanceAdmissionClock()
         hidden = !visible
         reconcile(player.videos())
+        // Frame scheduling stops as soon as the surface is hidden. Withdraw demand
+        // and release media resources here; waiting for advance() would retain them
+        // indefinitely. Native scene mutation is deferred until the next safe step.
+        if (hidden) decoderPool?.update(decoderOwner, emptyList())
+        var failure: Throwable? = null
         for ((component, entry) in entries) {
             player.videoCommand(component, 6, if (hidden) 1.0 else 0.0, 1)
-            if (hidden) {
+            if (hidden && entry.decoder != null) {
                 entry.decoder?.action(1, 0.0, 0)
-                entry.pausedByHost = true
+                entry.decoder?.whenReleased { decoderPool?.release(decoderOwner, component) }
+                entry.retiredForVisibility = true
+                try {
+                    retire(component, entry)
+                } catch (error: Throwable) {
+                    if (failure == null) failure = error else failure.addSuppressed(error)
+                }
             }
         }
+        failure?.let { throw it }
+    }
+
+    /** Called only after any submitted native frame has completed. */
+    private fun restoreVisibleDecoders(videos: List<NuxieVideoOccurrence>): List<NuxieVideoOccurrence> {
+        if (hidden) return videos
+        for (video in videos) {
+            val entry = checkNotNull(entries[video.componentId])
+            if (!entry.retiredForVisibility) continue
+            // A previous timed-out close still owns its slot until release is acknowledged.
+            retire(video.componentId, entry)
+            if (entry.interrupted) player.videoCommand(video.componentId, 6, 0.0, 4)
+            // Commit queued pause/seek/rate/dispose intent before rebuilding the decoder.
+            for (action in player.videoStep(video.componentId, 0, video.generation)) {
+                if (action.kind == 3) entry.rate = action.value
+                if (action.kind == 5) entry.failed = true
+            }
+            if (video.state == 7 || video.state == 8) entry.failed = true
+            if (!entry.failed) player.videoReclaimDecoder(video.componentId, false)
+            entry.ready = false
+            entry.ended = false
+            entry.interrupted = false
+            entry.resourceBlocked = false
+            entry.retiredForVisibility = false
+        }
+        return player.videos()
     }
 
     /** Retire all denied owners before opening any replacement; callbacks use a fresh generation. */
@@ -206,7 +243,6 @@ internal class ExperienceVideoPlayback(
                 entry.ready = false
                 entry.ended = false
                 entry.interrupted = false
-                entry.pausedByHost = false
             }
         }
         for ((index, video) in videos.withIndex()) {
@@ -222,7 +258,7 @@ internal class ExperienceVideoPlayback(
     /** Called only before a new scene step, never while a native frame is submitted. */
     fun advance(renderer: NuxieAndroidVulkanRenderer, monotonicSeconds: Double) {
         check(!closed)
-        for (video in admit(reconcile(player.videos()))) {
+        for (video in admit(restoreVisibleDecoders(reconcile(player.videos())))) {
             val entry = checkNotNull(entries[video.componentId])
             if (entry.failed) continue
             if (entry.decoder == null && !hidden && !entry.resourceBlocked) {
@@ -267,13 +303,6 @@ internal class ExperienceVideoPlayback(
             if (entry.failed) {
                 retire(video.componentId, entry)
                 continue
-            }
-            // A hide/show can occur entirely while presentation is pending. The
-            // decoder was paused immediately; restore only actual native play intent.
-            if (!hidden && entry.pausedByHost) {
-                val current = player.videos().first { it.componentId == video.componentId }
-                if (current.state == 2 && current.wantsPlay) decoder?.action(0, 0.0, current.generation)
-                entry.pausedByHost = false
             }
             val clock = decoder?.clock()
             player.videoClock(video.componentId, monotonicSeconds,
