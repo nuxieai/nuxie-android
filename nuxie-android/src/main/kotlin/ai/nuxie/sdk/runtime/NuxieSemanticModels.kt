@@ -11,6 +11,7 @@ internal object NativeSemanticRole {
     const val TEXT = 7
     const val IMAGE = 8
     const val LIST = 10
+    const val LIST_ITEM = 11
     const val DIALOG = 14
     const val ALERT_DIALOG = 15
     const val RADIO_GROUP = 16
@@ -54,7 +55,15 @@ internal data class NativeSemanticNode(
     val label: String,
     val value: String,
     val hint: String,
-)
+    private val collectionFlags: Int = 0,
+    private val collectionOwner: Long = 0,
+    private val collectionCount: Long = 0,
+    private val collectionPosition: Long = 0,
+) {
+    val collectionId: Long? get() = collectionOwner.takeIf { collectionFlags and 1 != 0 }
+    val itemCount: Long? get() = collectionCount.takeIf { collectionFlags and 2 != 0 }
+    val itemPosition: Long? get() = collectionPosition.takeIf { collectionFlags and 4 != 0 }
+}
 
 internal interface NuxieSemanticNative {
     fun enableSemantics(player: Long): Int = error("enableSemantics is not implemented")
@@ -123,7 +132,28 @@ internal class NuxieSemanticTree(
         require(nodes.size <= 16_384) { "Semantic tree exceeds native node limit" }
         val byId = nodes.associateBy { it.id }
         require(byId.size == nodes.size) { "Duplicate semantic node identity" }
+        val positions = mutableMapOf<Long, MutableSet<Long>>()
+        val members = mutableMapOf<Long, Int>()
+        for (node in nodes) {
+            require((node.itemCount == null || node.role == NativeSemanticRole.LIST) &&
+                (node.itemPosition == null || node.role == NativeSemanticRole.LIST_ITEM) &&
+                (node.collectionId == null || node.role == NativeSemanticRole.LIST_ITEM) &&
+                (node.itemPosition == null || node.collectionId != null)) { "Invalid collection metadata role" }
+            require(listOfNotNull(node.collectionId, node.itemCount, node.itemPosition)
+                .all { it in 0..0xffff_ffffL }) { "Invalid unsigned collection metadata" }
+            val ownerId = node.collectionId ?: continue
+            val owner = requireNotNull(byId[ownerId]) { "Missing collection owner" }
+            require(owner.role == NativeSemanticRole.LIST) { "Collection owner is not a list" }
+            val count = (members[ownerId] ?: 0) + 1
+            members[ownerId] = count
+            require(owner.itemCount?.let { count <= it } ?: true) { "Collection has more members than its total" }
+            node.itemPosition?.let { position ->
+                require((owner.itemCount?.let { position < it } ?: true) &&
+                    positions.getOrPut(ownerId) { mutableSetOf() }.add(position)) { "Invalid collection position" }
+            }
+        }
         val inheritedFlags = mutableMapOf<Long, Int>()
+        val nearestLists = mutableMapOf<Long, Long>()
         val inheritedMask = NativeSemanticState.DISABLED or NativeSemanticState.HIDDEN
         for (node in nodes) {
             val path = mutableListOf<NativeSemanticNode>()
@@ -136,7 +166,11 @@ internal class NuxieSemanticTree(
                     requireNotNull(byId[current.parentId.toLong() and 0xffff_ffffL]) { "Missing semantic ancestor" }
             }
             var inherited = current?.let { inheritedFlags.getValue(it.id) } ?: 0
+            var nearestList = current?.let { nearestLists[it.id] }
             for (item in path.asReversed()) {
+                require(item.collectionId == null || item.collectionId == nearestList) { "Invalid collection owner ancestry" }
+                if (item.role == NativeSemanticRole.LIST) nearestList = item.id
+                nearestList?.let { nearestLists[item.id] = it }
                 inherited = inherited or (item.stateFlags and inheritedMask)
                 inheritedFlags[item.id] = inherited
             }

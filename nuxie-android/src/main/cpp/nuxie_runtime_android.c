@@ -2056,7 +2056,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeSemanticSnapshotNode(
   if (status == NUX_STATUS_OK && (*env)->PushLocalFrame(env, 5) == 0) {
     jclass cls = (*env)->FindClass(env, "ai/nuxie/sdk/runtime/NativeSemanticNode");
     jmethodID ctor = cls == NULL ? NULL : (*env)->GetMethodID(env, cls, "<init>",
-        "(JIIIIIIIFFFFLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+        "(JIIIIIIIFFFFLjava/lang/String;Ljava/lang/String;Ljava/lang/String;IJJJ)V");
     if (ctor != NULL) {
       jstring label = new_string_view(env, node.label);
       jstring value = label == NULL ? NULL : new_string_view(env, node.value);
@@ -2065,7 +2065,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeSemanticSnapshotNode(
           (jlong)node.id, (jint)node.parent_id, (jint)node.sibling_index, (jint)node.role,
           (jint)node.state_flags, (jint)node.trait_flags, (jint)node.heading_level, (jint)node.actions,
           (jfloat)node.min_x, (jfloat)node.min_y, (jfloat)node.max_x, (jfloat)node.max_y,
-          label, value, hint);
+          label, value, hint, (jint)node.collection_flags,
+          (jlong)node.collection_id, (jlong)node.item_count, (jlong)node.item_position);
     }
     result = (*env)->PopLocalFrame(env, result);
   }

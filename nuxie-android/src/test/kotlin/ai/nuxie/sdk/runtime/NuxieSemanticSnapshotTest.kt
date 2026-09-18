@@ -1,9 +1,45 @@
 package ai.nuxie.sdk.runtime
 
+import ai.nuxie.sdk.fixtures.FixtureRunner
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.long
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.*
 import org.junit.Test
 
 class NuxieSemanticSnapshotTest {
+    @Test fun `shared collection capture contract preserves unknown zero and ownership`() {
+        val suite = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("accessibility/collections.json").readText()).jsonObject
+        assertEquals(1, suite.getValue("schemaVersion").jsonPrimitive.int)
+        for (entry in suite.getValue("cases").jsonArray) {
+            val scenario = entry.jsonObject
+            val nodes = scenario.getValue("nodes").jsonArray.map { value ->
+                val item = value.jsonObject
+                val owner = item["collectionId"]?.jsonPrimitive?.long
+                val count = item["itemCount"]?.jsonPrimitive?.long
+                val position = item["itemPosition"]?.jsonPrimitive?.long
+                NativeSemanticNode(item.getValue("id").jsonPrimitive.long,
+                    item["parentId"]?.jsonPrimitive?.long?.toInt() ?: -1, 0,
+                    item.getValue("role").jsonPrimitive.int, 0, 0, 0, 0,
+                    0f, 0f, 0f, 0f, "Item", "", "",
+                    (if (owner != null) 1 else 0) or (if (count != null) 2 else 0) or
+                        (if (position != null) 4 else 0), owner ?: 0, count ?: 0, position ?: 0)
+            }
+            val id = scenario.getValue("id").jsonPrimitive.content
+            if (scenario.getValue("valid").jsonPrimitive.boolean) {
+                assertEquals(id, nodes, NuxieSemanticTree(1, 1, nodes).nodes)
+            } else {
+                val error = assertThrows(id, IllegalArgumentException::class.java) { NuxieSemanticTree(1, 1, nodes) }
+                assertTrue(id, error.message.orEmpty().contains("collection", ignoreCase = true))
+            }
+        }
+    }
+
     @Test fun `copy failure releases capture without returning a partial tree`() {
         val native = RecordingNative().apply { failNode = true }
         val error = assertThrows(NuxieRuntimeCallException::class.java) {

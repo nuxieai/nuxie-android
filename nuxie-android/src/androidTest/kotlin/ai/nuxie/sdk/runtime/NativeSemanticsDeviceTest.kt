@@ -6,6 +6,52 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NativeSemanticsDeviceTest {
+    @Test fun collectionMetadataCrossesJniAfterPresentation() {
+        val runtime = NuxieRuntime.shared
+        assertTrue(runtime.isAvailable)
+        val bytes = InstrumentationRegistry.getInstrumentation().context.assets
+            .open("accessibility/collections.riv").use { it.readBytes() }
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(200, 200))
+        try {
+            val file = checkNotNull(runtime.importFile(renderer, bytes, checkNotNull(runtime.inspectFileAssets(bytes))))
+            try {
+                val artboard = checkNotNull(file.newArtboard())
+                try {
+                    val player = checkNotNull(artboard.newPlayer())
+                    try {
+                        player.enableSemantics()
+                        player.stepTyped(elapsedSeconds = 0.0)
+                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        val capture = player.captureSemantics()
+                        val nodes = try { capture.tree.nodes } finally { capture.close() }
+                        assertEquals(9, nodes.size)
+                        val plans = nodes.single { it.label == "Plans" }
+                        assertEquals(10L, plans.itemCount)
+                        assertNull(plans.collectionId)
+                        assertNull(plans.itemPosition)
+                        for (position in 4L..6L) {
+                            val item = nodes.single { it.label == "Plan $position" }
+                            assertEquals(plans.id, item.collectionId)
+                            assertEquals(position, item.itemPosition)
+                            assertNull(item.itemCount)
+                        }
+                        val nested = nodes.single { it.label == "Nested" }
+                        val nestedItem = nodes.single { it.label == "Nested item" }
+                        assertEquals(1L, nested.itemCount)
+                        assertEquals(nested.id, nestedItem.collectionId)
+                        assertEquals(0L, nestedItem.itemPosition)
+                        assertEquals(0L, nodes.single { it.label == "Empty" }.itemCount)
+                        val unknown = nodes.single { it.label == "Unknown" }
+                        assertNull(unknown.itemCount)
+                        val item = nodes.single { it.label == "Unknown item" }
+                        assertEquals(unknown.id, item.collectionId)
+                        assertNull(item.itemPosition)
+                    } finally { player.close() }
+                } finally { artboard.close() }
+            } finally { file.close() }
+        } finally { renderer.close() }
+    }
+
     @Test fun populatedNodesAndUnicodeTextOwnershipCrossJni() {
         val runtime = NuxieRuntime.shared
         assertTrue(runtime.isAvailable)
@@ -82,7 +128,7 @@ class NativeSemanticsDeviceTest {
                         assertNotEquals(0L, snapshot)
                         val info = checkNotNull(bridge.nativeSemanticSnapshotInfo(snapshot, status))
                         assertEquals(0, status.single())
-                        assertEquals(3, info.size)
+                        assertEquals(5, info.size)
                         assertTrue(info[0] > 0)
                         assertEquals(0, bridge.nativePlayerValidateSemanticSnapshot(handle, snapshot))
                         assertNull(bridge.nativeSemanticSnapshotNode(snapshot, info[2].toInt(), status))
