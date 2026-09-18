@@ -135,9 +135,11 @@ class ConfiguredImportSmokeTest {
                             instrumentation.context.assets.open("video/inventory.json").bufferedReader().use { it.readText() }) as kotlinx.serialization.json.JsonObject
                         val targets = ai.nuxie.sdk.experiences.JourneyRenderSchema.videoElements(
                             kotlinx.serialization.json.JsonObject(inventory + ("renderer" to kotlinx.serialization.json.JsonPrimitive("nux"))))
+                        var slots = 1
                         val playback = ExperienceVideoPlayback(instrumentation.targetContext, player,
                             listOf(ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding(0, initial.assetId, initial.sourceKey, local, true,
-                                listOf(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(2, "en")))), targets)
+                                listOf(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(2, "en")))), targets,
+                            decoderBudget = { NuxieVideoDecoderBudget(slots, slots, 0, 100_000, 0) })
                         try {
                             playback.setVisible(true)
                             val deadline = android.os.SystemClock.elapsedRealtime() + 15_000
@@ -173,6 +175,16 @@ class ConfiguredImportSmokeTest {
                             assertThrows(IllegalArgumentException::class.java) { playback.apply(command("pause", "missing")) }
                             playback.apply(command("pause"))
                             playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                            assertEquals(false, player.videos().single().wantsPlay)
+                            val beforeRetirement = player.videos().single().generation
+                            slots = 0
+                            playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                            val retired = player.videos().single()
+                            assertTrue(retired.generation > beforeRetirement)
+                            assertEquals(false, retired.wantsPlay)
+                            slots = 1
+                            playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                            assertTrue(player.videos().single().generation > retired.generation)
                             assertEquals(false, player.videos().single().wantsPlay)
                             playback.setVisible(false)
                             playback.apply(command("play"))
