@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "611670df759b02627ff36c5f8dab8548c4aa386b",
+  "sourceCommit": "1e0f2816d13d6233b2081d245b101169ca96f991",
   "files": {
     "README.md": "9104a727bef89b388554d25583a6e013531c310f1a93d8f9f81440af8fcf67df",
     "accessibility/control-state.json": "6a4e35c6c2f55575344f4a26a2bdb5f22728a41845464c3beeb93251082e97f2",
@@ -216,6 +216,9 @@
     "video/inventory.json": "56c7dc278d1b54fdde0450ddd4a7e877e69b16f8e7bff11243f6715d0a60f69a",
     "video/list-inventory.json": "93184ca97a95a11b14f54a75e53c60eca2e959a9633bfef26142958ac993def3",
     "video/list-journey.json": "4f852a2f37092e90c6106cbbb15751acfb52959eb9abcf1f3c25155ab6cf5d95",
-    "video/list.nux": "8e7bd72c6ddab0d4dc96e938ddd75c27025415e544fd372060593d8565a80645"
+    "video/list.nux": "8e7bd72c6ddab0d4dc96e938ddd75c27025415e544fd372060593d8565a80645",
+    "video/waiting-inventory.json": "c7945e0f0ee74c69c19d52e3e634b845d6f05ebb64af41d088fb07cc9eacdc9e",
+    "video/waiting-journey.json": "8cc61bdb05b2d1f3bd9e8b616fd1f6848b49d794f63becda0d12929be57cca8b",
+    "video/waiting.nux": "de4610584c70a26a3648ade99d44350683781ed2ae53fe224cc9d0e9576474b7"
   }
 }

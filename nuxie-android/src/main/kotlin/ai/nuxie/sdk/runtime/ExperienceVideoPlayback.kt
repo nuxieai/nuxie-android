@@ -11,6 +11,7 @@ internal class ExperienceVideoPlayback(
     private val player: NuxieRuntimePlayer,
     private val bindings: List<ExperienceVideoAssetBinding>,
     private val targets: List<ExperienceVideoElement> = emptyList(),
+    private val nanoTime: () -> Long = System::nanoTime,
 ) : AutoCloseable {
     private class Entry(val binding: ExperienceVideoAssetBinding) {
         var decoder: AndroidVideoDecoder? = null
@@ -21,6 +22,51 @@ internal class ExperienceVideoPlayback(
         var pausedByHost = false
     }
     private val entries = mutableMapOf<Long, Entry>()
+    private class Admission(var elapsed: Double = 0.0, var decision: Int = 0)
+    private val admissions = mutableMapOf<Long, Admission>()
+    private var admissionClock = nanoTime()
+    private var presentationAdmitted = false
+
+    private fun advanceAdmissionClock() {
+        val now = nanoTime()
+        val elapsed = (now - admissionClock).coerceAtLeast(0) / 1_000_000_000.0
+        admissionClock = now
+        if (!hidden) admissions.values.filter { it.decision == 0 }.forEach { it.elapsed += elapsed }
+    }
+
+    fun isReadyForPresentation(): Boolean {
+        check(!closed)
+        advanceAdmissionClock()
+        val videos = player.videos()
+        val live = videos.map { it.componentId }.toSet()
+        admissions.keys.retainAll(live)
+        var waiting = false
+        for (video in videos.filter { it.readiness == 1 }) {
+            val target = targets.single {
+                it.sourceArtboardIndex == video.sourceArtboardIndex && it.componentId == video.sourceComponentId
+            }
+            val admission = admissions.getOrPut(video.componentId) { Admission() }
+            if (admission.decision == 0) {
+                admission.decision = player.videoReadiness(video.componentId, admission.elapsed,
+                    target.readinessTimeoutSeconds, target.optional)
+                if (admission.decision == 2) {
+                    entries[video.componentId]?.let {
+                        it.decoder?.close()
+                        it.decoder = null
+                        it.failed = true
+                    }
+                    player.videoCommand(video.componentId, 8)
+                    player.videoStep(video.componentId, 0, video.generation)
+                }
+            }
+            check(admission.decision != 3) { "Required video first frame unavailable" }
+            waiting = waiting || admission.decision == 0
+        }
+        // New list rows retain deadlines without hiding the existing screen.
+        if (!waiting) presentationAdmitted = true
+        return presentationAdmitted
+    }
+
 
     private fun reconcile(videos: List<NuxieVideoOccurrence>): List<NuxieVideoOccurrence> {
         val live = videos.map { it.componentId }.toSet()
@@ -67,6 +113,7 @@ internal class ExperienceVideoPlayback(
     /** Stop audio immediately even when a submitted Vulkan frame is still pending. */
     fun setVisible(visible: Boolean) {
         if (closed || hidden == !visible) return
+        advanceAdmissionClock()
         hidden = !visible
         reconcile(player.videos())
         for ((component, entry) in entries) {
@@ -153,6 +200,7 @@ internal class ExperienceVideoPlayback(
     override fun close() {
         if (closed) return
         closed = true
+        admissions.clear()
         var failure: Throwable? = null
         for (entry in entries.values) {
             try { entry.decoder?.close() } catch (error: Throwable) {

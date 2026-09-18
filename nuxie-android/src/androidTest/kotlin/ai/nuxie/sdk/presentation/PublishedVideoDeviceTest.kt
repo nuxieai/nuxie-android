@@ -30,6 +30,10 @@ class PublishedVideoDeviceTest {
         verifyPublishedVideo("list", "item-card", 2, 20, 30)
     }
 
+    @Test fun firstPresentationWaitsForDecodedVideo() {
+        verifyPublishedVideo("waiting", "clip-view", 1, 100, 80)
+    }
+
     private fun verifyPublishedVideo(sceneName: String, viewNodeId: String, expectedOwners: Int,
         sampleX: Int, sampleY: Int) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -68,6 +72,7 @@ class PublishedVideoDeviceTest {
             SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val failure = AtomicReference<Throwable?>()
         val first = CountDownLatch(1)
+        val firstContainsVideo = java.util.concurrent.atomic.AtomicBoolean()
         val closed = CountDownLatch(1)
         val ownerCount = java.util.concurrent.atomic.AtomicInteger()
         var created = false
@@ -78,7 +83,20 @@ class PublishedVideoDeviceTest {
         try {
             instrumentation.runOnMainSync {
                 mounted = ExperienceMountedScreen(activity, prepared, object : ExperienceSurfaceHost.Listener {
-                    override fun onFirstFrame() { first.countDown() }
+                    override fun onFirstFrame() {
+                        if (sceneName == "waiting") {
+                            mounted.surface.bitmap?.let { bitmap ->
+                                val scale = minOf(bitmap.width / width, bitmap.height / height)
+                                val x = ((bitmap.width - width * scale) / 2 + sampleX * scale).toInt()
+                                val y = ((bitmap.height - height * scale) / 2 + sampleY * scale).toInt()
+                                val pixel = bitmap.getPixel(x, y)
+                                firstContainsVideo.set((Color.red(pixel) > 180 && Color.blue(pixel) < 70) ||
+                                    (Color.blue(pixel) > 180 && Color.red(pixel) < 70))
+                                bitmap.recycle()
+                            }
+                        }
+                        first.countDown()
+                    }
                     override fun onVideoCaptions(captions: Map<Long, ai.nuxie.sdk.runtime.NuxieVideoCaption>) {
                         ownerCount.accumulateAndGet(captions.size, ::maxOf)
                     }
@@ -90,6 +108,8 @@ class PublishedVideoDeviceTest {
                 mounted.observeWindow()
             }
             assertTrue("First presented frame", first.await(15, TimeUnit.SECONDS))
+            failure.get()?.let { throw AssertionError("First presentation failed", it) }
+            if (sceneName == "waiting") assertTrue("First admitted presentation contains decoded video", firstContainsVideo.get())
             val colors = mutableListOf<Boolean>()
             val captions = mutableSetOf<String>()
             val accessibleCaptions = mutableSetOf<String>()
@@ -182,7 +202,7 @@ class PublishedVideoDeviceTest {
             assertTrue("Paused seek must present its red frame", pixelMatches())
             Thread.sleep(1_200)
             assertTrue("Paused video must retain its frame", pixelMatches())
-            repeat(12) { index ->
+            repeat(60) { index ->
                 val red = index % 2 != 0
                 val seconds = if (red) 0.1 else 1.2
                 assertTrue(command("seek", ",\"seconds\":$seconds"))

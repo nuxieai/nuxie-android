@@ -364,6 +364,7 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
     fun videoPresent(renderer: Long, player: Long, component: Long, frame: NuxieVideoFrame): Int = error("videoPresent is not implemented")
 
     fun videoOccurrences(player: Long): List<NuxieVideoOccurrence> = error("videoOccurrences is not implemented")
+    fun videoReadiness(player: Long, component: Long, elapsed: Double, timeout: Double, optional: Boolean): Int = error("videoReadiness is not implemented")
     fun videoCommand(player: Long, component: Long, kind: Int, value: Double, reason: Int): Int = error("videoCommand is not implemented")
     fun videoStep(player: Long, component: Long, observation: Int, generation: Long, value: Double): List<NuxieVideoAction> = error("videoStep is not implemented")
 
@@ -550,6 +551,13 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         val values = NuxieRuntimeBridge.nativeVideoOccurrences(player, status)
         if (status[0] != NUX_STATUS_OK) throw NuxieRuntimeCallException("video occurrences", status[0])
         return checkNotNull(values).toList()
+    }
+
+    override fun videoReadiness(player: Long, component: Long, elapsed: Double, timeout: Double, optional: Boolean): Int {
+        val result = NuxieRuntimeBridge.nativeVideoReadiness(player, component, elapsed, timeout, optional)
+        if (result < 0) throw NuxieRuntimeCallException("video readiness", -result)
+        check(result in 0..3) { "Invalid video readiness" }
+        return result
     }
 
     override fun videoCommand(player: Long, component: Long, kind: Int, value: Double, reason: Int): Int =

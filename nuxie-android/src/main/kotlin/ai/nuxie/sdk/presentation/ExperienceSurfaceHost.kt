@@ -775,6 +775,15 @@ internal class ExperienceSurfaceHost(
                     submittedSnapshot = viewModelSnapshot?.let { SubmittedTextSnapshot(it, outcome.textGeometry, generation, epoch) }
                     if (!firstFramePresented) firstFrameUpdateBaseline = surfaceUpdates.get()
                 }
+                if (!pendingPresentation) {
+                    try {
+                        if (videoPlayback?.isReadyForPresentation() == false) return@enqueue
+                    } catch (error: Throwable) {
+                        reportFailure(ExperiencePresentationException.Reason.HOST_FAILED,
+                            "Experience video readiness failed", error)
+                        return@enqueue
+                    }
+                }
                 val disposition = renderer.renderAndPresent(player, window, clearColor, true)
                 pendingPresentation = disposition == 4
                 if (disposition < 0) {

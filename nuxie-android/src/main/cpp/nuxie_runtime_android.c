@@ -3371,6 +3371,17 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoCommand(
   return nux_player_video_command(from_handle(player), (size_t)component, (uint32_t)kind, value, (uint32_t)reason);
 }
 
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoReadiness(
+    JNIEnv *env, jobject self, jlong player, jlong component, jdouble elapsed, jdouble timeout, jboolean optional) {
+  (void)env; (void)self;
+  if (component < 0) return -NUX_STATUS_INVALID_ARGUMENT;
+  uint32_t readiness = 0;
+  NuxStatus status = nux_player_video_readiness(from_handle(player), (size_t)component,
+      elapsed, timeout, optional ? 1 : 0, &readiness);
+  return status == NUX_STATUS_OK ? (jint)readiness : -(jint)status;
+}
+
 static void video_action_callback(void *context, const struct NuxVideoAction *action) {
   struct video_jni_collector *c = context;
   if (c->failed) return;
