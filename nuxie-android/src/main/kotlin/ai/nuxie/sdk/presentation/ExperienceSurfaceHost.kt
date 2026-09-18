@@ -861,7 +861,7 @@ internal class ExperienceSurfaceHost(
     }
 
     /** Release every native handle. The host is not reusable afterwards. */
-    fun release(finalState: Map<String, NuxieViewModelScalarValue> = emptyMap()) {
+    fun release(finalState: Map<String, NuxieViewModelScalarValue> = emptyMap(), onMediaReleased: () -> Unit = {}) {
         if (!released.compareAndSet(false, true)) return
         captionPublication.incrementAndGet()
         listener?.onVideoCaptions(emptyMap())
@@ -879,7 +879,7 @@ internal class ExperienceSurfaceHost(
             val closeHandles = listOfNotNull(
                 renderer?.let { active -> { active.detachSurface(); Unit } },
                 window?.let { it::close },
-                videoPlayback?.let { it::close },
+                videoPlayback?.let { owner -> { owner.closeAfterRetirement(onMediaReleased) } } ?: onMediaReleased,
                 player?.let { it::close },
                 viewModelState?.let { it::close },
                 artboard?.let { it::close },

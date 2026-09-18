@@ -184,7 +184,8 @@ internal class ExperienceMountedScreen(
         textOverlay = null
         val finalState = if (changingConfigurations) lifecycle.snapshot()
             else lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN)
-        surface.release(finalState)
-        lane.shutdown(completion)
+        val retirement = ExperienceScreenRetirement(completion)
+        surface.release(finalState, retirement::mediaReleased)
+        lane.shutdown(retirement::nativeReleased)
     }
 }

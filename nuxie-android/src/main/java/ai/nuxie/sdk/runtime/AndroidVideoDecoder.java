@@ -583,6 +583,37 @@ final class AndroidVideoDecoder {
     }
   }
   private volatile RuntimeException closeFailure;
+  private boolean resourcesReleased;
+  private final java.util.List<Runnable> releaseCallbacks = new java.util.ArrayList<>();
+
+  /** Completion means media and GL resources were released, not merely that close was requested. */
+  public void whenReleased(Runnable callback) {
+    synchronized (this) {
+      if (!resourcesReleased) {
+        releaseCallbacks.add(callback);
+        return;
+      }
+    }
+    callback.run();
+  }
+
+  private void notifyReleased() {
+    java.util.List<Runnable> callbacks;
+    synchronized (this) {
+      resourcesReleased = true;
+      callbacks = new java.util.ArrayList<>(releaseCallbacks);
+      releaseCallbacks.clear();
+    }
+    for (Runnable callback : callbacks) {
+      try {
+        callback.run();
+      } catch (RuntimeException error) {
+        ai.nuxie.sdk.logging.NuxieLog.INSTANCE.w("Nuxie", "Video retirement callback failed", error,
+            new ai.nuxie.sdk.logging.NuxieLogger.Field[0]);
+      }
+    }
+  }
+
   public void close() {
     if (Thread.currentThread() == thread)
       throw new IllegalStateException("video decoder cannot synchronously close its own worker");
@@ -618,6 +649,7 @@ final class AndroidVideoDecoder {
           } finally {
             thread.quitSafely();
           }
+          if (closeFailure == null) notifyReleased();
         })) closeFailure = new IllegalStateException("video teardown worker unavailable");
       }
     }

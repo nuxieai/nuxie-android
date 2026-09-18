@@ -27,7 +27,8 @@ internal class ExperienceVideoPlayback(
         var rate = 1.0
     }
     private val decoderOwner = UUID.randomUUID()
-    private var disposalComplete = false
+    @Volatile private var disposalComplete = false
+    private var retirementRequested = false
     private val entries = mutableMapOf<Long, Entry>()
     private val decodeCosts = mutableMapOf<String, Long>()
     private class Admission(var elapsed: Double = 0.0, var decision: Int = 0)
@@ -283,8 +284,44 @@ internal class ExperienceVideoPlayback(
         return entries.filter { (id, entry) -> id in live && !entry.failed }.keys.associateWith(player::videoCaption)
     }
 
+    /** Used by screen teardown: a timed-out worker retains claims and file leases until release. */
+    fun closeAfterRetirement(onRetired: () -> Unit) {
+        check(!retirementRequested) { "Video retirement already requested" }
+        retirementRequested = true
+        closed = true
+        val remaining = java.util.concurrent.atomic.AtomicInteger(entries.size + 1)
+        fun released() {
+            if (remaining.decrementAndGet() == 0) {
+                decoderPool?.remove(decoderOwner)
+                disposalComplete = true
+                onRetired()
+            }
+        }
+        for ((id, entry) in entries) {
+            val decoder = entry.decoder
+            if (decoder == null) {
+                decoderPool?.release(decoderOwner, id)
+                released()
+            } else {
+                decoder.whenReleased {
+                    decoderPool?.release(decoderOwner, id)
+                    released()
+                }
+                try { decoder.close() } catch (error: RuntimeException) {
+                    ai.nuxie.sdk.logging.NuxieLog.w("Nuxie", "Video retirement is incomplete; retaining its resource and file leases", error)
+                }
+            }
+        }
+        entries.clear()
+        admissions.clear()
+        captions.clear()
+        decodeCosts.clear()
+        released()
+    }
+
     override fun close() {
         if (disposalComplete) return
+        check(!retirementRequested) { "Asynchronous video retirement is still pending" }
         closed = true
         admissions.clear()
         var failure: Throwable? = null
