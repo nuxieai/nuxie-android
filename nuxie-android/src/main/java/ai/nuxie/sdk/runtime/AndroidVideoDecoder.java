@@ -608,7 +608,12 @@ final class AndroidVideoDecoder {
       // Optional diagnostics must not fail otherwise valid playback. Retry boundedly.
     }
   }
-  private volatile RuntimeException closeFailure;
+  private static final class CloseAttempt {
+    final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+    RuntimeException failure;
+  }
+  private CloseAttempt closeAttempt;
+  private VideoResourceCleanup cleanup;
   private boolean resourcesReleased;
   private final java.util.List<Runnable> releaseCallbacks = new java.util.ArrayList<>();
 
@@ -640,66 +645,84 @@ final class AndroidVideoDecoder {
     }
   }
 
+  private VideoResourceCleanup cleanupSteps() {
+    return new VideoResourceCleanup(
+        () -> {
+          if (routeReceiverRegistered) {
+            application.unregisterReceiver(routeReceiver);
+            routeReceiverRegistered = false;
+          }
+        },
+        this::releaseFocus,
+        () -> { if (player != null) { player.release(); player = null; } },
+        () -> { if (surface != null) { surface.release(); surface = null; } },
+        () -> { if (texture != null) { texture.release(); texture = null; } },
+        () -> {
+          if (display != EGL14.EGL_NO_DISPLAY && !EGL14.eglMakeCurrent(display,
+              EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT))
+            throw new IllegalStateException("could not detach video EGL context");
+        },
+        () -> {
+          if (display != EGL14.EGL_NO_DISPLAY && eglSurface != EGL14.EGL_NO_SURFACE) {
+            if (!EGL14.eglDestroySurface(display, eglSurface))
+              throw new IllegalStateException("could not release video EGL surface");
+            eglSurface = EGL14.EGL_NO_SURFACE;
+          }
+        },
+        () -> {
+          if (display != EGL14.EGL_NO_DISPLAY && context != EGL14.EGL_NO_CONTEXT) {
+            if (!EGL14.eglDestroyContext(display, context))
+              throw new IllegalStateException("could not release video EGL context");
+            context = EGL14.EGL_NO_CONTEXT;
+          }
+        },
+        () -> {
+          // The app can share the default display; never terminate that display.
+          if (display != EGL14.EGL_NO_DISPLAY && !EGL14.eglReleaseThread())
+            throw new IllegalStateException("could not release video EGL thread");
+        });
+  }
+
   public void close() {
     if (Thread.currentThread() == thread)
       throw new IllegalStateException("video decoder cannot synchronously close its own worker");
+    final CloseAttempt attempt;
     synchronized (this) {
+      if (resourcesReleased) return;
       if (!closed) {
         closed = true;
         invalidateClock();
         latest = null;
+      }
+      if (closeAttempt == null || closeAttempt.done.getCount() == 0) {
+        closeAttempt = new CloseAttempt();
+        final CloseAttempt scheduled = closeAttempt;
         if (!handler.post(() -> {
           try {
-            if (routeReceiverRegistered) {
-              application.unregisterReceiver(routeReceiver);
-              routeReceiverRegistered = false;
+            if (cleanup == null) cleanup = cleanupSteps();
+            scheduled.failure = cleanup.release();
+            if (scheduled.failure == null) {
+              thread.quitSafely();
+              notifyReleased();
             }
-          } catch (RuntimeException error) { closeFailure = error; }
-          try {
-            releaseFocus();
-            if (player != null) {
-              player.release();
-              player = null;
-            }
-            if (surface != null)
-              surface.release();
-            if (texture != null)
-              texture.release();
-            if (display != EGL14.EGL_NO_DISPLAY) {
-              EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
-                                   EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
-              if (eglSurface != EGL14.EGL_NO_SURFACE)
-                EGL14.eglDestroySurface(display, eglSurface);
-              if (context != EGL14.EGL_NO_CONTEXT)
-                EGL14.eglDestroyContext(display, context);
-              // The default display may also belong to the app's own GL
-              // contexts. Destroy only our context/surface, never its display.
-              EGL14.eglReleaseThread();
-            }
-          } catch (RuntimeException error) {
-            if (closeFailure == null) closeFailure = error;
-            else closeFailure.addSuppressed(error);
-          } finally {
-            thread.quitSafely();
-          }
-          if (closeFailure == null) notifyReleased();
-        })) closeFailure = new IllegalStateException("video teardown worker unavailable");
+            // Keep the worker available to retry releases that threw. Successful
+            // steps are not repeated, and lease/pool callbacks remain pending.
+          } finally { scheduled.done.countDown(); }
+        })) {
+          scheduled.failure = new IllegalStateException("video teardown worker unavailable");
+          scheduled.done.countDown();
+        }
       }
+      attempt = closeAttempt;
     }
-    // Scene admission may reuse this decoder slot immediately after close.
-    // Wait for the private worker to release MediaPlayer/SurfaceTexture first.
-    if (Thread.currentThread() != thread) {
-      try {
-        thread.join(2000);
-      } catch (InterruptedException error) {
-        Thread.currentThread().interrupt();
-        throw new IllegalStateException(
-            "interrupted while closing video decoder", error);
-      }
-      if (thread.isAlive())
+    try {
+      if (!attempt.done.await(2, java.util.concurrent.TimeUnit.SECONDS))
         throw new IllegalStateException("video decoder teardown timed out");
+    } catch (InterruptedException error) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("interrupted while closing video decoder", error);
     }
-    if (closeFailure != null)
-      throw new IllegalStateException("video decoder teardown failed", closeFailure);
+    if (attempt.failure != null)
+      throw new IllegalStateException("video decoder teardown failed", attempt.failure);
   }
 }
