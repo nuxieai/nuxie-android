@@ -119,10 +119,14 @@ class ConfiguredImportSmokeTest {
     @Test
     fun preferredFrenchTrackFollowsActualVideoPlayback() = verifyDecodedVideo(frenchCaptions = true)
 
-    private fun verifyDecodedVideo(frenchCaptions: Boolean) {
+    @Test
+    fun video720pDeliveryMeasurements() = verifyDecodedVideo(frenchCaptions = false, measure720p = true)
+
+    private fun verifyDecodedVideo(frenchCaptions: Boolean, measure720p: Boolean = false) {
+        val preparationStarted = System.nanoTime()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val local = java.io.File.createTempFile("video-decoder-", ".mp4", instrumentation.targetContext.cacheDir)
-        instrumentation.context.assets.open(if (frenchCaptions) "video/multilingual.mp4" else "video/captions.mp4").use { input ->
+        instrumentation.context.assets.open(if (measure720p) "video/captions-720p.mp4" else if (frenchCaptions) "video/multilingual.mp4" else "video/captions.mp4").use { input ->
             local.outputStream().use { input.copyTo(it) }
         }
         val bytes = instrumentation.context.assets.open("video/greeting.nux").use { it.readBytes() }
@@ -142,7 +146,7 @@ class ConfiguredImportSmokeTest {
                         val targets = ai.nuxie.sdk.experiences.JourneyRenderSchema.videoElements(
                             kotlinx.serialization.json.JsonObject(inventory + ("renderer" to kotlinx.serialization.json.JsonPrimitive("nux"))))
                         var slots = 1
-                        val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(slots, slots, 0, 100_000, 0) }
+                        val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(slots, slots, 0, if (measure720p) 1280L * 720 * 31 else 100_000, 0) }
                         val tracks = mutableListOf(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(2, "eng"))
                         if (frenchCaptions) tracks.add(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(3, "fra"))
                         val playback = ExperienceVideoPlayback(instrumentation.targetContext, player,
@@ -151,12 +155,18 @@ class ConfiguredImportSmokeTest {
                             decoderPool = pool, preferredCaptionLanguages = if (frenchCaptions) listOf("fr-CA", "en") else listOf("en"))
                         try {
                             playback.setVisible(true)
+                            val measuringStarted = System.nanoTime()
+                            var firstDelivered: Long? = null
+                            val tickMilliseconds = mutableListOf<Double>()
                             val deadline = android.os.SystemClock.elapsedRealtime() + 15_000
                             val seenCaptions = mutableSetOf<String>()
                             var suspended = false
                             val colors = mutableListOf<Boolean>()
                             while (android.os.SystemClock.elapsedRealtime() < deadline && colors.size < 4) {
+                                val cycleStarted = System.nanoTime()
                                 playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                                tickMilliseconds += (System.nanoTime() - cycleStarted) / 1_000_000.0
+                                if (firstDelivered == null && playback.deliveredFrames > 0) firstDelivered = System.nanoTime()
                                 seenCaptions += checkNotNull(playback.captionSnapshot()[initial.componentId]).text
                                 player.step(0.0)
                                 val composed = renderer.renderToCpuFrame(player, 0, false)
@@ -165,7 +175,7 @@ class ConfiguredImportSmokeTest {
                                 val blue = composed.rgba[offset + 2].toInt() and 255
                                 if (red > 180 && blue < 70 && colors.lastOrNull() != true) colors.add(true)
                                 if (blue > 180 && red < 70 && colors.lastOrNull() != false) colors.add(false)
-                                if (!suspended && colors == listOf(true)) {
+                                if (!measure720p && !suspended && colors == listOf(true)) {
                                     playback.setVisible(false)
                                     assertTrue(playback.captionSnapshot().isEmpty())
                                     playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
@@ -175,7 +185,23 @@ class ConfiguredImportSmokeTest {
                                     playback.setVisible(true)
                                     suspended = true
                                 }
-                                Thread.sleep(16)
+                                if (measure720p) java.util.concurrent.locks.LockSupport.parkNanos(
+                                    maxOf(0L, 16_666_667L - (System.nanoTime() - cycleStarted)))
+                                else Thread.sleep(16)
+                            }
+                            if (measure720p) {
+                                val elapsed = (System.nanoTime() - measuringStarted) / 1_000_000_000.0
+                                val ordered = tickMilliseconds.sorted()
+                                val metrics = org.json.JSONObject()
+                                    .put("width", 1280).put("height", 720).put("players", 1)
+                                    .put("elapsedSeconds", elapsed).put("deliveredFrames", playback.deliveredFrames)
+                                    .put("aggregateDeliveredFps", playback.deliveredFrames / elapsed)
+                                    .put("firstFrameFromPreparationMs", ((firstDelivered ?: System.nanoTime()) - preparationStarted) / 1_000_000.0)
+                                    .put("tickP95Ms", ordered[(ordered.size * 0.95).toInt().coerceAtMost(ordered.lastIndex)])
+                                    .put("deliveredRGBABytes", playback.deliveredRGBABytes)
+                                    .put("activeDecoders", playback.activeDecoderCount)
+                                    .put("includesForcedVulkanReadback", true).put("targetTickPeriodMs", 1000.0 / 60)
+                                println("NUXIE_VIDEO_MEASUREMENT $metrics")
                             }
                             assertTrue(seenCaptions.containsAll(if (frenchCaptions) listOf("Bonjour 👋", "Bienvenue") else listOf("Hello 👋", "Welcome")))
                             if (frenchCaptions) assertFalse(seenCaptions.contains("Hello 👋"))
@@ -201,7 +227,7 @@ class ConfiguredImportSmokeTest {
                             playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
                             assertTrue(player.videos().single().wantsPlay)
                             assertTrue(player.videos().single().state != 2)
-                        } finally { playback.close() }
+                        } finally { playback.close(); assertEquals(0, playback.activeDecoderCount) }
                     } finally { player.close() }
                 } finally { artboard.close() }
             } finally { file.close() }
