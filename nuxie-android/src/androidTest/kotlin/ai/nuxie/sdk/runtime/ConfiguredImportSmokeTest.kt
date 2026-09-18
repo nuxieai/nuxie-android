@@ -136,10 +136,11 @@ class ConfiguredImportSmokeTest {
                         val targets = ai.nuxie.sdk.experiences.JourneyRenderSchema.videoElements(
                             kotlinx.serialization.json.JsonObject(inventory + ("renderer" to kotlinx.serialization.json.JsonPrimitive("nux"))))
                         var slots = 1
+                        val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(slots, slots, 0, 100_000, 0) }
                         val playback = ExperienceVideoPlayback(instrumentation.targetContext, player,
                             listOf(ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding(0, initial.assetId, initial.sourceKey, local, true,
                                 listOf(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(2, "en")))), targets,
-                            decoderBudget = { NuxieVideoDecoderBudget(slots, slots, 0, 100_000, 0) })
+                            decoderPool = pool)
                         try {
                             playback.setVisible(true)
                             val deadline = android.os.SystemClock.elapsedRealtime() + 15_000

@@ -4,6 +4,58 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AndroidVideoResourceDeviceTest {
+    @Test fun sharedPoolWaitsForDisposalBeforePriorityHandoff() {
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(1, 1, 0, 100, 0) }
+        val background = java.util.UUID.randomUUID()
+        val foreground = java.util.UUID.randomUUID()
+        val low = listOf(NuxieVideoDecoderRequest(5, 100, 0, true))
+        val high = listOf(NuxieVideoDecoderRequest(5, 100, 10, true))
+        assertEquals(setOf(5L), pool.update(background, low))
+        assertEquals(emptySet<Long>(), pool.update(foreground, high))
+        assertEquals(emptySet<Long>(), pool.update(background, low))
+        assertEquals(emptySet<Long>(), pool.update(foreground, high))
+        pool.release(background, 5)
+        assertEquals(setOf(5L), pool.update(foreground, high))
+        pool.remove(foreground)
+        assertEquals(setOf(5L), pool.update(background, low))
+    }
+
+    @Test fun sharedPoolRetainsRemovedAndResizedClaimsUntilDisposal() {
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(3, 3, 0, 100, 0) }
+        val first = java.util.UUID.randomUUID()
+        val second = java.util.UUID.randomUUID()
+        assertEquals(setOf(1L), pool.update(first, listOf(NuxieVideoDecoderRequest(1, 80, 0, true))))
+        assertEquals(emptySet<Long>(), pool.update(first, emptyList()))
+        val next = listOf(NuxieVideoDecoderRequest(2, 30, 10, true))
+        assertEquals(emptySet<Long>(), pool.update(second, next))
+        pool.release(first, 1)
+        assertEquals(setOf(2L), pool.update(second, next))
+        val resized = listOf(NuxieVideoDecoderRequest(2, 60, 10, true))
+        assertEquals(emptySet<Long>(), pool.update(second, resized))
+        pool.release(second, 2)
+        assertEquals(setOf(2L), pool.update(second, resized))
+        assertEquals(setOf(1L), pool.update(first, listOf(NuxieVideoDecoderRequest(1, 40, 0, true))))
+    }
+
+    @Test fun concurrentOwnerLanesCannotDoubleReserveCapacity() {
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(1, 1, 0, 100, 0) }
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(8)
+        val start = java.util.concurrent.CountDownLatch(1)
+        try {
+            val results = (1..8).map {
+                executor.submit<Boolean> {
+                    check(start.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                    pool.update(java.util.UUID.randomUUID(), listOf(NuxieVideoDecoderRequest(5, 100, 0, true))).isNotEmpty()
+                }
+            }
+            start.countDown()
+            assertEquals(1, results.count { it.get(5, java.util.concurrent.TimeUnit.SECONDS) })
+        } finally { executor.shutdownNow() }
+    }
+
     @Test fun readsBoundedDecodeCostFromRetainedFile() {
         val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
         val file = java.io.File.createTempFile("decode-cost-", ".mp4", instrumentation.targetContext.cacheDir)
