@@ -76,7 +76,7 @@ class JourneyReleaseArtifactAcquirerTest {
             assertEquals(setOf(sha256(rivBytes)), acquired.artifactDigests)
         }
         acquirer(true).acquire(declaration, delivery()).use { acquired ->
-            assertArrayEquals(rivBytes, acquired.rivFile.readBytes())
+            assertArrayEquals(rivBytes, acquired.sceneFile.readBytes())
             assertEquals(1, acquired.artifactsByKey.size)
         }
         assertEquals(1, requests)

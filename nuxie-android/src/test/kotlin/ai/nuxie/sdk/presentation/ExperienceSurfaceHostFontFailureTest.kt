@@ -108,7 +108,7 @@ class ExperienceSurfaceHostFontFailureTest {
             ExpectedFileAsset(0, FileAssetKind.FONT, 10, "native", "ttf", false, false, 3),
         )
         override fun newFile(rendererHandle: Long, bytes: ByteArray, expectedAssets: List<ExpectedFileAsset>,
-            externalAssets: Map<Int, ByteArray>, imageDecoder: NuxImageDecoder): Long {
+            externalAssets: Map<Int, ByteArray>, imageDecoder: NuxImageDecoder, videoEnabled: Boolean): Long {
             imports++
             assertTrue(externalAssets.getValue(0).isNotEmpty())
             failure?.let { throw it }
