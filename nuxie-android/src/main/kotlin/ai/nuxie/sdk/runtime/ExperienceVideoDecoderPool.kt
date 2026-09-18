@@ -4,6 +4,17 @@ import java.util.UUID
 
 /** Shared across runtime lanes. Revocation retains capacity until decoder disposal is acknowledged. */
 internal class ExperienceVideoDecoderPool(private val budget: () -> NuxieVideoDecoderBudget) {
+    companion object {
+        // Shared across overlapping screens and Experiences. SDK workload
+        // ceilings do not assert the platform's hardware decoder capacity.
+        // Include upward rounding of the shortest sample interval.
+        val productionBudget = NuxieVideoDecoderBudget(
+            maxPlayers = 4, managedPlayers = 4, hardwarePlayers = 0,
+            managedPixelsPerSecond = 3840L * 2160L * 61L, softwarePixelsPerSecond = 0,
+        )
+        val shared = ExperienceVideoDecoderPool { productionBudget }
+    }
+
     private data class Key(val owner: UUID, val componentId: Long)
     private data class Entry(val id: Long, val request: NuxieVideoDecoderRequest)
     private var nextId = 0L
