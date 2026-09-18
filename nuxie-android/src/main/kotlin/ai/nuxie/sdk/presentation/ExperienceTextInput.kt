@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
+import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -22,7 +23,23 @@ internal data class ExperienceTextInput(
     val maxLength: Int?,
     val geometryPaths: Map<String, String>,
     val style: Style,
+    val responseCapture: ResponseCapture = ResponseCapture.TEXT,
 ) {
+    enum class ResponseCapture { TEXT, BINDING }
+
+    /** Native bindings own conversion; a missing source is not a raw-text fallback. */
+    fun captureResponse(text: String, snapshot: NuxieViewModelSnapshot?): JsonPrimitive {
+        if (responseCapture == ResponseCapture.TEXT) return JsonPrimitive(text)
+        check(!secure) { "Converted response capture is unavailable for secure input $id" }
+        val field = checkNotNull(responseField) { "Converted input $id has no response field" }
+        return when (val value = snapshot?.resolveScalar(listOf("response", "values", field))) {
+            is NuxieViewModelScalarValue.StringValue -> JsonPrimitive(value.value)
+            is NuxieViewModelScalarValue.NumberValue -> JsonPrimitive(value.value)
+            is NuxieViewModelScalarValue.BooleanValue -> JsonPrimitive(value.value)
+            else -> error("Converted input $id has no valid evaluated response source")
+        }
+    }
+
     data class Style(
         val fontFamily: String,
         val fontWeight: String,
@@ -70,6 +87,11 @@ internal data class ExperienceTextInput(
                     runName = input.text("riveTextRunName"),
                     value = input.text("value"),
                     responseField = input.optionalText("responseFieldKey"),
+                    responseCapture = when (input.optionalText("responseCapture")) {
+                        null, "text" -> ResponseCapture.TEXT
+                        "binding" -> ResponseCapture.BINDING
+                        else -> error("Unsupported text input response capture")
+                    },
                     placeholder = input.optionalText("placeholder"),
                     keyboardType = input.optionalText("keyboardType"),
                     secure = input.primitive("secureTextEntry").boolean,

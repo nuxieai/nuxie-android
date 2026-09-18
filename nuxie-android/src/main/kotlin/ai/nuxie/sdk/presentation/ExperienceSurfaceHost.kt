@@ -83,7 +83,7 @@ internal class ExperienceSurfaceHost(
         /** UI-thread callback after native fields and virtual controls share a committed tree. */
         fun onSemanticTreePublished() {}
         /** Runtime-lane callback ordered with writes and renderer publications. */
-        fun onTextCommitted(inputId: String, text: String) {}
+        fun onTextCommitted(inputId: String, text: String, snapshot: NuxieViewModelSnapshot?) {}
     }
 
     /** Owned runtime wrappers; created, touched, and closed only on the runtime lane. */
@@ -245,6 +245,12 @@ internal class ExperienceSurfaceHost(
     // SUBMITTED retains the exact frame until native completion. Polling must
     // neither step the player nor publish effects from its unfinished frame.
     private var pendingPresentation = false
+    private val pendingTextWrites = ArrayDeque<() -> Unit>()
+
+    private fun drainTextWrites() {
+        if (pendingPresentation) return
+        while (pendingTextWrites.isNotEmpty()) pendingTextWrites.removeFirst().invoke()
+    }
     private data class SubmittedTextSnapshot(
         val snapshot: NuxieViewModelSnapshot,
         val geometry: NuxieTextGeometryCapture,
@@ -513,16 +519,40 @@ internal class ExperienceSurfaceHost(
             complete(Result.failure(IllegalStateException("Experience surface is released")))
             return
         }
-        val accepted = lane.enqueue {
+        val write = {
             val result = runCatching {
                 check(!released.get()) { "Experience surface is released" }
                 val input = checkNotNull(textInputs[inputId]) { "Text input is not declared for this screen" }
                 val limited = ExperienceTextInputLimit.apply(text, input.maxLength)
                 checkNotNull(artboard) { "Experience artboard is unavailable" }
                     .setTextRun(input.runName, if (input.secure) "" else limited)
-                if (commit) listener?.onTextCommitted(inputId, limited)
+                if (commit) {
+                    val snapshot = if (input.responseCapture == ExperienceTextInput.ResponseCapture.BINDING) {
+                        check(!input.secure) { "Converted secure input is unsupported" }
+                        val correlationId = nextCorrelationId
+                        nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
+                        val outcome = checkNotNull(player).stepTyped(
+                            elapsedSeconds = 0.0,
+                            correlationId = correlationId,
+                            textRunNames = textInputs.values.map { it.runName }.distinct(),
+                        )
+                        val captured = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
+                        captured?.let { retainedViewModel?.set(it) }
+                        if (outcome.hasPublishableEffects()) {
+                            unpublishedSteps.addLast(PublishedStep(correlationId, outcome, captured))
+                        }
+                        publishSteps()
+                        captured
+                    } else null
+                    listener?.onTextCommitted(inputId, limited, snapshot)
+                }
             }
             complete(result)
+        }
+        val accepted = lane.enqueue {
+            // A submitted render owns its revision until completion; text edits wait on the same lane.
+            pendingTextWrites.addLast(write)
+            drainTextWrites()
         }
         if (!accepted) complete(Result.failure(IllegalStateException("Runtime lane is shut down")))
     }
@@ -727,6 +757,7 @@ internal class ExperienceSurfaceHost(
                 // a type-level guard, never a reachable behavior change.
                 val window = window ?: return@enqueue
                 if (!pendingPresentation) {
+                    drainTextWrites()
                     // A submitted frame owns its model revision through completion and semantic capture.
                     // Coalesce newer environment values and apply them before advancing the next frame.
                     if (runtimeValuesPending) {
@@ -839,6 +870,7 @@ internal class ExperienceSurfaceHost(
                         firstFramePresented = true
                     }
                     publishSteps()
+                    drainTextWrites()
                     drainSemanticAction()
                     drainVideoCommands()
                 }
@@ -884,6 +916,8 @@ internal class ExperienceSurfaceHost(
         pointerInput.release()
         updateFrameScheduling()
         lane.enqueue {
+            pendingPresentation = false
+            drainTextWrites() // Complete queued edits as failed before closing native handles.
             applyRuntimeValues(finalValues)
             // Capture on the original lane after input/exit writes and before releasing handles.
             var firstFailure = retainedViewModel?.let { retained -> runCatching {

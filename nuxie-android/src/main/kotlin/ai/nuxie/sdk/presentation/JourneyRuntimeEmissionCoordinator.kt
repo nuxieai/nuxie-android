@@ -131,6 +131,7 @@ internal class JourneyRuntimeEmissionCoordinator(
         text: String,
         state: ExperienceTextInputState = textCommitState,
         lifetime: RendererEffectLifetime? = null,
+        snapshot: NuxieViewModelSnapshot? = null,
     ): Boolean {
         if (!awaitReveal(lifetime)) return true
         return gate.withLock {
@@ -142,7 +143,7 @@ internal class JourneyRuntimeEmissionCoordinator(
             if (previous == text) return@withLock true
             val field = input.responseField
             val accepted = field == null || publishDrafts(
-                listOf(Draft.ResponseSet(field, JsonPrimitive(text))),
+                listOf(Draft.ResponseSet(field, input.captureResponse(text, snapshot))),
                 JourneyScreenEmissionSource(screenId, "text_input:$inputId", inputId, null),
             )
             if (accepted) state.recordCommit(inputId, text)

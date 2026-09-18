@@ -626,7 +626,7 @@ class ExperiencePresentationServiceTest {
         val received = mutableListOf<String>()
         PresentationRegistry.register("edit-owner",
             PreparedPresentation(File("unused.riv"), null, 0, PresentationShell.FullScreen),
-            {}, {}, {}, {}, onTextCommitted = { _, text, _ -> received += text })
+            {}, {}, {}, {}, onTextCommitted = { _, text, _, _ -> received += text })
         val old = AttachedHost()
         val current = AttachedHost()
         assertTrue(PresentationRegistry.attach("edit-owner", old))
