@@ -210,13 +210,7 @@ internal class ExperienceVideoPlayback(
         for (video in videos) {
             val entry = checkNotNull(entries[video.componentId])
             if (entry.failed) continue
-            for (action in player.videoStep(video.componentId, 0, video.generation)) {
-                if (action.kind == 3) entry.rate = action.value
-                if (action.kind == 5) {
-                    retire(video.componentId, entry)
-                    entry.failed = true
-                } else entry.decoder?.action(action.kind, action.value, action.generation)
-            }
+            dispatchActions(video.componentId, entry, player.videoStep(video.componentId, 0, video.generation))
         }
         val requests = videos.map { video ->
             val entry = checkNotNull(entries[video.componentId])
@@ -299,23 +293,17 @@ internal class ExperienceVideoPlayback(
                 else -> 0
             }
             if (decoder != null) {
+                val interruptionEnded = decoder.takeInterruptionEnded()
                 val interrupted = decoder.interrupted()
-                if (entry.interrupted != interrupted) {
-                    entry.interrupted = interrupted
-                    player.videoCommand(video.componentId, 6, if (interrupted) 1.0 else 0.0, 4)
-                }
                 if (decoder.takePermanentLoss()) player.videoCommand(video.componentId, 1)
+                entry.interrupted = player.reconcileVideoInterruption(
+                    video, entry.interrupted, interrupted, interruptionEnded,
+                ) { actions -> dispatchActions(video.componentId, entry, actions) }
             }
             val blocked = decoder?.takePlayBlocked() == true
             val actions = player.videoStep(video.componentId, if (blocked && observation != 6) 5 else observation,
                 video.generation, if (observation == 1) checkNotNull(decoder).duration() else 0.0)
-            for (action in actions) {
-                if (action.kind == 3) entry.rate = action.value
-                if (action.kind == 5) {
-                    retire(video.componentId, entry)
-                    entry.failed = true
-                } else decoder?.action(action.kind, action.value, action.generation)
-            }
+            dispatchActions(video.componentId, entry, actions)
             if (entry.failed) {
                 retire(video.componentId, entry)
                 continue
@@ -330,6 +318,16 @@ internal class ExperienceVideoPlayback(
                 deliveredFrames++
                 deliveredRGBABytes += it.rgba.size
             }
+        }
+    }
+
+    private fun dispatchActions(component: Long, entry: Entry, actions: List<NuxieVideoAction>) {
+        for (action in actions) {
+            if (action.kind == 3) entry.rate = action.value
+            if (action.kind == 5) {
+                retire(component, entry)
+                entry.failed = true
+            } else entry.decoder?.action(action.kind, action.value, action.generation)
         }
     }
 
@@ -394,4 +392,26 @@ internal class ExperienceVideoPlayback(
         captions.clear()
         decodeCosts.clear()
     }
+}
+
+/** Preserve a completed interruption even when both focus callbacks occur between scene updates. */
+internal fun NuxieRuntimePlayer.reconcileVideoInterruption(
+    video: NuxieVideoOccurrence,
+    wasInterrupted: Boolean,
+    interrupted: Boolean,
+    interruptionEnded: Boolean,
+    dispatch: (List<NuxieVideoAction>) -> Unit,
+): Boolean {
+    var applied = wasInterrupted
+    if (interruptionEnded && !applied) {
+        videoCommand(video.componentId, 6, 1.0, 4)
+        // Commit suspension separately: one batch containing both edges would cancel them out.
+        // Draining also honors any authored pause already queued before focus returned.
+        dispatch(videoStep(video.componentId, 0, video.generation))
+        applied = true
+    }
+    if (applied != interrupted) {
+        videoCommand(video.componentId, 6, if (interrupted) 1.0 else 0.0, 4)
+    }
+    return interrupted
 }

@@ -54,6 +54,47 @@ class ConfiguredImportSmokeTest {
         }
     }
 
+    @Test
+    fun focusLossAndGainBetweenUpdatesResumeOnlyRequestedPlayback() {
+        assertTrue("Engine library must load on the test device", NuxieRuntime.shared.isAvailable)
+        val bytes = InstrumentationRegistry.getInstrumentation().context.assets
+            .open("video/greeting.nux").use { it.readBytes() }
+        val runtime = NuxieRuntime.shared
+        val catalog = checkNotNull(runtime.inspectFileAssets(bytes))
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(320, 640))
+        try {
+            val file = checkNotNull(runtime.importFile(renderer, bytes, catalog, videoEnabled = true))
+            try {
+                for (authoredPause in listOf(false, true)) {
+                    val artboard = checkNotNull(file.newArtboard("Video Frame"))
+                    try {
+                        val player = checkNotNull(artboard.newPlayer())
+                        try {
+                            val video = player.videos().single()
+                            assertTrue(player.videoStep(video.componentId, 1, video.generation, 2.022)
+                                .any { it.kind == 0 })
+                            player.videoStep(video.componentId, 2, video.generation)
+                            if (authoredPause) player.videoCommand(video.componentId, 1)
+                            val actions = mutableListOf<NuxieVideoAction>()
+                            // MediaPlayer has paused on loss; gain arrived before the next host poll.
+                            assertFalse(player.reconcileVideoInterruption(video,
+                                wasInterrupted = false, interrupted = false, interruptionEnded = true,
+                            ) { actions.addAll(it) })
+                            actions.addAll(player.videoStep(video.componentId, 0, video.generation))
+                            val playback = actions.filter { it.kind == 0 || it.kind == 1 }.map { it.kind }
+                            assertEquals(if (authoredPause) listOf(1) else listOf(1, 0), playback)
+                            // A consumed notification must not cause another pause/resume pair.
+                            assertFalse(player.reconcileVideoInterruption(video,
+                                wasInterrupted = false, interrupted = false, interruptionEnded = false,
+                            ) { throw AssertionError("Consumed interruption replayed") })
+                            assertTrue(player.videoStep(video.componentId, 0, video.generation).isEmpty())
+                        } finally { player.close() }
+                    } finally { artboard.close() }
+                }
+            } finally { file.close() }
+        } finally { renderer.close() }
+    }
+
     private data class VideoMeasurement(val file: String, val width: Int, val height: Int, val cadence: Int) {
         companion object {
             val HD = VideoMeasurement("captions-720p.mp4", 1280, 720, 31)
