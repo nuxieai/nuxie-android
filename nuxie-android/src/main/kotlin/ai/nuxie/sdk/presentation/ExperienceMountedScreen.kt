@@ -15,6 +15,7 @@ internal class ExperienceMountedScreen(
     private val prepared: PreparedPresentation,
     listener: ExperienceSurfaceHost.Listener,
     private val onFailure: (Throwable) -> Unit,
+    videoDecoderPool: ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool? = null,
 ) {
     // Validate synchronous inputs before allocating a native lane or observers.
     private val rivBytes = prepared.sceneFile.readBytes()
@@ -45,6 +46,7 @@ internal class ExperienceMountedScreen(
     val surface = ExperienceSurfaceHost(
         context = activity,
         lane = lane,
+        videoDecoderPool = videoDecoderPool,
         clearColor = prepared.clearColor,
         artboardSize = prepared.artboardSize,
         listener = object : ExperienceSurfaceHost.Listener by listener {

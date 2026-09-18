@@ -291,7 +291,7 @@ internal class ExperienceVideoPlayback(
     fun captionSnapshot(): Map<Long, NuxieVideoCaption> {
         if (hidden || closed) return emptyMap()
         val live = player.videos().map { it.componentId }.toSet()
-        return entries.filter { (id, entry) -> id in live && !entry.failed }.keys.associateWith(player::videoCaption)
+        return entries.filter { (id, entry) -> id in live && !entry.failed && !entry.resourceBlocked }.keys.associateWith(player::videoCaption)
     }
 
     /** Used by screen teardown: a timed-out worker retains claims and file leases until release. */
