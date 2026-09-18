@@ -9,7 +9,7 @@ import android.content.Context
 internal class ExperienceVideoPlayback(
     private val context: Context,
     private val player: NuxieRuntimePlayer,
-    bindings: List<ExperienceVideoAssetBinding>,
+    private val bindings: List<ExperienceVideoAssetBinding>,
     private val targets: List<ExperienceVideoElement> = emptyList(),
 ) : AutoCloseable {
     private class Entry(val binding: ExperienceVideoAssetBinding) {
@@ -20,14 +20,33 @@ internal class ExperienceVideoPlayback(
         var interrupted = false
         var pausedByHost = false
     }
-    private val entries = player.videos().associate { video ->
-        require(!video.embedded) { "Published video must use an acquired file" }
-        val binding = bindings.single { it.authoredId == video.assetId && it.sourceAssetKey == video.sourceKey }
-        video.componentId to Entry(binding)
+    private val entries = mutableMapOf<Long, Entry>()
+
+    private fun reconcile(videos: List<NuxieVideoOccurrence>): List<NuxieVideoOccurrence> {
+        val live = videos.map { it.componentId }.toSet()
+        require(live.size == videos.size) { "Duplicate video occurrence identity" }
+        val additions = videos.filter { it.componentId !in entries }.associate { video ->
+            require(!video.embedded) { "Published video must use an acquired file" }
+            val binding = bindings.single { it.authoredId == video.assetId && it.sourceAssetKey == video.sourceKey }
+            video.componentId to Entry(binding)
+        }
+        val removed = entries.keys.filter { it !in live }.mapNotNull(entries::remove)
+        var failure: Throwable? = null
+        for (entry in removed) {
+            try { entry.decoder?.close() } catch (error: Throwable) {
+                if (failure == null) failure = error else failure.addSuppressed(error)
+            }
+        }
+        failure?.let { throw it }
+        entries.putAll(additions)
+        for (id in additions.keys) player.videoCommand(id, 6, if (hidden) 1.0 else 0.0, 1)
+        return videos
     }
     private val captions = mutableMapOf<Pair<String, Int>, List<NuxieVideoCaptionCue>>()
     private var hidden = true
     private var closed = false
+
+    init { reconcile(player.videos()) }
 
     fun apply(action: JourneyVideoAction) {
         check(!closed)
@@ -41,6 +60,7 @@ internal class ExperienceVideoPlayback(
     fun setVisible(visible: Boolean) {
         if (closed || hidden == !visible) return
         hidden = !visible
+        reconcile(player.videos())
         for ((component, entry) in entries) {
             player.videoCommand(component, 6, if (hidden) 1.0 else 0.0, 1)
             if (hidden) {
@@ -53,8 +73,8 @@ internal class ExperienceVideoPlayback(
     /** Called only before a new scene step, never while a native frame is submitted. */
     fun advance(renderer: NuxieAndroidVulkanRenderer, monotonicSeconds: Double) {
         check(!closed)
-        for (video in player.videos()) {
-            val entry = entries[video.componentId] ?: error("Video occurrence changed outside its owning session")
+        for (video in reconcile(player.videos())) {
+            val entry = checkNotNull(entries[video.componentId])
             if (entry.failed) continue
             if (entry.decoder == null && !hidden) {
                 entry.decoder = entry.binding.file?.let { file ->
@@ -116,8 +136,11 @@ internal class ExperienceVideoPlayback(
         }
     }
 
-    fun captionSnapshot(): Map<Long, NuxieVideoCaption> =
-        if (hidden || closed) emptyMap() else entries.filterValues { !it.failed }.keys.associateWith(player::videoCaption)
+    fun captionSnapshot(): Map<Long, NuxieVideoCaption> {
+        if (hidden || closed) return emptyMap()
+        val live = player.videos().map { it.componentId }.toSet()
+        return entries.filter { (id, entry) -> id in live && !entry.failed }.keys.associateWith(player::videoCaption)
+    }
 
     override fun close() {
         if (closed) return
