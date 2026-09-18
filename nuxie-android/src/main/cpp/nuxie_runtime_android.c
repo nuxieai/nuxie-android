@@ -3331,9 +3331,13 @@ static void video_occurrence_callback(void *context, const struct NuxVideoInfo *
   /* Bound temporary JVM metadata independently from hardware decoder admission. */
   if (c->count >= 65536 || video->struct_size < sizeof(struct NuxVideoInfo) ||
       video->component_id > INT64_MAX || video->source_artboard_index > INT64_MAX ||
-      video->source_component_id > INT64_MAX || video->priority > INT32_MAX ||
+      video->source_component_id > INT64_MAX ||
       video->readiness > INT32_MAX) { c->failed = 1; return; }
   JNIEnv *env = c->env;
+  /* Kotlin retains the u32 priority bit pattern in Int and widens it unsigned
+     for allocation. A signed range check here would reject valid scenes. */
+  jint priority;
+  memcpy(&priority, &video->priority, sizeof(priority));
   jstring source = new_string_view(env, video->source_key);
   jstring mime = source == NULL ? NULL : new_string_view(env, video->content_type);
   jstring name = mime == NULL ? NULL : new_string_view(env, video->component_name);
@@ -3342,7 +3346,7 @@ static void video_occurrence_callback(void *context, const struct NuxVideoInfo *
       (jlong)video->component_id, (jlong)video->asset_id, (jlong)video->generation,
       (jint)video->state, (jboolean)(video->wants_play != 0), (jint)video->audio_policy,
       source, mime, (jboolean)(video->embedded_bytes.len != 0), name,
-      (jint)video->priority, (jint)video->readiness,
+      priority, (jint)video->readiness,
       (jlong)video->source_artboard_index, (jlong)video->source_component_id));
   if (source != NULL) (*env)->DeleteLocalRef(env, source);
   if (mime != NULL) (*env)->DeleteLocalRef(env, mime);
