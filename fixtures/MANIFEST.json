@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "8f27b14199efb209574b8b64580fac01a605b700",
+  "sourceCommit": "38428e8bb1c65605d6c982ff22b2a18d63229950",
   "files": {
     "README.md": "9104a727bef89b388554d25583a6e013531c310f1a93d8f9f81440af8fcf67df",
     "accessibility/control-state.json": "6a4e35c6c2f55575344f4a26a2bdb5f22728a41845464c3beeb93251082e97f2",
@@ -207,8 +207,9 @@
     "unicode/GraphemeBreakTest-16.0.0.txt": "ee2b9354d270ac061b29f09662cafea06341d77e704b8cc6bd72aaeeda363cb5",
     "unicode/LICENSE.txt": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96",
     "unicode/grapheme-properties-16.0.0.json": "84c942f0030116e6341c2fb3cd57a8d619b8cf82f613860766493b8b99498cf4",
-    "video/README.md": "e1973a8855609956f964fe027ef9b2db66100bbe400a8ee710f44d30a2c652fc",
+    "video/README.md": "839c33f9d25b842cf000b85c7a0ec8612a5e68d257b06830c6900d6acd167b43",
     "video/caption-selection.json": "90d556cdeb581ac2cfbd67036e8b22a3963513acfda915074b9f769c00ce16ad",
+    "video/captions-720p.mp4": "16b1362520eaf0be21545d16062606ff7782409e0ea784c2d94dae8d0135b113",
     "video/captions-fr.srt": "dc2ec7f1e69c95e9e2fa48f6a60bfa03766e2a7ce81dbcbea9d7a3fc7b3f82c4",
     "video/captions.mp4": "927dea0603713eb68586b050cb640b9379952753b0b6d60b17395b321a0f3b41",
     "video/captions.srt": "afbc920c5ebb7e09ceddd8f286afcf759e31cdbcd58d23ba8a681a83bf935a94",

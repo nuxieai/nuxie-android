@@ -106,6 +106,11 @@ internal class ExperienceVideoPlayback(
     private val captions = mutableMapOf<Pair<String, Int>, List<NuxieVideoCaptionCue>>()
     private var hidden = true
     private var closed = false
+    var deliveredFrames = 0L
+        private set
+    var deliveredRGBABytes = 0L
+        private set
+    val activeDecoderCount: Int get() = entries.values.count { it.decoder != null }
 
     init {
         require(decoderBudget == null || decoderPool == null) { "Video playback requires a single budget owner" }
@@ -277,6 +282,8 @@ internal class ExperienceVideoPlayback(
             decoder?.takeFrame()?.let {
                 player.videoPresent(renderer, video.componentId,
                     NuxieVideoFrame(it.generation, it.seconds, it.width, it.height, it.rgba))
+                deliveredFrames++
+                deliveredRGBABytes += it.rgba.size
             }
         }
     }
