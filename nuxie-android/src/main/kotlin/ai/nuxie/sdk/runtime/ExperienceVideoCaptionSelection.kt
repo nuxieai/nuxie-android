@@ -9,7 +9,14 @@ internal object ExperienceVideoCaptionSelection {
     private val isoLanguages by lazy {
         Locale.getISOLanguages().mapNotNull { language ->
             runCatching { Locale(language).isO3Language to language }.getOrNull()
-        }.toMap()
+        }.toMap() + mapOf(
+            // ISO 639-2 bibliographic codes retained by MP4 language metadata.
+            // https://www.loc.gov/standards/iso639-2/php/code_list.php
+            "alb" to "sq", "arm" to "hy", "baq" to "eu", "bur" to "my", "chi" to "zh",
+            "cze" to "cs", "dut" to "nl", "fre" to "fr", "geo" to "ka", "ger" to "de",
+            "gre" to "el", "ice" to "is", "mac" to "mk", "mao" to "mi", "may" to "ms",
+            "per" to "fa", "rum" to "ro", "slo" to "sk", "tib" to "bo", "wel" to "cy",
+        )
     }
 
     @Suppress("DEPRECATION")
