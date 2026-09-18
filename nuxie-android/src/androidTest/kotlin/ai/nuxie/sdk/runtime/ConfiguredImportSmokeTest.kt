@@ -43,6 +43,10 @@ class ConfiguredImportSmokeTest {
                         val player = checkNotNull(artboard.newPlayer())
                         try {
                             assertEquals(priority, player.videos().single().priority.toLong() and 0xffff_ffffL)
+                            player.stepTyped(elapsedSeconds = 0.0)
+                            val component = player.videos().single().componentId
+                            assertTrue(player.videoIsVisible(component, VideoViewport(0f, 0f, 320f, 640f)))
+                            assertFalse(player.videoIsVisible(component, VideoViewport(1000f, 1000f, 1100f, 1100f)))
                         } finally { player.close() }
                     } finally { artboard.close() }
                 } finally { file.close() }
@@ -206,7 +210,7 @@ class ConfiguredImportSmokeTest {
                         listOf(ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding(0, video.assetId,
                             video.sourceKey, local, true,
                             listOf(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(2, "eng")))),
-                        targets, decoderPool = pool, preferredCaptionLanguages = listOf("en")))
+                        targets, initialViewport = VideoViewport(0f, 0f, 320f, 640f), decoderPool = pool, preferredCaptionLanguages = listOf("en")))
                 }
                 playbacks.forEach { it.setVisible(true) }
                 val colors = List(2) { mutableListOf<Boolean>() }
@@ -216,9 +220,9 @@ class ConfiguredImportSmokeTest {
                 while (android.os.SystemClock.elapsedRealtime() < deadline && colors.any { it.size < 4 }) {
                     val cycle = System.nanoTime()
                     playbacks.forEachIndexed { index, playback ->
+                        players[index].step(0.0)
                         playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
                         captions[index].addAll(playback.captionSnapshot().values.map { it.text })
-                        players[index].step(0.0)
                         val frame = renderer.renderToCpuFrame(players[index], 0, false)
                         val offset = (80 * frame.width + 100) * 4
                         val red = frame.rgba[offset].toInt() and 255
@@ -291,7 +295,7 @@ class ConfiguredImportSmokeTest {
                         if (frenchCaptions) tracks.add(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(3, "fra"))
                         val playback = ExperienceVideoPlayback(instrumentation.targetContext, player,
                             listOf(ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding(0, initial.assetId, initial.sourceKey, local, true,
-                                tracks)), targets,
+                                tracks)), targets, initialViewport = VideoViewport(0f, 0f, 320f, 640f),
                             decoderPool = pool, preferredCaptionLanguages = if (frenchCaptions) listOf("fr-CA", "en") else listOf("en"))
                         try {
                             playback.setVisible(true)
@@ -303,12 +307,12 @@ class ConfiguredImportSmokeTest {
                             var suspended = false
                             val colors = mutableListOf<Boolean>()
                             while (android.os.SystemClock.elapsedRealtime() < deadline && colors.size < 4) {
+                                player.step(0.0)
                                 val cycleStarted = System.nanoTime()
                                 playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
                                 tickMilliseconds += (System.nanoTime() - cycleStarted) / 1_000_000.0
                                 if (firstDelivered == null && playback.deliveredFrames > 0) firstDelivered = System.nanoTime()
                                 seenCaptions += checkNotNull(playback.captionSnapshot()[initial.componentId]).text
-                                player.step(0.0)
                                 val composed = renderer.renderToCpuFrame(player, 0, false)
                                 val offset = (80 * composed.width + 100) * 4
                                 val red = composed.rgba[offset].toInt() and 255

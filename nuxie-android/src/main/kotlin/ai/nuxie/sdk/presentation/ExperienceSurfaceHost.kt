@@ -91,6 +91,7 @@ internal class ExperienceSurfaceHost(
     private var window: NuxieRuntimeWindow? = null
     private var player: NuxieRuntimePlayer? = null
     private var videoPlayback: ExperienceVideoPlayback? = null
+    private var videoArtboardSize: Pair<Float, Float>? = null
     private data class VideoCommand(val action: JourneyVideoAction, val generation: Long, val result: CompletableDeferred<Boolean>)
     private val videoCommands = ArrayDeque<VideoCommand>()
 
@@ -388,6 +389,11 @@ internal class ExperienceSurfaceHost(
                 val screen = (render?.get("screens") as? JsonArray)?.mapNotNull { it as? JsonObject }
                     ?.singleOrNull { (it["artboardName"] as? JsonPrimitive)?.content == artboardName }
                 val artboardId = (screen?.get("artboardId") as? JsonPrimitive)?.content
+                videoArtboardSize = if (videoBindings.isEmpty()) null else {
+                    val sceneWidth = (screen?.get("width") as? JsonPrimitive)?.content?.toFloatOrNull()
+                    val sceneHeight = (screen?.get("height") as? JsonPrimitive)?.content?.toFloatOrNull()
+                    if (sceneWidth != null && sceneHeight != null) sceneWidth to sceneHeight else null
+                }
                 videoTargets = import.videoElements
                 try {
                     runtime.importFile(
@@ -477,7 +483,7 @@ internal class ExperienceSurfaceHost(
                 if (semanticsEnabled) checkNotNull(player).enableSemantics()
                 if (videoBindings.isNotEmpty()) {
                     videoPlayback = ExperienceVideoPlayback(context.applicationContext, checkNotNull(player), videoBindings, videoTargets,
-                        decoderPool = videoDecoderPool)
+                        decoderPool = videoDecoderPool, initialViewport = currentVideoViewport(width, height))
                     videoPlayback?.setVisible(running)
                 }
             } catch (error: Exception) {
@@ -589,10 +595,16 @@ internal class ExperienceSurfaceHost(
                 )
                 return@enqueue
             }
+            videoPlayback?.setViewport(currentVideoViewport(width, height))
             attached = true
         }
         surfaceAvailable = true
         updateFrameScheduling()
+    }
+
+    private fun currentVideoViewport(surfaceWidth: Int, surfaceHeight: Int): ai.nuxie.sdk.runtime.VideoViewport {
+        val size = checkNotNull(videoArtboardSize) { "Video screen dimensions are unavailable" }
+        return ai.nuxie.sdk.runtime.VideoViewport.contain(size.first, size.second, surfaceWidth, surfaceHeight)
     }
 
     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
@@ -613,6 +625,7 @@ internal class ExperienceSurfaceHost(
                         "Experience renderer resize failed with status $status",
                     )
                 }
+                videoPlayback?.setViewport(currentVideoViewport(width, height))
                 drainVideoCommands()
             }
         }
@@ -737,14 +750,13 @@ internal class ExperienceSurfaceHost(
                         nextCorrelationId + 1uL
                     }
                     val outcome = try {
-                        videoPlayback?.advance(renderer, frameTimeNanos / 1_000_000_000.0)
                         if (!sceneInputEnabled.get()) pointerInput.reset()
                         player.stepTyped(
                             elapsedSeconds = elapsedSeconds,
                             pointers = pointerInput.takeBatch(),
                             correlationId = correlationId,
                             textRunNames = textInputs.values.map { it.runName }.distinct(),
-                        )
+                        ).also { videoPlayback?.advance(renderer, frameTimeNanos / 1_000_000_000.0) }
                     } catch (error: Throwable) {
                         reportFailure(
                             ExperiencePresentationException.Reason.HOST_FAILED,

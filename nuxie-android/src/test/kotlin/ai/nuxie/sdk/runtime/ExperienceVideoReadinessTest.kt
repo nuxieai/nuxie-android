@@ -15,6 +15,8 @@ import org.robolectric.RuntimeEnvironment
 class ExperienceVideoReadinessTest {
     private class Native : NuxieTypedRuntimeNative {
         var videos = listOf(video(1))
+        var visible = true
+        override fun videoIsVisible(player: Long, component: Long, viewport: VideoViewport) = visible
         val elapsed = mutableListOf<Pair<Long, Double>>()
         val commands = mutableListOf<Pair<Long, Int>>()
         var decision: (Long, Double) -> Int = { _, _ -> 0 }
@@ -36,6 +38,7 @@ class ExperienceVideoReadinessTest {
         RuntimeEnvironment.getApplication(), NuxieRuntimePlayer(1, native),
         listOf(ExperienceVideoAssetBinding(0, 0, "asset:clip", null, false)),
         listOf(ExperienceVideoElement(0, "screen", "clip", "clip", 5, 2.0, true)), clock,
+        initialViewport = VideoViewport(0f, 0f, 320f, 640f),
     )
 
     @Test fun suspensionDoesNotConsumeWaitAndFallbackIsLatched() {
@@ -98,6 +101,32 @@ class ExperienceVideoReadinessTest {
         assertTrue(host.isReadyForPresentation())
         assertTrue(native.elapsed.isEmpty())
         assertTrue(native.commands.none { it.second == 8 })
+        host.close()
+    }
+
+    @Test fun offscreenVideoDoesNotGateAndReentryStartsItsOwnWait() {
+        val native = Native()
+        var now = 0L
+        native.visible = false
+        val host = host(native) { now }
+        host.setVisible(true)
+        assertTrue(host.isReadyForPresentation())
+        now = 100_000_000_000
+        assertTrue(host.isReadyForPresentation())
+        assertTrue(native.elapsed.isEmpty())
+        native.visible = true
+        assertTrue(host.isReadyForPresentation())
+        assertEquals(1L to 0.0, native.elapsed.last())
+        now += 500_000_000
+        assertTrue(host.isReadyForPresentation())
+        assertEquals(1L to 0.5, native.elapsed.last())
+        native.visible = false
+        host.setViewport(VideoViewport(0f, 0f, 0f, 0f))
+        now += 100_000_000_000
+        assertTrue(host.isReadyForPresentation())
+        native.visible = true
+        assertTrue(host.isReadyForPresentation())
+        assertEquals(1L to 0.5, native.elapsed.last())
         host.close()
     }
 

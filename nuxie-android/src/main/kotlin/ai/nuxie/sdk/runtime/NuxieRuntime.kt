@@ -524,6 +524,11 @@ internal class NuxieRuntimePlayer internal constructor(
         if (status != NUX_STATUS_OK) throw NuxieRuntimeCallException("video frame", status)
     }
 
+    internal fun videoIsVisible(component: Long, viewport: VideoViewport): Boolean {
+        require(component >= 0)
+        return native.videoIsVisible(requireHandle(), component, viewport)
+    }
+
     fun videos(): List<NuxieVideoOccurrence> = native.videoOccurrences(requireHandle())
 
     fun videoAllocateDecoders(requests: List<NuxieVideoDecoderRequest>, budget: NuxieVideoDecoderBudget): List<NuxieVideoAllocation> {

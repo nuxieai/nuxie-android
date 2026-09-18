@@ -365,6 +365,7 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
 
     fun videoOccurrences(player: Long): List<NuxieVideoOccurrence> = error("videoOccurrences is not implemented")
     fun videoAllocateDecoders(requests: List<NuxieVideoDecoderRequest>, budget: NuxieVideoDecoderBudget): List<NuxieVideoAllocation> = error("videoAllocateDecoders is not implemented")
+    fun videoIsVisible(player: Long, component: Long, viewport: VideoViewport): Boolean = error("videoIsVisible is not implemented")
     fun videoReclaimDecoder(player: Long, component: Long, blocked: Boolean): Long = error("videoReclaimDecoder is not implemented")
     fun videoReadiness(player: Long, component: Long, elapsed: Double, timeout: Double, optional: Boolean): Int = error("videoReadiness is not implemented")
     fun videoCommand(player: Long, component: Long, kind: Int, value: Double, reason: Int): Int = error("videoCommand is not implemented")
@@ -564,6 +565,14 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         if (status[0] != NUX_STATUS_OK) throw NuxieRuntimeCallException("video allocation", status[0])
         check(allocations != null && allocations.size == requests.size) { "Invalid video allocation result" }
         return allocations.map { value -> NuxieVideoAllocation.entries.getOrNull(value) ?: error("Invalid video allocation") }
+    }
+
+    override fun videoIsVisible(player: Long, component: Long, viewport: VideoViewport): Boolean {
+        val result = NuxieRuntimeBridge.nativeVideoIsVisible(player, component,
+            viewport.minX, viewport.minY, viewport.maxX, viewport.maxY)
+        if (result < 0) throw NuxieRuntimeCallException("video visibility", -result)
+        check(result in 0..1) { "Invalid video visibility result" }
+        return result == 1
     }
 
     override fun videoReclaimDecoder(player: Long, component: Long, blocked: Boolean): Long {

@@ -254,6 +254,7 @@ internal object NuxieRuntimeBridge {
     external fun nativeVideoOccurrences(player: Long, statusOut: IntArray): Array<NuxieVideoOccurrence>?
     external fun nativeVideoAllocateDecoders(requests: LongArray, budget: LongArray, status: IntArray): IntArray?
     external fun nativeVideoReclaimDecoder(player: Long, component: Long, blocked: Boolean, status: IntArray): Long
+    external fun nativeVideoIsVisible(player: Long, component: Long, minX: Float, minY: Float, maxX: Float, maxY: Float): Int
     external fun nativeVideoReadiness(player: Long, component: Long, elapsed: Double, timeout: Double, optional: Boolean): Int
     external fun nativeVideoCommand(player: Long, componentId: Long, kind: Int, value: Double, reason: Int): Int
     external fun nativeVideoStep(player: Long, componentId: Long, observation: Int, generation: Long,
