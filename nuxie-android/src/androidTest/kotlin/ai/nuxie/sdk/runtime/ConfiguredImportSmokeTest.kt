@@ -122,6 +122,95 @@ class ConfiguredImportSmokeTest {
     @Test
     fun video720pDeliveryMeasurements() = verifyDecodedVideo(frenchCaptions = false, measure720p = true)
 
+    @Test
+    fun concurrent720pOwnersShareDecoderCapacity() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val local = java.io.File.createTempFile("concurrent-video-", ".mp4", instrumentation.targetContext.cacheDir)
+        val artboards = mutableListOf<NuxieRuntimeArtboard>()
+        val players = mutableListOf<NuxieRuntimePlayer>()
+        val playbacks = mutableListOf<ExperienceVideoPlayback>()
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val renderer = checkNotNull(NuxieRuntime.shared.newAndroidVulkanRenderer(320, 640))
+        try {
+            instrumentation.context.assets.open("video/captions-720p.mp4").use { input ->
+                local.outputStream().use { input.copyTo(it) }
+            }
+            val bytes = instrumentation.context.assets.open("video/greeting.nux").use { it.readBytes() }
+            val file = checkNotNull(NuxieRuntime.shared.importFile(renderer, bytes,
+                checkNotNull(NuxieRuntime.shared.inspectFileAssets(bytes)), videoEnabled = true))
+            try {
+                val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(2, 2, 0, 2L * 1280 * 720 * 31, 0) }
+                val inventory = kotlinx.serialization.json.Json.parseToJsonElement(
+                    instrumentation.context.assets.open("video/inventory.json").bufferedReader().use { it.readText() }) as kotlinx.serialization.json.JsonObject
+                val targets = ai.nuxie.sdk.experiences.JourneyRenderSchema.videoElements(
+                    kotlinx.serialization.json.JsonObject(inventory + ("renderer" to kotlinx.serialization.json.JsonPrimitive("nux"))))
+                repeat(2) { index ->
+                    val artboard = checkNotNull(file.newArtboard("Video Frame")).also { artboards.add(it) }
+                    val player = checkNotNull(artboard.newPlayer()).also { players.add(it) }
+                    val video = player.videos().single()
+                    // One audible greeting plus one motion background. Two
+                    // exclusive audio owners intentionally compete for focus.
+                    if (index == 1) player.videoCommand(video.componentId, 5, 1.0)
+                    playbacks.add(ExperienceVideoPlayback(instrumentation.targetContext, player,
+                        listOf(ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding(0, video.assetId,
+                            video.sourceKey, local, true,
+                            listOf(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(2, "eng")))),
+                        targets, decoderPool = pool, preferredCaptionLanguages = listOf("en")))
+                }
+                playbacks.forEach { it.setVisible(true) }
+                val colors = List(2) { mutableListOf<Boolean>() }
+                val captions = List(2) { mutableSetOf<String>() }
+                val started = System.nanoTime()
+                val deadline = android.os.SystemClock.elapsedRealtime() + 15_000
+                while (android.os.SystemClock.elapsedRealtime() < deadline && colors.any { it.size < 4 }) {
+                    val cycle = System.nanoTime()
+                    playbacks.forEachIndexed { index, playback ->
+                        playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                        captions[index].addAll(playback.captionSnapshot().values.map { it.text })
+                        players[index].step(0.0)
+                        val frame = renderer.renderToCpuFrame(players[index], 0, false)
+                        val offset = (80 * frame.width + 100) * 4
+                        val red = frame.rgba[offset].toInt() and 255
+                        val blue = frame.rgba[offset + 2].toInt() and 255
+                        if (red > 180 && blue < 70 && colors[index].lastOrNull() != true) colors[index].add(true)
+                        if (blue > 180 && red < 70 && colors[index].lastOrNull() != false) colors[index].add(false)
+                    }
+                    java.util.concurrent.locks.LockSupport.parkNanos(maxOf(0L, 16_666_667L - (System.nanoTime() - cycle)))
+                }
+                val elapsed = (System.nanoTime() - started) / 1_000_000_000.0
+                colors.forEach { assertEquals(listOf(true, false, true, false), it.take(4)) }
+                captions.forEach { assertTrue(it.containsAll(listOf("Hello 👋", "Welcome"))) }
+                assertEquals(listOf(1, 1), playbacks.map { it.activeDecoderCount })
+                println("NUXIE_VIDEO_MEASUREMENT " + org.json.JSONObject()
+                    .put("width", 1280).put("height", 720).put("players", 2)
+                    .put("independentOwners", true).put("elapsedSeconds", elapsed)
+                    .put("mutedOwners", 1)
+                    .put("deliveredFrames", playbacks.sumOf { it.deliveredFrames })
+                    .put("framesPerOwner", org.json.JSONArray(playbacks.map { it.deliveredFrames }))
+                    .put("aggregateDeliveredFps", playbacks.sumOf { it.deliveredFrames } / elapsed)
+                    .put("deliveredRGBABytes", playbacks.sumOf { it.deliveredRGBABytes })
+                    .put("includesForcedVulkanReadback", true).put("targetTickPeriodMs", 1000.0 / 60))
+                playbacks[0].setVisible(false)
+                playbacks[0].advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                assertEquals(0, playbacks[0].activeDecoderCount)
+                val survivingFrames = playbacks[1].deliveredFrames
+                val survivorDeadline = android.os.SystemClock.elapsedRealtime() + 3_000
+                while (playbacks[1].deliveredFrames == survivingFrames && android.os.SystemClock.elapsedRealtime() < survivorDeadline) {
+                    playbacks[1].advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                    Thread.sleep(16)
+                }
+                assertTrue("The other owner must continue delivering frames", playbacks[1].deliveredFrames > survivingFrames)
+                assertTrue(players[0].videos().single().wantsPlay)
+                assertEquals(1, playbacks[1].activeDecoderCount)
+            } finally {
+                playbacks.asReversed().forEach { it.close(); assertEquals(0, it.activeDecoderCount) }
+                players.asReversed().forEach { it.close() }
+                artboards.asReversed().forEach { it.close() }
+                file.close()
+            }
+        } finally { renderer.close(); local.delete() }
+    }
+
     private fun verifyDecodedVideo(frenchCaptions: Boolean, measure720p: Boolean = false) {
         val preparationStarted = System.nanoTime()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
