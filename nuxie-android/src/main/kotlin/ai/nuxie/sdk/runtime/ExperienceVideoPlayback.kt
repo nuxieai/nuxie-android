@@ -4,6 +4,7 @@ import ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding
 import ai.nuxie.sdk.experiences.ExperienceVideoElement
 import ai.nuxie.sdk.experiences.JourneyVideoAction
 import android.content.Context
+import java.util.UUID
 
 /** Runtime-lane owner. Acquisition retains the files until this owner closes. */
 internal class ExperienceVideoPlayback(
@@ -13,6 +14,7 @@ internal class ExperienceVideoPlayback(
     private val targets: List<ExperienceVideoElement> = emptyList(),
     private val nanoTime: () -> Long = System::nanoTime,
     private val decoderBudget: (() -> NuxieVideoDecoderBudget)? = null,
+    private val decoderPool: ExperienceVideoDecoderPool? = null,
 ) : AutoCloseable {
     private class Entry(val binding: ExperienceVideoAssetBinding) {
         var decoder: AndroidVideoDecoder? = null
@@ -24,6 +26,8 @@ internal class ExperienceVideoPlayback(
         var resourceBlocked = false
         var rate = 1.0
     }
+    private val decoderOwner = UUID.randomUUID()
+    private var disposalComplete = false
     private val entries = mutableMapOf<Long, Entry>()
     private val decodeCosts = mutableMapOf<String, Long>()
     private class Admission(var elapsed: Double = 0.0, var decision: Int = 0)
@@ -55,8 +59,7 @@ internal class ExperienceVideoPlayback(
                     target.readinessTimeoutSeconds, target.optional)
                 if (admission.decision == 2) {
                     entries[video.componentId]?.let {
-                        it.decoder?.close()
-                        it.decoder = null
+                        retire(video.componentId, it)
                         it.failed = true
                     }
                     player.videoCommand(video.componentId, 8)
@@ -83,10 +86,13 @@ internal class ExperienceVideoPlayback(
             val binding = bindings.single { it.authoredId == video.assetId && it.sourceAssetKey == video.sourceKey }
             video.componentId to Entry(binding)
         }
-        val removed = entries.keys.filter { it !in live }.mapNotNull(entries::remove)
+        val removed = entries.keys.filter { it !in live }
         var failure: Throwable? = null
-        for (entry in removed) {
-            try { entry.decoder?.close() } catch (error: Throwable) {
+        for (id in removed) {
+            try {
+                retire(id, checkNotNull(entries[id]))
+                entries.remove(id)
+            } catch (error: Throwable) {
                 if (failure == null) failure = error else failure.addSuppressed(error)
             }
         }
@@ -99,7 +105,16 @@ internal class ExperienceVideoPlayback(
     private var hidden = true
     private var closed = false
 
-    init { reconcile(player.videos()) }
+    init {
+        require(decoderBudget == null || decoderPool == null) { "Video playback requires a single budget owner" }
+        reconcile(player.videos())
+    }
+
+    private fun retire(componentId: Long, entry: Entry) {
+        entry.decoder?.close()
+        entry.decoder = null
+        decoderPool?.release(decoderOwner, componentId)
+    }
 
     fun apply(action: JourneyVideoAction) {
         check(!closed)
@@ -131,15 +146,15 @@ internal class ExperienceVideoPlayback(
 
     /** Retire all denied owners before opening any replacement; callbacks use a fresh generation. */
     private fun admit(videos: List<NuxieVideoOccurrence>): List<NuxieVideoOccurrence> {
-        val budget = decoderBudget?.invoke() ?: return videos
+        if (decoderBudget == null && decoderPool == null) return videos
+        val budget = decoderBudget?.invoke()
         for (video in videos) {
             val entry = checkNotNull(entries[video.componentId])
             if (entry.failed) continue
             for (action in player.videoStep(video.componentId, 0, video.generation)) {
                 if (action.kind == 3) entry.rate = action.value
                 if (action.kind == 5) {
-                    entry.decoder?.close()
-                    entry.decoder = null
+                    retire(video.componentId, entry)
                     entry.failed = true
                 } else entry.decoder?.action(action.kind, action.value, action.generation)
             }
@@ -151,8 +166,7 @@ internal class ExperienceVideoPlayback(
                     decodeCosts.getOrPut(file.absolutePath) { ExperienceVideoDecodeCost.read(file) }
                 } catch (_: Exception) {
                     entry.failed = true
-                    entry.decoder?.close()
-                    entry.decoder = null
+                    retire(video.componentId, entry)
                     player.videoStep(video.componentId, 6, video.generation)
                     0L
                 }
@@ -162,7 +176,10 @@ internal class ExperienceVideoPlayback(
             NuxieVideoDecoderRequest(video.componentId, pixels, video.priority.toLong() and 0xffff_ffffL,
                 !hidden && !entry.failed && entry.binding.file != null)
         }
-        val choices = player.videoAllocateDecoders(requests, budget)
+        val choices = if (decoderPool != null) {
+            val admitted = decoderPool.update(decoderOwner, requests)
+            videos.map { if (it.componentId in admitted) NuxieVideoAllocation.PlatformManaged else NuxieVideoAllocation.Poster }
+        } else player.videoAllocateDecoders(requests, checkNotNull(budget))
         // A failed synchronous close leaves ownership intact and aborts admission.
         for ((index, video) in videos.withIndex()) {
             val entry = checkNotNull(entries[video.componentId])
@@ -172,8 +189,7 @@ internal class ExperienceVideoPlayback(
                 "MediaPlayer cannot force a hardware or software decoder"
             }
             if (blocked && !entry.resourceBlocked) {
-                entry.decoder?.close()
-                entry.decoder = null
+                retire(video.componentId, entry)
                 if (entry.interrupted) {
                     player.videoCommand(video.componentId, 6, 0.0, 4)
                     player.videoStep(video.componentId, 0, video.generation)
@@ -235,14 +251,12 @@ internal class ExperienceVideoPlayback(
             for (action in actions) {
                 if (action.kind == 3) entry.rate = action.value
                 if (action.kind == 5) {
-                    decoder?.close()
-                    entry.decoder = null
+                    retire(video.componentId, entry)
                     entry.failed = true
                 } else decoder?.action(action.kind, action.value, action.generation)
             }
             if (entry.failed) {
-                decoder?.close()
-                entry.decoder = null
+                retire(video.componentId, entry)
                 continue
             }
             // A hide/show can occur entirely while presentation is pending. The
@@ -270,18 +284,22 @@ internal class ExperienceVideoPlayback(
     }
 
     override fun close() {
-        if (closed) return
+        if (disposalComplete) return
         closed = true
         admissions.clear()
         var failure: Throwable? = null
-        for (entry in entries.values) {
-            try { entry.decoder?.close() } catch (error: Throwable) {
+        for ((id, entry) in entries.toMap()) {
+            try {
+                retire(id, entry)
+                entries.remove(id)
+            } catch (error: Throwable) {
                 if (failure == null) failure = error else failure.addSuppressed(error)
             }
-            entry.decoder = null
         }
+        failure?.let { throw it }
+        decoderPool?.remove(decoderOwner)
+        disposalComplete = true
         captions.clear()
         decodeCosts.clear()
-        failure?.let { throw it }
     }
 }
