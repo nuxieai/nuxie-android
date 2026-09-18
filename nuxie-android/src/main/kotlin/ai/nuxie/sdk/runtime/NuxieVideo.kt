@@ -14,6 +14,8 @@ internal data class NuxieVideoOccurrence(
     val componentName: String = "",
     val priority: Int = 0,
     val readiness: Int = 0,
+    val sourceArtboardIndex: Long,
+    val sourceComponentId: Long,
 )
 
 internal data class NuxieVideoAction(val kind: Int, val value: Double, val generation: Long)

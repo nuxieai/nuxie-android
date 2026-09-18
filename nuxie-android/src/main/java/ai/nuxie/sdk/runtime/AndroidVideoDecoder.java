@@ -137,7 +137,7 @@ final class AndroidVideoDecoder {
   private int width, height, textureId, program;
   private ByteBuffer readback;
   private long generation;
-  private boolean seeking, wantsPlay;
+  private boolean seeking, wantsPlay, frameLatchedDuringSeek;
   private double queuedSeek = -1;
   private long queuedGeneration;
   private float rate = 1, volume = 0;
@@ -237,6 +237,10 @@ final class AndroidVideoDecoder {
           beginSeek(target, token);
         } else {
           seeking = false;
+          if (frameLatchedDuringSeek) {
+            frameLatchedDuringSeek = false;
+            presentLatchedFrame();
+          }
           if (wantsPlay && !interrupted && acquireFocus()) {
             try {
               // Rate commands received while preparing/seeking are deferred.
@@ -361,8 +365,21 @@ final class AndroidVideoDecoder {
       return;
     try {
       texture.updateTexImage();
-      if (seeking || !ready)
+      if (seeking) {
+        // A paused seek may deliver its only frame before onSeekComplete.
+        // Keep the latched texture until that seek is committed.
+        frameLatchedDuringSeek = true;
         return;
+      }
+      presentLatchedFrame();
+    } catch (Exception e) {
+      fail(e.toString());
+    }
+  }
+  private void presentLatchedFrame() {
+    if (closed || failure != null || !ready || seeking)
+      return;
+    try {
       observeDecoderInfo();
       texture.getTransformMatrix(textureTransform);
       GLES20.glViewport(0, 0, width, height);
@@ -492,6 +509,7 @@ final class AndroidVideoDecoder {
     if ((Double.isNaN(seconds) || Double.isInfinite(seconds)) || seconds < 0)
       throw new IllegalArgumentException("invalid seek");
     seeking = true;
+    frameLatchedDuringSeek = false;
     generation = token;
     if (android.os.Build.VERSION.SDK_INT >= 26)
       player.seekTo((long)(seconds * 1000), MediaPlayer.SEEK_CLOSEST);

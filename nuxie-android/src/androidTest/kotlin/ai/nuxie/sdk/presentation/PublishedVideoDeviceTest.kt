@@ -22,17 +22,28 @@ import org.junit.Test
 class PublishedVideoDeviceTest {
     @Test
     fun mountedPublishedVideoPresentsPixelsCaptionsAndRetiresThemWhenHidden() {
+        verifyPublishedVideo("greeting", "clip-view", 1, 100, 80)
+    }
+
+    @Test
+    fun mountedListVideosPresentAndAcceptJourneyCommands() {
+        verifyPublishedVideo("list", "item-card", 2, 20, 30)
+    }
+
+    private fun verifyPublishedVideo(sceneName: String, viewNodeId: String, expectedOwners: Int,
+        sampleX: Int, sampleY: Int) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         assertTrue(NuxieRuntime.shared.isAvailable)
         val directory = File(instrumentation.targetContext.cacheDir, "published-video-test").apply { mkdirs() }
         fun copy(name: String) = File(directory, name).also { file ->
             instrumentation.context.assets.open("video/$name").use { input -> file.outputStream().use { input.copyTo(it) } }
         }
-        val scene = copy("greeting.nux")
+        val scene = copy("$sceneName.nux")
         val video = copy("captions.mp4")
         val digest = MessageDigest.getInstance("SHA-256").digest(video.readBytes()).joinToString("") { "%02x".format(it) }
         val key = "assets/sha256/$digest.mp4"
-        val inventory = instrumentation.context.assets.open("video/inventory.json").bufferedReader().use {
+        val inventoryName = if (sceneName == "greeting") "inventory" else "$sceneName-inventory"
+        val inventory = instrumentation.context.assets.open("video/$inventoryName.json").bufferedReader().use {
             Json.parseToJsonElement(it.readText()).jsonObject
         }
         val asset = JsonObject(inventory.getValue("assets").jsonArray.single().jsonObject + mapOf(
@@ -43,15 +54,22 @@ class PublishedVideoDeviceTest {
         ))
         val descriptor = buildJsonObject {
             put("render", JsonObject(inventory + mapOf("renderer" to JsonPrimitive("nux"), "assets" to JsonArray(listOf(asset)))))
-            put("leg", buildJsonObject { put("screens", buildJsonArray { add(buildJsonObject { put("id", "screen") }) }) })
+            put("leg", instrumentation.context.assets.open("video/$sceneName-journey.json").bufferedReader().use {
+                Json.parseToJsonElement(it.readText())
+            })
         }
-        val prepared = PreparedPresentation(scene, "Video Frame", Color.BLACK, PresentationShell.FullScreen,
-            "screen", descriptor, mapOf(key to video), ExperienceArtboardSize(320f, 640f))
+        val screen = inventory.getValue("screens").jsonArray.single().jsonObject
+        val width = screen.getValue("width").jsonPrimitive.float
+        val height = screen.getValue("height").jsonPrimitive.float
+        val prepared = PreparedPresentation(scene, screen.getValue("artboardName").jsonPrimitive.content,
+            Color.BLACK, PresentationShell.FullScreen,
+            "screen", descriptor, mapOf(key to video), ExperienceArtboardSize(width, height))
         val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
             SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val failure = AtomicReference<Throwable?>()
         val first = CountDownLatch(1)
         val closed = CountDownLatch(1)
+        val ownerCount = java.util.concurrent.atomic.AtomicInteger()
         var created = false
         lateinit var mounted: ExperienceMountedScreen
         lateinit var content: View
@@ -61,6 +79,9 @@ class PublishedVideoDeviceTest {
             instrumentation.runOnMainSync {
                 mounted = ExperienceMountedScreen(activity, prepared, object : ExperienceSurfaceHost.Listener {
                     override fun onFirstFrame() { first.countDown() }
+                    override fun onVideoCaptions(captions: Map<Long, ai.nuxie.sdk.runtime.NuxieVideoCaption>) {
+                        ownerCount.accumulateAndGet(captions.size, ::maxOf)
+                    }
                     override fun onFailure(error: ExperiencePresentationException) { failure.set(error); first.countDown() }
                 }, failure::set)
                 created = true
@@ -83,9 +104,9 @@ class PublishedVideoDeviceTest {
                 failure.get()?.let { throw AssertionError("Mounted playback failed", it) }
                 instrumentation.runOnMainSync {
                     mounted.surface.bitmap?.let { bitmap ->
-                        val scale = minOf(bitmap.width / 320f, bitmap.height / 640f)
-                        val x = ((bitmap.width - 320 * scale) / 2 + 100 * scale).toInt()
-                        val y = ((bitmap.height - 640 * scale) / 2 + 80 * scale).toInt()
+                        val scale = minOf(bitmap.width / width, bitmap.height / height)
+                        val x = ((bitmap.width - width * scale) / 2 + sampleX * scale).toInt()
+                        val y = ((bitmap.height - height * scale) / 2 + sampleY * scale).toInt()
                         val pixel = bitmap.getPixel(x, y)
                         if (Color.red(pixel) > 180 && Color.blue(pixel) < 70 && colors.lastOrNull() != true) colors += true
                         if (Color.blue(pixel) > 180 && Color.red(pixel) < 70 && colors.lastOrNull() != false) colors += false
@@ -117,7 +138,7 @@ class PublishedVideoDeviceTest {
                 instrumentation.uiAutomation.rootInActiveWindow?.let(::collectAccessibility)
                 if (!screenshotSaved && layoutChecks >= 3 && colors.size >= 2 && captions.contains("Welcome")) {
                     instrumentation.uiAutomation.takeScreenshot()?.let { bitmap ->
-                        File(instrumentation.targetContext.getExternalFilesDir(null), "task3b-video-caption.png").outputStream().use {
+                        File(instrumentation.targetContext.getExternalFilesDir(null), "task3b-$sceneName-video-caption.png").outputStream().use {
                             bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
                         }
                         bitmap.recycle()
@@ -126,39 +147,49 @@ class PublishedVideoDeviceTest {
                 }
                 Thread.sleep(30)
             }
+            assertEquals(expectedOwners, ownerCount.get())
             assertEquals(listOf(true, false, true, false), colors.take(4))
             assertTrue("Visible captions: $captions", captions.containsAll(listOf("Hello 👋", "Welcome")))
             assertTrue("Accessibility tree captions: $accessibleCaptions", accessibleCaptions.any { it == "Hello 👋" || it == "Welcome" })
             assertTrue("Screenshot captured", screenshotSaved)
             assertTrue("Caption layout must be measured", layoutChecks > 0)
-            fun command(type: String, extra: String = "", view: String = "clip-view"): Boolean = runBlocking {
+            fun command(type: String, extra: String = "", view: String = viewNodeId): Boolean = runBlocking {
                 withTimeout(5_000) {
                     mounted.surface.applyVideoCommand(ai.nuxie.sdk.experiences.JourneyVideoAction.parse(
                         Json.parseToJsonElement("""{"type":"video","target":{"artboardId":"screen","viewNodeId":"$view"},"command":{"type":"$type"$extra}}""")))
                 }
             }
-            fun pixelIsRed(): Boolean {
-                var red = false
+            fun pixelMatches(expectRed: Boolean = true): Boolean {
+                var matches = false
                 instrumentation.runOnMainSync {
                     mounted.surface.bitmap?.let { bitmap ->
-                        val scale = minOf(bitmap.width / 320f, bitmap.height / 640f)
-                        val x = ((bitmap.width - 320 * scale) / 2 + 100 * scale).toInt()
-                        val y = ((bitmap.height - 640 * scale) / 2 + 80 * scale).toInt()
+                        val scale = minOf(bitmap.width / width, bitmap.height / height)
+                        val x = ((bitmap.width - width * scale) / 2 + sampleX * scale).toInt()
+                        val y = ((bitmap.height - height * scale) / 2 + sampleY * scale).toInt()
                         val pixel = bitmap.getPixel(x, y)
-                        red = Color.red(pixel) > 180 && Color.blue(pixel) < 70
+                        matches = if (expectRed) Color.red(pixel) > 180 && Color.blue(pixel) < 70
+                            else Color.blue(pixel) > 180 && Color.red(pixel) < 70
                         bitmap.recycle()
                     }
                 }
-                return red
+                return matches
             }
             assertFalse("Unknown targets must fail without affecting playback", command("pause", view = "missing"))
             assertTrue("Pause must acknowledge native application", command("pause"))
             assertTrue("Seek must acknowledge native application", command("seek", ",\"seconds\":0.1"))
             val seekDeadline = SystemClock.elapsedRealtime() + 3_000
-            while (!pixelIsRed() && SystemClock.elapsedRealtime() < seekDeadline) Thread.sleep(20)
-            assertTrue("Paused seek must present its red frame", pixelIsRed())
+            while (!pixelMatches() && SystemClock.elapsedRealtime() < seekDeadline) Thread.sleep(20)
+            assertTrue("Paused seek must present its red frame", pixelMatches())
             Thread.sleep(1_200)
-            assertTrue("Paused video must retain its frame", pixelIsRed())
+            assertTrue("Paused video must retain its frame", pixelMatches())
+            repeat(12) { index ->
+                val red = index % 2 != 0
+                val seconds = if (red) 0.1 else 1.2
+                assertTrue(command("seek", ",\"seconds\":$seconds"))
+                val deadline = SystemClock.elapsedRealtime() + 3_000
+                while (!pixelMatches(red) && SystemClock.elapsedRealtime() < deadline) Thread.sleep(10)
+                assertTrue("Paused seek $index must present ${if (red) "red" else "blue"}", pixelMatches(red))
+            }
             assertTrue("Play must acknowledge native application", command("play"))
             instrumentation.runOnMainSync { mounted.setVisible(false) }
             Thread.sleep(250)
