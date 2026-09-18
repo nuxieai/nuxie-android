@@ -26,6 +26,7 @@ internal class ExperienceVideoPlayback(
         var resourceBlocked = false
         var rate = 1.0
     }
+    private val preferredCaptionLanguages = ExperienceVideoCaptionSelection.preferredLanguages(context)
     private val decoderOwner = UUID.randomUUID()
     @Volatile private var disposalComplete = false
     private var retirementRequested = false
@@ -221,7 +222,9 @@ internal class ExperienceVideoPlayback(
             if (entry.failed) continue
             if (entry.decoder == null && !hidden && !entry.resourceBlocked) {
                 entry.decoder = entry.binding.file?.let { file ->
-                    entry.binding.captionTracks.firstOrNull()?.let { track ->
+                    val tracks = entry.binding.captionTracks
+                    ExperienceVideoCaptionSelection.index(tracks.map { it.language }, preferredCaptionLanguages)
+                        ?.let { tracks[it] }?.let { track ->
                         val cues = captions.getOrPut(file.absolutePath to track.streamIndex) {
                             ExperienceVideoCaptions.read(file, track.streamIndex)
                         }
