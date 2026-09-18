@@ -12,6 +12,7 @@ internal class ExperienceVideoPlayback(
     private val bindings: List<ExperienceVideoAssetBinding>,
     private val targets: List<ExperienceVideoElement> = emptyList(),
     private val nanoTime: () -> Long = System::nanoTime,
+    private val decoderBudget: (() -> NuxieVideoDecoderBudget)? = null,
 ) : AutoCloseable {
     private class Entry(val binding: ExperienceVideoAssetBinding) {
         var decoder: AndroidVideoDecoder? = null
@@ -20,8 +21,11 @@ internal class ExperienceVideoPlayback(
         var failed = false
         var interrupted = false
         var pausedByHost = false
+        var resourceBlocked = false
+        var rate = 1.0
     }
     private val entries = mutableMapOf<Long, Entry>()
+    private val decodeCosts = mutableMapOf<String, Long>()
     private class Admission(var elapsed: Double = 0.0, var decision: Int = 0)
     private val admissions = mutableMapOf<Long, Admission>()
     private var admissionClock = nanoTime()
@@ -125,13 +129,80 @@ internal class ExperienceVideoPlayback(
         }
     }
 
+    /** Retire all denied owners before opening any replacement; callbacks use a fresh generation. */
+    private fun admit(videos: List<NuxieVideoOccurrence>): List<NuxieVideoOccurrence> {
+        val budget = decoderBudget?.invoke() ?: return videos
+        for (video in videos) {
+            val entry = checkNotNull(entries[video.componentId])
+            if (entry.failed) continue
+            for (action in player.videoStep(video.componentId, 0, video.generation)) {
+                if (action.kind == 3) entry.rate = action.value
+                if (action.kind == 5) {
+                    entry.decoder?.close()
+                    entry.decoder = null
+                    entry.failed = true
+                } else entry.decoder?.action(action.kind, action.value, action.generation)
+            }
+        }
+        val requests = videos.map { video ->
+            val entry = checkNotNull(entries[video.componentId])
+            val cost = if (entry.failed) 0L else entry.binding.file?.let { file ->
+                try {
+                    decodeCosts.getOrPut(file.absolutePath) { ExperienceVideoDecodeCost.read(file) }
+                } catch (_: Exception) {
+                    entry.failed = true
+                    entry.decoder?.close()
+                    entry.decoder = null
+                    player.videoStep(video.componentId, 6, video.generation)
+                    0L
+                }
+            } ?: 0L
+            val scaled = kotlin.math.ceil(cost * maxOf(1.0, entry.rate))
+            val pixels = if (scaled >= Long.MAX_VALUE.toDouble()) Long.MAX_VALUE else scaled.toLong()
+            NuxieVideoDecoderRequest(video.componentId, pixels, video.priority.toLong() and 0xffff_ffffL,
+                !hidden && !entry.failed && entry.binding.file != null)
+        }
+        val choices = player.videoAllocateDecoders(requests, budget)
+        // A failed synchronous close leaves ownership intact and aborts admission.
+        for ((index, video) in videos.withIndex()) {
+            val entry = checkNotNull(entries[video.componentId])
+            if (entry.failed || entry.binding.file == null) continue
+            val blocked = choices[index] == NuxieVideoAllocation.Poster
+            check(blocked || choices[index] == NuxieVideoAllocation.PlatformManaged) {
+                "MediaPlayer cannot force a hardware or software decoder"
+            }
+            if (blocked && !entry.resourceBlocked) {
+                entry.decoder?.close()
+                entry.decoder = null
+                if (entry.interrupted) {
+                    player.videoCommand(video.componentId, 6, 0.0, 4)
+                    player.videoStep(video.componentId, 0, video.generation)
+                }
+                player.videoReclaimDecoder(video.componentId, true)
+                entry.resourceBlocked = true
+                entry.ready = false
+                entry.ended = false
+                entry.interrupted = false
+                entry.pausedByHost = false
+            }
+        }
+        for ((index, video) in videos.withIndex()) {
+            val entry = checkNotNull(entries[video.componentId])
+            if (!entry.failed && entry.resourceBlocked && choices[index] == NuxieVideoAllocation.PlatformManaged) {
+                player.videoReclaimDecoder(video.componentId, false)
+                entry.resourceBlocked = false
+            }
+        }
+        return player.videos()
+    }
+
     /** Called only before a new scene step, never while a native frame is submitted. */
     fun advance(renderer: NuxieAndroidVulkanRenderer, monotonicSeconds: Double) {
         check(!closed)
-        for (video in reconcile(player.videos())) {
+        for (video in admit(reconcile(player.videos()))) {
             val entry = checkNotNull(entries[video.componentId])
             if (entry.failed) continue
-            if (entry.decoder == null && !hidden) {
+            if (entry.decoder == null && !hidden && !entry.resourceBlocked) {
                 entry.decoder = entry.binding.file?.let { file ->
                     entry.binding.captionTracks.firstOrNull()?.let { track ->
                         val cues = captions.getOrPut(file.absolutePath to track.streamIndex) {
@@ -162,6 +233,7 @@ internal class ExperienceVideoPlayback(
             val actions = player.videoStep(video.componentId, if (blocked && observation != 6) 5 else observation,
                 video.generation, if (observation == 1) checkNotNull(decoder).duration() else 0.0)
             for (action in actions) {
+                if (action.kind == 3) entry.rate = action.value
                 if (action.kind == 5) {
                     decoder?.close()
                     entry.decoder = null
@@ -209,6 +281,7 @@ internal class ExperienceVideoPlayback(
             entry.decoder = null
         }
         captions.clear()
+        decodeCosts.clear()
         failure?.let { throw it }
     }
 }
