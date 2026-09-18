@@ -4,6 +4,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AndroidVideoResourceDeviceTest {
+    @Test fun readsBoundedDecodeCostFromRetainedFile() {
+        val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        val file = java.io.File.createTempFile("decode-cost-", ".mp4", instrumentation.targetContext.cacheDir)
+        try {
+            instrumentation.context.assets.open("video/captions.mp4").use { input ->
+                file.outputStream().use { input.copyTo(it) }
+            }
+            // 64x32 at 30fps; microsecond timestamp rounding conservatively admits 31fps.
+            assertEquals(64L * 32 * 31, ExperienceVideoDecodeCost.read(file))
+        } finally { file.delete() }
+    }
+
     @Test fun nativeAllocatorHonorsPriorityBudgetAndInputOrder() {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val budget = NuxieVideoDecoderBudget(2, 1, 1, 100, 100)
