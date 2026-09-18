@@ -9,6 +9,13 @@ import org.junit.Test
 
 /** Exercises the scripted import path on the device architecture. */
 class ConfiguredImportSmokeTest {
+    private data class VideoMeasurement(val file: String, val width: Int, val height: Int, val cadence: Int) {
+        companion object {
+            val HD = VideoMeasurement("captions-720p.mp4", 1280, 720, 31)
+            val UHD = VideoMeasurement("captions-4k60.mp4", 3840, 2160, 61)
+        }
+    }
+
     @Test
     fun captionsAreExtractedFromTheRetainedMp4() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -120,7 +127,10 @@ class ConfiguredImportSmokeTest {
     fun preferredFrenchTrackFollowsActualVideoPlayback() = verifyDecodedVideo(frenchCaptions = true)
 
     @Test
-    fun video720pDeliveryMeasurements() = verifyDecodedVideo(frenchCaptions = false, measure720p = true)
+    fun video4k60DeliveryMeasurements() = verifyDecodedVideo(frenchCaptions = false, measurement = VideoMeasurement.UHD)
+
+    @Test
+    fun video720pDeliveryMeasurements() = verifyDecodedVideo(frenchCaptions = false, measurement = VideoMeasurement.HD)
 
     @Test
     fun concurrent720pOwnersShareDecoderCapacity() {
@@ -211,11 +221,11 @@ class ConfiguredImportSmokeTest {
         } finally { renderer.close(); local.delete() }
     }
 
-    private fun verifyDecodedVideo(frenchCaptions: Boolean, measure720p: Boolean = false) {
+    private fun verifyDecodedVideo(frenchCaptions: Boolean, measurement: VideoMeasurement? = null) {
         val preparationStarted = System.nanoTime()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val local = java.io.File.createTempFile("video-decoder-", ".mp4", instrumentation.targetContext.cacheDir)
-        instrumentation.context.assets.open(if (measure720p) "video/captions-720p.mp4" else if (frenchCaptions) "video/multilingual.mp4" else "video/captions.mp4").use { input ->
+        instrumentation.context.assets.open("video/" + (measurement?.file ?: if (frenchCaptions) "multilingual.mp4" else "captions.mp4")).use { input ->
             local.outputStream().use { input.copyTo(it) }
         }
         val bytes = instrumentation.context.assets.open("video/greeting.nux").use { it.readBytes() }
@@ -235,7 +245,7 @@ class ConfiguredImportSmokeTest {
                         val targets = ai.nuxie.sdk.experiences.JourneyRenderSchema.videoElements(
                             kotlinx.serialization.json.JsonObject(inventory + ("renderer" to kotlinx.serialization.json.JsonPrimitive("nux"))))
                         var slots = 1
-                        val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(slots, slots, 0, if (measure720p) 1280L * 720 * 31 else 100_000, 0) }
+                        val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(slots, slots, 0, measurement?.let { it.width.toLong() * it.height * it.cadence } ?: 100_000, 0) }
                         val tracks = mutableListOf(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(2, "eng"))
                         if (frenchCaptions) tracks.add(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(3, "fra"))
                         val playback = ExperienceVideoPlayback(instrumentation.targetContext, player,
@@ -264,7 +274,7 @@ class ConfiguredImportSmokeTest {
                                 val blue = composed.rgba[offset + 2].toInt() and 255
                                 if (red > 180 && blue < 70 && colors.lastOrNull() != true) colors.add(true)
                                 if (blue > 180 && red < 70 && colors.lastOrNull() != false) colors.add(false)
-                                if (!measure720p && !suspended && colors == listOf(true)) {
+                                if (measurement == null && !suspended && colors == listOf(true)) {
                                     playback.setVisible(false)
                                     assertTrue(playback.captionSnapshot().isEmpty())
                                     playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
@@ -274,15 +284,15 @@ class ConfiguredImportSmokeTest {
                                     playback.setVisible(true)
                                     suspended = true
                                 }
-                                if (measure720p) java.util.concurrent.locks.LockSupport.parkNanos(
+                                if (measurement != null) java.util.concurrent.locks.LockSupport.parkNanos(
                                     maxOf(0L, 16_666_667L - (System.nanoTime() - cycleStarted)))
                                 else Thread.sleep(16)
                             }
-                            if (measure720p) {
+                            if (measurement != null) {
                                 val elapsed = (System.nanoTime() - measuringStarted) / 1_000_000_000.0
                                 val ordered = tickMilliseconds.sorted()
                                 val metrics = org.json.JSONObject()
-                                    .put("width", 1280).put("height", 720).put("players", 1)
+                                    .put("width", measurement.width).put("height", measurement.height).put("players", 1)
                                     .put("elapsedSeconds", elapsed).put("deliveredFrames", playback.deliveredFrames)
                                     .put("aggregateDeliveredFps", playback.deliveredFrames / elapsed)
                                     .put("firstFrameFromPreparationMs", ((firstDelivered ?: System.nanoTime()) - preparationStarted) / 1_000_000.0)
