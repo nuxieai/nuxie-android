@@ -182,7 +182,11 @@ class PublishedVideoDeviceTest {
             fun pixelMatches(expectRed: Boolean = true): Boolean {
                 var matches = false
                 instrumentation.runOnMainSync {
-                    mounted.surface.bitmap?.let { bitmap ->
+                    // Preserve the viewport aspect ratio while sampling colors;
+                    // full-display readbacks on every poll create avoidable GPU/GC pressure.
+                    val sampleWidth = minOf(128, mounted.surface.width).coerceAtLeast(1)
+                    val sampleHeight = (mounted.surface.height.toLong() * sampleWidth / mounted.surface.width.coerceAtLeast(1)).toInt().coerceAtLeast(1)
+                    mounted.surface.getBitmap(sampleWidth, sampleHeight)?.let { bitmap ->
                         val scale = minOf(bitmap.width / width, bitmap.height / height)
                         val x = ((bitmap.width - width * scale) / 2 + sampleX * scale).toInt()
                         val y = ((bitmap.height - height * scale) / 2 + sampleY * scale).toInt()
@@ -202,7 +206,9 @@ class PublishedVideoDeviceTest {
             assertTrue("Paused seek must present its red frame", pixelMatches())
             Thread.sleep(1_200)
             assertTrue("Paused video must retain its frame", pixelMatches())
-            repeat(60) { index ->
+            val seekIterations = InstrumentationRegistry.getArguments().getString("videoSeekIterations")?.toInt() ?: 60
+            require(seekIterations in 1..1_000) { "videoSeekIterations must be within 1..1000" }
+            repeat(seekIterations) { index ->
                 val red = index % 2 != 0
                 val seconds = if (red) 0.1 else 1.2
                 assertTrue(command("seek", ",\"seconds\":$seconds"))
