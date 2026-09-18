@@ -10,6 +10,12 @@ import org.junit.Test
 
 class EmbeddedRuntimeCompatibilityTest {
     @Test
+    fun `mobile admission supports the published video wire capability`() {
+        val supported = requireNotNull(supportedRuntimeForEmbeddedRuntime("native"))
+        assertTrue(supported.supportedCapabilities.contains("video.playback.v1"))
+    }
+
+    @Test
     fun `shipped sdk version satisfies the first stable release minimum`() {
         val current = requireNotNull(
             SemanticVersion.parse(requireNotNull(supportedRuntimeForEmbeddedRuntime("native")).currentSdkVersion),

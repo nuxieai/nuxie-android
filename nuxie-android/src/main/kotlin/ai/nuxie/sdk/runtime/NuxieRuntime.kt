@@ -526,6 +526,11 @@ internal class NuxieRuntimePlayer internal constructor(
 
     fun videos(): List<NuxieVideoOccurrence> = native.videoOccurrences(requireHandle())
 
+    fun videoReadiness(component: Long, elapsed: Double, timeout: Double, optional: Boolean): Int {
+        require(component >= 0 && elapsed.isFinite() && elapsed >= 0 && timeout.isFinite() && timeout in 0.0..60.0)
+        return native.videoReadiness(requireHandle(), component, elapsed, timeout, optional)
+    }
+
     fun videoCommand(component: Long, kind: Int, value: Double = 0.0, reason: Int = 0) {
         require(component >= 0 && kind >= 0 && value.isFinite() && reason >= 0)
         val status = native.videoCommand(requireHandle(), component, kind, value, reason)
