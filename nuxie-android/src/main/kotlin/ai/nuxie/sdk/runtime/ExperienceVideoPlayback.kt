@@ -27,6 +27,9 @@ internal class ExperienceVideoPlayback(
         require(live.size == videos.size) { "Duplicate video occurrence identity" }
         val additions = videos.filter { it.componentId !in entries }.associate { video ->
             require(!video.embedded) { "Published video must use an acquired file" }
+            require(targets.any {
+                it.sourceArtboardIndex == video.sourceArtboardIndex && it.componentId == video.sourceComponentId
+            }) { "Video occurrence differs from signed target inventory" }
             val binding = bindings.single { it.authoredId == video.assetId && it.sourceAssetKey == video.sourceKey }
             video.componentId to Entry(binding)
         }
@@ -51,9 +54,14 @@ internal class ExperienceVideoPlayback(
     fun apply(action: JourneyVideoAction) {
         check(!closed)
         val matches = targets.filter { it.artboardId == action.artboardId && it.viewNodeId == action.viewNodeId }
-        val live = player.videos().map { it.componentId }.toSet()
-        require(matches.isNotEmpty() && matches.all { it.componentId in live }) { "Video target is not mounted in this screen" }
-        for (target in matches) player.videoCommand(target.componentId, action.commandKind, action.commandValue)
+        val live = player.videos().filter { occurrence ->
+            matches.any { target ->
+                target.sourceArtboardIndex == occurrence.sourceArtboardIndex &&
+                    target.componentId == occurrence.sourceComponentId
+            }
+        }
+        require(live.isNotEmpty()) { "Video target is not mounted in this screen" }
+        for (occurrence in live) player.videoCommand(occurrence.componentId, action.commandKind, action.commandValue)
     }
 
     /** Stop audio immediately even when a submitted Vulkan frame is still pending. */

@@ -387,7 +387,7 @@ internal class ExperienceSurfaceHost(
                 val screen = (render?.get("screens") as? JsonArray)?.mapNotNull { it as? JsonObject }
                     ?.singleOrNull { (it["artboardName"] as? JsonPrimitive)?.content == artboardName }
                 val artboardId = (screen?.get("artboardId") as? JsonPrimitive)?.content
-                videoTargets = import.videoElements.filter { it.artboardId == artboardId }
+                videoTargets = import.videoElements
                 try {
                     runtime.importFile(
                         renderer = activeRenderer,

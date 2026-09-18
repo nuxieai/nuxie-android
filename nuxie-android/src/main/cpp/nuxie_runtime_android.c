@@ -3330,7 +3330,8 @@ static void video_occurrence_callback(void *context, const struct NuxVideoInfo *
   if (c->failed) return;
   /* Bound temporary JVM metadata independently from hardware decoder admission. */
   if (c->count >= 65536 || video->struct_size < sizeof(struct NuxVideoInfo) ||
-      video->component_id > INT64_MAX || video->priority > INT32_MAX ||
+      video->component_id > INT64_MAX || video->source_artboard_index > INT64_MAX ||
+      video->source_component_id > INT64_MAX || video->priority > INT32_MAX ||
       video->readiness > INT32_MAX) { c->failed = 1; return; }
   JNIEnv *env = c->env;
   jstring source = new_string_view(env, video->source_key);
@@ -3341,7 +3342,8 @@ static void video_occurrence_callback(void *context, const struct NuxVideoInfo *
       (jlong)video->component_id, (jlong)video->asset_id, (jlong)video->generation,
       (jint)video->state, (jboolean)(video->wants_play != 0), (jint)video->audio_policy,
       source, mime, (jboolean)(video->embedded_bytes.len != 0), name,
-      (jint)video->priority, (jint)video->readiness));
+      (jint)video->priority, (jint)video->readiness,
+      (jlong)video->source_artboard_index, (jlong)video->source_component_id));
   if (source != NULL) (*env)->DeleteLocalRef(env, source);
   if (mime != NULL) (*env)->DeleteLocalRef(env, mime);
   if (name != NULL) (*env)->DeleteLocalRef(env, name);
@@ -3353,7 +3355,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoOccurrences(
   (void)self;
   struct video_jni_collector c;
   if (!video_collector_init(&c, env, "ai/nuxie/sdk/runtime/NuxieVideoOccurrence",
-      "(JJJIZILjava/lang/String;Ljava/lang/String;ZLjava/lang/String;II)V")) {
+      "(JJJIZILjava/lang/String;Ljava/lang/String;ZLjava/lang/String;IIJJ)V")) {
     c.failed = 1;
     return video_collector_finish(&c, NUX_STATUS_RUNTIME_ERROR, status_out);
   }
