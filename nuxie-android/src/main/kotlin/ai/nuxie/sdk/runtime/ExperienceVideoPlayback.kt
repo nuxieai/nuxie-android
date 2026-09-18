@@ -15,6 +15,7 @@ internal class ExperienceVideoPlayback(
     private val nanoTime: () -> Long = System::nanoTime,
     private val decoderBudget: (() -> NuxieVideoDecoderBudget)? = null,
     private val decoderPool: ExperienceVideoDecoderPool? = null,
+    private val preferredCaptionLanguages: List<String> = ExperienceVideoCaptionSelection.preferredLanguages(context),
 ) : AutoCloseable {
     private class Entry(val binding: ExperienceVideoAssetBinding) {
         var decoder: AndroidVideoDecoder? = null
@@ -26,7 +27,6 @@ internal class ExperienceVideoPlayback(
         var resourceBlocked = false
         var rate = 1.0
     }
-    private val preferredCaptionLanguages = ExperienceVideoCaptionSelection.preferredLanguages(context)
     private val decoderOwner = UUID.randomUUID()
     @Volatile private var disposalComplete = false
     private var retirementRequested = false
