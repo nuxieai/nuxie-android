@@ -22,6 +22,7 @@ internal data class ExperienceAssetImport(
 
 /** Authored identity and local component slot in this exact signed scene. */
 internal data class ExperienceVideoElement(
+    val sourceArtboardIndex: Long,
     val artboardId: String,
     val viewNodeId: String,
     val renderedNodeId: String,

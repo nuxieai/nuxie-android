@@ -21,20 +21,21 @@ internal object JourneyRenderSchema {
     fun videoElements(render: JsonObject): List<ExperienceVideoElement> {
         val value = render["videoElements"] ?: return emptyList()
         val targets = mutableSetOf<Pair<String, String>>()
-        val slots = mutableSetOf<Pair<String, Long>>()
+        val slots = mutableSetOf<Pair<Long, Long>>()
         return array(value, 4096).map { entry ->
             if (text(render["renderer"]) != "nux") fail("video element requires nux renderer")
-            val element = exact(entry, setOf("artboardId", "viewNodeId", "renderedNodeId", "componentId", "readinessTimeoutSeconds", "optional"))
+            val element = exact(entry, setOf("sourceArtboardIndex", "artboardId", "viewNodeId", "renderedNodeId", "componentId", "readinessTimeoutSeconds", "optional"))
             val artboard = releaseId(element["artboardId"])
             val viewNode = releaseId(element["viewNodeId"])
             val renderedNode = releaseId(element["renderedNodeId"])
+            val sourceArtboard = integer(element["sourceArtboardIndex"], 0, 0xffff_ffffL)
             val component = integer(element["componentId"], 1, 0xffff_ffffL)
             val timeout = number(element["readinessTimeoutSeconds"], 0.0, 60.0)
             val optional = boolean(element["optional"])
-            if (!targets.add(artboard to renderedNode) || !slots.add(artboard to component)) {
+            if (!targets.add(artboard to renderedNode) || !slots.add(sourceArtboard to component)) {
                 fail("duplicate video element target")
             }
-            ExperienceVideoElement(artboard, viewNode, renderedNode, component, timeout, optional)
+            ExperienceVideoElement(sourceArtboard, artboard, viewNode, renderedNode, component, timeout, optional)
         }
     }
 

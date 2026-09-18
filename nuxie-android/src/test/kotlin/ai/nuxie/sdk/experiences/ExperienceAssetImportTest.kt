@@ -116,7 +116,7 @@ class ExperienceAssetImportTest {
                 put("render", buildJsonObject {
                     put("renderer", "nux")
                     put("videoElements", buildJsonArray { add(buildJsonObject {
-                        put("artboardId", "welcome"); put("viewNodeId", "greeting")
+                        put("sourceArtboardIndex", 0); put("artboardId", "welcome"); put("viewNodeId", "greeting")
                         put("renderedNodeId", "greeting-instance"); put("componentId", 7)
                         put("readinessTimeoutSeconds", 2.5); put("optional", false)
                     }) })
@@ -135,7 +135,7 @@ class ExperienceAssetImportTest {
             val catalog = ExpectedFileAsset(0, FileAssetKind.VIDEO, 2, "greeting", "mp4", false, false, 4)
             val binding = ExperienceAssetImportBuilder.build(descriptor(), mapOf(key to file), listOf(catalog))
             assertEquals(emptyMap<Int, ByteArray>(), binding.externalAssets)
-            assertEquals(listOf(ExperienceVideoElement("welcome", "greeting", "greeting-instance", 7, 2.5, false)), binding.videoElements)
+            assertEquals(listOf(ExperienceVideoElement(0, "welcome", "greeting", "greeting-instance", 7, 2.5, false)), binding.videoElements)
             assertEquals(listOf(ExperienceVideoAssetBinding(0, 2, "asset:greeting", file, true, listOf(ExperienceVideoCaptionTrack(2, "en")))), binding.videos)
             for (invalid in listOf(catalog.copy(isEmbedded = true), catalog.copy(authoredId = 3),
                 catalog.copy(requiredProviderFlags = 3), catalog.copy(name = "other"))) {
