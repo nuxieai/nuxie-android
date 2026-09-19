@@ -368,6 +368,17 @@ Without the controller argument this operator test is skipped. Cleartext network
 is enabled only in the instrumentation test manifest; production configuration is
 unchanged. This proves policy-to-device delivery, not invoice aging or Play purchases.
 
+The same test also supports an isolated local invoice fixture. Its `/config`
+sets `localInvoiceFixture: true` and supplies the local AppPlatform's `pk_live_`
+key, because automatic invoice enforcement operates in the live namespace.
+The controller must use an isolated test database and local Worker bindings;
+SDK traffic remains restricted to the forwarded loopback controller. `/policy`
+changes fixture invoice debt and invokes the real automatic reconciler instead
+of setting policy directly. `POST /settle-one` pays one of two overdue invoices;
+`POST /settle-partial` leaves a positive balance on the second. Neither may restore
+delivery. Clearing all overdue debt must restore the same release and native
+presentation. These local invoice records do not represent provider payments.
+
 ### Activity identity
 
 `NuxieActivityInfo.customerId` identifies the customer who produced the durable

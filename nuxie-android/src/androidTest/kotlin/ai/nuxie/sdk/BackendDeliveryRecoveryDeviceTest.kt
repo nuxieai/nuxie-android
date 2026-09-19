@@ -41,7 +41,8 @@ class BackendDeliveryRecoveryDeviceTest {
         }
         val config = Json.parseToJsonElement(control("/config").body.decodeToString()).jsonObject
         val apiKey = config.getValue("apiKey").jsonPrimitive.content
-        require(apiKey.startsWith("pk_test_"))
+        val invoiceFixture = config["localInvoiceFixture"]?.jsonPrimitive?.booleanOrNull == true
+        require(apiKey.startsWith(if (invoiceFixture) "pk_live_" else "pk_test_"))
         val platformId = config.getValue("appPlatformId").jsonPrimitive.content
         val artifactKeys = config.getValue("artifactKeys").jsonArray.map { it.jsonPrimitive.content }.toSet()
         val online = AtomicBoolean(true)
@@ -87,6 +88,7 @@ class BackendDeliveryRecoveryDeviceTest {
             assertEquals(1, snapshot().profile.armedLegs.size)
             val release = snapshot().releasesByDigest.values.single()
             assertEquals(platformId, release.identity.appId)
+            assertEquals(if (invoiceFixture) "live" else "test", release.identity.environment)
             control("/policy", "{\"suspended\":true}")
             online.set(false)
             assertFalse(core.profile.refreshAndWait())
@@ -98,6 +100,15 @@ class BackendDeliveryRecoveryDeviceTest {
             Nuxie.trigger("mar_delivery_recovered")
             core.eventLog.awaitBarrier()
             assertEquals("Suspended delivery must not launch an Experience", 0, monitor.hits)
+            if (invoiceFixture) {
+                control("/settle-one", "{}")
+                assertTrue(core.profile.refreshAndWait())
+                assertTrue("One paid invoice must not restore delivery", snapshot().profile.armedLegs.isEmpty())
+                control("/settle-partial", "{}")
+                assertTrue(core.profile.refreshAndWait())
+                assertTrue("Partial credit must not restore delivery", snapshot().profile.armedLegs.isEmpty())
+                assertEquals(0, monitor.hits)
+            }
             control("/policy", "{\"suspended\":false}")
             assertTrue(core.profile.refreshAndWait())
             assertEquals(1, snapshot().profile.armedLegs.size)
