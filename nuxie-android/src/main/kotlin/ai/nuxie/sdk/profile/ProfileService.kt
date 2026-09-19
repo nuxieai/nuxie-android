@@ -13,9 +13,16 @@ import ai.nuxie.sdk.journey.JourneyProfileConsumer
 import android.content.Context
 import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.io.File
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -91,6 +98,10 @@ internal class ProfileService(
         val featurePurchaseRevision: Long,
         val featureAuthoritativeRevision: Long,
     )
+
+    private var admissionPreparation: Job? = null
+
+    private fun detachPreparationLocked(): Job? = admissionPreparation.also { admissionPreparation = null }
 
     private enum class AuthoritySource { NETWORK, CACHE }
 
@@ -181,8 +192,10 @@ internal class ProfileService(
         if (localeScope == previousLocale) return
 
         val identityScope = identity.captureScope()
+        var obsolete: Job? = null
         val withdrawal = withCurrentScope(identityScope, localeScope) {
             synchronized(lock) {
+                obsolete = detachPreparationLocked()
                 nextProfileGeneration += 1
                 latestAppliedGeneration = nextProfileGeneration
                 if (resident?.distinctId == identityScope.distinctId) resident = null
@@ -190,6 +203,7 @@ internal class ProfileService(
                 identityScope.distinctId to nextProfileGeneration
             }
         } ?: return
+        obsolete?.cancel(CancellationException("Profile locale changed"))
         journeys.profileDidWithdraw(withdrawal.first, withdrawal.second)
     }
 
@@ -361,16 +375,28 @@ internal class ProfileService(
             Log.w(LOG_TAG, "Journey plane profile rejected", it)
             return false
         }
-        val artifacts = runCatching {
-            journeyArtifacts?.prepareJourneys(prepared.snapshot)
-        }.getOrElse {
-            Log.w(LOG_TAG, "Journey profile artifacts unavailable", it)
+        // The caller owns completed results until admission transfers them, including
+        // cancellation between a child completing and its await delivering the result.
+        val artifactResult = AtomicReference<PreparedJourneyArtifacts?>(null)
+        try {
+            prepareArtifacts(prepared.snapshot, admission, artifactResult)
+        } catch (cancelled: CancellationException) {
+            artifactResult.getAndSet(null)?.close()
+            currentCoroutineContext().ensureActive()
+            if (withCurrentScope(admission.identityScope, admission.localeScope) {
+                    synchronized(lock) { admission.generation == nextProfileGeneration }
+                } == true) throw cancelled
+            return false
+        } catch (failure: Throwable) {
+            artifactResult.getAndSet(null)?.close()
+            Log.w(LOG_TAG, "Journey profile artifacts unavailable", failure)
             return false
         }
-        val planePrepared = PreparedPlane(prepared, artifacts)
+        val planePrepared = PreparedPlane(prepared, artifactResult.getAndSet(null))
 
         var featurePublication: FeatureInfo.Mutation? = null
         val admitted = try {
+            currentCoroutineContext().ensureActive()
             withCurrentScope(admission.identityScope, admission.localeScope) {
                 synchronized(lock) {
                     if (admission.generation != nextProfileGeneration ||
@@ -430,17 +456,46 @@ internal class ProfileService(
         return admitted
     }
 
+    private suspend fun prepareArtifacts(
+        snapshot: JourneyProfileCatalog.Snapshot,
+        admission: Admission,
+        result: AtomicReference<PreparedJourneyArtifacts?>,
+    ) = supervisorScope {
+        val manager = journeyArtifacts ?: return@supervisorScope
+        val task = async(start = CoroutineStart.LAZY) {
+            result.set(manager.prepareJourneys(snapshot))
+        }
+        val accepted = withCurrentScope(admission.identityScope, admission.localeScope) {
+            synchronized(lock) {
+                if (admission.generation != nextProfileGeneration || admission.generation < latestAppliedGeneration) false
+                else {
+                    admissionPreparation = task
+                    true
+                }
+            }
+        } == true
+        if (!accepted) task.cancel(CancellationException("Obsolete profile preparation"))
+        try { task.await() }
+        finally {
+            synchronized(lock) {
+                if (admissionPreparation === task) admissionPreparation = null
+            }
+        }
+    }
+
     private fun beginAdmission(expectedDistinctId: String? = null): Admission? {
         val identityScope = identity.captureScope()
         if (expectedDistinctId != null && identityScope.distinctId != expectedDistinctId) return null
         val localeScope = localeSettings.captureScope()
-        return withCurrentScope(identityScope, localeScope) {
+        var obsolete: Job? = null
+        val admission = withCurrentScope(identityScope, localeScope) {
             synchronized(lock) {
                 if (expectedDistinctId != null &&
                     identityScope.distinctId != expectedDistinctId
                 ) {
                     return@synchronized null
                 }
+                obsolete = detachPreparationLocked()
                 nextProfileGeneration += 1
                 Admission(
                     identityScope = identityScope,
@@ -451,6 +506,8 @@ internal class ProfileService(
                 )
             }
         }
+        obsolete?.cancel(CancellationException("Profile admission superseded"))
+        return admission
     }
 
     private fun isAdmissionCurrent(admission: Admission): Boolean =
@@ -468,13 +525,16 @@ internal class ProfileService(
     }
 
     private suspend fun clearCache(distinctId: String) {
+        var obsolete: Job? = null
         val admissionGeneration = synchronized(lock) {
+            obsolete = detachPreparationLocked()
             nextProfileGeneration += 1
             latestAppliedGeneration = nextProfileGeneration
             if (resident?.distinctId == distinctId) resident = null
             fileFor(distinctId).delete()
             nextProfileGeneration
         }
+        obsolete?.cancel(CancellationException("Profile cache cleared"))
         journeyProfiles.clear(distinctId)
         journeys.profileDidClear(distinctId, admissionGeneration)
     }

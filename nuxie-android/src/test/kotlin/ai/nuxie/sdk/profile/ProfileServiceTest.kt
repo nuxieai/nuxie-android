@@ -124,7 +124,8 @@ class ProfileServiceTest {
         fun started(index: Int): CompletableDeferred<Unit> = gates[index].started
     }
 
-    private class RuntimePublicationRecorder : JourneyProfileConsumer {
+    private class RuntimePublicationRecorder(private val retainArtifacts: Boolean = false) : JourneyProfileConsumer {
+        val retained = CopyOnWriteArrayList<PreparedJourneyArtifacts>()
         data class Publication(val kind: String, val generation: Long?)
 
         val publications = CopyOnWriteArrayList<Publication>()
@@ -136,7 +137,7 @@ class ProfileServiceTest {
             admissionGeneration: Long,
             artifacts: PreparedJourneyArtifacts?,
         ) {
-            artifacts?.close()
+            if (retainArtifacts) artifacts?.let(retained::add) else artifacts?.close()
             publications += Publication("commit", admissionGeneration)
         }
 
@@ -169,6 +170,32 @@ class ProfileServiceTest {
             throw IOException("artifact unavailable")
         }
 
+        override fun retainForRun(runKey: String, digests: Set<String>) = Unit
+        override fun releaseRun(runKey: String) = Unit
+        override fun retainedRunDigests(runKey: String): Set<String>? = null
+    }
+
+    private class GatedArtifactManager : JourneyArtifactManager {
+        val calls = AtomicInteger()
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val cancelled = CompletableDeferred<Unit>()
+        val closed = CopyOnWriteArrayList<Int>()
+        override suspend fun prepareJourneys(snapshot: JourneyProfileCatalog.Snapshot): PreparedJourneyArtifacts {
+            val call = calls.incrementAndGet()
+            if (call == 2) {
+                started.complete(Unit)
+                try { release.await() }
+                catch (error: kotlinx.coroutines.CancellationException) {
+                    cancelled.complete(Unit)
+                    // Model a completed acquisition racing cancellation at the return boundary.
+                }
+            }
+            val identity = snapshot.releasesByDigest.values.first().identity
+            return PreparedJourneyArtifacts(mapOf("lease-$call" to ai.nuxie.sdk.experiences.AcquiredJourneyRelease(
+                identity, emptyMap(), File("unused-test-scene"), protection = java.io.Closeable { closed += call },
+            )))
+        }
         override fun retainForRun(runKey: String, digests: Set<String>) = Unit
         override fun releaseRun(runKey: String) = Unit
         override fun retainedRunDigests(runKey: String): Set<String>? = null
@@ -223,6 +250,8 @@ class ProfileServiceTest {
         )
 
         fun hasDiskProfile(): Boolean = profileFile.exists()
+
+        suspend fun cancelScope() { scope.coroutineContext[Job]?.cancelAndJoin() }
 
         suspend fun close(deleteDisk: Boolean = true) {
             service.close()
@@ -435,6 +464,64 @@ class ProfileServiceTest {
         assertEquals("\"plane-v1\"", profileRequests.single { "If-None-Match" in it.headers }
             .headers["If-None-Match"])
         core.stop()
+    }
+
+    @Test fun localeChangeCancelsObsoletePreparationAndPreservesCommittedLease() = runBlocking {
+        verifyPreparationCancellation("locale") { fixture -> fixture.service.setLocaleIdentifier("fr_FR") }
+    }
+
+    @Test fun resetCancelsObsoletePreparationWithoutStoppingProfileWorker() = runBlocking {
+        verifyPreparationCancellation("reset") { fixture ->
+            val next = fixture.distinctId + "-reset"
+            fixture.identity.setDistinctId(next)
+            fixture.service.transitionObserver.handleUserChange(UserTransitionCoordinator.Kind.RESET, fixture.distinctId, next)
+        }
+    }
+
+    @Test fun identityAdmissionCancelsOlderArtifactPreparation() = runBlocking {
+        verifyPreparationCancellation("identity") { fixture ->
+            val next = fixture.distinctId + "-identified"
+            fixture.identity.setDistinctId(next)
+            fixture.service.transitionObserver.handleUserChange(UserTransitionCoordinator.Kind.IDENTIFY, fixture.distinctId, next)
+        }
+    }
+
+    @Test fun parentCancellationClosesUndeliveredPreparationLease() = runBlocking {
+        verifyPreparationCancellation("parent", cancelParent = true) { it.cancelScope() }
+    }
+
+    private suspend fun verifyPreparationCancellation(name: String, cancelParent: Boolean = false,
+        invalidate: suspend (ProfileFixture) -> Unit) = kotlinx.coroutines.coroutineScope {
+        val plane = planeProfileFixture()
+        val manager = GatedArtifactManager()
+        val runtime = RuntimePublicationRecorder(retainArtifacts = true)
+        val fixture = ProfileFixture(
+            transport = FakeTransport().apply { respond = { canonicalProfileResponse(plane.first, "\"cancel-$name\"") } },
+            distinctId = "cancel-preparation-$name", localeIdentifier = "en_US", apiKey = "pk_cancel_preparation_$name",
+            journeyProfiles = JourneyProfileCatalog(
+                trustedKeys = JourneyTrustRoots.keys(NuxieEnvironment.DEVELOPMENT),
+                highWater = JourneyReleaseHighWaterStore(RuntimeEnvironment.getApplication()), supportedRuntime = { plane.second },
+            ), journeyRuntime = runtime, journeyArtifacts = manager,
+        )
+        try {
+            assertTrue(fixture.service.refreshAndWait())
+            val pending = async(Dispatchers.Default) { fixture.service.refreshAndWait() }
+            withTimeout(5_000) { manager.started.await() }
+            invalidate(fixture)
+            withTimeout(1_000) { manager.cancelled.await() }
+            assertFalse(withTimeout(5_000) { pending.await() })
+            assertEquals("Cancellation closes only the untransferred acquisition", listOf(2), manager.closed.toList())
+            assertEquals(1, runtime.publications.count { it.kind == "commit" })
+            if (!cancelParent) {
+                assertTrue("The serial profile worker must remain usable", withTimeout(5_000) { fixture.service.refreshAndWait() })
+                assertEquals(2, runtime.publications.count { it.kind == "commit" })
+                assertEquals(listOf(2), manager.closed.toList())
+            }
+        } finally {
+            manager.release.complete(Unit)
+            fixture.close()
+            runtime.retained.forEach(PreparedJourneyArtifacts::close)
+        }
     }
 
     @Test
