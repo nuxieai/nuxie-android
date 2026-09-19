@@ -350,6 +350,24 @@ release then renders the Experience; a real touch must commit its compiled contr
 event and Journey response. This also uses controlled HTTP responses, not backend
 invoice enforcement.
 
+To exercise a real local backend policy, use the opt-in
+`ai.nuxie.sdk.BackendDeliveryRecoveryDeviceTest` instrumentation class and pass
+`-Pandroid.testInstrumentationRunnerArguments.nuxie_delivery_probe_url=http://127.0.0.1:<forwarded-port>/<run-token>`.
+Forward that loopback port with `adb reverse`. The controller contract is:
+
+- `GET /config`: test `apiKey`, `appPlatformId`, and allowed `artifactKeys`.
+- `POST /policy` with `{ "suspended": boolean }`: publish the real test delivery policy.
+- `POST /profile`: forward the SDK request and conditional headers to the backend.
+- `GET /<artifact-key>`: serve hash-verified published release bytes and content type.
+
+The test checks active → offline retained → online empty → restored delivery,
+then triggers `mar_delivery_recovered` and requires native Experience presentation.
+It restores delivery in cleanup and retains SDK telemetry locally. The controller
+must also restore policy and remove its ADB forward if instrumentation fails.
+Without the controller argument this operator test is skipped. Cleartext networking
+is enabled only in the instrumentation test manifest; production configuration is
+unchanged. This proves policy-to-device delivery, not invoice aging or Play purchases.
+
 ### Activity identity
 
 `NuxieActivityInfo.customerId` identifies the customer who produced the durable
