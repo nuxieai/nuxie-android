@@ -330,6 +330,19 @@ instrumentation method is opt-in and skips in an ordinary suite; its seed phase
 must be terminated by this driver. These cases use controlled HTTP and real
 native rendering/storage. They do not qualify death during store checkout,
 OS task restoration, or a live server release.
+
+To qualify delivery-cache withdrawal and recovery on a connected device:
+
+```sh
+ANDROID_SERIAL=emulator-5558 ./gradlew :nuxie-android:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=ai.nuxie.sdk.NuxiePublicStartupDeviceTest#emptyDeliverySurvivesOfflineReconstructionAndRestoresTheSameRelease
+```
+
+This uses controlled HTTP responses with the real SDK, signed release, disk
+cache and publication replay store. Failed refreshes retain the last received
+delivery. A successful empty profile removes its arms and releases, remains empty
+after SDK reconstruction while offline, and accepts the same signed release on
+recovery without clearing replay protection. It does not kill the Android process,
+render a screen, or exercise a backend billing policy.
 ### Activity identity
 
 `NuxieActivityInfo.customerId` identifies the customer who produced the durable
