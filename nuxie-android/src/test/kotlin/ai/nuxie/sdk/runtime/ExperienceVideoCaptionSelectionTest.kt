@@ -24,3 +24,26 @@ class ExperienceVideoCaptionSelectionTest {
         }
     }
 }
+
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
+class ExperienceVideoCaptionPreferencesTest {
+    @Test fun systemLocaleChangesPublishPreferencesUntilClosed() {
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val changes = mutableListOf<List<String>>()
+        val preferences = ExperienceVideoCaptionPreferences(context) { changes += it }
+        fun select(value: String) {
+            android.provider.Settings.Secure.putString(context.contentResolver, "accessibility_captioning_locale", value)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        }
+        try {
+            select("fr_CA")
+            assertEquals("fr-CA", changes.last().first())
+            select("en_US")
+            assertEquals("en-US", changes.last().first())
+            preferences.close()
+            val count = changes.size
+            select("de_DE")
+            assertEquals(count, changes.size)
+        } finally { preferences.close() }
+    }
+}

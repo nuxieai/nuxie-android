@@ -397,6 +397,21 @@ class ConfiguredImportSmokeTest {
                             playback.apply(command("pause"))
                             playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
                             assertEquals(false, player.videos().single().wantsPlay)
+                            if (frenchCaptions) {
+                                val before = player.videos().single()
+                                val decoderCount = playback.activeDecoderCount
+                                playback.refreshCaptionLanguages(listOf("en"))
+                                val english = player.videoCaption(initial.componentId)
+                                assertEquals("eng", english.language)
+                                assertTrue(english.text in listOf("Hello 👋", "Welcome"))
+                                assertEquals(before, player.videos().single())
+                                assertEquals(decoderCount, playback.activeDecoderCount)
+                                playback.refreshCaptionLanguages(listOf("fr"))
+                                val french = player.videoCaption(initial.componentId)
+                                assertEquals("fra", french.language)
+                                assertTrue(french.text in listOf("Bonjour 👋", "Bienvenue"))
+                                assertEquals(before, player.videos().single())
+                            }
                             val beforeRetirement = player.videos().single().generation
                             slots = 0
                             playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)

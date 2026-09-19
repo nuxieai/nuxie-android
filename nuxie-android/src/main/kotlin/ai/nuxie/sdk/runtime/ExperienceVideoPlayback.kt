@@ -15,7 +15,7 @@ internal class ExperienceVideoPlayback(
     private val nanoTime: () -> Long = System::nanoTime,
     private val decoderBudget: (() -> NuxieVideoDecoderBudget)? = null,
     private val decoderPool: ExperienceVideoDecoderPool? = null,
-    private val preferredCaptionLanguages: List<String> = ExperienceVideoCaptionSelection.preferredLanguages(context),
+    preferredCaptionLanguages: List<String>? = null,
     initialViewport: VideoViewport,
 ) : AutoCloseable {
     private class Entry(val binding: ExperienceVideoAssetBinding) {
@@ -28,6 +28,9 @@ internal class ExperienceVideoPlayback(
         var retiredForVisibility = false
         var rate = 1.0
     }
+    private var captionLanguages = preferredCaptionLanguages ?: ExperienceVideoCaptionSelection.preferredLanguages(context)
+    private val pendingCaptionLanguages = java.util.concurrent.atomic.AtomicReference<List<String>?>(null)
+    private var captionPreferences: ExperienceVideoCaptionPreferences? = null
     private var viewport = initialViewport
     private var visibleOccurrences = emptySet<Long>()
     private val decoderOwner = UUID.randomUUID()
@@ -119,6 +122,9 @@ internal class ExperienceVideoPlayback(
     init {
         require(decoderBudget == null || decoderPool == null) { "Video playback requires a single budget owner" }
         reconcile(player.videos())
+        if (preferredCaptionLanguages == null) {
+            captionPreferences = ExperienceVideoCaptionPreferences(context) { pendingCaptionLanguages.set(it) }
+        }
     }
 
     private fun retire(componentId: Long, entry: Entry) {
@@ -265,22 +271,35 @@ internal class ExperienceVideoPlayback(
         return player.videos()
     }
 
+    private fun applyCaptions(componentId: Long, entry: Entry) {
+        val file = entry.binding.file ?: return
+        val tracks = entry.binding.captionTracks
+        val index = ExperienceVideoCaptionSelection.index(tracks.map { it.language }, captionLanguages) ?: return
+        val track = tracks[index]
+        val cues = captions.getOrPut(file.absolutePath to track.streamIndex) {
+            ExperienceVideoCaptions.read(file, track.streamIndex)
+        }
+        player.videoSetCaptions(componentId, track.language.orEmpty(), cues)
+    }
+
+    internal fun refreshCaptionLanguages(languages: List<String>) {
+        if (closed || languages == captionLanguages) return
+        captionLanguages = languages.toList()
+        val live = player.videos().map { it.componentId }.toSet()
+        for ((id, entry) in entries) if (id in live && entry.decoder != null && !entry.failed) applyCaptions(id, entry)
+    }
+
     /** Called after the scene step and before drawing, never while a native frame is submitted. */
     fun advance(renderer: NuxieAndroidVulkanRenderer, monotonicSeconds: Double) {
         check(!closed)
-        for (video in admit(restoreVisibleDecoders(reconcile(player.videos())))) {
+        val live = reconcile(player.videos())
+        pendingCaptionLanguages.getAndSet(null)?.let(::refreshCaptionLanguages)
+        for (video in admit(restoreVisibleDecoders(live))) {
             val entry = checkNotNull(entries[video.componentId])
             if (entry.failed) continue
             if (entry.decoder == null && !hidden && !entry.resourceBlocked) {
                 entry.decoder = entry.binding.file?.let { file ->
-                    val tracks = entry.binding.captionTracks
-                    ExperienceVideoCaptionSelection.index(tracks.map { it.language }, preferredCaptionLanguages)
-                        ?.let { tracks[it] }?.let { track ->
-                        val cues = captions.getOrPut(file.absolutePath to track.streamIndex) {
-                            ExperienceVideoCaptions.read(file, track.streamIndex)
-                        }
-                        player.videoSetCaptions(video.componentId, track.language.orEmpty(), cues)
-                    }
+                    applyCaptions(video.componentId, entry)
                     AndroidVideoDecoder(context, file, video.generation, 64 * 1024 * 1024, video.audioPolicy)
                 }
             }
@@ -342,6 +361,9 @@ internal class ExperienceVideoPlayback(
         check(!retirementRequested) { "Video retirement already requested" }
         retirementRequested = true
         closed = true
+        captionPreferences?.close()
+        captionPreferences = null
+        pendingCaptionLanguages.set(null)
         val remaining = java.util.concurrent.atomic.AtomicInteger(entries.size + 1)
         fun released() {
             if (remaining.decrementAndGet() == 0) {
@@ -376,6 +398,9 @@ internal class ExperienceVideoPlayback(
         if (disposalComplete) return
         check(!retirementRequested) { "Asynchronous video retirement is still pending" }
         closed = true
+        captionPreferences?.close()
+        captionPreferences = null
+        pendingCaptionLanguages.set(null)
         admissions.clear()
         var failure: Throwable? = null
         for ((id, entry) in entries.toMap()) {

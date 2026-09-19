@@ -57,3 +57,30 @@ internal object ExperienceVideoCaptionSelection {
         return 0
     }
 }
+
+/** OS callbacks publish preferences only; runtime calls stay on the owning lane. */
+internal class ExperienceVideoCaptionPreferences(context: Context, private val changed: (List<String>) -> Unit) : AutoCloseable {
+    private val context = context.applicationContext
+    private val active = java.util.concurrent.atomic.AtomicBoolean(true)
+    private val manager = this.context.getSystemService(Context.CAPTIONING_SERVICE) as? CaptioningManager
+    private val listener = object : CaptioningManager.CaptioningChangeListener() {
+        override fun onLocaleChanged(locale: Locale?) = publish()
+    }
+    private val configuration = object : android.content.ComponentCallbacks {
+        override fun onConfigurationChanged(newConfig: android.content.res.Configuration) = publish()
+        override fun onLowMemory() = Unit
+    }
+    init {
+        manager?.addCaptioningChangeListener(listener)
+        this.context.registerComponentCallbacks(configuration)
+        publish()
+    }
+    private fun publish() {
+        if (active.get()) changed(ExperienceVideoCaptionSelection.preferredLanguages(context))
+    }
+    override fun close() {
+        if (!active.getAndSet(false)) return
+        manager?.removeCaptioningChangeListener(listener)
+        context.unregisterComponentCallbacks(configuration)
+    }
+}
