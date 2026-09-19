@@ -40,7 +40,7 @@ class HostRenderHarnessTest {
     fun `nux declaration cannot silently load a riv field`() {
         val input = prepareInput()
         val descriptor = File(input, "release-descriptor.json")
-        descriptor.writeText(descriptor.readText().replace("\"renderer\":\"rive\"", "\"renderer\":\"nux\""))
+        descriptor.writeText(descriptor.readText().replace("\"nux\":", "\"riv\":"))
         val output = Files.createTempDirectory("host-render-mismatch-").toFile()
         val native = RecordingNative()
         try {
@@ -114,13 +114,13 @@ class HostRenderHarnessTest {
         }
     }
 
-    private fun prepareInput(declaredDefault: Boolean = false, renderer: String = "rive"): File {
+    private fun prepareInput(declaredDefault: Boolean = false, renderer: String = "nux"): File {
         val input = Files.createTempDirectory("host-render-input-").toFile()
         File(input, "assets/hero.png").apply {
             requireNotNull(parentFile).mkdirs()
             writeBytes(byteArrayOf(1, 2, 3, 4))
         }
-        val extension = if (renderer == "nux") "nux" else "riv"
+        val extension = "nux"
         File(input, "scene.$extension").writeBytes(byteArrayOf(82, 73, 86, 69))
         val defaultDeclaration = if (declaredDefault) ",\"defaultViewModelName\":\"Root\"" else ""
         File(input, "release-descriptor.json").writeText(
@@ -131,8 +131,8 @@ class HostRenderHarnessTest {
                 "renderer":"$renderer",
                 "$extension":{"key":"scene.$extension"},
                 "assets":[{
-                  "kind":"image","key":"assets/hero.png","riveAssetId":7,
-                  "riveUniqueName":"hero-7","required":true
+                  "kind":"image","key":"assets/hero.png","authoredAssetId":7,
+                  "assetUniqueName":"hero-7","required":true
                 }],
                 "screens":[{"id":"main","artboardName":"Main","width":4,"height":2}]
               },

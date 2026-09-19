@@ -71,7 +71,7 @@ internal object ExperienceAssetImportBuilder {
         inputs?.forEach { value ->
             val style = (value as? JsonObject)?.get("style") as? JsonObject
                 ?: error("Experience text input style is missing")
-            val system = systemFonts[style.string("fontAssetRiveUniqueName")]
+            val system = systemFonts[style.string("fontAssetUniqueName")]
             require(if (system != null) {
                 style.string("fontFamily") == "System" &&
                     style.string("fontWeight") == system.weight.toString() &&
@@ -151,10 +151,10 @@ internal object ExperienceAssetImportBuilder {
             }
             Declaration(
                 kind = kind,
-                authoredId = asset.long("riveAssetId")
+                authoredId = asset.long("authoredAssetId")
                     ?.takeIf { it in 0..UINT32_MAX }
                     ?: error("Journey release asset $index has an invalid authored id"),
-                uniqueName = asset.string("riveUniqueName")
+                uniqueName = asset.string("assetUniqueName")
                     ?.takeIf(String::isNotBlank)
                     ?: error("Journey release asset $index has no unique name"),
                 source = if (kind == FileAssetKind.FONT && asset.string("location") == "system") {
@@ -163,7 +163,7 @@ internal object ExperienceAssetImportBuilder {
                     require(weight in (100..900 step 100).map(Int::toString))
                     require((asset["required"] as? JsonPrimitive)?.booleanOrNull == true)
                     Source.System(SystemFontRequirement(
-                        uniqueName = asset.string("riveUniqueName")!!,
+                        uniqueName = asset.string("assetUniqueName")!!,
                         weight = weight!!.toInt(),
                         style = "normal",
                     ))
@@ -207,7 +207,7 @@ internal object ExperienceAssetImportBuilder {
             Triple(kind, authoredId, uniqueName)
 
         fun matches(asset: ExpectedFileAsset): Boolean {
-            // The declaration identity is the Rive-uniquified "name-authoredId";
+            // The declaration identity is the runtime-uniquified "name-authoredId";
             // the iOS binding accepts exactly that form and nothing looser.
             // Production declarations are always external on the wire, so a
             // declaration can bind only a non-embedded catalog descriptor.

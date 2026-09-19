@@ -2417,7 +2417,7 @@ class PublishedTextInputDeviceTest {
         val failureCheckpointResponses = AtomicReference<JsonObject?>()
         val responsesBeforeNavigation = AtomicReference<JsonObject?>()
         val downloaded = java.util.concurrent.CopyOnWriteArrayList<String>()
-        val renderKey = fixture.release.descriptor.getValue("render").jsonObject.getValue("riv").jsonObject.getValue("key").jsonPrimitive.content
+        val renderKey = fixture.release.descriptor.getValue("render").jsonObject.getValue("nux").jsonObject.getValue("key").jsonPrimitive.content
         val artifactFiles = fixture.assets + (renderKey to fixture.riv)
         val artifactAcquirer = ai.nuxie.sdk.experiences.JourneyReleaseArtifactAcquirer(
             ai.nuxie.sdk.experiences.JourneyReleaseArtifactCache(context,
@@ -3314,12 +3314,12 @@ class PublishedTextInputDeviceTest {
             return key to file
         }
         val render = release.descriptor.getValue("render").jsonObject
-        val riv = stage(render.getValue("riv").jsonObject).second
+        val riv = stage(render.getValue("nux").jsonObject).second
         val scripts = (release.descriptor["screenBehaviors"] as? JsonArray).orEmpty().mapNotNull {
             (it.jsonObject["script"] as? JsonObject)?.get("artifact")?.jsonObject
         }
         val assets = (render.getValue("assets").jsonArray.map { it.jsonObject } + scripts).associate { stage(it) }
-        val references = render.getValue("assets").jsonArray.map { it.jsonObject } + scripts + render.getValue("riv").jsonObject
+        val references = render.getValue("assets").jsonArray.map { it.jsonObject } + scripts + render.getValue("nux").jsonObject
         val contentTypes = references.associate { it.getValue("key").jsonPrimitive.content to it.getValue("contentType").jsonPrimitive.content }
         return PublishedFixture(release, riv, assets, entry, trustedKeys, contentTypes)
     }

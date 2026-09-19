@@ -84,7 +84,7 @@ internal data class ExperienceTextInput(
                 val style = input.getValue("style") as JsonObject
                 ExperienceTextInput(
                     id = input.text("id"),
-                    runName = input.text("riveTextRunName"),
+                    runName = input.text("textRunName"),
                     value = input.text("value"),
                     responseField = input.optionalText("responseFieldKey"),
                     responseCapture = when (input.optionalText("responseCapture")) {
@@ -107,7 +107,7 @@ internal data class ExperienceTextInput(
                         lineHeight = style.primitive("lineHeight").float,
                         letterSpacing = style.primitive("letterSpacing").float,
                         color = style.primitive("color").long.toInt(),
-                        fontAssetName = style.text("fontAssetRiveUniqueName"),
+                        fontAssetName = style.text("fontAssetUniqueName"),
                         textAlign = style.optionalText("textAlign"),
                     ),
                 )

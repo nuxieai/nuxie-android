@@ -46,16 +46,16 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun systemFontsCreateNoDownloadOrCacheObjectsIncludingOfflineReload() = runTest {
-        val rivBytes = "system-font-scene".encodeToByteArray()
-        val riv = artifact("renders/sha256/${sha256(rivBytes)}.riv", rivBytes, "application/vnd.rive")
+        val sceneBytes = "system-font-scene".encodeToByteArray()
+        val riv = artifact("renders/sha256/${sha256(sceneBytes)}.nux", sceneBytes, "application/vnd.nuxie.scene")
         val system = buildJsonObject {
             put("kind", JsonPrimitive("font"))
             put("location", JsonPrimitive("system"))
             put("family", JsonPrimitive("System"))
             put("weight", JsonPrimitive("400"))
             put("style", JsonPrimitive("normal"))
-            put("riveAssetId", JsonPrimitive(1))
-            put("riveUniqueName", JsonPrimitive("native-1"))
+            put("authoredAssetId", JsonPrimitive(1))
+            put("assetUniqueName", JsonPrimitive("native-1"))
             put("required", JsonPrimitive(true))
         }
         val directory = temporaryFolder.newFolder("system-font-cache")
@@ -67,16 +67,16 @@ class JourneyReleaseArtifactAcquirerTest {
                 check(!offline) { "Offline acquisition attempted a download" }
                 requests += 1
                 assertTrue(request.url.toString().endsWith(riv.getValue("key").jsonPrimitive.content))
-                HttpTransport.Response(200, rivBytes, mapOf("Content-Type" to "application/vnd.rive"))
+                HttpTransport.Response(200, sceneBytes, mapOf("Content-Type" to "application/vnd.nuxie.scene"))
             },
         ))
         val declaration = release(riv, assets = listOf(system))
         acquirer(false).acquire(declaration, delivery()).use { acquired ->
             assertEquals(setOf(riv.getValue("key").jsonPrimitive.content), acquired.artifactsByKey.keys)
-            assertEquals(setOf(sha256(rivBytes)), acquired.artifactDigests)
+            assertEquals(setOf(sha256(sceneBytes)), acquired.artifactDigests)
         }
         acquirer(true).acquire(declaration, delivery()).use { acquired ->
-            assertArrayEquals(rivBytes, acquired.sceneFile.readBytes())
+            assertArrayEquals(sceneBytes, acquired.sceneFile.readBytes())
             assertEquals(1, acquired.artifactsByKey.size)
         }
         assertEquals(1, requests)
@@ -196,9 +196,9 @@ class JourneyReleaseArtifactAcquirerTest {
         }, maxTotalBytes = 0, cacheDirectory = directory)
         val acquirer = JourneyReleaseArtifactAcquirer(cache)
         val firstBinding = JsonObject(video + mapOf("sourceAssetKey" to JsonPrimitive("asset:first"),
-            "riveAssetId" to JsonPrimitive(1), "riveUniqueName" to JsonPrimitive("first"), "required" to JsonPrimitive(false)))
+            "authoredAssetId" to JsonPrimitive(1), "assetUniqueName" to JsonPrimitive("first"), "required" to JsonPrimitive(false)))
         val secondBinding = JsonObject(video + mapOf("sourceAssetKey" to JsonPrimitive("asset:second"),
-            "riveAssetId" to JsonPrimitive(2), "riveUniqueName" to JsonPrimitive("second")))
+            "authoredAssetId" to JsonPrimitive(2), "assetUniqueName" to JsonPrimitive("second")))
         val release = release(scene, assets = listOf(firstBinding, secondBinding), renderer = "nux")
         val first = acquirer.acquire(release, delivery())
         try {
@@ -239,11 +239,11 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun successfulDownloadPublishesVerifiedFilesAndCacheHitSkipsRequest() = runTest {
-        val rivBytes = "verified-riv".encodeToByteArray()
+        val sceneBytes = "verified-riv".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         var requestCount = 0
         val transport = HttpTransport { request ->
@@ -251,8 +251,8 @@ class JourneyReleaseArtifactAcquirerTest {
             assertEquals("GET", request.method)
             HttpTransport.Response(
                 statusCode = 200,
-                body = rivBytes,
-                headers = mapOf("Content-Type" to "application/vnd.rive"),
+                body = sceneBytes,
+                headers = mapOf("Content-Type" to "application/vnd.nuxie.scene"),
             )
         }
         val cache = JourneyReleaseArtifactCache(
@@ -271,9 +271,9 @@ class JourneyReleaseArtifactAcquirerTest {
                 first.sceneFile,
                 first.artifactsByKey.getValue(riv.getValue("key").jsonPrimitive.content),
             )
-            assertArrayEquals(rivBytes, first.sceneFile.readBytes())
+            assertArrayEquals(sceneBytes, first.sceneFile.readBytes())
             assertEquals(first.sceneFile, second.sceneFile)
-            assertEquals(setOf(sha256(rivBytes)), first.artifactDigests)
+            assertEquals(setOf(sha256(sceneBytes)), first.artifactDigests)
             acquirer.retainForRun("journey-run", first.artifactDigests)
             assertEquals(first.artifactDigests, acquirer.retainedRunDigests("journey-run"))
             assertTrue(first.sceneFile.delete())
@@ -287,11 +287,11 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun sameAcquirerRepairsCorruptCachedObjectWithVerifiedBytes() = runTest {
-        val rivBytes = "repairable-riv".encodeToByteArray()
+        val sceneBytes = "repairable-riv".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         var requestCount = 0
         val cache = JourneyReleaseArtifactCache(
@@ -300,8 +300,8 @@ class JourneyReleaseArtifactAcquirerTest {
                 requestCount += 1
                 HttpTransport.Response(
                     statusCode = 200,
-                    body = rivBytes,
-                    headers = mapOf("Content-Type" to "application/vnd.rive"),
+                    body = sceneBytes,
+                    headers = mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                 )
             },
             cacheDirectory = temporaryFolder.newFolder("repair-corrupt-cache"),
@@ -310,11 +310,11 @@ class JourneyReleaseArtifactAcquirerTest {
         val cachedFile = acquirer.acquire(release(riv), delivery()).use { acquired ->
             acquired.sceneFile
         }
-        cachedFile.writeBytes(ByteArray(rivBytes.size) { 0x7f })
+        cachedFile.writeBytes(ByteArray(sceneBytes.size) { 0x7f })
 
         acquirer.acquire(release(riv), delivery()).use { repaired ->
             assertEquals(2, requestCount)
-            assertArrayEquals(rivBytes, repaired.sceneFile.readBytes())
+            assertArrayEquals(sceneBytes, repaired.sceneFile.readBytes())
         }
     }
 
@@ -323,9 +323,9 @@ class JourneyReleaseArtifactAcquirerTest {
         val received = "corrupt-riv".encodeToByteArray()
         val expected = "expected-riv".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(expected)}.riv",
+            key = "renders/sha256/${sha256(expected)}.nux",
             bytes = received,
-            contentType = "application/vnd.rive",
+            contentType = "application/vnd.nuxie.scene",
             declaredSha256 = sha256(expected),
         )
         val cacheDirectory = temporaryFolder.newFolder("digest-mismatch")
@@ -335,7 +335,7 @@ class JourneyReleaseArtifactAcquirerTest {
                 HttpTransport.Response(
                     200,
                     received,
-                    mapOf("Content-Type" to "application/vnd.rive"),
+                    mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                 )
             },
             cacheDirectory = cacheDirectory,
@@ -358,9 +358,9 @@ class JourneyReleaseArtifactAcquirerTest {
         val declared = "four".encodeToByteArray()
         val body = "four-and-more".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(declared)}.riv",
+            key = "renders/sha256/${sha256(declared)}.nux",
             bytes = declared,
-            contentType = "application/vnd.rive",
+            contentType = "application/vnd.nuxie.scene",
         )
         val tracking = TrackingInputStream(body)
         val transport = object : HttpTransport {
@@ -370,7 +370,7 @@ class JourneyReleaseArtifactAcquirerTest {
             override fun open(request: HttpTransport.Request) = HttpTransport.StreamingResponse(
                 statusCode = 200,
                 body = tracking,
-                headers = mapOf("Content-Type" to "application/vnd.rive"),
+                headers = mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                 finalUrl = request.url,
             )
         }
@@ -393,19 +393,19 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun oversizedRivDeclarationIsRejectedBeforeDownload() = runTest {
-        val rivBytes = "oversized-riv".encodeToByteArray()
+        val sceneBytes = "oversized-riv".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
-            declaredSizeBytes = JourneyReleaseLimits.RIV_ARTIFACT_BYTES + 1,
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
+            declaredSizeBytes = JourneyReleaseLimits.SCENE_ARTIFACT_BYTES + 1,
         )
         var requestCount = 0
         val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 requestCount += 1
-                HttpTransport.Response(200, rivBytes)
+                HttpTransport.Response(200, sceneBytes)
             },
             cacheDirectory = temporaryFolder.newFolder("oversized-riv"),
         )
@@ -420,12 +420,12 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun oversizedExternalAssetDeclarationIsRejectedBeforeDownload() = runTest {
-        val rivBytes = "asset-limit-riv".encodeToByteArray()
+        val sceneBytes = "asset-limit-riv".encodeToByteArray()
         val assetBytes = "oversized-asset".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val asset = artifact(
             key = "assets/sha256/${sha256(assetBytes)}.png",
@@ -458,12 +458,12 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun scriptAboveExternalAssetCeilingIsRejectedBeforeDownload() = runTest {
-        val rivBytes = "script-limit-riv".encodeToByteArray()
+        val sceneBytes = "script-limit-riv".encodeToByteArray()
         val scriptBytes = "oversized-script".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val script = artifact(
             key = "screen-behavior/sha256/${sha256(scriptBytes)}.bin",
@@ -494,13 +494,13 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun scriptsHaveTheCorrectedSixteenMiBAggregateCeiling() = runTest {
-        val rivBytes = "script-aggregate-riv".encodeToByteArray()
+        val sceneBytes = "script-aggregate-riv".encodeToByteArray()
         val firstBytes = "script-aggregate-one".encodeToByteArray()
         val secondBytes = "script-aggregate-two".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val scripts = listOf(firstBytes, secondBytes).map { bytes ->
             artifact(
@@ -530,12 +530,12 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun scriptAboveFourMiBPassesPerArtifactValidation() = runTest {
-        val rivBytes = "corrected-script-limit-riv".encodeToByteArray()
+        val sceneBytes = "corrected-script-limit-riv".encodeToByteArray()
         val scriptBytes = "corrected-script-limit".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val script = artifact(
             key = "screen-behavior/sha256/${sha256(scriptBytes)}.bin",
@@ -551,8 +551,8 @@ class JourneyReleaseArtifactAcquirerTest {
                 if (request.url.path.startsWith("/renders/")) {
                     HttpTransport.Response(
                         200,
-                        rivBytes,
-                        mapOf("Content-Type" to "application/vnd.rive"),
+                        sceneBytes,
+                        mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                     )
                 } else {
                     HttpTransport.Response(
@@ -579,14 +579,14 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun aggregateArtifactCeilingIsRejectedBeforeDownload() = runTest {
-        val rivBytes = "aggregate-riv".encodeToByteArray()
+        val sceneBytes = "aggregate-riv".encodeToByteArray()
         val assetBytes = listOf("aggregate-a", "aggregate-b", "aggregate-c")
             .map(String::encodeToByteArray)
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
-            declaredSizeBytes = JourneyReleaseLimits.RIV_ARTIFACT_BYTES,
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
+            declaredSizeBytes = JourneyReleaseLimits.SCENE_ARTIFACT_BYTES,
         )
         val assets = assetBytes.mapIndexed { index, bytes ->
             artifact(
@@ -621,11 +621,11 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun nonSuccessStatusIsTypedAndNamesTheArtifact() = runTest {
-        val rivBytes = "status-riv".encodeToByteArray()
+        val sceneBytes = "status-riv".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
@@ -643,11 +643,11 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun offOriginRedirectIsRejectedWithoutFollowingIt() = runTest {
-        val rivBytes = "redirect-riv".encodeToByteArray()
+        val sceneBytes = "redirect-riv".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val requested = mutableListOf<URL>()
         val cache = JourneyReleaseArtifactCache(
@@ -657,7 +657,7 @@ class JourneyReleaseArtifactAcquirerTest {
                 HttpTransport.Response(
                     302,
                     ByteArray(0),
-                    mapOf("Location" to "https://evil.example/artifact.riv"),
+                    mapOf("Location" to "https://evil.example/artifact.nux"),
                 )
             },
             cacheDirectory = temporaryFolder.newFolder("redirect"),
@@ -671,23 +671,23 @@ class JourneyReleaseArtifactAcquirerTest {
             JourneyReleaseArtifactAcquisitionException.Reason.REDIRECT_ESCAPED_ORIGIN,
             failure.reason,
         )
-        assertEquals(listOf(URL("https://cdn.nuxie.test/renders/sha256/${sha256(rivBytes)}.riv")), requested)
+        assertEquals(listOf(URL("https://cdn.nuxie.test/renders/sha256/${sha256(sceneBytes)}.nux")), requested)
     }
 
     @Test
     fun contradictoryContentTypeIsRejected() = runTest {
-        val rivBytes = "content-type-riv".encodeToByteArray()
+        val sceneBytes = "content-type-riv".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val cache = JourneyReleaseArtifactCache(
             RuntimeEnvironment.getApplication(),
             HttpTransport {
                 HttpTransport.Response(
                     200,
-                    rivBytes,
+                    sceneBytes,
                     mapOf("Content-Type" to "text/html; charset=utf-8"),
                 )
             },
@@ -706,12 +706,12 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun screenBehaviorScriptIsAcquiredAsARequiredInput() = runTest {
-        val rivBytes = "scripted-riv".encodeToByteArray()
+        val sceneBytes = "scripted-riv".encodeToByteArray()
         val scriptBytes = "script-bytecode".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val script = artifact(
             key = "screen-behavior/sha256/${sha256(scriptBytes)}.bin",
@@ -724,10 +724,10 @@ class JourneyReleaseArtifactAcquirerTest {
             HttpTransport { request ->
                 requested += request.url
                 when (request.url.path) {
-                    "/renders/sha256/${sha256(rivBytes)}.riv" -> HttpTransport.Response(
+                    "/renders/sha256/${sha256(sceneBytes)}.nux" -> HttpTransport.Response(
                         200,
-                        rivBytes,
-                        mapOf("Content-Type" to "application/vnd.rive"),
+                        sceneBytes,
+                        mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                     )
                     "/assets/screen-behavior/sha256/${sha256(scriptBytes)}.bin" ->
                         HttpTransport.Response(
@@ -756,12 +756,12 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun screenBehaviorScriptServerFailureIsFatal() = runTest {
-        val rivBytes = "required-script-riv".encodeToByteArray()
+        val sceneBytes = "required-script-riv".encodeToByteArray()
         val scriptBytes = "required-script-bytecode".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val script = artifact(
             key = "screen-behavior/sha256/${sha256(scriptBytes)}.bin",
@@ -774,8 +774,8 @@ class JourneyReleaseArtifactAcquirerTest {
                 if (request.url.path.startsWith("/renders/")) {
                     HttpTransport.Response(
                         200,
-                        rivBytes,
-                        mapOf("Content-Type" to "application/vnd.rive"),
+                        sceneBytes,
+                        mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                     )
                 } else {
                     HttpTransport.Response(503, ByteArray(0))
@@ -797,12 +797,12 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun twoScreensSharingOneScriptAcquireTheDigestOnce() = runTest {
-        val rivBytes = "shared-script-riv".encodeToByteArray()
+        val sceneBytes = "shared-script-riv".encodeToByteArray()
         val scriptBytes = "shared-script-bytecode".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val script = artifact(
             key = "screen-behavior/sha256/${sha256(scriptBytes)}.bin",
@@ -815,10 +815,10 @@ class JourneyReleaseArtifactAcquirerTest {
             HttpTransport { request ->
                 requestCount.incrementAndGet()
                 when (request.url.path) {
-                    "/renders/sha256/${sha256(rivBytes)}.riv" -> HttpTransport.Response(
+                    "/renders/sha256/${sha256(sceneBytes)}.nux" -> HttpTransport.Response(
                         200,
-                        rivBytes,
-                        mapOf("Content-Type" to "application/vnd.rive"),
+                        sceneBytes,
+                        mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                     )
                     "/assets/screen-behavior/sha256/${sha256(scriptBytes)}.bin" ->
                         HttpTransport.Response(
@@ -844,12 +844,12 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun conflictingMetadataForOneDigestIsRejectedWithoutTouchingALeasedFile() = runTest {
-        val rivBytes = "metadata-conflict-riv".encodeToByteArray()
+        val sceneBytes = "metadata-conflict-riv".encodeToByteArray()
         val scriptBytes = "metadata-conflict-script".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val scriptKey = "screen-behavior/sha256/${sha256(scriptBytes)}.bin"
         val script = artifact(
@@ -871,8 +871,8 @@ class JourneyReleaseArtifactAcquirerTest {
                 if (request.url.path.startsWith("/renders/")) {
                     HttpTransport.Response(
                         200,
-                        rivBytes,
-                        mapOf("Content-Type" to "application/vnd.rive"),
+                        sceneBytes,
+                        mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                     )
                 } else {
                     HttpTransport.Response(
@@ -908,12 +908,12 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun conflictingContentTypeForOneDigestIsRejectedBeforeAnyRequest() = runTest {
-        val rivBytes = "content-conflict-riv".encodeToByteArray()
+        val sceneBytes = "content-conflict-riv".encodeToByteArray()
         val assetBytes = "content-conflict-asset".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val assetKey = "assets/sha256/${sha256(assetBytes)}.bin"
         val first = artifact(
@@ -951,12 +951,12 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun anyRequiredReferenceMakesTheSharedDigestRequired() = runTest {
-        val rivBytes = "required-merge-riv".encodeToByteArray()
+        val sceneBytes = "required-merge-riv".encodeToByteArray()
         val assetBytes = "required-merge-asset".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val assetKey = "assets/sha256/${sha256(assetBytes)}.png"
         val optionalAsset = artifact(
@@ -979,8 +979,8 @@ class JourneyReleaseArtifactAcquirerTest {
                 if (request.url.path.startsWith("/renders/")) {
                     HttpTransport.Response(
                         200,
-                        rivBytes,
-                        mapOf("Content-Type" to "application/vnd.rive"),
+                        sceneBytes,
+                        mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                     )
                 } else {
                     HttpTransport.Response(404, ByteArray(0))
@@ -1089,12 +1089,12 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun optionalAssetNotFoundIsOmitted() = runTest {
-        val rivBytes = "optional-riv".encodeToByteArray()
+        val sceneBytes = "optional-riv".encodeToByteArray()
         val assetBytes = "optional-asset".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val asset = artifact(
             key = "assets/sha256/${sha256(assetBytes)}.png",
@@ -1109,8 +1109,8 @@ class JourneyReleaseArtifactAcquirerTest {
                 if (request.url.path.startsWith("/renders/")) {
                     HttpTransport.Response(
                         200,
-                        rivBytes,
-                        mapOf("Content-Type" to "application/vnd.rive"),
+                        sceneBytes,
+                        mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                     )
                 } else {
                     HttpTransport.Response(404, ByteArray(0))
@@ -1129,12 +1129,12 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun requiredAssetNotFoundFailsClosed() = runTest {
-        val rivBytes = "required-riv".encodeToByteArray()
+        val sceneBytes = "required-riv".encodeToByteArray()
         val assetBytes = "required-asset".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val asset = artifact(
             key = "assets/sha256/${sha256(assetBytes)}.png",
@@ -1147,7 +1147,7 @@ class JourneyReleaseArtifactAcquirerTest {
             RuntimeEnvironment.getApplication(),
             HttpTransport { request ->
                 if (request.url.path.startsWith("/renders/")) {
-                    HttpTransport.Response(200, rivBytes, mapOf("Content-Type" to "application/vnd.rive"))
+                    HttpTransport.Response(200, sceneBytes, mapOf("Content-Type" to "application/vnd.nuxie.scene"))
                 } else {
                     HttpTransport.Response(404, ByteArray(0))
                 }
@@ -1168,11 +1168,11 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun concurrentAcquisitionsOfOneDigestDownloadOnce() = runTest {
-        val rivBytes = "concurrent-riv".encodeToByteArray()
+        val sceneBytes = "concurrent-riv".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val requestStarted = CountDownLatch(1)
         val requestCount = AtomicInteger()
@@ -1181,16 +1181,16 @@ class JourneyReleaseArtifactAcquirerTest {
             requestCount.incrementAndGet()
             requestStarted.countDown()
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-            while (firstCache.protectionCount(sha256(rivBytes)) < 2 &&
+            while (firstCache.protectionCount(sha256(sceneBytes)) < 2 &&
                 System.nanoTime() < deadline
             ) {
                 Thread.yield()
             }
-            assertEquals(2, firstCache.protectionCount(sha256(rivBytes)))
+            assertEquals(2, firstCache.protectionCount(sha256(sceneBytes)))
             HttpTransport.Response(
                 200,
-                rivBytes,
-                mapOf("Content-Type" to "application/vnd.rive"),
+                sceneBytes,
+                mapOf("Content-Type" to "application/vnd.nuxie.scene"),
             )
         }
         val cacheDirectory = temporaryFolder.newFolder("concurrent")
@@ -1217,7 +1217,7 @@ class JourneyReleaseArtifactAcquirerTest {
         try {
             assertEquals(1, requestCount.get())
             assertEquals(results[0].sceneFile, results[1].sceneFile)
-            assertArrayEquals(rivBytes, results[0].sceneFile.readBytes())
+            assertArrayEquals(sceneBytes, results[0].sceneFile.readBytes())
         } finally {
             results.forEach(AcquiredJourneyRelease::close)
         }
@@ -1225,12 +1225,12 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun completeReleaseIsProtectedWhileAcquisitionPrunes() = runTest {
-        val rivBytes = "12345678".encodeToByteArray()
+        val sceneBytes = "12345678".encodeToByteArray()
         val assetBytes = "abcdefgh".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val asset = artifact(
             key = "assets/sha256/${sha256(assetBytes)}.png",
@@ -1244,10 +1244,10 @@ class JourneyReleaseArtifactAcquirerTest {
             HttpTransport { request ->
                 requested += request.url
                 when (request.url.path) {
-                    "/renders/sha256/${sha256(rivBytes)}.riv" -> HttpTransport.Response(
+                    "/renders/sha256/${sha256(sceneBytes)}.nux" -> HttpTransport.Response(
                         200,
-                        rivBytes,
-                        mapOf("Content-Type" to "application/vnd.rive"),
+                        sceneBytes,
+                        mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                     )
                     "/assets/sha256/${sha256(assetBytes)}.png" -> HttpTransport.Response(
                         200,
@@ -1270,7 +1270,7 @@ class JourneyReleaseArtifactAcquirerTest {
             assertTrue(acquired.artifactsByKey.values.all { it.exists() })
             assertEquals(
                 listOf(
-                    URL("https://cdn.nuxie.test/renders/sha256/${sha256(rivBytes)}.riv"),
+                    URL("https://cdn.nuxie.test/renders/sha256/${sha256(sceneBytes)}.nux"),
                     URL("https://cdn.nuxie.test/assets/sha256/${sha256(assetBytes)}.png"),
                 ),
                 requested,
@@ -1285,9 +1285,9 @@ class JourneyReleaseArtifactAcquirerTest {
         val retainedBytes = "retained".encodeToByteArray()
         val cacheDirectory = temporaryFolder.newFolder("parked-pin")
         val cache = JourneyReleaseArtifactCache(RuntimeEnvironment.getApplication(), HttpTransport {
-            HttpTransport.Response(200, retainedBytes, mapOf("Content-Type" to "application/vnd.rive"))
+            HttpTransport.Response(200, retainedBytes, mapOf("Content-Type" to "application/vnd.nuxie.scene"))
         }, maxTotalBytes = 12, cacheDirectory = cacheDirectory)
-        val riv = artifact("renders/sha256/${sha256(retainedBytes)}.riv", retainedBytes, "application/vnd.rive")
+        val riv = artifact("renders/sha256/${sha256(retainedBytes)}.nux", retainedBytes, "application/vnd.nuxie.scene")
         val acquired = JourneyReleaseArtifactAcquirer(cache).acquire(release(riv), delivery())
         cache.retainForRun("customer/journey/generation", listOf(sha256(retainedBytes))).close()
         acquired.close()
@@ -1308,13 +1308,13 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun acquiredReleaseRemainsProtectedUntilItsLeaseIsClosed() = runTest {
-        val rivBytes = "12345678".encodeToByteArray()
+        val sceneBytes = "12345678".encodeToByteArray()
         val firstOutsiderBytes = "abcdefgh".encodeToByteArray()
         val secondOutsiderBytes = "ABCDEFGH".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val cacheDirectory = temporaryFolder.newFolder("consumption-lease")
         val releaseCache = JourneyReleaseArtifactCache(
@@ -1322,8 +1322,8 @@ class JourneyReleaseArtifactAcquirerTest {
             HttpTransport {
                 HttpTransport.Response(
                     200,
-                    rivBytes,
-                    mapOf("Content-Type" to "application/vnd.rive"),
+                    sceneBytes,
+                    mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                 )
             },
             maxTotalBytes = 12,
@@ -1367,15 +1367,15 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun everyArtifactRoleIsValidatedBeforeTheFirstRequest() = runTest {
-        val rivBytes = "preflight-riv".encodeToByteArray()
+        val sceneBytes = "preflight-riv".encodeToByteArray()
         val assetBytes = "preflight-asset".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val asset = artifact(
-            key = "renders/sha256/${sha256(assetBytes)}.riv",
+            key = "renders/sha256/${sha256(assetBytes)}.nux",
             bytes = assetBytes,
             contentType = "image/png",
             kind = "image",
@@ -1405,15 +1405,15 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun screenBehaviorScriptCannotClaimARenderKey() = runTest {
-        val rivBytes = "script-role-riv".encodeToByteArray()
+        val sceneBytes = "script-role-riv".encodeToByteArray()
         val scriptBytes = "script-role-script".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val script = artifact(
-            key = "renders/sha256/${sha256(scriptBytes)}.riv",
+            key = "renders/sha256/${sha256(scriptBytes)}.nux",
             bytes = scriptBytes,
             contentType = "application/octet-stream",
         )
@@ -1441,13 +1441,13 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun oneDigestDeclaredAcrossAssetAndScriptRolesIsRejected() = runTest {
-        val rivBytes = "cross-role-riv".encodeToByteArray()
+        val sceneBytes = "cross-role-riv".encodeToByteArray()
         val sharedBytes = "cross-role-external".encodeToByteArray()
         val digest = sha256(sharedBytes)
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val asset = artifact(
             key = "assets/sha256/$digest.bin",
@@ -1483,11 +1483,11 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun transportFailureCanBeRetriedWithoutAStalePartialFile() = runTest {
-        val rivBytes = "retry-riv".encodeToByteArray()
+        val sceneBytes = "retry-riv".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         var requestCount = 0
         val cacheDirectory = temporaryFolder.newFolder("retry")
@@ -1498,8 +1498,8 @@ class JourneyReleaseArtifactAcquirerTest {
                 if (requestCount == 1) throw IOException("offline")
                 HttpTransport.Response(
                     200,
-                    rivBytes,
-                    mapOf("Content-Type" to "application/vnd.rive"),
+                    sceneBytes,
+                    mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                 )
             },
             cacheDirectory = cacheDirectory,
@@ -1510,7 +1510,7 @@ class JourneyReleaseArtifactAcquirerTest {
         acquirer.acquire(release(riv), delivery()).use { acquired ->
             assertEquals(JourneyReleaseArtifactAcquisitionException.Reason.TRANSPORT, failure.reason)
             assertEquals(2, requestCount)
-            assertArrayEquals(rivBytes, acquired.sceneFile.readBytes())
+            assertArrayEquals(sceneBytes, acquired.sceneFile.readBytes())
             assertEquals(1, cacheDirectory.list()?.size)
         }
     }
@@ -1566,13 +1566,13 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun conflictingDuplicateArtifactKeyIsRejectedBeforeAnyRequest() = runTest {
-        val rivBytes = "duplicate-riv".encodeToByteArray()
+        val sceneBytes = "duplicate-riv".encodeToByteArray()
         val assetBytes = "duplicate-asset".encodeToByteArray()
-        val duplicateKey = "renders/sha256/${sha256(rivBytes)}.riv"
+        val duplicateKey = "renders/sha256/${sha256(sceneBytes)}.nux"
         val riv = artifact(
             key = duplicateKey,
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val asset = artifact(
             key = duplicateKey,
@@ -1604,13 +1604,13 @@ class JourneyReleaseArtifactAcquirerTest {
 
     @Test
     fun protectionIsSharedByCacheInstancesUsingTheSameDirectory() = runTest {
-        val rivBytes = "12345678".encodeToByteArray()
+        val sceneBytes = "12345678".encodeToByteArray()
         val assetBytes = "abcdefgh".encodeToByteArray()
         val outsiderBytes = "ABCDEFGH".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val asset = artifact(
             key = "assets/sha256/${sha256(assetBytes)}.png",
@@ -1625,10 +1625,10 @@ class JourneyReleaseArtifactAcquirerTest {
             RuntimeEnvironment.getApplication(),
             HttpTransport { request ->
                 when (request.url.path) {
-                    "/renders/sha256/${sha256(rivBytes)}.riv" -> HttpTransport.Response(
+                    "/renders/sha256/${sha256(sceneBytes)}.nux" -> HttpTransport.Response(
                         200,
-                        rivBytes,
-                        mapOf("Content-Type" to "application/vnd.rive"),
+                        sceneBytes,
+                        mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                     )
                     "/assets/sha256/${sha256(assetBytes)}.png" -> {
                         assetRequestStarted.countDown()
@@ -1662,7 +1662,7 @@ class JourneyReleaseArtifactAcquirerTest {
         }
         yield()
         assertTrue(assetRequestStarted.await(5, TimeUnit.SECONDS))
-        val sceneFile = requireNotNull(releaseCache.cachedFile(sha256(rivBytes)))
+        val sceneFile = requireNotNull(releaseCache.cachedFile(sha256(sceneBytes)))
         sceneFile.setLastModified(System.currentTimeMillis() - 60_000)
         try {
             pruningCache.acquire(
@@ -1688,7 +1688,7 @@ class JourneyReleaseArtifactAcquirerTest {
         riv: JsonObject,
         assets: List<JsonObject> = emptyList(),
         scripts: List<JsonObject> = emptyList(),
-        renderer: String = "rive",
+        renderer: String = "nux",
     ) = TestJourneyRelease(
         identity = TEST_IDENTITY,
         descriptor = buildJsonObject {
@@ -1707,7 +1707,7 @@ class JourneyReleaseArtifactAcquirerTest {
             })
             put("render", buildJsonObject {
                 put("renderer", JsonPrimitive(renderer))
-                put(if (renderer == "nux") "nux" else "riv", riv)
+                put("nux", riv)
                 put("screens", buildJsonArray { })
                 put("transitions", buildJsonArray { })
                 put("textInputs", buildJsonArray { })
@@ -1755,12 +1755,12 @@ class JourneyReleaseArtifactAcquirerTest {
         expectedReason: JourneyReleaseArtifactAcquisitionException.Reason? = null,
         response: (ByteArray) -> HttpTransport.Response,
     ) {
-        val rivBytes = "$name-riv".encodeToByteArray()
+        val sceneBytes = "$name-riv".encodeToByteArray()
         val assetBytes = "$name-asset".encodeToByteArray()
         val riv = artifact(
-            key = "renders/sha256/${sha256(rivBytes)}.riv",
-            bytes = rivBytes,
-            contentType = "application/vnd.rive",
+            key = "renders/sha256/${sha256(sceneBytes)}.nux",
+            bytes = sceneBytes,
+            contentType = "application/vnd.nuxie.scene",
         )
         val asset = artifact(
             key = "assets/sha256/${sha256(assetBytes)}.png",
@@ -1775,8 +1775,8 @@ class JourneyReleaseArtifactAcquirerTest {
                 if (request.url.path.startsWith("/renders/")) {
                     HttpTransport.Response(
                         200,
-                        rivBytes,
-                        mapOf("Content-Type" to "application/vnd.rive"),
+                        sceneBytes,
+                        mapOf("Content-Type" to "application/vnd.nuxie.scene"),
                     )
                 } else {
                     response(assetBytes)

@@ -326,12 +326,12 @@ internal class ExperienceSurfaceHost(
     }
 
     /**
-     * Load a verified release riv and select its artboard/player. Must be
+     * Load a verified Nuxie scene and select its artboard/player. Must be
      * called before the surface is created (tracer entry point; the
      * presentation service supersedes this with prepared releases).
      */
     fun loadArtboard(
-        rivBytes: ByteArray,
+        sceneBytes: ByteArray,
         artboardName: String?,
         descriptor: JsonObject? = null,
         artifactsByKey: Map<String, File> = emptyMap(),
@@ -359,9 +359,9 @@ internal class ExperienceSurfaceHost(
             var videoBindings: List<ExperienceVideoAssetBinding> = emptyList()
             var videoTargets: List<ExperienceVideoElement> = emptyList()
             file = if (descriptor == null) {
-                runtime.importFile(activeRenderer, rivBytes)
+                runtime.importFile(activeRenderer, sceneBytes)
             } else {
-                val inspectedCatalog = runtime.inspectFileAssets(rivBytes)
+                val inspectedCatalog = runtime.inspectFileAssets(sceneBytes)
                 if (inspectedCatalog == null) {
                     reportFailure(
                         ExperiencePresentationException.Reason.PREPARATION_FAILED,
@@ -404,7 +404,7 @@ internal class ExperienceSurfaceHost(
                 try {
                     runtime.importFile(
                         renderer = activeRenderer,
-                        bytes = rivBytes,
+                        bytes = sceneBytes,
                         expectedAssets = import.expectedAssets,
                         externalAssets = import.externalAssets,
                         videoEnabled = videoBindings.isNotEmpty(),
@@ -425,7 +425,7 @@ internal class ExperienceSurfaceHost(
             }
             val loadedFile = file
             if (loadedFile == null) {
-                Log.w(LOG_TAG, "Runtime rejected the riv bytes")
+                Log.w(LOG_TAG, "Runtime rejected the scene bytes")
                 reportFailure(
                     ExperiencePresentationException.Reason.PREPARATION_FAILED,
                     "Runtime rejected the prepared Experience content",

@@ -2,7 +2,7 @@ package ai.nuxie.sdk.runtime
 
 /**
  * The compatibility declaration shared by the embedded runtime and the
- * publisher backend that produces its Rive/Luau inputs.
+ * publisher backend that produces its Nuxie scene/Luau inputs.
  *
  * This is intentionally distinct from the native runtime's build source
  * revision, which is provenance rather than a release-format contract.
@@ -13,5 +13,5 @@ internal object NuxieEmbeddedRuntimeCompatibility {
     val LUAU_BYTECODE_VERSIONS = setOf(3, 6)
     const val SCENE_FORMAT_MAJOR = 7
     const val SCENE_FORMAT_MINOR = 3
-    val CAPABILITIES = setOf("rive", "text-input", "video.playback.v1")
+    val CAPABILITIES = setOf("nux", "text-input", "video.playback.v1")
 }

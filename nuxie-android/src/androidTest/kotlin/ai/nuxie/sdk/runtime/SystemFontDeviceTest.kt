@@ -82,7 +82,7 @@ class SystemFontDeviceTest {
         val mixed = (0 until scenes.length()).map(scenes::getJSONObject).single { it.getString("name") == "mixed" }
         val fonts = mixed.getJSONArray("fonts")
         val systemID = (0 until fonts.length()).map(fonts::getJSONObject)
-            .single { it.getString("location") == "system" }.getLong("riveAssetId")
+            .single { it.getString("location") == "system" }.getLong("authoredAssetId")
         val device = SystemFontProvider.prepare(SystemFontRequirement("system", 400, "normal"))
         val cdn = asset("mixed-cdn.ttf")
         val valid = catalog.associate { it.ordinal to if (it.authoredId == systemID) device.bytes else cdn }

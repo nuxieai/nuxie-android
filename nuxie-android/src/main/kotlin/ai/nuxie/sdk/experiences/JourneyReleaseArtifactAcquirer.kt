@@ -137,14 +137,13 @@ internal class JourneyReleaseArtifactAcquirer(
         val render = descriptor["render"] as? JsonObject
             ?: invalidDescriptor("<render>", "release render is missing")
         val sceneField = when (render.string("renderer")) {
-            "rive" -> "riv"
             "nux" -> "nux"
             else -> invalidDescriptor("<render>", "unsupported release renderer")
         }
         val scene = artifact(render[sceneField] as? JsonObject, "<$sceneField>", ArtifactRole.SCENE)
-        val sceneMime = if (sceneField == "nux") "application/vnd.nuxie.scene" else "application/vnd.rive"
+        val sceneMime = "application/vnd.nuxie.scene"
         if (scene.key != "renders/sha256/${scene.sha256}.$sceneField" || scene.contentType != sceneMime ||
-            (sceneField == "nux" && scene.sizeBytes == 0L)) {
+            scene.sizeBytes == 0L) {
             invalidDescriptor(scene.key, "scene artifact differs from renderer")
         }
         REQUIRED_RENDER_ARRAYS.forEach { field ->
@@ -358,13 +357,13 @@ internal class JourneyReleaseArtifactAcquirer(
     private enum class ArtifactRole(
         val maximumBytes: Long,
     ) {
-        SCENE(JourneyReleaseLimits.RIV_ARTIFACT_BYTES.toLong()),
+        SCENE(JourneyReleaseLimits.SCENE_ARTIFACT_BYTES.toLong()),
         ASSET(JourneyReleaseLimits.EXTERNAL_ASSET_BYTES.toLong()),
         SCRIPT(JourneyReleaseLimits.EXTERNAL_ASSET_BYTES.toLong()),
         ;
 
         fun accepts(key: String, sha256: String): Boolean = when (this) {
-            SCENE -> key == "renders/sha256/$sha256.riv" || key == "renders/sha256/$sha256.nux"
+            SCENE -> key == "renders/sha256/$sha256.nux"
             ASSET -> {
                 val prefix = "assets/sha256/$sha256."
                 key.startsWith(prefix) && key.removePrefix(prefix) in ASSET_EXTENSIONS
