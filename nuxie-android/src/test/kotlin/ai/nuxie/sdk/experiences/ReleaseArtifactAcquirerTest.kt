@@ -195,7 +195,11 @@ class JourneyReleaseArtifactAcquirerTest {
                 headers = mapOf("Content-Type" to if (isVideo) "video/mp4" else "application/vnd.nuxie.scene"))
         }, maxTotalBytes = 0, cacheDirectory = directory)
         val acquirer = JourneyReleaseArtifactAcquirer(cache)
-        val release = release(scene, assets = listOf(video), renderer = "nux")
+        val firstBinding = JsonObject(video + mapOf("sourceAssetKey" to JsonPrimitive("asset:first"),
+            "riveAssetId" to JsonPrimitive(1), "riveUniqueName" to JsonPrimitive("first"), "required" to JsonPrimitive(false)))
+        val secondBinding = JsonObject(video + mapOf("sourceAssetKey" to JsonPrimitive("asset:second"),
+            "riveAssetId" to JsonPrimitive(2), "riveUniqueName" to JsonPrimitive("second")))
+        val release = release(scene, assets = listOf(firstBinding, secondBinding), renderer = "nux")
         val first = acquirer.acquire(release, delivery())
         try {
             assertArrayEquals(sceneBytes, first.sceneFile.readBytes())
@@ -209,6 +213,28 @@ class JourneyReleaseArtifactAcquirerTest {
             assertTrue("Active lease must protect video despite a zero cache budget", videoFile.isFile)
             assertEquals(2, requests)
         } finally { first.close() }
+    }
+
+    @Test
+    fun requiredVideoBindingMakesSharedObjectFailureFatal() = runTest {
+        val sceneBytes = "shared-video-scene".encodeToByteArray()
+        val videoBytes = "shared-video".encodeToByteArray()
+        val scene = artifact("renders/sha256/${sha256(sceneBytes)}.nux", sceneBytes, "application/vnd.nuxie.scene")
+        val videoKey = "assets/sha256/${sha256(videoBytes)}.mp4"
+        val optional = artifact(videoKey, videoBytes, "video/mp4", kind = "video", required = false)
+        val required = artifact(videoKey, videoBytes, "video/mp4", kind = "video")
+        var videoRequests = 0
+        val cache = JourneyReleaseArtifactCache(RuntimeEnvironment.getApplication(), HttpTransport { request ->
+            if (request.url.path.endsWith(".mp4")) {
+                videoRequests += 1
+                HttpTransport.Response(404, ByteArray(0))
+            } else HttpTransport.Response(200, sceneBytes, mapOf("Content-Type" to "application/vnd.nuxie.scene"))
+        }, cacheDirectory = temporaryFolder.newFolder("required-video-binding"))
+        val failure = acquisitionFailure {
+            JourneyReleaseArtifactAcquirer(cache).acquire(release(scene, assets = listOf(optional, required), renderer = "nux"), delivery())
+        }
+        assertEquals(videoKey, failure.artifactKey)
+        assertEquals(1, videoRequests)
     }
 
     @Test

@@ -77,7 +77,18 @@ internal object JourneyRenderSchema {
         for (input in array(render["textInputs"], 1024)) textInput(input, screens)
         val assets = array(render["assets"], 1024)
         val keys = assets.map(::asset)
-        sortedUnique(keys)
+        if (keys != keys.sorted()) fail("asset ordering")
+        assets.zip(keys).groupBy { it.second }.values.filter { it.size > 1 }.forEach { group ->
+            val bindings = group.map { record(it.first) }
+            if (bindings.any { text(it["kind"]) != "video" }) fail("duplicate asset key")
+            val sources = bindings.map { text(it["sourceAssetKey"]) }
+            sortedUnique(sources)
+            val identityFields = setOf("sourceAssetKey", "riveAssetId", "riveUniqueName", "required")
+            val metadata = bindings.first().filterKeys { it !in identityFields }
+            if (bindings.any { it.filterKeys { field -> field !in identityFields } != metadata }) {
+                fail("conflicting video asset metadata")
+            }
+        }
         val nativeAssets = assets.map(::record).filter { text(it["kind"]) in setOf("image", "font", "video") }
         for (field in listOf("riveAssetId", "riveUniqueName")) {
             if (nativeAssets.map { it[field] }.toSet().size != nativeAssets.size) fail("duplicate native asset identity")
