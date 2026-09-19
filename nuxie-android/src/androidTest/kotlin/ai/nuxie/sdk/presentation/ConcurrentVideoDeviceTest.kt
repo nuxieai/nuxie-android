@@ -5,6 +5,9 @@ import ai.nuxie.sdk.runtime.NuxieRuntime
 import android.content.Intent
 import android.graphics.Color
 import android.os.SystemClock
+import android.os.Debug
+import java.util.UUID
+import ai.nuxie.sdk.runtime.NuxieVideoDecoderRequest
 import android.view.View
 import android.widget.LinearLayout
 import androidx.test.platform.app.InstrumentationRegistry
@@ -20,7 +23,11 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ConcurrentVideoDeviceTest {
-    @Test fun fiveMountedLanesSaturateProductionPoolAndResumeAfterRetirement() {
+    @Test fun fiveMountedLanesSaturateProductionPoolAndResumeAfterRetirement() = qualify(false)
+
+    @Test fun repeatedPlaybackRetiresResourcesAndReusesPool() = qualify(true)
+
+    private fun qualify(repeated: Boolean) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         assertTrue(NuxieRuntime.shared.isAvailable)
         val directory = File(instrumentation.targetContext.cacheDir, "concurrent-video-test").apply { mkdirs() }
@@ -113,19 +120,64 @@ class ConcurrentVideoDeviceTest {
                 container = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
                 activity.setContentView(container)
             }
-            repeat(4) { mount() }
-            awaitPhases(setOf(0, 1, 2, 3))
-            mount()
-            awaitPhases(setOf(0, 1, 2, 3), denied = 4)
-            val closed = CountDownLatch(1)
-            instrumentation.runOnMainSync {
-                retired += 0
-                screens[0].close(false) { closed.countDown() }
-                container.removeView(views[0])
+            if (repeated) {
+                fun decoderThreads() = Thread.getAllStackTraces().keys.count { it.isAlive && it.name == "NuxieVideo" }
+                val baselineThreads = decoderThreads()
+                // Process PSS is observational, not a GPU measurement or pass ceiling.
+                // Emulator Vulkan first-draw retention also reproduces without video.
+                val pssKiB = mutableListOf<Int>()
+                repeat(10) { cycle ->
+                    mount()
+                    awaitPhases(setOf(0))
+                    runBlocking {
+                        assertTrue(withTimeout(5_000) { screens.single().surface.applyVideoCommand(
+                            ai.nuxie.sdk.experiences.JourneyVideoAction.parse(Json.parseToJsonElement(
+                                """{"type":"video","target":{"artboardId":"screen","viewNodeId":"clip-view"},"command":{"type":"pause"}}"""))) })
+                    }
+                    val closed = CountDownLatch(1)
+                    instrumentation.runOnMainSync {
+                        retired += 0
+                        screens.single().close(false) { closed.countDown() }
+                        container.removeAllViews()
+                    }
+                    assertTrue("Cycle $cycle acknowledges decoder/native retirement", closed.await(10, TimeUnit.SECONDS))
+                    screens.clear()
+                    views.clear()
+                    retired.clear()
+                    val deadline = SystemClock.elapsedRealtime() + 5_000
+                    while (decoderThreads() > baselineThreads && SystemClock.elapsedRealtime() < deadline) Thread.sleep(20)
+                    assertEquals("No decoder worker survives a closed session", baselineThreads, decoderThreads())
+                    val owner = UUID.randomUUID()
+                    try {
+                        val admitted = ExperienceVideoDecoderPool.shared.update(owner, (0L..3L).map {
+                            NuxieVideoDecoderRequest(it, 1280L * 720 * 31, 0, true)
+                        })
+                        assertEquals("All production reservations are reusable", 4, admitted.size)
+                    } finally {
+                        ExperienceVideoDecoderPool.shared.remove(owner)
+                    }
+                    Thread.sleep(100)
+                    val memory = Debug.MemoryInfo()
+                    Debug.getMemoryInfo(memory)
+                    pssKiB += memory.totalPss
+                }
+                val warmed = pssKiB.drop(2)
+                println("VIDEO_LIFECYCLE cycles=10 retiredDecoderThreads=$baselineThreads reusableSlots=4 pssKiB=$pssKiB warmedMin=${warmed.minOrNull()} warmedMax=${warmed.maxOrNull()} measurement=processPSS_notGPU localFixture=noNetwork")
+            } else {
+                repeat(4) { mount() }
+                awaitPhases(setOf(0, 1, 2, 3))
+                mount()
+                awaitPhases(setOf(0, 1, 2, 3), denied = 4)
+                val closed = CountDownLatch(1)
+                instrumentation.runOnMainSync {
+                    retired += 0
+                    screens[0].close(false) { closed.countDown() }
+                    container.removeView(views[0])
+                }
+                assertTrue("Retirement must acknowledge native/decoder cleanup", closed.await(10, TimeUnit.SECONDS))
+                awaitPhases(setOf(1, 2, 3, 4))
+                println("concurrent-video: four independent 720p30 runtime lanes rendered both phases; fifth waited and recovered after retirement")
             }
-            assertTrue("Retirement must acknowledge native/decoder cleanup", closed.await(10, TimeUnit.SECONDS))
-            awaitPhases(setOf(1, 2, 3, 4))
-            println("concurrent-video: four independent 720p30 runtime lanes rendered both phases; fifth waited and recovered after retirement")
         } finally {
             val closed = CountDownLatch(screens.size - retired.size)
             instrumentation.runOnMainSync {
