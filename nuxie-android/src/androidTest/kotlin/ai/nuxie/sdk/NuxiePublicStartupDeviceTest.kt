@@ -127,6 +127,9 @@ class NuxiePublicStartupDeviceTest {
         }
     }
 
+    @Test fun restoredDeliveryPresentsAndCommitsACompiledControlEvent() =
+        exercise(eventEntry = false, deliveryRecovery = true)
+
     @Test fun initialProfileAdmitsASignedJourneyAndCommitsACompiledControlEvent() = exercise(eventEntry = false)
 
     @Test fun triggerCapturedBeforeTheInitialProfileEnrollsItsSignedJourney() = exercise(eventEntry = true)
@@ -153,6 +156,7 @@ class NuxiePublicStartupDeviceTest {
         eventEntry: Boolean,
         backgroundDuringRefresh: Boolean = false,
         holdInitialProfile: Boolean = true,
+        deliveryRecovery: Boolean = false,
         processPhase: String? = null,
         processRun: String? = null,
         processBoundary: String = "pending-profile",
@@ -185,6 +189,10 @@ class NuxiePublicStartupDeviceTest {
         val profileEntered = CountDownLatch(1)
         val releaseProfile = CountDownLatch(1)
         val profile = profile(entry, descriptor.getValue("leg").jsonObject.getValue("entryCondition").jsonObject)
+        val deliverySuspended = java.util.concurrent.atomic.AtomicBoolean(deliveryRecovery)
+        val emptyProfile = JsonObject(profile + mapOf(
+            "armedLegs" to JsonArray(emptyList()), "releases" to JsonArray(emptyList()),
+        ))
         val directory = if (processPhase == null) {
             File(context.cacheDir, "public-startup-${UUID.randomUUID()}").apply { mkdirs() }
         } else {
@@ -204,8 +212,9 @@ class NuxiePublicStartupDeviceTest {
                 path == "profile" -> {
                     profileEntered.countDown()
                     check(releaseProfile.await(10, TimeUnit.SECONDS)) { "Initial profile release timed out." }
-                    HttpTransport.Response(200, profile.toString().encodeToByteArray(), mapOf(
-                        "ETag" to "\"public-startup\"",
+                    val suspended = deliverySuspended.get()
+                    HttpTransport.Response(200, (if (suspended) emptyProfile else profile).toString().encodeToByteArray(), mapOf(
+                        "ETag" to if (suspended) "\"empty-delivery\"" else "\"public-startup\"",
                         "Nuxie-App-Id" to locator.getValue("appId").jsonPrimitive.content,
                         "Nuxie-App-Environment" to "test",
                     ))
@@ -269,6 +278,19 @@ class NuxiePublicStartupDeviceTest {
                 } }
             }
             releaseProfile.countDown()
+            if (deliveryRecovery) {
+                runBlocking { withTimeout(10_000) {
+                    assertTrue(core.profile.refreshAndWait())
+                    core.eventLog.awaitBarrier()
+                    assertEquals(emptyProfile, core.profile.currentProfile()?.body)
+                    assertTrue(checkNotNull(core.journeyProfiles.snapshot(owner)).profile.armedLegs.isEmpty())
+                    assertTrue(core.store.pendingBatch(200).none { it.name == SystemEventNames.EXPERIENCE_SHOWN })
+                } }
+                assertEquals("Empty delivery must not launch an Experience", 0, monitor.hits)
+                assertTrue("Empty delivery must not acquire release artifacts", downloaded.isEmpty())
+                deliverySuspended.set(false)
+                runBlocking { withTimeout(10_000) { assertTrue(core.profile.refreshAndWait()) } }
+            }
             if (backgroundDuringRefresh) {
                 runBlocking { withTimeout(10_000) {
                     core.profile.refreshAndWait()

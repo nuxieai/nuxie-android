@@ -343,6 +343,13 @@ delivery. A successful empty profile removes its arms and releases, remains empt
 after SDK reconstruction while offline, and accepts the same signed release on
 recovery without clearing replay protection. It does not kill the Android process,
 render a screen, or exercise a backend billing policy.
+To qualify native presentation after delivery restoration, run the same command
+with `#restoredDeliveryPresentsAndCommitsACompiledControlEvent`. An empty profile
+must launch no Experience and download no release artifacts. Restoring the signed
+release then renders the Experience; a real touch must commit its compiled control
+event and Journey response. This also uses controlled HTTP responses, not backend
+invoice enforcement.
+
 ### Activity identity
 
 `NuxieActivityInfo.customerId` identifies the customer who produced the durable
