@@ -1256,7 +1256,7 @@ class PublishedTextInputDeviceTest {
                     listener = object : ExperienceSurfaceHost.Listener {
                         override fun onFirstFrame() { firstFrame.countDown() }
                         override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
-                        override fun onTextCommitted(inputId: String, text: String) { commits.add(inputId to text) }
+                        override fun onTextCommitted(inputId: String, text: String, snapshot: NuxieViewModelSnapshot?) { commits.add(inputId to text) }
                     })
                 checkNotNull(surface).loadArtboard(fixture.riv.readBytes(), screen.getValue("artboardName").jsonPrimitive.content,
                     fixture.release.descriptor, fixture.assets, textInputs = inputs)
@@ -1365,7 +1365,7 @@ class PublishedTextInputDeviceTest {
             release.descriptor, assets,
             ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float),
         ), onFirstFrame = { approveFixtureFrame(presentationId); firstFrame.countDown() }, onFailure = { failure.set(it) },
-            onDismissed = {}, onOutcome = { if (it is CloseReason.Error) failure.set(it.cause) }, onTextCommitted = { id, text, _ -> commits.add(id to text) })
+            onDismissed = {}, onOutcome = { if (it is CloseReason.Error) failure.set(it.cause) }, onTextCommitted = { id, text, _, _ -> commits.add(id to text) })
         try {
             context.startActivity(Intent(context, NuxieExperienceActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
