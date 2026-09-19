@@ -1629,7 +1629,7 @@ class ExperiencePresentationServiceTest {
             assertEquals(release.identity.experienceId, failure.properties["experience_id"])
             assertEquals(release.identity.experienceVersionId, failure.properties["experience_version"])
             assertEquals(release.identity.buildId, failure.properties["artifact_build_id"])
-            assertEquals(release.descriptor.getValue("render").jsonObject.getValue("riv").jsonObject
+            assertEquals(release.descriptor.getValue("render").jsonObject.getValue("nux").jsonObject
                 .getValue("sha256").jsonPrimitive.content, failure.properties["artifact_content_hash"])
             assertEquals("unknown", failure.properties["artifact_source"])
             assertEquals("customer-1", failure.distinctId)

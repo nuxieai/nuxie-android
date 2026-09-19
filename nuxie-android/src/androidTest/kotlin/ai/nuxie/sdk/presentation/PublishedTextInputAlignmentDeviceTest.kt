@@ -123,14 +123,14 @@ class PublishedTextInputAlignmentDeviceTest {
                     fun string(key: String) = style.getValue(key).jsonPrimitive.content
                     val prefix = expected[index].jsonObject.getValue("path").jsonPrimitive.content
                     ExperienceTextInput(record.getValue("viewNodeId").jsonPrimitive.content,
-                        record.getValue("riveTextRunName").jsonPrimitive.content,
+                        record.getValue("textRunName").jsonPrimitive.content,
                         record.getValue("value").jsonPrimitive.content, null, null, null,
                         record["secureTextEntry"]?.jsonPrimitive?.booleanOrNull ?: false,
                         record.getValue("multiline").jsonPrimitive.boolean, null,
                         listOf("x", "y", "width", "height", "rotation", "scaleX", "scaleY").associate { "${it}Path" to "$prefix/$it" },
                         ExperienceTextInput.Style(string("fontFamily"), string("fontWeight"), false,
                             style.getValue("fontSize").jsonPrimitive.float, style.getValue("lineHeight").jsonPrimitive.float,
-                            0f, style.getValue("color").jsonPrimitive.long.toInt(), string("fontAssetRiveUniqueName"), "left"))
+                            0f, style.getValue("color").jsonPrimitive.long.toInt(), string("fontAssetUniqueName"), "left"))
                 }
                 var writes = 0
                 val current = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(390f, 844f), inputs,

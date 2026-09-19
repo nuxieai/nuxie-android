@@ -25,6 +25,32 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyReleaseTest {
+    @Test fun `scene admission accepts only the Nuxie format`() {
+        val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/scene-admission.json").readText()).jsonObject
+        val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        for (value in corpus.getValue("cases").jsonArray) {
+            val item = value.jsonObject
+            val render = source.getValue("render").jsonObject
+            val scene = render.getValue("nux").jsonObject
+            val digest = scene.getValue("sha256").jsonPrimitive.content
+            val extension = item.getValue("extension").jsonPrimitive.content
+            val candidate = JsonObject(source + ("render" to JsonObject(render - "nux" + mapOf(
+                "renderer" to item.getValue("renderer"),
+                item.getValue("field").jsonPrimitive.content to JsonObject(scene + mapOf(
+                    "key" to JsonPrimitive("renders/sha256/$digest.$extension"),
+                    "contentType" to item.getValue("contentType"),
+                )),
+            ))))
+            if (item.getValue("valid").jsonPrimitive.boolean) JourneySchemaValidator.validate(candidate)
+            else assertThrows(item.getValue("name").jsonPrimitive.content, JourneyReleaseAuthenticationException::class.java) {
+                JourneySchemaValidator.validate(candidate)
+            }
+        }
+    }
+
     @Test fun `video commands match shared wire grammar and runtime operation codes`() {
         val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/video-actions.json").readText()).jsonObject
@@ -167,14 +193,14 @@ class JourneyReleaseTest {
             val renderer = case["renderer"]?.jsonPrimitive?.content ?: "nux"
             val sceneField = if (renderer == "nux") "nux" else "riv"
             val oldRender = source.getValue("render").jsonObject
-            val oldScene = oldRender.getValue("riv").jsonObject
+            val oldScene = oldRender.getValue("nux").jsonObject
             val digest = oldScene.getValue("sha256").jsonPrimitive.content
             val scene = JsonObject(oldScene + mapOf(
                 "key" to JsonPrimitive("renders/sha256/$digest.$sceneField"),
                 "contentType" to JsonPrimitive(if (renderer == "nux") "application/vnd.nuxie.scene" else "application/vnd.rive"),
             ))
             val asset = JsonObject(corpus.getValue("videoAsset").jsonObject + (case["assetPatch"]?.jsonObject ?: emptyMap()))
-            val render = JsonObject(oldRender - "riv" + mapOf(
+            val render = JsonObject(oldRender - "nux" + mapOf(
                 "renderer" to JsonPrimitive(renderer), sceneField to scene,
                 "assets" to JsonArray(listOf(asset) + (case["additionalAssets"]?.jsonArray ?: emptyList())),
             ) + (case["videoElements"]?.let { mapOf("videoElements" to it) } ?: emptyMap()))
@@ -324,9 +350,9 @@ class JourneyReleaseTest {
         val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
             .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
         val render = source.getValue("render").jsonObject
-        val riv = JsonObject(render.getValue("riv").jsonObject + ("key" to JsonPrimitive("../outside.riv")))
+        val riv = JsonObject(render.getValue("nux").jsonObject + ("key" to JsonPrimitive("../outside.riv")))
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
-            JourneySchemaValidator.validate(JsonObject(source + ("render" to JsonObject(render + ("riv" to riv)))))
+            JourneySchemaValidator.validate(JsonObject(source + ("render" to JsonObject(render + ("nux" to riv)))))
         }
         val invalid = source.toString().replace("\"kind\":\"declarative\"", "\"kind\":\"script\"")
         assertThrows(JourneyReleaseAuthenticationException::class.java) {

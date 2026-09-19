@@ -173,7 +173,7 @@ class NuxiePublicStartupDeviceTest {
         ).decodeToString()).jsonObject
         val render = descriptor.getValue("render").jsonObject
         val artifactKeys = (render.getValue("assets").jsonArray.map { it.jsonObject.getValue("key").jsonPrimitive.content } +
-            render.getValue("riv").jsonObject.getValue("key").jsonPrimitive.content +
+            render.getValue("nux").jsonObject.getValue("key").jsonPrimitive.content +
             descriptor.getValue("screenBehaviors").jsonArray.map {
                 it.jsonObject.getValue("script").jsonObject.getValue("artifact").jsonObject.getValue("key").jsonPrimitive.content
             }).toSet()
@@ -222,7 +222,7 @@ class NuxiePublicStartupDeviceTest {
                 path in artifactKeys -> {
                     downloaded += path
                     HttpTransport.Response(200, read(path), mapOf(
-                        "Content-Type" to if (path.endsWith(".riv")) "application/vnd.rive" else "application/octet-stream",
+                        "Content-Type" to if (path.endsWith(".nux")) "application/vnd.nuxie.scene" else "application/octet-stream",
                     ))
                 }
                 else -> HttpTransport.Response(503, ByteArray(0)) // Retain captured events for the oracle.

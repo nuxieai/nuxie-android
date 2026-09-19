@@ -160,7 +160,7 @@ class TestStoreDeviceTest {
                     entry.getValue("envelope").jsonObject.getValue("descriptorBytesBase64").jsonPrimitive.content,
                     android.util.Base64.NO_WRAP).decodeToString()).jsonObject
                 val render = descriptor.getValue("render").jsonObject
-                val artifacts = (render.getValue("assets").jsonArray.toList() + render.getValue("riv"))
+                val artifacts = (render.getValue("assets").jsonArray.toList() + render.getValue("nux"))
                     .associate { value -> value.jsonObject.let { it.getValue("key").jsonPrimitive.content to it } }
                 val appId = locator.getValue("appId").jsonPrimitive.content
                 val environment = locator.getValue("environment").jsonPrimitive.content

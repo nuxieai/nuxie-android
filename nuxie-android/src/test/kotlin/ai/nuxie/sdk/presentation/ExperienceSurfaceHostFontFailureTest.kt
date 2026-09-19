@@ -119,6 +119,6 @@ class ExperienceSurfaceHostFontFailureTest {
 
     private val descriptor = Json.parseToJsonElement("""{
       "render":{"assets":[{"kind":"font","location":"system","family":"System",
-      "weight":"700","style":"normal","riveAssetId":10,"riveUniqueName":"native-10","required":true}]}
+      "weight":"700","style":"normal","authoredAssetId":10,"assetUniqueName":"native-10","required":true}]}
     }""").jsonObject
 }

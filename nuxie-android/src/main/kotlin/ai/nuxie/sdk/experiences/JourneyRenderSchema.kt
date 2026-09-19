@@ -40,15 +40,15 @@ internal object JourneyRenderSchema {
     }
 
     fun validate(input: JsonObject) {
-        val renderer = oneOf(input["renderer"], "rive", "nux")
-        val sceneField = if (renderer == "nux") "nux" else "riv"
+        val renderer = oneOf(input["renderer"], "nux")
+        val sceneField = "nux"
         val render = exact(input, setOf("renderer", sceneField, "screens", "transitions", "textInputs", "assets"), setOf("videoElements"))
         videoElements(render)
         val scene = exact(render[sceneField], setOf("key", "sha256", "sizeBytes", "contentType"))
         val sha = hash(scene["sha256"])
         if (text(scene["key"]) != "renders/sha256/$sha.$sceneField") fail("render artifact key")
-        oneOf(scene["contentType"], if (renderer == "nux") "application/vnd.nuxie.scene" else "application/vnd.rive")
-        integer(scene["sizeBytes"], if (renderer == "nux") 1 else 0, JourneyReleaseLimits.RIV_ARTIFACT_BYTES.toLong())
+        oneOf(scene["contentType"], "application/vnd.nuxie.scene")
+        integer(scene["sizeBytes"], 1, JourneyReleaseLimits.SCENE_ARTIFACT_BYTES.toLong())
         val screens = array(render["screens"], 256).map { input ->
             val screen = exact(input, setOf("id", "artboardId", "artboardName", "width", "height"), setOf("exit"))
             releaseId(screen["artboardId"]); id(screen["artboardName"])
@@ -83,14 +83,14 @@ internal object JourneyRenderSchema {
             if (bindings.any { text(it["kind"]) != "video" }) fail("duplicate asset key")
             val sources = bindings.map { text(it["sourceAssetKey"]) }
             sortedUnique(sources)
-            val identityFields = setOf("sourceAssetKey", "riveAssetId", "riveUniqueName", "required")
+            val identityFields = setOf("sourceAssetKey", "authoredAssetId", "assetUniqueName", "required")
             val metadata = bindings.first().filterKeys { it !in identityFields }
             if (bindings.any { it.filterKeys { field -> field !in identityFields } != metadata }) {
                 fail("conflicting video asset metadata")
             }
         }
         val nativeAssets = assets.map(::record).filter { text(it["kind"]) in setOf("image", "font", "video") }
-        for (field in listOf("riveAssetId", "riveUniqueName")) {
+        for (field in listOf("authoredAssetId", "assetUniqueName")) {
             if (nativeAssets.map { it[field] }.toSet().size != nativeAssets.size) fail("duplicate native asset identity")
         }
         val videos = nativeAssets.filter { text(it["kind"]) == "video" }
@@ -101,13 +101,13 @@ internal object JourneyRenderSchema {
     private fun asset(input: JsonElement): String {
         val asset = record(input)
         if (text(asset["kind"]) == "font" && asset["location"]?.let(::text) == "system") {
-            exact(asset, setOf("kind", "location", "riveAssetId", "riveUniqueName", "family", "weight", "style", "required"))
-            integer(asset["riveAssetId"])
+            exact(asset, setOf("kind", "location", "authoredAssetId", "assetUniqueName", "family", "weight", "style", "required"))
+            integer(asset["authoredAssetId"])
             oneOf(asset["family"], "System")
             oneOf(asset["weight"], "100", "200", "300", "400", "500", "600", "700", "800", "900")
             oneOf(asset["style"], "normal")
             if (!boolean(asset["required"])) fail("System font is required")
-            return "system-font:${releaseId(asset["riveUniqueName"])}"
+            return "system-font:${releaseId(asset["assetUniqueName"])}"
         }
         val common = setOf("kind", "key", "sha256", "sizeBytes", "contentType", "required")
         val digest = hash(asset["sha256"])
@@ -115,8 +115,8 @@ internal object JourneyRenderSchema {
         boolean(asset["required"])
         val extension = when (text(asset["kind"])) {
             "image" -> {
-                exact(asset, common + setOf("riveAssetId", "riveUniqueName", "width", "height"))
-                integer(asset["riveAssetId"]); releaseId(asset["riveUniqueName"])
+                exact(asset, common + setOf("authoredAssetId", "assetUniqueName", "width", "height"))
+                integer(asset["authoredAssetId"]); releaseId(asset["assetUniqueName"])
                 integer(asset["width"], 1, 65_535); integer(asset["height"], 1, 65_535)
                 when (oneOf(asset["contentType"], "image/png", "image/jpeg", "image/webp")) {
                     "image/png" -> "png"
@@ -125,10 +125,10 @@ internal object JourneyRenderSchema {
                 }
             }
             "video" -> {
-                exact(asset, common + setOf("sourceAssetKey", "riveAssetId", "riveUniqueName", "width", "height",
+                exact(asset, common + setOf("sourceAssetKey", "authoredAssetId", "assetUniqueName", "width", "height",
                     "durationMs", "videoCodec", "audioCodec", "captionTracks"))
                 integer(asset["sizeBytes"], 1, JourneyReleaseLimits.EXTERNAL_ASSET_BYTES.toLong())
-                integer(asset["riveAssetId"]); releaseId(asset["riveUniqueName"])
+                integer(asset["authoredAssetId"]); releaseId(asset["assetUniqueName"])
                 val source = id(asset["sourceAssetKey"], 128)
                 if (!source.matches(Regex("^asset:[A-Za-z0-9_-]+$"))) fail("video source identity")
                 integer(asset["width"], 1, 8192); integer(asset["height"], 1, 8192)
@@ -147,10 +147,10 @@ internal object JourneyRenderSchema {
                 "mp4"
             }
             "font" -> {
-                exact(asset, common + setOf("location", "riveAssetId", "riveUniqueName", "family", "weight", "style", "format"))
+                exact(asset, common + setOf("location", "authoredAssetId", "assetUniqueName", "family", "weight", "style", "format"))
                 oneOf(asset["location"], "cdn")
                 if (text(asset["family"]).trim().lowercase() == "system") fail("System font must use system location")
-                integer(asset["riveAssetId"]); releaseId(asset["riveUniqueName"])
+                integer(asset["authoredAssetId"]); releaseId(asset["assetUniqueName"])
                 id(asset["family"]); id(asset["weight"], 32); oneOf(asset["style"], "normal", "italic")
                 val format = oneOf(asset["format"], "ttf", "otf")
                 when (oneOf(asset["contentType"], "font/ttf", "font/otf", "application/octet-stream")) {
@@ -172,12 +172,12 @@ internal object JourneyRenderSchema {
     }
 
     private fun textInput(input: JsonElement, screens: Set<String>) {
-        val ids = setOf("id", "screenId", "artboardId", "viewNodeId", "renderedNodeId", "riveTextObjectKey", "riveTextRunObjectKey")
-        val value = exact(input, ids + setOf("riveTextName", "riveTextRunName", "value", "editable", "geometry", "style", "secureTextEntry", "multiline"),
+        val ids = setOf("id", "screenId", "artboardId", "viewNodeId", "renderedNodeId", "textObjectKey", "textRunObjectKey")
+        val value = exact(input, ids + setOf("textName", "textRunName", "value", "editable", "geometry", "style", "secureTextEntry", "multiline"),
             setOf("responseFieldKey", "responseCapture", "placeholder", "keyboardType", "maxLength"))
         for (key in ids) releaseId(value[key])
         if (text(value["screenId"]) !in screens) fail("text input screen")
-        id(value["riveTextName"]); id(value["riveTextRunName"])
+        id(value["textName"]); id(value["textRunName"])
         if (text(value["value"]).length > 1_000_000) fail("text input value")
         value["responseFieldKey"]?.let { releaseId(it) }
         value["responseCapture"]?.let {
@@ -192,13 +192,13 @@ internal object JourneyRenderSchema {
         val paths = setOf("xPath", "yPath", "widthPath", "heightPath", "rotationPath", "scaleXPath", "scaleYPath")
         val geometry = exact(value["geometry"], paths)
         for (path in paths) id(geometry[path], 512)
-        val style = exact(value["style"], setOf("fontFamily", "fontWeight", "fontStyle", "fontSize", "lineHeight", "letterSpacing", "color", "fontAssetRiveUniqueName"), setOf("textAlign"))
+        val style = exact(value["style"], setOf("fontFamily", "fontWeight", "fontStyle", "fontSize", "lineHeight", "letterSpacing", "color", "fontAssetUniqueName"), setOf("textAlign"))
         id(style["fontFamily"]); id(style["fontWeight"], 32); oneOf(style["fontStyle"], "normal", "italic")
         positive(style["fontSize"], 2048.0)
         val lineHeight = number(style["lineHeight"], -1.0, 8192.0)
         if (lineHeight != -1.0 && lineHeight <= 0.0) fail("natural or positive line height")
         number(style["letterSpacing"], -2048.0, 2048.0); integer(style["color"], maximum = 0xffffffffL)
-        releaseId(style["fontAssetRiveUniqueName"]); style["textAlign"]?.let { id(it, 32) }
+        releaseId(style["fontAssetUniqueName"]); style["textAlign"]?.let { id(it, 32) }
     }
 
     private fun positive(value: JsonElement?, max: Double) {

@@ -21,13 +21,13 @@ class ExperienceAssetImportTest {
                 put("render", buildJsonObject {
                     put("assets", buildJsonArray { add(buildJsonObject {
                         put("kind", "font"); put("location", "system"); put("family", "System")
-                        put("weight", "700"); put("style", "normal"); put("riveAssetId", 10)
-                        put("riveUniqueName", "native-10"); put("required", true)
+                        put("weight", "700"); put("style", "normal"); put("authoredAssetId", 10)
+                        put("assetUniqueName", "native-10"); put("required", true)
                     }) })
                     put("textInputs", buildJsonArray { add(buildJsonObject {
                         put("style", buildJsonObject {
                             put("fontFamily", family); put("fontWeight", weight)
-                            put("fontStyle", style); put("fontAssetRiveUniqueName", name)
+                            put("fontStyle", style); put("fontAssetUniqueName", name)
                         })
                     }) })
                 })
@@ -53,16 +53,16 @@ class ExperienceAssetImportTest {
             put("family", "System")
             put("weight", "700")
             put("style", "normal")
-            put("riveAssetId", 10)
-            put("riveUniqueName", "native-10")
+            put("authoredAssetId", 10)
+            put("assetUniqueName", "native-10")
             put("required", true)
         }
         val cdn = buildJsonObject {
             put("kind", "font")
             put("location", "cdn")
             put("key", "downloaded-font")
-            put("riveAssetId", 20)
-            put("riveUniqueName", "custom-20")
+            put("authoredAssetId", 20)
+            put("assetUniqueName", "custom-20")
             put("required", true)
         }
         val descriptor = buildJsonObject {
@@ -123,7 +123,7 @@ class ExperienceAssetImportTest {
                     put("assets", buildJsonArray {
                         add(buildJsonObject {
                             put("kind", "video"); put("key", key)
-                            put("riveAssetId", 2); put("riveUniqueName", "greeting-2")
+                            put("authoredAssetId", 2); put("assetUniqueName", "greeting-2")
                             put("sourceAssetKey", source); put("required", required)
                             put("captionTracks", buildJsonArray { add(buildJsonObject {
                                 put("streamIndex", 2); put("codec", "mov_text"); put("language", "en")
@@ -167,8 +167,8 @@ class ExperienceAssetImportTest {
                         put("sha256", digest)
                         put("sizeBytes", 4)
                         put("contentType", "image/png")
-                        put("riveAssetId", 1)
-                        put("riveUniqueName", "hero-1")
+                        put("authoredAssetId", 1)
+                        put("assetUniqueName", "hero-1")
                         put("required", true)
                     })
                 })
@@ -225,8 +225,8 @@ class ExperienceAssetImportTest {
                         put("sha256", digest)
                         put("sizeBytes", 4)
                         put("contentType", "image/png")
-                        put("riveAssetId", 1)
-                        put("riveUniqueName", "hero-1")
+                        put("authoredAssetId", 1)
+                        put("assetUniqueName", "hero-1")
                         put("required", true)
                     })
                 })
@@ -266,8 +266,8 @@ class ExperienceAssetImportTest {
                         put("sha256", digest)
                         put("sizeBytes", 4)
                         put("contentType", "image/png")
-                        put("riveAssetId", 1)
-                        put("riveUniqueName", "hero")
+                        put("authoredAssetId", 1)
+                        put("assetUniqueName", "hero")
                         put("required", true)
                     })
                 })

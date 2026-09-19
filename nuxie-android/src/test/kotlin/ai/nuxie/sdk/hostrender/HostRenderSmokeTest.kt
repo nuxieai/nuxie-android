@@ -143,17 +143,17 @@ class HostRenderSmokeTest {
             System.getProperty("nuxie.repo.root"),
             "example-app/src/debug/assets/asset-smoke",
         )
-        val rivBytes = namedArtboardFixture(
+        val sceneBytes = namedArtboardFixture(
             File(fixtureDirectory, "external-image.riv").readBytes(),
             artboardOffset = 0x11,
             name = "Image smoke",
         )
         val imageBytes = File(fixtureDirectory, "external-image.png").readBytes()
-        val imageAsset = checkNotNull(runtime.inspectFileAssets(rivBytes))
+        val imageAsset = checkNotNull(runtime.inspectFileAssets(sceneBytes))
             .single { it.kind == FileAssetKind.IMAGE }
         val authoredId = checkNotNull(imageAsset.authoredId)
         val input = Files.createTempDirectory("host-render-smoke-input-").toFile()
-        File(input, "scene.riv").writeBytes(rivBytes)
+        File(input, "scene.nux").writeBytes(sceneBytes)
         if (includeExternalAsset) {
             File(input, "assets/external-image.png").apply {
                 requireNotNull(parentFile).mkdirs()
@@ -165,8 +165,8 @@ class HostRenderSmokeTest {
                 put("backgroundColor", "#FF00FFFF")
             })
             put("render", buildJsonObject {
-                put("renderer", "rive")
-                put("riv", buildJsonObject { put("key", "scene.riv") })
+                put("renderer", "nux")
+                put("nux", buildJsonObject { put("key", "scene.nux") })
                 put("assets", buildJsonArray {
                     add(buildJsonObject {
                         put("kind", "image")
@@ -174,8 +174,8 @@ class HostRenderSmokeTest {
                         put("sha256", sha256(imageBytes))
                         put("sizeBytes", imageBytes.size)
                         put("contentType", "image/png")
-                        put("riveAssetId", authoredId)
-                        put("riveUniqueName", "${imageAsset.name}-$authoredId")
+                        put("authoredAssetId", authoredId)
+                        put("assetUniqueName", "${imageAsset.name}-$authoredId")
                         put("required", true)
                     })
                 })
@@ -201,20 +201,20 @@ class HostRenderSmokeTest {
     }
 
     private fun prepareScriptedInterpolatorInput(): File {
-        val rivBytes = namedArtboardFixture(
+        val sceneBytes = namedArtboardFixture(
             fixtureBytes("scripted-interpolator.riv.base64"),
             artboardOffset = 0x251,
             name = "Script smoke",
         )
         val input = Files.createTempDirectory("host-render-script-input-").toFile()
-        File(input, "scene.riv").writeBytes(rivBytes)
+        File(input, "scene.nux").writeBytes(sceneBytes)
         val descriptor = buildJsonObject {
             put("presentation", buildJsonObject {
                 put("backgroundColor", "#FF00FFFF")
             })
             put("render", buildJsonObject {
-                put("renderer", "rive")
-                put("riv", buildJsonObject { put("key", "scene.riv") })
+                put("renderer", "nux")
+                put("nux", buildJsonObject { put("key", "scene.nux") })
                 put("assets", buildJsonArray {})
                 put("screens", buildJsonArray {
                     add(buildJsonObject {

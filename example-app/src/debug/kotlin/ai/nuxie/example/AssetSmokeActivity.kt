@@ -20,11 +20,11 @@ class AssetSmokeActivity : Activity() {
     runCatching {
       val rivFile = copyFixtureToCache(RIV_ASSET)
       val imageFile = copyFixtureToCache(IMAGE_ASSET)
-      val rivBytes = rivFile.readBytes()
+      val sceneBytes = rivFile.readBytes()
       val imageBytes = imageFile.readBytes()
       val imageSha256 = imageBytes.sha256()
       val imageKey = "assets/sha256/$imageSha256.png"
-      val inspectedImage = ExperienceRenderProbe.inspectImageAsset(rivBytes)
+      val inspectedImage = ExperienceRenderProbe.inspectImageAsset(sceneBytes)
       val descriptor = syntheticDescriptor(
         imageKey = imageKey,
         imageSha256 = imageSha256,
@@ -35,7 +35,7 @@ class AssetSmokeActivity : Activity() {
 
       ExperienceRenderProbe.createView(
         context = this,
-        rivBytes = rivBytes,
+        sceneBytes = sceneBytes,
         descriptorJson = descriptor.toString(),
         artifactsByKey = mapOf(imageKey to imageFile),
         onFirstFrame = { Log.i(LOG_TAG, "first frame") },
@@ -71,8 +71,8 @@ class AssetSmokeActivity : Activity() {
       .put("sha256", imageSha256)
       .put("sizeBytes", imageSizeBytes)
       .put("contentType", "image/png")
-      .put("riveAssetId", authoredId)
-      .put("riveUniqueName", "$imageName-$authoredId")
+      .put("authoredAssetId", authoredId)
+      .put("assetUniqueName", "$imageName-$authoredId")
       .put("required", true)
     return JSONObject().put(
       "render",

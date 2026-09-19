@@ -132,7 +132,6 @@ internal class HostRenderHarness(
 
     private fun resolveScene(input: File, render: JsonObject): File {
         val field = when (render.string("renderer")) {
-            "rive" -> "riv"
             "nux" -> "nux"
             else -> error("Journey release renderer is unsupported")
         }

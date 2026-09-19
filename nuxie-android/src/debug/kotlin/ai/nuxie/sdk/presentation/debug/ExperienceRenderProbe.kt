@@ -32,7 +32,7 @@ object ExperienceRenderProbe {
      * constructs its synthetic release descriptor.
      */
     @JvmStatic
-    fun inspectImageAsset(rivBytes: ByteArray): InspectedImageAsset {
+    fun inspectImageAsset(sceneBytes: ByteArray): InspectedImageAsset {
         check(runtime.isAvailable) {
             "Nuxie runtime library is unavailable"
         }
@@ -43,7 +43,7 @@ object ExperienceRenderProbe {
         var imageAsset: InspectedImageAsset? = null
         val accepted = lane.enqueue {
             runCatching {
-                val catalog = checkNotNull(runtime.inspectFileAssets(rivBytes)) {
+                val catalog = checkNotNull(runtime.inspectFileAssets(sceneBytes)) {
                     "Runtime could not inspect the Experience asset catalog"
                 }
                 val image = catalog.singleOrNull { it.kind == FileAssetKind.IMAGE }
@@ -81,7 +81,7 @@ object ExperienceRenderProbe {
     @JvmStatic
     fun createView(
         context: Context,
-        rivBytes: ByteArray,
+        sceneBytes: ByteArray,
         descriptorJson: String,
         artifactsByKey: Map<String, File>,
         onFirstFrame: () -> Unit,
@@ -106,7 +106,7 @@ object ExperienceRenderProbe {
             },
         )
         host.loadArtboard(
-            rivBytes = rivBytes,
+            sceneBytes = sceneBytes,
             artboardName = null,
             descriptor = descriptor,
             artifactsByKey = artifactsByKey,

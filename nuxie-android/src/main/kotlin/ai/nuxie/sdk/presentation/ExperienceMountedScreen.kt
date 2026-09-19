@@ -18,7 +18,7 @@ internal class ExperienceMountedScreen(
     videoDecoderPool: ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool? = null,
 ) {
     // Validate synchronous inputs before allocating a native lane or observers.
-    private val rivBytes = prepared.sceneFile.readBytes()
+    private val sceneBytes = prepared.sceneFile.readBytes()
     private val inputs = ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId)
     private val inputSize = if (inputs.isEmpty()) null else requireNotNull(prepared.artboardSize) {
         "Editable Experience has no authored artboard extent"
@@ -27,7 +27,7 @@ internal class ExperienceMountedScreen(
         .orEmpty().mapNotNull { value ->
             val asset = value as? JsonObject ?: return@mapNotNull null
             if ((asset["kind"] as? JsonPrimitive)?.content != "font") return@mapNotNull null
-            val name = (asset["riveUniqueName"] as? JsonPrimitive)?.content ?: return@mapNotNull null
+            val name = (asset["assetUniqueName"] as? JsonPrimitive)?.content ?: return@mapNotNull null
             val key = (asset["key"] as? JsonPrimitive)?.content ?: return@mapNotNull null
             prepared.artifactsByKey[key]?.let { name to it }
         }.toMap()
@@ -85,7 +85,7 @@ internal class ExperienceMountedScreen(
             surface.updateRuntimeValues(lifecycle.updateReduceMotion(reduced))
         }
         surface.loadArtboard(
-            rivBytes = rivBytes,
+            sceneBytes = sceneBytes,
             artboardName = prepared.artboardName,
             descriptor = prepared.descriptor,
             artifactsByKey = prepared.artifactsByKey,

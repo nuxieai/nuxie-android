@@ -1661,12 +1661,12 @@ internal class ExperiencePresentationService(
         val code = error.systemFontFailureCode() ?: return
         if (!active.fontFailureReported.compareAndSet(false, true)) return
         val render = descriptor?.get("render") as? JsonObject
-        val riv = render?.get("riv") as? JsonObject
+        val scene = render?.get("nux") as? JsonObject
         val properties = linkedMapOf<String, Any?>(
             "experience_id" to active.ref.experienceId,
             "experience_version" to active.ref.experienceVersion,
             "artifact_build_id" to active.acquired.identity.buildId,
-            "artifact_content_hash" to riv?.string("sha256"),
+            "artifact_content_hash" to scene?.string("sha256"),
             "artifact_source" to "unknown",
             "error_message" to error.message,
             "error_code" to code,

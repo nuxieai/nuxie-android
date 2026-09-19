@@ -89,7 +89,7 @@ The input directory must contain:
 ```text
 release/
 ├── release-descriptor.json
-├── experience.riv
+├── experience.nux
 └── assets/
     └── ... files at their descriptor keys, relative to release/
 ```
