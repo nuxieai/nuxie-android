@@ -210,6 +210,9 @@ class ConfiguredImportSmokeTest {
     fun localMp4DecodesIntoVulkanAcrossTwoLoops() = verifyDecodedVideo(frenchCaptions = false)
 
     @Test
+    fun composedVideoTracksAudioMasterClockAcrossLoopsAndSeek() = verifyDecodedVideo(false, avClockMeasurement = true)
+
+    @Test
     fun preferredFrenchTrackFollowsActualVideoPlayback() = verifyDecodedVideo(frenchCaptions = true)
 
     @Test
@@ -307,7 +310,7 @@ class ConfiguredImportSmokeTest {
         } finally { renderer.close(); local.delete() }
     }
 
-    private fun verifyDecodedVideo(frenchCaptions: Boolean, measurement: VideoMeasurement? = null) {
+    private fun verifyDecodedVideo(frenchCaptions: Boolean, measurement: VideoMeasurement? = null, avClockMeasurement: Boolean = false) {
         val preparationStarted = System.nanoTime()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val local = java.io.File.createTempFile("video-decoder-", ".mp4", instrumentation.targetContext.cacheDir)
@@ -347,20 +350,69 @@ class ConfiguredImportSmokeTest {
                             val seenCaptions = mutableSetOf<String>()
                             var suspended = false
                             val colors = mutableListOf<Boolean>()
-                            while (android.os.SystemClock.elapsedRealtime() < deadline && colors.size < 4) {
+                            val clockPhases = mutableSetOf<Boolean>()
+                            val transitionWindows = mutableListOf<Pair<Double, Double>>()
+                            val phaseMismatches = mutableListOf<String>()
+                            var lastRedClock: Double? = null
+                            var previousClock: Double? = null
+                            var lastClockGeneration: Long? = null
+                            var firstVideoClock: Double? = null
+                            // Test-only access to the independent MediaPlayer audio-master clock.
+                            // Frame.seconds is intentionally not used as a video timestamp oracle.
+                            fun mediaClock(): AndroidVideoDecoder.Clock? {
+                                if (!avClockMeasurement) return null
+                                val field = ExperienceVideoPlayback::class.java.getDeclaredField("entries").apply { isAccessible = true }
+                                val entry = (field.get(playback) as Map<*, *>).values.singleOrNull() ?: return null
+                                val decoderField = entry.javaClass.getDeclaredField("decoder").apply { isAccessible = true }
+                                return (decoderField.get(entry) as? AndroidVideoDecoder)?.clock()
+                            }
+                            fun renderedColor(): Boolean? {
+                                val before = mediaClock()
+                                val composed = renderer.renderToCpuFrame(player, 0, false)
+                                val after = mediaClock()
+                                val offset = (80 * composed.width + 100) * 4
+                                val red = composed.rgba[offset].toInt() and 255
+                                val blue = composed.rgba[offset + 2].toInt() and 255
+                                val color = when {
+                                    red > 180 && blue < 70 -> true
+                                    blue > 180 && red < 70 -> false
+                                    else -> null
+                                }
+                                if (color != null && firstVideoClock == null && after != null) firstVideoClock = after.seconds
+                                if (firstVideoClock != null && before != null && after != null && before.playing && after.playing &&
+                                    before.generation == after.generation && after.seconds >= before.seconds) {
+                                    // Never bracket across a seek, loop, or material clock correction.
+                                    if (lastClockGeneration != before.generation || previousClock?.let { before.seconds + 0.02 < it } == true) lastRedClock = null
+                                    lastClockGeneration = before.generation
+                                    previousClock = after.seconds
+                                    // Exclude 100ms around the fixture’s authored 1s color boundary.
+                                    val expected = when {
+                                        before.seconds >= 0.1 && after.seconds <= 0.9 -> true
+                                        before.seconds >= 1.1 && after.seconds <= 1.9 -> false
+                                        else -> null
+                                    }
+                                    if (expected != null) {
+                                        if (expected != color) phaseMismatches += "clock=[${before.seconds},${after.seconds}] expectedRed=$expected actualRed=$color"
+                                        else clockPhases += expected
+                                    }
+                                    if (color == true) lastRedClock = before.seconds
+                                    if (color == false && lastRedClock != null) {
+                                        if (after.seconds >= checkNotNull(lastRedClock)) transitionWindows += (checkNotNull(lastRedClock) - 1.0) to (after.seconds - 1.0)
+                                        lastRedClock = null
+                                    }
+                                }
+                                return color
+                            }
+                            while (android.os.SystemClock.elapsedRealtime() < deadline &&
+                                (colors.size < 4 || avClockMeasurement && transitionWindows.size < 2)) {
                                 player.step(0.0)
                                 val cycleStarted = System.nanoTime()
                                 playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
                                 tickMilliseconds += (System.nanoTime() - cycleStarted) / 1_000_000.0
                                 if (firstDelivered == null && playback.deliveredFrames > 0) firstDelivered = System.nanoTime()
                                 seenCaptions += checkNotNull(playback.captionSnapshot()[initial.componentId]).text
-                                val composed = renderer.renderToCpuFrame(player, 0, false)
-                                val offset = (80 * composed.width + 100) * 4
-                                val red = composed.rgba[offset].toInt() and 255
-                                val blue = composed.rgba[offset + 2].toInt() and 255
-                                if (red > 180 && blue < 70 && colors.lastOrNull() != true) colors.add(true)
-                                if (blue > 180 && red < 70 && colors.lastOrNull() != false) colors.add(false)
-                                if (measurement == null && !suspended && colors == listOf(true)) {
+                                renderedColor()?.let { color -> if (colors.lastOrNull() != color) colors.add(color) }
+                                if (measurement == null && !avClockMeasurement && !suspended && colors == listOf(true)) {
                                     playback.setVisible(false)
                                     assertTrue(playback.captionSnapshot().isEmpty())
                                     playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
@@ -390,13 +442,68 @@ class ConfiguredImportSmokeTest {
                             }
                             assertTrue(seenCaptions.containsAll(if (frenchCaptions) listOf("Bonjour 👋", "Bienvenue") else listOf("Hello 👋", "Welcome")))
                             if (frenchCaptions) assertFalse(seenCaptions.contains("Hello 👋"))
-                            assertEquals("Decoded frames must repeat through native loop commands", listOf(true, false, true, false), colors)
-                            fun command(type: String, view: String = "clip-view") = ai.nuxie.sdk.experiences.JourneyVideoAction.parse(
-                                kotlinx.serialization.json.Json.parseToJsonElement("""{"type":"video","target":{"artboardId":"screen","viewNodeId":"$view"},"command":{"type":"$type"}}"""))
+                            assertEquals("Decoded frames must repeat through native loop commands", listOf(true, false, true, false), colors.take(4))
+                            fun command(type: String, view: String = "clip-view", extra: String = "") = ai.nuxie.sdk.experiences.JourneyVideoAction.parse(
+                                kotlinx.serialization.json.Json.parseToJsonElement("""{"type":"video","target":{"artboardId":"screen","viewNodeId":"$view"},"command":{"type":"$type"$extra}}"""))
                             assertThrows(IllegalArgumentException::class.java) { playback.apply(command("pause", "missing")) }
+                            if (frenchCaptions) {
+                                // The fixture has a deliberate 0.9–1.0s cue gap. Reach an
+                                // active cue before freezing playback for language replacement.
+                                val cueDeadline = android.os.SystemClock.elapsedRealtime() + 2_000
+                                while (player.videoCaption(initial.componentId).text.isEmpty() &&
+                                    android.os.SystemClock.elapsedRealtime() < cueDeadline) {
+                                    player.step(0.0)
+                                    playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                                    Thread.sleep(16)
+                                }
+                                assertTrue(player.videoCaption(initial.componentId).text.isNotEmpty())
+                            }
                             playback.apply(command("pause"))
                             playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
                             assertEquals(false, player.videos().single().wantsPlay)
+                            if (avClockMeasurement) {
+                                println("NUXIE_AV_CLOCK_LOOPS windows=$transitionWindows mismatches=$phaseMismatches firstVideoClock=$firstVideoClock")
+                                assertEquals(setOf(true, false), clockPhases)
+                                assertTrue("Both loops have independently bracketed phase transitions", transitionWindows.size >= 2)
+                                playback.apply(command("seek", extra = ",\"seconds\":0.25"))
+                                var settled = false
+                                val seekDeadline = android.os.SystemClock.elapsedRealtime() + 5_000
+                                while (!settled && android.os.SystemClock.elapsedRealtime() < seekDeadline) {
+                                    player.step(0.0)
+                                    playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                                    val color = renderedColor()
+                                    val clock = mediaClock()
+                                    settled = color == true && clock != null && !clock.playing && kotlin.math.abs(clock.seconds - 0.25) < 0.1
+                                    Thread.sleep(16)
+                                }
+                                assertTrue("Paused seek restores the red frame at the media clock", settled)
+                                lastRedClock = null
+                                previousClock = null
+                                playback.apply(command("play"))
+                                var resumed = false
+                                val resumeDeadline = android.os.SystemClock.elapsedRealtime() + 5_000
+                                while (!resumed && android.os.SystemClock.elapsedRealtime() < resumeDeadline) {
+                                    player.step(0.0)
+                                    playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                                    val color = renderedColor()
+                                    val clock = mediaClock()
+                                    resumed = color == false && clock != null && clock.playing && clock.seconds >= 1.4
+                                    Thread.sleep(16)
+                                }
+                                assertTrue("Resumed media reaches the blue phase", resumed)
+                                assertTrue("Seek/resume has another observed phase transition", transitionWindows.size >= 3)
+                                println("NUXIE_AV_CLOCK_MEASUREMENT " + org.json.JSONObject()
+                                    .put("clock", "MediaPlayer audio-master snapshot extrapolated at most 100ms")
+                                    .put("firstRenderedVideoClockSeconds", firstVideoClock)
+                                    .put("clockFreshnessBoundMs", 100).put("includesForcedVulkanReadback", true)
+                                    .put("transitionOffsetWindowsMs", org.json.JSONArray(transitionWindows.map {
+                                        org.json.JSONArray(listOf(it.first * 1000, it.second * 1000))
+                                    })).put("physicalSpeakerLatencyMeasured", false)
+                                    .put("phaseMismatches", org.json.JSONArray(phaseMismatches)))
+                                assertTrue("Composed phases outside fixture boundary exclusion: $phaseMismatches", phaseMismatches.isEmpty())
+                                playback.apply(command("pause"))
+                                playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                            }
                             if (frenchCaptions) {
                                 val before = player.videos().single()
                                 val decoderCount = playback.activeDecoderCount
