@@ -31,6 +31,102 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NuxiePublicStartupDeviceTest {
+    @Test fun emptyDeliverySurvivesOfflineReconstructionAndRestoresTheSameRelease() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        fun read(path: String) = instrumentation.context.assets
+            .open("journeys/rendered-screen-control/$path").use { it.readBytes() }
+        val entry = Json.parseToJsonElement(read("release-entry.json").decodeToString()).jsonObject
+        val locator = entry.getValue("locator").jsonObject
+        val envelope = entry.getValue("envelope").jsonObject
+        val descriptor = Json.parseToJsonElement(android.util.Base64.decode(
+            envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, android.util.Base64.NO_WRAP,
+        ).decodeToString()).jsonObject
+        val active = profile(entry, descriptor.getValue("leg").jsonObject.getValue("entryCondition").jsonObject)
+        val empty = JsonObject(active + mapOf(
+            "armedLegs" to JsonArray(emptyList()), "releases" to JsonArray(emptyList()),
+        ))
+        val render = descriptor.getValue("render").jsonObject
+        val artifactKeys = (render.getValue("assets").jsonArray.map { it.jsonObject.getValue("key").jsonPrimitive.content } +
+            render.getValue("riv").jsonObject.getValue("key").jsonPrimitive.content +
+            descriptor.getValue("screenBehaviors").jsonArray.map {
+                it.jsonObject.getValue("script").jsonObject.getValue("artifact").jsonObject.getValue("key").jsonPrimitive.content
+            }).toSet()
+        val online = java.util.concurrent.atomic.AtomicBoolean(true)
+        val body = java.util.concurrent.atomic.AtomicReference(active)
+        val blocked = java.util.concurrent.atomic.AtomicInteger()
+        val transport = HttpTransport { request ->
+            if (!online.get()) {
+                blocked.incrementAndGet()
+                throw java.io.IOException("qualification transport offline")
+            }
+            val path = request.url.path.trimStart('/')
+            when {
+                path == "profile" -> HttpTransport.Response(200, body.get().toString().encodeToByteArray(), mapOf(
+                    "ETag" to if (body.get() == empty) "\"empty-delivery\"" else "\"active-delivery\"",
+                    "Nuxie-App-Id" to locator.getValue("appId").jsonPrimitive.content,
+                    "Nuxie-App-Environment" to locator.getValue("environment").jsonPrimitive.content,
+                ))
+                path in artifactKeys -> HttpTransport.Response(200, read(path), mapOf(
+                    "Content-Type" to if (path.endsWith(".riv")) "application/vnd.rive" else "application/octet-stream",
+                ))
+                else -> HttpTransport.Response(503, ByteArray(0))
+            }
+        }
+        val directory = File(context.cacheDir, "delivery-recovery-${UUID.randomUUID()}").apply { mkdirs() }
+        val identity = IdentityService(context).apply { setDistinctId(directory.name) }
+        val apiKey = "pk_test_${directory.name}"
+        fun createCore() = NuxieCore(
+            context = context, apiKey = apiKey, environment = NuxieEnvironment.DEVELOPMENT,
+            logLevel = LogLevel.NONE, beforeSend = null,
+            overrides = NuxieCore.Overrides(
+                identity = identity, transport = transport, registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+                eventDatabaseFile = File(directory, "events.db"),
+                profileCacheDirectory = File(directory, "profiles"),
+            ),
+        )
+        var core = createCore()
+        fun snapshot() = requireNotNull(core.journeyProfiles.snapshot(identity.distinctId()))
+        try {
+            assertTrue("Initial signed profile must be admitted", core.profile.refreshAndWait())
+            assertEquals(1, snapshot().profile.armedLegs.size)
+            val release = snapshot().releasesByDigest.values.single()
+            val highWater = ai.nuxie.sdk.experiences.JourneyReleaseHighWaterStore(context)
+            val floor = highWater.floor(release.identity.streamKey)
+
+            body.set(empty)
+            online.set(false)
+            assertFalse(core.profile.refreshAndWait())
+            assertEquals(1, snapshot().profile.armedLegs.size)
+            online.set(true)
+            assertTrue("Empty delivery must replace the active profile", core.profile.refreshAndWait())
+            assertTrue(snapshot().profile.armedLegs.isEmpty())
+            assertTrue(snapshot().releasesByDigest.isEmpty())
+            assertEquals(floor, highWater.floor(release.identity.streamKey))
+
+            core.stopAndAwait()
+            online.set(false)
+            core = createCore()
+            assertFalse(core.profile.refreshAndWait())
+            assertEquals(empty, core.profile.currentProfile()?.body)
+            assertTrue(snapshot().profile.armedLegs.isEmpty())
+            assertTrue(snapshot().releasesByDigest.isEmpty())
+            assertEquals(floor, highWater.floor(release.identity.streamKey))
+
+            body.set(active)
+            online.set(true)
+            assertTrue("The same release must be readmitted after recovery", core.profile.refreshAndWait())
+            assertEquals(1, snapshot().profile.armedLegs.size)
+            assertEquals(release.identity, snapshot().releasesByDigest.values.single().identity)
+            assertEquals(floor, highWater.floor(release.identity.streamKey))
+            assertTrue("Both offline refreshes must reach the impaired transport", blocked.get() >= 2)
+        } finally {
+            core.stopAndAwait()
+            directory.deleteRecursively()
+        }
+    }
+
     @Test fun initialProfileAdmitsASignedJourneyAndCommitsACompiledControlEvent() = exercise(eventEntry = false)
 
     @Test fun triggerCapturedBeforeTheInitialProfileEnrollsItsSignedJourney() = exercise(eventEntry = true)
