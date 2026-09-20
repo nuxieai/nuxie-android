@@ -668,6 +668,13 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         return NativeCallResult(status.single(), id.takeIf { status.single() == 0 })
     }
     override fun freeSemantics(snapshot: Long) = NuxieRuntimeBridge.nativeSemanticSnapshotFree(snapshot)
+    override fun fieldStringCopy(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<ByteArray> {
+        val status = intArrayOf(4)
+        val value = NuxieRuntimeBridge.nativePlayerFieldStringCopy(player, snapshot, nodeId, name.encodeToByteArray(), status)
+        return NativeCallResult(status.single(), value)
+    }
+    override fun fieldStringSet(player: Long, snapshot: Long, nodeId: Long, name: String, value: ByteArray): Int =
+        NuxieRuntimeBridge.nativePlayerFieldStringSet(player, snapshot, nodeId, name.encodeToByteArray(), value)
     override fun validateSemantics(player: Long, snapshot: Long) =
         NuxieRuntimeBridge.nativePlayerValidateSemanticSnapshot(player, snapshot)
     override fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int) =
