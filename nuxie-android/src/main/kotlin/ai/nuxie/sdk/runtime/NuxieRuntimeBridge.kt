@@ -232,6 +232,10 @@ internal object NuxieRuntimeBridge {
 
     external fun nativePlayerSemanticNodeForTextRun(player: Long, snapshot: Long, name: ByteArray, statusOut: IntArray): Long
 
+    external fun nativePlayerFieldStringCopy(player: Long, snapshot: Long, nodeId: Long, name: ByteArray, statusOut: IntArray): ByteArray?
+
+    external fun nativePlayerFieldStringSet(player: Long, snapshot: Long, nodeId: Long, name: ByteArray, value: ByteArray): Int
+
     external fun nativeSemanticSnapshotFree(snapshot: Long): Int
 
     external fun nativePlayerValidateSemanticSnapshot(player: Long, snapshot: Long): Int

@@ -2014,6 +2014,83 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeSemanticSnapshotFree(
   return nux_semantic_snapshot_free((struct NuxSemanticSnapshot *)from_handle(snapshot));
 }
 
+JNIEXPORT jbyteArray JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerFieldStringCopy(
+    JNIEnv *env, jobject self, jlong player, jlong snapshot, jlong node_id,
+    jbyteArray name, jintArray status_out) {
+  (void)self;
+  NuxStatus status = NUX_STATUS_NULL_ARGUMENT;
+  jbyteArray result = NULL;
+  if (node_id < 0 || node_id > UINT32_MAX) {
+    status = NUX_STATUS_INVALID_ARGUMENT;
+  } else if (name != NULL) {
+    jsize name_length = (*env)->GetArrayLength(env, name);
+    if (name_length > 4096) {
+      status = NUX_STATUS_LIMIT_EXCEEDED;
+    } else {
+      jbyte *name_bytes = (*env)->GetByteArrayElements(env, name, NULL);
+      if (name_bytes == NULL) {
+        status = NUX_STATUS_RUNTIME_ERROR;
+      } else {
+        struct NuxStringView key = {(const char *)name_bytes, (size_t)name_length};
+        size_t length = 0;
+        status = nux_player_field_string_copy(
+            (const struct NuxPlayer *)from_handle(player),
+            (const struct NuxSemanticSnapshot *)from_handle(snapshot),
+            (uint32_t)node_id, key, NULL, 0, &length);
+        if (status == NUX_STATUS_OK && length > 1048576) status = NUX_STATUS_LIMIT_EXCEEDED;
+        if (status == NUX_STATUS_OK) {
+          result = (*env)->NewByteArray(env, (jsize)length);
+          if (result == NULL) {
+            status = NUX_STATUS_RUNTIME_ERROR;
+          } else if (length > 0) {
+            jbyte *value = (*env)->GetByteArrayElements(env, result, NULL);
+            if (value == NULL) {
+              status = NUX_STATUS_RUNTIME_ERROR;
+            } else {
+              status = nux_player_field_string_copy(
+                  (const struct NuxPlayer *)from_handle(player),
+                  (const struct NuxSemanticSnapshot *)from_handle(snapshot),
+                  (uint32_t)node_id, key, (uint8_t *)value, length, &length);
+              (*env)->ReleaseByteArrayElements(env, result, value, status == NUX_STATUS_OK ? 0 : JNI_ABORT);
+            }
+          }
+        }
+        (*env)->ReleaseByteArrayElements(env, name, name_bytes, JNI_ABORT);
+      }
+    }
+  }
+  if (!set_status_out(env, status_out, status) || status != NUX_STATUS_OK) return NULL;
+  return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerFieldStringSet(
+    JNIEnv *env, jobject self, jlong player, jlong snapshot, jlong node_id,
+    jbyteArray name, jbyteArray value) {
+  (void)self;
+  if (node_id < 0 || node_id > UINT32_MAX) return NUX_STATUS_INVALID_ARGUMENT;
+  if (name == NULL || value == NULL) return NUX_STATUS_NULL_ARGUMENT;
+  jsize name_length = (*env)->GetArrayLength(env, name);
+  jsize value_length = (*env)->GetArrayLength(env, value);
+  if (name_length > 4096 || value_length > 1048576) return NUX_STATUS_LIMIT_EXCEEDED;
+  jbyte *name_bytes = (*env)->GetByteArrayElements(env, name, NULL);
+  if (name_bytes == NULL) return NUX_STATUS_RUNTIME_ERROR;
+  jbyte *value_bytes = (*env)->GetByteArrayElements(env, value, NULL);
+  if (value_bytes == NULL) {
+    (*env)->ReleaseByteArrayElements(env, name, name_bytes, JNI_ABORT);
+    return NUX_STATUS_RUNTIME_ERROR;
+  }
+  struct NuxStringView key = {(const char *)name_bytes, (size_t)name_length};
+  struct NuxStringView input = {(const char *)value_bytes, (size_t)value_length};
+  NuxStatus status = nux_player_field_string_set(
+      (struct NuxPlayer *)from_handle(player),
+      (const struct NuxSemanticSnapshot *)from_handle(snapshot), (uint32_t)node_id, key, input);
+  (*env)->ReleaseByteArrayElements(env, value, value_bytes, JNI_ABORT);
+  (*env)->ReleaseByteArrayElements(env, name, name_bytes, JNI_ABORT);
+  return status;
+}
+
 JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerValidateSemanticSnapshot(
     JNIEnv *env, jobject self, jlong player, jlong snapshot) {

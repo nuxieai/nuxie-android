@@ -91,6 +91,11 @@ pub fn semantic_text_artboard() -> Vec<u8> {
             push_string(bytes, "TextValueRun", "text", "private field value");
         });
     }
+    push_object(&mut bytes, "CustomPropertyString", |bytes| {
+        push_uint(bytes, "Component", "parentId", 0);
+        push_string(bytes, "Component", "name", "editable/名前");
+        push_string(bytes, "CustomPropertyString", "propertyValue", "value 😀");
+    });
     bytes
 }
 

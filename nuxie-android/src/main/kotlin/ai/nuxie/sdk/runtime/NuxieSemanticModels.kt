@@ -60,6 +60,10 @@ internal interface NuxieSemanticNative {
     fun semanticNode(snapshot: Long, index: Int): NativeCallResult<NativeSemanticNode> = error("semanticNode is not implemented")
     fun semanticNodeForTextRun(player: Long, snapshot: Long, name: String): NativeCallResult<Long> =
         error("semanticNodeForTextRun is not implemented")
+    fun fieldStringCopy(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<ByteArray> =
+        error("fieldStringCopy is not implemented")
+    fun fieldStringSet(player: Long, snapshot: Long, nodeId: Long, name: String, value: ByteArray): Int =
+        error("fieldStringSet is not implemented")
     fun freeSemantics(snapshot: Long): Int = error("freeSemantics is not implemented")
     fun validateSemantics(player: Long, snapshot: Long): Int = error("validateSemantics is not implemented")
     fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int): Int = error("queueSemanticAction is not implemented")
@@ -113,6 +117,24 @@ internal class NuxieSemanticSnapshot private constructor(
 
     fun queueAction(player: Long, nodeId: Long, action: Int): Int =
         native.queueSemanticAction(player, requireHandle(), nodeId, action)
+
+    /** Execution-only value access; never add the returned bytes to the UI-safe semantic tree. */
+    fun readFieldString(player: Long, nodeId: Long, name: String): ByteArray {
+        val handle = requireFieldHandle(nodeId)
+        return native.fieldStringCopy(player, handle, nodeId, name).required("read field value")
+    }
+
+    /** Success reports a property write, not reverse-conversion acceptance. */
+    fun writeFieldString(player: Long, nodeId: Long, name: String, value: ByteArray): Int =
+        native.fieldStringSet(player, requireFieldHandle(nodeId), nodeId, name, value)
+
+    private fun requireFieldHandle(nodeId: Long): Long {
+        val handle = requireHandle()
+        check(tree.nodes.any { it.id == nodeId && it.role == NativeSemanticRole.TEXT_FIELD }) {
+            "Field value access requires a captured text field"
+        }
+        return handle
+    }
 
     /** Missing means no visible semantic field for this authored root run in this capture. */
     fun nodeForTextRun(player: Long, name: String): NativeSemanticNode? {

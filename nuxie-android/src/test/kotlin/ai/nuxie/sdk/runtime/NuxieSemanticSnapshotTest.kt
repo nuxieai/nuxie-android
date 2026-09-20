@@ -55,6 +55,26 @@ class NuxieSemanticSnapshotTest {
         var failNode = false
         var role = 1
         var associationStatus = 0
+        var fieldStatus = 0
+        var fieldValue = "private 😀".encodeToByteArray()
+        var fieldCalls = 0
+        override fun fieldStringCopy(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<ByteArray> {
+            assertEquals(10L, player)
+            assertEquals(99L, snapshot)
+            assertEquals(0xffff_ffffL, nodeId)
+            assertEquals("editable", name)
+            fieldCalls++
+            return NativeCallResult(fieldStatus, fieldValue.copyOf().takeIf { fieldStatus == 0 })
+        }
+        override fun fieldStringSet(player: Long, snapshot: Long, nodeId: Long, name: String, value: ByteArray): Int {
+            assertEquals(10L, player)
+            assertEquals(99L, snapshot)
+            assertEquals(0xffff_ffffL, nodeId)
+            assertEquals("editable", name)
+            fieldCalls++
+            if (fieldStatus == 0) fieldValue = value.copyOf()
+            return fieldStatus
+        }
         override fun semanticNodeForTextRun(player: Long, snapshot: Long, name: String) =
             NativeCallResult(associationStatus, 0xffff_ffffL.takeIf { associationStatus == 0 })
         val freed = mutableListOf<Long>()
@@ -67,5 +87,43 @@ class NuxieSemanticSnapshotTest {
         override fun freeSemantics(snapshot: Long): Int { freed += snapshot; return 0 }
         override fun validateSemantics(player: Long, snapshot: Long) = 0
         override fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int) = 0
+    }
+
+    @Test fun `field bytes use captured ownership without entering semantic text`() {
+        val native = RecordingNative().apply { role = NativeSemanticRole.TEXT_FIELD }
+        val snapshot = NuxieSemanticSnapshot.capture(10, native)
+        assertEquals("private 😀", snapshot.readFieldString(10, 0xffff_ffffL, "editable").decodeToString())
+        val next = "changed é".encodeToByteArray()
+        assertEquals(0, snapshot.writeFieldString(10, 0xffff_ffffL, "editable", next))
+        assertArrayEquals(next, snapshot.readFieldString(10, 0xffff_ffffL, "editable"))
+        assertEquals("", snapshot.tree.nodes.single().value)
+        snapshot.close()
+        val callsBeforeClose = native.fieldCalls
+        assertThrows(IllegalStateException::class.java) { snapshot.readFieldString(10, 0xffff_ffffL, "editable") }
+        assertThrows(IllegalStateException::class.java) { snapshot.writeFieldString(10, 0xffff_ffffL, "editable", next) }
+        assertEquals(callsBeforeClose, native.fieldCalls)
+    }
+
+    @Test fun `field access preserves native stale rejection without exposing values in errors`() {
+        val native = RecordingNative().apply { role = NativeSemanticRole.TEXT_FIELD; fieldStatus = 9 }
+        val snapshot = NuxieSemanticSnapshot.capture(10, native)
+        val error = assertThrows(NuxieRuntimeCallException::class.java) {
+            snapshot.readFieldString(10, 0xffff_ffffL, "editable")
+        }
+        assertEquals(9, error.status)
+        assertFalse(error.message.orEmpty().contains("private"))
+        assertEquals(9, snapshot.writeFieldString(10, 0xffff_ffffL, "editable", byteArrayOf()))
+        snapshot.close()
+    }
+
+    @Test fun `field access rejects absent and non-field nodes before native calls`() {
+        val native = RecordingNative()
+        val snapshot = NuxieSemanticSnapshot.capture(10, native)
+        for (id in listOf(123L, 0xffff_ffffL)) {
+            assertThrows(IllegalStateException::class.java) { snapshot.readFieldString(10, id, "editable") }
+            assertThrows(IllegalStateException::class.java) { snapshot.writeFieldString(10, id, "editable", byteArrayOf()) }
+        }
+        assertEquals(0, native.fieldCalls)
+        snapshot.close()
     }
 }
