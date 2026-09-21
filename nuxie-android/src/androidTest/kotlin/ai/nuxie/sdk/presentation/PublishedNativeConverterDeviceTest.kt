@@ -65,6 +65,8 @@ class PublishedNativeConverterDeviceTest {
             SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val failure = AtomicReference<Throwable?>()
         val commits = LinkedBlockingQueue<Pair<String, NuxieViewModelSnapshot?>>()
+        val latestCommit = AtomicReference<Pair<String, NuxieViewModelSnapshot?>?>()
+        val completionEvents = LinkedBlockingQueue<Pair<ExperienceSemanticTextDraft.Event, Pair<String, NuxieViewModelSnapshot?>?>>()
         var mounted: ExperienceMountedScreen? = null
         lateinit var content: View
         fun editors(view: View): List<EditText> = when (view) {
@@ -78,7 +80,11 @@ class PublishedNativeConverterDeviceTest {
                     override fun onFirstFrame() { checkNotNull(mounted).activate() }
                     override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
                     override fun onTextCommitted(inputId: String, text: String, snapshot: NuxieViewModelSnapshot?) {
+                        latestCommit.set(text to snapshot)
                         commits.add(text to snapshot)
+                    }
+                    override fun onTextInputEvent(inputId: String, event: ExperienceSemanticTextDraft.Event) {
+                        completionEvents.add(event to latestCommit.get())
                     }
                 }, failure::set)
                 content = checkNotNull(mounted).mount()
@@ -111,6 +117,28 @@ class PublishedNativeConverterDeviceTest {
             edited("1:30", 90.0)
             // A valid edit may also map to an unchanged source value.
             edited("01:30", 90.0)
+            fun blurAfterEdit(draft: String, seconds: Double) {
+                // Deliberately do not wait for conversion between editing and blur.
+                instrumentation.runOnMainSync {
+                    field.requestFocus()
+                    field.setText(draft)
+                    field.clearFocus()
+                }
+                val (event, precedingCommit) = checkNotNull(completionEvents.poll(10, TimeUnit.SECONDS)) {
+                    "Expected input completion after the pending edit"
+                }
+                failure.get()?.let { throw AssertionError("Published native completion failed", it) }
+                assertEquals(ExperienceSemanticTextDraft.EventKind.EDITING_ENDED, event.kind)
+                assertEquals(draft, event.text)
+                val committed = checkNotNull(precedingCommit)
+                assertEquals("Completion must follow the latest value notification", draft, committed.first)
+                assertEquals(seconds, input.captureResponse(committed.first, committed.second).double, 0.0)
+            }
+            blurAfterEdit("3:00", 180.0)
+            // Authored validation must receive the invalid draft, not a reformatted
+            // previous source. Completion is not permission to submit that source.
+            blurAfterEdit("invalid", 180.0)
+            blurAfterEdit("0:45", 45.0)
         } finally {
             val closed = CountDownLatch(1)
             instrumentation.runOnMainSync {
