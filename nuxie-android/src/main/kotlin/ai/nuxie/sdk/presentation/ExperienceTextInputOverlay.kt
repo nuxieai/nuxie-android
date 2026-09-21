@@ -50,7 +50,7 @@ internal class ExperienceTextInputOverlay(
     private val nativeWriter: ((ExperienceTextFieldTarget, ExperienceSemanticTextDraft.Write,
         (ExperienceSemanticTextDraft.Outcome) -> Unit) -> Unit)? = null,
     private val nativeNotification: (ExperienceTextFieldTarget, String) -> Unit = { _, _ -> },
-    private val nativeEvent: (ExperienceTextFieldTarget, ExperienceSemanticTextDraft.Event) -> Unit = { _, _ -> },
+    private val nativeEvent: (ExperienceTextFieldTarget, Long, ExperienceSemanticTextDraft.Event) -> Unit = { _, _, _ -> },
 ) : FrameLayout(context) {
     private class Binding(val input: ExperienceTextInput, val editor: Editor, val container: FrameLayout,
         var geometryAvailable: Boolean = true, var field: ExperienceNativeTextField? = null,
@@ -157,14 +157,14 @@ internal class ExperienceTextInputOverlay(
                             created.draft!!.replaceText(editor.text.toString(), editor.isComposingText())
                             created.draft.requestNotification()?.let { nativeNotification(field.target, it) }
                             if (commit) created.draft.requestEvent(ExperienceSemanticTextDraft.EventKind.EDITING_ENDED)
-                                .forEach { nativeEvent(field.target, it) }
+                                .forEach { nativeEvent(field.target, field.ownerId, it) }
                             flushNativeWrite(created)
                         }
                     }
                     editor.onReturn = {
                         if (!closed && inputEnabled && editor.isEnabled && created in bindings) {
                             created.draft!!.requestEvent(ExperienceSemanticTextDraft.EventKind.RETURN)
-                                .forEach { nativeEvent(field.target, it) }
+                                .forEach { nativeEvent(field.target, field.ownerId, it) }
                         }
                     }
                 }
@@ -187,7 +187,7 @@ internal class ExperienceTextInputOverlay(
         checkNotNull(nativeWriter).invoke(field.target, write) { outcome ->
             if (!closed && session.isCurrent() && binding in bindings) {
                 draft.finish(write, outcome)?.let { nativeNotification(field.target, it) }
-                draft.takeReadyEvents().forEach { nativeEvent(field.target, it) }
+                draft.takeReadyEvents().forEach { nativeEvent(field.target, field.ownerId, it) }
                 if (outcome == ExperienceSemanticTextDraft.Outcome.REJECTED)
                     binding.editor.replacePresentedText(draft.text)
                 flushNativeWrite(binding)

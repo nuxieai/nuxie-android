@@ -227,7 +227,7 @@ internal class NuxieRuntimeFile(
         }
     }
 
-    private fun viewModelCatalog(): NuxieViewModelCatalog = requireNativeValue(
+    internal fun viewModelCatalog(): NuxieViewModelCatalog = requireNativeValue(
         native.viewModelCatalog(owned.require()),
         "read view-model catalog",
     ).toViewModelCatalog()
@@ -604,6 +604,12 @@ internal class NuxieRuntimePlayer internal constructor(
         elapsedSeconds = elapsedSeconds,
     )
 
+    /** Generated VM triggers may belong to the auxiliary interaction machine. */
+    fun stepAfterStateMutation(correlationId: ULong, textRunNames: List<String> = emptyList()): NuxiePlayerStepOutcome {
+        interactionStepPending = true
+        return stepTyped(elapsedSeconds = 0.0, correlationId = correlationId, textRunNames = textRunNames)
+    }
+
     fun stepTyped(
         inputs: List<NuxiePlayerInput> = emptyList(),
         pointers: List<NuxiePlayerPointerEvent> = emptyList(),
@@ -821,6 +827,19 @@ internal class NuxieFieldViewModel(handle: Long, private val native: NuxieTypedR
         val result = native.snapshotViewModel(owned.require())
         if (result.status != 0) throw NuxieRuntimeCallException("snapshot field view model", result.status)
         return NuxieViewModelSnapshot.fromNative(checkNotNull(result.value) { "Field owner returned no snapshot" })
+    }
+
+    /** No new runtime operation: write the generated value, then fire its existing trigger. */
+    fun commitTextInput(catalog: NuxieViewModelCatalog, nodeId: String, value: String): Boolean {
+        val handle = owned.require()
+        val schema = requireNativeValue(native.viewModelRootSchemaIndex(handle), "read field owner schema")
+        check(schema in 0..Int.MAX_VALUE.toLong()) { "Invalid field owner schema" }
+        val (valuePath, commitPath) = catalog.scriptedInputCommitPaths(schema.toInt(), nodeId) ?: return false
+        requireNativeSuccess(native.mutateViewModel(handle, NativeViewModelWrite(
+            NuxieViewModelMutationKind.SET_STRING, valuePath, bytesValue = value.encodeToByteArray())), "set input action value")
+        requireNativeSuccess(native.mutateViewModel(handle, NativeViewModelWrite(
+            NuxieViewModelMutationKind.FIRE_TRIGGER, commitPath)), "fire input action trigger")
+        return true
     }
 
     fun close() = owned.close()

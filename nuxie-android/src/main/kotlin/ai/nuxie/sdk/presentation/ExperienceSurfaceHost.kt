@@ -86,6 +86,7 @@ internal class ExperienceSurfaceHost(
         fun onSemanticTreePublished() {}
         /** Runtime-lane callback ordered with writes and renderer publications. */
         fun onTextCommitted(inputId: String, text: String, snapshot: NuxieViewModelSnapshot?) {}
+        fun onTextInputEvent(inputId: String, event: ExperienceSemanticTextDraft.Event) {}
     }
 
     /** Owned runtime wrappers; created, touched, and closed only on the runtime lane. */
@@ -200,6 +201,8 @@ internal class ExperienceSurfaceHost(
             semanticSnapshot?.close()
             semanticSnapshot = null
             nativeTextFields = emptyList()
+            nativeTextOwners.values.forEach { it.close() }
+            nativeTextOwners = emptyMap()
             acceptedNativeText.clear()
             queuedSemanticAction = null
             semanticActionPending.set(false)
@@ -208,6 +211,7 @@ internal class ExperienceSurfaceHost(
 
     private var nativeTextFields: List<ExperienceNativeTextField> = emptyList()
     private var nativeTextCaptureId = 0L
+    private var nativeTextOwners: Map<Long, ai.nuxie.sdk.runtime.NuxieFieldViewModel> = emptyMap()
     private class AcceptedNativeText(val text: String, val snapshot: NuxieViewModelSnapshot)
     private val acceptedNativeText = mutableMapOf<ExperienceTextFieldTarget, AcceptedNativeText>()
 
@@ -224,6 +228,7 @@ internal class ExperienceSurfaceHost(
             }
         } catch (error: Throwable) { next.close(); throw error }
         val nextCaptureId = nativeTextCaptureId + 1
+        val nextOwners = mutableMapOf<Long, ai.nuxie.sdk.runtime.NuxieFieldViewModel>()
         val nativeFields = try {
             ExperienceNativeTextFieldCapture.read(textInputs.values.toList(), next.tree.nodes,
                 nextCaptureId,
@@ -231,10 +236,17 @@ internal class ExperienceSurfaceHost(
                 readText = { nodeId, name -> next.readFieldString(active.requireHandle(), nodeId, name) },
                 readOwner = { nodeId, name ->
                     val owner = checkNotNull(active.fieldOwner(next, nodeId, name)) { "Native input has no state owner" }
-                    try { owner.snapshot() } finally { owner.close() }
+                    nextOwners[nodeId] = owner
+                    owner.snapshot()
                 })
-        } catch (error: Throwable) { next.close(); throw error }
+        } catch (error: Throwable) {
+            nextOwners.values.forEach { owner -> runCatching { owner.close() }.exceptionOrNull()?.let(error::addSuppressed) }
+            next.close()
+            throw error
+        }
         semanticSnapshot?.close()
+        nativeTextOwners.values.forEach { it.close() }
+        nativeTextOwners = nextOwners
         nativeTextCaptureId = nextCaptureId
         nativeTextFields = nativeFields
         acceptedNativeText.entries.removeAll { (target, accepted) ->
@@ -573,7 +585,7 @@ internal class ExperienceSurfaceHost(
                     // Settle reverse bindings on the ordinary player before reading the typed source.
                     val correlationId = nextCorrelationId
                     nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
-                    val outcome = active.stepTyped(elapsedSeconds = 0.0, correlationId = correlationId,
+                    val outcome = active.stepAfterStateMutation(correlationId = correlationId,
                         textRunNames = textInputs.values.filter { it.editableValueName == null }.map { it.runName }.distinct())
                     val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
                     root?.let { retainedViewModel?.set(it) }
@@ -607,6 +619,38 @@ internal class ExperienceSurfaceHost(
             val field = nativeTextFields.singleOrNull { it.target == target } ?: return@enqueue
             if (accepted.text != text || accepted.snapshot.nativeRootInstanceId != field.ownerId) return@enqueue
             listener?.onTextCommitted(target.inputId, text, accepted.snapshot)
+        }
+    }
+
+    /** Lifecycle actions are separate from value notifications, including when text is unchanged. */
+    fun nativeTextEvent(target: ExperienceTextFieldTarget, ownerId: Long, event: ExperienceSemanticTextDraft.Event) {
+        val generation = frameGeneration.get()
+        val epoch = semanticEpoch.get()
+        lane.enqueue {
+            pendingTextWrites.addLast {
+                if (released.get() || !running || !sceneInputEnabled.get() || generation != frameGeneration.get() ||
+                    epoch != semanticEpoch.get()) return@addLast
+                val input = textInputs[target.inputId] ?: return@addLast
+                if (event.kind != input.actionEvent) return@addLast
+                val field = nativeTextFields.singleOrNull { it.target == target && it.ownerId == ownerId } ?: return@addLast
+                val owner = nativeTextOwners[target.nodeId] ?: return@addLast
+                try {
+                    check(owner.snapshot().nativeRootInstanceId == field.ownerId) { "Native input action owner changed" }
+                    val scripted = owner.commitTextInput(checkNotNull(file).viewModelCatalog(), input.viewNodeId, event.text)
+                    if (scripted) {
+                        val correlationId = nextCorrelationId
+                        nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
+                        val outcome = checkNotNull(player).stepAfterStateMutation(correlationId = correlationId)
+                        val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
+                        root?.let { retainedViewModel?.set(it) }
+                        if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, root))
+                        publishSteps()
+                    } else listener?.onTextInputEvent(target.inputId, event)
+                } catch (error: Exception) {
+                    reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Native input action failed", error)
+                }
+            }
+            drainTextWrites()
         }
     }
 

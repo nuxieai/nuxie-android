@@ -6,6 +6,21 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NuxieExperiencePlayerTest {
+    @Test fun `generated state mutation advances both players once without fabricated input`() {
+        val native = RecordingNative()
+        val player = NuxieRuntimePlayer(10, native)
+        player.installInteractionPlayer(NuxieRuntimePlayer(11, native))
+        player.stepTyped(elapsedSeconds = 0.0)
+        native.steps.clear()
+        val outcome = player.stepAfterStateMutation(17u)
+        assertEquals(listOf(10L, 11L), native.steps.map { it.handle })
+        assertTrue(native.steps.all { it.elapsed == 0f && it.pointers == 0 && it.inputs.isEmpty() && it.correlation == 17L })
+        assertEquals(listOf("event-10", "event-11"), outcome.events.map { it.name })
+        player.stepTyped(elapsedSeconds = 0.25)
+        assertEquals(listOf(10L, 11L, 10L), native.steps.map { it.handle })
+        player.close()
+    }
+
     @Test fun `shared selections retain scene and avoid duplicate interaction players`() {
         FixtureRunner.run("sdk/interaction-player.json", "runtime-interaction-player") { vector ->
             val body = vector.body

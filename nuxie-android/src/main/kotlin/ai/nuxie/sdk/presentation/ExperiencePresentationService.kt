@@ -177,6 +177,7 @@ internal object PresentationRegistry {
         val onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit,
         val onTextCommitted: (String, String, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit,
         val onRecovery: (Throwable) -> Unit = {},
+        val onTextInputEvent: (String, ExperienceSemanticTextDraft.Event, RendererEffectLifetime?) -> Unit = { _, _, _ -> },
     )
 
     private class Entry(initial: PresentationContentState, var callbacks: Callbacks) {
@@ -210,9 +211,10 @@ internal object PresentationRegistry {
         onTextCommitted: (String, String, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit = { _, _, _, _ -> },
         requiresAcquiring: Boolean = false,
         onRecovery: (Throwable) -> Unit = {},
+        onTextInputEvent: (String, ExperienceSemanticTextDraft.Event, RendererEffectLifetime?) -> Unit = { _, _, _ -> },
     ) {
         synchronized(lock) {
-            val callbacks = Callbacks(onFirstFrame, onFailure, onDismissed, onOutcome, onRuntimeStep, onTextCommitted, onRecovery)
+            val callbacks = Callbacks(onFirstFrame, onFailure, onDismissed, onOutcome, onRuntimeStep, onTextCommitted, onRecovery, onTextInputEvent)
             val existing = entries[id]
             if (existing == null) {
                 check(!requiresAcquiring) { "Acquiring presentation was withdrawn" }
@@ -485,6 +487,15 @@ internal object PresentationRegistry {
             }?.callbacks?.onTextCommitted
         } ?: return
         callback(inputId, text, snapshot, screen.rendererEffects)
+    }
+
+    fun reportTextInputEvent(id: String, screen: PresentationScreenHandle, inputId: String, event: ExperienceSemanticTextDraft.Event) {
+        val callback = synchronized(lock) {
+            entries[id]?.takeUnless {
+                it.terminal.get() || it.dismissalReason != null || it.latestScreen.get() !== screen || screen.rendererEffects?.isRetired == true
+            }?.callbacks?.onTextInputEvent
+        } ?: return
+        callback(inputId, event, screen.rendererEffects)
     }
 
     fun dismiss(id: String, reason: CloseReason) {
@@ -1089,6 +1100,11 @@ internal class ExperiencePresentationService(
                             onTextCommitted = { inputId, text, snapshot, lifetime ->
                                 publishScreenEffects(pending) {
                                     pending.journey.emissions.publishTextCommit(inputId, text, textInputState, lifetime, snapshot)
+                                }
+                            },
+                            onTextInputEvent = { inputId, event, lifetime ->
+                                publishScreenEffects(pending) {
+                                    pending.journey.emissions.publishTextInputEvent(inputId, event, lifetime)
                                 }
                             },
                         )

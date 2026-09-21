@@ -30,6 +30,24 @@ internal data class NuxieViewModelCatalog(
     val properties: List<Property>,
     val authoredInstances: List<AuthoredInstance>,
 ) {
+    /** Generated input controls use the same value/commit contract as the iOS state compiler. */
+    internal fun scriptedInputCommitPaths(rootSchemaIndex: Int, nodeId: String): Pair<String, String>? {
+        if (properties.none { it.schemaIndex == rootSchemaIndex && it.name == "controls" }) return null
+        val controls = propertyAtPath(rootSchemaIndex, "controls")
+        require(controls.kind == NuxieViewModelPropertyKind.VIEW_MODEL && controls.referencedSchemaIndex != null) {
+            "Generated controls is not a view model"
+        }
+        if (properties.none { it.schemaIndex == controls.referencedSchemaIndex && it.name == nodeId }) return null
+        require(nodeId.isNotEmpty() && '/' !in nodeId) { "Generated input identity is not a path segment" }
+        val value = "controls/$nodeId/value"
+        val commit = "controls/$nodeId/commit"
+        require(propertyAtPath(rootSchemaIndex, value).kind == NuxieViewModelPropertyKind.STRING &&
+            propertyAtPath(rootSchemaIndex, commit).kind == NuxieViewModelPropertyKind.TRIGGER) {
+            "Generated input has invalid value/commit types"
+        }
+        return value to commit
+    }
+
     data class Schema(
         val index: Int,
         val name: String,

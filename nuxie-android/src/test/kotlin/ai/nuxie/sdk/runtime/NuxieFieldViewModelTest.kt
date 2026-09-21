@@ -9,6 +9,13 @@ class NuxieFieldViewModelTest {
         var status = 0
         var reads = 0
         val freed = mutableListOf<Long>()
+        val writes = mutableListOf<NativeViewModelWrite>()
+        override fun viewModelRootSchemaIndex(viewModelHandle: Long) = NativeCallResult(0, 0L)
+        override fun mutateViewModel(viewModelHandle: Long, write: NativeViewModelWrite): Int {
+            assertEquals(77L, viewModelHandle)
+            writes += write
+            return status
+        }
         override fun snapshotViewModel(viewModelHandle: Long): NativeCallResult<NativeViewModelSnapshot> {
             assertEquals(77L, viewModelHandle)
             reads++
@@ -19,6 +26,44 @@ class NuxieFieldViewModelTest {
         }
         override fun freeViewModel(handle: Long): Int { freed += handle; return 0 }
     }
+
+    @Test fun `input action writes its value before triggering the same occurrence owner`() {
+        val native = Native()
+        val owner = NuxieFieldViewModel(77, native)
+        assertTrue(owner.commitTextInput(catalog(), "field", "typed value"))
+        assertEquals(listOf(NuxieViewModelMutationKind.SET_STRING, NuxieViewModelMutationKind.FIRE_TRIGGER),
+            native.writes.map { it.kind })
+        assertEquals(listOf("controls/field/value", "controls/field/commit"), native.writes.map { it.path })
+        assertEquals("typed value", native.writes.first().bytesValue.decodeToString())
+        owner.close()
+    }
+
+    @Test fun `ordinary input has no scripted commit and malformed controls fail before writes`() {
+        val native = Native()
+        val owner = NuxieFieldViewModel(77, native)
+        assertFalse(owner.commitTextInput(catalog().copy(properties = emptyList()), "field", "text"))
+        val malformed = catalog().let { catalog -> catalog.copy(properties = catalog.properties.map {
+            if (it.name == "commit") it.copy(kind = NuxieViewModelPropertyKind.STRING) else it
+        }) }
+        assertThrows(IllegalArgumentException::class.java) { owner.commitTextInput(malformed, "field", "text") }
+        assertTrue(native.writes.isEmpty())
+        owner.close()
+    }
+
+    @Test fun `failed value write never fires the action trigger`() {
+        val native = Native().apply { status = 4 }
+        val owner = NuxieFieldViewModel(77, native)
+        assertThrows(NuxieRuntimeCallException::class.java) { owner.commitTextInput(catalog(), "field", "text") }
+        assertEquals(listOf(NuxieViewModelMutationKind.SET_STRING), native.writes.map { it.kind })
+        owner.close()
+    }
+
+    private fun catalog() = NuxieViewModelCatalog(emptyList(), listOf(
+        NuxieViewModelCatalog.Property(0, 0, "controls", NuxieViewModelPropertyKind.VIEW_MODEL, 1, emptyList()),
+        NuxieViewModelCatalog.Property(1, 0, "field", NuxieViewModelPropertyKind.VIEW_MODEL, 2, emptyList()),
+        NuxieViewModelCatalog.Property(2, 0, "value", NuxieViewModelPropertyKind.STRING, null, emptyList()),
+        NuxieViewModelCatalog.Property(2, 1, "commit", NuxieViewModelPropertyKind.TRIGGER, null, emptyList()),
+    ), emptyList())
 
     @Test fun `field reference sees live occurrence state and closes exactly once`() {
         val native = Native()
