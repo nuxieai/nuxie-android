@@ -5,7 +5,11 @@ import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import ai.nuxie.sdk.runtime.NuxieHostCommand
 import ai.nuxie.sdk.runtime.NuxieHostValue
 import ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome
-import ai.nuxie.sdk.experiences.JourneyReleaseEnvelope
+import ai.nuxie.sdk.experiences.JourneyReleaseIdentity
+import ai.nuxie.sdk.experiences.JourneyReleaseReplayPolicy
+import ai.nuxie.sdk.experiences.JourneyReleaseVerifier
+import ai.nuxie.sdk.core.supportedRuntimeForEmbeddedRuntime
+import ai.nuxie.sdk.runtime.nuxieRuntimeSourceRevision
 import android.content.Intent
 import android.os.SystemClock
 import android.util.Base64
@@ -23,7 +27,7 @@ import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 
-/** Qualifies publisher bytes below the still-closed signed descriptor admission gate. */
+/** Qualifies signed publisher releases through SDK admission and native editing. */
 class PublishedNativeConverterDeviceTest {
     @Test fun plainDurationRejectsInvalidEditAndRecovers() = qualify(false)
     @Test fun secureDurationRejectsInvalidEditAndRecovers() = qualify(true)
@@ -40,13 +44,19 @@ class PublishedNativeConverterDeviceTest {
             .joinToString("") { "%02x".format(it) }
         val entry = Json.parseToJsonElement(read("release-entry.json").decodeToString()).jsonObject
         val envelope = entry.getValue("envelope").jsonObject
-        val descriptorBytes = JourneyReleaseEnvelope.authenticate(
+        val locator = entry.getValue("locator").jsonObject
+        val release = JourneyReleaseVerifier.authenticate(
             envelope.toString().encodeToByteArray(),
             mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(
                 "IVL40Zt5HSRFMkLhXy6rbLfP+ntqXtMAl5YOBpiB2xI=", Base64.NO_WRAP)),
-        ).descriptorBytes
+            checkNotNull(JourneyReleaseIdentity.fromJson(locator, setOf("legId"))),
+            locator.getValue("legId").jsonPrimitive.content,
+            checkNotNull(supportedRuntimeForEmbeddedRuntime(nuxieRuntimeSourceRevision())),
+            JourneyReleaseReplayPolicy.Active(0),
+        )
+        val descriptorBytes = release.descriptorBytes
         assertEquals(envelope.getValue("descriptorSha256").jsonPrimitive.content, digest(descriptorBytes))
-        val descriptor = Json.parseToJsonElement(descriptorBytes.decodeToString()).jsonObject
+        val descriptor = release.descriptor
         val render = descriptor.getValue("render").jsonObject
         val screen = render.getValue("screens").jsonArray.single().jsonObject
         val screenId = screen.getValue("id").jsonPrimitive.content

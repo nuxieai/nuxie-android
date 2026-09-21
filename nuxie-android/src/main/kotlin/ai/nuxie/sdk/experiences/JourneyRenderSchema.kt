@@ -174,10 +174,13 @@ internal object JourneyRenderSchema {
     private fun textInput(input: JsonElement, screens: Set<String>) {
         val ids = setOf("id", "screenId", "artboardId", "viewNodeId", "renderedNodeId", "textObjectKey", "textRunObjectKey")
         val value = exact(input, ids + setOf("textName", "textRunName", "value", "editable", "geometry", "style", "secureTextEntry", "multiline"),
-            setOf("responseFieldKey", "responseCapture", "placeholder", "keyboardType", "maxLength"))
+            setOf("editableValueName", "actionEvent", "declarativeActionId", "responseFieldKey", "responseCapture", "placeholder", "keyboardType", "maxLength"))
         for (key in ids) releaseId(value[key])
         if (text(value["screenId"]) !in screens) fail("text input screen")
         id(value["textName"]); id(value["textRunName"])
+        value["editableValueName"]?.let { id(it) }
+        value["actionEvent"]?.let { oneOf(it, "editing-ended", "return") }
+        value["declarativeActionId"]?.let { id(it, Int.MAX_VALUE) }
         if (text(value["value"]).length > 1_000_000) fail("text input value")
         value["responseFieldKey"]?.let { releaseId(it) }
         value["responseCapture"]?.let {

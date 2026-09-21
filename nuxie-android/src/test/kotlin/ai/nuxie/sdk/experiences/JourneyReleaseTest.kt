@@ -320,6 +320,40 @@ class JourneyReleaseTest {
         }
     }
 
+    @Test fun `native editable input admission validates endpoint and completion fields strictly`() {
+        val navigation = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/text-input-navigation.json").readText()).jsonObject
+        val envelope = navigation.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val render = source.getValue("render").jsonObject
+        fun validate(fields: Map<String, kotlinx.serialization.json.JsonElement>) {
+            val inputs = render.getValue("textInputs").jsonArray.toMutableList()
+            inputs[0] = JsonObject(inputs.first().jsonObject + fields)
+            JourneySchemaValidator.validate(JsonObject(source + ("render" to JsonObject(render +
+                ("textInputs" to JsonArray(inputs))))))
+        }
+        validate(emptyMap())
+        for (event in listOf("editing-ended", "return")) {
+            validate(mapOf("editableValueName" to JsonPrimitive("duration-input"),
+                "actionEvent" to JsonPrimitive(event), "declarativeActionId" to JsonPrimitive("finish-input")))
+        }
+        validate(mapOf("editableValueName" to JsonPrimitive("x".repeat(256))))
+        for (key in listOf("editableValueName", "actionEvent", "declarativeActionId")) {
+            for (invalid in listOf(JsonNull, JsonPrimitive(1), JsonPrimitive(false), JsonPrimitive(""), JsonArray(emptyList()))) {
+                assertThrows("$key=$invalid", JourneyReleaseAuthenticationException::class.java) {
+                    validate(mapOf(key to invalid))
+                }
+            }
+        }
+        for ((key, invalid) in listOf("editableValueName" to "x".repeat(257),
+            "actionEvent" to "change", "unknownInputField" to "value")) {
+            assertThrows(key, JourneyReleaseAuthenticationException::class.java) {
+                validate(mapOf(key to JsonPrimitive(invalid)))
+            }
+        }
+    }
+
     @Test fun `admits signed local programs with and without a render closure`() {
         for (key in listOf("entry", "renderedEntry")) {
             val entry = fixture.getValue(key).jsonObject
