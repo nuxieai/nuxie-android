@@ -64,6 +64,8 @@ internal interface NuxieSemanticNative {
         error("fieldStringCopy is not implemented")
     fun fieldStringSet(player: Long, snapshot: Long, nodeId: Long, name: String, value: ByteArray): Int =
         error("fieldStringSet is not implemented")
+    fun textInputGeometry(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<NativeTextInputGeometry> =
+        error("textInputGeometry is not implemented")
     fun freeSemantics(snapshot: Long): Int = error("freeSemantics is not implemented")
     fun validateSemantics(player: Long, snapshot: Long): Int = error("validateSemantics is not implemented")
     fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int): Int = error("queueSemanticAction is not implemented")
@@ -127,6 +129,15 @@ internal class NuxieSemanticSnapshot private constructor(
     /** Success reports a property write, not reverse-conversion acceptance. */
     fun writeFieldString(player: Long, nodeId: Long, name: String, value: ByteArray): Int =
         native.fieldStringSet(player, requireFieldHandle(nodeId), nodeId, name, value)
+
+    /** Missing endpoints do not borrow geometry from another occurrence. */
+    fun textInputGeometry(player: Long, nodeId: Long, name: String): NuxieTextInputGeometry? {
+        val result = native.textInputGeometry(player, requireFieldHandle(nodeId), nodeId, name)
+        if (result.status == 3) return null // NUX_STATUS_NOT_FOUND
+        return result.required("read text input geometry").copied().also {
+            check(it.renderRevision == tree.renderRevision.toULong()) { "Text input geometry revision mismatch" }
+        }
+    }
 
     private fun requireFieldHandle(nodeId: Long): Long {
         val handle = requireHandle()

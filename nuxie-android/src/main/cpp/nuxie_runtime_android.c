@@ -2205,6 +2205,70 @@ static jfloatArray new_float_values(JNIEnv *env, const float *values, jsize coun
   return result;
 }
 
+JNIEXPORT jobject JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerTextInputGeometry(
+    JNIEnv *env, jobject self, jlong player, jlong snapshot, jlong node_id,
+    jbyteArray name, jintArray status_out) {
+  (void)self;
+  NuxStatus status = NUX_STATUS_INVALID_ARGUMENT;
+  if (name == NULL || node_id < 0 || (uint64_t)node_id > UINT32_MAX) {
+    set_status_out(env, status_out, status);
+    return NULL;
+  }
+  jsize length = (*env)->GetArrayLength(env, name);
+  if (length > 4096) {
+    set_status_out(env, status_out, NUX_STATUS_LIMIT_EXCEEDED);
+    return NULL;
+  }
+  jbyte *bytes = (*env)->GetByteArrayElements(env, name, NULL);
+  if (bytes == NULL) {
+    clear_jni_exception(env);
+    set_status_out(env, status_out, NUX_STATUS_RUNTIME_ERROR);
+    return NULL;
+  }
+  struct NuxTextInputGeometry geometry = {0};
+  geometry.struct_size = sizeof(geometry);
+  struct NuxStringView view = {(const char *)bytes, (size_t)length};
+  status = nux_player_text_input_geometry(
+      (const struct NuxPlayer *)from_handle(player),
+      (const struct NuxSemanticSnapshot *)from_handle(snapshot),
+      (uint32_t)node_id, view, &geometry);
+  (*env)->ReleaseByteArrayElements(env, name, bytes, JNI_ABORT);
+  if (status != NUX_STATUS_OK) {
+    set_status_out(env, status_out, status);
+    return NULL;
+  }
+  if ((*env)->PushLocalFrame(env, 8) < 0) {
+    clear_jni_exception(env);
+    set_status_out(env, status_out, NUX_STATUS_RUNTIME_ERROR);
+    return NULL;
+  }
+  jobject result = NULL;
+  jclass klass = (*env)->FindClass(env, "ai/nuxie/sdk/runtime/NativeTextInputGeometry");
+  if (clear_jni_exception(env) || klass == NULL) goto input_geometry_done;
+  jmethodID constructor = (*env)->GetMethodID(env, klass, "<init>", "(J[F[FZ[F[FZFZZ)V");
+  if (clear_jni_exception(env) || constructor == NULL) goto input_geometry_done;
+  float bounds[] = {geometry.min_x, geometry.min_y, geometry.max_x, geometry.max_y};
+  float layout_bounds[] = {geometry.layout_ancestor_min_x, geometry.layout_ancestor_min_y,
+      geometry.layout_ancestor_max_x, geometry.layout_ancestor_max_y};
+  jfloatArray world = new_float_values(env, geometry.world_transform, 6);
+  jfloatArray box = new_float_values(env, bounds, 4);
+  jfloatArray layout = new_float_values(env, geometry.layout_ancestor_transform, 6);
+  jfloatArray layout_box = new_float_values(env, layout_bounds, 4);
+  if (world == NULL || box == NULL || layout == NULL || layout_box == NULL) goto input_geometry_done;
+  result = (*env)->NewObject(env, klass, constructor,
+      (jlong)geometry.render_revision, world, box,
+      (jboolean)(geometry.has_layout_ancestor == 1), layout, layout_box,
+      (jboolean)(geometry.has_first_baseline == 1), (jfloat)geometry.first_baseline,
+      (jboolean)(geometry.obscured == 1), (jboolean)(geometry.multiline == 1));
+  if (clear_jni_exception(env)) result = NULL;
+input_geometry_done:
+  status = result == NULL ? NUX_STATUS_RUNTIME_ERROR : NUX_STATUS_OK;
+  result = (*env)->PopLocalFrame(env, result);
+  if (!set_status_out(env, status_out, status)) return NULL;
+  return result;
+}
+
 static jobject copy_text_geometry_field(
     JNIEnv *env, struct NuxPlayer *player, struct NuxPlayerStepResult *step,
     jbyteArray encoded_name, jclass field_class, jmethodID constructor,

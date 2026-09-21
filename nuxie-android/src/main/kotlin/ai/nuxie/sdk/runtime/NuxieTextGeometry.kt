@@ -37,6 +37,43 @@ internal data class NativeTextRunGeometry(
 
 internal data class NativeTextGeometryCapture(val status: Int, val fields: Array<NativeTextRunGeometry>)
 
+/** One native TextInput occurrence; never carries editable text or selection. */
+internal data class NuxieTextInputGeometry(
+    val renderRevision: ULong,
+    val worldTransform: NuxieTextRunGeometry.Transform,
+    val textBounds: NuxieTextRunGeometry.Bounds,
+    val layout: NuxieTextRunGeometry.Layout?,
+    val firstBaseline: Float?,
+    val obscured: Boolean,
+    val multiline: Boolean,
+)
+
+/** JNI transfer shape for the existing NuxTextInputGeometry ABI. */
+internal data class NativeTextInputGeometry(
+    val renderRevision: Long,
+    val worldTransform: FloatArray,
+    val textBounds: FloatArray,
+    val hasLayout: Boolean,
+    val layoutTransform: FloatArray,
+    val layoutBounds: FloatArray,
+    val hasFirstBaseline: Boolean,
+    val firstBaseline: Float,
+    val obscured: Boolean,
+    val multiline: Boolean,
+) {
+    fun copied(): NuxieTextInputGeometry {
+        require(renderRevision != 0L)
+        require(!hasFirstBaseline || firstBaseline.isFinite())
+        return NuxieTextInputGeometry(
+            renderRevision.toULong(), worldTransform.toGeometryTransform(), textBounds.toGeometryBounds(),
+            if (hasLayout) NuxieTextRunGeometry.Layout(
+                layoutTransform.toGeometryTransform(), layoutBounds.toGeometryBounds(),
+            ) else null,
+            firstBaseline.takeIf { hasFirstBaseline }, obscured, multiline,
+        )
+    }
+}
+
 internal fun NativeTextGeometryCapture?.toTextGeometryCapture(): NuxieTextGeometryCapture {
     if (this == null) return NuxieTextGeometryCapture.NotRequested
     if (status != 0) return NuxieTextGeometryCapture.Failed(status)
