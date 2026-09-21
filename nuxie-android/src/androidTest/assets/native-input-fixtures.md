@@ -34,3 +34,19 @@ Generate with `NUXIE_NATIVE_INPUT_FIXTURE_PATH=<absolute output path> cargo test
 
 This mounted test does not qualify signed release admission or custom converter
 failure/recovery. Those require the full publication path.
+
+## Published plain and secure custom converters
+
+`native-converter/` and `native-converter-secure/` contain unchanged publication
+outputs from the parent repository's
+`packages/view-compiler/src/compiler-backends/rive-ios-production-artifact.test.ts`,
+test `publishes a numeric duration response with a custom editable formatter`.
+Export using `NUXIE_CONVERTER_DEVICE_ARTIFACT_DIR=<new absolute directory>`;
+the secure case exports to that directory suffixed with `-secure`.
+
+The fixture converts numeric seconds to minutes:seconds and reverse-converts
+valid edits. Invalid edits preserve the previous numeric source, leaving the
+draft available for authored validation. Secure and plain descriptors both use
+binding capture. The instrumentation test verifies descriptor and all staged
+artifact hashes from the release entry. It intentionally mounts below signed
+admission and does not prove submission validation or authenticated admission.
