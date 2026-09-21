@@ -565,6 +565,12 @@ internal class NuxieRuntimePlayer internal constructor(
 
     fun captureSemantics(): NuxieSemanticSnapshot = NuxieSemanticSnapshot.capture(requireHandle(), native)
 
+    /** Retains the actual occurrence owner so reads can follow a settled reverse binding. */
+    fun fieldOwner(capture: NuxieSemanticSnapshot, nodeId: Long, name: String): NuxieFieldViewModel? {
+        val handle = capture.acquireFieldViewModel(requireHandle(), nodeId, name) ?: return null
+        return NuxieFieldViewModel(handle, native)
+    }
+
     /** Queue the exact authored action; normal stepping drains its generated listener output. */
     fun queueSemanticAction(snapshot: NuxieSemanticSnapshot, nodeId: Long, action: Int): Int {
         val status = snapshot.queueAction(requireHandle(), nodeId, action)
@@ -804,6 +810,22 @@ internal class NuxieRuntimeWindow internal constructor(
 }
 
 /** Small free-once guard shared by all lane-confined owned wrappers. */
+/** Lane-owned reference to a presented field's state; never rebound or cloned. */
+internal class NuxieFieldViewModel(handle: Long, private val native: NuxieTypedRuntimeNative) {
+    private val owned = NuxieOwnedHandle(handle, "field view model") {
+        val status = native.freeViewModel(it)
+        if (status != 0) throw NuxieRuntimeCallException("free field view model", status)
+    }
+
+    fun snapshot(): NuxieViewModelSnapshot {
+        val result = native.snapshotViewModel(owned.require())
+        if (result.status != 0) throw NuxieRuntimeCallException("snapshot field view model", result.status)
+        return NuxieViewModelSnapshot.fromNative(checkNotNull(result.value) { "Field owner returned no snapshot" })
+    }
+
+    fun close() = owned.close()
+}
+
 private class NuxieOwnedHandle(
     handle: Long,
     private val name: String,
