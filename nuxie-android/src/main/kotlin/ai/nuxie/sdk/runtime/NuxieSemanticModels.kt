@@ -66,6 +66,8 @@ internal interface NuxieSemanticNative {
         error("fieldStringSet is not implemented")
     fun textInputGeometry(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<NativeTextInputGeometry> =
         error("textInputGeometry is not implemented")
+    fun fieldViewModel(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<Long> =
+        error("fieldViewModel is not implemented")
     fun freeSemantics(snapshot: Long): Int = error("freeSemantics is not implemented")
     fun validateSemantics(player: Long, snapshot: Long): Int = error("validateSemantics is not implemented")
     fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int): Int = error("queueSemanticAction is not implemented")
@@ -145,6 +147,13 @@ internal class NuxieSemanticSnapshot private constructor(
             "Field value access requires a captured text field"
         }
         return handle
+    }
+
+    /** Caller owns this handle to the existing occurrence state, not a clone. */
+    fun acquireFieldViewModel(player: Long, nodeId: Long, name: String): Long? {
+        val result = native.fieldViewModel(player, requireFieldHandle(nodeId), nodeId, name)
+        if (result.status == 3) return null
+        return result.required("resolve field owner").also { check(it != 0L) { "Field owner returned no handle" } }
     }
 
     /** Missing means no visible semantic field for this authored root run in this capture. */

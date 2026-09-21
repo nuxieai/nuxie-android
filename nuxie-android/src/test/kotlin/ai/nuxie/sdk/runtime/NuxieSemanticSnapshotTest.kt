@@ -59,6 +59,14 @@ class NuxieSemanticSnapshotTest {
         var fieldValue = "private 😀".encodeToByteArray()
         var fieldCalls = 0
         var geometryRevision = 7L
+        override fun fieldViewModel(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<Long> {
+            assertEquals(10L, player)
+            assertEquals(99L, snapshot)
+            assertEquals(0xffff_ffffL, nodeId)
+            assertEquals("editable", name)
+            fieldCalls++
+            return NativeCallResult(fieldStatus, 77L.takeIf { fieldStatus == 0 })
+        }
         override fun textInputGeometry(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<NativeTextInputGeometry> {
             assertEquals(10L, player)
             assertEquals(99L, snapshot)
@@ -99,6 +107,23 @@ class NuxieSemanticSnapshotTest {
         override fun freeSemantics(snapshot: Long): Int { freed += snapshot; return 0 }
         override fun validateSemantics(player: Long, snapshot: Long) = 0
         override fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int) = 0
+    }
+
+    @Test fun `field owner acquisition requires this captured occurrence`() {
+        val native = RecordingNative().apply { role = NativeSemanticRole.TEXT_FIELD }
+        val snapshot = NuxieSemanticSnapshot.capture(10, native)
+        assertEquals(77L, snapshot.acquireFieldViewModel(10, 0xffff_ffffL, "editable"))
+        native.fieldStatus = 3
+        assertNull(snapshot.acquireFieldViewModel(10, 0xffff_ffffL, "editable"))
+        native.fieldStatus = 9
+        assertEquals(9, assertThrows(NuxieRuntimeCallException::class.java) {
+            snapshot.acquireFieldViewModel(10, 0xffff_ffffL, "editable")
+        }.status)
+        val calls = native.fieldCalls
+        assertThrows(IllegalStateException::class.java) { snapshot.acquireFieldViewModel(10, 123, "editable") }
+        snapshot.close()
+        assertThrows(IllegalStateException::class.java) { snapshot.acquireFieldViewModel(10, 0xffff_ffffL, "editable") }
+        assertEquals(calls, native.fieldCalls)
     }
 
     @Test fun `native input geometry is occurrence and revision scoped`() {

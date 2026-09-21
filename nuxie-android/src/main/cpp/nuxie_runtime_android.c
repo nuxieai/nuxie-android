@@ -2091,6 +2091,40 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerFieldStringSet(
   return status;
 }
 
+JNIEXPORT jlong JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerFieldViewModel(
+    JNIEnv *env, jobject self, jlong player, jlong snapshot, jlong node_id,
+    jbyteArray name, jintArray status_out) {
+  (void)self;
+  struct NuxViewModelInstance *owner = NULL;
+  NuxStatus status = NUX_STATUS_INVALID_ARGUMENT;
+  if (node_id < 0 || (uint64_t)node_id > UINT32_MAX || name == NULL) {
+    set_status_out(env, status_out, status);
+    return 0;
+  }
+  jsize length = (*env)->GetArrayLength(env, name);
+  if (length > 4096) {
+    set_status_out(env, status_out, NUX_STATUS_LIMIT_EXCEEDED);
+    return 0;
+  }
+  jbyte *bytes = (*env)->GetByteArrayElements(env, name, NULL);
+  if (bytes == NULL) {
+    clear_jni_exception(env);
+    set_status_out(env, status_out, NUX_STATUS_RUNTIME_ERROR);
+    return 0;
+  }
+  struct NuxStringView key = {(const char *)bytes, (size_t)length};
+  status = nux_player_field_view_model_instance(
+      (const struct NuxPlayer *)from_handle(player),
+      (const struct NuxSemanticSnapshot *)from_handle(snapshot), (uint32_t)node_id, key, &owner);
+  (*env)->ReleaseByteArrayElements(env, name, bytes, JNI_ABORT);
+  if (!set_status_out(env, status_out, status)) {
+    if (owner != NULL) nux_view_model_instance_free(owner);
+    return 0;
+  }
+  return (jlong)(intptr_t)owner;
+}
+
 JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerValidateSemanticSnapshot(
     JNIEnv *env, jobject self, jlong player, jlong snapshot) {

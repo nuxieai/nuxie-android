@@ -680,6 +680,11 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         val geometry = NuxieRuntimeBridge.nativePlayerTextInputGeometry(player, snapshot, nodeId, name.encodeToByteArray(), status)
         return NativeCallResult(status.single(), geometry)
     }
+    override fun fieldViewModel(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<Long> {
+        val status = intArrayOf(4)
+        val owner = NuxieRuntimeBridge.nativePlayerFieldViewModel(player, snapshot, nodeId, name.encodeToByteArray(), status)
+        return NativeCallResult(status.single(), owner.takeIf { status.single() == 0 })
+    }
     override fun validateSemantics(player: Long, snapshot: Long) =
         NuxieRuntimeBridge.nativePlayerValidateSemanticSnapshot(player, snapshot)
     override fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int) =

@@ -238,6 +238,8 @@ internal object NuxieRuntimeBridge {
 
     external fun nativePlayerTextInputGeometry(player: Long, snapshot: Long, nodeId: Long, name: ByteArray, statusOut: IntArray): NativeTextInputGeometry?
 
+    external fun nativePlayerFieldViewModel(player: Long, snapshot: Long, nodeId: Long, name: ByteArray, statusOut: IntArray): Long
+
     external fun nativeSemanticSnapshotFree(snapshot: Long): Int
 
     external fun nativePlayerValidateSemanticSnapshot(player: Long, snapshot: Long): Int
