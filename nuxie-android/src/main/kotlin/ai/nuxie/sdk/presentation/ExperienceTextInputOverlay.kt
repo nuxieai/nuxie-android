@@ -47,9 +47,16 @@ internal class ExperienceTextInputOverlay(
     private val writer: (String, String, Boolean, (Result<Unit>) -> Unit) -> Unit,
     private val onFailure: (Throwable) -> Unit,
     state: ExperienceTextInputState = ExperienceTextInputState(),
+    private val nativeWriter: ((ExperienceTextFieldTarget, ExperienceSemanticTextDraft.Write,
+        (ExperienceSemanticTextDraft.Outcome) -> Unit) -> Unit)? = null,
+    private val nativeNotification: (ExperienceTextFieldTarget, String) -> Unit = { _, _ -> },
+    private val nativeEvent: (ExperienceTextFieldTarget, ExperienceSemanticTextDraft.Event) -> Unit = { _, _ -> },
 ) : FrameLayout(context) {
-    private data class Binding(val input: ExperienceTextInput, val editor: Editor, val container: FrameLayout, var geometryAvailable: Boolean = true)
+    private class Binding(val input: ExperienceTextInput, val editor: Editor, val container: FrameLayout,
+        var geometryAvailable: Boolean = true, var field: ExperienceNativeTextField? = null,
+        val draft: ExperienceSemanticTextDraft? = null)
     private val bindings = mutableListOf<Binding>()
+    private val nativeInputs = inputs.filter { it.editableValueName != null }.associateBy { it.id }
     private val session = state.bind()
     private var snapshot: NuxieViewModelSnapshot? = null
     private var geometryCapture: NuxieTextGeometryCapture? = null
@@ -67,7 +74,7 @@ internal class ExperienceTextInputOverlay(
             post { if (!closed) avoidKeyboard() }
             insets
         }
-        inputs.forEach { input ->
+        inputs.filter { it.editableValueName == null }.forEach { input ->
             val retained = session.read(input.id)
             val editor = Editor(context, input.copy(value = retained?.text ?: input.value))
             retained?.let {
@@ -102,6 +109,92 @@ internal class ExperienceTextInputOverlay(
         }
     }
 
+    /** Complete occurrence inventory from one presented frame; absent owners are retired. */
+    fun updateNativeFields(fields: List<ExperienceNativeTextField>) {
+        if (closed || !session.isCurrent()) return
+        check(fields.map { it.target }.distinct().size == fields.size) { "Duplicate native input occurrence" }
+        check(fields.map { it.target.nodeId }.distinct().size == fields.size) { "Multiple inputs name one native field" }
+        fields.forEach { field ->
+            val input = checkNotNull(nativeInputs[field.target.inputId]) { "Undeclared native input" }
+            check(field.node.id == field.target.nodeId &&
+                field.node.role == ai.nuxie.sdk.runtime.NativeSemanticRole.TEXT_FIELD &&
+                field.geometry.obscured == input.secure) {
+                "Native input presentation does not match its declaration"
+            }
+        }
+        if (fields.isNotEmpty()) checkNotNull(nativeWriter) { "Native input writer is unavailable" }
+        val incoming = fields.associateBy { it.target }
+        bindings.filter { binding -> binding.field?.let { old ->
+            incoming[old.target]?.ownerId != old.ownerId
+        } == true }.toList().forEach { binding ->
+            binding.editor.onChange = {}
+            binding.editor.onReturn = null
+            binding.draft?.withdraw()
+            binding.editor.isEnabled = false
+            if (binding.editor.hasFocus()) clearEditorFocus()
+            removeView(binding.container)
+            bindings.remove(binding)
+        }
+        for (field in fields) {
+            val input = checkNotNull(nativeInputs[field.target.inputId]) { "Undeclared native input" }
+            val binding = bindings.firstOrNull { it.field?.target == field.target } ?: run {
+                val editor = Editor(context, input.copy(value = field.text))
+                editor.tag = "nuxie-text-input-${input.id}-${field.target.nodeId}"
+                editor.setTextColor(input.style.color)
+                editor.visibility = View.INVISIBLE
+                val container = FrameLayout(context).apply {
+                    importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+                    clipChildren = false
+                    clipToPadding = false
+                }
+                container.addView(editor, LayoutParams(1, 1))
+                addView(container, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+                Binding(input, editor, container, field = field,
+                    draft = ExperienceSemanticTextDraft(field.text)).also { created ->
+                    bindings += created
+                    editor.onChange = { commit ->
+                        if (!closed && inputEnabled && editor.isEnabled && created in bindings) {
+                            created.draft!!.replaceText(editor.text.toString(), editor.isComposingText())
+                            created.draft.requestNotification()?.let { nativeNotification(field.target, it) }
+                            if (commit) created.draft.requestEvent(ExperienceSemanticTextDraft.EventKind.EDITING_ENDED)
+                                .forEach { nativeEvent(field.target, it) }
+                            flushNativeWrite(created)
+                        }
+                    }
+                    editor.onReturn = {
+                        if (!closed && inputEnabled && editor.isEnabled && created in bindings) {
+                            created.draft!!.requestEvent(ExperienceSemanticTextDraft.EventKind.RETURN)
+                                .forEach { nativeEvent(field.target, it) }
+                        }
+                    }
+                }
+            }
+            binding.field = field
+            binding.editor.semanticNode = field.node
+            binding.editor.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+            binding.draft!!.present(field.captureId)
+            if (binding.draft.receiveSource(field.text)) binding.editor.replacePresentedText(binding.draft.text)
+            flushNativeWrite(binding)
+        }
+        layoutEditors()
+    }
+
+    private fun flushNativeWrite(binding: Binding) {
+        if (closed || !inputEnabled || binding !in bindings) return
+        val draft = binding.draft ?: return
+        val field = binding.field ?: return
+        val write = draft.takeWrite() ?: return
+        checkNotNull(nativeWriter).invoke(field.target, write) { outcome ->
+            if (!closed && session.isCurrent() && binding in bindings) {
+                draft.finish(write, outcome)?.let { nativeNotification(field.target, it) }
+                draft.takeReadyEvents().forEach { nativeEvent(field.target, it) }
+                if (outcome == ExperienceSemanticTextDraft.Outcome.REJECTED)
+                    binding.editor.replacePresentedText(draft.text)
+                flushNativeWrite(binding)
+            }
+        }
+    }
+
     /** IME callbacks can outlive touch dispatch; fence them during native preparation too. */
     fun setInputEnabled(enabled: Boolean) {
         if (closed || inputEnabled == enabled) return
@@ -109,12 +202,16 @@ internal class ExperienceTextInputOverlay(
         inputEnabled = false
         bindings.forEach { binding ->
             val editor = binding.editor
-            if (enabled) session.read(binding.input.id)?.let { retained ->
+            if (!enabled) binding.draft?.let { draft ->
+                draft.withdraw()
+                editor.replacePresentedText(draft.text)
+            }
+            if (enabled && binding.field == null) session.read(binding.input.id)?.let { retained ->
                 editor.setText(retained.text)
                 val length = editor.text?.length ?: 0
                 editor.setSelection(retained.selectionStart.coerceIn(0, length), retained.selectionEnd.coerceIn(0, length))
             }
-            val node = semanticFields?.get(binding.input.id)
+            val node = binding.field?.node ?: semanticFields?.get(binding.input.id)
             editor.isEnabled = enabled && binding.geometryAvailable && (semanticFields == null || node != null && node.stateFlags and NativeSemanticState.DISABLED == 0)
         }
         inputEnabled = enabled
@@ -123,7 +220,7 @@ internal class ExperienceTextInputOverlay(
     fun updateSemantics(fields: Map<String, NativeSemanticNode>) {
         if (closed) return
         semanticFields = fields.toMap()
-        bindings.forEach { binding ->
+        bindings.filter { it.field == null }.forEach { binding ->
             val node = fields[binding.input.id]
             binding.editor.semanticNode = node
             binding.editor.importantForAccessibility = if (node == null) View.IMPORTANT_FOR_ACCESSIBILITY_NO
@@ -165,7 +262,7 @@ internal class ExperienceTextInputOverlay(
         closed = true
         if (viewTreeObserver.isAlive) viewTreeObserver.removeOnGlobalLayoutListener(keyboardLayoutListener)
         applyKeyboardShift(0f)
-        bindings.forEach { it.editor.onChange = {}; it.editor.onSelection = null }
+        bindings.forEach { it.editor.onChange = {}; it.editor.onSelection = null; it.editor.onReturn = null; it.draft?.withdraw() }
         clearEditorFocus()
         removeAllViews()
         bindings.clear()
@@ -274,24 +371,30 @@ internal class ExperienceTextInputOverlay(
     }
 
     private fun layoutEditors() {
-        val snapshot = snapshot ?: return
         if (width <= 0 || height <= 0) return
         val scale = min(width / artboardSize.width, height / artboardSize.height)
         val left = (width - artboardSize.width * scale) / 2f
         val top = (height - artboardSize.height * scale) / 2f
         for (binding in bindings) {
-            val (input, editor, container) = binding
-            if (semanticFields != null && input.id !in semanticFields.orEmpty()) {
+            val input = binding.input
+            val editor = binding.editor
+            val container = binding.container
+            val nativeField = binding.field
+            val snapshot = nativeField?.snapshot ?: snapshot ?: continue
+            if (nativeField == null && semanticFields != null && input.id !in semanticFields.orEmpty()) {
                 editor.visibility = View.INVISIBLE
                 continue
             }
             val metrics = input.effectiveMetrics(snapshot)
-            val field = (geometryCapture as? NuxieTextGeometryCapture.Captured)?.fields?.get(input.runName)
+            val field = nativeField?.geometry?.let { native ->
+                NuxieTextRunGeometry(native.renderRevision, native.worldTransform, native.worldTransform,
+                    native.textBounds, native.layout, native.firstBaseline)
+            } ?: (geometryCapture as? NuxieTextGeometryCapture.Captured)?.fields?.get(input.runName)
             binding.geometryAvailable = field != null && metrics != null && placeCapturedField(input, metrics, editor, container, field, scale, left, top)
-            val node = semanticFields?.get(input.id)
+            val node = nativeField?.node ?: semanticFields?.get(input.id)
             val enabled = binding.geometryAvailable && inputEnabled &&
                 (semanticFields == null || node != null && node.stateFlags and NativeSemanticState.DISABLED == 0)
-            if (enabled && !editor.isEnabled) {
+            if (enabled && !editor.isEnabled && nativeField == null) {
                 session.read(input.id)?.let { retained ->
                     editor.setText(retained.text)
                     val length = editor.text?.length ?: 0
@@ -424,6 +527,7 @@ internal class ExperienceTextInputOverlay(
 
         var onChange: (Boolean) -> Unit = {}
         var onSelection: (() -> Unit)? = null
+        var onReturn: (() -> Unit)? = null
         private var normalizing = false
         private var committingComposition = false
 
@@ -487,6 +591,7 @@ internal class ExperienceTextInputOverlay(
             }
             setOnEditorActionListener { _, action, _ ->
                 if (action == EditorInfo.IME_ACTION_DONE) {
+                    onReturn?.invoke()
                     clearEditorFocus()
                     true
                 } else false
@@ -526,6 +631,17 @@ internal class ExperienceTextInputOverlay(
         }
 
         fun isEditingText(): Boolean = hasFocus() || hasComposingSpan(text)
+
+        fun isComposingText(): Boolean = hasComposingSpan(text)
+
+        fun replacePresentedText(value: String) {
+            if (text.toString() == value) return
+            normalizing = true
+            try {
+                setText(value)
+                setSelection(text?.length ?: 0)
+            } finally { normalizing = false }
+        }
 
         private fun hasComposingSpan(value: CharSequence): Boolean = value is Spanned &&
             value.getSpans(0, value.length, Any::class.java).any {
