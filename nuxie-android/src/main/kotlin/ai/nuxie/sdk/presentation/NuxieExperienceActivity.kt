@@ -229,6 +229,8 @@ internal class NuxieExperienceActivity : Activity() {
         override fun onRuntimeEvent(event: NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) = Unit
         override fun onTextCommitted(inputId: String, text: String, snapshot: NuxieViewModelSnapshot?) =
             PresentationRegistry.reportTextCommitted(id, this, inputId, text, snapshot)
+        override fun onTextInputEvent(inputId: String, event: ExperienceSemanticTextDraft.Event) =
+            PresentationRegistry.reportTextInputEvent(id, this, inputId, event)
         override fun onFailure(error: ExperiencePresentationException) = fail(error)
 
         fun hasRevealed(): Boolean = revealed

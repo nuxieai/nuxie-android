@@ -25,6 +25,9 @@ internal data class ExperienceTextInput(
     val style: Style,
     val responseCapture: ResponseCapture = ResponseCapture.TEXT,
     val editableValueName: String? = null,
+    val viewNodeId: String = id,
+    val actionEvent: ExperienceSemanticTextDraft.EventKind = ExperienceSemanticTextDraft.EventKind.EDITING_ENDED,
+    val declarativeActionId: String? = null,
 ) {
     enum class ResponseCapture { TEXT, BINDING }
 
@@ -86,6 +89,13 @@ internal data class ExperienceTextInput(
                     id = input.text("id"),
                     runName = input.text("textRunName"),
                     editableValueName = input.optionalText("editableValueName"),
+                    viewNodeId = input.optionalText("viewNodeId") ?: input.text("id"),
+                    actionEvent = when (input.optionalText("actionEvent")) {
+                        null, "editing-ended" -> ExperienceSemanticTextDraft.EventKind.EDITING_ENDED
+                        "return" -> ExperienceSemanticTextDraft.EventKind.RETURN
+                        else -> error("Unsupported input action event")
+                    },
+                    declarativeActionId = input.optionalText("declarativeActionId"),
                     value = input.text("value"),
                     responseField = input.optionalText("responseFieldKey"),
                     responseCapture = when (input.optionalText("responseCapture")) {

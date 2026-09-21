@@ -45,6 +45,31 @@ internal fun textInputDescriptor(value: String = ""): JsonObject = Json.parseToJ
 
 @RunWith(RobolectricTestRunner::class)
 class ExperienceTextInputTest {
+    @Test fun `unchanged Return executes the declared action each time but blur does not`() = runTest {
+        val descriptor = Json.parseToJsonElement(textInputDescriptor().toString()
+            .replace("\"textRunName\":", "\"actionEvent\":\"return\",\"declarativeActionId\":\"submit\",\"textRunName\":")) as JsonObject
+        val behaviors = Json.parseToJsonElement("""[{"screenId":"survey","controls":[{
+          "actionId":"submit","behavior":{"kind":"declarative","program":[{"type":"emit","eventName":"submitted"}]}
+        }]}]""")
+        val batches = mutableListOf<JourneyScreenEmissionBatch>()
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey",
+            JsonObject(descriptor + ("screenBehaviors" to behaviors)), 0, 0,
+            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
+        coordinator.reveal()
+        assertTrue(coordinator.publishTextInputEvent("name", ExperienceSemanticTextDraft.Event(
+            ExperienceSemanticTextDraft.EventKind.EDITING_ENDED, "same")))
+        assertTrue(batches.isEmpty())
+        repeat(2) {
+            assertTrue(coordinator.publishTextInputEvent("name", ExperienceSemanticTextDraft.Event(
+                ExperienceSemanticTextDraft.EventKind.RETURN, "same")))
+        }
+        assertEquals(2, batches.size)
+        assertTrue(batches.all { it.source.actionId == "submit" && it.source.componentId == "name" })
+        assertFalse(coordinator.publishTextInputEvent("unknown", ExperienceSemanticTextDraft.Event(
+            ExperienceSemanticTextDraft.EventKind.RETURN, "same")))
+        coordinator.close()
+    }
+
     @Test fun `native response deduplication belongs to each occurrence owner`() = runTest {
         val descriptor = Json.parseToJsonElement(textInputDescriptor().toString()
             .replace("\"textRunName\":", "\"editableValueName\":\"editable\",\"textRunName\":")) as JsonObject

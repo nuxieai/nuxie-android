@@ -42,7 +42,8 @@ internal class ExperienceMountedScreen(
     private var content: View? = null
     private var awaitingSemanticPublication =
         ((prepared.descriptor?.get("requirements") as? JsonObject)?.get("requiredCapabilities") as? JsonArray)
-            .orEmpty().any { (it as? JsonPrimitive)?.content == "experience-accessibility" }
+            .orEmpty().any { (it as? JsonPrimitive)?.content == "experience-accessibility" } ||
+            inputs.any { it.editableValueName != null }
     val surface = ExperienceSurfaceHost(
         context = activity,
         lane = lane,
@@ -60,7 +61,13 @@ internal class ExperienceMountedScreen(
             }
             override fun onSemanticFields(fields: Map<String, ai.nuxie.sdk.runtime.NativeSemanticNode>): Map<Long, View> {
                 textOverlay?.updateSemantics(fields)
-                return textOverlay?.semanticViews().orEmpty()
+                val ids = fields.values.map { it.id }.toSet()
+                return textOverlay?.semanticViews().orEmpty().filterKeys { it in ids }
+            }
+            override fun onNativeTextFields(fields: List<ExperienceNativeTextField>): Map<Long, View> {
+                textOverlay?.updateNativeFields(fields)
+                val ids = fields.map { it.target.nodeId }.toSet()
+                return textOverlay?.semanticViews().orEmpty().filterKeys { it in ids }
             }
             override fun onSemanticTreePublished() {
                 if (awaitingSemanticPublication) {
@@ -104,7 +111,8 @@ internal class ExperienceMountedScreen(
             }
             inputSize?.let { size ->
                 val overlay = ExperienceTextInputOverlay(activity, size, inputs, fonts,
-                    surface::writeText, onFailure, prepared.textInputState)
+                    surface::writeText, onFailure, prepared.textInputState,
+                    surface::writeNativeText, surface::notifyNativeText, surface::nativeTextEvent)
                 textOverlay = overlay
                 addView(overlay, FrameLayout.LayoutParams(-1, -1))
             }

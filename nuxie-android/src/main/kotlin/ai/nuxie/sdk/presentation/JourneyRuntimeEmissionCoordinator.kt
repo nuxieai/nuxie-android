@@ -153,6 +153,22 @@ internal class JourneyRuntimeEmissionCoordinator(
         }
     }
 
+    /** An authored Return/blur is an action, not another response-value notification. */
+    suspend fun publishTextInputEvent(inputId: String, event: ExperienceSemanticTextDraft.Event,
+        lifetime: RendererEffectLifetime? = null): Boolean {
+        if (!awaitReveal(lifetime)) return true
+        return gate.withLock {
+            if (closed) return@withLock false
+            if (lifetime?.isRetired == true) return@withLock true
+            val input = textInputs[inputId] ?: return@withLock false
+            if (event.kind != input.actionEvent) return@withLock true
+            val actionId = input.declarativeActionId ?: return@withLock true
+            val invocation = Invocation(actionId, JsonPrimitive(event.text), input.viewNodeId, null)
+            val drafts = materializeControl(Control(screenId, invocation)) ?: return@withLock false
+            publishDrafts(drafts, JourneyScreenEmissionSource(screenId, actionId, input.viewNodeId, null))
+        }
+    }
+
     private suspend fun awaitReveal(lifetime: RendererEffectLifetime?): Boolean {
         if (lifetime == null) { revealed.await(); return true }
         return select {
