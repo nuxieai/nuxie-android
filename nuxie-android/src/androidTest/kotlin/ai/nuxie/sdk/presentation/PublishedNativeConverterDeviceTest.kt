@@ -5,6 +5,7 @@ import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import ai.nuxie.sdk.runtime.NuxieHostCommand
 import ai.nuxie.sdk.runtime.NuxieHostValue
 import ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome
+import ai.nuxie.sdk.experiences.JourneyReleaseEnvelope
 import android.content.Intent
 import android.os.SystemClock
 import android.util.Base64
@@ -39,7 +40,11 @@ class PublishedNativeConverterDeviceTest {
             .joinToString("") { "%02x".format(it) }
         val entry = Json.parseToJsonElement(read("release-entry.json").decodeToString()).jsonObject
         val envelope = entry.getValue("envelope").jsonObject
-        val descriptorBytes = Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP)
+        val descriptorBytes = JourneyReleaseEnvelope.authenticate(
+            envelope.toString().encodeToByteArray(),
+            mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(
+                "IVL40Zt5HSRFMkLhXy6rbLfP+ntqXtMAl5YOBpiB2xI=", Base64.NO_WRAP)),
+        ).descriptorBytes
         assertEquals(envelope.getValue("descriptorSha256").jsonPrimitive.content, digest(descriptorBytes))
         val descriptor = Json.parseToJsonElement(descriptorBytes.decodeToString()).jsonObject
         val render = descriptor.getValue("render").jsonObject
