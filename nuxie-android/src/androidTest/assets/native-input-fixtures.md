@@ -12,3 +12,25 @@ They are not part of the separately synchronized `fixtures/` export.
 | native_input_occurrences.riv | d94235991c6f20d61e08173788236139d96c7ab6be914736f3efd2a844a9446b |
 
 Update from the iOS source fixtures, not by modifying the Android copies.
+
+## Mounted converter fixture
+
+`native_input_mounted.riv` is generated through Nuxie's Scene authoring API by
+`tools/nuxie-editor/crates/nuxie-authoring/src/native_input_device_fixture.rs`
+in the parent repository. It contains a laid-out native TextInput with semantic
+identity and a two-way StringTrim binding to `State.answer`. Initial source text
+is `  initial  `. Forward presentation trims it; reverse editing preserves the
+entered text, following the native converter contract.
+
+Generate with `NUXIE_NATIVE_INPUT_FIXTURE_PATH=<absolute output path> cargo test
+-p nuxie-authoring --lib generate_mounted_input_fixture -- --ignored` from
+`tools/nuxie-editor`. The external font is an unchanged copy of
+`crates/editor/assets/nuxie-editor-ui-400.ttf`.
+
+| File | SHA-256 |
+| --- | --- |
+| native_input_mounted.riv | 44c4d6025a10ca91f0a45b7e70d629bbb525a6207752206a709ca235f6d2a624 |
+| native_input_font.ttf | 2898476918b21c3f9b5ba22e86853c6d63b544f92da277a92533011a28c93af5 |
+
+This mounted test does not qualify signed release admission or custom converter
+failure/recovery. Those require the full publication path.
