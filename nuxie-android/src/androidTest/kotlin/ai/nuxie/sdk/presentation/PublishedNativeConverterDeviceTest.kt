@@ -2,6 +2,9 @@ package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.runtime.NuxieRuntime
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
+import ai.nuxie.sdk.runtime.NuxieHostCommand
+import ai.nuxie.sdk.runtime.NuxieHostValue
+import ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome
 import android.content.Intent
 import android.os.SystemClock
 import android.util.Base64
@@ -23,12 +26,14 @@ import org.junit.Test
 class PublishedNativeConverterDeviceTest {
     @Test fun plainDurationRejectsInvalidEditAndRecovers() = qualify(false)
     @Test fun secureDurationRejectsInvalidEditAndRecovers() = qualify(true)
+    @Test fun plainDurationValidatesDraftBeforeSubmission() = qualify(false, true)
+    @Test fun secureDurationValidatesDraftBeforeSubmission() = qualify(true, true)
 
-    private fun qualify(secure: Boolean) {
+    private fun qualify(secure: Boolean, validate: Boolean = false) {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val assets = instrumentation.context.assets
-        val prefix = if (secure) "native-converter-secure" else "native-converter"
+        val prefix = "native-converter" + (if (secure) "-secure" else "") + (if (validate) "-validated" else "")
         fun read(name: String) = assets.open("$prefix/$name").use { it.readBytes() }
         fun digest(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes)
             .joinToString("") { "%02x".format(it) }
@@ -65,6 +70,7 @@ class PublishedNativeConverterDeviceTest {
             SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val failure = AtomicReference<Throwable?>()
         val commits = LinkedBlockingQueue<Pair<String, NuxieViewModelSnapshot?>>()
+        val commands = LinkedBlockingQueue<NuxieHostCommand>()
         val latestCommit = AtomicReference<Pair<String, NuxieViewModelSnapshot?>?>()
         val completionEvents = LinkedBlockingQueue<Pair<ExperienceSemanticTextDraft.Event, Pair<String, NuxieViewModelSnapshot?>?>>()
         var mounted: ExperienceMountedScreen? = null
@@ -79,6 +85,9 @@ class PublishedNativeConverterDeviceTest {
                 mounted = ExperienceMountedScreen(activity, prepared, object : ExperienceSurfaceHost.Listener {
                     override fun onFirstFrame() { checkNotNull(mounted).activate() }
                     override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
+                    override fun onRuntimeStep(outcome: NuxiePlayerStepOutcome, correlationId: ULong, viewModelSnapshot: NuxieViewModelSnapshot?) {
+                        commands.addAll(outcome.hostCommands)
+                    }
                     override fun onTextCommitted(inputId: String, text: String, snapshot: NuxieViewModelSnapshot?) {
                         latestCommit.set(text to snapshot)
                         commits.add(text to snapshot)
@@ -100,6 +109,31 @@ class PublishedNativeConverterDeviceTest {
             failure.get()?.let { throw AssertionError("Published native input mount failed", it) }
             val field = checkNotNull(editor) { "Published native input must be editable" }
             assertTrue("Mount cannot emit an answer", commits.isEmpty())
+            if (validate) {
+                assertTrue("Mount cannot submit", commands.isEmpty())
+                fun complete(draft: String, expected: Double?) {
+                    instrumentation.runOnMainSync { field.requestFocus(); field.setText(draft); field.clearFocus() }
+                    checkNotNull(commits.poll(10, TimeUnit.SECONDS)) { "Expected draft notification before validation" }
+                    if (expected == null) {
+                        assertNull("Invalid draft must not emit a response or continuation", commands.poll(1, TimeUnit.SECONDS))
+                    } else {
+                        val response = checkNotNull(commands.poll(10, TimeUnit.SECONDS)) { "Expected validated response" }
+                        assertEquals("\$response_set", response.name)
+                        val fields = (response.value as NuxieHostValue.Object).fields.associate { it.key to it.value }
+                        assertEquals(NuxieHostValue.String("durationSeconds"), fields["field"])
+                        assertEquals(NuxieHostValue.Number(expected), fields["value"])
+                        assertEquals("duration_ready", checkNotNull(commands.poll(10, TimeUnit.SECONDS)).name)
+                    }
+                    failure.get()?.let { throw AssertionError("Published validation failed", it) }
+                }
+                complete("2:00", 120.0)
+                complete("invalid", null)
+                complete("", null)
+                complete("1:60", null)
+                complete("0:45", 45.0)
+                complete("00:45", 45.0)
+                return
+            }
             fun edit(text: String) = instrumentation.runOnMainSync { field.requestFocus(); field.setText(text) }
             fun edited(text: String, seconds: Double) {
                 edit(text)
