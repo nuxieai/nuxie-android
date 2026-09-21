@@ -181,9 +181,8 @@ internal object JourneyRenderSchema {
         if (text(value["value"]).length > 1_000_000) fail("text input value")
         value["responseFieldKey"]?.let { releaseId(it) }
         value["responseCapture"]?.let {
-            val mode = oneOf(it, "text", "binding")
+            oneOf(it, "text", "binding")
             if (value["responseFieldKey"] == null) fail("response capture field")
-            if (mode == "binding" && boolean(value["secureTextEntry"])) fail("secure binding response capture")
         }
         value["placeholder"]?.let { if (text(it).length > 1024) fail("placeholder") }
         value["keyboardType"]?.let { id(it, 64) }

@@ -30,7 +30,6 @@ internal data class ExperienceTextInput(
     /** Native bindings own conversion; a missing source is not a raw-text fallback. */
     fun captureResponse(text: String, snapshot: NuxieViewModelSnapshot?): JsonPrimitive {
         if (responseCapture == ResponseCapture.TEXT) return JsonPrimitive(text)
-        check(!secure) { "Converted response capture is unavailable for secure input $id" }
         val field = checkNotNull(responseField) { "Converted input $id has no response field" }
         return when (val value = snapshot?.resolveScalar(listOf("response", "values", field))) {
             is NuxieViewModelScalarValue.StringValue -> JsonPrimitive(value.value)

@@ -310,7 +310,7 @@ class JourneyReleaseTest {
                     if (field) input["responseFieldKey"] = JsonPrimitive("answer") else input.remove("responseFieldKey")
                     inputs[0] = JsonObject(input)
                     val root = JsonObject(source + ("render" to JsonObject(render + ("textInputs" to JsonArray(inputs)))))
-                    val valid = field && (mode == "text" || (mode == "binding" && !secure))
+                    val valid = field && (mode == "text" || mode == "binding")
                     if (valid) JourneySchemaValidator.validate(root)
                     else assertThrows("$mode secure=$secure field=$field", JourneyReleaseAuthenticationException::class.java) {
                         JourneySchemaValidator.validate(root)

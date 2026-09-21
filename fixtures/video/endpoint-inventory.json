@@ -1,0 +1,43 @@
+{
+  "screens": [
+    {
+      "id": "screen",
+      "artboardId": "screen",
+      "artboardName": "Interactive video comparison",
+      "width": 320,
+      "height": 640
+    }
+  ],
+  "transitions": [],
+  "videoElements": [
+    {
+      "sourceArtboardIndex": 0,
+      "artboardId": "screen",
+      "viewNodeId": "clip-view",
+      "renderedNodeId": "clip-view",
+      "componentId": 5,
+      "readinessTimeoutSeconds": 5,
+      "optional": false
+    }
+  ],
+  "textInputs": [],
+  "assets": [
+    {
+      "kind": "video",
+      "key": "assets/sha256/b3cfdaacce368542a7a287677d708b550ca56beb620b04764dd994edac15223f.mp4",
+      "sha256": "b3cfdaacce368542a7a287677d708b550ca56beb620b04764dd994edac15223f",
+      "sizeBytes": 21024,
+      "contentType": "video/mp4",
+      "sourceAssetKey": "asset:clip",
+      "authoredAssetId": 0,
+      "assetUniqueName": "video-clip-5afb4ece-0",
+      "width": 64,
+      "height": 32,
+      "durationMs": 2022,
+      "videoCodec": "avc1.64000a",
+      "audioCodec": "mp4a.40.2",
+      "captionTracks": [],
+      "required": true
+    }
+  ]
+}

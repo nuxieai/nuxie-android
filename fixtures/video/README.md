@@ -93,3 +93,19 @@ ffmpeg -i captions.mp4 -map 0 -vf scale=3840:2160:flags=neighbor,setsar=1,fps=60
 
 Passing loop/caption/control checks at this size is distinct from sustaining
 60 delivered frames/second; record the measured delivery rate and host.
+
+`endpoint.nux` reuses the interactive video Frame and the checked-in
+`endpoint.luau` controller. The same generator command above emits it and its
+inventory. Its controller requests `scrub(1, 0, video:duration())` and paints a
+green status strip only after the request reports `settled`. The native test
+binds `endpoint-low-fps.mp4`: its 2-second duration extends beyond the last
+10 fps video frame at 1.9 seconds. Metal readback must show both the green strip
+and the final blue image, so an uploaded-but-rejected frame cannot pass.
+
+The endpoint media is the runtime's `fixtures/video/red-blue-endpoint.mp4`.
+Copy that canonical fixture from `third_party/nuxie-runtime` in the parent repo
+before running the generator; its source-generation recipe is recorded beside it.
+
+This covers accepting a frame actually selected by the decoder. A separate
+long audio-tail case where AVFoundation provides no image at all remains tracked
+in [UNIV-3339](https://universe.basis.dev/issue/UNIV-3339).
