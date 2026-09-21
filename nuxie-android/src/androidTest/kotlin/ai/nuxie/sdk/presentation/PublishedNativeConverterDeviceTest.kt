@@ -89,6 +89,7 @@ class PublishedNativeConverterDeviceTest {
         val latestCommit = AtomicReference<Pair<String, NuxieViewModelSnapshot?>?>()
         val completionEvents = LinkedBlockingQueue<Pair<ExperienceSemanticTextDraft.Event, Pair<String, NuxieViewModelSnapshot?>?>>()
         var mounted: ExperienceMountedScreen? = null
+        var journey: PublishedConverterJourneyHarness? = null
         lateinit var content: View
         fun editors(view: View): List<EditText> = when (view) {
             is EditText -> listOf(view)
@@ -96,11 +97,17 @@ class PublishedNativeConverterDeviceTest {
             else -> emptyList()
         }
         try {
+            if (validate) journey = PublishedConverterJourneyHarness(instrumentation.targetContext, directory, entry)
             instrumentation.runOnMainSync {
                 mounted = ExperienceMountedScreen(activity, prepared, object : ExperienceSurfaceHost.Listener {
                     override fun onFirstFrame() { checkNotNull(mounted).activate() }
                     override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
                     override fun onRuntimeStep(outcome: NuxiePlayerStepOutcome, correlationId: ULong, viewModelSnapshot: NuxieViewModelSnapshot?) {
+                        try {
+                            journey?.publish(outcome, correlationId, viewModelSnapshot)
+                        } catch (error: Throwable) {
+                            failure.set(error)
+                        }
                         commands.addAll(outcome.hostCommands)
                     }
                     override fun onTextCommitted(inputId: String, text: String, snapshot: NuxieViewModelSnapshot?) {
@@ -126,6 +133,10 @@ class PublishedNativeConverterDeviceTest {
             assertTrue("Mount cannot emit an answer", commits.isEmpty())
             if (validate) {
                 assertTrue("Mount cannot submit", commands.isEmpty())
+                val persisted = checkNotNull(journey)
+                assertTrue("Mount cannot persist an answer", persisted.responses().isEmpty())
+                var lastValid: Double? = null
+                var submissions = 0
                 fun complete(draft: String, expected: Double?) {
                     instrumentation.runOnMainSync { field.requestFocus(); field.setText(draft); field.clearFocus() }
                     checkNotNull(commits.poll(10, TimeUnit.SECONDS)) { "Expected draft notification before validation" }
@@ -138,8 +149,13 @@ class PublishedNativeConverterDeviceTest {
                         assertEquals(NuxieHostValue.String("durationSeconds"), fields["field"])
                         assertEquals(NuxieHostValue.Number(expected), fields["value"])
                         assertEquals("duration_ready", checkNotNull(commands.poll(10, TimeUnit.SECONDS)).name)
+                        lastValid = expected
+                        submissions += 1
                     }
                     failure.get()?.let { throw AssertionError("Published validation failed", it) }
+                    assertEquals("Journal reload must preserve the converted numeric answer",
+                        lastValid?.let(::JsonPrimitive), persisted.responses()["durationSeconds"])
+                    assertEquals("Only valid drafts submit", submissions, persisted.submissions())
                 }
                 complete("2:00", 120.0)
                 complete("invalid", null)
@@ -195,6 +211,7 @@ class PublishedNativeConverterDeviceTest {
                 activity.finish()
             }
             assertTrue("Mounted native lane must retire", closed.await(10, TimeUnit.SECONDS))
+            journey?.close()
             directory.deleteRecursively()
         }
     }

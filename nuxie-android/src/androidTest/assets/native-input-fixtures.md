@@ -58,5 +58,10 @@ assembler packages and signs its compiled action artifact. It shares the
 converter's parser and emits `$response_set` and `duration_ready` only when the
 draft parses. Device tests use actual UI edit/blur delivery and runtime commands,
 checking malformed, empty, invalid-seconds, corrected, and equivalent-value edits.
-These prove authenticated admission and authored validation at the native command
-boundary, not durable Journey persistence.
+The validated cases also route the actual native outcomes through
+`JourneyRuntimeEmissionCoordinator` and `JourneyService`. After each edit they
+reload the disk journal and check the typed numeric response and submission
+count. Invalid drafts preserve the previous answer without submitting;
+corrected and equivalent-value drafts submit. Admission uses the production
+catalog and installed runtime compatibility. The test supplies a local profile
+and mount adapter; it does not exercise network delivery or the public app API.
