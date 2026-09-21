@@ -50,3 +50,12 @@ draft available for authored validation. Secure and plain descriptors both use
 binding capture. The instrumentation test verifies descriptor and all staged
 artifact hashes from the release entry. It intentionally mounts below signed
 admission and does not prove submission validation or authenticated admission.
+
+The `native-converter-validated/` and `native-converter-secure-validated/`
+variants add the authored editing-ended action. The publisher's real release
+assembler packages and signs its compiled action artifact. It shares the
+converter's parser and emits `$response_set` and `duration_ready` only when the
+draft parses. Device tests use actual UI edit/blur delivery and runtime commands,
+checking malformed, empty, invalid-seconds, corrected, and equivalent-value edits.
+These prove authored validation at the native command boundary, not durable
+Journey persistence or signed admission.
