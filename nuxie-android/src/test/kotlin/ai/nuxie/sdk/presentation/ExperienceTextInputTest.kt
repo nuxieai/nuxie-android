@@ -45,6 +45,24 @@ internal fun textInputDescriptor(value: String = ""): JsonObject = Json.parseToJ
 
 @RunWith(RobolectricTestRunner::class)
 class ExperienceTextInputTest {
+    @Test fun `native response deduplication belongs to each occurrence owner`() = runTest {
+        val descriptor = Json.parseToJsonElement(textInputDescriptor().toString()
+            .replace("\"textRunName\":", "\"editableValueName\":\"editable\",\"textRunName\":")) as JsonObject
+        val batches = mutableListOf<JourneyScreenEmissionBatch>()
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", descriptor, 0, 0,
+            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
+        fun owner(id: Long) = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(id,
+            arrayOf(NativeViewModelSnapshotInstance(id, 0)), emptyArray()))
+        coordinator.reveal()
+        assertTrue(runCatching { coordinator.publishTextCommit("name", "Al") }.isFailure)
+        assertTrue(batches.isEmpty())
+        assertTrue(coordinator.publishTextCommit("name", "Al", snapshot = owner(10)))
+        assertTrue(coordinator.publishTextCommit("name", "Al", snapshot = owner(10)))
+        assertTrue(coordinator.publishTextCommit("name", "Al", snapshot = owner(20)))
+        assertEquals(2, batches.size)
+        coordinator.close()
+    }
+
     @Test
     @org.robolectric.annotation.Config(sdk = [35])
     @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)

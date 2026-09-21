@@ -80,6 +80,8 @@ internal class ExperienceSurfaceHost(
         fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot, geometry: NuxieTextGeometryCapture) {}
         /** Complete visible native-field association map, copied from the same presented capture. */
         fun onSemanticFields(fields: Map<String, NativeSemanticNode>): Map<Long, android.view.View> = emptyMap()
+        /** Execution-only values for native editors; never part of accessibility tree diagnostics. */
+        fun onNativeTextFields(fields: List<ExperienceNativeTextField>): Map<Long, android.view.View> = emptyMap()
         /** UI-thread callback after native fields and virtual controls share a committed tree. */
         fun onSemanticTreePublished() {}
         /** Runtime-lane callback ordered with writes and renderer publications. */
@@ -193,19 +195,27 @@ internal class ExperienceSurfaceHost(
         semanticEpoch.incrementAndGet()
         if (preserveFocus) accessibility.withdraw() else accessibility.retire()
         if (semanticsEnabled) listener?.onSemanticFields(emptyMap())
+        if (semanticsEnabled) listener?.onNativeTextFields(emptyList())
         lane.enqueue {
             semanticSnapshot?.close()
             semanticSnapshot = null
+            nativeTextFields = emptyList()
+            acceptedNativeText.clear()
             queuedSemanticAction = null
             semanticActionPending.set(false)
         }
     }
 
+    private var nativeTextFields: List<ExperienceNativeTextField> = emptyList()
+    private var nativeTextCaptureId = 0L
+    private class AcceptedNativeText(val text: String, val snapshot: NuxieViewModelSnapshot)
+    private val acceptedNativeText = mutableMapOf<ExperienceTextFieldTarget, AcceptedNativeText>()
+
     private fun publishSemantics(active: NuxieRuntimePlayer, generation: Long, epoch: Long) {
         if (!semanticsEnabled || epoch != semanticEpoch.get()) return
         val next = active.captureSemantics()
         val fields = try {
-            textInputs.values.mapNotNull { input ->
+            textInputs.values.filter { it.editableValueName == null }.mapNotNull { input ->
                 next.nodeForTextRun(active.requireHandle(), input.runName)?.let { input.id to it }
             }.toMap().also { fields ->
                 check(fields.values.map { it.id }.distinct().size == fields.size) {
@@ -213,18 +223,36 @@ internal class ExperienceSurfaceHost(
                 }
             }
         } catch (error: Throwable) { next.close(); throw error }
+        val nextCaptureId = nativeTextCaptureId + 1
+        val nativeFields = try {
+            ExperienceNativeTextFieldCapture.read(textInputs.values.toList(), next.tree.nodes,
+                nextCaptureId,
+                geometry = { nodeId, name -> next.textInputGeometry(active.requireHandle(), nodeId, name) },
+                readText = { nodeId, name -> next.readFieldString(active.requireHandle(), nodeId, name) },
+                readOwner = { nodeId, name ->
+                    val owner = checkNotNull(active.fieldOwner(next, nodeId, name)) { "Native input has no state owner" }
+                    try { owner.snapshot() } finally { owner.close() }
+                })
+        } catch (error: Throwable) { next.close(); throw error }
         semanticSnapshot?.close()
+        nativeTextCaptureId = nextCaptureId
+        nativeTextFields = nativeFields
+        acceptedNativeText.entries.removeAll { (target, accepted) ->
+            nativeFields.none { it.target == target && it.ownerId == accepted.snapshot.nativeRootInstanceId }
+        }
         semanticFields = fields
         semanticSnapshot = next
         semanticSnapshotEpoch = epoch
-        postSemanticTree(next.tree, fields, generation, epoch)
+        postSemanticTree(next.tree, fields, nativeFields, generation, epoch)
     }
 
-    private fun postSemanticTree(tree: NuxieSemanticTree, fields: Map<String, NativeSemanticNode>, generation: Long, epoch: Long) {
+    private fun postSemanticTree(tree: NuxieSemanticTree, fields: Map<String, NativeSemanticNode>,
+        nativeInputs: List<ExperienceNativeTextField>, generation: Long, epoch: Long) {
         post {
             if (!released.get() && running && sceneInputEnabled.get() && firstFrameComposed && generation == frameGeneration.get() && epoch == semanticEpoch.get()) {
                 try {
-                    val nativeFields = listener?.onSemanticFields(fields).orEmpty()
+                    val nativeFields = listener?.onSemanticFields(fields).orEmpty() +
+                        listener?.onNativeTextFields(nativeInputs).orEmpty()
                     accessibility.publish(tree, nativeFields)
                     listener?.onSemanticTreePublished()
                 } catch (error: Exception) {
@@ -344,7 +372,8 @@ internal class ExperienceSurfaceHost(
         lane.enqueue {
             val requirements = descriptor?.get("requirements") as? JsonObject
             semanticsEnabled = (requirements?.get("requiredCapabilities") as? JsonArray).orEmpty()
-                .any { (it as? JsonPrimitive)?.content == "experience-accessibility" }
+                .any { (it as? JsonPrimitive)?.content == "experience-accessibility" } ||
+                textInputs.any { it.editableValueName != null }
             this.textInputs = textInputs.associateBy(ExperienceTextInput::id)
             this.retainedViewModel = retainedViewModel
             val activeRenderer = ensureRenderer(1, 1)
@@ -513,6 +542,74 @@ internal class ExperienceSurfaceHost(
     }
 
     /** UI entry point. Native edits and optional response commits share the frame lane. */
+    fun writeNativeText(target: ExperienceTextFieldTarget, write: ExperienceSemanticTextDraft.Write,
+        completion: (ExperienceSemanticTextDraft.Outcome) -> Unit) {
+        val generation = frameGeneration.get()
+        val epoch = semanticEpoch.get()
+        fun complete(outcome: ExperienceSemanticTextDraft.Outcome) { post { completion(outcome) } }
+        val accepted = lane.enqueue {
+            pendingTextWrites.addLast {
+                val capture = semanticSnapshot
+                val active = player
+                val input = textInputs[target.inputId]
+                val field = nativeTextFields.singleOrNull { it.target == target }
+                if (released.get() || !running || !sceneInputEnabled.get() || generation != frameGeneration.get() ||
+                    epoch != semanticEpoch.get() || semanticSnapshotEpoch != epoch || write.captureId != nativeTextCaptureId ||
+                    capture == null || active == null || field == null || input?.editableValueName == null ||
+                    capture.validate(active.requireHandle()) != 0) {
+                    complete(ExperienceSemanticTextDraft.Outcome.STALE_CAPTURE)
+                    return@addLast
+                }
+                if (!ExperienceTextInputLimit.fits(write.text, input.maxLength)) {
+                    complete(ExperienceSemanticTextDraft.Outcome.REJECTED)
+                    return@addLast
+                }
+                var owner: ai.nuxie.sdk.runtime.NuxieFieldViewModel? = null
+                val result = runCatching {
+                    owner = checkNotNull(active.fieldOwner(capture, target.nodeId, input.editableValueName))
+                    val status = capture.writeFieldString(active.requireHandle(), target.nodeId,
+                        input.editableValueName, write.text.encodeToByteArray())
+                    if (status != 0) throw ai.nuxie.sdk.runtime.NuxieRuntimeCallException("write native input", status)
+                    // Settle reverse bindings on the ordinary player before reading the typed source.
+                    val correlationId = nextCorrelationId
+                    nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
+                    val outcome = active.stepTyped(elapsedSeconds = 0.0, correlationId = correlationId,
+                        textRunNames = textInputs.values.filter { it.editableValueName == null }.map { it.runName }.distinct())
+                    val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
+                    root?.let { retainedViewModel?.set(it) }
+                    if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, root))
+                    val evaluated = checkNotNull(owner).snapshot()
+                    check(evaluated.nativeRootInstanceId == field.ownerId) { "Native field owner changed during write" }
+                    acceptedNativeText[target] = AcceptedNativeText(write.text, evaluated)
+                    publishSteps()
+                }
+                try { owner?.close() } catch (error: Exception) {
+                    reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Native input owner cleanup failed", error)
+                }
+                val status = (result.exceptionOrNull() as? ai.nuxie.sdk.runtime.NuxieRuntimeCallException)?.status
+                complete(if (result.isSuccess) ExperienceSemanticTextDraft.Outcome.ACCEPTED
+                    else if (status == 9) ExperienceSemanticTextDraft.Outcome.STALE_CAPTURE
+                    else ExperienceSemanticTextDraft.Outcome.REJECTED)
+            }
+            drainTextWrites()
+        }
+        if (!accepted) complete(ExperienceSemanticTextDraft.Outcome.STALE_CAPTURE)
+    }
+
+    /** Value notifications consume the evaluated owner from that accepted write, never the screen root. */
+    fun notifyNativeText(target: ExperienceTextFieldTarget, text: String) {
+        val generation = frameGeneration.get()
+        val epoch = semanticEpoch.get()
+        lane.enqueue {
+            if (released.get() || !running || !sceneInputEnabled.get() || generation != frameGeneration.get() ||
+                epoch != semanticEpoch.get()) return@enqueue
+            val accepted = acceptedNativeText[target] ?: return@enqueue
+            val field = nativeTextFields.singleOrNull { it.target == target } ?: return@enqueue
+            if (accepted.text != text || accepted.snapshot.nativeRootInstanceId != field.ownerId) return@enqueue
+            listener?.onTextCommitted(target.inputId, text, accepted.snapshot)
+        }
+    }
+
     fun writeText(inputId: String, text: String, commit: Boolean, completion: (Result<Unit>) -> Unit) {
         fun complete(result: Result<Unit>) { post { completion(result) } }
         if (released.get()) {
@@ -523,6 +620,7 @@ internal class ExperienceSurfaceHost(
             val result = runCatching {
                 check(!released.get()) { "Experience surface is released" }
                 val input = checkNotNull(textInputs[inputId]) { "Text input is not declared for this screen" }
+                check(input.editableValueName == null) { "Native input requires a captured occurrence" }
                 val limited = ExperienceTextInputLimit.apply(text, input.maxLength)
                 checkNotNull(artboard) { "Experience artboard is unavailable" }
                     .setTextRun(input.runName, if (input.secure) "" else limited)
@@ -708,7 +806,7 @@ internal class ExperienceSurfaceHost(
             lane.enqueue {
                 if (!released.get()) {
                     publishSteps()
-                    semanticSnapshot?.tree?.let { postSemanticTree(it, semanticFields, generation, semanticSnapshotEpoch) }
+                    semanticSnapshot?.tree?.let { postSemanticTree(it, semanticFields, nativeTextFields, generation, semanticSnapshotEpoch) }
                 }
             }
         }
