@@ -160,6 +160,8 @@ internal class NuxieViewModelSnapshot private constructor(
     internal val retainedGraph: NuxieViewModelArchive,
 ) {
     private val instancesById = instances.associateBy(Instance::id)
+    /** Native occurrence identity, not an authored alias or a retained handle. */
+    internal val nativeRootInstanceId: Long get() = rootInstanceId
 
     /** Authored geometry paths may include the root view-model label. */
     fun resolveGeometryNumber(path: String): Float? =
