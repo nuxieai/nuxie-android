@@ -24,6 +24,7 @@ internal data class ExperienceTextInput(
     val geometryPaths: Map<String, String>,
     val style: Style,
     val responseCapture: ResponseCapture = ResponseCapture.TEXT,
+    val editableValueName: String? = null,
 ) {
     enum class ResponseCapture { TEXT, BINDING }
 
@@ -84,6 +85,7 @@ internal data class ExperienceTextInput(
                 ExperienceTextInput(
                     id = input.text("id"),
                     runName = input.text("textRunName"),
+                    editableValueName = input.optionalText("editableValueName"),
                     value = input.text("value"),
                     responseField = input.optionalText("responseFieldKey"),
                     responseCapture = when (input.optionalText("responseCapture")) {
