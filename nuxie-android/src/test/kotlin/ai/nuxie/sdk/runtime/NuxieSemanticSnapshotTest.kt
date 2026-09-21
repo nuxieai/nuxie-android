@@ -58,6 +58,18 @@ class NuxieSemanticSnapshotTest {
         var fieldStatus = 0
         var fieldValue = "private 😀".encodeToByteArray()
         var fieldCalls = 0
+        var geometryRevision = 7L
+        override fun textInputGeometry(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<NativeTextInputGeometry> {
+            assertEquals(10L, player)
+            assertEquals(99L, snapshot)
+            assertEquals(0xffff_ffffL, nodeId)
+            assertEquals("editable", name)
+            fieldCalls++
+            return NativeCallResult(fieldStatus, if (fieldStatus == 0) NativeTextInputGeometry(
+                geometryRevision, floatArrayOf(1f, 0f, 0f, 1f, 10f, 20f), floatArrayOf(0f, 0f, 100f, 40f),
+                false, floatArrayOf(), floatArrayOf(), false, 0f, true, false,
+            ) else null)
+        }
         override fun fieldStringCopy(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<ByteArray> {
             assertEquals(10L, player)
             assertEquals(99L, snapshot)
@@ -87,6 +99,26 @@ class NuxieSemanticSnapshotTest {
         override fun freeSemantics(snapshot: Long): Int { freed += snapshot; return 0 }
         override fun validateSemantics(player: Long, snapshot: Long) = 0
         override fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int) = 0
+    }
+
+    @Test fun `native input geometry is occurrence and revision scoped`() {
+        val native = RecordingNative().apply { role = NativeSemanticRole.TEXT_FIELD }
+        val snapshot = NuxieSemanticSnapshot.capture(10, native)
+        assertEquals(10f, snapshot.textInputGeometry(10, 0xffff_ffffL, "editable")!!.worldTransform.tx)
+        native.fieldStatus = 3
+        assertNull(snapshot.textInputGeometry(10, 0xffff_ffffL, "editable"))
+        native.fieldStatus = 9
+        assertEquals(9, assertThrows(NuxieRuntimeCallException::class.java) {
+            snapshot.textInputGeometry(10, 0xffff_ffffL, "editable")
+        }.status)
+        native.fieldStatus = 0
+        native.geometryRevision = 8
+        assertThrows(IllegalStateException::class.java) { snapshot.textInputGeometry(10, 0xffff_ffffL, "editable") }
+        val calls = native.fieldCalls
+        assertThrows(IllegalStateException::class.java) { snapshot.textInputGeometry(10, 123, "editable") }
+        snapshot.close()
+        assertThrows(IllegalStateException::class.java) { snapshot.textInputGeometry(10, 0xffff_ffffL, "editable") }
+        assertEquals(calls, native.fieldCalls)
     }
 
     @Test fun `field bytes use captured ownership without entering semantic text`() {
