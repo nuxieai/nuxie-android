@@ -70,7 +70,7 @@ internal class PublishedConverterJourneyHarness(
     init {
         val request = runBlocking {
             val profile = buildJsonObject {
-                put("schemaVersion", "nuxie.journey-plane-profile.v1"); put("status", "ok")
+                put("schemaVersion", "nuxie.journey-plane-profile.v2"); put("status", "ok")
                 putJsonObject("delivery") {
                     put("renderBaseUrl", "https://renders.example.com/")
                     put("assetBaseUrl", "https://assets.example.com/")

@@ -9,6 +9,13 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyPlaneProfileTest {
+    @Test fun `retired profile wire version is rejected`() {
+        val value = JsonObject(fixture() + ("schemaVersion" to JsonPrimitive("nuxie.journey-plane-profile.v1")))
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneyPlaneProfile.decode(value.toString().encodeToByteArray())
+        }
+    }
+
     @Test fun `shared conversion delivery vectors preserve original measurement`() {
         val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/conversion-delivery.json").readText()).jsonObject
@@ -38,7 +45,7 @@ class JourneyPlaneProfileTest {
         val entry = golden.getValue("entry").jsonObject
         val locator = entry.getValue("locator").jsonObject
         return buildJsonObject {
-            put("schemaVersion", "nuxie.journey-plane-profile.v1"); put("status", "ok")
+            put("schemaVersion", "nuxie.journey-plane-profile.v2"); put("status", "ok")
             putJsonObject("delivery") { put("renderBaseUrl", "https://renders.example.com"); put("assetBaseUrl", "https://assets.example.com/") }
             putJsonArray("features") {}
             putJsonObject("facts") {

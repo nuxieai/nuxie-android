@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.events
 
+import ai.nuxie.sdk.journey.JourneyStorageScope
+
 /** Runs one synchronous store mutation only while its execution fences hold. */
 internal fun interface StableEventCommitAdmission {
     /** Null means admission was revoked; false/true are the mutation result. */
@@ -22,6 +24,16 @@ internal data class StableEventCaptureResult(
 
 /** Persistence seam used by the future capture and delivery pipeline. */
 internal interface EventStore {
+    suspend fun bindConversionAuthority(scope: JourneyStorageScope)
+
+    suspend fun pendingConversionOccurrences(
+        distinctId: String,
+        limit: Int = 100,
+        throughEventId: String? = null,
+    ): List<PendingConversionOccurrence>
+
+    suspend fun acknowledgeConversionOccurrence(eventId: String, distinctId: String)
+
     suspend fun insertPending(event: StoredEvent)
 
     /** Commits a pending event and its local subscriber receipt atomically. */

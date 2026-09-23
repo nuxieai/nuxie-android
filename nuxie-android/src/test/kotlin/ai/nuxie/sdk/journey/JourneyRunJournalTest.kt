@@ -606,6 +606,52 @@ class JourneyRunJournalTest {
         assertTrue(JourneyRunJournal(directory, "customer", otherAppScope).runs().isEmpty())
     }
 
+    @Test fun `conversion watch survives completed run and releases its scene pin`() {
+        val (release, pinnedArm, _) = retainedReleaseFixture()
+        val policy = Json.parseToJsonElement("""{
+          "entry":{"trigger":{"type":"event","eventName":"start"},"frequency":{"type":"every_match"}},
+          "goal":{"criterion":{"type":"event","eventName":"done"},"attribution":{"basis":"entry","window":{"amount":1,"unit":"day"}}},
+          "exitWhenAny":[]
+        }""").jsonObject
+        val journal = JourneyRunJournal(directory, "customer")
+        val run = requireNotNull(journal.admit(pinnedArm, JourneyFrequency.EveryMatch, "step", 100_000,
+            release = release, policy = policy))
+        journal.markStartedQueued(run)
+        journal.complete(run.id, "done", 200_000)
+        journal.markCompletionQueued(run)
+        val reopened = JourneyRunJournal(directory, "customer")
+        assertTrue(reopened.runs().isEmpty())
+        assertNull(reopened.releasePin(release.envelope.getValue("descriptorSha256").jsonPrimitive.content))
+        val watch = requireNotNull(reopened.conversionWatches()[run.journeyId])
+        assertEquals(100_000L, watch.basis?.occurredAt)
+        assertEquals(200_000L, watch.legCompletedAt)
+        assertTrue(watch.shouldRetain(86_500_000, false))
+        assertFalse(watch.shouldRetain(86_500_001 + JourneyConversionWatch.BACKDATE_MILLIS, false))
+        assertTrue(JourneyRunJournal(directory, "another-customer").conversionWatches().isEmpty())
+    }
+
+    @Test fun `conversion receipt survives reopening before inbox acknowledgement`() {
+        val policy = Json.parseToJsonElement("""{
+          "entry":{"trigger":{"type":"event","eventName":"start"},"frequency":{"type":"every_match"}},
+          "goal":{"criterion":{"type":"event","eventName":"done"},"attribution":{"basis":"entry","window":{"amount":1,"unit":"day"}}},
+          "exitWhenAny":[]
+        }""").jsonObject
+        val journal = JourneyRunJournal(directory, "customer")
+        val first = requireNotNull(journal.admit(arm(), JourneyFrequency.EveryMatch, "step", 1_000, policy = policy))
+        val event = StoredEvent(id = "conversion", name = "done", timestampMillis = 3_000, distinctId = "customer")
+        journal.recordConversionOccurrence(event, 3_000, setOf(first.journeyId))
+        assertEquals(event.id, journal.conversionWatches().getValue(first.journeyId).conversion?.eventId)
+
+        // The event remains in the inbox if the process dies before acknowledgement.
+        val reopened = JourneyRunJournal(directory, "customer")
+        val second = requireNotNull(reopened.admit(arm(), JourneyFrequency.EveryMatch, "step", 2_000, policy = policy))
+        reopened.recordConversionOccurrence(event, 4_000, setOf(first.journeyId, second.journeyId))
+        val recovered = JourneyRunJournal(directory, "customer")
+        assertEquals(event.id, recovered.conversionWatches().getValue(first.journeyId).conversion?.eventId)
+        assertNull(recovered.conversionWatches().getValue(second.journeyId).conversion)
+        assertEquals(2, recovered.runs().size)
+    }
+
     @Test fun `live run retains its exact release until completion is queued`() {
         val (release, pinnedArm, entry) = retainedReleaseFixture()
         val journal = JourneyRunJournal(directory, "customer")

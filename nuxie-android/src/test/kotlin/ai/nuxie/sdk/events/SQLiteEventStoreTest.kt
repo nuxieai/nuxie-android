@@ -1,6 +1,8 @@
 package ai.nuxie.sdk.events
 
 import android.content.Context
+import ai.nuxie.sdk.journey.JourneyStorageScope
+import ai.nuxie.sdk.network.ProfileDeliveryAuthority
 import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.driver.AndroidSQLiteDriver
 import java.io.File
@@ -39,6 +41,77 @@ class SQLiteEventStoreTest {
         runBlocking { store?.close() }
         store = null
         databaseDirectory.deleteRecursively()
+    }
+
+    @Test fun conversionInboxSurvivesHistoryRemovalWithFirstAcceptanceAndRouteCutoff() = runBlocking {
+        var now = 100L
+        val first = SQLiteEventStore(context, nowMillis = { now }).also { store = it }
+        val entry = storedEvent("entry", 100)
+        assertTrue(first.insertPendingIfAbsent(entry))
+        now = 200
+        assertFalse(first.insertPendingIfAbsent(entry))
+        first.insertPending(storedEvent("goal", 200))
+        assertEquals(listOf("entry"), first.pendingConversionOccurrences("user-1", throughEventId = "entry").map { it.event.id })
+        first.close()
+        AndroidSQLiteDriver().open(File(databaseDirectory, "events.db").path).use {
+            it.prepare("DELETE FROM events;").use { statement -> statement.step() }
+        }
+        val reopened = SQLiteEventStore(context, nowMillis = { now }).also { store = it }
+        val pending = reopened.pendingConversionOccurrences("user-1")
+        assertEquals(listOf("entry", "goal"), pending.map { it.event.id })
+        assertEquals(100L, pending.first().acceptedAt)
+        reopened.acknowledgeConversionOccurrence("entry", "other")
+        assertEquals(2, reopened.pendingConversionOccurrences("user-1").size)
+        reopened.acknowledgeConversionOccurrence("entry", "user-1")
+        assertTrue(reopened.pendingConversionOccurrences("user-1", throughEventId = "entry").isEmpty())
+        assertEquals(listOf("goal"), reopened.pendingConversionOccurrences("user-1").map { it.event.id })
+    }
+
+    @Test fun inboxFailureRollsBackEventCapture() = runBlocking {
+        val current = SQLiteEventStore(context).also { store = it }
+        current.pendingBatch(1)
+        AndroidSQLiteDriver().open(File(databaseDirectory, "events.db").path).use {
+            it.prepare("CREATE TRIGGER reject_conversion BEFORE INSERT ON conversion_event_inbox BEGIN SELECT RAISE(ABORT, 'injected'); END;").use { statement -> statement.step() }
+        }
+        org.junit.Assert.assertThrows(Exception::class.java) {
+            runBlocking { current.insertPending(storedEvent("atomic", 100)) }
+        }
+        assertTrue(current.pendingBatch(10).isEmpty())
+        assertTrue(current.pendingConversionOccurrences("user-1").isEmpty())
+    }
+
+    @Test fun conversionAuthorityIsolatesAppsAndAllowsKeyRotation() = runBlocking {
+        val authority = JourneyStorageScope(ProfileDeliveryAuthority("app-a", "live"))
+        val original = SQLiteEventStore(context, conversionCaptureScope = "old")
+        original.insertPending(storedEvent("goal", 100))
+        original.bindConversionAuthority(authority)
+        original.close()
+        val other = SQLiteEventStore(context, conversionCaptureScope = "other")
+        other.bindConversionAuthority(JourneyStorageScope(ProfileDeliveryAuthority("app-b", "live")))
+        assertTrue(other.pendingConversionOccurrences("user-1").isEmpty())
+        other.acknowledgeConversionOccurrence("goal", "user-1")
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) { runBlocking { other.bindConversionAuthority(authority) } }
+        other.close()
+        val testEnvironment = SQLiteEventStore(context, conversionCaptureScope = "test-key")
+        testEnvironment.bindConversionAuthority(JourneyStorageScope(ProfileDeliveryAuthority("app-a", "test")))
+        assertTrue(testEnvironment.pendingConversionOccurrences("user-1").isEmpty())
+        testEnvironment.acknowledgeConversionOccurrence("goal", "user-1")
+        testEnvironment.close()
+        val rotated = SQLiteEventStore(context, conversionCaptureScope = "new").also { store = it }
+        assertTrue(rotated.pendingConversionOccurrences("user-1").isEmpty())
+        rotated.bindConversionAuthority(authority)
+        assertEquals(listOf("goal"), rotated.pendingConversionOccurrences("user-1").map { it.event.id })
+    }
+
+    @Test fun conversionExpiryKeepsTheInclusiveBoundaryAndNetworkDelivery() = runBlocking {
+        var now = 100L
+        val current = SQLiteEventStore(context, nowMillis = { now }).also { store = it }
+        current.insertPending(storedEvent("goal", 100))
+        now += PendingConversionOccurrence.RETENTION_MILLIS
+        assertEquals(1, current.pendingConversionOccurrences("user-1").size)
+        now += 1
+        assertTrue(current.pendingConversionOccurrences("user-1").isEmpty())
+        assertEquals(listOf("goal"), current.pendingBatch(10).map { it.id })
     }
 
     @Test
@@ -177,7 +250,7 @@ class SQLiteEventStoreTest {
 
         val connection = AndroidSQLiteDriver().open(File(databaseDirectory, "events.db").absolutePath)
         connection.use {
-            assertEquals(4L, it.queryLong("PRAGMA user_version;"))
+            assertEquals(5L, it.queryLong("PRAGMA user_version;"))
             assertEquals(
                 setOf(
                     "events",

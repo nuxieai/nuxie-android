@@ -32,7 +32,7 @@ class NuxieApiTest {
         val transport = object : HttpTransport {
             override fun execute(request: HttpTransport.Request) = HttpTransport.Response(
                 statusCode = 200,
-                body = """{"schemaVersion":"nuxie.journey-plane-profile.v1"}"""
+                body = """{"schemaVersion":"nuxie.journey-plane-profile.v2"}"""
                     .encodeToByteArray(),
                 headers = mapOf(
                     "ETag" to "\"plane-v1\"",
@@ -56,7 +56,7 @@ class NuxieApiTest {
             val transport = HttpTransport {
                 HttpTransport.Response(
                     statusCode = 200,
-                    body = """{"schemaVersion":"nuxie.journey-plane-profile.v1"}"""
+                    body = """{"schemaVersion":"nuxie.journey-plane-profile.v2"}"""
                         .encodeToByteArray(),
                     headers = headers,
                 )
@@ -92,7 +92,7 @@ class NuxieApiTest {
             listOf(
                 HttpTransport.Response(
                     statusCode = 200,
-                    body = """{"schemaVersion":"nuxie.journey-plane-profile.v1"}"""
+                    body = """{"schemaVersion":"nuxie.journey-plane-profile.v2"}"""
                         .encodeToByteArray(),
                     headers = mapOf(
                         "ETag" to "\"plane-v1\"",

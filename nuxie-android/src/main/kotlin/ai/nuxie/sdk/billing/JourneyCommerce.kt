@@ -18,6 +18,7 @@ internal class JourneyCommerceException(message: String) : IllegalStateException
 internal data class CommerceOutcomeCorrelation(
     val eventId: String,
     val distinctId: String,
+    val journeyId: String? = null,
 )
 
 /** Authenticated catalog projected into exact Play product requests. */

@@ -194,7 +194,7 @@ internal class NuxieApi(
         val validator = profileValidator(response, resourceScope, authority)
         val canonical = runCatching {
             (Json.parseToJsonElement(text) as? kotlinx.serialization.json.JsonObject)
-                ?.get("schemaVersion") == JsonPrimitive("nuxie.journey-plane-profile.v1")
+                ?.get("schemaVersion") == JsonPrimitive("nuxie.journey-plane-profile.v2")
         }.getOrDefault(false)
         if (canonical && (authority == null || validator == null)) {
             throw IOException("Canonical profile omitted authenticated authority or validator")

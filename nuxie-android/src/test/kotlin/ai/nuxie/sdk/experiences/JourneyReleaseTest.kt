@@ -25,6 +25,16 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyReleaseTest {
+    @Test fun `retired release wire version is rejected`() {
+        val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val retired = JsonObject(source + ("schemaVersion" to JsonPrimitive("nuxie.journey-release.v1")))
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneySchemaValidator.validate(retired)
+        }
+    }
+
     @Test fun `scene admission accepts only the Nuxie format`() {
         val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/scene-admission.json").readText()).jsonObject

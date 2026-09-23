@@ -111,4 +111,16 @@ interface NuxiePurchaseDelegate {
 internal data class PurchaseContext(
     val experienceId: String?,
     val experienceVersion: String?,
+    val journeyId: String? = null,
+)
+
+/** A checkout-owned copy; shared catalog products never retain Journey ownership. */
+internal fun StoreProduct.forJourneyCheckout(journeyId: String?): StoreProduct = StoreProduct(
+    productId = productId, storeProductId = storeProductId, basePlanId = basePlanId,
+    purchaseOptionId = purchaseOptionId, offerId = offerId, placementId = placementId,
+    rawProduct = rawProduct, offerToken = offerToken, isOfferPersonalized = isOfferPersonalized,
+    productType = productType, consumable = consumable, featureAllowances = featureAllowances,
+    licensingPublicKey = licensingPublicKey,
+    purchaseContext = purchaseContext?.copy(journeyId = journeyId),
+    testStorePreview = testStorePreview,
 )

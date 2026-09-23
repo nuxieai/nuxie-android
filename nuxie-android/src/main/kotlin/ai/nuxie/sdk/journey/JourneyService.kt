@@ -789,6 +789,7 @@ internal class JourneyService(
         // The durable route must survive until the visible host has current authority.
         if (foreground.isRevalidating()) return false
         if (journal?.distinctId != event.distinctId) return false
+        if (!recoverConversionOccurrences(throughEventId = event.id)) return false
         val directlyRoutedRunId = directlyRoutedRunByEventId.remove(event.id)
         resumePresentationActionOutcome(event, excludingRunId = directlyRoutedRunId)
         val state = currentState() ?: return currentProfilePublished
@@ -980,9 +981,46 @@ internal class JourneyService(
         return journal?.distinctId == distinctId && distinctId !in revokingCustomers
     }
 
+    private suspend fun recoverConversionOccurrences(throughEventId: String? = null): Boolean {
+        val target = journal ?: return false
+        val executionToken = executionFence.token()
+        val identityScope = identity.captureScope()
+        if (identityScope.distinctId != target.distinctId) return false
+        return try {
+            while (true) {
+                if (!isExecutionCurrent(executionToken, target)) return false
+                val pending = events.pendingConversionOccurrences(target.distinctId, 100, throughEventId)
+                if (pending.isEmpty()) return true
+                for (occurrence in pending) {
+                    val event = occurrence.event
+                    val normalized = JourneyConversionWatch.normalized(event, occurrence.acceptedAt)
+                    val matching = mutableSetOf<String>()
+                    if (normalized != null) {
+                        for (watch in target.conversionWatches().values) {
+                            if (watch.matches(normalized)) matching += watch.journeyId
+                        }
+                    }
+                    val committed = publishJournalIfCurrent(executionToken, identityScope) {
+                        if (journal !== target) return@publishJournalIfCurrent false
+                        target.recordConversionOccurrence(event, occurrence.acceptedAt, matching, nowMillis())
+                        true
+                    }
+                    if (committed != true) return false
+                    events.acknowledgeConversionOccurrence(event.id, target.distinctId)
+                }
+            }
+            @Suppress("UNREACHABLE_CODE")
+            true
+        } catch (error: Exception) {
+            Log.w(LOG_TAG, "Journey conversion recovery remains pending", error)
+            false
+        }
+    }
+
     private suspend fun openJournal(distinctId: String) {
         val scope = storageScope ?: return
         runCatching {
+            events.bindConversionAuthority(scope)
             val opened = JourneyRunJournal(journalDirectory, distinctId, scope)
             clearRetainedReleaseCache()
             journal = opened
@@ -991,6 +1029,11 @@ internal class JourneyService(
                 manager == null || manager.retainedRunDigests(
                     journeyArtifactRunKey(run),
                 ) == run.artifactDigests
+            }
+            // Do not consume a later goal before replay has admitted an earlier entry.
+            val firstPendingRoute = events.queryPendingLocalRoutes(distinctId).firstOrNull()?.id
+            check(recoverConversionOccurrences(throughEventId = firstPendingRoute)) {
+                "Recovered conversion measurement is pending"
             }
             check(publishTerminalPresentationPublications(opened)) { "Recovered presentation publication is pending" }
             check(flushPendingReports(opened)) { "Recovered Journey reports are pending" }
@@ -1211,6 +1254,7 @@ internal class JourneyService(
                             ),
                             stateReceipt,
                             artifactDigests,
+                            policy = release.leg.getValue("policy").jsonObject,
                             retainArtifacts = { candidate ->
                                 artifactManager?.retainForRun(
                                     journeyArtifactRunKey(candidate),

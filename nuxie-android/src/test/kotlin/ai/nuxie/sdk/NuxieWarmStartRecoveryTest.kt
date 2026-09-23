@@ -4,6 +4,7 @@ import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.events.EventRouteCommit
 import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.SQLiteEventStore
+import ai.nuxie.sdk.events.StableEventCommitAdmission
 import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.experiences.JourneyPlaneProfile
 import ai.nuxie.sdk.identity.IdentityService
@@ -140,13 +141,25 @@ class NuxieWarmStartRecoveryTest {
         val failedReport = CompletableDeferred<Unit>()
         val writes = java.util.concurrent.CopyOnWriteArrayList<String>()
         val store = object : EventStore by sqlite {
-            override suspend fun insertPendingIfAbsentAndStageRoute(event: StoredEvent): EventRouteCommit {
+            private fun injectFailure(event: StoredEvent) {
                 if (event.id == retained.startedEventId && failReport.get()) {
                     failedReport.complete(Unit)
                     throw IOException("Injected recovered-report write failure")
                 }
+            }
+            override suspend fun insertPendingIfAbsentAndStageRoute(event: StoredEvent): EventRouteCommit {
+                injectFailure(event)
                 return sqlite.insertPendingIfAbsentAndStageRoute(event).also {
                     if (it.inserted) writes += event.id
+                }
+            }
+            override suspend fun insertPendingIfAbsentAndStageRoute(
+                event: StoredEvent,
+                admission: StableEventCommitAdmission,
+            ): EventRouteCommit? {
+                injectFailure(event)
+                return sqlite.insertPendingIfAbsentAndStageRoute(event, admission).also {
+                    if (it?.inserted == true) writes += event.id
                 }
             }
         }

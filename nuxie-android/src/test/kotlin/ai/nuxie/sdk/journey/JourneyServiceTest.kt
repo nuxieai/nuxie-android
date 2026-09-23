@@ -7,6 +7,7 @@ import ai.nuxie.sdk.runtime.NuxieHostCommand
 import ai.nuxie.sdk.runtime.NuxieHostValue
 import ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome
 import ai.nuxie.sdk.NuxieEnvironment
+import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.events.NuxieContextBuilder
@@ -115,6 +116,68 @@ class JourneyServiceTest {
         scope.cancel()
         directory.deleteRecursively()
         }
+    }
+
+    @Test fun `recovery retries failed conversion acknowledgement without crediting another Journey`() = runBlocking {
+        store.close()
+        store = SQLiteEventStore(context, nowMillis = { 100_500L })
+        val storageScope = JourneyStorageScope(authority)
+        val journal = JourneyRunJournal(directory, "customer", storageScope)
+        val arm = JourneyPlaneProfile.decode(profile().toString().encodeToByteArray()).armedLegs.single()
+        val policy = Json.parseToJsonElement("""{
+          "entry":{"trigger":{"type":"event","eventName":"start"},"frequency":{"type":"every_match"}},
+          "goal":{"criterion":{"type":"event","eventName":"done"},"attribution":{"basis":"entry","window":{"amount":1,"unit":"day"}}},
+          "exitWhenAny":[]
+        }""").jsonObject
+        val first = requireNotNull(journal.admit(arm, JourneyFrequency.EveryMatch, "step", 100_000, policy = policy))
+        journal.markStartedQueued(first)
+        journal.complete(first.id, "done", 100_100)
+        journal.markCompletionQueued(first)
+        val event = StoredEvent("conversion", "done", timestampMillis = 100_500, distinctId = "customer")
+        store.insertPending(event)
+        var acknowledgements = 0
+        val interruptedStore = object : EventStore by store {
+            override suspend fun acknowledgeConversionOccurrence(eventId: String, distinctId: String) {
+                acknowledgements++
+                throw java.io.IOException("Interrupted before inbox acknowledgement")
+            }
+        }
+        val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            JourneyService(identity = identity("customer"), events = interruptedStore, catalog = catalog(),
+                journalDirectory = directory, scope = firstScope, capture = { _, _, _, _ -> true },
+                fixedStorageScope = storageScope, nowMillis = { 100_500L }).initialize()
+        } finally { firstScope.cancel() }
+        assertEquals(1, acknowledgements)
+        assertEquals(event.id, journal.conversionWatches().getValue(first.journeyId).conversion?.eventId)
+        assertEquals(listOf(event.id), store.pendingConversionOccurrences("customer").map { it.event.id })
+
+        val second = requireNotNull(journal.admit(arm, JourneyFrequency.EveryMatch, "step", 100_250, policy = policy))
+        JourneyService(identity = identity("customer"), events = store, catalog = catalog(),
+            journalDirectory = directory, scope = scope, capture = { _, _, _, _ -> true },
+            fixedStorageScope = storageScope, nowMillis = { 100_500L }).initialize()
+        val reopened = JourneyRunJournal(directory, "customer", storageScope)
+        assertEquals(event.id, reopened.conversionWatches().getValue(first.journeyId).conversion?.eventId)
+        assertNull(reopened.conversionWatches().getValue(second.journeyId).conversion)
+        assertTrue(store.pendingConversionOccurrences("customer").isEmpty())
+        assertEquals(listOf(event.id), store.pendingBatch(10).map { it.id })
+    }
+
+    @Test fun `startup measurement stops at the earliest pending local route`() = runBlocking {
+        store.close()
+        store = SQLiteEventStore(context, nowMillis = { 100_500L })
+        val entryEvent = StoredEvent("entry", "start", timestampMillis = 100_000, distinctId = "customer")
+        val goalEvent = StoredEvent("goal", "done", timestampMillis = 100_500, distinctId = "customer")
+        store.insertPendingAndStageRoute(entryEvent)
+        store.insertPendingAndStageRoute(goalEvent)
+        JourneyService(identity = identity("customer"), events = store, catalog = catalog(),
+            journalDirectory = directory, scope = scope, capture = { _, _, _, _ -> true },
+            fixedStorageScope = JourneyStorageScope(authority), nowMillis = { 100_500L }).initialize()
+
+        // Entry routing still owns admission. Measurement must leave the later goal
+        // available until that route has had the opportunity to create its watch.
+        assertEquals(listOf(goalEvent.id), store.pendingConversionOccurrences("customer").map { it.event.id })
+        assertEquals(listOf(entryEvent.id, goalEvent.id), store.queryPendingLocalRoutes("customer").map { it.id })
     }
 
     @Test fun `foreground arm executes its authenticated leg once across revalidation`() = runBlocking {
@@ -2274,7 +2337,7 @@ class JourneyServiceTest {
         val locator = releaseEntry.getValue("locator").jsonObject
         val envelope = releaseEntry.getValue("envelope").jsonObject
         return buildJsonObject {
-            put("schemaVersion", "nuxie.journey-plane-profile.v1")
+            put("schemaVersion", "nuxie.journey-plane-profile.v2")
             put("status", "ok")
             putJsonObject("delivery") {
                 put("renderBaseUrl", renderBaseUrl)

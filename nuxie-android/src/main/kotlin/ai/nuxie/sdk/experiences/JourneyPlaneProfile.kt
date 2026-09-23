@@ -33,7 +33,7 @@ internal class JourneyPlaneProfile private constructor(
         fun decode(bytes: ByteArray): JourneyPlaneProfile {
             if (bytes.size > PROFILE_BYTES) fail("profile size")
             val root = exact(JourneyReleaseEnvelope.parseObject(bytes), setOf("schemaVersion", "status", "delivery", "features", "facts", "armedLegs", "releases"))
-            if (text(root["schemaVersion"]) != "nuxie.journey-plane-profile.v1" || text(root["status"]) != "ok") fail("profile version")
+            if (text(root["schemaVersion"]) != "nuxie.journey-plane-profile.v2" || text(root["status"]) != "ok") fail("profile version")
             val delivery = exact(root["delivery"], setOf("renderBaseUrl", "assetBaseUrl"))
             val origins = listOf("renderBaseUrl", "assetBaseUrl").map { key ->
                 val value = text(delivery[key])

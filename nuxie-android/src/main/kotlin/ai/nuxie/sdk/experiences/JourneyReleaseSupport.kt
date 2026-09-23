@@ -6,8 +6,8 @@ import kotlinx.serialization.json.doubleOrNull
 
 internal object JourneyReleaseLimits {
     const val MEDIA_TYPE = "application/vnd.nuxie.journey+json"
-    const val SCHEMA_VERSION = "nuxie.journey-release.v1"
-    const val SIGNATURE_DOMAIN = "nuxie.journey-release.v1\u0000"
+    const val SCHEMA_VERSION = "nuxie.journey-release.v2"
+    const val SIGNATURE_DOMAIN = "nuxie.journey-release.v2\u0000"
     const val DESCRIPTOR_BYTES = 4 * 1024 * 1024
     const val ENVELOPE_BYTES = 6 * 1024 * 1024
     const val GENERIC_STRING_BYTES = 4 * 1024
