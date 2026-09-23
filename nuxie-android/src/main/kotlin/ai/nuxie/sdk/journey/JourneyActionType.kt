@@ -23,7 +23,6 @@ internal enum class JourneyActionType(val wireValue: String) {
     DISMISS("dismiss"),
     SEND_EVENT("send_event"),
     UPDATE_CUSTOMER("update_customer"),
-    MILESTONE("milestone"),
     SUBMIT_RESPONSE("submit_response"),
     APP_ACTION("app_action"),
     EXIT("exit"),

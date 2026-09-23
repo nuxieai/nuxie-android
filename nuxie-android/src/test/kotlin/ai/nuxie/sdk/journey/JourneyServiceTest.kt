@@ -460,7 +460,7 @@ class JourneyServiceTest {
             val run = requireNotNull(
                 journal.admit(
                     snapshot.profile.armedLegs.single(),
-                    JourneyReentry.EveryTime,
+                    JourneyFrequency.EveryMatch,
                     release.leg.getValue("entryStepId").jsonPrimitive.content,
                     100_000L,
                     release = snapshot.profile.releases.single(),
@@ -1126,7 +1126,7 @@ class JourneyServiceTest {
             val run = requireNotNull(
                 journal.admit(
                     arm,
-                    JourneyReentry.EveryTime,
+                    JourneyFrequency.EveryMatch,
                     entryStepId,
                     100_000L + index,
                     release = releaseEntry,
@@ -1188,7 +1188,7 @@ class JourneyServiceTest {
             val run = requireNotNull(
                 journal.admit(
                     arm,
-                    JourneyReentry.EveryTime,
+                    JourneyFrequency.EveryMatch,
                     entryStepId,
                     100_000L,
                     release = releaseEntry,
@@ -1301,7 +1301,7 @@ class JourneyServiceTest {
             val run = requireNotNull(
                 journal.admit(
                     arm,
-                    JourneyReentry.EveryTime,
+                    JourneyFrequency.EveryMatch,
                     entryStepId,
                     100_000L,
                     release = releaseEntry,
@@ -1349,7 +1349,7 @@ class JourneyServiceTest {
             put("type", "event"); put("eventName", "inventory_opened")
         }).toString().encodeToByteArray()), authenticated.releasesByDigest)
         val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(authority))
-        val retained = requireNotNull(journal.admit(snapshot.profile.armedLegs.single(), JourneyReentry.EveryTime,
+        val retained = requireNotNull(journal.admit(snapshot.profile.armedLegs.single(), JourneyFrequency.EveryMatch,
             authenticated.releasesByDigest.values.single().leg.getValue("entryStepId").jsonPrimitive.content,
             1_000L, release = snapshot.profile.releases.single(), executionSnapshot = executionSnapshot(snapshot)))
         val eventLog = EventLog(store, NuxieContextBuilder(context, NuxieEnvironment.DEVELOPMENT, LogLevel.DEBUG, identity),
@@ -1486,7 +1486,7 @@ class JourneyServiceTest {
                 put("type", "event"); put("eventName", "inventory_opened")
             }).toString().encodeToByteArray()), authenticated.releasesByDigest)
         val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(authority))
-        val retained = requireNotNull(journal.admit(snapshot.profile.armedLegs.single(), JourneyReentry.EveryTime,
+        val retained = requireNotNull(journal.admit(snapshot.profile.armedLegs.single(), JourneyFrequency.EveryMatch,
             authenticated.releasesByDigest.values.single().leg.getValue("entryStepId").jsonPrimitive.content,
             1_000L, release = snapshot.profile.releases.single(), executionSnapshot = executionSnapshot(snapshot)))
         if (failureMode == "presentation") {
@@ -1958,8 +1958,11 @@ class JourneyServiceTest {
                         completion("completed"),
                         completion("failed"),
                         completion("cancelled"),
+                        Json.parseToJsonElement("""{"kind":"action","id":"skip_offer","action":{"type":"dismiss"},"outlets":{"next":"skipped"}}"""),
+                        completion("skipped"),
                     ),
                 ),
+                "offers" to Json.parseToJsonElement("""[{"screenId":"screen_welcome","placementIds":["golden:monthly"],"alreadyEntitledStepId":"skip_offer","unknownStepId":"skip_offer"}]"""),
                 "routes" to JsonArray(
                     listOf(
                         buildJsonObject {
@@ -1970,11 +1973,22 @@ class JourneyServiceTest {
                             put("eventName", SystemEventNames.SCREEN_SHOWN)
                             put("entryStepId", "purchase")
                         },
+                        buildJsonObject {
+                            putJsonObject("host") { put("kind", "screen"); put("screenId", "screen_welcome") }
+                            put("eventName", "\$offer_already_entitled"); put("entryStepId", "skip_offer")
+                        },
+                        buildJsonObject {
+                            putJsonObject("host") { put("kind", "screen"); put("screenId", "screen_welcome") }
+                            put("eventName", "\$offer_access_unknown"); put("entryStepId", "skip_offer")
+                        },
                     ),
                 ),
             ),
         )
-        val descriptor = JsonObject(original.descriptor + ("leg" to commerceLeg))
+        val products = JsonArray(original.descriptor.getValue("products").jsonArray.map {
+            JsonObject(it.jsonObject + ("entitlements" to Json.parseToJsonElement("""[{"id":"premium-grant","featureId":"premium","featureExternalId":null,"purchaseUsageFeatureIds":[]}]""")))
+        })
+        val descriptor = JsonObject(original.descriptor + mapOf("leg" to commerceLeg, "products" to products))
         val envelope = JourneyReleaseEnvelope.authenticate(
             renderedEntry.getValue("envelope").toString().encodeToByteArray(),
             mapOf(
@@ -2025,6 +2039,7 @@ class JourneyServiceTest {
                 val settled = admission?.commitIfCurrent { true } != null
                 StableEventCaptureResult(settled, event.takeIf { settled })
             },
+            featureAccess = { ai.nuxie.sdk.features.FeatureAccess(false, false, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN) },
             presenter = presenter,
             nowMillis = { 100_000L },
         )

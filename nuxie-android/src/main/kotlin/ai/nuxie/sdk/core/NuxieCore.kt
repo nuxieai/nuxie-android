@@ -423,8 +423,9 @@ internal class NuxieCore(
         captureScreenEvent = eventLog::captureScreenEvent,
         capturePresentationEvent = eventLog::captureRoutedSystemEvent,
         featureAccess = { featureId ->
-            features.getCached(featureId, requiredBalance = null, entityId = null)
+            features.getForJourney(featureId, resolveUnknown = false)
         },
+        offerFeatureAccess = { featureId -> features.getForJourney(featureId, resolveUnknown = true) },
         dispatcher = journeyDispatcher,
         presenter = journeyPresenter,
         nowMillis = nowMillis,

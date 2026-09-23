@@ -48,5 +48,10 @@ class ProfileAuthorityBindingStoreTest {
         assertEquals(first.authorityBindingFilename, same.authorityBindingFilename)
         assertNotEquals(first.cacheSubdirectory, rotated.cacheSubdirectory)
         assertNotEquals(first.cacheSubdirectory, production.cacheSubdirectory)
+        val retiredDigest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest("nuxie.profile-storage.v2\u0000DEVELOPMENT\u0000pk_one".encodeToByteArray())
+            .joinToString("") { "%02x".format(it) }
+        assertNotEquals("profiles-v2-$retiredDigest", first.cacheSubdirectory)
+        assertNotEquals("$retiredDigest.json", first.authorityBindingFilename)
     }
 }

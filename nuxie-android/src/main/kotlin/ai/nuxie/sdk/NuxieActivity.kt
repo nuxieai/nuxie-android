@@ -83,7 +83,6 @@ sealed interface NuxieActivity {
         val generation: Long,
         val outcome: String,
     ) : NuxieActivity
-    data class MilestoneReached(val experience: ExperienceRef, val milestoneId: String) : NuxieActivity
 
     data class PurchaseCompleted(val info: PurchaseInfo) : NuxieActivity
     data class PurchaseFailed(val info: PurchaseInfo, val message: String) : NuxieActivity
@@ -192,7 +191,6 @@ private fun NuxieActivity.wireName(): String = when (this) {
         is NuxieActivity.ExperienceErrored -> "experience_errored"
         is NuxieActivity.JourneyStarted -> "journey_started"
         is NuxieActivity.JourneyCompleted -> "journey_completed"
-        is NuxieActivity.MilestoneReached -> "milestone_reached"
         is NuxieActivity.PurchaseCompleted -> "purchase_completed"
         is NuxieActivity.PurchaseFailed -> "purchase_failed"
         is NuxieActivity.PurchaseCancelled -> "purchase_cancelled"
@@ -235,10 +233,6 @@ private fun NuxieActivity.wireProperties(): Map<String, NuxieActivityValue> = bu
                 put("leg_id", activity.legId.activityValue())
                 put("leg_generation", NuxieActivityValue.Int(activity.generation))
                 put("outcome", activity.outcome.activityValue())
-            }
-            is NuxieActivity.MilestoneReached -> {
-                add(activity.experience)
-                put("milestone_id", activity.milestoneId.activityValue())
             }
             is NuxieActivity.PurchaseCompleted -> add(activity.info)
             is NuxieActivity.PurchaseFailed -> {

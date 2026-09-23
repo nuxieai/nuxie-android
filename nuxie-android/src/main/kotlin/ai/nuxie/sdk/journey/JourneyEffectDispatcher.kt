@@ -31,7 +31,6 @@ internal class JourneyEffectDispatcher(
         return when (request.action.text("type")) {
             "send_event" -> sendEvent(request)
             "update_customer" -> updateCustomer(request)
-            "milestone" -> milestone(request)
             "submit_response" -> JourneyDispatchResult.Outlet("next")
             "app_action" -> appAction(request)
             "exit" -> {
@@ -65,14 +64,6 @@ internal class JourneyEffectDispatcher(
         val properties = attribution(request).toMutableMap()
         properties["attributes_updated"] = native.keys.sorted()
         return captureThenAdvance(CUSTOMER_UPDATED, properties, request)
-    }
-
-    private suspend fun milestone(request: JourneyDispatchRequest): JourneyDispatchResult {
-        val milestoneId = request.action.text("milestoneId")
-            ?: return JourneyDispatchResult.Failed
-        val properties = attribution(request).toMutableMap()
-        properties["milestone_id"] = milestoneId
-        return captureThenAdvance(JourneyEventNames.MILESTONE, properties, request)
     }
 
     private suspend fun appAction(request: JourneyDispatchRequest): JourneyDispatchResult {

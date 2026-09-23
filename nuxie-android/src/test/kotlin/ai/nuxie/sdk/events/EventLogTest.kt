@@ -944,7 +944,7 @@ class EventLogTest {
         val eventLog = log(store, forwardingEnabled = { true }, nowMillis = { 2_000L })
         val fact = StoredEvent(
             id = "server-fact",
-            name = JourneyEventNames.MILESTONE,
+            name = "server_outcome",
             timestampMillis = 500L,
             distinctId = "anon-1",
         )

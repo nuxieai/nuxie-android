@@ -24,16 +24,11 @@ internal object JourneySchemaValidator {
         if (text(root["schemaVersion"]) != "nuxie.journey-release.v1") fail("descriptor version")
         JourneyReleaseSchema.validate(root)
         val leg = exact(root["leg"], setOf("schemaVersion", "id", "entryCondition", "entryStepId", "steps", "routes",
-            "screens", "reentry", "entitlementGate", "facts", "inputs", "outputs", "completionOutputs"))
+            "screens", "policy", "offers", "facts", "inputs", "outputs", "completionOutputs"))
         if (text(leg["schemaVersion"]) != "nuxie.experience-planes.v1") fail("leg version")
         hash(leg["id"])
         JourneyPlaneProfile.validateEntry(leg["entryCondition"])
-        val reentry = record(leg["reentry"])
-        when (text(reentry["type"])) {
-            "one_time", "every_time" -> exact(reentry, setOf("type"))
-            "once_per_window" -> { exact(reentry, setOf("type", "windowSeconds")); integer(reentry["windowSeconds"], 1) }
-            else -> fail("reentry")
-        }
+        ExperiencePolicySchema.validate(leg["policy"])
         val products = array(root["products"], 256).map { id(record(it)["id"]) }
         if (products.toSet().size != products.size) fail("duplicate product")
         val placements = array(root["placements"], 256).map {
@@ -80,12 +75,23 @@ internal object JourneySchemaValidator {
             if (event == "host_dismissed" && text(step["kind"]) == "action" &&
                 text(record(step["action"])["type"]) in JourneyGrammar.presenting) fail("host dismissal presents")
         }
-        val gate = exact(leg["entitlementGate"], setOf("enabled", "products"))
-        boolean(gate["enabled"])
-        for (value in array(gate["products"])) {
-            val product = exact(value, setOf("productId", "featureIds"))
-            if (id(product["productId"]) !in products) fail("entitlement product")
-            ids(product["featureIds"])
+        val offerScreens = mutableSetOf<String>()
+        val offerRoutes = array(leg["routes"]).map(::record)
+        for (item in array(leg["offers"])) {
+            val offer = exact(item, setOf("screenId", "placementIds", "alreadyEntitledStepId", "unknownStepId"))
+            val screen = id(offer["screenId"])
+            if (screen !in screens || !offerScreens.add(screen)) fail("offer screen")
+            val offeredPlacements = ids(offer["placementIds"])
+            if (offeredPlacements.isEmpty() || offeredPlacements.toSet().size != offeredPlacements.size ||
+                !placements.containsAll(offeredPlacements)) fail("offer placements")
+            for ((key, event) in listOf("alreadyEntitledStepId" to "\$offer_already_entitled", "unknownStepId" to "\$offer_access_unknown")) {
+                val cursor = id(offer[key])
+                if (cursor !in ids || offerRoutes.none {
+                    val host = record(it["host"])
+                    text(host["kind"]) == "screen" && text(host["screenId"]) == screen &&
+                        text(it["eventName"]) == event && text(it["entryStepId"]) == cursor
+                }) fail("offer alternative")
+            }
         }
         facts(leg)
         JourneyGrammar.boundary(leg["inputs"])

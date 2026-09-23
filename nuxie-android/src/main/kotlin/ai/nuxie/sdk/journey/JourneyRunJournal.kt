@@ -41,7 +41,7 @@ internal data class JourneyRun(
     val completion: Completion? = null,
     val effectReceipts: Map<String, String> = emptyMap(),
     val experimentExposures: List<ExperimentExposure> = emptyList(),
-    val reentry: JourneyReentry? = null,
+    val reentry: JourneyFrequency? = null,
     val requiresReleasePin: Boolean = false,
     val artifactDigests: Set<String> = emptySet(),
     val nextPresentationBatchSequence: Long = 0,
@@ -107,7 +107,7 @@ internal data class JourneyCheckmark(
     val outcome: String,
     val completedAtMillis: Long,
     val lastEnrollmentAtMillis: Long?,
-    val reentry: JourneyReentry? = null,
+    val reentry: JourneyFrequency? = null,
     val lastSeenLiveAtMillis: Long? = null,
 )
 
@@ -118,7 +118,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     private val ids: TimeBasedEpochGenerator = TimeBasedEpochGenerator.shared,
     private val maximumRunCount: Int = MAX_RUN_COUNT,
 ) {
-    private val root = File(directory, "journey-state-v1")
+    private val root = File(directory, "journey-state-v2")
     private val journals = File(root, "journals")
     private val customerDigest = storageScope.customerDigest(distinctId)
     private val file = File(journals, "$customerDigest.json")
@@ -136,7 +136,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     /** The caller authenticates the arm's release before admitting it here. */
     fun admit(
         arm: JourneyPlaneProfile.Arm,
-        reentry: JourneyReentry,
+        reentry: JourneyFrequency,
         entryStepId: String,
         atMillis: Long,
         release: JourneyPlaneProfile.Release? = null,
@@ -158,9 +158,9 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             val latest = state.runs.values.filter { it.experienceId == experienceId && it.isEnrollment }.maxOfOrNull { it.startedAtMillis }
             val last = listOfNotNull(latest, previous?.lastEnrollmentAtMillis).maxOrNull()
             if (last != null) when (reentry) {
-                JourneyReentry.OneTime -> return@update null
-                JourneyReentry.EveryTime -> Unit
-                is JourneyReentry.OncePerWindow -> {
+                JourneyFrequency.OneTime -> return@update null
+                JourneyFrequency.EveryMatch -> Unit
+                is JourneyFrequency.OncePerWindow -> {
                     check(reentry.windowMillis > 0)
                     if (atMillis < last || atMillis - last < reentry.windowMillis) return@update null
                 }
@@ -225,7 +225,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
 
     /** Retains consumed enrollment state only for currently live policy. */
     fun retainCheckmarks(
-        liveExperiences: Map<String, JourneyReentry>,
+        liveExperiences: Map<String, JourneyFrequency>,
         atMillis: Long,
     ) = update { state ->
         for ((experienceId, checkmark) in state.checklist.toMap()) {
@@ -240,13 +240,13 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             val retainedPolicy = checkmark.reentry ?: continue
             val lastSeen = checkmark.lastSeenLiveAtMillis ?: continue
             when (retainedPolicy) {
-                is JourneyReentry.OncePerWindow -> if (
+                is JourneyFrequency.OncePerWindow -> if (
                     atMillis >= lastSeen &&
                     atMillis - lastSeen >= retainedPolicy.windowMillis
                 ) {
                     state.checklist.remove(experienceId)
                 }
-                JourneyReentry.OneTime, JourneyReentry.EveryTime ->
+                JourneyFrequency.OneTime, JourneyFrequency.EveryMatch ->
                     state.checklist.remove(experienceId)
             }
         }
@@ -1046,21 +1046,21 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         mark.lastSeenLiveAtMillis?.let { put("lastSeenLiveAtMillis", JsonPrimitive(it)) }
     }
 
-    private fun encodeReentry(reentry: JourneyReentry): JsonObject = buildJsonObject {
+    private fun encodeReentry(reentry: JourneyFrequency): JsonObject = buildJsonObject {
         when (reentry) {
-            JourneyReentry.OneTime -> put("type", JsonPrimitive("one_time"))
-            JourneyReentry.EveryTime -> put("type", JsonPrimitive("every_time"))
-            is JourneyReentry.OncePerWindow -> {
+            JourneyFrequency.OneTime -> put("type", JsonPrimitive("one_time"))
+            JourneyFrequency.EveryMatch -> put("type", JsonPrimitive("every_match"))
+            is JourneyFrequency.OncePerWindow -> {
                 put("type", JsonPrimitive("once_per_window"))
                 put("windowMillis", JsonPrimitive(reentry.windowMillis))
             }
         }
     }
 
-    private fun decodeReentry(value: JsonObject): JourneyReentry = when (value.text("type")) {
-        "one_time" -> JourneyReentry.OneTime
-        "every_time" -> JourneyReentry.EveryTime
-        "once_per_window" -> JourneyReentry.OncePerWindow(value.number("windowMillis"))
+    private fun decodeReentry(value: JsonObject): JourneyFrequency = when (value.text("type")) {
+        "one_time" -> JourneyFrequency.OneTime
+        "every_match" -> JourneyFrequency.EveryMatch
+        "once_per_window" -> JourneyFrequency.OncePerWindow(value.number("windowMillis"))
         else -> throw IOException("Invalid retained reentry policy")
     }
 
@@ -1082,7 +1082,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     )
 
     private companion object {
-        const val VERSION = "nuxie.journey-journal.v1"
+        const val VERSION = "nuxie.journey-journal.v2"
         // A canonical profile may contribute up to 24 MiB of admitted context.
         // Preserve headroom for cursors, responses, receipts, and checkmarks.
         const val MAX_BYTES = 40 * 1024 * 1024
