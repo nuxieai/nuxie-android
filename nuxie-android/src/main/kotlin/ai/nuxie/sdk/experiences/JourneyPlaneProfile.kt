@@ -19,7 +19,10 @@ internal class JourneyPlaneProfile private constructor(
     val releases: List<Release>,
 ) {
     data class Arm(val reference: JsonObject, val binding: JsonObject,
-        val entryCondition: JsonObject, val context: JsonObject)
+        val entryCondition: JsonObject, val context: JsonObject, val conversion: Conversion? = null)
+    data class ConversionOccurrence(val eventId: String, val occurredAt: Long)
+    data class Conversion(val startedAt: Long, val revision: Long,
+        val basis: ConversionOccurrence?, val conversion: ConversionOccurrence?)
     data class Release(val locator: JourneyReleaseIdentity, val legId: String, val envelope: JsonObject)
 
     companion object {
@@ -89,7 +92,9 @@ internal class JourneyPlaneProfile private constructor(
             val seen = mutableSetOf<Pair<JsonObject, JsonObject>>()
             val referenced = mutableSetOf<String>()
             val arms = array(root["armedLegs"]).also { if (it.size > 1024) fail("arm count") }.map { value ->
-                val arm = exact(value, setOf("reference", "binding", "entryCondition", "context"))
+                val armValue = record(value)
+                val arm = exact(value, setOf("reference", "binding", "entryCondition", "context") +
+                    if (armValue.containsKey("conversion")) setOf("conversion") else emptySet())
                 val reference = exact(arm["reference"], setOf("experienceId", "versionId", "legId", "descriptorSha256"))
                 val experienceId = id(reference["experienceId"])
                 val versionId = id(reference["versionId"])
@@ -112,10 +117,33 @@ internal class JourneyPlaneProfile private constructor(
                 val entry = validateEntry(arm["entryCondition"])
                 val context = exact(arm["context"], setOf("event", "responses"))
                 for (key in listOf("event", "responses")) for (name in record(context[key]).keys) id(JsonPrimitive(name))
-                Arm(reference, binding, entry, context)
+                val measurement = arm["conversion"]?.let {
+                    if (text(binding["type"]) != "continue") fail("new journey measurement")
+                    conversion(it)
+                }
+                Arm(reference, binding, entry, context, measurement)
             }
             if (referenced != byDigest.keys) fail("unreferenced release")
             return JourneyPlaneProfile(JourneyReleaseDelivery(origins[0], origins[1]), features, facts, arms, releases)
+        }
+
+        private fun conversion(value: JsonElement): Conversion {
+            val raw = record(value)
+            val state = exact(raw, setOf("startedAt", "revision") +
+                listOf("basis", "conversion").filter { raw.containsKey(it) })
+            fun occurrence(value: JsonElement): ConversionOccurrence {
+                val item = exact(value, setOf("eventId", "occurredAt"))
+                val eventId = text(item["eventId"])
+                if (eventId.isEmpty() || eventId.length > 1024) fail("conversion event identity")
+                return ConversionOccurrence(eventId, integer(item["occurredAt"]))
+            }
+            val startedAt = integer(state["startedAt"])
+            val revision = integer(state["revision"])
+            val basis = state["basis"]?.let(::occurrence)
+            val matched = state["conversion"]?.let(::occurrence)
+            if (basis != null && basis.occurredAt < startedAt) fail("conversion basis before entry")
+            if (matched != null && (basis == null || matched.occurredAt < basis.occurredAt)) fail("conversion before basis")
+            return Conversion(startedAt, revision, basis, matched)
         }
 
         /** Applies the same exact release-entry validation to a retained pin. */
