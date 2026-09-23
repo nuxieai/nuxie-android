@@ -14,13 +14,13 @@ internal class ProfileStorageScope(apiKey: String, environment: NuxieEnvironment
         .digest("$DOMAIN${environment.name}\u0000$apiKey".encodeToByteArray())
         .joinToString("") { "%02x".format(it) }
 
-    val cacheSubdirectory: String = "profiles-v2-$digest"
+    val cacheSubdirectory: String = "profiles-v3-$digest"
     val authorityBindingFilename: String = "$digest.json"
 
     fun cacheDirectory(cacheDirectory: File): File =
         File(File(cacheDirectory, "nuxie"), cacheSubdirectory)
 
     private companion object {
-        const val DOMAIN = "nuxie.profile-storage.v2\u0000"
+        const val DOMAIN = "nuxie.profile-storage.v3\u0000"
     }
 }

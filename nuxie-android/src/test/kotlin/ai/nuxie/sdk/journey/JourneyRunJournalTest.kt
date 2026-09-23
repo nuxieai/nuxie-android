@@ -64,11 +64,23 @@ class JourneyRunJournalTest {
         Unit
     }
 
+    @Test fun `policy cut ignores retired journal without touching purchase evidence`() {
+        val retired = File(directory, "journey-state-v1/journals").apply { mkdirs() }
+        val digest = JourneyStorageScope.testFixture.customerDigest("customer")
+        val oldFile = File(retired, "$digest.json").apply { writeText("retired milestone journal") }
+        val commerce = File(directory, "purchase-evidence-sentinel").apply { writeText("verified purchase evidence") }
+
+        val journal = JourneyRunJournal(directory, "customer")
+        assertTrue(journal.runs().isEmpty())
+        assertEquals("retired milestone journal", oldFile.readText())
+        assertEquals("verified purchase evidence", commerce.readText())
+    }
+
     @Test fun `completion queues stable events and forgets the run without a network ack`() = runBlocking {
         val store = SQLiteEventStore(context, nowMillis = { 0 })
         val eventLog = eventLog(store).also { log = it }
         val journal = JourneyRunJournal(directory, "customer")
-        val run = requireNotNull(journal.admit(arm(), JourneyReentry.OneTime, "screen", 100_000))
+        val run = requireNotNull(journal.admit(arm(), JourneyFrequency.OneTime, "screen", 100_000))
         val reporter = JourneyReporter(journal, eventLog::captureIdempotently)
         reporter.flushPending()
         journal.complete(run.id, "closed", 200_000)
@@ -77,7 +89,7 @@ class JourneyRunJournalTest {
         assertTrue(reopened.runs().isEmpty())
         assertEquals("closed", reopened.checkmark("experience")?.outcome)
         assertEquals(100_000L, reopened.checkmark("experience")?.lastEnrollmentAtMillis)
-        assertNull(reopened.admit(arm(), JourneyReentry.OneTime, "screen", 300_000))
+        assertNull(reopened.admit(arm(), JourneyFrequency.OneTime, "screen", 300_000))
         val rows = store.pendingBatch(10)
         assertEquals(setOf(run.startedEventId, run.completedEventId), rows.map { it.id }.toSet())
         assertEquals(setOf(JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED), rows.map { it.name }.toSet())
@@ -111,7 +123,7 @@ class JourneyRunJournalTest {
         val run = requireNotNull(
             journal.admit(
                 arm(),
-                JourneyReentry.EveryTime,
+                JourneyFrequency.EveryMatch,
                 "step",
                 100_000,
                 executionSnapshot = executionSnapshot,
@@ -133,7 +145,7 @@ class JourneyRunJournalTest {
             val vector = item.jsonObject
             directory.deleteRecursively()
             val journal = JourneyRunJournal(directory, "customer")
-            val run = requireNotNull(journal.admit(arm(vector.getValue("binding").jsonObject), JourneyReentry.EveryTime,
+            val run = requireNotNull(journal.admit(arm(vector.getValue("binding").jsonObject), JourneyFrequency.EveryMatch,
                 "step", suite.number("startedAtMillis")))
             journal.markStartedQueued(run)
             journal.recordResponses(run.id, vector.getValue("responses").jsonObject)
@@ -182,7 +194,7 @@ class JourneyRunJournalTest {
         )
         val journal = JourneyRunJournal(directory, "customer")
         val run = requireNotNull(
-            journal.admit(armed, JourneyReentry.EveryTime, "step", 100_000),
+            journal.admit(armed, JourneyFrequency.EveryMatch, "step", 100_000),
         )
         journal.markStartedQueued(run)
 
@@ -207,7 +219,7 @@ class JourneyRunJournalTest {
         )
         val journal = JourneyRunJournal(directory, "customer")
         val run = requireNotNull(
-            journal.admit(armed, JourneyReentry.EveryTime, "step", 100_000),
+            journal.admit(armed, JourneyFrequency.EveryMatch, "step", 100_000),
         )
         assertEquals(
             payload.length,
@@ -225,7 +237,7 @@ class JourneyRunJournalTest {
     @Test fun `large collected responses are not duplicated before completion`() {
         val journal = JourneyRunJournal(directory, "customer")
         val run = requireNotNull(
-            journal.admit(arm(), JourneyReentry.EveryTime, "survey", 100_000),
+            journal.admit(arm(), JourneyFrequency.EveryMatch, "survey", 100_000),
         )
         val answer = "y".repeat(21 * 1024 * 1024)
         val responses = JsonObject(mapOf("answer" to JsonPrimitive(answer)))
@@ -252,7 +264,7 @@ class JourneyRunJournalTest {
 
     @Test fun `routed component source survives reopen and clears on a new event`() {
         val journal = JourneyRunJournal(directory, "customer")
-        val run = requireNotNull(journal.admit(arm(), JourneyReentry.EveryTime, "screen", 100))
+        val run = requireNotNull(journal.admit(arm(), JourneyFrequency.EveryMatch, "screen", 100))
         journal.markStartedQueued(run)
         journal.park(run.id, "screen", null)
         val publication = JourneyRun.PendingPresentationPublication(
@@ -301,7 +313,7 @@ class JourneyRunJournalTest {
         val screenId = fixtureRun.text("screen_id")
         val journal = JourneyRunJournal(directory, customerId)
         val run = requireNotNull(
-            journal.admit(arm(), JourneyReentry.EveryTime, screenId, 100_000),
+            journal.admit(arm(), JourneyFrequency.EveryMatch, screenId, 100_000),
         )
         journal.markStartedQueued(run)
         journal.park(run.id, screenId, null)
@@ -391,7 +403,7 @@ class JourneyRunJournalTest {
     @Test fun `partially published renderer batch abandons with responses before report retirement`() {
         val journal = JourneyRunJournal(directory, "customer")
         val run = requireNotNull(
-            journal.admit(arm(), JourneyReentry.EveryTime, "survey", 100_000),
+            journal.admit(arm(), JourneyFrequency.EveryMatch, "survey", 100_000),
         )
         journal.markStartedQueued(run)
         val context = JsonObject(
@@ -434,7 +446,7 @@ class JourneyRunJournalTest {
 
     @Test fun `continuations do not restart reentry windows or regress consumed chapters`() {
         val journal = JourneyRunJournal(directory, "customer")
-        val policy = JourneyReentry.OncePerWindow(100_000)
+        val policy = JourneyFrequency.OncePerWindow(100_000)
         val first = requireNotNull(journal.admit(arm(), policy, "step", 100_000))
         finish(journal, first, 110_000)
         fun continuation(generation: Long) = arm(JsonObject(mapOf("type" to JsonPrimitive("continue"),
@@ -451,7 +463,7 @@ class JourneyRunJournalTest {
 
     @Test fun `executor transitions atomically persist cursors context and fixed timer anchors`() {
         val journal = JourneyRunJournal(directory, "customer")
-        val run = requireNotNull(journal.admit(arm(), JourneyReentry.EveryTime, "condition", 1_000))
+        val run = requireNotNull(journal.admit(arm(), JourneyFrequency.EveryMatch, "condition", 1_000))
         journal.markStartedQueued(run)
         val changedContext = JsonObject(run.context + ("event" to JsonObject(mapOf("ready" to JsonPrimitive(true)))))
         journal.transition(run.id, "wait", changedContext, JourneyControlExecutor.Checkpoint(2_000, 12_000))
@@ -471,7 +483,7 @@ class JourneyRunJournalTest {
     @Test fun `experiment exposure stays latent until its bound screen is shown`() = runBlocking {
         val journal = JourneyRunJournal(directory, "customer")
         val run = requireNotNull(
-            journal.admit(arm(), JourneyReentry.EveryTime, "experiment", 1_000),
+            journal.admit(arm(), JourneyFrequency.EveryMatch, "experiment", 1_000),
         )
         journal.markStartedQueued(run)
         val exposure = JourneyRun.ExperimentExposure(
@@ -528,10 +540,10 @@ class JourneyRunJournalTest {
     @Test fun `admission is atomic across instances and scoped by customer`() = runBlocking {
         val first = JourneyRunJournal(directory, "../customer")
         val second = JourneyRunJournal(directory, "../customer")
-        val a = async(Dispatchers.Default) { first.admit(arm(), JourneyReentry.OneTime, "step", 100_000) }
-        val b = async(Dispatchers.Default) { second.admit(arm(), JourneyReentry.OneTime, "step", 100_000) }
+        val a = async(Dispatchers.Default) { first.admit(arm(), JourneyFrequency.OneTime, "step", 100_000) }
+        val b = async(Dispatchers.Default) { second.admit(arm(), JourneyFrequency.OneTime, "step", 100_000) }
         assertEquals(1, listOfNotNull(a.await(), b.await()).size)
-        assertNotNull(JourneyRunJournal(directory, "customer").admit(arm(), JourneyReentry.OneTime, "step", 100_000))
+        assertNotNull(JourneyRunJournal(directory, "customer").admit(arm(), JourneyFrequency.OneTime, "step", 100_000))
         assertEquals(1, JourneyRunJournal(directory, "../customer").runs().size)
     }
 
@@ -540,8 +552,8 @@ class JourneyRunJournalTest {
             val first = JourneyRunJournal(directory, "customer-$index")
             val alias = JourneyRunJournal(File(directory, "."), "customer-$index")
             val begin = CompletableDeferred<Unit>()
-            val a = async(Dispatchers.Default) { begin.await(); first.admit(arm(), JourneyReentry.OneTime, "step", 100_000) }
-            val b = async(Dispatchers.Default) { begin.await(); alias.admit(arm(), JourneyReentry.OneTime, "step", 100_000) }
+            val a = async(Dispatchers.Default) { begin.await(); first.admit(arm(), JourneyFrequency.OneTime, "step", 100_000) }
+            val b = async(Dispatchers.Default) { begin.await(); alias.admit(arm(), JourneyFrequency.OneTime, "step", 100_000) }
             begin.complete(Unit)
             assertEquals(1, listOfNotNull(a.await(), b.await()).size)
         }
@@ -567,7 +579,7 @@ class JourneyRunJournalTest {
 
     @Test fun `invalid buffered JSON cannot replace the last readable snapshot`() {
         val journal = JourneyRunJournal(directory, "customer")
-        val run = requireNotNull(journal.admit(arm(), JourneyReentry.EveryTime, "step", 100_000))
+        val run = requireNotNull(journal.admit(arm(), JourneyFrequency.EveryMatch, "step", 100_000))
         journal.recordResponses(run.id, JsonObject(mapOf("answer" to JsonPrimitive("yes"))))
         try {
             journal.recordResponses(run.id, JsonObject(mapOf("answer" to JsonPrimitive(Double.NaN))))
@@ -586,7 +598,7 @@ class JourneyRunJournalTest {
         val rotatedKeyScope = JourneyStorageScope(ProfileDeliveryAuthority("app", "test"))
         val otherAppScope = JourneyStorageScope(ProfileDeliveryAuthority("other", "test"))
         val first = JourneyRunJournal(directory, "customer", firstScope)
-        val run = requireNotNull(first.admit(arm(), JourneyReentry.EveryTime, "step", 100_000))
+        val run = requireNotNull(first.admit(arm(), JourneyFrequency.EveryMatch, "step", 100_000))
         first.markStartedQueued(run)
         first.park(run.id, "step", 200_000)
 
@@ -600,7 +612,7 @@ class JourneyRunJournalTest {
         val run = requireNotNull(
             journal.admit(
                 pinnedArm,
-                JourneyReentry.EveryTime,
+                JourneyFrequency.EveryMatch,
                 "step",
                 100_000,
                 release = release,
@@ -624,7 +636,7 @@ class JourneyRunJournalTest {
         val run = requireNotNull(
             journal.admit(
                 pinnedArm,
-                JourneyReentry.EveryTime,
+                JourneyFrequency.EveryMatch,
                 "step",
                 100_000,
                 release = release,
@@ -636,7 +648,7 @@ class JourneyRunJournalTest {
         val digest = release.envelope.getValue("descriptorSha256").jsonPrimitive.content
         val pinFile = File(
             directory,
-            "journey-state-v1/release-pins/${scope.customerDigest("customer")}/$digest.json",
+            "journey-state-v2/release-pins/${scope.customerDigest("customer")}/$digest.json",
         )
         val entry = Json.parseToJsonElement(pinFile.readText()).jsonObject
         val locator = entry.getValue("locator").jsonObject
@@ -663,7 +675,7 @@ class JourneyRunJournalTest {
         val run = requireNotNull(
             journal.admit(
                 arm(),
-                JourneyReentry.EveryTime,
+                JourneyFrequency.EveryMatch,
                 "step",
                 100_000,
                 artifactDigests = setOf(digest),
@@ -693,7 +705,7 @@ class JourneyRunJournalTest {
         try {
             journal.admit(
                 invalidArm,
-                JourneyReentry.EveryTime,
+                JourneyFrequency.EveryMatch,
                 "step",
                 100_000,
                 release = release,
@@ -701,7 +713,7 @@ class JourneyRunJournalTest {
             fail("Invalid journal JSON must reject admission")
         } catch (_: ai.nuxie.sdk.experiences.JourneyReleaseAuthenticationException) { }
 
-        val releaseRoot = File(directory, "journey-state-v1/release-pins")
+        val releaseRoot = File(directory, "journey-state-v2/release-pins")
         assertTrue(
             releaseRoot.walkTopDown().none { it.isFile && it.extension == "json" },
         )
@@ -718,7 +730,7 @@ class JourneyRunJournalTest {
         try {
             journal.admit(
                 pinnedArm,
-                JourneyReentry.EveryTime,
+                JourneyFrequency.EveryMatch,
                 "step",
                 100_000,
                 release = release,
@@ -726,7 +738,7 @@ class JourneyRunJournalTest {
             fail("Run limit must reject admission")
         } catch (_: java.io.IOException) { }
 
-        val releaseRoot = File(directory, "journey-state-v1/release-pins")
+        val releaseRoot = File(directory, "journey-state-v2/release-pins")
         assertTrue(
             releaseRoot.walkTopDown().none { it.isFile && it.extension == "json" },
         )
@@ -739,13 +751,13 @@ class JourneyRunJournalTest {
         assertNotNull(
             JourneyRunJournal(directory, orphanCustomer, scope).admit(
                 pinnedArm,
-                JourneyReentry.EveryTime,
+                JourneyFrequency.EveryMatch,
                 "step",
                 100_000,
                 release = release,
             ),
         )
-        val root = File(directory, "journey-state-v1")
+        val root = File(directory, "journey-state-v2")
         val orphanDigest = scope.customerDigest(orphanCustomer)
         val orphanPins = File(root, "release-pins/$orphanDigest")
         assertTrue(orphanPins.isDirectory)
@@ -754,7 +766,7 @@ class JourneyRunJournalTest {
         assertNotNull(
             JourneyRunJournal(directory, "active-customer", scope).admit(
                 pinnedArm,
-                JourneyReentry.EveryTime,
+                JourneyFrequency.EveryMatch,
                 "step",
                 110_000,
                 release = release,
@@ -766,7 +778,7 @@ class JourneyRunJournalTest {
 
     @Test fun `effect identity is stable for one cursor visit and rotates after advance`() {
         val journal = JourneyRunJournal(directory, "customer")
-        val run = requireNotNull(journal.admit(arm(), JourneyReentry.EveryTime, "effect", 100_000))
+        val run = requireNotNull(journal.admit(arm(), JourneyFrequency.EveryMatch, "effect", 100_000))
         journal.markStartedQueued(run)
 
         val first = journal.claimEffect(run.id, "effect")
@@ -777,31 +789,31 @@ class JourneyRunJournalTest {
 
     @Test fun `revocation blocks reopening until every abandonment is queued`() {
         val journal = JourneyRunJournal(directory, "customer")
-        val run = requireNotNull(journal.admit(arm(), JourneyReentry.EveryTime, "wait", 100_000))
+        val run = requireNotNull(journal.admit(arm(), JourneyFrequency.EveryMatch, "wait", 100_000))
         journal.markStartedQueued(run)
         journal.park(run.id, "wait", 200_000)
 
         journal.abandonAll(150_000)
-        assertNull(journal.admit(arm(), JourneyReentry.EveryTime, "step", 160_000))
+        assertNull(journal.admit(arm(), JourneyFrequency.EveryMatch, "step", 160_000))
         assertEquals("abandoned", journal.runs().single().completion?.outcome)
         assertFalse(journal.finalizeRevocation())
 
         journal.markCompletionQueued(journal.runs().single())
         assertTrue(journal.finalizeRevocation())
-        assertNotNull(journal.admit(arm(), JourneyReentry.EveryTime, "step", 170_000))
+        assertNotNull(journal.admit(arm(), JourneyFrequency.EveryMatch, "step", 170_000))
     }
 
     @Test fun `state arm receipt is durable and cleared by foreground kind`() {
         val journal = JourneyRunJournal(directory, "customer")
         val armed = arm()
         val receipt = journeyStateArmReceipt(armed)
-        assertNotNull(journal.admit(armed, JourneyReentry.EveryTime, "step", 100_000,
+        assertNotNull(journal.admit(armed, JourneyFrequency.EveryMatch, "step", 100_000,
             stateArmReceipt = receipt))
-        assertNull(journal.admit(armed, JourneyReentry.EveryTime, "step", 100_001,
+        assertNull(journal.admit(armed, JourneyFrequency.EveryMatch, "step", 100_001,
             stateArmReceipt = receipt))
 
         journal.clearStateArmReceipts("app_foregrounded")
-        assertNotNull(journal.admit(armed, JourneyReentry.EveryTime, "step", 100_002,
+        assertNotNull(journal.admit(armed, JourneyFrequency.EveryMatch, "step", 100_002,
             stateArmReceipt = receipt))
     }
 
@@ -834,7 +846,7 @@ class JourneyRunJournalTest {
 
     @Test fun `checkmarks retire after delivery and the authored reentry window`() {
         val journal = JourneyRunJournal(directory, "customer")
-        val window = JourneyReentry.OncePerWindow(100)
+        val window = JourneyFrequency.OncePerWindow(100)
         val run = requireNotNull(
             journal.admit(arm(), window, "step", 100),
         )
@@ -848,10 +860,10 @@ class JourneyRunJournalTest {
         assertNull(JourneyRunJournal(directory, "customer").checkmark("experience"))
 
         val everyTime = requireNotNull(
-            journal.admit(arm(), JourneyReentry.EveryTime, "step", 300),
+            journal.admit(arm(), JourneyFrequency.EveryMatch, "step", 300),
         )
         finish(journal, everyTime, 310)
-        assertEquals(JourneyReentry.EveryTime, journal.checkmark("experience")?.reentry)
+        assertEquals(JourneyFrequency.EveryMatch, journal.checkmark("experience")?.reentry)
         assertEquals(310L, journal.checkmark("experience")?.lastSeenLiveAtMillis)
         journal.retainCheckmarks(emptyMap(), atMillis = 311)
         assertNull(journal.checkmark("experience"))
@@ -879,7 +891,7 @@ class JourneyRunJournalTest {
             }
             events.subscribeForwarding(isEnabled = { true }, handler = forwarder::onCommitted)
             val journal = JourneyRunJournal(directory, "customer")
-            val run = requireNotNull(journal.admit(arm(vector.getValue("binding").jsonObject), JourneyReentry.EveryTime,
+            val run = requireNotNull(journal.admit(arm(vector.getValue("binding").jsonObject), JourneyFrequency.EveryMatch,
                 "step", vector.number("startedAtMillis")))
             val outputs = vector.getValue("outputs").jsonObject
             journal.recordResponses(run.id, outputs.getValue("responses").jsonObject)

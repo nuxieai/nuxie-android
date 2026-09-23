@@ -29,7 +29,6 @@ internal object ActivityCuration {
         SystemEventNames.FEATURE_USED,
         JourneyEventNames.LEG_STARTED,
         JourneyEventNames.LEG_COMPLETED,
-        JourneyEventNames.MILESTONE,
         SystemEventNames.NOTIFICATIONS_DENIED,
         SystemEventNames.NOTIFICATIONS_ENABLED,
         SystemEventNames.PERMISSION_DENIED,
@@ -83,12 +82,6 @@ internal object ActivityCuration {
                 outcome == null -> missing(internalName)
                 else -> NuxieActivity.JourneyCompleted(ref, legId, generation, outcome)
             }
-        }
-        JourneyEventNames.MILESTONE -> {
-            val ref = experienceRef(properties)
-            val milestoneId = properties.string("milestone_id")
-            if (ref == null || milestoneId == null) missing(internalName)
-            else NuxieActivity.MilestoneReached(ref, milestoneId)
         }
         SystemEventNames.PURCHASE_COMPLETED -> purchaseInfo(properties)
             ?.let(NuxieActivity::PurchaseCompleted) ?: missing(internalName)

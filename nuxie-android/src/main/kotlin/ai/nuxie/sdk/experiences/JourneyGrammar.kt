@@ -105,7 +105,6 @@ internal object JourneyGrammar {
             }
             "restore", "submit_response", "request_notifications", "request_tracking" -> shape()
             "request_permission" -> { shape("permissionType"); journeyId(action["permissionType"]) }
-            "milestone" -> { shape("milestoneId"); journeyId(action["milestoneId"]) }
             "send_event", "app_action" -> {
                 val key = if (text(action["type"]) == "send_event") "eventName" else "name"
                 shape(key, optional = setOf("payload"))

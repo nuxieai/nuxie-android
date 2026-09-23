@@ -172,6 +172,7 @@ internal class JourneyService(
         StableEventCommitAdmission?,
     ) -> StableEventCaptureResult = captureScreenEvent,
     private val featureAccess: suspend (String) -> FeatureAccess? = { null },
+    private val offerFeatureAccess: suspend (String) -> FeatureAccess? = featureAccess,
     private val dispatcher: JourneyDispatching = JourneyDispatching {
         JourneyDispatchResult.Unsupported
     },
@@ -208,7 +209,7 @@ internal class JourneyService(
     private data class ReentryCandidate(
         val enrollment: Boolean,
         val release: AuthenticatedJourneyRelease,
-        val reentry: JourneyReentry,
+        val reentry: JourneyFrequency,
     )
 
     private enum class PresentationLifecycleResult {
@@ -1157,7 +1158,6 @@ internal class JourneyService(
         // arms remain eligible for a later matching event.
         if (release.hasScreens() && !foreground.get()) return
         if (!entryMatches(arm, release, state, event)) return
-        if (entitlementGateSuppresses(release.leg)) return
         if (!entryMatches(arm, release, state, event) || !isCurrent(state)) return
         val context = JourneyBoundaryProjector.inputContext(
             arm,
@@ -1165,7 +1165,7 @@ internal class JourneyService(
             release.leg.getValue("inputs").jsonObject,
         ) ?: return
         val admittedArm = arm.copy(context = context)
-        val reentry = parseReentry(release.leg.getValue("reentry").jsonObject) ?: return
+        val reentry = parseFrequency(release.leg.getValue("policy").jsonObject.getValue("entry").jsonObject.getValue("frequency").jsonObject) ?: return
         val entryStepId = release.leg.text("entryStepId") ?: return
         val stateReceipt = arm.entryCondition.text("type")
             ?.takeIf { it != "event" }
@@ -1282,19 +1282,25 @@ internal class JourneyService(
         )
     }
 
-    private suspend fun entitlementGateSuppresses(leg: JsonObject): Boolean {
-        val gate = leg.getValue("entitlementGate").jsonObject
-        if (gate["enabled"]?.jsonPrimitive?.booleanOrNull != true) return false
-        for (value in gate.getValue("products").jsonArray) {
-            val product = value.jsonObject
-            val featureIds = product.getValue("featureIds").jsonArray.map {
-                it.jsonPrimitive.content
-            }
-            if (featureIds.isNotEmpty() && featureIds.all { featureAccess(it)?.allowed == true }) {
-                return true
-            }
+    private suspend fun offerAlternative(
+        offer: JsonObject,
+        release: AuthenticatedJourneyRelease,
+        placementId: String? = null,
+    ): String? {
+        val placements = offer.getValue("placementIds").jsonArray.map { it.jsonPrimitive.content }
+        val decision = if (placementId != null && placementId !in placements) {
+            JourneyOfferAccess.Decision.UNKNOWN
+        } else JourneyOfferAccess.evaluate(
+            placementId?.let(::listOf) ?: placements,
+            release.descriptor.getValue("products").jsonArray,
+            release.descriptor.getValue("placements").jsonArray,
+            offerFeatureAccess,
+        )
+        return when (decision) {
+            JourneyOfferAccess.Decision.ELIGIBLE -> null
+            JourneyOfferAccess.Decision.ALREADY_ENTITLED -> offer.text("alreadyEntitledStepId")
+            JourneyOfferAccess.Decision.UNKNOWN -> offer.text("unknownStepId")
         }
-        return false
     }
 
     private suspend fun resumeParkedRuns(
@@ -2308,6 +2314,14 @@ internal class JourneyService(
                                 finishExecution(run, "abandoned")
                                 return
                             }
+                            val alternative = JourneyOfferAccess.forScreen(leg, screenId)?.let { offerAlternative(it, release) }
+                            if (!current()) { finishExecution(run, "abandoned"); return }
+                            if (alternative != null) {
+                                target.transition(run.id, alternative, run.context)
+                                run = run.copy(stepId = alternative, park = null)
+                                checkpoint = null
+                                return@repeat
+                            }
                             // A null fresh reservation may still be valid when
                             // this same Journey already owns the visible surface;
                             // the presentation choke point decides that atomically.
@@ -2383,6 +2397,21 @@ internal class JourneyService(
                                     finishExecution(run, "abandoned")
                                     return
                                 }
+                                val offer = JourneyOfferAccess.forPurchaseStep(leg, result.stepId)
+                                if (offer == null) {
+                                    val placement = release.descriptor.getValue("placements").jsonArray.map { it.jsonObject }.firstOrNull { it.text("id") == placementId }
+                                    val product = release.descriptor.getValue("products").jsonArray.map { it.jsonObject }.firstOrNull { it.text("id") == placement?.text("productId") }
+                                    if (product?.text("type") != "consumable") { finishExecution(run, "abandoned"); return }
+                                } else {
+                                    val alternative = offerAlternative(offer, release, placementId)
+                                    if (!current()) { finishExecution(run, "abandoned"); return }
+                                    if (alternative != null) {
+                                        target.transition(run.id, alternative, run.context)
+                                        run = run.copy(stepId = alternative, park = null)
+                                        checkpoint = null
+                                        return@repeat
+                                    }
+                                }
                                 pendingPresentationPurchasePlacements[run.id] = placementId
                             }
                             when (val presentationResult = presentation.dispatchAction(
@@ -2391,6 +2420,15 @@ internal class JourneyService(
                                 effectId,
                             )) {
                                 is JourneyPresentationActionResult.Navigate -> {
+                                    val alternative = JourneyOfferAccess.forScreen(leg, presentationResult.screenId)?.let { offerAlternative(it, release) }
+                                    if (!current()) { finishExecution(run, "abandoned"); return }
+                                    if (alternative != null) {
+                                        presentation.cancelBackNavigation(owner)
+                                        target.transition(run.id, alternative, run.context)
+                                        run = run.copy(stepId = alternative, park = null)
+                                        checkpoint = null
+                                        return@repeat
+                                    }
                                     val reserved = presentationReservation
                                         ?: presentation.reserve(target.distinctId)
                                     presentationReservation = null
@@ -2631,23 +2669,23 @@ internal class JourneyService(
         put("properties", event.properties)
     }
 
-    private fun parseReentry(value: JsonObject): JourneyReentry? = when (value.text("type")) {
-        "one_time" -> JourneyReentry.OneTime
-        "every_time" -> JourneyReentry.EveryTime
-        "once_per_window" -> JourneyReentry.OncePerWindow(
-            Math.multiplyExact(value.getValue("windowSeconds").jsonPrimitive.long, 1_000L),
+    private fun parseFrequency(value: JsonObject): JourneyFrequency? = when (value.text("type")) {
+        "one_time" -> JourneyFrequency.OneTime
+        "every_match" -> JourneyFrequency.EveryMatch
+        "once_per_window" -> JourneyFrequency.OncePerWindow(
+            ai.nuxie.sdk.experiences.ExperiencePolicySchema.durationMillis(value["window"]),
         )
         else -> null
     }
 
     private fun liveReentryPolicies(
         snapshot: JourneyProfileCatalog.Snapshot,
-    ): Map<String, JourneyReentry> {
+    ): Map<String, JourneyFrequency> {
         val selected = linkedMapOf<String, ReentryCandidate>()
         for (arm in snapshot.profile.armedLegs) {
             val release = snapshot.releasesByDigest[arm.reference.text("descriptorSha256")]
                 ?: continue
-            val reentry = parseReentry(release.leg.getValue("reentry").jsonObject)
+            val reentry = parseFrequency(release.leg.getValue("policy").jsonObject.getValue("entry").jsonObject.getValue("frequency").jsonObject)
                 ?: continue
             val candidate = ReentryCandidate(
                 enrollment = arm.binding.text("type") == "new",

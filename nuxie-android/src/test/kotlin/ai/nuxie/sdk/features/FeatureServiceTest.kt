@@ -589,6 +589,39 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun journeyAccessUsesPurchaseEvidenceWithoutChangingAuthoritativeChecks() = runBlocking {
+        val transport = FakeTransport()
+        val core = core(transport)
+        applyTestPurchase(core, listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)), "token-journey")
+        assertTrue(core.features.getForJourney("pro", resolveUnknown = false)?.allowed == true)
+        assertEquals(null, core.features.getCached("pro", null))
+        assertTrue(transport.requests.none { it.url.path == "/entitled" })
+
+        core.identity.setDistinctId("other-customer")
+        assertEquals(null, core.features.getForJourney("pro", resolveUnknown = false))
+        core.stop()
+    }
+
+    @Test
+    fun onlyUnknownOffersRequestFreshAccess() = runBlocking {
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    HttpTransport.Response(200, featureResponse(core.identity.distinctId(), "pro", 1.0,
+                        allowed = false, balance = "null", type = "boolean").encodeToByteArray())
+                } else profileResponse("[]")
+            }
+        }
+        core = core(transport)
+        assertEquals(null, core.features.getForJourney("pro", resolveUnknown = false))
+        assertTrue(transport.requests.none { it.url.path == "/entitled" })
+        assertEquals(false, core.features.getForJourney("pro", resolveUnknown = true)?.allowed)
+        assertEquals(1, transport.requests.count { it.url.path == "/entitled" })
+        core.stop()
+    }
+
+    @Test
     fun optimisticPurchaseWidensDescriptorAllowancesAndClearsBackToProfile() = runBlocking {
         val core = core(FakeTransport())
         val customer = core.identity.distinctId()

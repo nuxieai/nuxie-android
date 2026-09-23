@@ -79,6 +79,30 @@ internal class FeatureService(
     suspend fun getCached(featureId: String, entityId: String?): FeatureAccess? =
         getCached(featureId, requiredBalance = null, entityId = entityId)
 
+    /** Journey eligibility can use existing purchase evidence without granting server spend authority. */
+    suspend fun getForJourney(featureId: String, resolveUnknown: Boolean): FeatureAccess? {
+        synchronizeCustomerScopeIfNeeded()
+        val identityScope = identity.captureScope()
+        val (generation, local) = synchronized(lock) {
+            if (cacheDistinctId != identityScope.distinctId) return null
+            scopeGeneration to visibleAccess(featureId, cachedAccess(featureId, null, null))
+        }
+        if (!identity.isCurrentScope(identityScope)) return null
+        if (local != null) return local
+        if (!resolveUnknown) return null
+        val resolved = try {
+            checkWithCache(featureId)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+        return synchronized(lock) {
+            if (scopeGeneration != generation || !identity.isCurrentScope(identityScope)) null
+            else visibleAccess(featureId, resolved)
+        }
+    }
+
     suspend fun getAllCached(): Map<String, FeatureAccess> {
         synchronizeCustomerScopeIfNeeded()
         return synchronized(lock) {

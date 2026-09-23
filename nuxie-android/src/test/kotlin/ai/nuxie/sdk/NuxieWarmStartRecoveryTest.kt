@@ -7,7 +7,7 @@ import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.experiences.JourneyPlaneProfile
 import ai.nuxie.sdk.identity.IdentityService
-import ai.nuxie.sdk.journey.JourneyReentry
+import ai.nuxie.sdk.journey.JourneyFrequency
 import ai.nuxie.sdk.journey.JourneyRunJournal
 import ai.nuxie.sdk.journey.JourneyStorageScope
 import ai.nuxie.sdk.network.HttpTransport
@@ -79,8 +79,12 @@ class NuxieWarmStartRecoveryTest {
                 )
             }
         }
+        val store = SQLiteEventStore(context, databaseFile = File(temporary.root, "identity-events.db"))
+        // Load Robolectric's native SQLite before timing the identity protocol.
+        // A cold native-library load must not consume an event-barrier deadline.
+        store.pendingBatch(1)
         Nuxie.overridesForTesting = NuxieCore.Overrides(identity = identity, transport = transport,
-            registerLifecycle = false, eventDatabaseFile = File(temporary.root, "identity-events.db"),
+            registerLifecycle = false, store = store,
             profileCacheDirectory = File(temporary.root, "identity-profiles"))
         Nuxie.setup(context, NuxieConfiguration("pk_test_warm_identity"))
         val core = checkNotNull(Nuxie.core)
@@ -128,7 +132,7 @@ class NuxieWarmStartRecoveryTest {
             entryCondition = record("type" to "event", "eventName" to "unused"),
             context = JsonObject(mapOf("event" to JsonObject(emptyMap()), "responses" to JsonObject(emptyMap()))),
         )
-        val retained = checkNotNull(journal.admit(arm, JourneyReentry.EveryTime, "completed-step", 1_000L))
+        val retained = checkNotNull(journal.admit(arm, JourneyFrequency.EveryMatch, "completed-step", 1_000L))
         journal.complete(retained.id, "completed", 2_000L)
         val database = File(temporary.root, "events.db")
         val sqlite = SQLiteEventStore(context, databaseFile = database)
