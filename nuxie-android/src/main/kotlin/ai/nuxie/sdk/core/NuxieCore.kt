@@ -184,6 +184,7 @@ internal class NuxieCore(
         appContext,
         nowMillis = nowMillis,
         databaseFile = overrides.eventDatabaseFile ?: File(appContext.filesDir, "nuxie/events.db"),
+        conversionCaptureScope = ProfileStorageScope(apiKey, environment).cacheSubdirectory,
     )).also { store -> construction?.onFailure { store.close() } }
 
     val userTransitions: UserTransitionCoordinator by lazy {

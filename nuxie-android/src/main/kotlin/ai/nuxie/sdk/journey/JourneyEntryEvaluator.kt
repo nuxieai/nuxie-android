@@ -30,6 +30,7 @@ internal object JourneyEntryEvaluator {
         events: EventStore? = null,
         distinctId: String? = null,
         featureAccess: (suspend (String) -> FeatureAccess?)? = null,
+        journeyId: String? = null,
     ): Boolean {
         val properties = facts["properties"] as? JsonObject ?: return false
         val memberships = facts["memberships"] as? JsonObject ?: return false
@@ -63,6 +64,7 @@ internal object JourneyEntryEvaluator {
             events,
             distinctId,
             featureAccess,
+            journeyId,
         )
         if (!context.available(envelope["expr"])) return false
         return try {
@@ -83,6 +85,7 @@ internal object JourneyEntryEvaluator {
         val events: EventStore?,
         val distinctId: String?,
         val featureAccess: (suspend (String) -> FeatureAccess?)?,
+        val journeyId: String?,
     ) {
         fun available(value: JsonElement?, hasEvent: Boolean = event != null, depth: Int = 0): Boolean {
             if (depth > 64) return false
@@ -91,6 +94,7 @@ internal object JourneyEntryEvaluator {
             fun children(key: String): Boolean = (expression[key] as? JsonArray)?.all { available(it, hasEvent, depth + 1) } == true
             return when (expression["type"].string()) {
                 "Bool", "String", "Number", "Timestamp", "Duration", "Time.Now", "Time.Window" -> true
+                "Journey.Id" -> journeyId != null
                 "Time.Ago" -> child("duration")
                 "List" -> children("value")
                 "Not" -> child("arg")
@@ -143,6 +147,7 @@ internal object JourneyEntryEvaluator {
                     val children = expression["value"] as? JsonArray ?: return null
                     JsonArray(children.map { evaluate(it) ?: return null })
                 }
+                "Journey.Id" -> journeyId?.let(::JsonPrimitive)
                 "Time.Now" -> JsonPrimitive(nowMillis / 1000.0)
                 "Time.Ago" -> evaluate(expression["duration"])?.number()?.let { JsonPrimitive(nowMillis / 1000.0 - it) }
                 "Time.Window" -> expression["value"].number()?.let {

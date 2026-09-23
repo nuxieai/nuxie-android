@@ -242,7 +242,10 @@ class PurchaseOutcomeCommitFixtureTest {
         val productName = action.requiredString("product")
         val product = contract.products.getValue(productName)
         val checkout = async {
-            harness.service.purchase(activity(), product.toStoreProduct(), replacement = null)
+            harness.service.purchase(activity(), product.toStoreProduct(), replacement = null,
+                outcomeCorrelation = action.optionalString("journeyId")?.let {
+                    CommerceOutcomeCorrelation("fixture-checkout-$it", harness.ownerDistinctId, it)
+                })
         }
         runCurrent()
         val launch = checkNotNull(harness.billing.launches.lastOrNull()) {
@@ -461,6 +464,14 @@ class PurchaseOutcomeCommitFixtureTest {
             expected.requiredBoolean("completionCarriesProductMapping"),
             completions.isNotEmpty() && completions.all { it.carriesProductMapping(contract) },
         )
+        expected.optionalString("completionJourneyId")?.let { journeyId ->
+            assertTrue(name, completions.isNotEmpty())
+            completions.forEach { assertEquals(name, journeyId, it.properties["journey_id"]) }
+        }
+        expected.optionalString("completionExperienceVersionId")?.let { versionId ->
+            assertTrue(name, completions.isNotEmpty())
+            completions.forEach { assertEquals(name, versionId, it.properties["experience_version_id"]) }
+        }
         assertProductContexts(name, contract, harness)
         assertFixturePayloadMapping(name, contract, vector, harness)
         assertPurchaseRequests(name, contract, harness)

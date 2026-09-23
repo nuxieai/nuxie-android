@@ -237,7 +237,7 @@ class JourneyProfileCatalogTest {
         val locator = releaseEntry.getValue("locator").jsonObject
         val envelope = releaseEntry.getValue("envelope").jsonObject
         return buildJsonObject {
-            put("schemaVersion", "nuxie.journey-plane-profile.v1")
+            put("schemaVersion", "nuxie.journey-plane-profile.v2")
             put("status", "ok")
             putJsonObject("delivery") {
                 put("renderBaseUrl", "https://renders.example.com/")

@@ -563,7 +563,7 @@ internal class ProfileService(
         isCanonical(cached.body)
 
     private fun isCanonical(body: JsonObject): Boolean =
-        body["schemaVersion"] == JsonPrimitive("nuxie.journey-plane-profile.v1")
+        body["schemaVersion"] == JsonPrimitive("nuxie.journey-plane-profile.v2")
 
     private fun loadCached(distinctId: String): CachedProfile? {
         if (resident?.distinctId == distinctId) return resident

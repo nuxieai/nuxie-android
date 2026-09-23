@@ -63,6 +63,13 @@ class NuxieCoreForwardingTest {
     }
 
     private class RecordingStore : EventStore {
+        // These capture/forwarding tests do not install Journey measurement watches.
+        override suspend fun bindConversionAuthority(scope: ai.nuxie.sdk.journey.JourneyStorageScope) = Unit
+        override suspend fun pendingConversionOccurrences(
+            distinctId: String, limit: Int, throughEventId: String?,
+        ): List<ai.nuxie.sdk.events.PendingConversionOccurrence> = emptyList()
+        override suspend fun acknowledgeConversionOccurrence(eventId: String, distinctId: String) = Unit
+
         val pending = CopyOnWriteArrayList<StoredEvent>()
         val accessedAfterClose = AtomicBoolean(false)
         private val closed = AtomicBoolean(false)

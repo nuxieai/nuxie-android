@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.events
 
 import android.content.Context
+import ai.nuxie.sdk.journey.JourneyStorageScope
 import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.SQLiteStatement
 import androidx.sqlite.driver.AndroidSQLiteDriver
@@ -18,17 +19,19 @@ import kotlinx.coroutines.withContext
 internal class SQLiteEventStore(
     context: Context,
     private val writerDispatcher: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1),
-    nowMillis: () -> Long = System::currentTimeMillis,
+    private val nowMillis: () -> Long = System::currentTimeMillis,
     private val databaseFile: File = File(context.filesDir, "nuxie/events.db"),
+    conversionCaptureScope: String = "test-fixture",
 ) : EventStore {
     // A legacy store has no proof about its older rows. Capture the conservative
     // origin before any writes, and retain it durably on subsequent opens.
     private val initialCoverageMillis = nowMillis()
+    private val conversionCaptureScope = "capture-" + conversionCaptureScope
     private var connection: SQLiteConnection? = null
     private var closed = false
 
     override suspend fun insertPending(event: StoredEvent): Unit = onWriter { database ->
-        insertPendingMutation(database, event)
+        database.immediateTransaction { insertPendingMutation(database, event) }
         Unit
     }
 
@@ -97,6 +100,77 @@ internal class SQLiteEventStore(
             statement.bindStoredEvent(event, DELIVERY_PENDING)
             statement.step()
         }
+        stageConversion(database, event)
+    }
+
+    private fun conversionScope(database: SQLiteConnection): String = database.prepare(
+        "SELECT authority_scope FROM conversion_scope_bindings WHERE capture_scope = ?;",
+    ).use {
+        it.bindText(1, conversionCaptureScope)
+        if (it.step()) it.getText(0) else conversionCaptureScope
+    }
+
+    override suspend fun bindConversionAuthority(scope: JourneyStorageScope): Unit = onWriter { database ->
+        database.immediateTransaction {
+            val existing = conversionScope(database)
+            val target = scope.conversionNamespace
+            check(existing == conversionCaptureScope || existing == target) { "Conversion authority changed" }
+            for (sql in listOf(
+                "INSERT OR IGNORE INTO conversion_scope_bindings(authority_scope, capture_scope) VALUES (?, ?);",
+                "UPDATE conversion_event_inbox SET scope = ? WHERE scope = ?;",
+            )) database.prepare(sql).use {
+                it.bindText(1, target); it.bindText(2, conversionCaptureScope); it.step()
+            }
+        }
+    }
+
+    override suspend fun pendingConversionOccurrences(distinctId: String, limit: Int, throughEventId: String?): List<PendingConversionOccurrence> = onWriter { database ->
+        pruneConversion(database, nowMillis())
+        val cutoff = if (throughEventId == null) "" else
+            " AND rowid <= (SELECT rowid FROM conversion_event_inbox WHERE event_id = ?4 AND user_id = ?1 AND scope = ?2)"
+        database.prepare("SELECT event_id, name, properties, timestamp, user_id, session_id, accepted_at FROM conversion_event_inbox WHERE user_id = ?1 AND scope = ?2" + cutoff + " ORDER BY rowid LIMIT ?3;").use {
+            it.bindText(1, distinctId); it.bindText(2, conversionScope(database)); it.bindLong(3, limit.coerceIn(1, 1000).toLong())
+            throughEventId?.let { id -> it.bindText(4, id) }
+            buildList { while (it.step()) add(PendingConversionOccurrence(it.readStoredEvent(), it.getLong(6))) }
+        }
+    }
+
+    override suspend fun acknowledgeConversionOccurrence(eventId: String, distinctId: String): Unit = onWriter { database ->
+        database.prepare("DELETE FROM conversion_event_inbox WHERE event_id = ? AND user_id = ? AND scope = ?;").use {
+            it.bindText(1, eventId); it.bindText(2, distinctId); it.bindText(3, conversionScope(database)); it.step()
+        }
+        Unit
+    }
+
+    private fun pruneConversion(database: SQLiteConnection, now: Long) {
+        require(now >= 0)
+        database.prepare("DELETE FROM conversion_event_inbox WHERE scope = ? AND accepted_at < ?;").use {
+            it.bindText(1, conversionScope(database)); it.bindLong(2, now - PendingConversionOccurrence.RETENTION_MILLIS); it.step()
+        }
+    }
+
+    private fun stageConversion(database: SQLiteConnection, event: StoredEvent) {
+        val acceptedAt = nowMillis()
+        pruneConversion(database, acceptedAt)
+        val scope = conversionScope(database)
+        database.prepare("""INSERT OR IGNORE INTO conversion_event_inbox
+            (event_id, name, properties, timestamp, user_id, session_id, accepted_at, scope)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);""").use {
+            it.bindText(1, event.id); it.bindText(2, event.name); it.bindBlob(3, event.encodedProperties())
+            it.bindLong(4, event.timestampMillis); it.bindText(5, event.distinctId)
+            event.sessionId?.let { session -> it.bindText(6, session) } ?: it.bindNull(6)
+            it.bindLong(7, acceptedAt); it.bindText(8, scope); it.step()
+        }
+        if (database.queryLong("SELECT changes();") == 0L) {
+            database.prepare("SELECT event_id, name, properties, timestamp, user_id, session_id FROM conversion_event_inbox WHERE event_id = ? AND scope = ?;").use {
+                it.bindText(1, event.id); it.bindText(2, scope)
+                check(it.step()) { "Conversion identity conflicts with another scope" }
+                val retained = it.readStoredEvent()
+                check(retained.name == event.name && retained.distinctId == event.distinctId &&
+                    retained.timestampMillis == event.timestampMillis &&
+                    retained.encodedProperties().contentEquals(event.encodedProperties())) { "Conflicting conversion occurrence" }
+            }
+        }
     }
 
     private fun stageLocalRoute(database: SQLiteConnection, eventId: String) {
@@ -139,7 +213,9 @@ internal class SQLiteEventStore(
             statement.bindText(9, event.id)
             statement.step()
         }
-        return database.queryLong("SELECT changes();") == 1L
+        val inserted = database.queryLong("SELECT changes();") == 1L
+        if (inserted) stageConversion(database, event)
+        return inserted
     }
 
     override suspend fun hasStableOutcome(eventId: String): Boolean = onWriter { database ->
@@ -211,7 +287,9 @@ internal class SQLiteEventStore(
             statement.bindStoredEvent(event, DELIVERY_DELIVERED)
             statement.step()
         }
-        return database.queryLong("SELECT changes();") == 1L
+        val inserted = database.queryLong("SELECT changes();") == 1L
+        if (inserted) stageConversion(database, event)
+        return inserted
     }
 
     override suspend fun markDelivered(ids: List<String>) {
@@ -543,6 +621,17 @@ internal class SQLiteEventStore(
         if (version < 4L) database.immediateTransaction {
             database.execute(CREATE_LOCAL_ROUTES_TABLE)
             database.execute("PRAGMA user_version = 4;")
+        }
+        if (version < 5L) database.immediateTransaction {
+            database.execute("""CREATE TABLE conversion_event_inbox (
+                event_id TEXT PRIMARY KEY, name TEXT NOT NULL, properties BLOB NOT NULL,
+                timestamp INTEGER NOT NULL, user_id TEXT NOT NULL, session_id TEXT,
+                accepted_at INTEGER NOT NULL, scope TEXT NOT NULL
+            );""")
+            database.execute("CREATE INDEX idx_conversion_inbox_user ON conversion_event_inbox(scope, user_id);")
+            database.execute("CREATE INDEX idx_conversion_inbox_expiry ON conversion_event_inbox(scope, accepted_at);")
+            database.execute("CREATE TABLE conversion_scope_bindings(capture_scope TEXT PRIMARY KEY, authority_scope TEXT NOT NULL);")
+            database.execute("PRAGMA user_version = 5;")
         }
     }
 

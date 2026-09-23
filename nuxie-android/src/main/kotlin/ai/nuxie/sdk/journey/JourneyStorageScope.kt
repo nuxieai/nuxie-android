@@ -13,6 +13,8 @@ internal class JourneyStorageScope private constructor(
         require(authority.isValid) { "Invalid journey storage authority" }
     }
 
+    val conversionNamespace: String get() = "authority-" + namespaceHash
+
     fun customerDigest(distinctId: String): String =
         digest("$DOMAIN$namespaceHash\u0000$distinctId")
 

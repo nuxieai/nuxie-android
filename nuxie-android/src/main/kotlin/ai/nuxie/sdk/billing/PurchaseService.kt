@@ -486,7 +486,7 @@ internal class PurchaseService(
         evidenceStore.loadBindings()
             .filter { it.outcomeEventId == eventId }
             .forEach { binding ->
-                if (!evidenceStore.upsertBinding(binding.copy(outcomeEventId = null))) {
+                if (!evidenceStore.upsertBinding(binding.copy(outcomeEventId = null, context = binding.context?.copy(journeyId = null)))) {
                     cleared = false
                 }
             }
@@ -604,7 +604,8 @@ internal class PurchaseService(
                     put("product_id", evidence.storeProductIds.first())
                     put("customer_id", distinctId)
                     evidence.context?.experienceId?.let { put("experience_id", it) }
-                    evidence.context?.experienceVersion?.let { put("experience_version", it) }
+                    evidence.context?.experienceVersion?.let { put("experience_version_id", it) }
+                    evidence.context?.journeyId?.let { put("journey_id", it) }
                 }
                 if (!capturePurchaseSynced(
                         SystemEventNames.PURCHASE_SYNCED,
@@ -801,6 +802,7 @@ internal class PurchaseService(
         expectedOwnerDistinctId: String? = null,
         outcomeCorrelation: CommerceOutcomeCorrelation? = null,
     ): PurchaseResult {
+        val product = product.forJourneyCheckout(outcomeCorrelation?.journeyId)
         ensureCheckoutIntakeOpen()
         val initiatingOwner = distinctId()
         if (expectedOwnerDistinctId != null && initiatingOwner != expectedOwnerDistinctId) {
@@ -845,7 +847,7 @@ internal class PurchaseService(
                 outcomeCorrelation?.eventId,
             )
         }
-        products[product.productIdentity()] = product
+        products[product.productIdentity()] = product.forJourneyCheckout(null)
         val owner = initiatingOwner
         val accountId = sha256(owner)
         if (!evidenceStore.upsertProductMapping(product.toMapping()) ||
@@ -1846,7 +1848,8 @@ internal class PurchaseService(
                 put("product_id", current.storeProductIds.firstOrNull().orEmpty())
                 put("customer_id", current.syncedCustomerId.orEmpty())
                 current.context?.experienceId?.let { put("experience_id", it) }
-                current.context?.experienceVersion?.let { put("experience_version", it) }
+                current.context?.experienceVersion?.let { put("experience_version_id", it) }
+                current.context?.journeyId?.let { put("journey_id", it) }
             }
             emit(SystemEventNames.PURCHASE_SYNCED, properties)
             upsertEvidenceLocked(
@@ -2097,6 +2100,8 @@ internal class PurchaseService(
             "placement_id" to evidence.context?.placementId,
             "store_product_id" to evidence.storeProductIds.firstOrNull().orEmpty(),
             "experience_id" to evidence.context?.experienceId,
+            "experience_version_id" to evidence.context?.experienceVersion,
+            "journey_id" to evidence.context?.journeyId,
             "source" to source.wireValue,
             "test_store" to false,
             "transaction_id" to evidence.purchaseToken,
@@ -2116,6 +2121,8 @@ internal class PurchaseService(
             "placement_id" to product.placementId,
             "store_product_id" to product.storeProductId,
             "experience_id" to product.purchaseContext?.experienceId,
+            "experience_version_id" to product.purchaseContext?.experienceVersion,
+            "journey_id" to product.purchaseContext?.journeyId,
             "source" to source.wireValue,
             "test_store" to testStore,
             "transaction_id" to transactionId,
@@ -2221,6 +2228,8 @@ internal class PurchaseService(
             "store_product_id" to product.storeProductId,
             "placement_id" to product.placementId,
             "experience_id" to product.purchaseContext?.experienceId,
+            "experience_version_id" to product.purchaseContext?.experienceVersion,
+            "journey_id" to product.purchaseContext?.journeyId,
             "test_store" to outcome.testStore,
             "price" to price?.amount?.toDouble(),
             "display_price" to price?.display,
@@ -2349,7 +2358,7 @@ internal class PurchaseService(
         offerId = offerId,
         productType = productType,
         consumable = consumable,
-        context = toStoredContext(),
+        context = toStoredContext().copy(journeyId = null),
         featureAllowances = featureAllowances.toStoredAllowances(),
         licensingPublicKey = licensingPublicKey,
     )
@@ -2362,6 +2371,7 @@ internal class PurchaseService(
             purchaseContext?.experienceVersion,
             price?.amount,
             price?.display,
+            purchaseContext?.journeyId,
         )
     }
 

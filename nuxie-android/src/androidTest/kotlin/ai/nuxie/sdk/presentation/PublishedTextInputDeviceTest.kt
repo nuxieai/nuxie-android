@@ -3234,7 +3234,7 @@ class PublishedTextInputDeviceTest {
         fun obj(vararg fields: Pair<String, kotlinx.serialization.json.JsonElement>) = JsonObject(mapOf(*fields))
         val empty = JsonObject(emptyMap())
         return obj(
-            "schemaVersion" to JsonPrimitive("nuxie.journey-plane-profile.v1"), "status" to JsonPrimitive("ok"),
+            "schemaVersion" to JsonPrimitive("nuxie.journey-plane-profile.v2"), "status" to JsonPrimitive("ok"),
             "delivery" to obj("renderBaseUrl" to JsonPrimitive("https://renders.example.com/"), "assetBaseUrl" to JsonPrimitive("https://assets.example.com/")),
             "features" to JsonArray(emptyList()), "facts" to obj("properties" to empty, "memberships" to empty, "assignments" to empty),
             "releases" to JsonArray(listOf(entry)),

@@ -384,7 +384,7 @@ class PurchaseFeatureUseTest {
                 "product_id" to "play-credit-pack",
                 "customer_id" to "customer-a",
                 "experience_id" to "experience-1",
-                "experience_version" to "version-1",
+                "experience_version_id" to "version-1",
             ),
             captured.single().properties,
         )

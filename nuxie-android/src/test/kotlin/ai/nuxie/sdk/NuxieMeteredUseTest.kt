@@ -44,6 +44,13 @@ import java.util.concurrent.atomic.AtomicReference
 @RunWith(RobolectricTestRunner::class)
 class NuxieMeteredUseTest {
     private class RecordingDeliveredStore : EventStore {
+        // These capture/forwarding tests do not install Journey measurement watches.
+        override suspend fun bindConversionAuthority(scope: ai.nuxie.sdk.journey.JourneyStorageScope) = Unit
+        override suspend fun pendingConversionOccurrences(
+            distinctId: String, limit: Int, throughEventId: String?,
+        ): List<ai.nuxie.sdk.events.PendingConversionOccurrence> = emptyList()
+        override suspend fun acknowledgeConversionOccurrence(eventId: String, distinctId: String) = Unit
+
         val delivered = CopyOnWriteArrayList<StoredEvent>()
 
         override suspend fun insertPending(event: StoredEvent) = Unit

@@ -1269,7 +1269,7 @@ internal class ExperiencePresentationService(
                     session.purchase(
                         activity,
                         placementId,
-                        CommerceOutcomeCorrelation(effectId, owner.distinctId),
+                        CommerceOutcomeCorrelation(effectId, owner.distinctId, owner.journeyId),
                     )
                 }
                 JourneyPresentationActionResult.AwaitingOutcome

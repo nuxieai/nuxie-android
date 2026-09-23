@@ -40,6 +40,7 @@ class PurchaseEvidenceStoreTest {
                     "v1",
                     BigDecimal("9.990000"),
                     "€9.99",
+                    "checkout-journey",
                 ),
                 acknowledged = false,
                 syncAttempts = 1,

@@ -51,7 +51,7 @@ internal fun canonicalJourneyProfileText(features: String = "[]"): String {
         )
     }
     return buildJsonObject {
-        put("schemaVersion", JsonPrimitive("nuxie.journey-plane-profile.v1"))
+        put("schemaVersion", JsonPrimitive("nuxie.journey-plane-profile.v2"))
         put("status", JsonPrimitive("ok"))
         put("delivery", buildJsonObject {
             put("renderBaseUrl", JsonPrimitive("https://render.example/"))

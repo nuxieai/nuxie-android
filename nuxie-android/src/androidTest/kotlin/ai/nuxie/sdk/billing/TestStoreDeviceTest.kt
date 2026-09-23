@@ -253,7 +253,7 @@ class TestStoreDeviceTest {
         fun obj(vararg fields: Pair<String, JsonElement>) = JsonObject(mapOf(*fields))
         val empty = JsonObject(emptyMap())
         return obj(
-            "schemaVersion" to JsonPrimitive("nuxie.journey-plane-profile.v1"), "status" to JsonPrimitive("ok"),
+            "schemaVersion" to JsonPrimitive("nuxie.journey-plane-profile.v2"), "status" to JsonPrimitive("ok"),
             "delivery" to obj("renderBaseUrl" to JsonPrimitive("https://test-store-fixture.example/"),
                 "assetBaseUrl" to JsonPrimitive("https://test-store-fixture.example/")),
             "features" to JsonArray(emptyList()), "facts" to obj("properties" to empty, "memberships" to empty, "assignments" to empty),

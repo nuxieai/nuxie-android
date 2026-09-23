@@ -1273,13 +1273,14 @@ class PurchaseServiceTest {
     fun JourneyCheckoutUsesItsClaimedEffectIdForTheTerminalPurchaseEvent() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()
+        val catalogProduct = product()
         val checkout = async {
             fixture.service.purchase(
                 activity(),
-                product(),
+                catalogProduct,
                 null,
                 expectedOwnerDistinctId = owner,
-                outcomeCorrelation = CommerceOutcomeCorrelation("journey-effect", owner),
+                outcomeCorrelation = CommerceOutcomeCorrelation("journey-effect", owner, "checkout-journey"),
             )
         }
         runCurrent()
@@ -1289,6 +1290,10 @@ class PurchaseServiceTest {
 
         assertEquals(PurchaseResult.Purchased, checkout.await())
         assertEquals(listOf("journey-effect"), fixture.purchaseCompletionEventIds)
+        assertEquals("checkout-journey", fixture.store.load().getValue("journey-correlated").context?.journeyId)
+        assertNull(fixture.store.loadBindings().single().context?.journeyId)
+        assertNull(fixture.store.loadProductMappings().single().context?.journeyId)
+        assertNull(catalogProduct.purchaseContext?.journeyId)
         assertEquals(
             "journey-effect",
             fixture.store.load().getValue("journey-correlated").checkoutCompletionEventId,

@@ -289,7 +289,7 @@ class ProfileServiceTest {
         etag?.let { headers["ETag"] = it }
         val root = runCatching { Json.parseToJsonElement(body).jsonObject }.getOrNull()
             ?: return headers
-        if (root["schemaVersion"] != JsonPrimitive("nuxie.journey-plane-profile.v1")) {
+        if (root["schemaVersion"] != JsonPrimitive("nuxie.journey-plane-profile.v2")) {
             return headers
         }
         val locator = root["releases"]?.jsonArray?.firstOrNull()?.jsonObject
@@ -359,7 +359,7 @@ class ProfileServiceTest {
             )
         }
         val body = buildJsonObject {
-            put("schemaVersion", "nuxie.journey-plane-profile.v1")
+            put("schemaVersion", "nuxie.journey-plane-profile.v2")
             put("status", "ok")
             putJsonObject("delivery") {
                 put("renderBaseUrl", "https://renders.example.com/")
@@ -432,7 +432,7 @@ class ProfileServiceTest {
             respond = {
                 HttpTransport.Response(
                     200,
-                    """{"schemaVersion":"nuxie.journey-plane-profile.v1","status":"ok","delivery":{"renderBaseUrl":"https://render.example/","assetBaseUrl":"https://assets.example/"},"features":[],"facts":{"properties":{},"memberships":{},"assignments":{}},"armedLegs":[],"armedLegs":[],"releases":[]}""".encodeToByteArray(),
+                    """{"schemaVersion":"nuxie.journey-plane-profile.v2","status":"ok","delivery":{"renderBaseUrl":"https://render.example/","assetBaseUrl":"https://assets.example/"},"features":[],"facts":{"properties":{},"memberships":{},"assignments":{}},"armedLegs":[],"armedLegs":[],"releases":[]}""".encodeToByteArray(),
                 )
             }
         }

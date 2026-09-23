@@ -21,7 +21,7 @@ internal object JourneySchemaValidator {
     fun validate(value: JsonObject) {
         val root = exact(value, setOf("schemaVersion", "identity", "metadata", "presentation", "leg", "products",
             "placements", "viewModelValues", "screenBehaviors", "render", "requirements", "provenance"))
-        if (text(root["schemaVersion"]) != "nuxie.journey-release.v1") fail("descriptor version")
+        if (text(root["schemaVersion"]) != "nuxie.journey-release.v2") fail("descriptor version")
         JourneyReleaseSchema.validate(root)
         val leg = exact(root["leg"], setOf("schemaVersion", "id", "entryCondition", "entryStepId", "steps", "routes",
             "screens", "policy", "offers", "facts", "inputs", "outputs", "completionOutputs"))

@@ -46,6 +46,7 @@ internal data class StoredPurchaseContext(
     val experienceVersion: String? = null,
     val price: BigDecimal? = null,
     val displayPrice: String? = null,
+    val journeyId: String? = null,
 )
 
 internal data class StoredFeatureAllowance(
@@ -478,6 +479,7 @@ internal class FilePurchaseEvidenceStore(
         context.placementId?.let { put("placementId", JsonPrimitive(it)) }
         context.experienceId?.let { put("experienceId", JsonPrimitive(it)) }
         context.experienceVersion?.let { put("experienceVersion", JsonPrimitive(it)) }
+        context.journeyId?.let { put("journeyId", JsonPrimitive(it)) }
         context.price?.let { put("price", JsonPrimitive(it.toPlainString())) }
         context.displayPrice?.let { put("displayPrice", JsonPrimitive(it)) }
     })
@@ -488,6 +490,7 @@ internal class FilePurchaseEvidenceStore(
         raw.string("experienceVersion"),
         raw.string("price")?.toBigDecimalOrNull(),
         raw.string("displayPrice"),
+        raw.string("journeyId"),
     )
 
     private fun JsonObject.boolean(key: String): Boolean =

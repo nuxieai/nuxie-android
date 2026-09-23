@@ -45,7 +45,7 @@ internal class ExampleFeatureServer : AutoCloseable {
         when {
           path == "/profile" && !rejectProfiles -> {
             status = 200
-            response = """{"schemaVersion":"nuxie.journey-plane-profile.v1","status":"ok","delivery":{"renderBaseUrl":"https://render.example/","assetBaseUrl":"https://assets.example/"},"features":[{"id":"exports","type":"metered","balance":$balance,"unlimited":false,"nextResetAt":null,"interval":null}],"facts":{"properties":{},"memberships":{},"assignments":{}},"armedLegs":[],"releases":[]}"""
+            response = """{"schemaVersion":"nuxie.journey-plane-profile.v2","status":"ok","delivery":{"renderBaseUrl":"https://render.example/","assetBaseUrl":"https://assets.example/"},"features":[{"id":"exports","type":"metered","balance":$balance,"unlimited":false,"nextResetAt":null,"interval":null}],"facts":{"properties":{},"memberships":{},"assignments":{}},"armedLegs":[],"releases":[]}"""
           }
           path == "/entitled" -> {
             status = 200

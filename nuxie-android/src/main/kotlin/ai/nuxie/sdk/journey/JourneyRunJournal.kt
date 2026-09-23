@@ -1,6 +1,8 @@
 package ai.nuxie.sdk.journey
 
 import ai.nuxie.sdk.presentation.JourneyScreenEmissionSource
+import ai.nuxie.sdk.events.PendingConversionOccurrence
+import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.TimeBasedEpochGenerator
 import ai.nuxie.sdk.experiences.CacheFilesystemLock
 import ai.nuxie.sdk.experiences.JourneyReleaseDelivery
@@ -131,6 +133,8 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         val runs: MutableMap<String, JourneyRun> = linkedMapOf(),
         val checklist: MutableMap<String, JourneyCheckmark> = linkedMapOf(),
         val stateArmReceipts: MutableSet<String> = linkedSetOf(),
+        val conversionWatches: MutableMap<String, JourneyConversionWatch> = linkedMapOf(),
+        val conversionReceipts: MutableMap<String, Long> = linkedMapOf(),
     )
 
     /** The caller authenticates the arm's release before admitting it here. */
@@ -144,6 +148,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         stateArmReceipt: String? = null,
         artifactDigests: Set<String> = emptySet(),
         retainArtifacts: ((JourneyRun) -> Unit)? = null,
+        policy: JsonObject? = null,
     ): JourneyRun? = update { state ->
         if (revocationFile.exists()) return@update null
         if (stateArmReceipt != null && stateArmReceipt in state.stateArmReceipts) {
@@ -195,11 +200,50 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             artifactDigests = artifactDigests,
         )
         if (state.runs.containsKey(run.id)) return@update null
+        val executing = state.runs.values.map { it.journeyId }.toSet()
+        state.conversionWatches.entries.removeAll { !it.value.shouldRetain(atMillis, it.key in executing) }
+        if (policy?.containsKey("goal") == true) {
+            val candidate = JourneyConversionWatch.create(run, policy, arm.conversion)
+            val existing = state.conversionWatches[journeyId]
+            if (existing == null) {
+                if (state.conversionWatches.size >= 4096) throw IOException("Journey conversion watch limit exceeded")
+                state.conversionWatches[journeyId] = candidate
+            } else {
+                check(existing.policyHash == candidate.policyHash && existing.experienceId == candidate.experienceId &&
+                    existing.versionId == candidate.versionId && existing.startedAt == candidate.startedAt)
+                val reconciled = arm.conversion?.let(existing::reconcile) ?: existing
+                state.conversionWatches[journeyId] = reconciled.copy(legCompletedAt = null)
+            }
+        }
         retainArtifacts?.invoke(run)
         if (release != null) retainReleasePin(release, arm, state)
         state.runs[run.id] = run
         stateArmReceipt?.let(state.stateArmReceipts::add)
         run
+    }
+
+    fun conversionWatches(): Map<String, JourneyConversionWatch> = read { it.conversionWatches.toMap() }
+
+    /** Caller must hold its identity and execution fences through this commit. */
+    fun recordConversionOccurrence(
+        event: StoredEvent,
+        acceptedAt: Long,
+        matching: Set<String>,
+        processingAt: Long = acceptedAt,
+    ) {
+        require(event.distinctId == distinctId)
+        update { state ->
+            val floor = processingAt - PendingConversionOccurrence.RETENTION_MILLIS
+            state.conversionReceipts.entries.removeAll { it.value < floor }
+            val executing = state.runs.values.mapTo(mutableSetOf()) { it.journeyId }
+            state.conversionWatches.entries.removeAll {
+                !it.value.shouldRetain(processingAt, it.key in executing)
+            }
+            if (event.id !in state.conversionReceipts) {
+                JourneyConversionWatch.apply(event, acceptedAt, matching, state.conversionWatches)
+                state.conversionReceipts[event.id] = acceptedAt
+            }
+        }
     }
 
     fun runs(): List<JourneyRun> = read { it.runs.values.sortedBy(JourneyRun::startedEventId) }
@@ -556,6 +600,9 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             newer?.lastSeenLiveAtMillis ?: completion.atMillis,
         )
         state.runs.remove(current.id)
+        state.conversionWatches[current.journeyId]?.let { watch ->
+            state.conversionWatches[current.journeyId] = watch.copy(legCompletedAt = completion.atMillis)
+        }
         Unit
     }
 
@@ -581,6 +628,8 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     private fun persist(state: Snapshot) {
         val bytes = buildJsonObject {
             put("schemaVersion", JsonPrimitive(VERSION))
+            put("conversionWatches", JsonObject(state.conversionWatches.mapValues { it.value.toJson() }))
+            put("conversionReceipts", JsonObject(state.conversionReceipts.mapValues { JsonPrimitive(it.value) }))
             put("runs", JsonObject(state.runs.mapValues { encodeRun(it.value) }))
             put("checklist", JsonObject(state.checklist.mapValues { encodeCheckmark(it.value) }))
             put("stateArmReceipts", JsonArray(state.stateArmReceipts.sorted().map(::JsonPrimitive)))
@@ -648,7 +697,14 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         val receipts = (value["stateArmReceipts"] as? JsonArray).orEmpty().mapTo(linkedSetOf()) {
             it.jsonPrimitive.content
         }
-        return Snapshot(runs, checklist, receipts)
+        val watches = value.getValue("conversionWatches").jsonObject.mapValues {
+            JourneyConversionWatch.fromJson(it.value.jsonObject)
+        }.toMutableMap()
+        check(watches.all { (id, watch) -> id == watch.journeyId })
+        val conversionReceipts = value.getValue("conversionReceipts").jsonObject.mapValues {
+            it.value.jsonPrimitive.long
+        }.toMutableMap()
+        return Snapshot(runs, checklist, receipts, watches, conversionReceipts)
     }
 
     private fun encodeRun(run: JourneyRun) = buildJsonObject {
