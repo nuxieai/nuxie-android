@@ -9,6 +9,30 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyPlaneProfileTest {
+    @Test fun `shared conversion delivery vectors preserve original measurement`() {
+        val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/conversion-delivery.json").readText()).jsonObject
+        for (element in corpus.getValue("vectors").jsonArray) {
+            val vector = element.jsonObject
+            val root = fixture()
+            val arms = root.getValue("armedLegs").jsonArray
+            val original = arms.first().jsonObject
+            val binding = if (vector.getValue("bindingType").jsonPrimitive.content == "new")
+                buildJsonObject { put("type", "new") } else original.getValue("binding")
+            val arm = JsonObject(original + mapOf("binding" to binding, "conversion" to vector.getValue("conversion")))
+            val bytes = JsonObject(root + ("armedLegs" to JsonArray(listOf(arm)))).toString().encodeToByteArray()
+            if (vector.getValue("valid").jsonPrimitive.boolean) {
+                val conversion = checkNotNull(JourneyPlaneProfile.decode(bytes).armedLegs.single().conversion)
+                assertEquals(100L, conversion.startedAt)
+                assertEquals(3L, conversion.revision)
+                val expected = vector.getValue("conversion").jsonObject
+                assertEquals(expected["basis"]?.jsonObject?.get("eventId")?.jsonPrimitive?.content, conversion.basis?.eventId)
+                assertEquals(expected["conversion"]?.jsonObject?.get("eventId")?.jsonPrimitive?.content, conversion.conversion?.eventId)
+            } else assertThrows(vector.getValue("name").jsonPrimitive.content,
+                JourneyReleaseAuthenticationException::class.java) { JourneyPlaneProfile.decode(bytes) }
+        }
+    }
+
     private fun fixture(): JsonObject {
         val golden = Json.parseToJsonElement(FixtureRunner.fixturesRoot().resolve("journeys/planes/release.json").readText()).jsonObject
         val entry = golden.getValue("entry").jsonObject
