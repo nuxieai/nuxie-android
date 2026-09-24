@@ -335,8 +335,8 @@ class JourneyServiceTest {
         val presenter = RecordingJourneyPresenter()
         val service = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
             journalDirectory = directory, scope = scope, capture = { name, _, _, _ -> captures += name; true },
-            captureScreenEvent = { name, properties, eventId, distinctId, occurredAt, admission ->
-                val event = StoredEvent(eventId, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId)
+            captureScreenEvent = { name, properties, eventId, distinctId, occurredAt, admission, origin ->
+                val event = StoredEvent(eventId, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId, journeyOrigin = origin)
                 val settled = admission?.commitIfCurrent { true } != null
                 StableEventCaptureResult(settled, event.takeIf { settled })
             }, presenter = presenter, nowMillis = { clock.get() })
@@ -397,13 +397,14 @@ class JourneyServiceTest {
                 systemCaptures += name
                 true
             },
-            captureScreenEvent = { name, properties, eventId, distinctId, occurredAt, admission ->
+            captureScreenEvent = { name, properties, eventId, distinctId, occurredAt, admission, origin ->
                 val event = StoredEvent(
                     id = eventId,
                     name = name,
                     properties = JsonValueConverter.fromMap(properties),
                     timestampMillis = occurredAt,
                     distinctId = distinctId,
+                    journeyOrigin = origin,
                 )
                 val settled = admission?.commitIfCurrent {
                     ordinaryCaptures.putIfAbsent(eventId, event)
@@ -453,6 +454,15 @@ class JourneyServiceTest {
         assertEquals(1L, retained.nextPresentationBatchSequence)
         assertEquals(1L, retained.nextPresentationEmissionSequence)
         assertEquals(setOf("emission-1"), ordinaryCaptures.keys)
+        val origin = requireNotNull(ordinaryCaptures.getValue("emission-1").journeyOrigin)
+        assertEquals("screen_control", origin.source)
+        assertEquals(run.journeyId, origin.journeyId)
+        assertEquals(run.generation, origin.generation)
+        assertEquals("screen_welcome", origin.screenId)
+        assertEquals("submit", origin.actionId)
+        assertEquals("invocation-1", origin.invocationId)
+        assertEquals("emission-1", origin.occurrenceId)
+        assertNull(origin.stepId)
         val properties = ordinaryCaptures.getValue("emission-1").properties
         assertEquals(run.journeyId, properties.getValue("journey_id").jsonPrimitive.content)
         assertEquals("screen_welcome", properties.getValue("screen_id").jsonPrimitive.content)
@@ -515,8 +525,8 @@ class JourneyServiceTest {
             val service = JourneyService(identity = identity(customer), events = store,
                 catalog = catalog, journalDirectory = directory, scope = scope,
                 capture = { _, _, _, _ -> true },
-                captureScreenEvent = { name, properties, eventId, distinctId, occurredAt, admission ->
-                    val event = StoredEvent(eventId, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId)
+                captureScreenEvent = { name, properties, eventId, distinctId, occurredAt, admission, origin ->
+                    val event = StoredEvent(eventId, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId, journeyOrigin = origin)
                     val settled = admission?.commitIfCurrent {
                         captured.putIfAbsent(eventId, event)
                         true
@@ -681,6 +691,16 @@ class JourneyServiceTest {
                 expected.getValue("replay_customer_event_count").jsonPrimitive.long,
                 replayedCustomerEvents.size.toLong(),
             )
+            for (event in replayedCustomerEvents) {
+                val origin = requireNotNull(event.journeyOrigin)
+                assertEquals("screen_control", origin.source)
+                assertEquals(run.journeyId, origin.journeyId)
+                assertEquals(run.generation, origin.generation)
+                assertEquals(publication.sourceScreenId, origin.screenId)
+                assertEquals(publication.sourceActionId, origin.actionId)
+                assertEquals("fixture-recovery-invocation", origin.invocationId)
+                assertEquals(event.id, origin.occurrenceId)
+            }
             assertEquals(customerEventIds, replayedCustomerEvents.map { it.id })
             assertEquals(eventEffects.map { it.getValue("name").jsonPrimitive.content },
                 replayedCustomerEvents.map { it.name })
@@ -1653,7 +1673,7 @@ class JourneyServiceTest {
                 order += if (eventId == retained.startedEventId) "started" else if (eventId == retained.completedEventId) "completed" else eventId
                 !(fail && failureMode == "capture")
             }, nowMillis = { 100_000L }, beforeAdmission = { order += "fresh-admission" },
-            captureScreenEvent = { _, _, _, _, _, _ ->
+            captureScreenEvent = { _, _, _, _, _, _, _ ->
                 recovering.complete(Unit)
                 releaseRecovery.await()
                 order += "presentation"

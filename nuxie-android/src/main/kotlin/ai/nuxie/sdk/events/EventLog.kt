@@ -464,6 +464,7 @@ internal class EventLog(
         distinctId: String,
         occurredAtMillis: Long,
         admission: StableEventCommitAdmission?,
+        journeyOrigin: JourneyEventOrigin? = null,
     ): StableEventCaptureResult = captureStable(
         name,
         properties,
@@ -472,6 +473,7 @@ internal class EventLog(
         applyBeforeSend = true,
         occurredAtMillis = occurredAtMillis,
         commitAdmission = admission,
+        journeyOrigin = journeyOrigin,
     )
 
     /** Durably captures a required SDK-authored system event without host interception. */

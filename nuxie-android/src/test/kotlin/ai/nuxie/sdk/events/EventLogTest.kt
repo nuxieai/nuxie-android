@@ -182,9 +182,17 @@ class EventLogTest {
     }
 
     @Test fun authoredOriginSurvivesRedactionRoutingReopenAndDelivery(): Unit = runBlocking {
+        verifyOriginRecovery(JourneyEventOrigin("journey", "experience", "version", "leg", 0, "step", "event"))
+    }
+
+    @Test fun rendererOriginSurvivesRedactionRoutingReopenAndDelivery(): Unit = runBlocking {
+        verifyOriginRecovery(JourneyEventOrigin("journey", "experience", "version", "leg", 0, null, "event",
+            screenId = "screen", actionId = "continue", invocationId = "invocation-1"))
+    }
+
+    private suspend fun verifyOriginRecovery(origin: JourneyEventOrigin) {
         val context = org.robolectric.RuntimeEnvironment.getApplication()
         val database = java.io.File(context.cacheDir, "origin-${java.util.UUID.randomUUID()}.db")
-        val origin = JourneyEventOrigin("journey", "experience", "version", "leg", 0, "step", "event")
         val admission = StableEventCommitAdmission { it() }
         val firstStore = SQLiteEventStore(context, databaseFile = database)
         val first = log(firstStore, beforeSend = { event ->
