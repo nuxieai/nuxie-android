@@ -163,6 +163,152 @@ class JourneyServiceTest {
         assertEquals(listOf(event.id), store.pendingBatch(10).map { it.id })
     }
 
+    @Test fun `lapsed access permits every match reentry after prior conversion`() = runBlocking {
+        assertReentryAfterConversion("every_match", 2)
+    }
+
+    @Test fun `lapsed access preserves one time frequency after prior conversion`() = runBlocking {
+        assertReentryAfterConversion("one_time", 1)
+    }
+
+    private suspend fun assertReentryAfterConversion(frequency: String, expectedStarts: Int) {
+        val clock = java.util.concurrent.atomic.AtomicLong(100_000L)
+        store.close()
+        store = SQLiteEventStore(context, nowMillis = { clock.get() })
+        val owned = java.util.concurrent.atomic.AtomicBoolean(false)
+        val condition = Json.parseToJsonElement("""{
+          "type":"app_foregrounded","condition":{"ir_version":1,
+          "expr":{"type":"Not","arg":{"type":"Feature","op":"has","id":"premium"}}}
+        }""").jsonObject
+        val keys = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val publication = policyPublication(keys, 1, "acquired", 1_440, frequency, condition)
+        val catalog = policyCatalog(keys)
+        catalog.commit("customer", catalog.prepare(profile(condition, publication), authority))
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val starts = CopyOnWriteArrayList<String>()
+        val service = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
+            journalDirectory = directory, scope = scope, nowMillis = { clock.get() },
+            capture = { name, properties, _, _ ->
+                if (name == JourneyEventNames.LEG_STARTED) starts += requireNotNull(properties["journey_id"] as? String)
+                true
+            }, featureAccess = {
+                ai.nuxie.sdk.features.FeatureAccess(owned.get(), true, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN)
+            })
+        service.initialize()
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(snapshot, authority, "customer", 1)
+        assertEquals(1, starts.size)
+        val originalJourney = starts.single()
+        clock.set(100_100L)
+        val outcome = StoredEvent("first-acquisition", "acquired", timestampMillis = clock.get(), distinctId = "customer")
+        store.insertPending(outcome)
+        assertTrue(service.handleEvent(outcome, service.eventAdmissionGeneration()))
+        val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(authority))
+        assertEquals(outcome.id, journal.conversionWatches().getValue(originalJourney).conversion?.eventId)
+        owned.set(true)
+        service.onAppDidEnterBackground()
+        service.onAppWillEnterForeground()
+        assertEquals(1, starts.size)
+        owned.set(false)
+        clock.set(100_200L)
+        service.onAppDidEnterBackground()
+        service.onAppWillEnterForeground()
+        assertEquals(expectedStarts, starts.size)
+        val retained = journal.conversionWatches()
+        assertEquals(outcome.id, retained.getValue(originalJourney).conversion?.eventId)
+        assertEquals(1, retained.values.count { it.conversion != null })
+    }
+
+    @Test fun `signed republish preserves earlier goal and window during native admission`() = runBlocking {
+        val clock = java.util.concurrent.atomic.AtomicLong(1_000_000L)
+        store.close()
+        store = SQLiteEventStore(context, nowMillis = { clock.get() })
+        val keys = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val catalog = policyCatalog(keys)
+        val service = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
+            journalDirectory = directory, scope = scope, capture = { _, _, _, _ -> true }, nowMillis = { clock.get() })
+        service.initialize()
+        service.onAppWillEnterForeground()
+        val publications = listOf(
+            policyPublication(keys, 1, "earlier_done", 1),
+            policyPublication(keys, 2, "newer_done", 60),
+        )
+        publications.forEachIndexed { index, publication ->
+            catalog.commit("customer", catalog.prepare(profile(releaseEntry = publication), authority))
+            service.profileDidCommit(requireNotNull(catalog.snapshot("customer")), authority, "customer", index + 1L)
+            clock.addAndGet(100_000L)
+        }
+        val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(authority))
+        val watches = journal.conversionWatches()
+        assertEquals(2, watches.size)
+        val earlier = watches.values.single { it.versionId == "version_policy_1" }
+        val newer = watches.values.single { it.versionId == "version_policy_2" }
+        suspend fun deliver(name: String, id: String, at: Long) {
+            val event = StoredEvent(id, name, timestampMillis = at, distinctId = "customer")
+            store.insertPendingIfAbsent(event)
+            assertTrue(service.handleEvent(event, service.eventAdmissionGeneration()))
+        }
+        deliver("earlier_done", "outside-earlier-window", 1_120_000L)
+        deliver("newer_done", "newer-outcome", 1_120_000L)
+        val afterNew = journal.conversionWatches()
+        assertNull(afterNew.getValue(earlier.journeyId).conversion)
+        assertEquals("newer-outcome", afterNew.getValue(newer.journeyId).conversion?.eventId)
+        deliver("earlier_done", "delayed-earlier-outcome", 1_010_000L)
+        deliver("earlier_done", "delayed-earlier-outcome", 1_010_000L)
+        val retained = JourneyRunJournal(directory, "customer", JourneyStorageScope(authority)).conversionWatches()
+        assertEquals("delayed-earlier-outcome", retained.getValue(earlier.journeyId).conversion?.eventId)
+        assertEquals("newer-outcome", retained.getValue(newer.journeyId).conversion?.eventId)
+    }
+
+    private fun policyCatalog(keys: java.security.KeyPair) = JourneyProfileCatalog(
+        mapOf("TEST_ONLY_POLICY" to keys.public.encoded.takeLast(32).toByteArray()),
+        JourneyReleaseHighWaterStore(context),
+    ) { runtime(entry) }
+
+    private fun policyPublication(
+        keys: java.security.KeyPair, sequence: Int, event: String, minutes: Int,
+        frequency: String = "every_match",
+        condition: JsonObject = buildJsonObject { put("type", "app_foregrounded") },
+    ): JsonObject {
+        val envelope = entry.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(
+            envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP,
+        ).decodeToString()).jsonObject
+        val originalIdentity = source.getValue("identity").jsonObject
+        val changedIdentity = JsonObject(originalIdentity + mapOf(
+            "experienceVersionId" to JsonPrimitive("version_policy_$sequence"),
+            "buildId" to JsonPrimitive("build_policy_$sequence"),
+            "versionNumber" to JsonPrimitive(originalIdentity.getValue("versionNumber").jsonPrimitive.int + sequence),
+            "publishedAtSeq" to JsonPrimitive(originalIdentity.getValue("publishedAtSeq").jsonPrimitive.long + sequence),
+        ))
+        val policy = Json.parseToJsonElement("""{
+          "entry":{"trigger":{"type":"event","eventName":"${'$'}app_opened"},"frequency":{"type":"$frequency"}},
+          "goal":{"criterion":{"type":"event","eventName":"$event"},"attribution":{"basis":"entry","window":{"amount":$minutes,"unit":"minute"}}},
+          "exitWhenAny":[]
+        }""")
+        val leg = JsonObject(source.getValue("leg").jsonObject + mapOf("policy" to policy, "entryCondition" to condition))
+        val descriptor = JsonObject(source + mapOf("identity" to changedIdentity, "leg" to leg))
+        val bytes = descriptor.toString().encodeToByteArray()
+        val signature = java.security.Signature.getInstance("Ed25519").run {
+            initSign(keys.private)
+            update(ai.nuxie.sdk.experiences.JourneyReleaseLimits.SIGNATURE_DOMAIN.encodeToByteArray() + bytes)
+            sign()
+        }
+        return JsonObject(entry + mapOf(
+            "locator" to JsonObject(entry.getValue("locator").jsonObject + changedIdentity),
+            "envelope" to JsonObject(envelope + mapOf(
+                "descriptorBytesBase64" to JsonPrimitive(Base64.encodeToString(bytes, Base64.NO_WRAP)),
+                "descriptorSizeBytes" to JsonPrimitive(bytes.size),
+                "descriptorSha256" to JsonPrimitive(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(bytes).joinToString("") { "%02x".format(it) }),
+                "signature" to buildJsonObject {
+                    put("version", 1); put("algorithm", "ed25519"); put("keyId", "TEST_ONLY_POLICY")
+                    put("signatureBase64", Base64.encodeToString(signature, Base64.NO_WRAP))
+                },
+            )),
+        ))
+    }
+
     @Test fun `startup measurement stops at the earliest pending local route`() = runBlocking {
         store.close()
         store = SQLiteEventStore(context, nowMillis = { 100_500L })
