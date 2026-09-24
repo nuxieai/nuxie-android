@@ -1083,8 +1083,13 @@ internal class JourneyService(
             }
         }
 
+    private fun exposureReporter(target: JourneyRunJournal) = JourneyExperimentExposureReporter(target) {
+        name, properties, eventId, distinctId, occurredAt ->
+        capturePresentationEvent(name, properties, eventId, distinctId, occurredAt, null).settled
+    }
+
     private suspend fun flushPendingReports(target: JourneyRunJournal): Boolean {
-        val exposures = JourneyExperimentExposureReporter(target, capture).flushPending()
+        val exposures = exposureReporter(target).flushPending()
         val lifecycle = reporter(target).flushPending()
         return exposures && lifecycle
     }
@@ -2137,39 +2142,25 @@ internal class JourneyService(
 
     private fun experimentExposure(
         selection: JourneyControlExecutor.ExperimentSelection,
+        stepId: String,
     ): JourneyRun.ExperimentExposure = JourneyRun.ExperimentExposure(
         experimentId = selection.experimentId,
+        stepId = stepId,
         variantId = selection.variantId,
         isHoldout = selection.isHoldout,
         kind = when (selection.source) {
             JourneyControlExecutor.ExperimentSelection.Source.PROFILE ->
                 JourneyRun.ExperimentExposure.Kind.ASSIGNED
+            JourneyControlExecutor.ExperimentSelection.Source.OVERRIDE ->
+                JourneyRun.ExperimentExposure.Kind.OVERRIDE
+            JourneyControlExecutor.ExperimentSelection.Source.FIXED ->
+                JourneyRun.ExperimentExposure.Kind.FIXED
             JourneyControlExecutor.ExperimentSelection.Source.FALLBACK ->
                 JourneyRun.ExperimentExposure.Kind.FALLBACK
         },
         eventId = UUID.randomUUID().toString().lowercase(),
         selectedAtMillis = nowMillis(),
     )
-
-    private suspend fun markExperimentExposuresShown(
-        runId: String,
-        screenId: String,
-        executionFenceToken: JourneyExecutionFenceToken,
-    ) {
-        val target = checkNotNull(journal) { "Journey journal is unavailable" }
-        check(isExecutionCurrent(executionFenceToken, target)) {
-            "Journey execution authority changed before reveal"
-        }
-        val identityScope = identity.captureScope()
-        check(identityScope.distinctId == target.distinctId) {
-            "Journey identity changed before reveal"
-        }
-        val marked = publishJournalIfCurrent(executionFenceToken, identityScope) {
-            target.markExperimentExposuresShown(runId, screenId, nowMillis())
-        }
-        checkNotNull(marked) { "Journey exposure reveal was rejected" }
-        JourneyExperimentExposureReporter(target, capture).flushPending()
-    }
 
     private suspend fun presentScreen(
         currentRun: JourneyRun,
@@ -2183,7 +2174,7 @@ internal class JourneyService(
         transition: JsonObject? = null,
     ): PresentedScreen? {
         val presentation = presenter ?: return null
-        val run = target.preparePresentation(currentRun.id, screenId) ?: run {
+        val run = target.preparePresentation(currentRun.id) ?: run {
             reservation?.close()
             return null
         }
@@ -2221,13 +2212,6 @@ internal class JourneyService(
                             revealingScreenId = revealingScreenId,
                             method = method,
                             release = release,
-                            executionFenceToken = executionToken,
-                        )
-                    },
-                    onPresentationRevealed = { revealedScreenId ->
-                        markExperimentExposuresShown(
-                            runId = runId,
-                            screenId = revealedScreenId,
                             executionFenceToken = executionToken,
                         )
                     },
@@ -2330,7 +2314,7 @@ internal class JourneyService(
                                     it.experimentId == selection.experimentId
                                 }
                             }
-                            ?.let(::experimentExposure)
+                            ?.let { experimentExposure(it, run.stepId) }
                         target.transition(
                             run.id,
                             result.stepId,
@@ -2349,6 +2333,10 @@ internal class JourneyService(
                                 run.experimentExposures + exposure
                             },
                         )
+                        if (exposure != null) {
+                            runCatching { exposureReporter(target).flushPending() }
+                                .onFailure { Log.w(LOG_TAG, "Journey selector exposure remains pending", it) }
+                        }
                         checkpoint = null
                     }
                     is JourneyControlExecutor.Result.Park -> {

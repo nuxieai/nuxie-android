@@ -1293,7 +1293,7 @@ class JourneyServiceTest {
             )
         }
 
-    @Test fun `presentation reveal publishes only exposures bound to that screen`() =
+    @Test fun `foreground recovery reports selector exposure without a reveal`() =
         runBlocking {
             val identity = identity("customer")
             val renderedEntry = fixture.getValue("renderedEntry").jsonObject
@@ -1331,6 +1331,7 @@ class JourneyServiceTest {
                 run.stepId,
                 run.context,
                 experimentExposure = JourneyRun.ExperimentExposure(
+                    stepId = "selector",
                     experimentId = "checkout",
                     variantId = "treatment",
                     isHoldout = true,
@@ -1339,13 +1340,14 @@ class JourneyServiceTest {
                     selectedAtMillis = 99_000L,
                 ),
             )
-            journal.preparePresentation(run.id, "screen_welcome")
+            journal.preparePresentation(run.id)
             val request = requireNotNull(presenter.request)
 
             request.onPresentationRevealed("different_screen")
             assertTrue(captures.none { it.first == JourneyEventNames.EXPERIMENT_EXPOSURE })
 
-            request.onPresentationRevealed("screen_welcome")
+            service.onAppDidEnterBackground()
+            service.onAppWillEnterForeground()
             request.onPresentationRevealed("screen_welcome")
 
             val exposures = captures.filter {
@@ -1357,7 +1359,6 @@ class JourneyServiceTest {
             assertEquals("profile", exposures.single().second["assignment_source"])
             assertEquals(true, exposures.single().second["is_holdout"])
             val persisted = journal.runs().single().experimentExposures.single()
-            assertEquals(100_000L, persisted.shownAtMillis)
             assertTrue(persisted.queued)
         }
 

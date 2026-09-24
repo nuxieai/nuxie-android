@@ -96,7 +96,7 @@ class JourneyControlExecutorTest {
         )
         val assignments = listOf(
             """{"experiment_new":null}""",
-            """{"experiment_new":{"variantId":"removed","isHoldout":true}}""",
+            """{"experiment_new":{"variantId":"removed","isHoldout":true,"source":"profile"}}""",
         )
 
         for (rawAssignments in assignments) {
@@ -118,7 +118,7 @@ class JourneyControlExecutorTest {
         }
     }
 
-    @Test fun `authenticated variant holdout metadata overrides the profile hint`() {
+    @Test fun `matching assignment preserves published holdout metadata`() {
         val fixture = Json.parseToJsonElement(
             File("../fixtures/journeys/planes/executor-controls.json").readText(),
         ).jsonObject
@@ -126,7 +126,7 @@ class JourneyControlExecutorTest {
             .map { it.jsonObject }
             .single { it.text("id") == "experiment-uses-durable-assignment" }
         val assignments = Json.parseToJsonElement(
-            """{"experiment_assigned":{"variantId":"variant_b","isHoldout":true}}""",
+            """{"experiment_assigned":{"variantId":"variant_b","isHoldout":false,"source":"profile"}}""",
         ).jsonObject
         val executor = JourneyControlExecutor(
             SignedTimezoneBundle.load(),
