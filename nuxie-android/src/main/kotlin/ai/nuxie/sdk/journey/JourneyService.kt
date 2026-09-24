@@ -4,6 +4,7 @@ import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.events.StableEventCaptureResult
 import ai.nuxie.sdk.events.StableEventCommitAdmission
+import ai.nuxie.sdk.events.JourneyEventOrigin
 import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.features.FeatureAccess
@@ -145,7 +146,8 @@ internal class JourneyService(
         String,
         Long,
         StableEventCommitAdmission?,
-    ) -> StableEventCaptureResult = { name, properties, eventId, distinctId, occurredAt, admission ->
+        JourneyEventOrigin?,
+    ) -> StableEventCaptureResult = { name, properties, eventId, distinctId, occurredAt, admission, origin ->
         val admitted = admission == null || admission.commitIfCurrent { true } != null
         val settled = admitted && capture(name, properties, eventId, distinctId)
         StableEventCaptureResult(
@@ -157,6 +159,7 @@ internal class JourneyService(
                     JsonValueConverter.fromMap(properties),
                     occurredAt,
                     distinctId,
+                    journeyOrigin = origin,
                 )
             } else {
                 null
@@ -170,7 +173,9 @@ internal class JourneyService(
         String,
         Long,
         StableEventCommitAdmission?,
-    ) -> StableEventCaptureResult = captureScreenEvent,
+    ) -> StableEventCaptureResult = { name, properties, eventId, distinctId, occurredAt, admission ->
+        captureScreenEvent(name, properties, eventId, distinctId, occurredAt, admission, null)
+    },
     private val featureAccess: suspend (String) -> FeatureAccess? = { null },
     private val offerFeatureAccess: suspend (String) -> FeatureAccess? = featureAccess,
     private val dispatcher: JourneyDispatching = JourneyDispatching {
@@ -1150,6 +1155,23 @@ internal class JourneyService(
         return true
     }
 
+    private fun rendererOrigin(
+        run: JourneyRun,
+        publication: JourneyRun.PendingPresentationPublication,
+        item: JourneyRun.PendingPresentationPublication.Item,
+    ): JourneyEventOrigin? = if (item.name.startsWith("$")) null else JourneyEventOrigin(
+        journeyId = run.journeyId,
+        experienceId = run.reference.getValue("experienceId").jsonPrimitive.content,
+        versionId = run.reference.getValue("versionId").jsonPrimitive.content,
+        legId = run.reference.getValue("legId").jsonPrimitive.content,
+        generation = run.generation,
+        stepId = null,
+        occurrenceId = item.eventId,
+        screenId = publication.sourceScreenId,
+        actionId = publication.sourceActionId,
+        invocationId = publication.invocationId,
+    )
+
     private suspend fun publishPresentationObservability(
         run: JourneyRun,
         target: JourneyRunJournal,
@@ -1164,6 +1186,7 @@ internal class JourneyService(
                     target.distinctId,
                     item.occurredAtMillis,
                     null,
+                    rendererOrigin(run, publication, item),
                 )
             }.getOrNull() ?: return false
             if (!captured.settled) return false
@@ -1731,6 +1754,7 @@ internal class JourneyService(
                     target.distinctId,
                     item.occurredAtMillis,
                     admission,
+                    rendererOrigin(stagedRun, publication, item),
                 )
             }.getOrElse {
                 directlyRoutedRunByEventId.remove(item.eventId, stagedRun.id)
