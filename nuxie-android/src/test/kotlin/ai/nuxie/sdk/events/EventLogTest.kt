@@ -181,6 +181,37 @@ class EventLogTest {
         eventLog.subscribeForwarding(isEnabled = forwardingEnabled) {}
     }
 
+    @Test fun authoredOriginSurvivesRedactionRoutingReopenAndDelivery(): Unit = runBlocking {
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val database = java.io.File(context.cacheDir, "origin-${java.util.UUID.randomUUID()}.db")
+        val origin = JourneyEventOrigin("journey", "experience", "version", "leg", 0, "step", "event")
+        val admission = StableEventCommitAdmission { it() }
+        val firstStore = SQLiteEventStore(context, databaseFile = database)
+        val first = log(firstStore, beforeSend = { event ->
+            NuxieEvent(id = event.id, name = event.name, distinctId = event.distinctId,
+                properties = mapOf("redacted" to true), timestampMillis = event.timestampMillis)
+        })
+        val routed = java.util.concurrent.CopyOnWriteArrayList<StoredEvent>()
+        first.subscribeCommitted { routed.add(it) }
+        assertTrue(first.captureIdempotentlyIfCurrent("finished", mapOf("secret" to "removed"),
+            "event", "customer", admission, origin))
+        first.awaitBarrier()
+        assertEquals(origin, routed.single().journeyOrigin)
+        assertFalse(routed.single().properties.containsKey("secret"))
+        first.close()
+        val reopenedStore = SQLiteEventStore(context, databaseFile = database)
+        val reopened = log(reopenedStore)
+        assertTrue(reopened.captureIdempotentlyIfCurrent("finished", emptyMap(), "event", "customer", admission, origin))
+        val pending = reopenedStore.pendingBatch(10)
+        assertEquals(1, pending.size)
+        assertEquals(origin, pending.single().journeyOrigin)
+        val wire = Json.parseToJsonElement(BatchItemWireEncoder.encode(pending.single())).jsonObject
+        assertEquals(origin.toJson(), wire["journeyOrigin"])
+        assertFalse(wire.getValue("properties").jsonObject.containsKey("secret"))
+        reopened.close()
+        database.delete()
+    }
+
     @Test
     fun textSizeDevicePropertyTracksConfigurationChangesWithoutRecreatingBuilder() = runBlocking {
         val fixture = Json.parseToJsonElement(java.io.File(FixtureRunner.fixturesRoot(),

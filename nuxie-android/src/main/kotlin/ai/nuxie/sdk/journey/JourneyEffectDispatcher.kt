@@ -4,6 +4,7 @@ import ai.nuxie.sdk.AppAction
 import ai.nuxie.sdk.AppActionValueResolver
 import ai.nuxie.sdk.ExperienceRef
 import ai.nuxie.sdk.events.JsonValueConverter
+import ai.nuxie.sdk.events.JourneyEventOrigin
 import ai.nuxie.sdk.events.StableEventCommitAdmission
 import ai.nuxie.sdk.identity.IdentityService
 import kotlinx.serialization.json.JsonElement
@@ -20,6 +21,7 @@ internal class JourneyEffectDispatcher(
         String,
         String,
         StableEventCommitAdmission,
+        JourneyEventOrigin?,
     ) -> Boolean,
     private val deliverAppAction: suspend (
         AppAction,
@@ -99,12 +101,22 @@ internal class JourneyEffectDispatcher(
         request: JourneyDispatchRequest,
     ): JourneyDispatchResult {
         if (!requestIsCurrent(request)) return JourneyDispatchResult.Failed
+        val origin = if (request.action.text("type") == "send_event") JourneyEventOrigin(
+            journeyId = request.run.journeyId,
+            experienceId = request.run.reference.text("experienceId") ?: return JourneyDispatchResult.Failed,
+            versionId = request.run.reference.text("versionId") ?: return JourneyDispatchResult.Failed,
+            legId = request.run.reference.text("legId") ?: return JourneyDispatchResult.Failed,
+            generation = request.run.generation,
+            stepId = request.stepId,
+            occurrenceId = request.effectId,
+        ) else null
         if (!capture(
                 name,
                 properties,
                 request.effectId,
                 request.distinctId,
                 eventCommitAdmission(request),
+                origin,
             )
         ) {
             return JourneyDispatchResult.Failed

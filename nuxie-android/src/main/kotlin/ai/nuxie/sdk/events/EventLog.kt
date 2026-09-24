@@ -108,6 +108,7 @@ internal class EventLog(
             val admissionTickets: List<AdmissionTicket>,
             val activityIdentity: ActivityIdentity,
             val done: CompletableDeferred<StableEventCaptureResult>,
+            val journeyOrigin: JourneyEventOrigin? = null,
         ) : Command
         data class CaptureDeliveredIdempotently(
             val name: String,
@@ -186,6 +187,7 @@ internal class EventLog(
                             command.commitAdmission,
                             command.admissionTickets,
                             command.activityIdentity,
+                            command.journeyOrigin,
                         )
                     }.onFailure { Log.w(LOG_TAG, "Idempotent event capture failed", it) }
                         .getOrDefault(StableEventCaptureResult(false, null))
@@ -442,6 +444,7 @@ internal class EventLog(
         eventId: String,
         distinctId: String,
         admission: StableEventCommitAdmission,
+        journeyOrigin: JourneyEventOrigin? = null,
     ): Boolean = captureStable(
         name,
         properties,
@@ -450,6 +453,7 @@ internal class EventLog(
         applyBeforeSend = true,
         occurredAtMillis = null,
         commitAdmission = admission,
+        journeyOrigin = journeyOrigin,
     ).settled
 
     /** Stable ordinary event capture preserving renderer occurrence time. */
@@ -512,6 +516,7 @@ internal class EventLog(
         applyBeforeSend: Boolean,
         occurredAtMillis: Long?,
         commitAdmission: StableEventCommitAdmission?,
+        journeyOrigin: JourneyEventOrigin? = null,
     ): StableEventCaptureResult {
         if (name.isEmpty() || eventId.isEmpty() || distinctId.isEmpty()) {
             return StableEventCaptureResult(false, null)
@@ -528,6 +533,7 @@ internal class EventLog(
             sampleAdmissionTickets(),
             captureActivityIdentity(distinctId),
             done,
+            journeyOrigin,
         )
         if (commands.trySend(command).isFailure) {
             return StableEventCaptureResult(false, null)
@@ -626,6 +632,7 @@ internal class EventLog(
         commitAdmission: StableEventCommitAdmission?,
         admissionTickets: List<AdmissionTicket>,
         activityIdentity: ActivityIdentity,
+        journeyOrigin: JourneyEventOrigin?,
     ): StableEventCaptureResult {
         existingStableCapture(eventId)?.let { return it }
         var sanitized = EventSanitizer.sanitizeDataTypes(commandProperties)
@@ -666,7 +673,7 @@ internal class EventLog(
             Log.d(LOG_TAG, "Event terminally dropped by beforeSend hook", null, Log.sensitive("event", name))
             return StableEventCaptureResult(true, null)
         }
-        val stored = projectPostTransform(original, transformed, activityIdentity)
+        val stored = projectPostTransform(original, transformed, activityIdentity, journeyOrigin)
         val commit = if (commitAdmission == null) {
             store.insertPendingIfAbsentAndStageRoute(stored)
         } else {
@@ -919,6 +926,7 @@ internal class EventLog(
         original: NuxieEvent,
         transformed: NuxieEvent,
         activityIdentity: ActivityIdentity,
+        journeyOrigin: JourneyEventOrigin? = null,
     ): StoredEvent {
         // The prepared field is authoritative, matching iOS: wrappers that pin
         // distinctId also restore its property after a deleting or spoofing hook.
@@ -934,6 +942,7 @@ internal class EventLog(
             forwardingName = original.name,
             forwardingReceivedAtMillis = forwardingAdmission(transformed.timestampMillis),
             forwardingIdentity = activityIdentity,
+            journeyOrigin = journeyOrigin,
         )
     }
 
