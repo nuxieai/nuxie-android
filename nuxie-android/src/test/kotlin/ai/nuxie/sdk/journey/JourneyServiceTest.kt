@@ -1985,7 +1985,19 @@ class JourneyServiceTest {
     }
 
     @Test fun `purchase advances only from its correlated Journey outcome`() = runBlocking {
-        val identity = identity("customer")
+        assertPurchaseOfferRoute(ai.nuxie.sdk.features.FeatureAccess(false, false, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN))
+    }
+
+    @Test fun `unknown offer access takes its alternative without presenting or purchasing`() = runBlocking {
+        assertPurchaseOfferRoute(null)
+    }
+
+    @Test fun `owned offer access takes its alternative without presenting or purchasing`() = runBlocking {
+        assertPurchaseOfferRoute(ai.nuxie.sdk.features.FeatureAccess(true, true, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN))
+    }
+
+    private suspend fun assertPurchaseOfferRoute(access: ai.nuxie.sdk.features.FeatureAccess?) {
+        val identity = IdentityService(context).also { it.setDistinctId("customer") }
         val renderedEntry = fixture.getValue("renderedEntry").jsonObject
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
@@ -2021,11 +2033,13 @@ class JourneyServiceTest {
                         completion("completed"),
                         completion("failed"),
                         completion("cancelled"),
-                        Json.parseToJsonElement("""{"kind":"action","id":"skip_offer","action":{"type":"dismiss"},"outlets":{"next":"skipped"}}"""),
+                        Json.parseToJsonElement("""{"kind":"action","id":"skip_offer","action":{"type":"send_event","eventName":"offer_owned"},"outlets":{"next":"skipped"}}"""),
                         completion("skipped"),
+                        Json.parseToJsonElement("""{"kind":"action","id":"skip_unknown","action":{"type":"send_event","eventName":"offer_unknown"},"outlets":{"next":"skipped_unknown"}}"""),
+                        completion("skipped_unknown"),
                     ),
                 ),
-                "offers" to Json.parseToJsonElement("""[{"screenId":"screen_welcome","placementIds":["golden:monthly"],"alreadyEntitledStepId":"skip_offer","unknownStepId":"skip_offer"}]"""),
+                "offers" to Json.parseToJsonElement("""[{"screenId":"screen_welcome","placementIds":["golden:monthly"],"alreadyEntitledStepId":"skip_offer","unknownStepId":"skip_unknown"}]"""),
                 "routes" to JsonArray(
                     listOf(
                         buildJsonObject {
@@ -2042,7 +2056,7 @@ class JourneyServiceTest {
                         },
                         buildJsonObject {
                             putJsonObject("host") { put("kind", "screen"); put("screenId", "screen_welcome") }
-                            put("eventName", "\$offer_access_unknown"); put("entryStepId", "skip_offer")
+                            put("eventName", "\$offer_access_unknown"); put("entryStepId", "skip_unknown")
                         },
                     ),
                 ),
@@ -2102,13 +2116,34 @@ class JourneyServiceTest {
                 val settled = admission?.commitIfCurrent { true } != null
                 StableEventCaptureResult(settled, event.takeIf { settled })
             },
-            featureAccess = { ai.nuxie.sdk.features.FeatureAccess(false, false, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN) },
+            featureAccess = { access },
+            dispatcher = JourneyEffectDispatcher(
+                identity = identity,
+                capture = { name, properties, _, _, admission ->
+                    admission.commitIfCurrent { captures += name to properties; true } == true
+                },
+                deliverAppAction = { _, _ -> error("Offer alternative must not invoke an app action") },
+            ),
             presenter = presenter,
             nowMillis = { 100_000L },
         )
         service.initialize()
         service.onAppWillEnterForeground()
         service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+
+        if (access == null || access.allowed) {
+            assertEquals(null, presenter.request)
+            assertEquals(0, presenter.shownCount.get())
+            assertTrue(presenter.actions.isEmpty())
+            val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(renderedAuthority))
+            assertTrue(journal.runs().isEmpty())
+            assertEquals("continue", journal.checkmark(release.identity.experienceId)?.outcome)
+            assertEquals(
+                listOf(JourneyEventNames.LEG_STARTED, if (access == null) "offer_unknown" else "offer_owned", JourneyEventNames.LEG_COMPLETED),
+                captures.map { it.first },
+            )
+            return
+        }
 
         assertTrue(requireNotNull(presenter.request).onScreenChanged("screen_welcome"))
         val effectId = presenter.actions.single().second
