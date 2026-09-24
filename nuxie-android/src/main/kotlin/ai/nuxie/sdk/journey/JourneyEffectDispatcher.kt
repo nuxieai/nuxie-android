@@ -33,7 +33,9 @@ internal class JourneyEffectDispatcher(
             "update_customer" -> updateCustomer(request)
             "submit_response" -> JourneyDispatchResult.Outlet("next")
             "app_action" -> appAction(request)
-            "exit" -> {
+            // Owned surfaces handle dismiss before this seam. An offer can
+            // bypass presentation entirely and still terminate normally.
+            "exit", "dismiss" -> {
                 val reason = request.action.text("reason")
                 JourneyDispatchResult.Complete(reason?.takeIf(String::isNotEmpty) ?: "completed")
             }

@@ -1996,7 +1996,26 @@ class JourneyServiceTest {
         assertPurchaseOfferRoute(ai.nuxie.sdk.features.FeatureAccess(true, true, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN))
     }
 
-    private suspend fun assertPurchaseOfferRoute(access: ai.nuxie.sdk.features.FeatureAccess?) {
+    @Test fun `offer alternatives can dismiss before presentation using the shared contract`() = runBlocking {
+        val corpus = Json.parseToJsonElement(java.io.File(
+            FixtureRunner.fixturesRoot(), "journeys/planes/presentationless-dismiss.json",
+        ).readText()).jsonObject
+        for (element in corpus.getValue("cases").jsonArray) {
+            val vector = element.jsonObject
+            val access = if (vector.getValue("access").jsonPrimitive.content == "owned")
+                ai.nuxie.sdk.features.FeatureAccess(true, true, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN)
+            else null
+            assertPurchaseOfferRoute(access, vector.getValue("action").jsonObject,
+                vector.getValue("outcome").jsonPrimitive.content)
+        }
+    }
+
+    private suspend fun assertPurchaseOfferRoute(
+        access: ai.nuxie.sdk.features.FeatureAccess?,
+        dismissAlternative: JsonObject? = null,
+        expectedOutcome: String = "continue",
+    ) {
+        val directory = java.io.File(this.directory, java.util.UUID.randomUUID().toString()).apply { mkdirs() }
         val identity = IdentityService(context).also { it.setDistinctId("customer") }
         val renderedEntry = fixture.getValue("renderedEntry").jsonObject
         val catalog = catalog(renderedEntry)
@@ -2065,7 +2084,14 @@ class JourneyServiceTest {
         val products = JsonArray(original.descriptor.getValue("products").jsonArray.map {
             JsonObject(it.jsonObject + ("entitlements" to Json.parseToJsonElement("""[{"id":"premium-grant","featureId":"premium","featureExternalId":null,"purchaseUsageFeatureIds":[]}]""")))
         })
-        val descriptor = JsonObject(original.descriptor + mapOf("leg" to commerceLeg, "products" to products))
+        val qualifiedLeg = if (dismissAlternative == null) commerceLeg else JsonObject(commerceLeg + (
+            "steps" to JsonArray(commerceLeg.getValue("steps").jsonArray.map { step ->
+                if (step.jsonObject["id"]?.jsonPrimitive?.content in setOf("skip_offer", "skip_unknown")) {
+                    JsonObject(step.jsonObject + mapOf("action" to dismissAlternative, "outlets" to JsonObject(emptyMap())))
+                } else step
+            })
+        ))
+        val descriptor = JsonObject(original.descriptor + mapOf("leg" to qualifiedLeg, "products" to products))
         val envelope = JourneyReleaseEnvelope.authenticate(
             renderedEntry.getValue("envelope").toString().encodeToByteArray(),
             mapOf(
@@ -2137,9 +2163,10 @@ class JourneyServiceTest {
             assertTrue(presenter.actions.isEmpty())
             val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(renderedAuthority))
             assertTrue(journal.runs().isEmpty())
-            assertEquals("continue", journal.checkmark(release.identity.experienceId)?.outcome)
+            assertEquals(expectedOutcome, journal.checkmark(release.identity.experienceId)?.outcome)
             assertEquals(
-                listOf(JourneyEventNames.LEG_STARTED, if (access == null) "offer_unknown" else "offer_owned", JourneyEventNames.LEG_COMPLETED),
+                if (dismissAlternative != null) listOf(JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED)
+                else listOf(JourneyEventNames.LEG_STARTED, if (access == null) "offer_unknown" else "offer_owned", JourneyEventNames.LEG_COMPLETED),
                 captures.map { it.first },
             )
             return
