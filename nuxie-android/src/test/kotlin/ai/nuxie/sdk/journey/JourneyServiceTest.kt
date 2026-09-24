@@ -292,6 +292,90 @@ class JourneyServiceTest {
         assertEquals("screen_welcome", presenter.request?.screenId)
     }
 
+    @Test fun `goal exit preserves active presentation and its navigation handler`() = runBlocking {
+        assertNavigationAfterConversion(true)
+    }
+
+    @Test fun `conversion without goal exit preserves active presentation and navigation`() = runBlocking {
+        assertNavigationAfterConversion(false)
+    }
+
+    private suspend fun assertNavigationAfterConversion(exitEnabled: Boolean) {
+        val clock = java.util.concurrent.atomic.AtomicLong(100_000L)
+        store.close()
+        store = SQLiteEventStore(context, nowMillis = { clock.get() })
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        catalog.commit("customer", catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority))
+        val baseline = requireNotNull(catalog.snapshot("customer"))
+        val original = baseline.releasesByDigest.values.single()
+        val exits = if (exitEnabled) """[{"type":"goal_met"}]""" else "[]"
+        val policy = Json.parseToJsonElement("""{
+          "entry":{"trigger":{"type":"event","eventName":"${'$'}app_opened"},"frequency":{"type":"one_time"}},
+          "goal":{"criterion":{"type":"event","eventName":"reading_completed"},"attribution":{"basis":"first_shown","window":{"amount":1,"unit":"hour"}}},
+          "exitWhenAny":$exits
+        }""")
+        val leg = JsonObject(original.leg + mapOf(
+            "policy" to policy,
+            "screens" to JsonArray(original.leg.getValue("screens").jsonArray +
+                Json.parseToJsonElement("""{"id":"screen_details","responseCaptures":[]}""")),
+            "steps" to JsonArray(original.leg.getValue("steps").jsonArray.map { step ->
+                if (step.jsonObject["id"]?.jsonPrimitive?.content == "report")
+                    Json.parseToJsonElement("""{"kind":"action","id":"report","action":{"type":"navigate","screenId":"screen_details"},"outlets":{}}""")
+                else step
+            }),
+        ))
+        val envelope = JourneyReleaseEnvelope.authenticate(renderedEntry.getValue("envelope").toString().encodeToByteArray(),
+            mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP)))
+        val release = AuthenticatedJourneyRelease(envelope, original.identity,
+            JsonObject(original.descriptor + ("leg" to leg)), original.publishedAtSeqToPromote)
+        val snapshot = baseline.copy(releasesByDigest = mapOf(release.descriptorSha256 to release))
+        val captures = CopyOnWriteArrayList<String>()
+        val presenter = RecordingJourneyPresenter()
+        val service = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
+            journalDirectory = directory, scope = scope, capture = { name, _, _, _ -> captures += name; true },
+            captureScreenEvent = { name, properties, eventId, distinctId, occurredAt, admission ->
+                val event = StoredEvent(eventId, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId)
+                val settled = admission?.commitIfCurrent { true } != null
+                StableEventCaptureResult(settled, event.takeIf { settled })
+            }, presenter = presenter, nowMillis = { clock.get() })
+        service.initialize()
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+        val request = requireNotNull(presenter.request)
+        val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(renderedAuthority))
+        // Supply the real presenter's exposure boundary; this presenter records ownership only.
+        clock.set(100_100L)
+        val shown = StoredEvent("shown", "${'$'}experience_shown", buildJsonObject {
+            put("journey_id", request.journeyId)
+            put("experience_id", release.identity.experienceId)
+            put("experience_version_id", release.identity.experienceVersionId)
+        }, 100_100L, "customer")
+        store.insertPending(shown)
+        assertTrue(service.handleEvent(shown, service.eventAdmissionGeneration()))
+        clock.set(100_200L)
+        val outcome = StoredEvent("reading-outcome", "reading_completed", timestampMillis = 100_200L, distinctId = "customer")
+        store.insertPending(outcome)
+        assertTrue(service.handleEvent(outcome, service.eventAdmissionGeneration()))
+        assertEquals(outcome.id, journal.conversionWatches().getValue(request.journeyId).conversion?.eventId)
+        assertTrue(presenter.shutdowns.isEmpty())
+        assertFalse(captures.contains(JourneyEventNames.LEG_COMPLETED))
+        assertNull(journal.runs().single().completion)
+        assertTrue(request.onEmissionBatch(JourneyScreenEmissionBatch(request.journeyId, 0, "after-goal",
+            JourneyScreenEmissionSource("screen_welcome", "continue"),
+            listOf(JourneyScreenEmission("continue-event", 0, 100_300L, "continue", JsonObject(emptyMap()))))))
+        withTimeout(5_000) {
+            while (presenter.shownCount.get() < 2) kotlinx.coroutines.delay(10)
+        }
+        service.onAppDidEnterBackground() // FIFO barrier after navigation settles.
+        assertEquals("screen_details", presenter.request?.screenId)
+        assertEquals(request.journeyId, presenter.request?.journeyId)
+        assertNull(journal.runs().single().completion)
+        assertTrue(presenter.shutdowns.isEmpty())
+        assertFalse(captures.contains(JourneyEventNames.LEG_COMPLETED))
+    }
+
     @Test fun `renderer batches durably publish once and route the owning run`() = runBlocking {
         val identity = identity("customer")
         val renderedEntry = fixture.getValue("renderedEntry").jsonObject
