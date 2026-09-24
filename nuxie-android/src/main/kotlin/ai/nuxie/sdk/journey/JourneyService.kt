@@ -1958,7 +1958,7 @@ internal class JourneyService(
             payload + mapOf(
                 "journey_id" to JsonPrimitive(run.journeyId),
                 "experience_id" to JsonPrimitive(experienceId),
-                "experience_version" to JsonPrimitive(versionId),
+                "experience_version_id" to JsonPrimitive(versionId),
                 "leg_id" to JsonPrimitive(legId),
                 "leg_generation" to JsonPrimitive(run.generation),
             ),

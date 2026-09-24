@@ -1543,7 +1543,7 @@ internal class ExperiencePresentationService(
                     mapOf(
                         "journey_id" to active.ref.journeyId,
                         "experience_id" to active.ref.experienceId,
-                        "experience_version" to active.ref.experienceVersion,
+                        "experience_version_id" to active.ref.experienceVersion,
                     ),
                     active.ownerDistinctId,
                 )
@@ -1695,7 +1695,7 @@ internal class ExperiencePresentationService(
         val properties = linkedMapOf<String, Any?>(
             "journey_id" to ref.journeyId,
             "experience_id" to ref.experienceId,
-            "experience_version" to ref.experienceVersion,
+            "experience_version_id" to ref.experienceVersion,
         )
         when (reason) {
             CloseReason.UserDismissed -> properties["reason"] = "user"
