@@ -8,6 +8,16 @@ import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class BatchItemWireEncoderTest {
+    @Test fun publicPropertiesCannotManufactureOrigin() {
+        val stored = StoredEvent.from(NuxieEvent(
+            id = "event", name = "finished", distinctId = "customer",
+            properties = mapOf("journeyOrigin" to mapOf("source" to "device_action")),
+        ))
+        val wire = Json.parseToJsonElement(BatchItemWireEncoder.encode(stored)).jsonObject
+        assertFalse(wire.containsKey("journeyOrigin"))
+        assertEquals(stored.properties, wire["properties"])
+    }
+
     @Test
     fun timestampsFormatAsUtcIsoMilliseconds() {
         val stored = StoredEvent.from(

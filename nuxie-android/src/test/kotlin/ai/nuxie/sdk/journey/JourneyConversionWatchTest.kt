@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.journey
 
 import ai.nuxie.sdk.events.StoredEvent
+import ai.nuxie.sdk.events.JourneyEventOrigin
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
@@ -20,7 +21,8 @@ class JourneyConversionWatchTest {
             val event = StoredEvent(id = value.getValue("id").jsonPrimitive.content,
                 name = value.getValue("name").jsonPrimitive.content,
                 properties = value.getValue("properties").jsonObject, distinctId = "customer",
-                timestampMillis = value.getValue("occurredAt").jsonPrimitive.long)
+                timestampMillis = value.getValue("occurredAt").jsonPrimitive.long,
+                journeyOrigin = value["journeyOrigin"]?.jsonObject?.let(JourneyEventOrigin::fromJson))
             val acceptedAt = vector.getValue("acceptedAt").jsonPrimitive.long
             val normalized = JourneyConversionWatch.normalized(event, acceptedAt)
             val matching = watches.values.filter { normalized != null && it.matches(normalized) }.map { it.journeyId }.toSet()

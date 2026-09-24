@@ -20,6 +20,7 @@ internal class StoredEvent private constructor(
     /** Admission time when forwarding was enabled; null means do not replay. */
     val forwardingReceivedAtMillis: Long?,
     val forwardingIdentity: ActivityIdentity? = null,
+    val journeyOrigin: JourneyEventOrigin? = null,
 ) {
     private val encodedProperties = encodedProperties.copyOf()
 
@@ -39,6 +40,7 @@ internal class StoredEvent private constructor(
         forwardingName: String = name,
         forwardingReceivedAtMillis: Long? = null,
         forwardingIdentity: ActivityIdentity? = null,
+        journeyOrigin: JourneyEventOrigin? = null,
     ) : this(
         id = id,
         name = name,
@@ -51,6 +53,7 @@ internal class StoredEvent private constructor(
         forwardingName = forwardingName,
         forwardingReceivedAtMillis = forwardingReceivedAtMillis,
         forwardingIdentity = forwardingIdentity,
+        journeyOrigin = journeyOrigin,
     )
 
     fun encodedProperties(): ByteArray = encodedProperties.copyOf()
@@ -68,6 +71,7 @@ internal class StoredEvent private constructor(
         forwardingName = forwardingName,
         forwardingReceivedAtMillis = receivedAtMillis,
         forwardingIdentity = identity,
+        journeyOrigin = journeyOrigin,
     )
 
     internal companion object {
@@ -78,6 +82,7 @@ internal class StoredEvent private constructor(
             forwardingName: String = event.name,
             forwardingReceivedAtMillis: Long? = null,
             forwardingIdentity: ActivityIdentity? = null,
+            journeyOrigin: JourneyEventOrigin? = null,
         ): StoredEvent = StoredEvent(
             id = event.id,
             name = event.name,
@@ -87,6 +92,7 @@ internal class StoredEvent private constructor(
             forwardingName = forwardingName,
             forwardingReceivedAtMillis = forwardingReceivedAtMillis,
             forwardingIdentity = forwardingIdentity,
+            journeyOrigin = journeyOrigin,
         )
 
         fun fromStorage(
@@ -96,6 +102,7 @@ internal class StoredEvent private constructor(
             timestampMillis: Long,
             distinctId: String,
             sessionId: String?,
+            journeyOrigin: JourneyEventOrigin? = null,
         ): StoredEvent = StoredEvent(
             id = id,
             name = name,
@@ -105,6 +112,7 @@ internal class StoredEvent private constructor(
             sessionId = sessionId,
             forwardingName = name,
             forwardingReceivedAtMillis = null,
+            journeyOrigin = journeyOrigin,
         )
     }
 }

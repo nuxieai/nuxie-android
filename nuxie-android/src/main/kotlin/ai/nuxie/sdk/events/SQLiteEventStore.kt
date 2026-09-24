@@ -9,6 +9,7 @@ import java.io.File
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.jsonObject
 
 /**
  * SQLite-backed event persistence.
@@ -93,8 +94,8 @@ internal class SQLiteEventStore(
     private fun insertPendingMutation(database: SQLiteConnection, event: StoredEvent) {
         database.prepare(
             """
-            INSERT INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            INSERT INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin, journey_origin)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
             """.trimIndent(),
         ).use { statement ->
             statement.bindStoredEvent(event, DELIVERY_PENDING)
@@ -128,10 +129,10 @@ internal class SQLiteEventStore(
         pruneConversion(database, nowMillis())
         val cutoff = if (throughEventId == null) "" else
             " AND rowid <= (SELECT rowid FROM conversion_event_inbox WHERE event_id = ?4 AND user_id = ?1 AND scope = ?2)"
-        database.prepare("SELECT event_id, name, properties, timestamp, user_id, session_id, accepted_at FROM conversion_event_inbox WHERE user_id = ?1 AND scope = ?2" + cutoff + " ORDER BY rowid LIMIT ?3;").use {
+        database.prepare("SELECT event_id, name, properties, timestamp, user_id, session_id, journey_origin, accepted_at FROM conversion_event_inbox WHERE user_id = ?1 AND scope = ?2" + cutoff + " ORDER BY rowid LIMIT ?3;").use {
             it.bindText(1, distinctId); it.bindText(2, conversionScope(database)); it.bindLong(3, limit.coerceIn(1, 1000).toLong())
             throughEventId?.let { id -> it.bindText(4, id) }
-            buildList { while (it.step()) add(PendingConversionOccurrence(it.readStoredEvent(), it.getLong(6))) }
+            buildList { while (it.step()) add(PendingConversionOccurrence(it.readStoredEvent(), it.getLong(7))) }
         }
     }
 
@@ -154,20 +155,22 @@ internal class SQLiteEventStore(
         pruneConversion(database, acceptedAt)
         val scope = conversionScope(database)
         database.prepare("""INSERT OR IGNORE INTO conversion_event_inbox
-            (event_id, name, properties, timestamp, user_id, session_id, accepted_at, scope)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?);""").use {
+            (event_id, name, properties, timestamp, user_id, session_id, accepted_at, scope, journey_origin)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);""").use {
             it.bindText(1, event.id); it.bindText(2, event.name); it.bindBlob(3, event.encodedProperties())
             it.bindLong(4, event.timestampMillis); it.bindText(5, event.distinctId)
             event.sessionId?.let { session -> it.bindText(6, session) } ?: it.bindNull(6)
-            it.bindLong(7, acceptedAt); it.bindText(8, scope); it.step()
+            it.bindLong(7, acceptedAt); it.bindText(8, scope)
+            event.journeyOrigin?.let { origin -> it.bindText(9, CanonicalJson.encode(origin.toJson())) } ?: it.bindNull(9)
+            it.step()
         }
         if (database.queryLong("SELECT changes();") == 0L) {
-            database.prepare("SELECT event_id, name, properties, timestamp, user_id, session_id FROM conversion_event_inbox WHERE event_id = ? AND scope = ?;").use {
+            database.prepare("SELECT event_id, name, properties, timestamp, user_id, session_id, journey_origin FROM conversion_event_inbox WHERE event_id = ? AND scope = ?;").use {
                 it.bindText(1, event.id); it.bindText(2, scope)
                 check(it.step()) { "Conversion identity conflicts with another scope" }
                 val retained = it.readStoredEvent()
                 check(retained.name == event.name && retained.distinctId == event.distinctId &&
-                    retained.timestampMillis == event.timestampMillis &&
+                    retained.timestampMillis == event.timestampMillis && retained.journeyOrigin == event.journeyOrigin &&
                     retained.encodedProperties().contentEquals(event.encodedProperties())) { "Conflicting conversion occurrence" }
             }
         }
@@ -238,7 +241,7 @@ internal class SQLiteEventStore(
     override suspend fun stableEvent(eventId: String): StoredEvent? = onWriter { database ->
         database.prepare(
             """
-            SELECT id, name, properties, timestamp, user_id, session_id
+            SELECT id, name, properties, timestamp, user_id, session_id, journey_origin
             FROM events
             WHERE id = ?
             LIMIT 1;
@@ -280,8 +283,8 @@ internal class SQLiteEventStore(
     ): Boolean {
         database.prepare(
             """
-            INSERT OR IGNORE INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            INSERT OR IGNORE INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin, journey_origin)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
             """.trimIndent(),
         ).use { statement ->
             statement.bindStoredEvent(event, DELIVERY_DELIVERED)
@@ -380,7 +383,7 @@ internal class SQLiteEventStore(
             val upperBound = if (untilMillis == null) "" else " AND timestamp <= ?"
             database.prepare(
                 """
-                SELECT id, name, properties, timestamp, user_id, session_id FROM events
+                SELECT id, name, properties, timestamp, user_id, session_id, journey_origin FROM events
                 WHERE user_id = ? AND name = ? AND timestamp >= ?$upperBound
                 ORDER BY timestamp ASC, id ASC LIMIT ${HISTORY_QUERY_LIMIT + 1};
                 """.trimIndent(),
@@ -445,7 +448,7 @@ internal class SQLiteEventStore(
     override suspend fun querySessionEvents(sessionId: String): List<StoredEvent> = onWriter { database ->
         database.prepare(
             """
-            SELECT id, name, properties, timestamp, user_id, session_id
+            SELECT id, name, properties, timestamp, user_id, session_id, journey_origin
             FROM events
             WHERE session_id = ?
             ORDER BY timestamp DESC;
@@ -483,7 +486,7 @@ internal class SQLiteEventStore(
         database.prepare(
             """
             SELECT events.id, events.name, events.properties, events.timestamp,
-                   events.user_id, events.session_id
+                   events.user_id, events.session_id, events.journey_origin
             FROM event_local_routes
             JOIN events ON events.id = event_local_routes.event_id
             WHERE event_local_routes.delivery_state = ? AND events.user_id = ?
@@ -528,7 +531,7 @@ internal class SQLiteEventStore(
     override suspend fun pendingBatch(limit: Int): List<StoredEvent> = onWriter { database ->
         database.prepare(
             """
-            SELECT id, name, properties, timestamp, user_id, session_id
+            SELECT id, name, properties, timestamp, user_id, session_id, journey_origin
             FROM events
             WHERE delivery_state = ?
             ORDER BY timestamp ASC, id ASC
@@ -602,7 +605,7 @@ internal class SQLiteEventStore(
             val origins = database.prepare("SELECT id, name, properties, timestamp, user_id, session_id FROM events;").use {
                 buildList {
                     while (it.step()) {
-                        val row = it.readStoredEvent()
+                        val row = it.readStoredEvent(hasOrigin = false)
                         if (runCatching { row.origin }.getOrNull() == "server") add(row.id)
                     }
                 }
@@ -632,6 +635,11 @@ internal class SQLiteEventStore(
             database.execute("CREATE INDEX idx_conversion_inbox_expiry ON conversion_event_inbox(scope, accepted_at);")
             database.execute("CREATE TABLE conversion_scope_bindings(capture_scope TEXT PRIMARY KEY, authority_scope TEXT NOT NULL);")
             database.execute("PRAGMA user_version = 5;")
+        }
+        if (version < 6L) database.immediateTransaction {
+            database.execute("ALTER TABLE events ADD COLUMN journey_origin TEXT;")
+            database.execute("ALTER TABLE conversion_event_inbox ADD COLUMN journey_origin TEXT;")
+            database.execute("PRAGMA user_version = 6;")
         }
     }
 
@@ -710,15 +718,19 @@ internal class SQLiteEventStore(
         event.sessionId?.let { bindText(6, it) } ?: bindNull(6)
         bindLong(7, deliveryState)
         bindText(8, event.origin)
+        event.journeyOrigin?.let { bindText(9, CanonicalJson.encode(it.toJson())) } ?: bindNull(9)
     }
 
-    private fun SQLiteStatement.readStoredEvent(): StoredEvent = StoredEvent.fromStorage(
+    private fun SQLiteStatement.readStoredEvent(hasOrigin: Boolean = true): StoredEvent = StoredEvent.fromStorage(
         id = getText(0),
         name = getText(1),
         encodedProperties = getBlob(2),
         timestampMillis = getLong(3),
         distinctId = getText(4),
         sessionId = if (isNull(5)) null else getText(5),
+        journeyOrigin = if (!hasOrigin || isNull(6)) null else JourneyEventOrigin.fromJson(
+            kotlinx.serialization.json.Json.parseToJsonElement(getText(6)).jsonObject
+        ),
     )
 
     private companion object {
