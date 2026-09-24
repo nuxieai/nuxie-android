@@ -1100,6 +1100,12 @@ class ExperiencePresentationServiceTest {
             emitted.map(Emitted::name),
         )
         assertEquals("user", emitted.last().properties["reason"])
+        emitted.forEach { event ->
+            assertEquals("journey-1", event.properties["journey_id"])
+            assertEquals("experience_golden", event.properties["experience_id"])
+            assertEquals("version_golden", event.properties["experience_version_id"])
+            assertFalse(event.properties.containsKey("experience_version"))
+        }
         assertTrue(lease.closed.get())
     }
 

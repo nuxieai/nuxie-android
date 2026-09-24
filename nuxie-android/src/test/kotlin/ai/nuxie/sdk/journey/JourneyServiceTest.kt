@@ -984,7 +984,7 @@ class JourneyServiceTest {
             }.second
             for (properties in listOf(shown, dismissed)) {
                 assertEquals("experience_golden", properties["experience_id"])
-                assertEquals("version_golden", properties["experience_version"])
+                assertEquals("version_golden", properties["experience_version_id"])
                 assertEquals("screen_welcome", properties["screen_id"])
                 assertEquals(0L, properties["leg_generation"])
                 assertTrue((properties["journey_id"] as? String).orEmpty().isNotEmpty())
