@@ -198,22 +198,15 @@ internal class SQLiteEventStore(
     ): Boolean {
         database.prepare(
             """
-            INSERT OR IGNORE INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin)
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?
+            INSERT OR IGNORE INTO events (id, name, properties, timestamp, user_id, session_id, delivery_state, origin, journey_origin)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
             WHERE NOT EXISTS (
                 SELECT 1 FROM stable_event_drops WHERE event_id = ?
             );
             """.trimIndent(),
         ).use { statement ->
-            statement.bindText(1, event.id)
-            statement.bindText(2, event.name)
-            statement.bindBlob(3, event.encodedProperties())
-            statement.bindLong(4, event.timestampMillis)
-            statement.bindText(5, event.distinctId)
-            event.sessionId?.let { statement.bindText(6, it) } ?: statement.bindNull(6)
-            statement.bindLong(7, DELIVERY_PENDING)
-            statement.bindText(8, event.origin)
-            statement.bindText(9, event.id)
+            statement.bindStoredEvent(event, DELIVERY_PENDING)
+            statement.bindText(10, event.id)
             statement.step()
         }
         val inserted = database.queryLong("SELECT changes();") == 1L

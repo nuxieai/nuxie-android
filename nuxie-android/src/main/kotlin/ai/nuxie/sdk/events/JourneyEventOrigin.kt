@@ -2,7 +2,7 @@ package ai.nuxie.sdk.events
 
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.int
+import kotlinx.serialization.json.long
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
@@ -12,7 +12,7 @@ internal data class JourneyEventOrigin(
     val experienceId: String,
     val versionId: String,
     val legId: String,
-    val generation: Int,
+    val generation: Long,
     val stepId: String,
     val occurrenceId: String,
 ) {
@@ -30,7 +30,7 @@ internal data class JourneyEventOrigin(
                 experienceId = value.getValue("experienceId").jsonPrimitive.content,
                 versionId = value.getValue("versionId").jsonPrimitive.content,
                 legId = value.getValue("legId").jsonPrimitive.content,
-                generation = value.getValue("generation").jsonPrimitive.int,
+                generation = value.getValue("generation").jsonPrimitive.long,
                 stepId = value.getValue("stepId").jsonPrimitive.content,
                 occurrenceId = value.getValue("occurrenceId").jsonPrimitive.content,
             )

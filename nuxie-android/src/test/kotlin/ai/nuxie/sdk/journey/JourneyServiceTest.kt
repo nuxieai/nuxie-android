@@ -2000,7 +2000,7 @@ class JourneyServiceTest {
         val delivered = mutableListOf<String>()
         val dispatcher = JourneyEffectDispatcher(
             identity = identity,
-            capture = { _, _, _, _, _ -> error("revoked app action must not capture its rider") },
+            capture = { _, _, _, _, _, _ -> error("revoked app action must not capture its rider") },
             deliverAppAction = { action, publishIfCurrent ->
                 identity.setDistinctId("replacement")
                 publishIfCurrent { delivered += action.name }
@@ -2009,6 +2009,26 @@ class JourneyServiceTest {
 
         assertEquals(JourneyDispatchResult.Failed, dispatcher.dispatch(request))
         assertTrue(delivered.isEmpty())
+    }
+
+    @Test fun `authored event effect carries exact execution origin`() = runBlocking {
+        val identity = IdentityService(context).also { it.setDistinctId("customer") }
+        val request = dispatchRequest(identity, buildJsonObject {
+            put("type", "send_event"); put("eventName", "finished")
+        })
+        var captured: ai.nuxie.sdk.events.JourneyEventOrigin? = null
+        val dispatcher = JourneyEffectDispatcher(identity = identity,
+            capture = { _, _, _, _, admission, origin ->
+                admission.commitIfCurrent { captured = origin; true } == true
+            }, deliverAppAction = { _, _ -> error("Unexpected app action") })
+        assertEquals(JourneyDispatchResult.Outlet("next"), dispatcher.dispatch(request))
+        assertEquals(request.run.journeyId, captured?.journeyId)
+        assertEquals(request.run.reference.getValue("experienceId").jsonPrimitive.content, captured?.experienceId)
+        assertEquals(request.run.reference.getValue("versionId").jsonPrimitive.content, captured?.versionId)
+        assertEquals(request.run.reference.getValue("legId").jsonPrimitive.content, captured?.legId)
+        assertEquals(request.run.generation, captured?.generation)
+        assertEquals(request.stepId, captured?.stepId)
+        assertEquals(request.effectId, captured?.occurrenceId)
     }
 
     @Test fun `event effect cannot commit after its identity fence is revoked`() = runBlocking {
@@ -2023,7 +2043,7 @@ class JourneyServiceTest {
         var commits = 0
         val dispatcher = JourneyEffectDispatcher(
             identity = identity,
-            capture = { _, _, _, _, admission ->
+            capture = { _, _, _, _, admission, _ ->
                 identity.setDistinctId("replacement")
                 admission.commitIfCurrent {
                     commits += 1
@@ -2050,7 +2070,7 @@ class JourneyServiceTest {
         val captures = mutableListOf<Pair<String, Map<String, Any?>>>()
         val dispatcher = JourneyEffectDispatcher(
             identity = identity,
-            capture = { name, properties, _, _, admission ->
+            capture = { name, properties, _, _, admission, _ ->
                 admission.commitIfCurrent {
                     captures += name to properties
                     true
@@ -2229,7 +2249,7 @@ class JourneyServiceTest {
             featureAccess = { access },
             dispatcher = JourneyEffectDispatcher(
                 identity = identity,
-                capture = { name, properties, _, _, admission ->
+                capture = { name, properties, _, _, admission, _ ->
                     admission.commitIfCurrent { captures += name to properties; true } == true
                 },
                 deliverAppAction = { _, _ -> error("Offer alternative must not invoke an app action") },
