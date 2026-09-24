@@ -8,6 +8,7 @@ import androidx.sqlite.driver.AndroidSQLiteDriver
 import java.io.File
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -41,6 +42,23 @@ class SQLiteEventStoreTest {
         runBlocking { store?.close() }
         store = null
         databaseDirectory.deleteRecursively()
+    }
+
+    @Test fun originSurvivesReopenHistoryRemovalAndPendingDelivery() = runBlocking {
+        val origin = JourneyEventOrigin("journey", "experience", "version", "leg", 0, "step", "event")
+        val event = StoredEvent(id = "event", name = "finished", distinctId = "user-1",
+            timestampMillis = 100, properties = JsonObject(mapOf("answer" to JsonPrimitive(42))), journeyOrigin = origin)
+        val first = SQLiteEventStore(context, nowMillis = { 100 }).also { store = it }
+        first.insertPending(event)
+        first.close()
+        val reopened = SQLiteEventStore(context, nowMillis = { 100 }).also { store = it }
+        assertEquals(origin, reopened.pendingBatch(10).single().journeyOrigin)
+        assertEquals(origin, reopened.pendingConversionOccurrences("user-1").single().event.journeyOrigin)
+        val wire = kotlinx.serialization.json.Json.parseToJsonElement(BatchItemWireEncoder.encode(reopened.pendingBatch(10).single()))
+        assertEquals(origin.toJson(), wire.jsonObject["journeyOrigin"])
+        reopened.markDelivered(listOf("event"))
+        reopened.deleteOldestDeliveredEvents(keeping = 0)
+        assertEquals(origin, reopened.pendingConversionOccurrences("user-1").single().event.journeyOrigin)
     }
 
     @Test fun conversionInboxSurvivesHistoryRemovalWithFirstAcceptanceAndRouteCutoff() = runBlocking {
@@ -241,7 +259,7 @@ class SQLiteEventStoreTest {
     }
 
     @Test
-    fun migratesAnEmptyDatabaseToVersionFourWithTheExactSchema() = runBlocking {
+    fun migratesAnEmptyDatabaseToVersionSixWithTheExactSchema() = runBlocking {
         val eventStore = SQLiteEventStore(context).also { store = it }
 
         assertEquals(emptyList<StoredEvent>(), eventStore.pendingBatch(limit = 1))
@@ -250,7 +268,7 @@ class SQLiteEventStoreTest {
 
         val connection = AndroidSQLiteDriver().open(File(databaseDirectory, "events.db").absolutePath)
         connection.use {
-            assertEquals(5L, it.queryLong("PRAGMA user_version;"))
+            assertEquals(6L, it.queryLong("PRAGMA user_version;"))
             assertEquals(
                 setOf(
                     "events",

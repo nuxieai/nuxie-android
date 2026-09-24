@@ -119,32 +119,39 @@ internal data class JourneyConversionWatch(
             if (event.timestampMillis !in 0..MAX_SAFE_MILLIS || acceptedAt !in 0..MAX_SAFE_MILLIS ||
                 event.timestampMillis < acceptedAt - BACKDATE_MILLIS) return null
             return StoredEvent(id = event.id, name = event.name, properties = event.properties,
-                distinctId = event.distinctId, timestampMillis = minOf(event.timestampMillis, acceptedAt))
+                distinctId = event.distinctId, timestampMillis = minOf(event.timestampMillis, acceptedAt), journeyOrigin = event.journeyOrigin)
         }
 
         fun apply(event: StoredEvent, acceptedAt: Long, matching: Set<String>, watches: MutableMap<String, JourneyConversionWatch>) {
             if (event.name == "\$purchase_completed" || event.name == "\$purchase_synced") return
             val occurrence = normalized(event, acceptedAt) ?: return
             val time = occurrence.timestampMillis
-            val direct = (event.properties["journey_id"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            val reportedJourney = (event.properties["journey_id"] as? JsonPrimitive)?.takeIf { it.isString }?.content
             val hasContext = listOf("journey_id", "experience_id", "experience_version_id").any(event.properties::containsKey)
             if (hasContext) {
-                val watch = watches[direct] ?: return
+                val watch = watches[reportedJourney] ?: return
                 if (event.properties["experience_id"] != JsonPrimitive(watch.experienceId) ||
                     event.properties["experience_version_id"] != JsonPrimitive(watch.versionId)) return
             }
-            if (event.name == SystemEventNames.EXPERIENCE_SHOWN && direct != null) {
-                val watch = watches.getValue(direct)
+            if (event.name == SystemEventNames.EXPERIENCE_SHOWN && reportedJourney != null) {
+                val watch = watches.getValue(reportedJourney)
                 if (!watch.entryBasis && time >= watch.startedAt && watch.basis == null) {
-                    watches[direct] = watch.copy(basis = JourneyPlaneProfile.ConversionOccurrence(event.id, time))
+                    watches[reportedJourney] = watch.copy(basis = JourneyPlaneProfile.ConversionOccurrence(event.id, time))
                 }
             }
+            val direct = event.journeyOrigin?.journeyId
+            if (event.journeyOrigin != null) {
+                val origin = event.journeyOrigin
+                val watch = watches[origin.journeyId] ?: return
+                if (origin.occurrenceId != event.id || origin.experienceId != watch.experienceId ||
+                    origin.versionId != watch.versionId || (hasContext && reportedJourney != origin.journeyId)) return
+            } else if (hasContext) return
             val selected = watches.values.filter { watch ->
                 val basis = watch.basis
                 matching.contains(watch.journeyId) && basis != null &&
                     time in basis.occurredAt..(basis.occurredAt + watch.windowMillis) &&
                     (time != basis.occurredAt || event.id > basis.eventId) &&
-                    (!hasContext || watch.journeyId == direct)
+                    (direct == null || watch.journeyId == direct)
             }.sortedWith(compareByDescending<JourneyConversionWatch> { it.basis!!.occurredAt }.thenBy { it.journeyId }).firstOrNull() ?: return
             if (selected.conversion != null) return
             watches[selected.journeyId] = selected.copy(conversion = JourneyPlaneProfile.ConversionOccurrence(event.id, time))

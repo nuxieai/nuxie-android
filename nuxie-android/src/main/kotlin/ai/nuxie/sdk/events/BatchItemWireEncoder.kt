@@ -25,6 +25,7 @@ internal object BatchItemWireEncoder {
         properties.stringProperty("\$anon_distinct_id")?.let {
             item["\$anon_distinct_id"] = JsonPrimitive(it)
         }
+        event.journeyOrigin?.let { item["journeyOrigin"] = it.toJson() }
         properties.numericProperty("value")?.let { item["value"] = it }
         // The iOS reference encoder emits camel-cased `entityId` (RequestModels
         // CodingKeys has no snake mapping for it); the fixture's `entity_id`
