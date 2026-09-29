@@ -115,8 +115,6 @@ internal class ExperienceVideoPlayback(
     private var closed = false
     var deliveredFrames = 0L
         private set
-    var deliveredRGBABytes = 0L
-        private set
     val activeDecoderCount: Int get() = entries.values.count { it.decoder != null }
 
     init {
@@ -331,11 +329,16 @@ internal class ExperienceVideoPlayback(
             player.videoClock(video.componentId, monotonicSeconds,
                 if (clock == null) NuxieVideoClock(video.generation, 0.0, 0.0, false, false)
                 else NuxieVideoClock(clock.generation, clock.seconds, clock.rate, clock.playing, true))
-            decoder?.takeFrame()?.let {
-                player.videoPresent(renderer, video.componentId,
-                    NuxieVideoFrame(it.generation, it.seconds, it.width, it.height, it.rgba))
-                deliveredFrames++
-                deliveredRGBABytes += it.rgba.size
+            decoder?.takeFrame()?.let { frame ->
+                try {
+                    player.videoPresentHardwareBuffer(renderer, video.componentId, NuxieVideoHardwareBufferFrame(
+                        frame.generation, frame.seconds, frame.buffer, frame.cropLeft, frame.cropTop,
+                        frame.cropRight, frame.cropBottom, frame.rotationDegrees, frame.displayWidth,
+                        frame.displayHeight, frame.colorMatrix, frame.colorRange))
+                    deliveredFrames++
+                } finally {
+                    frame.close()
+                }
             }
         }
     }

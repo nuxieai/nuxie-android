@@ -1,49 +1,88 @@
 package ai.nuxie.sdk.runtime;
 
+import android.annotation.TargetApi;
 import android.content.Context;
 import android.content.BroadcastReceiver;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.graphics.SurfaceTexture;
+import android.graphics.ImageFormat;
+import android.graphics.Rect;
+import android.hardware.HardwareBuffer;
 import android.media.AudioManager;
+import android.media.Image;
+import android.media.ImageReader;
+import android.media.MediaExtractor;
+import android.media.MediaFormat;
 import android.media.MediaPlayer;
 import android.media.MediaTimestamp;
 import android.media.PlaybackParams;
-import android.opengl.EGL14;
-import android.opengl.EGLConfig;
-import android.opengl.EGLContext;
-import android.opengl.EGLDisplay;
-import android.opengl.EGLSurface;
-import android.opengl.GLES11Ext;
-import android.opengl.GLES20;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
-import android.view.Surface;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.FloatBuffer;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Decoder/audio owner only: no View, no overlay, and no renderer GL context.
- * A private OES surface converts platform-decoded frames to bounded RGBA for
- * the runtime's Vulkan factory. This initial path includes a GPU readback.
- * All media/GL mutations use one worker. Sources are retained, verified local
- * files supplied by SDK acquisition; this owner never downloads media.
+ * Decoder/audio owner only: no View, no overlay, and no GL. MediaPlayer
+ * decodes into an ImageReader, and each frame goes to the runtime's Vulkan
+ * renderer in its hardware buffer, which the runtime imports and converts on
+ * the GPU; no pixels pass through the CPU. Needs Android 9 (API 28) for
+ * Image.getHardwareBuffer; on older versions opening fails and the video
+ * reports an error. All media mutations use one worker.
+ * Sources are retained, verified local files supplied by SDK acquisition;
+ * this owner never downloads media.
  */
 final class AndroidVideoDecoder {
+  /** A decoded frame in the decoder's hardware buffer. Close it once presented. */
+  @TargetApi(Build.VERSION_CODES.P)
   public static final class Frame {
     public final long generation;
     public final double seconds;
-    public final int width, height;
-    public final byte[] rgba;
-    Frame(long generation, double seconds, int width, int height, byte[] rgba) {
+    public final HardwareBuffer buffer;
+    /** The picture's edges in buffer pixels; decoders may pad the buffer. */
+    public final int cropLeft, cropTop, cropRight, cropBottom;
+    /** Clockwise rotation from buffer to display: 0, 90, 180 or 270. */
+    public final int rotationDegrees;
+    /**
+     * Displayed width and height after the rotation, as MediaPlayer reports
+     * them. Video with non-square pixels displays wider or taller than its
+     * crop.
+     */
+    public final int displayWidth, displayHeight;
+    /** Y'CbCr matrix: 1 BT.601, 2 BT.709, 3 BT.2020. */
+    public final int colorMatrix;
+    /** 1 limited range, 2 full range. */
+    public final int colorRange;
+    private final Image image;
+    Frame(long generation, double seconds, Image image, int rotationDegrees,
+          int displayWidth, int displayHeight, int colorMatrix, int colorRange) {
       this.generation = generation;
       this.seconds = seconds;
-      this.width = width;
-      this.height = height;
-      this.rgba = rgba;
+      this.image = image;
+      this.buffer = image.getHardwareBuffer();
+      Rect crop = image.getCropRect();
+      this.cropLeft = crop.left;
+      this.cropTop = crop.top;
+      this.cropRight = crop.right;
+      this.cropBottom = crop.bottom;
+      this.rotationDegrees = rotationDegrees;
+      this.displayWidth = displayWidth;
+      this.displayHeight = displayHeight;
+      this.colorMatrix = colorMatrix;
+      this.colorRange = colorRange;
+    }
+    /** Displayed width. */
+    public int width() {
+      return displayWidth;
+    }
+    /** Displayed height. */
+    public int height() {
+      return displayHeight;
+    }
+    /** Returns the buffer to the decoder. */
+    public void close() {
+      buffer.close();
+      image.close();
     }
   }
   public static final class Clock {
@@ -131,16 +170,12 @@ final class AndroidVideoDecoder {
   private volatile double duration;
   private Frame latest;
   private MediaPlayer player;
-  private SurfaceTexture texture;
-  private Surface surface;
-  private EGLDisplay display = EGL14.EGL_NO_DISPLAY;
-  private EGLContext context = EGL14.EGL_NO_CONTEXT;
-  private EGLSurface eglSurface = EGL14.EGL_NO_SURFACE;
-  private EGLConfig config;
-  private int width, height, textureId, program;
-  private ByteBuffer readback;
+  private ImageReader reader;
+  /** An image that arrived during a seek, held until the seek commits. */
+  private Image latchedDuringSeek;
+  private int rotationDegrees, displayWidth, displayHeight, colorMatrix, colorRange;
   private long generation;
-  private boolean seeking, wantsPlay, frameLatchedDuringSeek;
+  private boolean seeking, wantsPlay;
   private double queuedSeek = -1;
   private long queuedGeneration;
   private float rate = 1, volume = 0;
@@ -195,11 +230,6 @@ final class AndroidVideoDecoder {
       }
     });
   }
-  private final float[] textureTransform = new float[16];
-  private final FloatBuffer vertices = ByteBuffer.allocateDirect(16 * 4)
-                                           .order(ByteOrder.nativeOrder())
-                                           .asFloatBuffer();
-
   AndroidVideoDecoder(Context application, java.io.File source, long generation,
                      int maxFrameBytes, int audioPolicy) {
     if (!source.isFile() || maxFrameBytes <= 0 || maxFrameBytes > 67_108_864)
@@ -211,9 +241,6 @@ final class AndroidVideoDecoder {
     this.application = application.getApplicationContext();
     this.generation = generation;
     this.maxFrameBytes = maxFrameBytes;
-    vertices
-        .put(new float[] {-1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, 1, 1, 1, 1})
-        .position(0);
     thread.start();
     handler = new Handler(thread.getLooper());
     handler.post(() -> open(source));
@@ -225,13 +252,26 @@ final class AndroidVideoDecoder {
       application.registerReceiver(routeReceiver,
           new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY), null, handler);
       routeReceiverRegistered = true;
-      initGl();
+      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P)
+        throw new IllegalStateException("video frames need Android 9");
+      int[] size = readTrack(source);
+      checkBudget(size[0], size[1]);
+      // Four images: one the runtime is importing, the latest, one held
+      // across a seek and one being decoded. PRIVATE images take the
+      // decoder's own size.
+      reader = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                   ? ImageReader.newInstance(size[0], size[1], ImageFormat.PRIVATE, 4,
+                                             HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE)
+                   : ImageReader.newInstance(size[0], size[1], ImageFormat.PRIVATE, 4);
+      reader.setOnImageAvailableListener(r -> onFrame(), handler);
       player = new MediaPlayer();
       player.setVolume(0, 0);
-      player.setSurface(surface);
+      player.setSurface(reader.getSurface());
       player.setOnVideoSizeChangedListener((p, w, h) -> {
         try {
-          resize(w, h);
+          checkBudget(w, h);
+          displayWidth = w;
+          displayHeight = h;
         } catch (Exception e) {
           fail(e.toString());
         }
@@ -263,10 +303,10 @@ final class AndroidVideoDecoder {
           beginSeek(target, token);
         } else {
           seeking = false;
-          if (frameLatchedDuringSeek) {
-            frameLatchedDuringSeek = false;
-            presentLatchedFrame();
-          }
+          Image latched = latchedDuringSeek;
+          latchedDuringSeek = null;
+          if (latched != null)
+            present(latched);
           if (wantsPlay && !interrupted && acquireFocus()) {
             try {
               // Rate commands received while preparing/seeking are deferred.
@@ -288,159 +328,122 @@ final class AndroidVideoDecoder {
       fail(e.toString());
     }
   }
-  private void initGl() {
-    display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
-    int[] versions = new int[2];
-    if (!EGL14.eglInitialize(display, versions, 0, versions, 1))
-      throw new IllegalStateException("EGL initialize");
-    EGLConfig[] configs = new EGLConfig[1];
-    int[] count = new int[1];
-    int[] attrs = {EGL14.EGL_RENDERABLE_TYPE,
-                   EGL14.EGL_OPENGL_ES2_BIT,
-                   EGL14.EGL_SURFACE_TYPE,
-                   EGL14.EGL_PBUFFER_BIT,
-                   EGL14.EGL_RED_SIZE,
-                   8,
-                   EGL14.EGL_GREEN_SIZE,
-                   8,
-                   EGL14.EGL_BLUE_SIZE,
-                   8,
-                   EGL14.EGL_ALPHA_SIZE,
-                   8,
-                   EGL14.EGL_NONE};
-    if (!EGL14.eglChooseConfig(display, attrs, 0, configs, 0, 1, count, 0) ||
-        count[0] == 0)
-      throw new IllegalStateException("EGL config");
-    config = configs[0];
-    context = EGL14.eglCreateContext(
-        display, config, EGL14.EGL_NO_CONTEXT,
-        new int[] {EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE}, 0);
-    resize(1, 1);
-    int[] ids = new int[1];
-    GLES20.glGenTextures(1, ids, 0);
-    textureId = ids[0];
-    GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId);
-    GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-                           GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
-    GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-                           GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
-    GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-                           GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
-    GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-                           GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
-    texture = new SurfaceTexture(textureId);
-    texture.setOnFrameAvailableListener(t -> onFrame(), handler);
-    surface = new Surface(texture);
-    int vertex = shader(GLES20.GL_VERTEX_SHADER,
-                        "attribute vec2 position;attribute vec2 uv;uniform " +
-                        "mat4 transform;varying vec2 tex;void "
-                            + "main(){gl_Position=vec4(position,0.,1.);tex=(" +
-                              "transform*vec4(uv,0.,1.)).xy;}");
-    int fragment =
-        shader(GLES20.GL_FRAGMENT_SHADER,
-               "#extension GL_OES_EGL_image_external : require\nprecision " +
-               "mediump float;uniform "
-                   + "samplerExternalOES frame;varying vec2 tex;void "
-                   + "main(){gl_FragColor=texture2D(frame,tex);}");
-    program = GLES20.glCreateProgram();
-    GLES20.glAttachShader(program, vertex);
-    GLES20.glAttachShader(program, fragment);
-    GLES20.glLinkProgram(program);
-    int[] status = new int[1];
-    GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, status, 0);
-    GLES20.glDeleteShader(vertex);
-    GLES20.glDeleteShader(fragment);
-    if (status[0] == 0)
-      throw new IllegalStateException(GLES20.glGetProgramInfoLog(program));
-  }
-  private int shader(int kind, String source) {
-    int id = GLES20.glCreateShader(kind);
-    GLES20.glShaderSource(id, source);
-    GLES20.glCompileShader(id);
-    int[] status = new int[1];
-    GLES20.glGetShaderiv(id, GLES20.GL_COMPILE_STATUS, status, 0);
-    if (status[0] == 0) {
-      String log = GLES20.glGetShaderInfoLog(id);
-      GLES20.glDeleteShader(id);
-      throw new IllegalStateException(log);
+  /**
+   * Width, height, rotation and color from the file's video track. The color
+   * is what the decoder tags its output with: the stream's own description,
+   * or Android's defaults for streams without one (limited range; BT.2020
+   * from 4K, BT.601 up to 720x576, BT.709 between). The runtime's Vulkan
+   * conversion needs it because drivers' own suggestions are not reliable.
+   */
+  @TargetApi(Build.VERSION_CODES.P)
+  private int[] readTrack(java.io.File source) throws java.io.IOException {
+    MediaExtractor extractor = new MediaExtractor();
+    try (java.io.FileInputStream input = new java.io.FileInputStream(source)) {
+      extractor.setDataSource(input.getFD());
+      for (int track = 0; track < extractor.getTrackCount(); track++) {
+        MediaFormat format = extractor.getTrackFormat(track);
+        String mime = format.getString(MediaFormat.KEY_MIME);
+        if (mime == null || !mime.startsWith("video/"))
+          continue;
+        int width = integer(format, MediaFormat.KEY_WIDTH, 0);
+        int height = integer(format, MediaFormat.KEY_HEIGHT, 0);
+        rotationDegrees = integer(format, MediaFormat.KEY_ROTATION, 0);
+        // Non-square pixels widen the picture. MediaPlayer's own video size
+        // replaces this estimate once it reports one.
+        int sarWidth = integer(format, "sar-width", 1), sarHeight = integer(format, "sar-height", 1);
+        int shown = sarWidth > 0 && sarHeight > 0 ? (int)((long)width * sarWidth / sarHeight) : width;
+        boolean turned = rotationDegrees % 180 != 0;
+        displayWidth = Math.max(1, turned ? height : shown);
+        displayHeight = Math.max(1, turned ? shown : height);
+        colorMatrix = matrix(integer(format, MediaFormat.KEY_COLOR_STANDARD, 0), width, height);
+        colorRange = integer(format, MediaFormat.KEY_COLOR_RANGE, 0) ==
+                             MediaFormat.COLOR_RANGE_FULL ? 2 : 1;
+        return new int[] {Math.max(1, width), Math.max(1, height)};
+      }
+      throw new IllegalArgumentException("source has no video track");
+    } finally {
+      extractor.release();
     }
-    return id;
   }
-  private void resize(int w, int h) {
+  private static int integer(MediaFormat format, String key, int fallback) {
+    return format.containsKey(key) ? format.getInteger(key) : fallback;
+  }
+  @TargetApi(Build.VERSION_CODES.P)
+  private static int matrix(int standard, int width, int height) {
+    switch (standard) {
+    case MediaFormat.COLOR_STANDARD_BT601_PAL:
+    case MediaFormat.COLOR_STANDARD_BT601_NTSC:
+      return 1;
+    case MediaFormat.COLOR_STANDARD_BT709:
+      return 2;
+    case MediaFormat.COLOR_STANDARD_BT2020:
+      return 3;
+    default:
+      if (width >= 3840 || height >= 3840 || (long)width * height >= 3840L * 1634)
+        return 3;
+      if ((width <= 720 && height <= 576) || (height <= 720 && width <= 576))
+        return 1;
+      return 2;
+    }
+  }
+  private void checkBudget(int w, int h) {
     if (w <= 0 || h <= 0 || (long)w * h * 4 > maxFrameBytes)
       throw new IllegalArgumentException("video frame exceeds budget");
-    if (width == w && height == h)
-      return;
-    EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE,
-                         EGL14.EGL_NO_CONTEXT);
-    if (eglSurface != EGL14.EGL_NO_SURFACE)
-      EGL14.eglDestroySurface(display, eglSurface);
-    eglSurface = EGL14.eglCreatePbufferSurface(
-        display, config,
-        new int[] {EGL14.EGL_WIDTH, w, EGL14.EGL_HEIGHT, h, EGL14.EGL_NONE}, 0);
-    if (!EGL14.eglMakeCurrent(display, eglSurface, eglSurface, context))
-      throw new IllegalStateException("EGL make current");
-    width = w;
-    height = h;
-    readback = ByteBuffer.allocateDirect(w * h * 4);
-    if (texture != null)
-      texture.setDefaultBufferSize(w, h);
   }
   private void onFrame() {
     if (closed || failure != null)
       return;
+    Image image = null;
     try {
-      texture.updateTexImage();
+      image = reader.acquireLatestImage();
+      if (image == null)
+        return;
       if (seeking) {
         // A paused seek may deliver its only frame before onSeekComplete.
-        // Keep the latched texture until that seek is committed.
-        frameLatchedDuringSeek = true;
+        // Keep the image until that seek is committed.
+        if (latchedDuringSeek != null)
+          latchedDuringSeek.close();
+        latchedDuringSeek = image;
+        image = null;
         return;
       }
-      presentLatchedFrame();
+      Image latestImage = image;
+      image = null;
+      present(latestImage);
     } catch (Exception e) {
       fail(e.toString());
+    } finally {
+      if (image != null)
+        image.close();
     }
   }
-  private void presentLatchedFrame() {
-    if (closed || failure != null || !ready || seeking)
+  /**
+   * Publishes `image` as the latest frame, or closes it when it cannot be.
+   * Images exist only after open() passed its Android 9 check.
+   */
+  @TargetApi(Build.VERSION_CODES.P)
+  private void present(Image image) {
+    if (closed || failure != null || !ready || seeking) {
+      image.close();
       return;
+    }
     try {
       observeDecoderInfo();
-      texture.getTransformMatrix(textureTransform);
-      GLES20.glViewport(0, 0, width, height);
-      GLES20.glUseProgram(program);
-      GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-      GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId);
-      GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "frame"), 0);
-      GLES20.glUniformMatrix4fv(
-          GLES20.glGetUniformLocation(program, "transform"), 1, false,
-          textureTransform, 0);
-      int position = GLES20.glGetAttribLocation(program, "position"),
-          uv = GLES20.glGetAttribLocation(program, "uv");
-      vertices.position(0);
-      GLES20.glVertexAttribPointer(position, 2, GLES20.GL_FLOAT, false, 16,
-                                   vertices);
-      GLES20.glEnableVertexAttribArray(position);
-      vertices.position(2);
-      GLES20.glVertexAttribPointer(uv, 2, GLES20.GL_FLOAT, false, 16, vertices);
-      GLES20.glEnableVertexAttribArray(uv);
-      GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
-      ByteBuffer pixels = readback;
-      pixels.clear();
-      GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA,
-                          GLES20.GL_UNSIGNED_BYTE, pixels);
-      if (GLES20.glGetError() != GLES20.GL_NO_ERROR)
-        throw new IllegalStateException("video readback failed");
-      byte[] rgba = new byte[width * height * 4];
-      for (int y = 0; y < height; y++) {
-        pixels.position((height - 1 - y) * width * 4);
-        pixels.get(rgba, y * width * 4, width * 4);
-      }
+      checkBudget(displayWidth, displayHeight);
       Frame frame = new Frame(generation, player.getCurrentPosition() / 1000.0,
-                              width, height, rgba);
-      synchronized (this) { latest = frame; }
+                              image, rotationDegrees, displayWidth, displayHeight,
+                              colorMatrix, colorRange);
+      if ((frame.buffer.getUsage() & HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE) == 0) {
+        frame.close();
+        throw new IllegalStateException("decoded video buffers cannot be sampled by the GPU");
+      }
+      synchronized (this) {
+        if (latest != null)
+          latest.close();
+        latest = frame;
+      }
     } catch (Exception e) {
+      image.close();
       fail(e.toString());
     }
   }
@@ -471,7 +474,11 @@ final class AndroidVideoDecoder {
           if (!interrupted) releaseFocus();
           break;
         case 2:
-          synchronized (this) { latest = null; }
+          synchronized (this) {
+            if (latest != null)
+              latest.close();
+            latest = null;
+          }
           ended = false;
           if (seeking || !ready) {
             queuedSeek = value;
@@ -535,7 +542,10 @@ final class AndroidVideoDecoder {
     if ((Double.isNaN(seconds) || Double.isInfinite(seconds)) || seconds < 0)
       throw new IllegalArgumentException("invalid seek");
     seeking = true;
-    frameLatchedDuringSeek = false;
+    if (latchedDuringSeek != null) {
+      latchedDuringSeek.close();
+      latchedDuringSeek = null;
+    }
     generation = token;
     if (android.os.Build.VERSION.SDK_INT >= 26)
       player.seekTo((long)(seconds * 1000), MediaPlayer.SEEK_CLOSEST);
@@ -618,7 +628,7 @@ final class AndroidVideoDecoder {
   private boolean resourcesReleased;
   private final java.util.List<Runnable> releaseCallbacks = new java.util.ArrayList<>();
 
-  /** Completion means media and GL resources were released, not merely that close was requested. */
+  /** Completion means media and image resources were released, not merely that close was requested. */
   public void whenReleased(Runnable callback) {
     synchronized (this) {
       if (!resourcesReleased) {
@@ -656,32 +666,11 @@ final class AndroidVideoDecoder {
         },
         this::releaseFocus,
         () -> { if (player != null) { player.release(); player = null; } },
-        () -> { if (surface != null) { surface.release(); surface = null; } },
-        () -> { if (texture != null) { texture.release(); texture = null; } },
         () -> {
-          if (display != EGL14.EGL_NO_DISPLAY && !EGL14.eglMakeCurrent(display,
-              EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT))
-            throw new IllegalStateException("could not detach video EGL context");
+          if (latchedDuringSeek != null) { latchedDuringSeek.close(); latchedDuringSeek = null; }
         },
-        () -> {
-          if (display != EGL14.EGL_NO_DISPLAY && eglSurface != EGL14.EGL_NO_SURFACE) {
-            if (!EGL14.eglDestroySurface(display, eglSurface))
-              throw new IllegalStateException("could not release video EGL surface");
-            eglSurface = EGL14.EGL_NO_SURFACE;
-          }
-        },
-        () -> {
-          if (display != EGL14.EGL_NO_DISPLAY && context != EGL14.EGL_NO_CONTEXT) {
-            if (!EGL14.eglDestroyContext(display, context))
-              throw new IllegalStateException("could not release video EGL context");
-            context = EGL14.EGL_NO_CONTEXT;
-          }
-        },
-        () -> {
-          // The app can share the default display; never terminate that display.
-          if (display != EGL14.EGL_NO_DISPLAY && !EGL14.eglReleaseThread())
-            throw new IllegalStateException("could not release video EGL thread");
-        });
+        // The runtime closes each frame as soon as it has presented it.
+        () -> { if (reader != null) { reader.close(); reader = null; } });
   }
 
   public void close() {
@@ -693,6 +682,8 @@ final class AndroidVideoDecoder {
       if (!closed) {
         closed = true;
         invalidateClock();
+        if (latest != null)
+          latest.close();
         latest = null;
       }
       if (closeAttempt == null || closeAttempt.done.getCount() == 0) {

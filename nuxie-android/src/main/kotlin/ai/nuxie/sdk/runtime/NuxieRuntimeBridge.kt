@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.runtime
 
 import ai.nuxie.sdk.logging.NuxieLog as Log
+import android.hardware.HardwareBuffer
 import java.io.File
 
 /**
@@ -258,6 +259,11 @@ internal object NuxieRuntimeBridge {
         generation: Long, seconds: Double, rate: Double, playing: Boolean, available: Boolean): Int
     external fun nativeVideoPresent(renderer: Long, player: Long, componentId: Long, generation: Long,
         seconds: Double, width: Int, height: Int, rgba: ByteArray): Int
+    /** nux_player_video_present_android_hardware_buffer; the buffer stays open for the call. */
+    external fun nativeVideoPresentHardwareBuffer(renderer: Long, player: Long, componentId: Long,
+        generation: Long, seconds: Double, buffer: HardwareBuffer, cropLeft: Int, cropTop: Int,
+        cropRight: Int, cropBottom: Int, rotationDegrees: Int, displayWidth: Int, displayHeight: Int,
+        colorMatrix: Int, colorRange: Int): Int
 
     external fun nativeVideoOccurrences(player: Long, statusOut: IntArray): Array<NuxieVideoOccurrence>?
     external fun nativeVideoAllocateDecoders(requests: LongArray, budget: LongArray, status: IntArray): IntArray?
