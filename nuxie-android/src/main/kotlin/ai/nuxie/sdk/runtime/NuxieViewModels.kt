@@ -399,6 +399,8 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
     fun videoCaption(player: Long, component: Long): NuxieVideoCaption = error("videoCaption is not implemented")
     fun videoClock(player: Long, component: Long, monotonicSeconds: Double, clock: NuxieVideoClock): Int = error("videoClock is not implemented")
     fun videoPresent(renderer: Long, player: Long, component: Long, frame: NuxieVideoFrame): Int = error("videoPresent is not implemented")
+    fun videoPresentHardwareBuffer(renderer: Long, player: Long, component: Long, frame: NuxieVideoHardwareBufferFrame): Int =
+        error("videoPresentHardwareBuffer is not implemented")
 
     fun videoOccurrences(player: Long): List<NuxieVideoOccurrence> = error("videoOccurrences is not implemented")
     fun videoAllocateDecoders(requests: List<NuxieVideoDecoderRequest>, budget: NuxieVideoDecoderBudget): List<NuxieVideoAllocation> = error("videoAllocateDecoders is not implemented")
@@ -585,6 +587,11 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
     override fun videoPresent(renderer: Long, player: Long, component: Long, frame: NuxieVideoFrame): Int =
         NuxieRuntimeBridge.nativeVideoPresent(renderer, player, component, frame.generation,
             frame.seconds, frame.width, frame.height, frame.rgba)
+
+    override fun videoPresentHardwareBuffer(renderer: Long, player: Long, component: Long, frame: NuxieVideoHardwareBufferFrame): Int =
+        NuxieRuntimeBridge.nativeVideoPresentHardwareBuffer(renderer, player, component, frame.generation,
+            frame.seconds, frame.buffer, frame.cropLeft, frame.cropTop, frame.cropRight, frame.cropBottom,
+            frame.rotationDegrees, frame.displayWidth, frame.displayHeight, frame.colorMatrix, frame.colorRange)
 
     override fun videoOccurrences(player: Long): List<NuxieVideoOccurrence> {
         val status = intArrayOf(-1)

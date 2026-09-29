@@ -9,6 +9,7 @@
 
 #if defined(__ANDROID__)
 #include <android/native_window_jni.h>
+#include <dlfcn.h>
 #endif
 #include <jni.h>
 #include <limits.h>
@@ -3699,6 +3700,65 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoPresent(
       from_handle(renderer), from_handle(player), (size_t)component, &frame);
   (*env)->ReleaseByteArrayElements(env, rgba, bytes, JNI_ABORT);
   return status;
+}
+
+#if defined(__ANDROID__)
+// AHardwareBuffer_fromHardwareBuffer is API 26 and the library's floor is 23,
+// so it is looked up at run time. It does not add a reference: the buffer
+// stays valid while the Java HardwareBuffer does, which covers this call.
+typedef void *(*hardware_buffer_from_java_fn)(JNIEnv *, jobject);
+static hardware_buffer_from_java_fn hardware_buffer_from_java(void) {
+  static hardware_buffer_from_java_fn resolved;
+  hardware_buffer_from_java_fn from_java = __atomic_load_n(&resolved, __ATOMIC_ACQUIRE);
+  if (from_java == NULL) {
+    void *library = dlopen("libandroid.so", RTLD_NOW);
+    if (library == NULL) return NULL;
+    from_java = (hardware_buffer_from_java_fn)dlsym(library, "AHardwareBuffer_fromHardwareBuffer");
+    __atomic_store_n(&resolved, from_java, __ATOMIC_RELEASE);
+  }
+  return from_java;
+}
+#endif
+
+// Runs on the player's lane, like every other presentation call.
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoPresentHardwareBuffer(
+    JNIEnv *env, jobject self, jlong renderer, jlong player, jlong component,
+    jlong generation, jdouble seconds, jobject buffer, jint crop_left, jint crop_top,
+    jint crop_right, jint crop_bottom, jint rotation_degrees, jint display_width,
+    jint display_height, jint color_matrix, jint color_range) {
+  (void)self;
+  if (component < 0 || !isfinite(seconds) || seconds < 0 || buffer == NULL || crop_left < 0 ||
+      crop_top < 0 || crop_right <= crop_left || crop_bottom <= crop_top ||
+      rotation_degrees < 0 || display_width < 0 || display_height < 0 || color_matrix < 0 ||
+      color_range < 0)
+    return NUX_STATUS_INVALID_ARGUMENT;
+#if defined(__ANDROID__)
+  hardware_buffer_from_java_fn from_java = hardware_buffer_from_java();
+  if (from_java == NULL) return NUX_STATUS_RUNTIME_ERROR;
+  void *hardware_buffer = from_java(env, buffer);
+  if (clear_jni_exception(env) || hardware_buffer == NULL) return NUX_STATUS_RUNTIME_ERROR;
+  struct NuxVideoHardwareBufferFrame frame;
+  memset(&frame, 0, sizeof(frame));
+  frame.struct_size = (uint32_t)sizeof(frame);
+  frame.generation = (uint64_t)generation;
+  frame.presentation_seconds = seconds;
+  frame.hardware_buffer = hardware_buffer;
+  frame.crop_left = (uint32_t)crop_left;
+  frame.crop_top = (uint32_t)crop_top;
+  frame.crop_right = (uint32_t)crop_right;
+  frame.crop_bottom = (uint32_t)crop_bottom;
+  frame.rotation_degrees = (uint32_t)rotation_degrees;
+  frame.display_width = (uint32_t)display_width;
+  frame.display_height = (uint32_t)display_height;
+  frame.color_matrix = (uint32_t)color_matrix;
+  frame.color_range = (uint32_t)color_range;
+  return nux_player_video_present_android_hardware_buffer(
+      from_handle(renderer), from_handle(player), (size_t)component, &frame);
+#else
+  (void)env; (void)renderer; (void)player; (void)generation;
+  return NUX_STATUS_RUNTIME_ERROR;
+#endif
 }
 
 JNIEXPORT jint JNICALL

@@ -22,14 +22,18 @@ class AndroidVideoResourceDeviceTest {
                 val deadline = android.os.SystemClock.elapsedRealtime() + 3_000
                 while (frame == null && android.os.SystemClock.elapsedRealtime() < deadline) {
                     assertNull(decoder.failure())
-                    frame = decoder.takeFrame()?.takeIf { it.generation == 2L }
+                    frame = decoder.takeFrame()?.let { if (it.generation == 2L) it else { it.close(); null } }
                     if (frame == null) Thread.sleep(5)
                 }
                 val decoded = checkNotNull(frame)
-                assertEquals(128, decoded.width)
-                assertEquals(32, decoded.height)
-                assertEquals(128 * 32 * 4, decoded.rgba.size)
-                assertEquals(decoded.width.toLong() * decoded.height * 31, ExperienceVideoDecodeCost.read(file))
+                try {
+                    // 64x32 stored pixels, each twice as wide as it is tall.
+                    assertEquals(64, decoded.cropRight - decoded.cropLeft)
+                    assertEquals(128, decoded.width())
+                    assertEquals(32, decoded.height())
+                    assertTrue((decoded.buffer.usage and android.hardware.HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE) != 0L)
+                    assertEquals(decoded.width().toLong() * decoded.height() * 31, ExperienceVideoDecodeCost.read(file))
+                } finally { decoded.close() }
             } finally { decoder.close() }
         } finally { file.delete() }
     }

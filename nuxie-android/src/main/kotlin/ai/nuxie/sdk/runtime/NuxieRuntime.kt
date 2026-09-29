@@ -524,6 +524,13 @@ internal class NuxieRuntimePlayer internal constructor(
         if (status != NUX_STATUS_OK) throw NuxieRuntimeCallException("video frame", status)
     }
 
+    /** Returns once the renderer has finished reading the buffer; the caller then closes it. */
+    fun videoPresentHardwareBuffer(renderer: NuxieAndroidVulkanRenderer, component: Long, frame: NuxieVideoHardwareBufferFrame) {
+        require(component >= 0)
+        val status = native.videoPresentHardwareBuffer(renderer.requireHandle(), requireHandle(), component, frame)
+        if (status != NUX_STATUS_OK) throw NuxieRuntimeCallException("video frame", status)
+    }
+
     internal fun videoIsVisible(component: Long, viewport: VideoViewport): Boolean {
         require(component >= 0)
         return native.videoIsVisible(requireHandle(), component, viewport)
