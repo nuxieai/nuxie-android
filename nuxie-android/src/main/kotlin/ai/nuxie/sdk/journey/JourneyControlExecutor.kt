@@ -27,6 +27,8 @@ internal class JourneyControlExecutor(
     ) {
         enum class Source {
             PROFILE,
+            OVERRIDE,
+            FIXED,
             FALLBACK,
         }
     }
@@ -117,10 +119,17 @@ internal class JourneyControlExecutor(
             ?: return Result.Invalid
         val assignment = assignments[experimentId] as? JsonObject
         val assigned = assignment?.text("variantId")
-        val matchedAssignment = assigned?.takeIf(available::containsKey)
+        val assignmentSource = when (assignment?.text("source")) {
+            "profile" -> ExperimentSelection.Source.PROFILE
+            "override" -> ExperimentSelection.Source.OVERRIDE
+            "fixed" -> ExperimentSelection.Source.FIXED
+            else -> null
+        }
+        val matchedAssignment = assigned?.takeIf { assignmentSource != null &&
+            available.containsKey(it) && available[it] == assignment["isHoldout"]?.jsonPrimitive?.booleanOrNull }
         val selected = matchedAssignment ?: fallback
         val source = if (matchedAssignment != null) {
-            ExperimentSelection.Source.PROFILE
+            checkNotNull(assignmentSource)
         } else {
             ExperimentSelection.Source.FALLBACK
         }

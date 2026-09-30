@@ -29,7 +29,7 @@ internal class JourneyReporter(
             }
             if (run.completion != null) {
                 if (run.experimentExposures.any {
-                        it.shownAtMillis != null && !it.queued
+                        !it.queued
                     }
                 ) { settled = false; continue }
                 if (run.pendingPresentationPublication != null) { settled = false; continue }
@@ -61,21 +61,22 @@ internal class JourneyReporter(
     }
 }
 
-/** Publishes only selected variants that reached their bound visible screen. */
+/** Publishes durably selected variants independently of presentation. */
 internal class JourneyExperimentExposureReporter(
     private val journal: JourneyRunJournal,
-    private val capture: suspend (String, Map<String, Any?>, String, String) -> Boolean,
+    private val capture: suspend (String, Map<String, Any?>, String, String, Long) -> Boolean,
 ) {
     suspend fun flushPending(): Boolean {
         for (run in journal.runs()) {
             for (exposure in run.experimentExposures) {
-                if (exposure.shownAtMillis == null || exposure.queued) continue
+                if (exposure.queued) continue
                 val projection = projection(run, exposure)
                 if (!capture(
                         projection.first,
                         projection.second,
                         exposure.eventId,
                         journal.distinctId,
+                        exposure.selectedAtMillis,
                     )
                 ) return false
                 if (!journal.markExperimentExposureQueued(run.id, exposure.eventId)) {
@@ -93,15 +94,22 @@ internal class JourneyExperimentExposureReporter(
         val properties = linkedMapOf<String, Any?>(
             "journey_id" to run.journeyId,
             "experience_id" to run.experienceId,
-            "experience_version" to run.reference.getValue("versionId").jsonPrimitive.content,
+            "experience_version_id" to run.reference.getValue("versionId").jsonPrimitive.content,
             "leg_id" to run.reference.getValue("legId").jsonPrimitive.content,
             "leg_generation" to run.generation,
             "experiment_key" to exposure.experimentId,
+            "step_id" to exposure.stepId,
             "variant_key" to exposure.variantId,
         )
         when (exposure.kind) {
             JourneyRun.ExperimentExposure.Kind.ASSIGNED -> {
                 properties["assignment_source"] = "profile"
+            }
+            JourneyRun.ExperimentExposure.Kind.OVERRIDE -> {
+                properties["assignment_source"] = "override"
+            }
+            JourneyRun.ExperimentExposure.Kind.FIXED -> {
+                properties["assignment_source"] = "fixed"
             }
             JourneyRun.ExperimentExposure.Kind.FALLBACK -> {
                 properties["assignment_source"] = "fallback"
