@@ -89,6 +89,8 @@ internal class HostRenderHarness(
             require(output.mkdirs() || output.isDirectory) {
                 "Could not create --output directory: $output"
             }
+            player.setLayoutSize(size.width.toFloat(), size.height.toFloat())
+            check(player.step(0.0) == NUX_STATUS_OK) { "Experience layout step failed" }
             val frames = buildList(options.frameCount) {
                 repeat(options.frameCount) { index ->
                     val stepStatus = player.step(options.stepMillis / 1_000.0)

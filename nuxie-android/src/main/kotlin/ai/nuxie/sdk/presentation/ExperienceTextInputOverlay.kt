@@ -38,10 +38,10 @@ import java.util.Locale
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** Native editors share the renderer's centered-contain coordinate space. UI-thread owned. */
+/** Native editors share the renderer's layout coordinate space. UI-thread owned. */
 internal class ExperienceTextInputOverlay(
     context: Context,
-    private val artboardSize: ExperienceArtboardSize,
+    private var artboardSize: ExperienceArtboardSize,
     inputs: List<ExperienceTextInput>,
     private val fonts: Map<String, File>,
     private val writer: (String, String, Boolean, (Result<Unit>) -> Unit) -> Unit,
@@ -370,11 +370,17 @@ internal class ExperienceTextInputOverlay(
         }
     }
 
+    fun updateLayoutBounds(bounds: ExperienceArtboardSize) {
+        artboardSize = bounds
+        layoutEditors()
+    }
+
     private fun layoutEditors() {
-        if (width <= 0 || height <= 0) return
-        val scale = min(width / artboardSize.width, height / artboardSize.height)
-        val left = (width - artboardSize.width * scale) / 2f
-        val top = (height - artboardSize.height * scale) / 2f
+        val transform = ExperienceLayoutTransform.create(artboardSize, width.toFloat(), height.toFloat(),
+            resources.displayMetrics.density) ?: return
+        val scale = transform.scale
+        val left = transform.contentLeft
+        val top = transform.contentTop
         for (binding in bindings) {
             val input = binding.input
             val editor = binding.editor
