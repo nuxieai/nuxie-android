@@ -1201,6 +1201,7 @@ internal class ExperiencePresentationService(
         owner: JourneyPresentationOwner,
         action: JsonObject,
         source: JourneyScreenEmissionSource?,
+        eventSource: JourneyRuntimeEventSource? = null,
     ): JsonObject? {
         val active = synchronized(stateLock) {
             current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) }
@@ -1223,7 +1224,9 @@ internal class ExperiencePresentationService(
                     val relative = reference["isRelative"]?.let {
                         (it as? JsonPrimitive)?.takeUnless(JsonPrimitive::isString)?.booleanOrNull ?: return null
                     }
-                    active.latestViewModelSnapshot.get()?.resolveScopedString(path, model, source?.instanceId, relative)
+                    if (relative == true) {
+                        eventSource?.snapshot?.resolveNativeString(path, model, eventSource.nativeId)
+                    } else active.latestViewModelSnapshot.get()?.resolveScopedString(path, model, source?.instanceId, relative)
                 }
                 else -> null
             }

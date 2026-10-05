@@ -293,6 +293,7 @@ internal class JourneyService(
             val signal: JourneyControlExecutor.Signal,
             val checkpoint: JourneyControlExecutor.Checkpoint?,
             val dismissPresentationOnCompletion: Boolean,
+            val eventSource: JourneyRuntimeEventSource? = null,
         ) : Command {
             override val done: CompletableDeferred<Unit>? = null
         }
@@ -1731,6 +1732,7 @@ internal class JourneyService(
             target,
             command.executionFenceToken,
             identityScope,
+            command.eventSource,
         )
     }
 
@@ -1740,6 +1742,7 @@ internal class JourneyService(
         target: JourneyRunJournal,
         executionToken: JourneyExecutionFenceToken,
         identityScope: IdentityScope,
+        eventSource: JourneyRuntimeEmissionSources? = null,
     ): Boolean {
         val publication = stagedRun.pendingPresentationPublication ?: return true
         val admission = StableEventCommitAdmission { commit ->
@@ -1857,6 +1860,7 @@ internal class JourneyService(
                     executorSignal(event),
                     null,
                     dismissPresentationOnCompletion = true,
+                    eventSource = eventSource?.source(routedEvent?.id),
                 ),
             )
             return true
@@ -1891,6 +1895,7 @@ internal class JourneyService(
                     JourneyControlExecutor.Signal(responsesChanged = true),
                     checkpoint,
                     dismissPresentationOnCompletion = true,
+                    eventSource = eventSource?.source(routedEvent?.id),
                 ),
             )
         }
@@ -1957,6 +1962,7 @@ internal class JourneyService(
             initialCheckpoint = command.checkpoint,
             target = target,
             dismissPresentationOnCompletion = command.dismissPresentationOnCompletion,
+            eventSource = command.eventSource,
         )
     }
 
@@ -2283,6 +2289,7 @@ internal class JourneyService(
         target: JourneyRunJournal,
         initialPresentationReservation: JourneyPresentationReservation? = null,
         dismissPresentationOnCompletion: Boolean = true,
+        eventSource: JourneyRuntimeEventSource? = null,
     ) {
         val leg = release.leg
         val executionSnapshot = initial.executionSnapshot ?: run {
@@ -2462,7 +2469,8 @@ internal class JourneyService(
                                 run.context,
                             )
                             val resolved = contextResolved?.let {
-                                presentation.resolveAction(owner, it, run.presentationSource?.source)
+                                presentation.resolveAction(owner, it, run.presentationSource?.source,
+                                    eventSource.takeIf { run.presentationSource?.eventId == initial.presentationSource?.eventId })
                             }
                             if (resolved == null) {
                                 finishExecution(run, "abandoned")
