@@ -6,10 +6,22 @@ import android.content.Context
 import android.content.Intent
 import androidx.browser.customtabs.CustomTabsIntent
 
-internal data class JourneyOpenedLink(val url: String, val target: String?, val screenId: String?, val instanceId: String? = null, val effectId: String? = null, val destination: String = "external")
+internal data class JourneyOpenedLink(val url: String, val target: String?, val screenId: String?, val instanceId: String? = null, val effectId: String? = null, val destination: String)
+
+internal data class JourneyLinkRequest(val url: String, val target: String?, val screenId: String?, val instanceId: String? = null, val effectId: String? = null) {
+    fun opened(destination: String) = JourneyOpenedLink(url, target, screenId, instanceId, effectId, destination)
+}
 
 /** One parsed destination for runtime links and Journey open-link steps. */
 internal object JourneyLinkRouting {
+    enum class State { SETTLED, CLOSED, BACKGROUND }
+
+    fun route(url: String, target: String?, state: State): Destination? {
+        if (state == State.BACKGROUND) return null
+        val link = destination(url, target) ?: return null
+        return if (state == State.CLOSED) Destination.External(link.uri) else link
+    }
+
     sealed interface Destination {
         val uri: Uri
         data class InApp(override val uri: Uri) : Destination
@@ -26,7 +38,6 @@ internal object JourneyLinkRouting {
         return if (web && (target?.lowercase() ?: "_self") in setOf("", "_self", "_parent", "_top", "in_app"))
             Destination.InApp(uri) else Destination.External(uri)
     }
-
 }
 
 internal fun openActivityLink(context: Context, destination: JourneyLinkRouting.Destination, activity: Activity?): Boolean =
@@ -45,4 +56,4 @@ internal fun openActivityLink(context: Context, destination: JourneyLinkRouting.
             }
         }
         true
-    }.getOrDefault(false)
+    }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }.getOrDefault(false)

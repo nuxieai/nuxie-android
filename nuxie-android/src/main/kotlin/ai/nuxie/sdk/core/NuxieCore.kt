@@ -327,9 +327,13 @@ internal class NuxieCore(
             scope = scope,
             runtimeAvailable = AndroidRenderCapability::isAvailable,
             commerce = journeyCommerce,
+            foregroundActivity = { lifecycleCoordinator.resumedActivity() },
         )).also { presentations -> construction?.onFailure { presentations.close() } }
 
     private val journeyPresenter = object : JourneyPresenting {
+        override suspend fun openLink(owner: JourneyPresentationOwner, link: ai.nuxie.sdk.presentation.JourneyLinkRequest) =
+            presentations.openJourneyLink(owner, link)
+
         override fun reserve(ownerDistinctId: String) =
             presentations.reserveJourney(ownerDistinctId)
 
@@ -431,7 +435,6 @@ internal class NuxieCore(
         offerFeatureAccess = { featureId -> features.getForJourney(featureId, resolveUnknown = true) },
         dispatcher = journeyDispatcher,
         linkRecorder = journeyDispatcher,
-        openExternalLink = presentations::openExternalLink,
         presenter = journeyPresenter,
         nowMillis = nowMillis,
         replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
@@ -471,7 +474,7 @@ internal class NuxieCore(
         emit = { name, properties -> eventLog.capture(name, properties) },
     )
 
-    private val lifecycleCoordinator = NuxieLifecycleCoordinator(
+    private val lifecycleCoordinator: NuxieLifecycleCoordinator = NuxieLifecycleCoordinator(
         lifecycleTracker,
         sessions,
         scope,

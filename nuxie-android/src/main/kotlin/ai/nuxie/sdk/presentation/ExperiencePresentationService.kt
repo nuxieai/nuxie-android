@@ -549,6 +549,7 @@ internal class ExperiencePresentationService(
     private val launch: (String) -> Unit,
     private val commerce: JourneyCommercePreparing = JourneyCommercePreparing.NONE,
     private val openLink: (JourneyLinkRouting.Destination, Activity?) -> Boolean = { _, _ -> false },
+    private val foregroundActivity: () -> Activity? = { null },
     private val firstFrameTimeoutMillis: Long = FIRST_FRAME_TIMEOUT_MILLIS,
     private val beforeHostTeardownForTesting: () -> Unit = {},
 ) {
@@ -558,6 +559,7 @@ internal class ExperiencePresentationService(
         scope: CoroutineScope,
         runtimeAvailable: () -> Boolean,
         commerce: JourneyCommercePreparing = JourneyCommercePreparing.NONE,
+        foregroundActivity: () -> Activity? = { null },
     ) : this(
         emit = emit,
         scope = scope,
@@ -565,27 +567,38 @@ internal class ExperiencePresentationService(
         launch = AndroidPresentationLauncher(context.applicationContext ?: context),
         commerce = commerce,
         openLink = { destination, activity -> openActivityLink(context, destination, activity) },
+        foregroundActivity = foregroundActivity,
         firstFrameTimeoutMillis = FIRST_FRAME_TIMEOUT_MILLIS,
     )
 
-    internal suspend fun openExternalLink(url: String): Boolean {
-        val destination = JourneyLinkRouting.destination(url, "external") ?: return false
-        return withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
-            runCatching { openLink(destination, null) }.getOrDefault(false)
-        }
+    internal suspend fun openJourneyLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest): JourneyOpenedLink? {
+        val active = synchronized(stateLock) { current?.takeIf { it.ref.journeyId == owner.journeyId && it.ownerDistinctId == owner.distinctId } }
+        return openLinkForPresentation(active, link)
     }
 
-    private suspend fun openAndRecord(owner: JourneyOutcome, link: JourneyOpenedLink, record: suspend (JourneyOpenedLink) -> Unit): Boolean {
-        val destination = JourneyLinkRouting.destination(link.url, link.target) ?: return false
-        val opened = withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
-            val active = synchronized(stateLock) { current?.takeIf { it.journey === owner && !it.closed.get() } }
-                ?: return@withContext false
-            val activity = PresentationRegistry.currentScreen(active.id)?.purchaseActivity()?.takeUnless { it.isFinishing || it.isDestroyed }
-            runCatching { openLink(destination, activity) }.getOrDefault(false)
+    private suspend fun openLinkForPresentation(active: ActivePresentation?, link: JourneyLinkRequest): JourneyOpenedLink? =
+        withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+            val activity = foregroundActivity()?.takeUnless { it.isDestroyed }
+            val screen = active?.let { PresentationRegistry.currentScreen(it.id) }
+            val live = active != null && synchronized(stateLock) { current === active && !transitionInProgress } && active.shown.get() && !active.closed.get() &&
+                active.outcomeReason.get() == null && screen?.screenCloseReason() == null &&
+                screen?.purchaseActivity() === activity && activity?.isFinishing == false && activity.window.decorView.isAttachedToWindow
+            val state = if (activity == null) JourneyLinkRouting.State.BACKGROUND
+                else if (live) JourneyLinkRouting.State.SETTLED else JourneyLinkRouting.State.CLOSED
+            val destination = JourneyLinkRouting.route(link.url, link.target, state) ?: return@withContext null
+            val opened = try { openLink(destination, activity?.takeUnless { it.isFinishing }) }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (failure: Throwable) { ai.nuxie.sdk.logging.NuxieLog.w("ExperiencePresentationService", "Link handoff failed", failure); false }
+            if (opened) link.copy(screenId = link.screenId ?: active?.journey?.screenId)
+                .opened(if (destination is JourneyLinkRouting.Destination.InApp) "in_app" else "external") else null
         }
-        if (!opened) return false
-        runCatching { record(link.copy(destination = if (destination is JourneyLinkRouting.Destination.InApp) "in_app" else "external")) }
-            .onFailure { ai.nuxie.sdk.logging.NuxieLog.w("ExperiencePresentationService", "Opened link recording failed", it) }
+
+    private suspend fun openAndRecord(owner: JourneyOutcome, link: JourneyLinkRequest, record: suspend (JourneyOpenedLink) -> Unit): Boolean {
+        val active = synchronized(stateLock) { current?.takeIf { it.journey === owner } }
+        val opened = openLinkForPresentation(active, link) ?: return false
+        try { record(opened) }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Throwable) { ai.nuxie.sdk.logging.NuxieLog.w("ExperiencePresentationService", "Opened link recording failed", failure) }
         return true
     }
 
@@ -619,7 +632,7 @@ internal class ExperiencePresentationService(
             String,
         ) -> JourneyScreenDismissalResult,
         val emissions: JourneyRuntimeEmissionCoordinator,
-        val openLink: suspend (JourneyOpenedLink) -> Boolean,
+        val openLink: suspend (JourneyLinkRequest) -> Boolean,
         val screenDismissed: AtomicBoolean = AtomicBoolean(false),
         var navigationDismissal: NavigationDismissal? = null,
         var navigationHistory: List<String> = emptyList(),
@@ -1333,7 +1346,7 @@ internal class ExperiencePresentationService(
                     ?: return JourneyPresentationActionResult.Advanced("next")
                 val target = action.string("target")
                     ?: return JourneyPresentationActionResult.Advanced("next")
-                active.journey.openLink(JourneyOpenedLink(url, target, active.journey.screenId, effectId = effectId))
+                active.journey.openLink(JourneyLinkRequest(url, target, active.journey.screenId, effectId = effectId))
                 JourneyPresentationActionResult.Advanced("next")
             }
             JourneyActionType.DISMISS -> {
@@ -1584,7 +1597,8 @@ internal class ExperiencePresentationService(
 
     private fun publishScreenEffects(active: ActivePresentation, publish: suspend () -> Boolean) {
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            val accepted = runCatching { publish() }.getOrDefault(false)
+            val accepted = runCatching { publish() }
+                .onFailure { if (it is CancellationException) throw it }.getOrDefault(false)
             if (!accepted && !active.closed.get()) {
                 PresentationRegistry.reportFailure(
                     active.id,
