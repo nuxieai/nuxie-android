@@ -2364,6 +2364,10 @@ class JourneyServiceTest {
                         if (!link.getValue("canOpen").jsonPrimitive.boolean) throw android.content.ActivityNotFoundException()
                         openActivityLink(app, route, activity)
                     })
+                lateinit var journeys: JourneyService
+                val transitions = ai.nuxie.sdk.identity.UserTransitionCoordinator(store, backgroundScope)
+                transitions.addObserver { _, from, _ -> presentations.shutdownOwnedBy(from) }
+                transitions.addObserver { _, from, to -> journeys.handleUserChange(from, to) }
                 var currentRequest: JourneyPresentationRequest? = null
                 var changedState = false
                 suspend fun changeState() {
@@ -2378,8 +2382,19 @@ class JourneyServiceTest {
                         "paused_foreground" -> controller!!.pause()
                         "host_dismissed" -> presentations.dismiss(CloseReason.HostDismissed)
                         "owner_retired", "presentation_finished" -> {
-                            val close = async { if (state == "owner_retired") presentations.shutdownOwnedBy("customer")
-                                else presentations.shutdownJourney("customer", requireNotNull(currentRequest).journeyId) }
+                            val close = async {
+                                if (state == "presentation_finished") {
+                                    presentations.shutdownJourney("customer", requireNotNull(currentRequest).journeyId)
+                                } else if (vector.getValue("retirement").jsonPrimitive.content == "identity_change") {
+                                    identity.setDistinctId("replacement-owner")
+                                    transitions.enqueue(ai.nuxie.sdk.identity.UserTransitionCoordinator.Transition(
+                                        ai.nuxie.sdk.identity.UserTransitionCoordinator.Kind.IDENTIFY,
+                                        "customer", "replacement-owner", migrateEvents = false))
+                                    transitions.drain()
+                                } else {
+                                    journeys.profileDidClear("customer", 2)
+                                }
+                            }
                             runCurrent(); controller!!.pause().stop().destroy(); host.resume(); runCurrent()
                             pendingClose = close
                         }
@@ -2408,7 +2423,7 @@ class JourneyServiceTest {
                 }
                 currentRequest = null
                 val journeyScope = CoroutineScope(backgroundScope.coroutineContext + SupervisorJob(backgroundScope.coroutineContext[kotlinx.coroutines.Job]))
-                val journeys = JourneyService(identity, store, catalog, File(directory, name).apply { mkdirs() }, journeyScope,
+                journeys = JourneyService(identity, store, catalog, File(directory, name).apply { mkdirs() }, journeyScope,
                     capture = { event, props, id, _ -> captures += Triple(event, props, id); true }, presenter = presenter, linkRecorder = recorder, nowMillis = { 100_000L })
                 val admission = async { journeys.initialize(); journeys.onAppWillEnterForeground(); journeys.profileDidCommit(snapshot, authority, "customer", 1) }
                 runCurrent()
@@ -2437,9 +2452,13 @@ class JourneyServiceTest {
                         Thread.sleep(10)
                     }
                 }
+                pendingClose?.await()
+                runCurrent()
                 val records = captures.filter { it.first == JourneyEventNames.LINK_OPENED }
                 assertEquals(name, if (expected.getValue("recorded").jsonPrimitive.boolean) 1 else 0, records.size)
-                assertEquals(name, expected["destination"]?.jsonPrimitive?.contentOrNull, records.firstOrNull()?.second?.get("destination"))
+                records.firstOrNull()?.let { record ->
+                    assertEquals(name, expected["destination"]?.jsonPrimitive?.contentOrNull, record.second["destination"])
+                }
                 val intent = controller?.get()?.let { org.robolectric.Shadows.shadowOf(it).nextStartedActivity }
                     ?: org.robolectric.Shadows.shadowOf(host.get()).nextStartedActivity ?: org.robolectric.Shadows.shadowOf(app).nextStartedActivity
                 assertEquals(name, expected.getValue("opened").jsonPrimitive.boolean, intent != null)
@@ -2454,7 +2473,6 @@ class JourneyServiceTest {
                     assertTrue(names.indexOf(JourneyEventNames.LINK_OPENED) < names.indexOf(JourneyEventNames.LEG_COMPLETED))
                 }
                 runCurrent()
-                pendingClose?.await()
                 dialog?.dismiss(); presentations.close()
                 controller?.let { if (!it.get().isDestroyed) { if (state !in setOf("background", "paused_foreground")) it.pause(); if (state != "background") it.stop(); it.destroy() } }
                 if (screenless || state in setOf("owner_retired", "presentation_finished")) host.pause()
