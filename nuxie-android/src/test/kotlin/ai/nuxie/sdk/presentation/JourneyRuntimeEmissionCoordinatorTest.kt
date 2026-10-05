@@ -42,7 +42,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
     @Test fun `two controls reject the batch but preserve its link`() = runTest {
         val descriptor = Json.parseToJsonElement("""{"screenBehaviors":[{"screenId":"screen","controls":[{"actionId":"control","behavior":{"kind":"declarative","program":[]}}]}]}""").jsonObject
         var batches = 0
-        val links = mutableListOf<JourneyOpenedLink>()
+        val links = mutableListOf<JourneyLinkRequest>()
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", descriptor, 0, 0,
             onEmissionBatch = { _, _ -> batches++; true }, onPresentationRevealed = {}, onOpenLink = { links += it })
         assertTrue(coordinator.reveal())

@@ -392,3 +392,12 @@ read. Switching A → B → A does not reactivate activity from the first A sess
 and shutting down the SDK invalidates activities from that SDK session. Stale
 activities are still delivered for analytics, with their original customer ID.
 Activity identity metadata does not change the flat activity name or properties.
+
+Links use the shared `events/link-open-states.json` state table. A settled, owned
+Experience opens web links in-app for an omitted target, `_self`, `_parent`, `_top`,
+or `in_app`; `_blank` and `external` use the browser. Closing, closed, and screenless
+Experiences fall back to the browser or system. With no resumed Activity nothing
+opens or records. Non-web schemes use an available system handler. Broken Journey
+link steps advance without opening, recording, or dismissing. `$link_opened` and
+public `LinkOpened` include the actual `destination` (`in_app` or `external`) and the
+original optional `target`. Step records use the step identity before completion.

@@ -31,6 +31,16 @@ class JourneyLinkRoutingTest {
         }
     }
 
+    class CancellingActivity : Activity() {
+        override fun startActivity(intent: Intent) { throw kotlinx.coroutines.CancellationException("cancelled") }
+    }
+
+    @Test fun `platform handoff propagates cancellation`() {
+        val activity = Robolectric.buildActivity(CancellingActivity::class.java).setup().get()
+        val route = requireNotNull(JourneyLinkRouting.destination("https://example.test", "external"))
+        org.junit.Assert.assertThrows(kotlinx.coroutines.CancellationException::class.java) { openActivityLink(activity, route, activity) }
+    }
+
     @Test fun `application fallback adds new task`() {
         val context = org.robolectric.RuntimeEnvironment.getApplication()
         val route = requireNotNull(JourneyLinkRouting.destination("https://example.test", "_self"))
