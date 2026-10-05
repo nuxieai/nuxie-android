@@ -103,7 +103,7 @@ internal class PublishedConverterJourneyHarness(
         coordinator = JourneyRuntimeEmissionCoordinator(
             journeyId = request.journeyId, screenId = request.screenId, descriptor = request.release.descriptor,
             nextBatchSequence = request.nextBatchSequence, nextEmissionSequence = request.nextEmissionSequence,
-            eventSources = request.eventSources, onEmissionBatch = request.onEmissionBatch, onScreenChanged = request.onScreenChanged,
+            onEmissionBatch = request.onEmissionBatch, onScreenChanged = request.onScreenChanged,
             onPresentationRevealed = request.onPresentationRevealed)
         runBlocking { check(coordinator.reveal()) }
     }
