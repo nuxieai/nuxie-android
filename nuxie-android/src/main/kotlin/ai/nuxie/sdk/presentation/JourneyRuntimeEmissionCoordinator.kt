@@ -250,7 +250,12 @@ internal class JourneyRuntimeEmissionCoordinator(
         var controlEventSource: JourneyRuntimeEventSource? = null
 
         outcome.events.forEach { event ->
-            val properties = event.propertiesMap() ?: return@forEach
+            val properties = event.propertiesMap() ?: run {
+                if (event.url.isNotEmpty() && event.name != GENERATED_INTERACTION_EVENT) {
+                    links += OpenLink(event.url, event.target.takeIf(String::isNotEmpty))
+                }
+                return@forEach
+            }
             val eventScreenId = properties.string("screenId", "screen_id") ?: screenId
             val componentId = properties.string(
                 "componentId",
@@ -268,6 +273,10 @@ internal class JourneyRuntimeEmissionCoordinator(
                     (properties.keys.any { it == "instanceId" || it == "instance_id" } &&
                         (declaredInstanceId == null || declaredInstanceId != instanceId))
                 )
+            if (event.url.isNotEmpty() && event.name != GENERATED_INTERACTION_EVENT) {
+                links += OpenLink(event.url, event.target.takeIf(String::isNotEmpty))
+                return@forEach
+            }
             if (invalidSource) {
                 Log.w(LOG_TAG, "Rejected runtime event source", null, Log.sensitive("screen", screenId))
                 return@forEach
@@ -295,10 +304,6 @@ internal class JourneyRuntimeEmissionCoordinator(
                         )
                     }
                 }
-                event.url.isNotEmpty() -> links += OpenLink(
-                    event.url,
-                    event.target.takeIf(String::isNotEmpty),
-                )
                 event.name.isNotEmpty() -> {
                     val payload = if (instanceId != null && nativeId != 0L && declaredInstanceId == null)
                         JsonObject(properties + ("instanceId" to JsonPrimitive(instanceId))) else properties
