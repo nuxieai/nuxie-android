@@ -30,7 +30,7 @@ class SystemFontDeviceTest {
                     val player = checkNotNull(artboard.newPlayer())
                     try {
                         player.step(0.0)
-                        return renderer.renderToCpuFrame(player, 0xff111111.toInt(), false).rgba
+                        return renderer.renderToCpuFrame(player, 0xff111111.toInt(), 1f).rgba
                     } finally { player.close() }
                 } finally { artboard.close() }
             } finally { file.close() }
@@ -95,7 +95,7 @@ class SystemFontDeviceTest {
                     val player = checkNotNull(artboard.newPlayer())
                     try {
                         player.step(0.0)
-                        val frame = renderer.renderToCpuFrame(player, 0xff111111.toInt(), false)
+                        val frame = renderer.renderToCpuFrame(player, 0xff111111.toInt(), 1f)
                         for (rows in listOf(16 until 112, 144 until 240)) {
                             val ink = rows.sumOf { y -> (0 until 320).sumOf { x ->
                                 ((frame.rgba[(y * 320 + x) * 4 + 2].toInt() and 255) - 0x11).coerceAtLeast(0)

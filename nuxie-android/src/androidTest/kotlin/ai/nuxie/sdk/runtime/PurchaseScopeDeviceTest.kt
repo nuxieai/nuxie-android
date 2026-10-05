@@ -57,7 +57,7 @@ class PurchaseScopeDeviceTest {
                     try {
                         player.stepTyped(elapsedSeconds = 0.0)
                         repeat(20) { player.stepTyped(elapsedSeconds = 0.016) }
-                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                         for (x in listOf(80f, 240f)) {
                             val down = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
                                 NuxiePlayerPointerEvent(NuxiePlayerPointerKind.DOWN, x, 30f, 1, 0f)))
@@ -102,7 +102,7 @@ class PurchaseScopeDeviceTest {
                         assertEquals("plan:annual", before.resolveString("second.placementId"))
                         assertEquals("plan:monthly", before.resolveScopedString("placementId", "Plan", "plan.first"))
                         assertEquals("plan:annual", before.resolveScopedString("placementId", "Plan", "plan.second"))
-                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                     } finally { player.close() }
                 } finally { artboard.close() }
             } finally { file.close() }

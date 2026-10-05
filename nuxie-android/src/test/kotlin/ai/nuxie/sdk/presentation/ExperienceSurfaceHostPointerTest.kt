@@ -1114,14 +1114,14 @@ class ExperienceSurfaceHostPointerTest {
             playerHandle: Long,
             windowHandle: Long,
             clearColor: Int,
-            fitContainCenter: Boolean,
+            layoutScaleFactor: Float,
         ): Int { onRender(); return presentation }
 
         override fun renderToCpuFrame(
             rendererHandle: Long,
             playerHandle: Long,
             clearColor: Int,
-            fitContainCenter: Boolean,
+            layoutScaleFactor: Float,
         ): NuxieCpuFrame = error("not used")
 
         override fun freeRenderer(handle: Long) = Unit

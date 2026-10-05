@@ -307,7 +307,7 @@ class PublishedTextInputDeviceTest {
                 cleanup += player::close
                 if (startSmall) assertEquals(0, renderer.resize(1080, 2400))
                 player.stepWithEvents(0.0)
-                val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                 assertEquals(1080 * 2400 * 4, frame.rgba.size)
                 assertTrue("Published content must produce non-background pixels", frame.rgba.indices.any {
                     it % 4 != 3 && frame.rgba[it] != 0.toByte()
@@ -315,7 +315,7 @@ class PublishedTextInputDeviceTest {
                 return RenderedResources(
                     render = {
                         player.stepWithEvents(1.0 / 60.0)
-                        val next = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        val next = renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                         assertEquals(1080 * 2400 * 4, next.rgba.size)
                     },
                     cleanup = { cleanup.asReversed().forEach { it() } },
@@ -1235,12 +1235,12 @@ class PublishedTextInputDeviceTest {
                 return -1
             }
             override fun renderAndPresent(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
-                clearColor: Int, fitContainCenter: Boolean): Int = error("Unsupported attachment must never use GPU surface presentation")
+                clearColor: Int, layoutScaleFactor: Float): Int = error("Unsupported attachment must never use GPU surface presentation")
             override fun copyPlayerToWindow(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
-                clearColor: Int, fitContainCenter: Boolean): Int {
+                clearColor: Int, layoutScaleFactor: Float): Int {
                 copied.incrementAndGet()
                 return ai.nuxie.sdk.runtime.JniNuxieTypedRuntimeNative.copyPlayerToWindow(
-                    rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter)
+                    rendererHandle, playerHandle, windowHandle, clearColor, layoutScaleFactor)
             }
             override fun freeRenderer(handle: Long) {
                 freed.incrementAndGet()
