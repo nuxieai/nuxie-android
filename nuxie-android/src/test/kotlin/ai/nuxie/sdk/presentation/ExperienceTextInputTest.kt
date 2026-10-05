@@ -490,7 +490,7 @@ class ExperienceTextInputTest {
                 (editor.parent as View).matrix.mapPoints(corners)
                 item.getValue("corners").jsonArray.forEachIndexed { index, value ->
                     assertEquals(item.getValue("name").jsonPrimitive.content,
-                        value.jsonPrimitive.float * 2f + if (index % 2 == 1) 100f else 0f, corners[index], 0.002f)
+                        value.jsonPrimitive.float, corners[index], 0.002f)
                 }
                 if (!composing) {
                     assertTrue(editor.requestFocus())
@@ -520,7 +520,7 @@ class ExperienceTextInputTest {
     }
 
     @Test
-    fun `geometry uses renderer contain fit and invalid geometry hides editor`() {
+    fun `geometry uses view density and invalid geometry hides editor`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(value = "abcd")
         val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
@@ -534,9 +534,9 @@ class ExperienceTextInputTest {
         val origin = floatArrayOf(0f, 0f)
         editor.matrix.mapPoints(origin)
         (editor.parent as View).matrix.mapPoints(origin)
-        assertArrayEquals(floatArrayOf(20f, 140f), origin, 0.002f)
-        assertEquals(160, editor.layoutParams.width)
-        assertEquals(40, editor.layoutParams.height)
+        assertArrayEquals(floatArrayOf(10f, 20f), origin, 0.002f)
+        assertEquals(80, editor.layoutParams.width)
+        assertEquals(20, editor.layoutParams.height)
         assertEquals(Color.TRANSPARENT, editor.currentTextColor)
         overlay.update(snapshot(), capturedGeometry(width = Float.NaN))
         assertEquals(View.INVISIBLE, editor.visibility)

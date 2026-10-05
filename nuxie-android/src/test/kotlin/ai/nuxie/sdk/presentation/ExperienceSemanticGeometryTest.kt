@@ -15,7 +15,7 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [23, 30])
 class ExperienceSemanticGeometryTest {
-    @Test fun `centered contain and host scale project the same authored rectangle`() {
+    @Test fun `view density and host scale project the same layout rectangle`() {
         val controller = Robolectric.buildActivity(Activity::class.java).setup().visible()
         try {
             val activity = controller.get()
@@ -34,9 +34,9 @@ class ExperienceSemanticGeometryTest {
             val node = NativeSemanticNode(1, -1, 0, 1, 0, 0, 0, 1,
                 10f, 5f, 30f, 15f, "Continue", "", "")
             val projected = checkNotNull(semanticBounds(host, ExperienceArtboardSize(100f, 50f), node))
-            assertEquals(Rect(30, 90, 90, 120), projected.inHost)
-            assertEquals(Rect(location[0] + 60, location[1] + 180,
-                location[0] + 180, location[1] + 240), projected.inScreen)
+            assertEquals(Rect(10, 5, 30, 15), projected.inHost)
+            assertEquals(Rect(location[0] + 20, location[1] + 10,
+                location[0] + 60, location[1] + 30), projected.inScreen)
             assertNull(semanticBounds(host, null, node))
             assertNull(semanticBounds(host, ExperienceArtboardSize(100f, 50f), node.copy(minX = Float.NaN)))
         } finally { controller.pause().stop().destroy() }
