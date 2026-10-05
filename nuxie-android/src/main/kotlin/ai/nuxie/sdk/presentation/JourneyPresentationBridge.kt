@@ -118,6 +118,7 @@ internal interface JourneyPresenting {
         owner: JourneyPresentationOwner,
         action: JsonObject,
         source: JourneyScreenEmissionSource?,
+        eventSource: JourneyRuntimeEventSource? = null,
     ): JsonObject? = action
 
     suspend fun dispatchAction(

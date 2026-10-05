@@ -232,6 +232,12 @@ internal class NuxieViewModelSnapshot private constructor(
     fun instanceAliases(nativeInstanceId: Long): Set<String> =
         instanceIds.filterValues { it == nativeInstanceId }.keys
 
+    fun resolveNativeString(path: String, viewModelName: String?, nativeInstanceId: Long): String? {
+        val selected = instancesById[nativeInstanceId] ?: return null
+        if (viewModelName != null && selected.schemaName != viewModelName) return null
+        return (resolveValue(path, selected) as? Value.StringValue)?.value
+    }
+
     /** Only one authenticated alias for an instance present in this frame is admissible. */
     fun authoredInstanceId(nativeInstanceId: Long): String? {
         if (nativeInstanceId !in instancesById) return null
