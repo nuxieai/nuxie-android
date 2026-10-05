@@ -2,6 +2,8 @@ package ai.nuxie.sdk.presentation
 
 import java.net.URI
 
+internal data class JourneyOpenedLink(val url: String, val target: String?, val screenId: String, val instanceId: String? = null)
+
 /** One destination policy for runtime links and Journey open-link steps. */
 internal object JourneyLinkRouting {
     fun destination(url: String, target: String?): String? {

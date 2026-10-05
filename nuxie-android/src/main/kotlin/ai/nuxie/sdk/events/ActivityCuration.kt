@@ -27,6 +27,7 @@ internal object ActivityCuration {
         SystemEventNames.EXPERIENCE_SHOWN,
         JourneyEventNames.EXPERIMENT_EXPOSURE,
         SystemEventNames.FEATURE_USED,
+        JourneyEventNames.LINK_OPENED,
         JourneyEventNames.LEG_STARTED,
         JourneyEventNames.LEG_COMPLETED,
         SystemEventNames.NOTIFICATIONS_DENIED,
@@ -69,6 +70,18 @@ internal object ActivityCuration {
         SystemEventNames.EXPERIENCE_ERRORED -> experienceRef(properties)?.let {
             NuxieActivity.ExperienceErrored(it, properties.string("error_message").orEmpty())
         } ?: missing(internalName)
+        JourneyEventNames.LINK_OPENED -> {
+            val ref = experienceRef(properties, requireVersion = true)
+            val legId = properties.nonemptyString("leg_id")
+            val generation = properties.double("leg_generation")?.takeIf {
+                it.isFinite() && it >= 0 && it <= 9_007_199_254_740_991.0 && kotlin.math.floor(it) == it
+            }?.toLong()
+            val url = properties.nonemptyString("url")
+            val target = properties.nonemptyString("target")
+            if (ref?.journeyId == null || legId == null || generation == null || url == null || target == null) missing(internalName)
+            else NuxieActivity.LinkOpened(ref, legId, generation, url, target,
+                properties.nonemptyString("screen_id"), properties.nonemptyString("instance_id"))
+        }
         JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED -> {
             val ref = experienceRef(properties, requireVersion = true)
             val legId = properties.nonemptyString("leg_id")

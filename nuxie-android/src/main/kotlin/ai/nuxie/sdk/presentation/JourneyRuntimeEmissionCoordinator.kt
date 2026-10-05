@@ -45,7 +45,7 @@ internal class JourneyRuntimeEmissionCoordinator(
     private val onEmissionBatch: suspend (JourneyScreenEmissionBatch) -> Boolean,
     private val onScreenChanged: suspend (String) -> Boolean = { true },
     private val onPresentationRevealed: suspend (String) -> Unit,
-    private val onOpenLink: (String, String?) -> Unit = { _, _ -> },
+    private val onOpenLink: suspend (JourneyOpenedLink) -> Unit = {},
     private val createId: () -> String = { UUID.randomUUID().toString() },
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val eventSources: JourneyRuntimeEventSources = JourneyRuntimeEventSources(),
@@ -99,7 +99,7 @@ internal class JourneyRuntimeEmissionCoordinator(
             if (lifetime?.isRetired == true) return@withLock true
             val projected = project(outcome, correlationId, snapshot)
             projected.links.forEach { link ->
-                runCatching { onOpenLink(link.url, link.target) }
+                runCatching { onOpenLink(JourneyOpenedLink(link.url, link.target, screenId, link.instanceId)) }
                     .onFailure { error ->
                         Log.w(LOG_TAG, "Journey renderer open-link callback failed", error)
                     }
@@ -274,7 +274,7 @@ internal class JourneyRuntimeEmissionCoordinator(
                         (declaredInstanceId == null || declaredInstanceId != instanceId))
                 )
             if (event.url.isNotEmpty() && event.name != GENERATED_INTERACTION_EVENT) {
-                links += OpenLink(event.url, event.target.takeIf(String::isNotEmpty))
+                links += OpenLink(event.url, event.target.takeIf(String::isNotEmpty), instanceId.takeUnless { invalidSource })
                 return@forEach
             }
             if (invalidSource) {
@@ -479,7 +479,7 @@ internal class JourneyRuntimeEmissionCoordinator(
         val instanceId: String?,
     )
 
-    private data class OpenLink(val url: String, val target: String?)
+    private data class OpenLink(val url: String, val target: String?, val instanceId: String? = null)
 
     private companion object {
         const val LOG_TAG = "Nuxie"

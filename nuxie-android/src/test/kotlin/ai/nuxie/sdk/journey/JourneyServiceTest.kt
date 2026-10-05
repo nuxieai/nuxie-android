@@ -2154,6 +2154,31 @@ class JourneyServiceTest {
         assertEquals(1, effectPublications.get())
     }
 
+    @Test fun `opened links capture the shared attributed run record`() = runBlocking {
+        val fixture = Json.parseToJsonElement(ai.nuxie.sdk.fixtures.FixtureRunner.fixturesRoot()
+            .resolve("events/runtime-link-opened.json").readText()).jsonObject.getValue("record").jsonObject
+        val expected = fixture.getValue("properties").jsonObject
+        val identity = IdentityService(context).also { it.setDistinctId("customer") }
+        val base = dispatchRequest(identity, JsonObject(emptyMap()))
+        val request = base.copy(run = base.run.copy(journeyId = "journey", generation = 2,
+            reference = buildJsonObject { put("experienceId", "experience"); put("versionId", "version"); put("legId", "leg") }))
+        val captures = mutableListOf<Pair<String, JsonObject>>()
+        val dispatcher = JourneyEffectDispatcher(identity = identity,
+            capture = { name, properties, _, _, admission, _ -> admission.commitIfCurrent {
+                captures += name to ai.nuxie.sdk.events.JsonValueConverter.fromMap(properties)
+                true
+            } == true }, deliverAppAction = { _, _ -> error("Unexpected app action") })
+        assertTrue(dispatcher.captureLinkOpened(ai.nuxie.sdk.presentation.JourneyOpenedLink(
+            expected.getValue("url").jsonPrimitive.content, expected.getValue("target").jsonPrimitive.content,
+            "screen", "second"), request))
+        assertEquals(listOf(fixture.getValue("name").jsonPrimitive.content to expected), captures)
+        val activity = ai.nuxie.sdk.events.ActivityCuration.activity(captures.single().first, captures.single().second)
+        assertTrue(activity is ai.nuxie.sdk.NuxieActivity.LinkOpened)
+        identity.setDistinctId("replacement")
+        assertFalse(dispatcher.captureLinkOpened(ai.nuxie.sdk.presentation.JourneyOpenedLink("https://example.test", "_self", "screen"), request))
+        assertEquals(1, captures.size)
+    }
+
     @Test fun `app action does not publish across an identity fence change`() = runBlocking {
         val identity = IdentityService(context).also { it.setDistinctId("customer") }
         val request = dispatchRequest(

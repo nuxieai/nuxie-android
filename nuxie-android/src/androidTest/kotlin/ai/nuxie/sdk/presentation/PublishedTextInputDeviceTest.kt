@@ -2470,7 +2470,7 @@ class PublishedTextInputDeviceTest {
                             if (method == "error") errorDismissals.add(it)
                         }
                     },
-                    eventSources = request.eventSources,
+                    onLinkOpened = request.onLinkOpened, eventSources = request.eventSources,
                     onEmissionBatch = { batch ->
                         val committed = request.onEmissionBatch(batch)
                         if (committed) accepted.add(batch)

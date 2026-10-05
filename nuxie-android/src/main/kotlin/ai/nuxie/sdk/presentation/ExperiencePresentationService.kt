@@ -585,6 +585,13 @@ internal class ExperiencePresentationService(
         firstFrameTimeoutMillis = FIRST_FRAME_TIMEOUT_MILLIS,
     )
 
+    private suspend fun openAndRecord(link: JourneyOpenedLink, record: suspend (JourneyOpenedLink) -> Unit): Boolean {
+        if (JourneyLinkRouting.destination(link.url, link.target) == null ||
+            !runCatching { openLink(link.url, link.target) }.getOrDefault(false)) return false
+        record(link.copy(target = link.target?.takeIf(String::isNotEmpty) ?: "_self"))
+        return true
+    }
+
     private data class ActivePresentation(
         val id: String,
         val ref: ExperienceRef,
@@ -615,6 +622,7 @@ internal class ExperiencePresentationService(
             String,
         ) -> JourneyScreenDismissalResult,
         val emissions: JourneyRuntimeEmissionCoordinator,
+        val openLink: suspend (JourneyOpenedLink) -> Boolean,
         val screenDismissed: AtomicBoolean = AtomicBoolean(false),
         var navigationDismissal: NavigationDismissal? = null,
         var navigationHistory: List<String> = emptyList(),
@@ -752,6 +760,7 @@ internal class ExperiencePresentationService(
         ) -> JourneyScreenDismissalResult = { _, _, _ ->
             JourneyScreenDismissalResult.HANDLED
         },
+        onLinkOpened: suspend (JourneyOpenedLink) -> Unit = {},
         eventSources: JourneyRuntimeEventSources = JourneyRuntimeEventSources(),
         onEmissionBatch: suspend (JourneyScreenEmissionBatch) -> Boolean = { true },
         onPresentationRevealed: suspend (String) -> Unit = {},
@@ -773,6 +782,7 @@ internal class ExperiencePresentationService(
                 screenId = screenId,
                 onOutcome = onOutcome,
                 onScreenDismissed = onScreenDismissed,
+                openLink = { link -> openAndRecord(link, onLinkOpened) },
                 emissions = JourneyRuntimeEmissionCoordinator(
                     journeyId = journeyId,
                     screenId = screenId,
@@ -783,7 +793,7 @@ internal class ExperiencePresentationService(
                     onEmissionBatch = onEmissionBatch,
                     onScreenChanged = onScreenChanged,
                     onPresentationRevealed = onPresentationRevealed,
-                    onOpenLink = { url, target -> openLink(url, target); Unit },
+                    onOpenLink = { link -> openAndRecord(link, onLinkOpened); Unit },
                 ),
             ),
             canPresent = canPresent,
@@ -1326,8 +1336,7 @@ internal class ExperiencePresentationService(
                     ?: return JourneyPresentationActionResult.Failed
                 val target = action.string("target")
                     ?: return JourneyPresentationActionResult.Failed
-                if (JourneyLinkRouting.destination(url, target) == null ||
-                    !runCatching { openLink(url, target) }.getOrDefault(false)) {
+                if (!active.journey.openLink(JourneyOpenedLink(url, target, active.journey.screenId))) {
                     JourneyPresentationActionResult.Failed
                 } else {
                     JourneyPresentationActionResult.Advanced("next")
