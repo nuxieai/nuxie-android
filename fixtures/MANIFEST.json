@@ -16,6 +16,7 @@
     "events/catalog.json": "19cb3d59c27b5f9c138cfdbc046ed9bb4c06cd4c2e52c8288c37630a7f8017cc",
     "events/delivery-disposition.json": "bf2e48165a90e6bf568f00ba804cfa8c2f1efcdc9a5867533a24bbf99a31575d",
     "events/generated-control-routing.json": "f461826c8a2e79d2f08178a1b3a27b03cbcda52ed208f572b995fa7165fef77a",
+    "events/runtime-event-sources.json": "16b9ede4fef9006249e261ccdbbc2f8ecf207284dc6c245b01a8a96fa5af834f",
     "features/command-recovery.json": "cf79db0033a62cb5dd30703f82599e001177b4f2ef0aad1f3cf177e03913c214",
     "features/optimistic-entitlement-projection.json": "8c9a89b1273a873cf913804897a63ec0704ad092af8bec71de16a3b85aaef59b",
     "ir/eval-vectors.json": "f1a5a7a0f0cfaea29d62999cddf5082dade701ae07a9d3e523dc671e999e3d7d",
@@ -242,6 +243,7 @@
     "journeys/planes/runtime-layout-transform.json": "c3caef3e808f4a45f730fb3a99db97dd01a242ec",
     "journeys/planes/runtime-safe-area.json": "c3caef3e808f4a45f730fb3a99db97dd01a242ec",
     "journeys/planes/runtime-window-insets-android.json": "c3caef3e808f4a45f730fb3a99db97dd01a242ec",
-    "journeys/planes/text-input-typography.json": "c3caef3e808f4a45f730fb3a99db97dd01a242ec"
+    "journeys/planes/text-input-typography.json": "c3caef3e808f4a45f730fb3a99db97dd01a242ec",
+    "events/runtime-event-sources.json": "375d313a185dee9104cb1bfc0efc02cc4428e569"
   }
 }
