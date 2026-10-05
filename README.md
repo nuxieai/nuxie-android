@@ -402,3 +402,4 @@ opens or records. Non-web schemes use an available system handler. Broken Journe
 link steps advance without opening, recording, or dismissing. `$link_opened` and
 public `LinkOpened` include the actual `destination` (`in_app` or `external`) and the
 original optional `target`. Step records use the step identity before completion.
+A link already in flight still opens externally after identity change or current-customer profile clear, but its revoked run records no event.
