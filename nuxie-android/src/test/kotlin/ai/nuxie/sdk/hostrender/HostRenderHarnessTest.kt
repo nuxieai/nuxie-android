@@ -63,7 +63,7 @@ class HostRenderHarnessTest {
         )
 
         assertEquals(2, result.frames.size)
-        assertEquals(listOf(0.02, 0.02), native.steps)
+        assertEquals(listOf(0.0, 0.02, 0.02), native.steps)
         assertEquals("Main", native.artboardName)
         assertEquals(HostRenderSize(4, 2), native.rendererSize)
         assertEquals(listOf("renderer", "import:4"), native.factoryLifecycle.take(2))
@@ -204,6 +204,12 @@ class HostRenderHarnessTest {
             return 0
         }
         override fun newNamedStateMachinePlayer(artboardHandle: Long, name: String): Long = 3
+        override fun setPlayerLayoutSize(playerHandle: Long, width: Float, height: Float): Int {
+            assertEquals(4f, width)
+            assertEquals(2f, height)
+            return 0
+        }
+
         override fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int {
             steps += elapsedSeconds
             return 0

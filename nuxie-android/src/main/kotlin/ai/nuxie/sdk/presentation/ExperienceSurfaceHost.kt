@@ -29,6 +29,7 @@ import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.os.Handler
@@ -60,14 +61,22 @@ internal class ExperienceSurfaceHost(
     private val lane: NuxieRuntimeLane,
     private val clearColor: Int = CLEAR_COLOR_OPAQUE_BLACK,
     private val listener: Listener? = null,
-    private val artboardSize: ExperienceArtboardSize? = null,
+    artboardSize: ExperienceArtboardSize? = null,
     private val runtime: NuxieRuntime = NuxieRuntime.shared,
     private val systemFontCache: SystemFontCache = SystemFontCache.shared,
     private val videoDecoderPool: ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool? = null,
 ) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
+    @Volatile private var layoutBounds = artboardSize
+    private var surfaceWidth = 0
+    private var surfaceHeight = 0
+    private var requestedDensity = 0f
+    private var surfaceLayout: ExperienceSurfaceLayout? = null
+    private var appliedLayout: ExperienceSurfaceLayout? = null
+    private var layoutStepPending = false
     private val mainHandler = Handler(Looper.getMainLooper())
     interface Listener {
         fun onVideoCaptions(captions: Map<Long, ai.nuxie.sdk.runtime.NuxieVideoCaption>) {}
+        fun onLayoutBounds(bounds: ExperienceArtboardSize) {}
         fun onFirstFrame()
         fun onRuntimeStep(
             outcome: NuxiePlayerStepOutcome,
@@ -94,7 +103,6 @@ internal class ExperienceSurfaceHost(
     private var window: NuxieRuntimeWindow? = null
     private var player: NuxieRuntimePlayer? = null
     private var videoPlayback: ExperienceVideoPlayback? = null
-    private var videoArtboardSize: Pair<Float, Float>? = null
     private data class VideoCommand(val action: JourneyVideoAction, val generation: Long, val result: CompletableDeferred<Boolean>)
     private val videoCommands = ArrayDeque<VideoCommand>()
 
@@ -132,7 +140,7 @@ internal class ExperienceSurfaceHost(
     private val sceneInputEnabled = AtomicBoolean(true)
     private val semanticEpoch = AtomicLong()
     private val accessibility = ExperienceAccessibilityProvider(this,
-        bounds = { semanticBounds(this, artboardSize, it) }, dispatch = ::dispatchSemanticAction)
+        bounds = { semanticBounds(this, layoutBounds, it) }, dispatch = ::dispatchSemanticAction)
 
     override fun getAccessibilityNodeProvider(): AccessibilityNodeProvider = accessibility
 
@@ -432,15 +440,6 @@ internal class ExperienceSurfaceHost(
                     return@enqueue
                 }
                 videoBindings = import.videos
-                val render = descriptor["render"] as? JsonObject
-                val screen = (render?.get("screens") as? JsonArray)?.mapNotNull { it as? JsonObject }
-                    ?.singleOrNull { (it["artboardName"] as? JsonPrimitive)?.content == artboardName }
-                val artboardId = (screen?.get("artboardId") as? JsonPrimitive)?.content
-                videoArtboardSize = if (videoBindings.isEmpty()) null else {
-                    val sceneWidth = (screen?.get("width") as? JsonPrimitive)?.content?.toFloatOrNull()
-                    val sceneHeight = (screen?.get("height") as? JsonPrimitive)?.content?.toFloatOrNull()
-                    if (sceneWidth != null && sceneHeight != null) sceneWidth to sceneHeight else null
-                }
                 videoTargets = import.videoElements
                 try {
                     runtime.importFile(
@@ -530,7 +529,7 @@ internal class ExperienceSurfaceHost(
                 if (semanticsEnabled) checkNotNull(player).enableSemantics()
                 if (videoBindings.isNotEmpty()) {
                     videoPlayback = ExperienceVideoPlayback(context.applicationContext, checkNotNull(player), videoBindings, videoTargets,
-                        decoderPool = videoDecoderPool, initialViewport = currentVideoViewport(width, height))
+                        decoderPool = videoDecoderPool, initialViewport = ai.nuxie.sdk.runtime.VideoViewport(0f, 0f, 0f, 0f))
                     videoPlayback?.setVisible(running)
                 }
             } catch (error: Exception) {
@@ -737,12 +736,16 @@ internal class ExperienceSurfaceHost(
 
     override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
         if (released.get()) return
+        surfaceWidth = width
+        surfaceHeight = height
+        requestedDensity = resources.displayMetrics.density
+        val layout = ExperienceSurfaceLayout.create(width, height, requestedDensity)
         val surface = Surface(texture)
         androidSurface = surface
         lane.enqueue {
             // Attach only once both the headless renderer and this surface's
             // window exist; a failed create/acquire keeps the frame gate shut.
-            val activeRenderer = ensureRenderer(width, height)
+            val activeRenderer = ensureRenderer(width.coerceAtLeast(1), height.coerceAtLeast(1))
             if (activeRenderer == null) {
                 reportFailure(
                     ExperiencePresentationException.Reason.HOST_FAILED,
@@ -750,7 +753,7 @@ internal class ExperienceSurfaceHost(
                 )
                 return@enqueue
             }
-            if (activeRenderer.resize(width, height) != NUX_STATUS_OK) {
+            if (activeRenderer.resize(width.coerceAtLeast(1), height.coerceAtLeast(1)) != NUX_STATUS_OK) {
                 Log.w(LOG_TAG, "Android Vulkan renderer resize failed")
                 reportFailure(
                     ExperiencePresentationException.Reason.HOST_FAILED,
@@ -767,29 +770,67 @@ internal class ExperienceSurfaceHost(
                 )
                 return@enqueue
             }
-            videoPlayback?.setViewport(currentVideoViewport(width, height))
+            surfaceLayout = layout
+            appliedLayout = null
             attached = true
+            player?.let(::applyLayoutSize)
         }
         surfaceAvailable = true
         updateFrameScheduling()
     }
 
-    private fun currentVideoViewport(surfaceWidth: Int, surfaceHeight: Int): ai.nuxie.sdk.runtime.VideoViewport {
-        val size = checkNotNull(videoArtboardSize) { "Video screen dimensions are unavailable" }
-        return ai.nuxie.sdk.runtime.VideoViewport.contain(size.first, size.second, surfaceWidth, surfaceHeight)
+    private fun applyLayoutSize(active: NuxieRuntimePlayer): Boolean {
+        val layout = surfaceLayout ?: return false
+        if (appliedLayout == layout) return true
+        return try {
+            active.setLayoutSize(layout.widthPoints, layout.heightPoints)
+            appliedLayout = layout
+            layoutStepPending = true
+            true
+        } catch (error: Throwable) {
+            reportFailure(ExperiencePresentationException.Reason.HOST_FAILED,
+                "Experience layout size failed", error)
+            false
+        }
+    }
+
+    private fun currentVideoViewport(layout: ExperienceSurfaceLayout): ai.nuxie.sdk.runtime.VideoViewport {
+        val bounds = layoutBounds
+        return ai.nuxie.sdk.runtime.VideoViewport.layout(layout.pixelWidth, layout.pixelHeight, layout.density,
+            bounds?.originX ?: 0f, bounds?.originY ?: 0f)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        refreshLayoutDensity()
+    }
+
+    private fun refreshLayoutDensity() {
+        if (surfaceAvailable && requestedDensity != resources.displayMetrics.density) {
+            resizeSurface(surfaceWidth, surfaceHeight)
+        }
     }
 
     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
+        resizeSurface(width, height)
+    }
+
+    private fun resizeSurface(width: Int, height: Int) {
+        if (released.get()) return
+        surfaceWidth = width
+        surfaceHeight = height
+        requestedDensity = resources.displayMetrics.density
+        val layout = ExperienceSurfaceLayout.create(width, height, requestedDensity)
         retireSemantics(preserveFocus = true)
         lane.enqueue {
+            surfaceLayout = layout
+            appliedLayout = null
+            pointerInput.reset()
             if (attached) {
                 pendingPresentation = false
                 submittedSnapshot = null
                 submittedCaptions = null
-                val status = renderer?.resize(
-                    width.coerceAtLeast(1),
-                    height.coerceAtLeast(1),
-                )
+                val status = renderer?.resize(width.coerceAtLeast(1), height.coerceAtLeast(1))
                 if (status != NUX_STATUS_OK) {
                     attached = false
                     reportFailure(
@@ -797,7 +838,8 @@ internal class ExperienceSurfaceHost(
                         "Experience renderer resize failed with status $status",
                     )
                 }
-                videoPlayback?.setViewport(currentVideoViewport(width, height))
+                if (attached) player?.let(::applyLayoutSize)
+                if (layout == null) videoPlayback?.setViewport(ai.nuxie.sdk.runtime.VideoViewport(0f, 0f, 0f, 0f))
                 drainVideoCommands()
             }
         }
@@ -874,6 +916,7 @@ internal class ExperienceSurfaceHost(
 
     override fun doFrame(frameTimeNanos: Long) {
         if (!running || failureReported.get()) return
+        refreshLayoutDensity()
         Choreographer.getInstance().postFrameCallback(this)
         if (!framePending.compareAndSet(false, true)) return
         // The preceding native frame can finish while this tick acquires the
@@ -898,6 +941,8 @@ internal class ExperienceSurfaceHost(
                 // window, so attached implies a live window; this null-check is
                 // a type-level guard, never a reachable behavior change.
                 val window = window ?: return@enqueue
+                val layout = surfaceLayout ?: return@enqueue
+                if (!applyLayoutSize(player)) return@enqueue
                 if (!pendingPresentation) {
                     drainTextWrites()
                     // A submitted frame owns its model revision through completion and semantic capture.
@@ -909,7 +954,7 @@ internal class ExperienceSurfaceHost(
                     // Keep the clock on the lane: a resize queued ahead of this
                     // tick may have retired its pending submission. Polling does
                     // not consume time, and visibility generations reset it.
-                    val elapsedSeconds = if (lastSteppedGeneration != generation) {
+                    val elapsedSeconds = if (layoutStepPending || lastSteppedGeneration != generation) {
                         0.0
                     } else {
                         (frameTimeNanos - lastFrameNanos) / 1_000_000_000.0
@@ -929,7 +974,22 @@ internal class ExperienceSurfaceHost(
                             pointers = pointerInput.takeBatch(),
                             correlationId = correlationId,
                             textRunNames = textInputs.values.map { it.runName }.distinct(),
-                        ).also { videoPlayback?.advance(renderer, frameTimeNanos / 1_000_000_000.0) }
+                        ).also {
+                            if (layoutStepPending) {
+                                val size = player.layoutSize()
+                                val bounds = ExperienceArtboardSize(size.first, size.second)
+                                layoutBounds = bounds
+                                pointerInput.updateBounds(bounds)
+                                layoutStepPending = false
+                                videoPlayback?.setViewport(currentVideoViewport(layout))
+                                mainHandler.post {
+                                    if (!released.get() && generation == frameGeneration.get() && epoch == semanticEpoch.get()) {
+                                        listener?.onLayoutBounds(bounds)
+                                    }
+                                }
+                            }
+                            videoPlayback?.advance(renderer, frameTimeNanos / 1_000_000_000.0)
+                        }
                     } catch (error: Throwable) {
                         reportFailure(
                             ExperiencePresentationException.Reason.HOST_FAILED,
@@ -971,7 +1031,7 @@ internal class ExperienceSurfaceHost(
                         return@enqueue
                     }
                 }
-                val disposition = renderer.renderAndPresent(player, window, clearColor, 1f)
+                val disposition = renderer.renderAndPresent(player, window, clearColor, layout.density)
                 pendingPresentation = disposition == 4
                 if (disposition < 0) {
                     Log.w(LOG_TAG, "render_player failed", null, Log.status("status", -disposition))
@@ -1032,13 +1092,14 @@ internal class ExperienceSurfaceHost(
         val copy = MotionEvent.obtain(event)
         val viewportWidth = width
         val viewportHeight = height
+        val density = resources.displayMetrics.density
         val generation = frameGeneration.get()
         val epoch = semanticEpoch.get()
         val accepted = lane.enqueue {
             try {
                 if (!released.get() && running && sceneInputEnabled.get() && generation == frameGeneration.get() &&
                     epoch == semanticEpoch.get()) {
-                    pointerInput.enqueue(copy, viewportWidth, viewportHeight)
+                    pointerInput.enqueue(copy, viewportWidth, viewportHeight, density)
                 }
             } finally {
                 copy.recycle()
