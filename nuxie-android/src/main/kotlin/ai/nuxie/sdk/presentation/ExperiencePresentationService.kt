@@ -546,6 +546,7 @@ internal class ExperiencePresentationService(
     private val emit: (String, Map<String, Any?>, String?) -> Unit,
     private val scope: CoroutineScope,
     private val runtimeAvailable: () -> Boolean,
+    private val currentDistinctId: () -> String,
     private val launch: (String) -> Unit,
     private val commerce: JourneyCommercePreparing = JourneyCommercePreparing.NONE,
     private val openLink: (JourneyLinkRouting.Destination, Activity?) -> Boolean = { _, _ -> false },
@@ -559,6 +560,7 @@ internal class ExperiencePresentationService(
         emit: (String, Map<String, Any?>, String?) -> Unit,
         scope: CoroutineScope,
         runtimeAvailable: () -> Boolean,
+        currentDistinctId: () -> String,
         commerce: JourneyCommercePreparing = JourneyCommercePreparing.NONE,
         foregroundActivity: () -> Activity? = { null },
         isAppForeground: () -> Boolean = { foregroundActivity() != null },
@@ -566,6 +568,7 @@ internal class ExperiencePresentationService(
         emit = emit,
         scope = scope,
         runtimeAvailable = runtimeAvailable,
+        currentDistinctId = currentDistinctId,
         launch = AndroidPresentationLauncher(context.applicationContext ?: context),
         commerce = commerce,
         openLink = { destination, activity -> openActivityLink(context, destination, activity) },
@@ -583,7 +586,9 @@ internal class ExperiencePresentationService(
         withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
             val activity = foregroundActivity()?.takeUnless { it.isDestroyed }
             val screen = active?.let { PresentationRegistry.currentScreen(it.id) }
-            val live = active != null && synchronized(stateLock) { current === active && !transitionInProgress } && active.shown.get() && !active.closed.get() &&
+            val live = active != null && active.ownerDistinctId == currentDistinctId() &&
+                synchronized(stateLock) { current === active && !transitionInProgress } &&
+                active.shown.get() && !active.closed.get() &&
                 active.outcomeReason.get() == null && screen?.screenCloseReason() == null &&
                 screen?.purchaseActivity() === activity && activity?.isFinishing == false && activity.window.decorView.isAttachedToWindow
             val state = if (!isAppForeground()) JourneyLinkRouting.State.BACKGROUND
