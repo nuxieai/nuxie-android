@@ -326,6 +326,7 @@ internal class NuxieCore(
             emit = eventLog::capture,
             scope = scope,
             runtimeAvailable = AndroidRenderCapability::isAvailable,
+            currentDistinctId = identity::distinctId,
             commerce = journeyCommerce,
             foregroundActivity = { lifecycleCoordinator.resumedActivity() },
             isAppForeground = { lifecycleCoordinator.isAppForeground() },

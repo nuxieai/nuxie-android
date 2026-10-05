@@ -913,6 +913,7 @@ class ExperiencePresentationServiceTest {
                 releaseWork.await()
             }
             val service = ExperiencePresentationService(
+                currentDistinctId = { "customer-1" },
                 emit = { _, _, _ -> fail("Unrevealed preparation must not emit presentation facts") },
                 scope = this, runtimeAvailable = { true }, launch = launched::add,
                 commerce = ai.nuxie.sdk.billing.JourneyCommercePreparing {
@@ -2021,7 +2022,7 @@ class ExperiencePresentationServiceTest {
         val foreground = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible().get()
         val release = renderedJourneyRelease("text-input-navigation.json")
         val launched = mutableListOf<String>()
-        val service = ExperiencePresentationService(scope = this, emit = { _, _, _ -> },
+        val service = ExperiencePresentationService(currentDistinctId = { "customer-1" }, scope = this, emit = { _, _, _ -> },
             runtimeAvailable = { true }, launch = launched::add,
             foregroundActivity = { foreground },
             openLink = { _, _ -> throw android.content.ActivityNotFoundException() })
@@ -2044,7 +2045,7 @@ class ExperiencePresentationServiceTest {
         val launched = mutableListOf<String>()
         val opened = mutableListOf<String>()
         lateinit var service: ExperiencePresentationService
-        service = ExperiencePresentationService(scope = this, emit = { _, _, _ -> }, runtimeAvailable = { true }, launch = launched::add,
+        service = ExperiencePresentationService(currentDistinctId = { "customer-1" }, scope = this, emit = { _, _, _ -> }, runtimeAvailable = { true }, launch = launched::add,
             foregroundActivity = { foreground },
             openLink = { destination, _ -> opened += destination.uri.toString(); true })
         val presentation = async {
@@ -2070,7 +2071,7 @@ class ExperiencePresentationServiceTest {
         val launched = mutableListOf<String>()
         val opened = mutableListOf<String>()
         val records = mutableListOf<JourneyOpenedLink>()
-        val service = ExperiencePresentationService(scope = this, emit = { _, _, _ -> },
+        val service = ExperiencePresentationService(currentDistinctId = { "customer-1" }, scope = this, emit = { _, _, _ -> },
             runtimeAvailable = { true }, launch = launched::add,
             foregroundActivity = { foreground },
             openLink = { destination, _ -> opened += destination.uri.toString(); true })
@@ -2103,6 +2104,7 @@ class ExperiencePresentationServiceTest {
         launch: (String) -> Unit = {},
         firstFrameTimeoutMillis: Long = 30_000,
     ) = ExperiencePresentationService(
+        currentDistinctId = { "customer-1" },
         emit = emit,
         scope = scope,
         runtimeAvailable = runtimeAvailable,
