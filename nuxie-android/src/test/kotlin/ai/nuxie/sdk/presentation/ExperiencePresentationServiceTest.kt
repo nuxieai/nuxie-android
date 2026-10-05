@@ -89,6 +89,34 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `unaliased runtime event does not fail the presentation`() = runTest {
+        val release = renderedJourneyRelease()
+        val launched = mutableListOf<String>()
+        val outcomes = mutableListOf<JourneySurfaceOutcome>()
+        val batches = mutableListOf<JourneyScreenEmissionBatch>()
+        val service = service(this, launch = launched::add)
+        val presentation = async {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
+                onEmissionBatch = { batches += it; true }, onOutcome = { outcomes += it })
+        }
+        runCurrent()
+        val id = launched.single()
+        PresentationRegistry.reportFirstFrame(id)
+        presentation.await()
+        val snapshot = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(1,
+            arrayOf(NativeViewModelSnapshotInstance(1, 0), NativeViewModelSnapshotInstance(2, 0)), emptyArray()))
+        PresentationRegistry.reportRuntimeStep(id, ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome(false, emptyList(),
+            listOf(ai.nuxie.sdk.runtime.NuxieRuntimeEvent(0, 128, "selected", "", "", 0f, emptyList(), 2)),
+            emptyList(), emptyList()), 1uL, snapshot)
+        runCurrent()
+        assertEquals(listOf("selected"), batches.single().emissions.map { it.name })
+        assertNull(batches.single().source.instanceId)
+        assertTrue(service.ownsJourney(JourneyPresentationOwner("journey-1", "customer-1")))
+        assertTrue(outcomes.isEmpty())
+    }
+
+    @Test
     fun `purchase reference cannot substitute root value for an unknown model`() = runTest {
         val release = renderedJourneyRelease()
         val launched = mutableListOf<String>()
