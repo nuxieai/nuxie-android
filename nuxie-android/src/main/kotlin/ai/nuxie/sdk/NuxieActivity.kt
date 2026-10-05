@@ -83,7 +83,8 @@ sealed interface NuxieActivity {
         val legId: String,
         val generation: Long,
         val url: String,
-        val target: String,
+        val target: String?,
+        val destination: String,
         val screenId: String?,
         val instanceId: String?,
     ) : NuxieActivity
@@ -244,7 +245,8 @@ private fun NuxieActivity.wireProperties(): Map<String, NuxieActivityValue> = bu
                 put("leg_id", activity.legId.activityValue())
                 put("leg_generation", NuxieActivityValue.Int(activity.generation))
                 put("url", activity.url.activityValue())
-                put("target", activity.target.activityValue())
+                activity.target?.let { put("target", it.activityValue()) }
+                put("destination", activity.destination.activityValue())
                 activity.screenId?.let { put("screen_id", it.activityValue()) }
                 activity.instanceId?.let { put("instance_id", it.activityValue()) }
             }

@@ -1,6 +1,5 @@
 package ai.nuxie.sdk.journey
 
-
 import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.events.StableEventCaptureResult
@@ -190,7 +189,6 @@ internal class JourneyService(
     },
     private val presenter: JourneyPresenting? = null,
     private val linkRecorder: JourneyLinkRecording = JourneyLinkRecording { _, _ -> error("Journey link recorder is not configured") },
-    private val openExternalLink: suspend (String) -> Boolean = { false },
     private val pinnedReleaseAuthenticator: (
         JsonObject,
         JsonObject,
@@ -914,7 +912,10 @@ internal class JourneyService(
 
     private suspend fun recordLink(link: ai.nuxie.sdk.presentation.JourneyOpenedLink, request: JourneyDispatchRequest) {
         runCatching { linkRecorder.captureLinkOpened(link, request) }
-            .onFailure { Log.w("JourneyService", "Opened link recording failed", it) }
+            .onFailure {
+                if (it is CancellationException) throw it
+                Log.w("JourneyService", "Opened link recording failed", it)
+            }
     }
 
     private fun resolvePresentationAction(
@@ -923,7 +924,7 @@ internal class JourneyService(
     ): JsonObject? {
         if (JourneyActionType.from(action) != JourneyActionType.OPEN_LINK) return action
         val expression = action["url"] ?: return null
-        val url = (if (expression is JsonObject) JourneyValues.resolve(expression, context) else expression) as? JsonPrimitive ?: return null
+        val url = JourneyValues.resolve(expression as? JsonObject ?: return null, context) as? JsonPrimitive ?: return null
         if (!url.isString || url.content.isEmpty()) return null
         return JsonObject(action + ("url" to JsonPrimitive(url.content)))
     }
@@ -2200,6 +2201,7 @@ internal class JourneyService(
         release: AuthenticatedJourneyRelease,
         executionSnapshot: JourneyRun.ExecutionSnapshot,
         executionToken: JourneyExecutionFenceToken,
+        identityScope: IdentityScope,
         target: JourneyRunJournal,
         reservation: JourneyPresentationReservation?,
         canPresent: () -> Boolean,
@@ -2255,8 +2257,7 @@ internal class JourneyService(
                         )
                     },
                     onLinkOpened = { link ->
-                        val identityScope = identity.captureScope()
-                        if (identityScope.distinctId == target.distinctId && executionFence.isCurrent(executionToken)) {
+                        if (identity.isCurrentScope(identityScope) && identityScope.distinctId == target.distinctId && executionFence.isCurrent(executionToken)) {
                             recordLink(link, JourneyDispatchRequest(run, release, run.stepId,
                                 JsonObject(emptyMap()), link.effectId ?: ai.nuxie.sdk.events.TimeBasedEpochGenerator.shared.next(), target.distinctId,
                                 identityScope, executionFence, executionToken))
@@ -2436,6 +2437,7 @@ internal class JourneyService(
                                 release = release,
                                 executionSnapshot = executionSnapshot,
                                 executionToken = executionToken,
+                                identityScope = identityScope,
                                 target = target,
                                 reservation = reserved,
                                 canPresent = { foreground.get() && current() },
@@ -2482,12 +2484,10 @@ internal class JourneyService(
                             val url = resolved?.text("url")
                             val linkTarget = resolved?.get("target")?.let { it as? JsonPrimitive }?.takeIf { it.isString }?.content
                             if (resolved != null && !url.isNullOrEmpty() && linkTarget != null) {
-                                if (presentation != null && presentation.owns(owner)) {
-                                    presentation.dispatchAction(owner, resolved, effectId)
-                                } else if (runCatching { openExternalLink(url) }.getOrDefault(false)) {
-                                    recordLink(ai.nuxie.sdk.presentation.JourneyOpenedLink(url, linkTarget, null,
-                                        effectId = effectId, destination = "external"), JourneyDispatchRequest(run, release, result.stepId,
-                                        resolved, effectId, target.distinctId, identity.captureScope(), executionFence, executionToken))
+                                val opened = presentation?.openLink(owner, ai.nuxie.sdk.presentation.JourneyLinkRequest(url, linkTarget, null, effectId = effectId))
+                                if (opened != null) {
+                                    recordLink(opened, JourneyDispatchRequest(run, release, result.stepId,
+                                        resolved, effectId, target.distinctId, identityScope, executionFence, executionToken))
                                 }
                             }
                             JourneyDispatchResult.Outlet("next")
@@ -2554,6 +2554,7 @@ internal class JourneyService(
                                         release = release,
                                         executionSnapshot = executionSnapshot,
                                         executionToken = executionToken,
+                                        identityScope = identityScope,
                                         target = target,
                                         reservation = reserved,
                                         canPresent = { foreground.get() && current() },

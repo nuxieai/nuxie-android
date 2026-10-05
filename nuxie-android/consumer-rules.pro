@@ -14,3 +14,8 @@
 # Video callbacks copy borrowed runtime views into these JNI-constructed values.
 -keep class ai.nuxie.sdk.runtime.NuxieVideoOccurrence { *; }
 -keep class ai.nuxie.sdk.runtime.NuxieVideoAction { *; }
+
+# Android restores this platform Fragment through its public no-argument constructor.
+-keep,allowobfuscation class ai.nuxie.sdk.core.NuxieResumedActivityProbe {
+    public <init>();
+}

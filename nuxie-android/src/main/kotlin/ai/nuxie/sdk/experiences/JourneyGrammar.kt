@@ -19,7 +19,7 @@ import kotlinx.serialization.json.JsonPrimitive
 /** Lowered actions carry selectors and local outlets, never nested programs. */
 internal object JourneyGrammar {
     val presenting = setOf("navigate", "back", "video", "purchase", "restore", "request_notifications",
-        "request_permission", "request_tracking", "open_link", "dismiss")
+        "request_permission", "request_tracking", "dismiss")
 
     fun action(input: JsonElement?, screens: Set<String>, placements: Set<String>) {
         val action = record(input)

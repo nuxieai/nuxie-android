@@ -77,9 +77,10 @@ internal object ActivityCuration {
                 it.isFinite() && it >= 0 && it <= 9_007_199_254_740_991.0 && kotlin.math.floor(it) == it
             }?.toLong()
             val url = properties.nonemptyString("url")
-            val target = properties.nonemptyString("target")
-            if (ref?.journeyId == null || legId == null || generation == null || url == null || target == null) missing(internalName)
-            else NuxieActivity.LinkOpened(ref, legId, generation, url, target,
+            val target = properties.string("target")
+            val destination = properties.string("destination")?.takeIf { it == "in_app" || it == "external" }
+            if (ref?.journeyId == null || legId == null || generation == null || url == null || destination == null) missing(internalName)
+            else NuxieActivity.LinkOpened(ref, legId, generation, url, target, destination,
                 properties.nonemptyString("screen_id"), properties.nonemptyString("instance_id"))
         }
         JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED -> {
