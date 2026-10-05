@@ -155,7 +155,8 @@ the flat activity view. Host `beforeSend` privacy policy applies to both reports
 The [`nuxie-android/api/nuxie-android.api`](nuxie-android/api/nuxie-android.api)
 `apiCheck` dump is the Android binding wrapper contract, sibling to the
 `nuxie-ios` `api/public-api.txt`. Wrappers may bind only symbols listed in that
-allowlist.
+allowlist. `NuxieActivity.LinkOpened` is part of this wrapper contract and forwards
+`$link_opened` with the URL, target, screen/source attribution and Journey leg.
 
 ## Setup
 
