@@ -98,7 +98,7 @@ private class ComposedColorProbe : AutoCloseable {
             frame.cropBottom, frame.rotationDegrees, frame.displayWidth, frame.displayHeight,
             frame.colorMatrix, frame.colorRange))
         player.step(0.0)
-        val composed = renderer.renderToCpuFrame(player, 0, false)
+        val composed = renderer.renderToCpuFrame(player, 0, 1f)
         val offset = (80 * composed.width + 100) * 4
         val r = composed.rgba[offset].toInt() and 255
         val b = composed.rgba[offset + 2].toInt() and 255
