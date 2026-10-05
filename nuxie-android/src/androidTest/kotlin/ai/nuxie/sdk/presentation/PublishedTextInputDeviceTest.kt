@@ -771,7 +771,7 @@ class PublishedTextInputDeviceTest {
             val cancelWaiter = item.getValue("cancelWaiter").jsonPrimitive.content.toBooleanStrict()
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             val service = ExperiencePresentationService(instrumentation.targetContext, { _, _, _ -> }, scope,
-                { NuxieRuntime.shared.isAvailable })
+                { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "terminal-owner" })
             val checkpointEntered = CountDownLatch(1)
             val checkpoint = CompletableDeferred<JourneyScreenDismissalResult>()
             val sourceReleased = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -1462,7 +1462,7 @@ class PublishedTextInputDeviceTest {
         val shown = java.util.concurrent.atomic.AtomicInteger()
         val service = ExperiencePresentationService(instrumentation.targetContext, { name, _, _ ->
             if (name == ai.nuxie.sdk.events.SystemEventNames.EXPERIENCE_SHOWN) shown.incrementAndGet()
-        }, scope, { NuxieRuntime.shared.isAvailable })
+        }, scope, { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "early-owner" })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val before = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
@@ -1614,7 +1614,7 @@ class PublishedTextInputDeviceTest {
         val shown = java.util.concurrent.atomic.AtomicInteger()
         val service = ExperiencePresentationService(instrumentation.targetContext, { name, _, _ ->
             if (name == ai.nuxie.sdk.events.SystemEventNames.EXPERIENCE_SHOWN) shown.incrementAndGet()
-        }, scope, { NuxieRuntime.shared.isAvailable })
+        }, scope, { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "recovery-owner" })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val pending = scope.async {
@@ -1747,7 +1747,7 @@ class PublishedTextInputDeviceTest {
         val checkpoints = java.util.concurrent.atomic.AtomicInteger()
         val service = ExperiencePresentationService(instrumentation.targetContext, { name, _, _ ->
             if (name == ai.nuxie.sdk.events.SystemEventNames.EXPERIENCE_SHOWN) shown.incrementAndGet()
-        }, scope, { NuxieRuntime.shared.isAvailable })
+        }, scope, { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "native-recovery-owner" })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val pending = scope.async {
@@ -1922,7 +1922,7 @@ class PublishedTextInputDeviceTest {
         val batches = LinkedBlockingQueue<JourneyScreenEmissionBatch>()
         val screens = LinkedBlockingQueue<String>()
         val service = ExperiencePresentationService(instrumentation.targetContext, { _, _, _ -> }, scope,
-            { NuxieRuntime.shared.isAvailable })
+            { NuxieRuntime.shared.isAvailable }, currentDistinctId = { owner })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val navigationContract = instrumentation.context.assets.open("journeys/planes/persistent-navigation-android.json")
@@ -2095,7 +2095,7 @@ class PublishedTextInputDeviceTest {
         val destinationCloses = java.util.concurrent.atomic.AtomicInteger()
         val checkpoints = java.util.concurrent.atomic.AtomicInteger()
         val service = ExperiencePresentationService(instrumentation.targetContext, { _, _, _ -> }, scope,
-            { NuxieRuntime.shared.isAvailable })
+            { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "recover-owner" })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val invalid = File.createTempFile("navigation-recovery", ".riv", instrumentation.targetContext.cacheDir).apply { writeText("invalid native fixture") }
@@ -2403,7 +2403,7 @@ class PublishedTextInputDeviceTest {
         val directory = File(context.cacheDir, owner).apply { mkdirs() }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val store = SQLiteEventStore(context, databaseFile = File(directory, "events.db"))
-        val presentations = ExperiencePresentationService(context, { _, _, _ -> }, scope, { NuxieRuntime.shared.isAvailable })
+        val presentations = ExperiencePresentationService(context, { _, _, _ -> }, scope, { NuxieRuntime.shared.isAvailable }, currentDistinctId = { owner })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val accepted = LinkedBlockingQueue<JourneyScreenEmissionBatch>()
