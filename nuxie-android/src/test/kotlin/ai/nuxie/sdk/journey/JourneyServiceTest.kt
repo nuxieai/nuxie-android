@@ -58,6 +58,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -2174,8 +2175,9 @@ class JourneyServiceTest {
         assertEquals(listOf(fixture.getValue("name").jsonPrimitive.content to expected), captures)
         val activity = ai.nuxie.sdk.events.ActivityCuration.activity(captures.single().first, captures.single().second)
         assertTrue(activity is ai.nuxie.sdk.NuxieActivity.LinkOpened)
+        assertEquals("in_app", (activity as ai.nuxie.sdk.NuxieActivity.LinkOpened).destination)
         identity.setDistinctId("replacement")
-        assertFalse(dispatcher.captureLinkOpened(ai.nuxie.sdk.presentation.JourneyOpenedLink("https://example.test", "_self", "screen"), request))
+        assertFalse(dispatcher.captureLinkOpened(ai.nuxie.sdk.presentation.JourneyOpenedLink("https://example.test", "_self", "screen", destination = "in_app"), request))
         assertEquals(1, captures.size)
     }
 
@@ -2279,19 +2281,32 @@ class JourneyServiceTest {
         assertEquals(request.run.generation, captures.single().second["leg_generation"])
     }
 
+    @Test fun `shared broken link states use JourneyService and the real presentation service`() = runBlocking {
+        val vectors = Json.parseToJsonElement(FixtureRunner.fixturesRoot().resolve("events/link-open-states.json").readText()).jsonObject.getValue("cases").jsonArray
+        var count = 0
+        for (entry in vectors) {
+            val link = entry.jsonObject.getValue("link").jsonObject
+            val expected = entry.jsonObject.getValue("expected").jsonObject
+            if (link["kind"] != JsonPrimitive("journey") || expected["opened"] != JsonPrimitive(false)) continue
+            assertLinkStep(link["url"], (link["target"] as? JsonPrimitive)?.contentOrNull, false, realPresenter = true)
+            count++
+        }
+        assertEquals(5, count)
+    }
+
     @Test fun `unresolved link advances without dismissal`() = runBlocking { assertLinkStep(Json.parseToJsonElement("""{"type":"Event.Field","key":"absent"}"""), "external", false) }
-    @Test fun `empty link advances without dismissal`() = runBlocking { assertLinkStep(JsonPrimitive(""), "external", false) }
+    @Test fun `empty link advances without dismissal`() = runBlocking { assertLinkStep(Json.parseToJsonElement("""{"type":"String","value":""}"""), "external", false) }
     @Test fun `missing link advances without dismissal`() = runBlocking { assertLinkStep(null, "external", false) }
     @Test fun `non string link advances without dismissal`() = runBlocking { assertLinkStep(JsonPrimitive(true), "external", false) }
-    @Test fun `missing target advances without dismissal`() = runBlocking { assertLinkStep(JsonPrimitive("https://example.test"), null, false) }
-    @Test fun `external link without presentation opens and advances`() = runBlocking { assertLinkStep(JsonPrimitive("https://example.test"), "external", true) }
-    @Test fun `in app link without presentation opens externally`() = runBlocking { assertLinkStep(JsonPrimitive("https://example.test"), "in_app", true) }
-    @Test fun `link record precedes completion and uses step effect id`() = runBlocking { assertLinkStep(JsonPrimitive("https://example.test"), "external", true, complete = true) }
-    @Test fun `recording failure cannot abandon an opened link`() = runBlocking { assertLinkStep(JsonPrimitive("https://example.test"), "external", true, recordingFails = true) }
+    @Test fun `missing target advances without dismissal`() = runBlocking { assertLinkStep(Json.parseToJsonElement("""{"type":"String","value":"https://example.test"}"""), null, false) }
+    @Test fun `external link without presentation opens and advances`() = runBlocking { assertLinkStep(Json.parseToJsonElement("""{"type":"String","value":"https://example.test"}"""), "external", true) }
+    @Test fun `in app link without presentation opens externally`() = runBlocking { assertLinkStep(Json.parseToJsonElement("""{"type":"String","value":"https://example.test"}"""), "in_app", true) }
+    @Test fun `link record precedes completion and uses step effect id`() = runBlocking { assertLinkStep(Json.parseToJsonElement("""{"type":"String","value":"https://example.test"}"""), "external", true, complete = true) }
+    @Test fun `recording failure cannot abandon an opened link`() = runBlocking { assertLinkStep(Json.parseToJsonElement("""{"type":"String","value":"https://example.test"}"""), "external", true, recordingFails = true) }
 
-    @Test fun `presented link record precedes completion and uses step effect id`() = runBlocking { assertLinkStep(JsonPrimitive("https://example.test"), "in_app", true, complete = true, owned = true) }
+    @Test fun `presented link record precedes completion and uses step effect id`() = runBlocking { assertLinkStep(Json.parseToJsonElement("""{"type":"String","value":"https://example.test"}"""), "in_app", true, complete = true, owned = true) }
 
-    private suspend fun assertLinkStep(url: JsonElement?, target: String?, opens: Boolean, complete: Boolean = false, recordingFails: Boolean = false, owned: Boolean = false) {
+    private suspend fun assertLinkStep(url: JsonElement?, target: String?, opens: Boolean, complete: Boolean = false, recordingFails: Boolean = false, owned: Boolean = false, realPresenter: Boolean = false) {
         val directory = java.io.File(this.directory, java.util.UUID.randomUUID().toString()).apply { mkdirs() }
         val identity = IdentityService(context).also { it.setDistinctId("customer") }
         val entry = fixture.getValue("renderedEntry").jsonObject
@@ -2301,7 +2316,8 @@ class JourneyServiceTest {
         val baseline = requireNotNull(catalog.snapshot("customer"))
         val original = baseline.releasesByDigest.values.single()
         val action = buildJsonObject { put("type", "open_link"); url?.let { put("url", it) }; target?.let { put("target", it) } }
-        val next = if (complete) Json.parseToJsonElement("""{"kind":"complete","id":"next","outcome":"completed"}""")
+        val next = if (realPresenter) Json.parseToJsonElement("""{"kind":"action","id":"next","action":{"type":"delay","durationMs":60000},"outlets":{}}""")
+            else if (complete) Json.parseToJsonElement("""{"kind":"complete","id":"next","outcome":"completed"}""")
             else Json.parseToJsonElement("""{"kind":"action","id":"next","action":{"type":"navigate","screenId":"screen_welcome"},"outlets":{}}""")
         val leg = JsonObject(original.leg + mapOf("entryStepId" to JsonPrimitive(if (owned) "present" else "link"), "routes" to (if (owned) Json.parseToJsonElement("""[{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"open","entryStepId":"link"}]""") else JsonArray(emptyList())),
             "steps" to JsonArray(listOf(Json.parseToJsonElement("""{"kind":"action","id":"present","action":{"type":"navigate","screenId":"screen_welcome"},"outlets":{}}"""), buildJsonObject { put("kind", "action"); put("id", "link"); put("action", action); putJsonObject("outlets") { put("next", "next") } }, next))))
@@ -2319,9 +2335,40 @@ class JourneyServiceTest {
                 if (recordingFails) error("Injected recording failure")
                 admission.commitIfCurrent { captures += Triple(name, properties, id); true } == true
             }, deliverAppAction = { _, _ -> false })
+        val actualPresentation = ai.nuxie.sdk.presentation.ExperiencePresentationService(scope = scope, emit = { _, _, _ -> },
+            runtimeAvailable = { true }, launch = { error("Broken link must not launch an Experience") },
+            openLink = { _, _ -> error("Broken link must not reach platform handoff") })
+        val presentationAttempts = CopyOnWriteArrayList<String>()
+        val actualPresenter = object : JourneyPresenting by presenter {
+            override suspend fun openLink(owner: JourneyPresentationOwner, link: ai.nuxie.sdk.presentation.JourneyLinkRequest): ai.nuxie.sdk.presentation.JourneyOpenedLink? {
+                presentationAttempts += "open"
+                return actualPresentation.openJourneyLink(owner, link)
+            }
+            override suspend fun present(request: JourneyPresentationRequest): JourneyPresentationResult {
+                presentationAttempts += "present"
+                return presenter.present(request)
+            }
+            override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String): JourneyPresentationActionResult {
+                presentationAttempts += "dispatch"
+                return actualPresentation.dispatchJourneyAction(owner, action, effectId)
+            }
+            override suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) {
+                presentationAttempts += "finish"
+                actualPresentation.shutdownJourney(ownerDistinctId, journeyId)
+            }
+            override suspend fun shutdownOwnedBy(ownerDistinctId: String) {
+                presentationAttempts += "shutdown"
+                actualPresentation.shutdownOwnedBy(ownerDistinctId)
+            }
+        }
         val service = JourneyService(identity = identity, events = store, catalog = catalog, journalDirectory = directory, scope = scope,
-            capture = { name, properties, id, _ -> captures += Triple(name, properties, id); true }, presenter = presenter,
-            linkRecorder = recorder, openExternalLink = { value -> opened += value; effectId = journal.runs().first().effectReceipts["link"]; true }, nowMillis = { 100_000L })
+            capture = { name, properties, id, _ -> captures += Triple(name, properties, id); true }, presenter = if (realPresenter) actualPresenter else presenter,
+            linkRecorder = recorder, nowMillis = { 100_000L })
+        if (!owned) presenter.linkHandler = { link ->
+            opened += link.url
+            effectId = journal.runs().first().effectReceipts["link"]
+            link.opened("external")
+        }
         service.initialize(); service.onAppWillEnterForeground(); service.profileDidCommit(snapshot, authority, "customer", 1)
         if (owned) {
             presenter.recordsOpenedLinks = true
@@ -2331,13 +2378,15 @@ class JourneyServiceTest {
             service.onAppDidEnterBackground()
             effectId = presenter.actions.first().second
         }
+        if (realPresenter) assertEquals("Broken steps must be rejected before foreground or presentation gating", emptyList<String>(), presentationAttempts)
         assertEquals(if (opens && !owned) 1 else 0, opened.size)
         val records = captures.filter { it.first == JourneyEventNames.LINK_OPENED }
         assertEquals(if (opens && !recordingFails) 1 else 0, records.size)
         records.firstOrNull()?.let { assertEquals(effectId, it.third); assertEquals(if (owned) "in_app" else "external", it.second["destination"]); assertEquals(target, it.second["target"]) }
         if (complete) {
             val names = captures.map { it.first }
-            assertTrue(names.indexOf(JourneyEventNames.LINK_OPENED) < names.indexOf(JourneyEventNames.LEG_COMPLETED))
+            if (opens) assertTrue(names.indexOf(JourneyEventNames.LINK_OPENED) < names.indexOf(JourneyEventNames.LEG_COMPLETED))
+            else assertEquals("completed", captures.single { it.first == JourneyEventNames.LEG_COMPLETED }.second["outcome"])
         } else {
             assertEquals("next", journal.runs().first().stepId)
             assertTrue(presenter.shutdowns.isEmpty())
@@ -2648,6 +2697,13 @@ class JourneyServiceTest {
             } else {
                 JourneyPresentationResult.Failed
             }
+        }
+
+        var linkHandler: (suspend (ai.nuxie.sdk.presentation.JourneyLinkRequest) -> ai.nuxie.sdk.presentation.JourneyOpenedLink?)? = null
+        override suspend fun openLink(owner: JourneyPresentationOwner, link: ai.nuxie.sdk.presentation.JourneyLinkRequest): ai.nuxie.sdk.presentation.JourneyOpenedLink? {
+            linkHandler?.let { return it(link) }
+            actions += buildJsonObject { put("type", "open_link"); put("url", link.url); put("target", link.target) } to requireNotNull(link.effectId)
+            return if (recordsOpenedLinks) link.opened("in_app") else null
         }
 
         override fun owns(owner: JourneyPresentationOwner): Boolean = request?.let {

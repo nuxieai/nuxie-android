@@ -55,6 +55,8 @@ internal object JourneySchemaValidator {
             "action" -> {
                 exact(step, setOf("kind", "id", "action", "outlets"))
                 for (target in record(step["outlets"]).values) if (id(target) !in ids) fail("local outlet")
+                if (screens.isEmpty() && text(record(step["action"])["type"]) in JourneyGrammar.presenting)
+                    fail("screenless presentation action")
                 JourneyGrammar.action(step["action"], screens.toSet(), placements)
             }
             else -> fail("step kind")

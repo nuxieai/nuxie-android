@@ -45,7 +45,7 @@ internal class JourneyRuntimeEmissionCoordinator(
     private val onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> Boolean,
     private val onScreenChanged: suspend (String) -> Boolean = { true },
     private val onPresentationRevealed: suspend (String) -> Unit,
-    private val onOpenLink: suspend (JourneyOpenedLink) -> Unit = {},
+    private val onOpenLink: suspend (JourneyLinkRequest) -> Unit = {},
     private val createId: () -> String = { TimeBasedEpochGenerator.shared.next() },
     private val nowMillis: () -> Long = System::currentTimeMillis,
 
@@ -121,8 +121,11 @@ internal class JourneyRuntimeEmissionCoordinator(
             publishDrafts(drafts, source, projected.eventSource)
         }
         links.forEach { link ->
-            runCatching { onOpenLink(JourneyOpenedLink(link.url, link.target, screenId, link.instanceId)) }
-                .onFailure { error -> Log.w(LOG_TAG, "Journey renderer open-link callback failed", error) }
+            runCatching { onOpenLink(JourneyLinkRequest(link.url, link.target, screenId, link.instanceId)) }
+                .onFailure { error ->
+                    if (error is kotlinx.coroutines.CancellationException) throw error
+                    Log.w(LOG_TAG, "Journey renderer open-link callback failed", error)
+                }
         }
         return accepted
     }
@@ -252,7 +255,7 @@ internal class JourneyRuntimeEmissionCoordinator(
         outcome.events.forEach { event ->
             val properties = event.propertiesMap(rejectDuplicates = event.name == GENERATED_INTERACTION_EVENT || controls.containsKey(event.name)) ?: run {
                 if (event.url.isNotEmpty() && event.name != GENERATED_INTERACTION_EVENT) {
-                    links += OpenLink(event.url, event.target.takeIf(String::isNotEmpty))
+                    links += OpenLink(event.url, event.target)
                 }
                 return@forEach
             }
@@ -274,7 +277,7 @@ internal class JourneyRuntimeEmissionCoordinator(
                         (declaredInstanceId == null || declaredInstanceId != instanceId))
                 )
             if (event.url.isNotEmpty() && event.name != GENERATED_INTERACTION_EVENT) {
-                links += OpenLink(event.url, event.target.takeIf(String::isNotEmpty), instanceId.takeUnless { invalidSource })
+                links += OpenLink(event.url, event.target, instanceId.takeUnless { invalidSource })
                 return@forEach
             }
             if (invalidSource) {

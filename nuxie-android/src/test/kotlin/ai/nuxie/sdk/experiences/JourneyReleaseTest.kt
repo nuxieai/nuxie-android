@@ -25,6 +25,27 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyReleaseTest {
+    @Test fun `open links allow host dismissal and screenless legs while screen actions do not`() {
+        for (entry in listOf("entry", "renderedEntry")) {
+            val envelope = fixture.getValue(entry).jsonObject.getValue("envelope").jsonObject
+            val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+            val leg = JsonObject(source.getValue("leg").jsonObject + mapOf(
+                "entryStepId" to JsonPrimitive("link"),
+                "steps" to Json.parseToJsonElement("""[{"kind":"action","id":"link","action":{"type":"open_link","url":{"type":"String","value":"https://example.test"},"target":"in_app"},"outlets":{"next":"done"}},{"kind":"complete","id":"done","outcome":"continue"}]"""),
+                "routes" to Json.parseToJsonElement("""[{"host":{"kind":"journey"},"eventName":"host_dismissed","entryStepId":"link"}]""")
+            ))
+            JourneySchemaValidator.validate(JsonObject(source + ("leg" to leg)))
+            val dismiss = Json.parseToJsonElement("""[{"kind":"action","id":"link","action":{"type":"dismiss"},"outlets":{"next":"done"}},{"kind":"complete","id":"done","outcome":"continue"}]""")
+            assertThrows(JourneyReleaseAuthenticationException::class.java) {
+                JourneySchemaValidator.validate(JsonObject(source + ("leg" to JsonObject(leg + ("steps" to dismiss)))))
+            }
+            if (entry == "entry") assertThrows(JourneyReleaseAuthenticationException::class.java) {
+                JourneySchemaValidator.validate(JsonObject(source + ("leg" to JsonObject(leg + mapOf(
+                    "steps" to dismiss, "routes" to JsonArray(emptyList()))))))
+            }
+        }
+    }
+
     @Test fun `retired release wire version is rejected`() {
         val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
         val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
