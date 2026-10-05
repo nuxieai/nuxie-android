@@ -2436,8 +2436,8 @@ class PublishedTextInputDeviceTest {
             override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
             override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
             override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
-            override fun resolveAction(owner: JourneyPresentationOwner, action: JsonObject, source: JourneyScreenEmissionSource?) =
-                presentations.resolveJourneyAction(owner, action, source)
+            override fun resolveAction(owner: JourneyPresentationOwner, action: JsonObject, source: JourneyScreenEmissionSource?, eventSource: JourneyRuntimeEventSource?) =
+                presentations.resolveJourneyAction(owner, action, source, eventSource)
             override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String): JourneyPresentationActionResult {
                 if (purchasing && action["type"]?.jsonPrimitive?.content == "purchase") {
                     purchases.add(action.getValue("placementId").jsonPrimitive.content)
@@ -2470,6 +2470,7 @@ class PublishedTextInputDeviceTest {
                             if (method == "error") errorDismissals.add(it)
                         }
                     },
+                    eventSources = request.eventSources,
                     onEmissionBatch = { batch ->
                         val committed = request.onEmissionBatch(batch)
                         if (committed) accepted.add(batch)

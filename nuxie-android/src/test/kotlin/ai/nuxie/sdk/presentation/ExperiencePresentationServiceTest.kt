@@ -31,6 +31,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
@@ -163,11 +164,31 @@ class ExperiencePresentationServiceTest {
         ).jsonObject
         assertEquals("secondary:monthly", service.resolveJourneyAction(owner, rootAction, source)
             ?.get("placementId")?.jsonPrimitive?.content)
-        assertEquals("secondary:monthly", service.resolveJourneyAction(owner, scoped(true), source)
+        assertEquals("secondary:monthly", service.resolveJourneyAction(owner, scoped(true), source, JourneyRuntimeEventSource(2, snapshot))
             ?.get("placementId")?.jsonPrimitive?.content)
         assertEquals("root:yearly", service.resolveJourneyAction(owner, scoped(false), source)
             ?.get("placementId")?.jsonPrimitive?.content)
         assertNull(service.resolveJourneyAction(owner, scoped(true), null))
+        assertNull(service.resolveJourneyAction(owner, scoped(true), source))
+        val fixture = Json.parseToJsonElement(ai.nuxie.sdk.fixtures.FixtureRunner.fixturesRoot()
+            .resolve("events/runtime-relative-values.json").readText()).jsonObject
+        val values = fixture.getValue("values").jsonObject
+        val rootId = fixture.getValue("root").jsonPrimitive.content.toLong()
+        val rows = fixture.getValue("rows").jsonArray.map { it.jsonPrimitive.content.toLong() }
+        val frame = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(rootId,
+            values.keys.map { NativeViewModelSnapshotInstance(it.toLong(), 0) }.toTypedArray(),
+            (values.map { (id, value) -> NativeViewModelSnapshotValue(id.toLong(), 0, "placementId",
+                NuxieViewModelPropertyKind.STRING.nativeValue, value.jsonPrimitive.content.encodeToByteArray(), 0)
+            } + NativeViewModelSnapshotValue(rootId, 1, "rows", NuxieViewModelPropertyKind.LIST.nativeValue,
+                byteArrayOf(), 0, listItemIds = rows.toLongArray())).toTypedArray()))
+        for (entry in fixture.getValue("cases").jsonArray) {
+            val vector = entry.jsonObject
+            val frameSource = vector["source"]?.jsonPrimitive?.contentOrNull?.toLong()?.let { JourneyRuntimeEventSource(it, frame) }
+            val expected = vector["expected"]?.jsonPrimitive?.contentOrNull
+            assertEquals(vector.getValue("name").jsonPrimitive.content, expected,
+                service.resolveJourneyAction(owner, scoped(true), null, frameSource)?.get("placementId")?.jsonPrimitive?.content)
+        }
+
     }
 
     @Test

@@ -8,6 +8,37 @@ import org.junit.Test
 
 class PurchaseScopeDeviceTest {
     @Test
+    fun unaliasedNestedCopyReportsItsNativeFrameValues() {
+        val bytes = InstrumentationRegistry.getInstrumentation().context.assets
+            .open("runtime/purchase-scopes/screen.riv").use { it.readBytes() }
+        val renderer = checkNotNull(NuxieRuntime.shared.newAndroidVulkanRenderer(320, 100))
+        try {
+            val file = checkNotNull(NuxieRuntime.shared.importFile(renderer, bytes))
+            try {
+                val artboard = checkNotNull(file.newArtboard("Purchase"))
+                try {
+                    artboard.bindDefaultViewModel("PurchaseRoot")
+                    val player = file.newExperiencePlayer(artboard, "Purchase")
+                    try {
+                        repeat(20) { player.stepTyped(elapsedSeconds = 0.016) }
+                        val down = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
+                            NuxiePlayerPointerEvent(NuxiePlayerPointerKind.DOWN, 240f, 30f, 1, 0f)))
+                        val up = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
+                            NuxiePlayerPointerEvent(NuxiePlayerPointerKind.UP, 240f, 30f, 1, 0.1f)))
+                        val settled = player.stepTyped(elapsedSeconds = 0.016)
+                        val event = (down.events + up.events + settled.events).single()
+                        val frame = checkNotNull(artboard.defaultViewModelSnapshot())
+                        assertTrue(event.sourceViewModelInstanceId != 0L)
+                        assertTrue(frame.containsInstance(event.sourceViewModelInstanceId))
+                        assertNull(frame.authoredInstanceId(event.sourceViewModelInstanceId))
+                        assertEquals("plan:annual", frame.resolveNativeString("placementId", "Plan", event.sourceViewModelInstanceId))
+                    } finally { player.close() }
+                } finally { artboard.close() }
+            } finally { file.close() }
+        } finally { renderer.close() }
+    }
+
+    @Test
     fun publishedPurchaseComponentEmitsWhenPlayedDirectly() {
         val bytes = InstrumentationRegistry.getInstrumentation().context.assets
             .open("runtime/purchase-scopes/screen.riv").use { it.readBytes() }
