@@ -383,8 +383,9 @@ internal class NuxieCore(
             owner: JourneyPresentationOwner,
             action: kotlinx.serialization.json.JsonObject,
             source: ai.nuxie.sdk.presentation.JourneyScreenEmissionSource?,
+            eventSource: ai.nuxie.sdk.presentation.JourneyRuntimeEventSource?,
         ): kotlinx.serialization.json.JsonObject? =
-            presentations.resolveJourneyAction(owner, action, source)
+            presentations.resolveJourneyAction(owner, action, source, eventSource)
 
         override suspend fun dispatchAction(
             owner: JourneyPresentationOwner,
