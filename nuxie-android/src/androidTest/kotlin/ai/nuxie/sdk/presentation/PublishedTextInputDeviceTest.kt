@@ -2436,6 +2436,8 @@ class PublishedTextInputDeviceTest {
             override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
             override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
             override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
+            override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest) =
+                presentations.openJourneyLink(owner, link)
             override fun resolveAction(owner: JourneyPresentationOwner, action: JsonObject, source: JourneyScreenEmissionSource?, eventSource: JourneyRuntimeEventSource?) =
                 presentations.resolveJourneyAction(owner, action, source, eventSource)
             override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String): JourneyPresentationActionResult {
