@@ -150,7 +150,7 @@ class ConfiguredImportSmokeTest {
                         }
                         fun assertVideoColor(red: Boolean) {
                             player.step(0.0)
-                            val frame = renderer.renderToCpuFrame(player, 0, false)
+                            val frame = renderer.renderToCpuFrame(player, 0, 1f)
                             val offset = (80 * frame.width + 100) * 4
                             assertTrue("Expected uploaded video frame in the composed Vulkan scene",
                                 (frame.rgba[offset + if (red) 0 else 2].toInt() and 255) > 180)
@@ -267,7 +267,7 @@ class ConfiguredImportSmokeTest {
                         players[index].step(0.0)
                         playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
                         captions[index].addAll(playback.captionSnapshot().values.map { it.text })
-                        val frame = renderer.renderToCpuFrame(players[index], 0, false)
+                        val frame = renderer.renderToCpuFrame(players[index], 0, 1f)
                         val offset = (80 * frame.width + 100) * 4
                         val red = frame.rgba[offset].toInt() and 255
                         val blue = frame.rgba[offset + 2].toInt() and 255
@@ -367,7 +367,7 @@ class ConfiguredImportSmokeTest {
                             }
                             fun renderedColor(): Boolean? {
                                 val before = mediaClock()
-                                val composed = renderer.renderToCpuFrame(player, 0, false)
+                                val composed = renderer.renderToCpuFrame(player, 0, 1f)
                                 val after = mediaClock()
                                 val offset = (80 * composed.width + 100) * 4
                                 val red = composed.rgba[offset].toInt() and 255

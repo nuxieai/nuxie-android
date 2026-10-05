@@ -62,7 +62,7 @@ class TextMetricsBindingDeviceTest {
                                 assertEquals(1929f / 2048f * size,
                                     checkNotNull(captured.fields.getValue(name).firstBaseline), 0.001f)
                             }
-                            val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                            val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                             val semantics = player.captureSemantics()
                             try {
                                 captured.fields.values.forEach {
@@ -158,7 +158,7 @@ class TextMetricsBindingDeviceTest {
                                 assertEquals(1929f / 2048f * effectiveSize, checkNotNull(geometry.firstBaseline), 0.001f)
                                 if (index == 0 && fieldIndex == 0) retainedGeometry = geometry
                             }
-                            val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                            val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                             val semantics = player.captureSemantics()
                             try {
                                 captured.fields.values.forEach {
