@@ -34,7 +34,7 @@ class GeneratedInteractionPlayerDeviceTest {
                         val player = if (experience) file.newExperiencePlayer(artboard, artboardName) else checkNotNull(artboard.newPlayer())
                         try {
                             player.stepTyped(elapsedSeconds = 0.0)
-                            val initial = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true).rgba
+                            val initial = renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f).rgba
                             val position = contract.getValue("pointer").jsonObject
                             fun pointer(kind: NuxiePlayerPointerKind) = NuxiePlayerPointerEvent(kind,
                                 position.getValue("x").jsonPrimitive.float, position.getValue("y").jsonPrimitive.float, 1, 0f)

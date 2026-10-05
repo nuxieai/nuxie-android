@@ -95,7 +95,7 @@ internal class HostRenderHarness(
                     check(stepStatus == NUX_STATUS_OK) {
                         "Experience player step failed with status $stepStatus"
                     }
-                    val frame = renderer.renderToCpuFrame(player, clearColor, true)
+                    val frame = renderer.renderToCpuFrame(player, clearColor, 1f)
                     check(frame.width == size.width && frame.height == size.height) {
                         "Runtime returned ${frame.width}x${frame.height}; expected ${size.width}x${size.height}"
                     }

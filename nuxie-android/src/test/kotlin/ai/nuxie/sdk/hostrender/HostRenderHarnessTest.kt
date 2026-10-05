@@ -219,7 +219,7 @@ class HostRenderHarnessTest {
             rendererHandle: Long,
             playerHandle: Long,
             clearColor: Int,
-            fitContainCenter: Boolean,
+            layoutScaleFactor: Float,
         ) = NuxieCpuFrame(4, 2, ByteArray(32) { (it + steps.size).toByte() })
         override fun freeRenderer(handle: Long) { factoryLifecycle += "free-renderer" }
     }

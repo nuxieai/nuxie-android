@@ -248,6 +248,10 @@ internal object NuxieRuntimeBridge {
     /** Action 0 = tap, 1 = increase, 2 = decrease; accepted work requires a normal player step. */
     external fun nativePlayerQueueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int): Int
 
+    external fun nativePlayerLayoutSizeSet(player: Long, width: Float, height: Float): Int
+
+    external fun nativePlayerLayoutSize(player: Long, statusOut: IntArray): FloatArray?
+
     external fun nativePlayerFree(player: Long)
 
     /** nux_player_step: advance by elapsed seconds; returns a status code. */
@@ -324,7 +328,7 @@ internal object NuxieRuntimeBridge {
         player: Long,
         window: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int
 
     /** Headless render and native window copy: 1 after posting, negative status on failure. */
@@ -333,7 +337,7 @@ internal object NuxieRuntimeBridge {
         player: Long,
         window: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int
 
     /** Renders into JVM-owned, tightly packed RGBA8 premultiplied-sRGB pixels. */
@@ -341,7 +345,7 @@ internal object NuxieRuntimeBridge {
         renderer: Long,
         player: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): NuxieCpuFrame?
 
     external fun nativeRendererFree(renderer: Long)

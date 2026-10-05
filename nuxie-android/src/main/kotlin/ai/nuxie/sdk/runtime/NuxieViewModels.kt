@@ -438,6 +438,12 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
     fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int =
         error("stepPlayerFrame is not implemented")
 
+    fun setPlayerLayoutSize(playerHandle: Long, width: Float, height: Float): Int =
+        error("setPlayerLayoutSize is not implemented")
+
+    fun playerLayoutSize(playerHandle: Long): NativeCallResult<FloatArray> =
+        error("playerLayoutSize is not implemented")
+
     fun freePlayer(handle: Long): Unit = error("freePlayer is not implemented")
 
     fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long =
@@ -467,7 +473,7 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         playerHandle: Long,
         windowHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int = error("renderAndPresent is not implemented")
 
     fun copyPlayerToWindow(
@@ -475,14 +481,14 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         playerHandle: Long,
         windowHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int = error("copyPlayerToWindow is not implemented")
 
     fun renderToCpuFrame(
         rendererHandle: Long,
         playerHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): NuxieCpuFrame = error("renderToCpuFrame is not implemented")
 
     fun freeRenderer(handle: Long): Unit = error("freeRenderer is not implemented")
@@ -732,6 +738,15 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
     override fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int =
         NuxieRuntimeBridge.nativePlayerStep(playerHandle, elapsedSeconds)
 
+    override fun setPlayerLayoutSize(playerHandle: Long, width: Float, height: Float): Int =
+        NuxieRuntimeBridge.nativePlayerLayoutSizeSet(playerHandle, width, height)
+
+    override fun playerLayoutSize(playerHandle: Long): NativeCallResult<FloatArray> {
+        val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
+        val size = NuxieRuntimeBridge.nativePlayerLayoutSize(playerHandle, status)
+        return NativeCallResult(status.single(), size)
+    }
+
     override fun freePlayer(handle: Long) {
         NuxieRuntimeBridge.nativePlayerFree(handle)
     }
@@ -753,13 +768,13 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         playerHandle: Long,
         windowHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int = NuxieRuntimeBridge.nativeRendererRenderPlayer(
         rendererHandle,
         playerHandle,
         windowHandle,
         clearColor,
-        fitContainCenter,
+        layoutScaleFactor,
     )
 
     override fun copyPlayerToWindow(
@@ -767,22 +782,22 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         playerHandle: Long,
         windowHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int = NuxieRuntimeBridge.nativeRendererCopyPlayerToWindow(
-        rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter,
+        rendererHandle, playerHandle, windowHandle, clearColor, layoutScaleFactor,
     )
 
     override fun renderToCpuFrame(
         rendererHandle: Long,
         playerHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): NuxieCpuFrame = checkNotNull(
         NuxieRuntimeBridge.nativeRendererRenderPlayerToCpuFrame(
             rendererHandle,
             playerHandle,
             clearColor,
-            fitContainCenter,
+            layoutScaleFactor,
         ),
     ) { "Android Vulkan renderer did not return a CPU frame" }
 

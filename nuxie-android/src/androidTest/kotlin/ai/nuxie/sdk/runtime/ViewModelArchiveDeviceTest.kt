@@ -72,7 +72,7 @@ class ViewModelArchiveDeviceTest {
                                 val player = file.newExperiencePlayer(artboard, "Purchase")
                                 try {
                                     player.stepTyped(elapsedSeconds = 0.016)
-                                    renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                                    renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                                 } finally { player.close() }
                             } finally { restored.close() }
                         }
@@ -149,7 +149,7 @@ class ViewModelArchiveDeviceTest {
                         val player = file.newExperiencePlayer(artboard, "Purchase")
                         try {
                             repeat(3) { player.stepTyped(elapsedSeconds = 0.016) }
-                            renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                            renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                         } finally { player.close() }
                     } finally { restored.close() }
                 } finally { artboard.close() }

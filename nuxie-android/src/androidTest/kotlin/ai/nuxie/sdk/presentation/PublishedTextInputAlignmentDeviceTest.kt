@@ -63,7 +63,7 @@ class PublishedTextInputAlignmentDeviceTest {
                             textRunNames = expected.map { it.jsonObject.getValue("runName").jsonPrimitive.content })
                             .textGeometry as NuxieTextGeometryCapture.Captured
                         snapshot = checkNotNull(artboard.defaultViewModelSnapshot())
-                        val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                         assertEquals(390, frame.width)
                         assertEquals(844, frame.height)
                         val authoredCases = if (fontScalePolicy) json("cases.json").getValue("cases").jsonArray
@@ -93,7 +93,7 @@ class PublishedTextInputAlignmentDeviceTest {
                             }
                             val step = player.stepTyped(elapsedSeconds = 0.0, textRunNames = capture.fields.keys.toList())
                             val metricsSnapshot = checkNotNull(artboard.defaultViewModelSnapshot())
-                            renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                            renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                             metricFrames += MetricsFrame(metricsSnapshot, step.textGeometry as NuxieTextGeometryCapture.Captured, size, height)
                         }
                         expected.forEach { field ->
@@ -105,7 +105,7 @@ class PublishedTextInputAlignmentDeviceTest {
                             .textGeometry as NuxieTextGeometryCapture.Captured
                         blankSnapshot = checkNotNull(artboard.defaultViewModelSnapshot())
                         blankCapture.fields.values.forEach { assertNull(it.firstBaseline) }
-                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                     } finally { player.close() }
                 } finally { artboard.close() }
             } finally { file.close() }

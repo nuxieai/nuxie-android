@@ -971,7 +971,7 @@ internal class ExperienceSurfaceHost(
                         return@enqueue
                     }
                 }
-                val disposition = renderer.renderAndPresent(player, window, clearColor, true)
+                val disposition = renderer.renderAndPresent(player, window, clearColor, 1f)
                 pendingPresentation = disposition == 4
                 if (disposition < 0) {
                     Log.w(LOG_TAG, "render_player failed", null, Log.status("status", -disposition))
