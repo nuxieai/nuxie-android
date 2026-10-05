@@ -48,6 +48,7 @@ internal class JourneyRuntimeEmissionCoordinator(
     private val onOpenLink: (String, String?) -> Unit = { _, _ -> },
     private val createId: () -> String = { UUID.randomUUID().toString() },
     private val nowMillis: () -> Long = System::currentTimeMillis,
+    private val eventSources: JourneyRuntimeEventSources = JourneyRuntimeEventSources(),
 ) {
     private val gate = Mutex()
     private val revealed = CompletableDeferred<Unit>()
@@ -121,7 +122,7 @@ internal class JourneyRuntimeEmissionCoordinator(
                 screenId = screenId,
                 actionId = "runtime:$correlationId",
             )
-            publishDrafts(drafts, source)
+            publishDrafts(drafts, source, projected.eventSource)
         }
     }
 
@@ -181,6 +182,7 @@ internal class JourneyRuntimeEmissionCoordinator(
     private suspend fun publishDrafts(
         drafts: List<Draft>,
         source: JourneyScreenEmissionSource,
+        eventSource: JourneyRuntimeEmissionSources? = null,
     ): Boolean {
         if (drafts.isEmpty()) return true
         if (drafts.any(Draft::isInvalid)) {
@@ -211,7 +213,10 @@ internal class JourneyRuntimeEmissionCoordinator(
             source = source,
             emissions = emissions,
         )
-        val accepted = runCatching { onEmissionBatch(batch) }
+        eventSources.put(invocationId, eventSource?.bound(batch))
+        val accepted = runCatching {
+            try { onEmissionBatch(batch) } finally { eventSources.take(invocationId) }
+        }
             .onFailure { error ->
                 Log.w(LOG_TAG, "Journey renderer emission publication failed", error)
             }
@@ -241,6 +246,8 @@ internal class JourneyRuntimeEmissionCoordinator(
         var source: JourneyScreenEmissionSource? = null
         var control: Control? = null
         var multipleControls = false
+        val draftEventSources = mutableListOf<JourneyRuntimeEventSource?>()
+        var controlEventSource: JourneyRuntimeEventSource? = null
 
         outcome.events.forEach { event ->
             val properties = event.propertiesMap() ?: return@forEach
@@ -252,15 +259,23 @@ internal class JourneyRuntimeEmissionCoordinator(
                 "element_id",
             )
             val declaredInstanceId = properties.string("instanceId", "instance_id")
-            val instanceId = if (event.sourceViewModelInstanceId != 0L) {
-                val captured = checkNotNull(snapshot?.authoredInstanceId(event.sourceViewModelInstanceId)) {
-                    "Runtime event source has no unique authenticated instance in the current frame"
-                }
-                check(declaredInstanceId == null || declaredInstanceId == captured) {
-                    "Runtime event source conflicts with its declared instance"
-                }
-                captured
-            } else declaredInstanceId
+            val nativeId = event.sourceViewModelInstanceId
+            val aliases = snapshot?.instanceAliases(nativeId).orEmpty()
+            val instanceId = if (nativeId != 0L) aliases.singleOrNull() else declaredInstanceId
+            val invalidSource = nativeId != 0L && (
+                snapshot == null || !snapshot.containsInstance(nativeId) || aliases.size > 1 ||
+                    properties.keys.count { it == "instanceId" || it == "instance_id" } > 1 ||
+                    (properties.keys.any { it == "instanceId" || it == "instance_id" } &&
+                        (declaredInstanceId == null || declaredInstanceId != instanceId))
+                )
+            if (invalidSource) {
+                Log.w(LOG_TAG, "Rejected runtime event source", null, Log.sensitive("screen", screenId))
+                return@forEach
+            }
+            val eventSource = snapshot?.let {
+                val resolved = if (nativeId == 0L) it.nativeRootInstanceId else nativeId
+                if (it.containsInstance(resolved)) JourneyRuntimeEventSource(resolved, it) else null
+            }
             val actionId = controlActionId(event, properties)
             if (event.name == GENERATED_INTERACTION_EVENT && actionId == null) {
                 return@forEach
@@ -268,6 +283,7 @@ internal class JourneyRuntimeEmissionCoordinator(
             when {
                 actionId != null -> {
                     if (control != null) multipleControls = true else {
+                        controlEventSource = eventSource
                         control = Control(
                             screenId = eventScreenId,
                             invocation = Invocation(
@@ -284,7 +300,10 @@ internal class JourneyRuntimeEmissionCoordinator(
                     event.target.takeIf(String::isNotEmpty),
                 )
                 event.name.isNotEmpty() -> {
-                    drafts += Draft.Event(event.name, properties)
+                    val payload = if (instanceId != null && nativeId != 0L && declaredInstanceId == null)
+                        JsonObject(properties + ("instanceId" to JsonPrimitive(instanceId))) else properties
+                    drafts += Draft.Event(event.name, payload)
+                    draftEventSources += eventSource
                     if (source == null) {
                         source = JourneyScreenEmissionSource(
                             screenId = eventScreenId,
@@ -337,7 +356,8 @@ internal class JourneyRuntimeEmissionCoordinator(
             Log.w(LOG_TAG, "Rejected renderer transaction with multiple signed controls")
             return Projection(emptyList(), null, null, emptyList())
         }
-        return Projection(drafts, source, control, links)
+        return Projection(drafts, source, control, links, JourneyRuntimeEmissionSources(controlEventSource,
+            draftEventSources + List(drafts.size - draftEventSources.size) { null }))
     }
 
     private fun controlActionId(
@@ -442,6 +462,7 @@ internal class JourneyRuntimeEmissionCoordinator(
         val source: JourneyScreenEmissionSource?,
         val control: Control?,
         val links: List<OpenLink>,
+        val eventSource: JourneyRuntimeEmissionSources? = null,
     )
 
     private data class Control(val screenId: String, val invocation: Invocation)

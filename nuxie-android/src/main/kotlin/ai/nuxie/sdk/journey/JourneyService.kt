@@ -22,6 +22,9 @@ import ai.nuxie.sdk.presentation.JourneyPresentationRequest
 import ai.nuxie.sdk.presentation.JourneyPresentationReservation
 import ai.nuxie.sdk.presentation.JourneyPresentationResult
 import ai.nuxie.sdk.presentation.JourneyPresenting
+import ai.nuxie.sdk.presentation.JourneyRuntimeEmissionSources
+import ai.nuxie.sdk.presentation.JourneyRuntimeEventSource
+import ai.nuxie.sdk.presentation.JourneyRuntimeEventSources
 import ai.nuxie.sdk.presentation.JourneyScreenEmissionBatch
 import ai.nuxie.sdk.presentation.JourneyScreenDismissalResult
 import ai.nuxie.sdk.presentation.JourneySurfaceOutcome
@@ -264,6 +267,7 @@ internal class JourneyService(
             val release: AuthenticatedJourneyRelease,
             val executionFenceToken: JourneyExecutionFenceToken,
             val batch: JourneyScreenEmissionBatch,
+            val eventSource: JourneyRuntimeEmissionSources?,
             val accepted: CompletableDeferred<Boolean>,
         ) : Command {
             override val done: CompletableDeferred<Unit>? = null
@@ -500,6 +504,7 @@ internal class JourneyService(
         release: AuthenticatedJourneyRelease,
         executionFenceToken: JourneyExecutionFenceToken,
         batch: JourneyScreenEmissionBatch,
+        eventSource: JourneyRuntimeEmissionSources? = null,
     ): Boolean {
         val accepted = CompletableDeferred<Boolean>()
         val command = Command.PresentationBatch(
@@ -508,6 +513,7 @@ internal class JourneyService(
             release = release,
             executionFenceToken = executionFenceToken,
             batch = batch,
+            eventSource = eventSource,
             accepted = accepted,
         )
         if (coroutineContext[WorkerContext]?.owner === this) {
@@ -2189,6 +2195,7 @@ internal class JourneyService(
         }
         val runId = run.id
         presentingRunIds[runId] = Unit
+        val eventSources = JourneyRuntimeEventSources()
         val result = try {
             presentation.present(
                 JourneyPresentationRequest(
@@ -2231,6 +2238,7 @@ internal class JourneyService(
                             executionFenceToken = executionToken,
                         )
                     },
+                    eventSources = eventSources,
                     onEmissionBatch = { batch ->
                         handlePresentationBatch(
                             runId = runId,
@@ -2238,6 +2246,7 @@ internal class JourneyService(
                             release = release,
                             executionFenceToken = executionToken,
                             batch = batch,
+                            eventSource = eventSources.take(batch.invocationId),
                         )
                     },
                     onOutcome = { outcome ->

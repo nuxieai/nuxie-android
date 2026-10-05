@@ -227,6 +227,11 @@ internal class NuxieViewModelSnapshot private constructor(
         return (resolveValue(path, selected) as? Value.StringValue)?.value
     }
 
+    fun containsInstance(nativeInstanceId: Long): Boolean = nativeInstanceId in instancesById
+
+    fun instanceAliases(nativeInstanceId: Long): Set<String> =
+        instanceIds.filterValues { it == nativeInstanceId }.keys
+
     /** Only one authenticated alias for an instance present in this frame is admissible. */
     fun authoredInstanceId(nativeInstanceId: Long): String? {
         if (nativeInstanceId !in instancesById) return null
