@@ -26,6 +26,34 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class JourneyRuntimeEmissionCoordinatorTest {
+    @Test fun `links run after batch handoff outside publication gate`() = runTest {
+        val order = mutableListOf<String>()
+        lateinit var coordinator: JourneyRuntimeEmissionCoordinator
+        coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", JsonObject(emptyMap()), 0, 0,
+            onEmissionBatch = { order += "batch"; true }, onPresentationRevealed = {},
+            onOpenLink = { order += "link"; coordinator.close() })
+        assertTrue(coordinator.reveal())
+        val events = listOf(NuxieRuntimeEvent(0, 131, "", "https://example.test", "_self", 0f, emptyList(), 99),
+            NuxieRuntimeEvent(1, 128, "sibling", "", "", 0f, emptyList()))
+        assertTrue(coordinator.publish(NuxiePlayerStepOutcome(false, emptyList(), events, emptyList(), emptyList()), 1uL))
+        assertEquals(listOf("batch", "link"), order)
+    }
+
+    @Test fun `unaliased control drops its own drafts and preserves siblings`() = runTest {
+        val descriptor = Json.parseToJsonElement("""{"screenBehaviors":[{"screenId":"screen","controls":[{"actionId":"control","behavior":{"kind":"declarative","program":[{"type":"emit","eventName":"before_missing","payload":{}},{"type":"emit","eventName":"requires_alias","payload":{"instance":{"source":"instance_id"}}}]}}]}]}""").jsonObject
+        val batches = mutableListOf<JourneyScreenEmissionBatch>()
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", descriptor, 0, 0,
+            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
+        assertTrue(coordinator.reveal())
+        val frame = ai.nuxie.sdk.runtime.NuxieViewModelSnapshot.fromNative(ai.nuxie.sdk.runtime.NativeViewModelSnapshot(1,
+            arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(1, 0), ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(3, 0)), emptyArray()))
+        val events = listOf(NuxieRuntimeEvent(0, 128, "control", "", "", 0f, emptyList(), 3),
+            NuxieRuntimeEvent(1, 128, "sibling", "", "", 0f, emptyList()))
+        assertTrue(coordinator.publish(NuxiePlayerStepOutcome(false, emptyList(), events, emptyList(), emptyList()), 1uL, snapshot = frame))
+        assertEquals(listOf("sibling"), batches.single().emissions.map { it.name })
+        assertEquals(listOf(0L), batches.single().emissions.map { it.sequence })
+    }
+
     @Test
     fun `durable admission waits for live host before releasing effects and is not replayed on recreation`() = runTest {
         val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()

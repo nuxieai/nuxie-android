@@ -213,10 +213,8 @@ internal class NuxieViewModelSnapshot private constructor(
         path: String,
         viewModelName: String?,
         instanceId: String?,
-        isRelative: Boolean? = null,
     ): String? {
-        if (isRelative == true && instanceId == null) return null
-        val sourceInstanceId = if (isRelative == false) null else instanceId
+        val sourceInstanceId = instanceId
         val root = instancesById[rootInstanceId] ?: return null
         val selected = when {
             sourceInstanceId != null -> instanceIds[sourceInstanceId]?.let(instancesById::get)
@@ -238,11 +236,6 @@ internal class NuxieViewModelSnapshot private constructor(
         return (resolveValue(path, selected) as? Value.StringValue)?.value
     }
 
-    /** Only one authenticated alias for an instance present in this frame is admissible. */
-    fun authoredInstanceId(nativeInstanceId: Long): String? {
-        if (nativeInstanceId !in instancesById) return null
-        return instanceIds.entries.singleOrNull { it.value == nativeInstanceId }?.key
-    }
 
     /** Capture stable aliases before playback; never reassign them when a reference changes. */
     fun captureInstanceIds(bindings: List<NuxieViewModelInstanceBinding>): Map<String, Long> {

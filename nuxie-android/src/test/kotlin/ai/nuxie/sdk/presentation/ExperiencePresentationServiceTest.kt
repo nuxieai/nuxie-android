@@ -186,7 +186,7 @@ class ExperiencePresentationServiceTest {
             val frameSource = vector["source"]?.jsonPrimitive?.contentOrNull?.toLong()?.let { JourneyRuntimeEventSource(it, frame) }
             val expected = vector["expected"]?.jsonPrimitive?.contentOrNull
             assertEquals(vector.getValue("name").jsonPrimitive.content, expected,
-                service.resolveJourneyAction(owner, scoped(true), null, frameSource)?.get("placementId")?.jsonPrimitive?.content)
+                service.resolveJourneyAction(owner, if (vector["viewModelName"] != null) Json.parseToJsonElement("""{"type":"purchase","placementId":{"ref":{"kind":"path","path":"placementId","isRelative":true,"viewModelName":"OtherModel"}}}""").jsonObject else scoped(true), null, frameSource)?.get("placementId")?.jsonPrimitive?.content)
         }
 
     }
@@ -2015,6 +2015,26 @@ class ExperiencePresentationServiceTest {
         assertEquals(vector.getValue("outcomeCount").jsonPrimitive.int, outcomes)
     }
 
+    @Test fun `an unopenable journey link advances without a record or dismissal`() = runTest {
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        val launched = mutableListOf<String>()
+        val service = ExperiencePresentationService(scope = this, emit = { _, _, _ -> },
+            runtimeAvailable = { true }, launch = launched::add,
+            openLink = { _, _ -> throw android.content.ActivityNotFoundException() })
+        val presentation = async {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
+                onLinkOpened = { error("An unopenable link must not be recorded") }, onOutcome = { error("Link must not dismiss") })
+        }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        presentation.await()
+        val owner = JourneyPresentationOwner("journey-1", "customer-1")
+        val action = Json.parseToJsonElement("""{"type":"open_link","url":"missing-app://item","target":"external"}""").jsonObject
+        assertEquals(JourneyPresentationActionResult.Advanced("next"), service.dispatchJourneyAction(owner, action, "link-effect"))
+        assertTrue(service.ownsJourney(owner))
+    }
+
     @Test fun `runtime and journey links open and record through the same function`() = runTest {
         val release = renderedJourneyRelease("text-input-navigation.json")
         val launched = mutableListOf<String>()
@@ -2022,7 +2042,7 @@ class ExperiencePresentationServiceTest {
         val records = mutableListOf<JourneyOpenedLink>()
         val service = ExperiencePresentationService(scope = this, emit = { _, _, _ -> },
             runtimeAvailable = { true }, launch = launched::add,
-            openLink = { url, _ -> opened += url; true })
+            openLink = { destination, _ -> opened += destination.uri.toString(); true })
         val presentation = async {
             service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
@@ -2043,6 +2063,8 @@ class ExperiencePresentationServiceTest {
         assertEquals(JourneyPresentationActionResult.Advanced("next"), service.dispatchJourneyAction(owner, action, "link-effect"))
         assertEquals(listOf("https://example.test/runtime", "https://example.test/step"), opened)
         assertEquals(opened, records.map { it.url })
+        assertNull(records.first().effectId)
+        assertEquals("link-effect", records.last().effectId)
         assertTrue(records.all { it.screenId == "screen_welcome" && it.instanceId == null })
     }
 

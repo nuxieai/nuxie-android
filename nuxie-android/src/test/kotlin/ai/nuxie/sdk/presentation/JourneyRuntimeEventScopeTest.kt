@@ -42,6 +42,9 @@ class JourneyRuntimeEventScopeTest {
             assertTrue(coordinator.reveal())
             val properties = mutableListOf(NuxieRuntimeEventProperty("value",
                 NuxieRuntimeEventPropertyValue.Bytes("literal".encodeToByteArray())))
+            vector["duplicateValue"]?.jsonPrimitive?.contentOrNull?.let {
+                properties += NuxieRuntimeEventProperty("value", NuxieRuntimeEventPropertyValue.Bytes(it.encodeToByteArray()))
+            }
             vector["declared"]?.jsonPrimitive?.contentOrNull?.let {
                 properties += NuxieRuntimeEventProperty("instanceId", NuxieRuntimeEventPropertyValue.Bytes(it.encodeToByteArray()))
             }
