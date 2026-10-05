@@ -30,7 +30,7 @@ class PurchaseScopeDeviceTest {
                         val frame = checkNotNull(artboard.defaultViewModelSnapshot())
                         assertTrue(event.sourceViewModelInstanceId != 0L)
                         assertTrue(frame.containsInstance(event.sourceViewModelInstanceId))
-                        assertNull(frame.authoredInstanceId(event.sourceViewModelInstanceId))
+                        assertNull(frame.instanceAliases(event.sourceViewModelInstanceId).singleOrNull())
                         assertEquals("plan:annual", frame.resolveNativeString("placementId", "Plan", event.sourceViewModelInstanceId))
                     } finally { player.close() }
                 } finally { artboard.close() }
@@ -104,7 +104,7 @@ class PurchaseScopeDeviceTest {
                             } }
                             assertEquals("One purchase interaction per tap: $details", 1, emitted.size)
                             val frame = checkNotNull(artboard.defaultViewModelSnapshot())
-                            val authoredId = frame.authoredInstanceId(emitted.single().sourceViewModelInstanceId)
+                            val authoredId = frame.instanceAliases(emitted.single().sourceViewModelInstanceId).singleOrNull()
                             assertEquals(if (x == 80f) "plan.first" else "plan.second", authoredId)
                             assertEquals(if (x == 80f) "plan:monthly" else "plan:annual",
                                 frame.resolveScopedString("placementId", "Plan", authoredId))
