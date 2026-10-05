@@ -740,6 +740,7 @@ internal class ExperiencePresentationService(
         ) -> JourneyScreenDismissalResult = { _, _, _ ->
             JourneyScreenDismissalResult.HANDLED
         },
+        eventSources: JourneyRuntimeEventSources = JourneyRuntimeEventSources(),
         onEmissionBatch: suspend (JourneyScreenEmissionBatch) -> Boolean = { true },
         onPresentationRevealed: suspend (String) -> Unit = {},
         onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
@@ -766,6 +767,7 @@ internal class ExperiencePresentationService(
                     descriptor = release.descriptor,
                     nextBatchSequence = nextBatchSequence,
                     nextEmissionSequence = nextEmissionSequence,
+                    eventSources = eventSources,
                     onEmissionBatch = onEmissionBatch,
                     onScreenChanged = onScreenChanged,
                     onPresentationRevealed = onPresentationRevealed,
