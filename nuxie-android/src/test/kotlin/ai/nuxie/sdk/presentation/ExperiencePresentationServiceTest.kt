@@ -2034,8 +2034,7 @@ class ExperiencePresentationServiceTest {
         PresentationRegistry.reportFirstFrame(launched.single())
         presentation.await()
         val owner = JourneyPresentationOwner("journey-1", "customer-1")
-        val action = Json.parseToJsonElement("""{"type":"open_link","url":"missing-app://item","target":"external"}""").jsonObject
-        assertEquals(JourneyPresentationActionResult.Advanced("next"), service.dispatchJourneyAction(owner, action, "link-effect"))
+        assertNull(service.openJourneyLink(owner, JourneyLinkRequest("missing-app://item", "external", "screen_welcome", effectId = "link-effect")))
         assertTrue(service.ownsJourney(owner))
     }
 
@@ -2065,7 +2064,7 @@ class ExperiencePresentationServiceTest {
         assertEquals(listOf("https://example.test"), opened)
     }
 
-    @Test fun `runtime and journey links open and record through the same function`() = runTest {
+    @Test fun `runtime links open and record through their production callback`() = runTest {
         val foreground = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible().get()
         val release = renderedJourneyRelease("text-input-navigation.json")
         val launched = mutableListOf<String>()
@@ -2091,139 +2090,10 @@ class ExperiencePresentationServiceTest {
             emptyList(), events, emptyList(), emptyList()), 1uL, null)
         runCurrent()
         val owner = JourneyPresentationOwner("journey-1", "customer-1")
-        val action = Json.parseToJsonElement("""{"type":"open_link","url":"https://example.test/step","target":"in_app"}""").jsonObject
-        assertEquals(JourneyPresentationActionResult.Advanced("next"), service.dispatchJourneyAction(owner, action, "link-effect"))
-        assertEquals(listOf("https://example.test/runtime", "https://example.test/step"), opened)
+        assertEquals(listOf("https://example.test/runtime"), opened)
         assertEquals(opened, records.map { it.url })
-        assertNull(records.first().effectId)
-        assertEquals("link-effect", records.last().effectId)
+        assertNull(records.single().effectId)
         assertTrue(records.all { it.screenId == "screen_welcome" && it.instanceId == null })
-    }
-
-    @org.robolectric.annotation.Config(
-        shadows = [LinkStateRenderCapabilityShadow::class, LinkStateNativeMountShadow::class],
-        instrumentedPackages = ["ai.nuxie.sdk.presentation.NuxieExperienceActivity", "ai.nuxie.sdk.presentation.AndroidRenderCapability"])
-    @Test fun `shared link states use real resumed windows and actual activity handoffs`() = runTest {
-        kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
-        val vectors = Json.parseToJsonElement(FixtureRunner.fixturesRoot().resolve("events/link-open-states.json").readText())
-            .jsonObject.getValue("cases").jsonArray
-        val app = org.robolectric.RuntimeEnvironment.getApplication()
-        val lifecycle = ai.nuxie.sdk.core.NuxieLifecycleCoordinator(
-            tracker = ai.nuxie.sdk.core.AppLifecycleTracker(
-                preferences = app.getSharedPreferences("link-states", android.content.Context.MODE_PRIVATE),
-                appVersionProvider = { "1" }, nowMillis = { 100_000L }, emit = { _, _ -> }),
-            sessions = ai.nuxie.sdk.session.SessionService { 100_000L }, scope = backgroundScope)
-        app.registerActivityLifecycleCallbacks(lifecycle)
-        try {
-            for (entry in vectors) {
-                val vector = entry.jsonObject
-                val name = vector.getValue("name").jsonPrimitive.content
-                val state = vector.getValue("state").jsonPrimitive.content
-                val link = vector.getValue("link").jsonObject
-                val expected = vector.getValue("expected").jsonObject
-                // Broken Journey expressions run through JourneyServiceTest with the real link presenter.
-                if (link["kind"] == kotlinx.serialization.json.JsonPrimitive("journey") && expected["opened"] == kotlinx.serialization.json.JsonPrimitive(false)) continue
-                val host = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
-                lateinit var controller: org.robolectric.android.controller.ActivityController<NuxieExperienceActivity>
-                val records = mutableListOf<Map<String, Any?>>()
-                val identity = ai.nuxie.sdk.identity.IdentityService(app).also { it.setDistinctId("customer-1") }
-                val recorder = ai.nuxie.sdk.journey.JourneyEffectDispatcher(identity,
-                    capture = { _, properties, _, _, admission, _ -> admission.commitIfCurrent { records += properties; true } == true },
-                    deliverAppAction = { _, _ -> false })
-                val release = renderedJourneyRelease("text-input-navigation.json")
-                val fence = ai.nuxie.sdk.journey.JourneyExecutionFence()
-                val run = ai.nuxie.sdk.journey.JourneyRun(journeyId = "journey-1", generation = 0,
-                    reference = Json.parseToJsonElement("""{"experienceId":"experience","versionId":"version","legId":"leg","descriptorSha256":"${release.descriptorSha256}"}""").jsonObject,
-                    startedAtMillis = 100_000L, isEnrollment = true, startedEventId = "started", completedEventId = "completed",
-                    startedQueued = true, stepId = "link", context = Json.parseToJsonElement("""{"event":{},"responses":{}}""").jsonObject)
-                val dispatch = ai.nuxie.sdk.journey.JourneyDispatchRequest(run, release, "link", kotlinx.serialization.json.JsonObject(emptyMap()),
-                    "00000000-0000-7000-8000-000000000923", "customer-1", identity.captureScope(), fence, fence.token())
-                val launched = mutableListOf<String>()
-                val service = ExperiencePresentationService(scope = backgroundScope, emit = { _, _, _ -> },
-                    runtimeAvailable = { true }, launch = { id ->
-                        launched += id
-                        host.pause()
-                        controller = org.robolectric.Robolectric.buildActivity(NuxieExperienceActivity::class.java,
-                            android.content.Intent(app, NuxieExperienceActivity::class.java).putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, id))
-                            .setup().visible()
-                    }, foregroundActivity = lifecycle::resumedActivity,
-                    openLink = { route, owner ->
-                        if (!link.getValue("canOpen").jsonPrimitive.boolean) throw android.content.ActivityNotFoundException()
-                        openActivityLink(app, route, owner)
-                    })
-                val presented = async {
-                    service.presentJourney(release, "screen_welcome", "journey-1", "customer-1", service.reserveJourney("customer-1"),
-                        acquire = { acquired(release.identity, Lease()) }, onLinkOpened = { recorder.captureLinkOpened(it, dispatch); Unit }, onOutcome = {})
-                }
-                runCurrent()
-                val id = launched.single()
-                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-                val activity = controller.get()
-                val screen = requireNotNull(PresentationRegistry.currentScreen(id))
-                assertEquals(activity, screen.purchaseActivity())
-                // Only native rendering is controlled; the production Screen handles first-frame admission.
-                org.robolectric.util.ReflectionHelpers.callInstanceMethod<Void>(screen, "onFirstFrame")
-                runCurrent()
-                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-                presented.await()
-                val owner = JourneyPresentationOwner("journey-1", "customer-1")
-                var dialog: android.app.Dialog? = null
-                when (state) {
-                    "sheet_active" -> dialog = android.app.Dialog(activity).also { it.setContentView(android.view.View(activity)); it.show() }
-                    "button_dismissing" -> android.widget.Button(activity).apply {
-                        setOnClickListener { service.dismiss(CloseReason.UserDismissed) }
-                    }.performClick()
-                    "swipe_dismissing" -> activity.onBackPressed()
-                    "host_dismissed" -> service.dismiss(CloseReason.HostDismissed)
-                    "owner_retired", "presentation_finished", "screenless" -> {
-                        val close = async {
-                            if (state == "owner_retired") service.shutdownOwnedBy("customer-1")
-                            else service.shutdownJourney("customer-1", "journey-1")
-                        }
-                        runCurrent()
-                        controller.pause().stop().destroy()
-                        host.resume()
-                        runCurrent()
-                        close.await()
-                    }
-                    "background" -> controller.pause().stop()
-                }
-                if (state == "host_dismissed") {
-                    controller.pause().stop().destroy()
-                    host.resume()
-                    runCurrent()
-                }
-                val url = link.getValue("url").jsonObject.getValue("value").jsonPrimitive.content
-                val target = link["target"]?.jsonPrimitive?.contentOrNull
-                val opened = service.openJourneyLink(owner, JourneyLinkRequest(url, target, "screen_welcome"))
-                if (opened != null) assertTrue(recorder.captureLinkOpened(opened, dispatch))
-                assertEquals(name, expected.getValue("opened").jsonPrimitive.boolean, opened != null)
-                assertEquals(name, expected["destination"]?.jsonPrimitive?.contentOrNull, opened?.destination)
-                assertEquals(name, if (expected.getValue("recorded").jsonPrimitive.boolean) 1 else 0, records.size)
-                val intent = org.robolectric.Shadows.shadowOf(activity).nextStartedActivity
-                    ?: org.robolectric.Shadows.shadowOf(host.get()).nextStartedActivity
-                    ?: org.robolectric.Shadows.shadowOf(app).nextStartedActivity
-                assertEquals(name, expected.getValue("opened").jsonPrimitive.boolean, intent != null)
-                if (intent != null) {
-                    assertEquals(android.content.Intent.ACTION_VIEW, intent.action)
-                    assertEquals(opened?.destination == "in_app", intent.hasExtra(androidx.browser.customtabs.CustomTabsIntent.EXTRA_SESSION))
-                }
-                dialog?.dismiss()
-                service.close()
-                if (!activity.isDestroyed) {
-                    if (state != "background") controller.pause().stop()
-                    controller.destroy()
-                }
-                if (state in setOf("host_dismissed", "owner_retired", "presentation_finished", "screenless")) host.pause()
-                host.stop().destroy()
-                runCurrent()
-                PresentationRegistry.clearForTesting()
-            }
-        } finally {
-            app.unregisterActivityLifecycleCallbacks(lifecycle)
-            lifecycle.close()
-            kotlinx.coroutines.Dispatchers.resetMain()
-        }
     }
 
     private fun service(

@@ -106,7 +106,7 @@ internal sealed interface JourneyPresentationActionResult {
 
 /** Adapter owned by NuxieCore so the executor has no Activity dependency. */
 internal interface JourneyPresenting {
-    suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest): JourneyOpenedLink? = null
+    suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest): JourneyOpenedLink?
 
     fun reserve(ownerDistinctId: String): JourneyPresentationReservation?
 

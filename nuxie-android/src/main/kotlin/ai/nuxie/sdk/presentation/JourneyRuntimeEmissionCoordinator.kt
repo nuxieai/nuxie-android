@@ -94,12 +94,18 @@ internal class JourneyRuntimeEmissionCoordinator(
 
     suspend fun publish(outcome: NuxiePlayerStepOutcome, correlationId: ULong, lifetime: RendererEffectLifetime? = null, snapshot: NuxieViewModelSnapshot? = null): Boolean {
         if (!awaitReveal(lifetime)) return true
-        var links: List<OpenLink> = emptyList()
+        var frameLinks: JourneyFrameLinks? = null
         val accepted = gate.withLock {
             if (closed) return@withLock false
             if (lifetime?.isRetired == true) return@withLock true
             val projected = project(outcome, correlationId, snapshot)
-            links = projected.links
+            frameLinks = JourneyFrameLinks {
+                projected.links.forEach { link ->
+                    try { onOpenLink(JourneyLinkRequest(link.url, link.target, screenId, link.instanceId)) }
+                    catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (error: Throwable) { Log.w(LOG_TAG, "Journey renderer open-link callback failed", error) }
+                }
+            }
             val drafts = when (val control = projected.control) {
                 null -> projected.drafts
                 else -> {
@@ -118,15 +124,9 @@ internal class JourneyRuntimeEmissionCoordinator(
                 screenId = screenId,
                 actionId = "runtime:$correlationId",
             )
-            publishDrafts(drafts, source, projected.eventSource)
+            publishDrafts(drafts, source, (projected.eventSource ?: JourneyRuntimeEmissionSources()).copy(frameLinks = frameLinks))
         }
-        links.forEach { link ->
-            runCatching { onOpenLink(JourneyLinkRequest(link.url, link.target, screenId, link.instanceId)) }
-                .onFailure { error ->
-                    if (error is kotlinx.coroutines.CancellationException) throw error
-                    Log.w(LOG_TAG, "Journey renderer open-link callback failed", error)
-                }
-        }
+        frameLinks?.perform()
         return accepted
     }
 
@@ -221,6 +221,7 @@ internal class JourneyRuntimeEmissionCoordinator(
             onEmissionBatch(batch, eventSource?.bound(batch))
         }
             .onFailure { error ->
+                if (error is kotlinx.coroutines.CancellationException) throw error
                 Log.w(LOG_TAG, "Journey renderer emission publication failed", error)
             }
             .getOrDefault(false)
