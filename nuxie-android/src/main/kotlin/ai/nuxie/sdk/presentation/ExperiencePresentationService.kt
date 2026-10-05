@@ -15,6 +15,7 @@ import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import android.app.Activity
 import android.content.Context
+import androidx.browser.customtabs.CustomTabsIntent
 import android.content.Intent
 import android.net.Uri
 import java.io.File
@@ -549,7 +550,7 @@ internal class ExperiencePresentationService(
     private val runtimeAvailable: () -> Boolean,
     private val launch: (String) -> Unit,
     private val commerce: JourneyCommercePreparing = JourneyCommercePreparing.NONE,
-    private val openLink: (String, String?) -> Unit = { _, _ -> },
+    private val openLink: (String, String?) -> Boolean = { _, _ -> false },
     private val firstFrameTimeoutMillis: Long = FIRST_FRAME_TIMEOUT_MILLIS,
     private val beforeHostTeardownForTesting: () -> Unit = {},
 ) {
@@ -565,10 +566,21 @@ internal class ExperiencePresentationService(
         runtimeAvailable = runtimeAvailable,
         launch = AndroidPresentationLauncher(context.applicationContext ?: context),
         commerce = commerce,
-        openLink = { url, _ ->
-            (context.applicationContext ?: context).startActivity(
-                Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
+        openLink = { url, target ->
+            val owner = context.applicationContext ?: context
+            kotlin.runCatching {
+                JourneyLinkRouting.open(url, target,
+                    inApp = { value ->
+                        val tab = CustomTabsIntent.Builder().build()
+                        tab.intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        tab.launchUrl(owner, Uri.parse(value))
+                        true
+                    }, external = { value ->
+                        owner.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(value))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        true
+                    })
+            }.getOrDefault(false)
         },
         firstFrameTimeoutMillis = FIRST_FRAME_TIMEOUT_MILLIS,
     )
@@ -771,7 +783,7 @@ internal class ExperiencePresentationService(
                     onEmissionBatch = onEmissionBatch,
                     onScreenChanged = onScreenChanged,
                     onPresentationRevealed = onPresentationRevealed,
-                    onOpenLink = openLink,
+                    onOpenLink = { url, target -> openLink(url, target); Unit },
                 ),
             ),
             canPresent = canPresent,
@@ -1314,7 +1326,8 @@ internal class ExperiencePresentationService(
                     ?: return JourneyPresentationActionResult.Failed
                 val target = action.string("target")
                     ?: return JourneyPresentationActionResult.Failed
-                if (runCatching { openLink(url, target) }.isFailure) {
+                if (JourneyLinkRouting.destination(url, target) == null ||
+                    !runCatching { openLink(url, target) }.getOrDefault(false)) {
                     JourneyPresentationActionResult.Failed
                 } else {
                     JourneyPresentationActionResult.Advanced("next")
