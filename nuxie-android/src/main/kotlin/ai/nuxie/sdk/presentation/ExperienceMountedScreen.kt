@@ -130,10 +130,8 @@ internal class ExperienceMountedScreen(
             ExperienceWindowInsets(activity, overlay, overlay::updateInsets)
         }
         windowInsets?.close()
-        windowInsets = prepared.artboardSize?.let { size ->
-            ExperienceWindowInsets(activity, surface, size) { insets ->
-                surface.updateRuntimeValues(insets.stateValues())
-            }
+        windowInsets = ExperienceWindowInsets(activity, surface) { insets ->
+            surface.updateRuntimeValues(insets.stateValues())
         }
     }
 
