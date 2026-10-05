@@ -19,14 +19,3 @@ internal data class JourneyRuntimeEmissionSources(
     fun source(eventId: String?): JourneyRuntimeEventSource? =
         if (eventId == null) control else byEmissionId[eventId]
 }
-
-/** Frame snapshots stay beside their invocation, never in a journaled batch. */
-internal class JourneyRuntimeEventSources {
-    private val sources = mutableMapOf<String, JourneyRuntimeEmissionSources>()
-
-    @Synchronized fun put(invocationId: String, source: JourneyRuntimeEmissionSources?) {
-        if (source == null) sources.remove(invocationId) else sources[invocationId] = source
-    }
-
-    @Synchronized fun take(invocationId: String): JourneyRuntimeEmissionSources? = sources.remove(invocationId)
-}

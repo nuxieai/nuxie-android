@@ -42,13 +42,13 @@ internal class JourneyRuntimeEmissionCoordinator(
     descriptor: JsonObject,
     nextBatchSequence: Long,
     nextEmissionSequence: Long,
-    private val onEmissionBatch: suspend (JourneyScreenEmissionBatch) -> Boolean,
+    private val onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> Boolean,
     private val onScreenChanged: suspend (String) -> Boolean = { true },
     private val onPresentationRevealed: suspend (String) -> Unit,
     private val onOpenLink: suspend (JourneyOpenedLink) -> Unit = {},
     private val createId: () -> String = { TimeBasedEpochGenerator.shared.next() },
     private val nowMillis: () -> Long = System::currentTimeMillis,
-    private val eventSources: JourneyRuntimeEventSources = JourneyRuntimeEventSources(),
+
 ) {
     private val gate = Mutex()
     private val revealed = CompletableDeferred<Unit>()
@@ -214,9 +214,8 @@ internal class JourneyRuntimeEmissionCoordinator(
             source = source,
             emissions = emissions,
         )
-        eventSources.put(invocationId, eventSource?.bound(batch))
         val accepted = runCatching {
-            try { onEmissionBatch(batch) } finally { eventSources.take(invocationId) }
+            onEmissionBatch(batch, eventSource?.bound(batch))
         }
             .onFailure { error ->
                 Log.w(LOG_TAG, "Journey renderer emission publication failed", error)
@@ -360,7 +359,7 @@ internal class JourneyRuntimeEmissionCoordinator(
         }
         if (multipleControls) {
             Log.w(LOG_TAG, "Rejected renderer transaction with multiple signed controls")
-            return Projection(emptyList(), null, null, emptyList())
+            return Projection(emptyList(), null, null, links)
         }
         return Projection(drafts, source, control, links, JourneyRuntimeEmissionSources(controlEventSource,
             draftEventSources + List(drafts.size - draftEventSources.size) { null }))

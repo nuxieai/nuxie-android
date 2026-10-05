@@ -1943,7 +1943,7 @@ class PublishedTextInputDeviceTest {
                         protection = Closeable {}) },
                     nextBatchSequence = nextBatch, nextEmissionSequence = nextEmission,
                     onScreenChanged = { screens.add(it); true },
-                    onEmissionBatch = { batch ->
+                    onEmissionBatch = { batch, frameSources ->
                         batches.add(batch)
                         true
                     }, onScreenDismissed = { _, _, _ ->
@@ -2470,9 +2470,9 @@ class PublishedTextInputDeviceTest {
                             if (method == "error") errorDismissals.add(it)
                         }
                     },
-                    onLinkOpened = request.onLinkOpened, eventSources = request.eventSources,
-                    onEmissionBatch = { batch ->
-                        val committed = request.onEmissionBatch(batch)
+                    onLinkOpened = request.onLinkOpened,
+                    onEmissionBatch = { batch, frameSources ->
+                        val committed = request.onEmissionBatch(batch, frameSources)
                         if (committed) accepted.add(batch)
                         committed
                     }, onPresentationRevealed = { id ->
@@ -2794,7 +2794,7 @@ class PublishedTextInputDeviceTest {
                     UUID.randomUUID().toString(), JourneyScreenEmissionSource("screen_1", "corpus-continue"),
                     listOf(JourneyScreenEmission(UUID.randomUUID().toString(), reopened.nextPresentationEmissionSequence,
                         System.currentTimeMillis(), "corpus_next_0", JsonObject(emptyMap()))),
-                )))
+                ), null))
             }
             assertHostedScreen(instrumentation, first, "screen_2")
             assertEquals(1, monitor.hits)
