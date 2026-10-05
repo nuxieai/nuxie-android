@@ -351,6 +351,7 @@ internal class NuxieCore(
                 nextEmissionSequence = request.nextEmissionSequence,
                 onScreenChanged = request.onScreenChanged,
                 onScreenDismissed = request.onScreenDismissed,
+                onLinkOpened = request.onLinkOpened,
                 eventSources = request.eventSources,
                 onEmissionBatch = request.onEmissionBatch,
                 onPresentationRevealed = request.onPresentationRevealed,

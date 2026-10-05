@@ -2,6 +2,7 @@ package ai.nuxie.sdk.journey
 
 /** Named constants for the reserved Journey event vocabulary. */
 internal object JourneyEventNames {
+    const val LINK_OPENED = "\$link_opened"
     const val LEG_STARTED = "\$journey_leg_started"
     const val LEG_COMPLETED = "\$journey_leg_completed"
     const val EXPERIENCE_ARTIFACT_LOAD_SUCCEEDED = "\$experience_artifact_load_succeeded"
