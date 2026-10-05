@@ -26,6 +26,20 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class JourneyRuntimeEmissionCoordinatorTest {
+    @Test fun `accepted frame link cancellation escapes publication`() = runTest {
+        val cancelled = kotlinx.coroutines.CancellationException("link cancelled")
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", JsonObject(emptyMap()), 0, 0,
+            onEmissionBatch = { _, sources -> sources?.frameLinks?.perform(); true }, onPresentationRevealed = {},
+            onOpenLink = { throw cancelled })
+        assertTrue(coordinator.reveal())
+        val events = listOf(NuxieRuntimeEvent(0, 128, "sibling", "", "", 0f, emptyList()),
+            NuxieRuntimeEvent(1, 131, "", "https://example.test", "_self", 0f, emptyList()))
+        try {
+            coordinator.publish(NuxiePlayerStepOutcome(false, emptyList(), events, emptyList(), emptyList()), 1uL)
+            org.junit.Assert.fail("Cancellation must escape the accepted batch")
+        } catch (failure: kotlinx.coroutines.CancellationException) { org.junit.Assert.assertSame(cancelled, failure) }
+    }
+
     @Test fun `links run after batch handoff outside publication gate`() = runTest {
         val order = mutableListOf<String>()
         lateinit var coordinator: JourneyRuntimeEmissionCoordinator

@@ -328,6 +328,7 @@ internal class NuxieCore(
             runtimeAvailable = AndroidRenderCapability::isAvailable,
             commerce = journeyCommerce,
             foregroundActivity = { lifecycleCoordinator.resumedActivity() },
+            isAppForeground = { lifecycleCoordinator.isAppForeground() },
         )).also { presentations -> construction?.onFailure { presentations.close() } }
 
     private val journeyPresenter = object : JourneyPresenting {

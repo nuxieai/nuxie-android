@@ -33,6 +33,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -405,7 +406,11 @@ internal class JourneyService(
                 command.accepted?.complete(result.getOrNull() == true)
             }
             if (command is Command.PresentationBatch) {
-                command.accepted.complete(result.getOrNull() == true)
+                val failure = result.exceptionOrNull()
+                if (failure is CancellationException) {
+                    command.accepted.completeExceptionally(failure)
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                } else { command.accepted.complete(result.getOrNull() == true) }
             }
             if (command is Command.PresentationLifecycle) {
                 command.result.complete(
@@ -1738,7 +1743,7 @@ internal class JourneyService(
                 publication = publication,
             )
         } ?: return false
-        return settlePresentationPublication(
+        val accepted = settlePresentationPublication(
             staged,
             command.release,
             target,
@@ -1746,6 +1751,9 @@ internal class JourneyService(
             identityScope,
             command.eventSource,
         )
+        // The worker cannot consume queued continuations until these links settle.
+        command.eventSource?.frameLinks?.perform()
+        return accepted
     }
 
     private suspend fun settlePresentationPublication(

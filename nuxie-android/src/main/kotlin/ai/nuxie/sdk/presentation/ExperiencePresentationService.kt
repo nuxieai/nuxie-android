@@ -550,6 +550,7 @@ internal class ExperiencePresentationService(
     private val commerce: JourneyCommercePreparing = JourneyCommercePreparing.NONE,
     private val openLink: (JourneyLinkRouting.Destination, Activity?) -> Boolean = { _, _ -> false },
     private val foregroundActivity: () -> Activity? = { null },
+    private val isAppForeground: () -> Boolean = { foregroundActivity() != null },
     private val firstFrameTimeoutMillis: Long = FIRST_FRAME_TIMEOUT_MILLIS,
     private val beforeHostTeardownForTesting: () -> Unit = {},
 ) {
@@ -560,6 +561,7 @@ internal class ExperiencePresentationService(
         runtimeAvailable: () -> Boolean,
         commerce: JourneyCommercePreparing = JourneyCommercePreparing.NONE,
         foregroundActivity: () -> Activity? = { null },
+        isAppForeground: () -> Boolean = { foregroundActivity() != null },
     ) : this(
         emit = emit,
         scope = scope,
@@ -568,6 +570,7 @@ internal class ExperiencePresentationService(
         commerce = commerce,
         openLink = { destination, activity -> openActivityLink(context, destination, activity) },
         foregroundActivity = foregroundActivity,
+        isAppForeground = isAppForeground,
         firstFrameTimeoutMillis = FIRST_FRAME_TIMEOUT_MILLIS,
     )
 
@@ -583,7 +586,7 @@ internal class ExperiencePresentationService(
             val live = active != null && synchronized(stateLock) { current === active && !transitionInProgress } && active.shown.get() && !active.closed.get() &&
                 active.outcomeReason.get() == null && screen?.screenCloseReason() == null &&
                 screen?.purchaseActivity() === activity && activity?.isFinishing == false && activity.window.decorView.isAttachedToWindow
-            val state = if (activity == null) JourneyLinkRouting.State.BACKGROUND
+            val state = if (!isAppForeground()) JourneyLinkRouting.State.BACKGROUND
                 else if (live) JourneyLinkRouting.State.SETTLED else JourneyLinkRouting.State.CLOSED
             val destination = JourneyLinkRouting.route(link.url, link.target, state) ?: return@withContext null
             val opened = try { openLink(destination, activity?.takeUnless { it.isFinishing }) }
@@ -1341,14 +1344,6 @@ internal class ExperiencePresentationService(
                 JourneyPermissionRequest.TRACKING,
                 null,
             )
-            JourneyActionType.OPEN_LINK -> {
-                val url = action.string("url")
-                    ?: return JourneyPresentationActionResult.Advanced("next")
-                val target = action.string("target")
-                    ?: return JourneyPresentationActionResult.Advanced("next")
-                active.journey.openLink(JourneyLinkRequest(url, target, active.journey.screenId, effectId = effectId))
-                JourneyPresentationActionResult.Advanced("next")
-            }
             JourneyActionType.DISMISS -> {
                 PresentationRegistry.dismiss(active.id, CloseReason.UserDismissed)
                 attemptOutcome(active, CloseReason.UserDismissed)
