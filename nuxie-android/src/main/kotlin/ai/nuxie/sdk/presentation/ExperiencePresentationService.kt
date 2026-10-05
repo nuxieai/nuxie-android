@@ -15,9 +15,7 @@ import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import android.app.Activity
 import android.content.Context
-import androidx.browser.customtabs.CustomTabsIntent
 import android.content.Intent
-import android.net.Uri
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.Collections
@@ -566,34 +564,28 @@ internal class ExperiencePresentationService(
         runtimeAvailable = runtimeAvailable,
         launch = AndroidPresentationLauncher(context.applicationContext ?: context),
         commerce = commerce,
-        openLink = { destination, activity ->
-            val owner = activity ?: context.applicationContext ?: context
-            kotlin.runCatching {
-                when (destination) {
-                    is JourneyLinkRouting.Destination.InApp -> {
-                        val tab = CustomTabsIntent.Builder().build()
-                        if (activity == null) tab.intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        tab.launchUrl(owner, destination.uri)
-                    }
-                    is JourneyLinkRouting.Destination.External -> {
-                        val intent = Intent(Intent.ACTION_VIEW, destination.uri)
-                        if (activity == null) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        owner.startActivity(intent)
-                    }
-                }
-                true
-            }.getOrDefault(false)
-        },
+        openLink = { destination, activity -> openActivityLink(context, destination, activity) },
         firstFrameTimeoutMillis = FIRST_FRAME_TIMEOUT_MILLIS,
     )
 
-    private suspend fun openAndRecord(link: JourneyOpenedLink, record: suspend (JourneyOpenedLink) -> Unit): Boolean {
+    internal suspend fun openExternalLink(url: String): Boolean {
+        val destination = JourneyLinkRouting.destination(url, "external") ?: return false
+        return withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+            runCatching { openLink(destination, null) }.getOrDefault(false)
+        }
+    }
+
+    private suspend fun openAndRecord(owner: JourneyOutcome, link: JourneyOpenedLink, record: suspend (JourneyOpenedLink) -> Unit): Boolean {
         val destination = JourneyLinkRouting.destination(link.url, link.target) ?: return false
         val opened = withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
-            runCatching { openLink(destination, purchaseActivity()?.takeUnless { it.isFinishing || it.isDestroyed }) }.getOrDefault(false)
+            val active = synchronized(stateLock) { current?.takeIf { it.journey === owner && !it.closed.get() } }
+                ?: return@withContext false
+            val activity = PresentationRegistry.currentScreen(active.id)?.purchaseActivity()?.takeUnless { it.isFinishing || it.isDestroyed }
+            runCatching { openLink(destination, activity) }.getOrDefault(false)
         }
         if (!opened) return false
-        record(link.copy(target = link.target?.takeIf(String::isNotEmpty) ?: "_self"))
+        runCatching { record(link.copy(destination = if (destination is JourneyLinkRouting.Destination.InApp) "in_app" else "external")) }
+            .onFailure { ai.nuxie.sdk.logging.NuxieLog.w("ExperiencePresentationService", "Opened link recording failed", it) }
         return true
     }
 
@@ -766,8 +758,7 @@ internal class ExperiencePresentationService(
             JourneyScreenDismissalResult.HANDLED
         },
         onLinkOpened: suspend (JourneyOpenedLink) -> Unit = {},
-        eventSources: JourneyRuntimeEventSources = JourneyRuntimeEventSources(),
-        onEmissionBatch: suspend (JourneyScreenEmissionBatch) -> Boolean = { true },
+        onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> Boolean = { _, _ -> true },
         onPresentationRevealed: suspend (String) -> Unit = {},
         onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
         transition: JsonObject? = null,
@@ -776,6 +767,24 @@ internal class ExperiencePresentationService(
         val request = reserved?.request ?: captureRequest(ownerDistinctId)
         if (request.ownerDistinctId != ownerDistinctId) throw declinedPresentation()
         val selectedScreen = AuthenticatedPresentationScreen.resolve(release, screenId)
+        lateinit var journey: JourneyOutcome
+        journey = JourneyOutcome(
+            screenId = screenId,
+            onOutcome = onOutcome,
+            onScreenDismissed = onScreenDismissed,
+            openLink = { link -> openAndRecord(journey, link, onLinkOpened) },
+            emissions = JourneyRuntimeEmissionCoordinator(
+                journeyId = journeyId,
+                screenId = screenId,
+                descriptor = release.descriptor,
+                nextBatchSequence = nextBatchSequence,
+                nextEmissionSequence = nextEmissionSequence,
+                onEmissionBatch = onEmissionBatch,
+                onScreenChanged = onScreenChanged,
+                onPresentationRevealed = onPresentationRevealed,
+                onOpenLink = { link -> openAndRecord(journey, link, onLinkOpened); Unit },
+            ),
+        )
         return presentPrepared(
             selectedScreen = selectedScreen,
             transition = transition,
@@ -783,24 +792,7 @@ internal class ExperiencePresentationService(
             journeyId = journeyId,
             reservationId = reserved?.id,
             reservationRequired = true,
-            journey = JourneyOutcome(
-                screenId = screenId,
-                onOutcome = onOutcome,
-                onScreenDismissed = onScreenDismissed,
-                openLink = { link -> openAndRecord(link, onLinkOpened) },
-                emissions = JourneyRuntimeEmissionCoordinator(
-                    journeyId = journeyId,
-                    screenId = screenId,
-                    descriptor = release.descriptor,
-                    nextBatchSequence = nextBatchSequence,
-                    nextEmissionSequence = nextEmissionSequence,
-                    eventSources = eventSources,
-                    onEmissionBatch = onEmissionBatch,
-                    onScreenChanged = onScreenChanged,
-                    onPresentationRevealed = onPresentationRevealed,
-                    onOpenLink = { link -> openAndRecord(link, onLinkOpened); Unit },
-                ),
-            ),
+            journey = journey,
             canPresent = canPresent,
         ) {
             val commerceSession = try {
@@ -1338,9 +1330,9 @@ internal class ExperiencePresentationService(
             )
             JourneyActionType.OPEN_LINK -> {
                 val url = action.string("url")
-                    ?: return JourneyPresentationActionResult.Failed
+                    ?: return JourneyPresentationActionResult.Advanced("next")
                 val target = action.string("target")
-                    ?: return JourneyPresentationActionResult.Failed
+                    ?: return JourneyPresentationActionResult.Advanced("next")
                 active.journey.openLink(JourneyOpenedLink(url, target, active.journey.screenId, effectId = effectId))
                 JourneyPresentationActionResult.Advanced("next")
             }

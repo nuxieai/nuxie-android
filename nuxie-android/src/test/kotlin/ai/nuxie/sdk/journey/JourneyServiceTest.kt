@@ -510,7 +510,7 @@ class JourneyServiceTest {
         assertNull(journal.runs().single().completion)
         assertTrue(request.onEmissionBatch(JourneyScreenEmissionBatch(request.journeyId, 0, "after-goal",
             JourneyScreenEmissionSource("screen_welcome", "continue"),
-            listOf(JourneyScreenEmission("continue-event", 0, 100_300L, "continue", JsonObject(emptyMap()))))))
+            listOf(JourneyScreenEmission("continue-event", 0, 100_300L, "continue", JsonObject(emptyMap())))), null))
         withTimeout(5_000) {
             while (presenter.shownCount.get() < 2) kotlinx.coroutines.delay(10)
         }
@@ -589,8 +589,8 @@ class JourneyServiceTest {
             ),
         )
 
-        assertTrue(request.onEmissionBatch(first))
-        assertTrue(request.onEmissionBatch(first))
+        assertTrue(request.onEmissionBatch(first, null))
+        assertTrue(request.onEmissionBatch(first, null))
 
         val retained = JourneyRunJournal(
             directory,
@@ -630,7 +630,7 @@ class JourneyServiceTest {
                             payload = JsonObject(emptyMap()),
                         ),
                     ),
-                ),
+                ), null,
             ),
         )
         // This lifecycle command is a FIFO barrier behind the routed continuation.
@@ -691,7 +691,7 @@ class JourneyServiceTest {
                 descriptor = snapshot.releasesByDigest.values.single().descriptor,
                 nextBatchSequence = run.nextPresentationBatchSequence,
                 nextEmissionSequence = run.nextPresentationEmissionSequence,
-                onEmissionBatch = { batches += it; request.onEmissionBatch(it) },
+                onEmissionBatch = { it, _ -> batches += it; request.onEmissionBatch(it, null) },
                 onPresentationRevealed = {}, nowMillis = { 100_001L })
             assertTrue(coordinator.reveal())
             fun outcome(seconds: Double?) = NuxiePlayerStepOutcome(
@@ -703,7 +703,7 @@ class JourneyServiceTest {
                     NuxieHostCommand("duration_ready", NuxieHostValue.Object(emptyList()))))
             assertTrue(coordinator.publish(outcome(120.0), 1uL))
             assertEquals(JsonPrimitive(120.0), retained().context.getValue("responses").jsonObject["durationSeconds"])
-            assertTrue(request.onEmissionBatch(batches.single()))
+            assertTrue(request.onEmissionBatch(batches.single(), null))
             assertEquals(1, captured.size)
             assertEquals(1L, retained().nextPresentationBatchSequence)
             val unexpectedField = JourneyScreenEmissionBatch(
@@ -714,7 +714,7 @@ class JourneyServiceTest {
                     name = "\$response_set", payload = buildJsonObject {
                         put("field", "notDeclaredByThisScreen"); put("value", 999)
                     })))
-            assertFalse(request.onEmissionBatch(unexpectedField))
+            assertFalse(request.onEmissionBatch(unexpectedField, null))
             assertEquals(1L, retained().nextPresentationBatchSequence)
             assertEquals(setOf("durationSeconds"), retained().context.getValue("responses").jsonObject.keys)
             // An invalid draft emits no commands; it must not erase the prior answer.
@@ -2170,7 +2170,7 @@ class JourneyServiceTest {
             } == true }, deliverAppAction = { _, _ -> error("Unexpected app action") })
         assertTrue(dispatcher.captureLinkOpened(ai.nuxie.sdk.presentation.JourneyOpenedLink(
             expected.getValue("url").jsonPrimitive.content, expected.getValue("target").jsonPrimitive.content,
-            "screen", "second"), request))
+            "screen", "second", destination = expected.getValue("destination").jsonPrimitive.content), request))
         assertEquals(listOf(fixture.getValue("name").jsonPrimitive.content to expected), captures)
         val activity = ai.nuxie.sdk.events.ActivityCuration.activity(captures.single().first, captures.single().second)
         assertTrue(activity is ai.nuxie.sdk.NuxieActivity.LinkOpened)
@@ -2277,6 +2277,71 @@ class JourneyServiceTest {
         assertEquals(listOf("\$app_action_requested"), captures.map { it.first })
         assertEquals(request.run.journeyId, captures.single().second["journey_id"])
         assertEquals(request.run.generation, captures.single().second["leg_generation"])
+    }
+
+    @Test fun `unresolved link advances without dismissal`() = runBlocking { assertLinkStep(Json.parseToJsonElement("""{"type":"Event.Field","key":"absent"}"""), "external", false) }
+    @Test fun `empty link advances without dismissal`() = runBlocking { assertLinkStep(JsonPrimitive(""), "external", false) }
+    @Test fun `missing link advances without dismissal`() = runBlocking { assertLinkStep(null, "external", false) }
+    @Test fun `non string link advances without dismissal`() = runBlocking { assertLinkStep(JsonPrimitive(true), "external", false) }
+    @Test fun `missing target advances without dismissal`() = runBlocking { assertLinkStep(JsonPrimitive("https://example.test"), null, false) }
+    @Test fun `external link without presentation opens and advances`() = runBlocking { assertLinkStep(JsonPrimitive("https://example.test"), "external", true) }
+    @Test fun `in app link without presentation opens externally`() = runBlocking { assertLinkStep(JsonPrimitive("https://example.test"), "in_app", true) }
+    @Test fun `link record precedes completion and uses step effect id`() = runBlocking { assertLinkStep(JsonPrimitive("https://example.test"), "external", true, complete = true) }
+    @Test fun `recording failure cannot abandon an opened link`() = runBlocking { assertLinkStep(JsonPrimitive("https://example.test"), "external", true, recordingFails = true) }
+
+    @Test fun `presented link record precedes completion and uses step effect id`() = runBlocking { assertLinkStep(JsonPrimitive("https://example.test"), "in_app", true, complete = true, owned = true) }
+
+    private suspend fun assertLinkStep(url: JsonElement?, target: String?, opens: Boolean, complete: Boolean = false, recordingFails: Boolean = false, owned: Boolean = false) {
+        val directory = java.io.File(this.directory, java.util.UUID.randomUUID().toString()).apply { mkdirs() }
+        val identity = IdentityService(context).also { it.setDistinctId("customer") }
+        val entry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(entry)
+        val authority = authority(entry)
+        catalog.commit("customer", catalog.prepare(profile(releaseEntry = entry), authority))
+        val baseline = requireNotNull(catalog.snapshot("customer"))
+        val original = baseline.releasesByDigest.values.single()
+        val action = buildJsonObject { put("type", "open_link"); url?.let { put("url", it) }; target?.let { put("target", it) } }
+        val next = if (complete) Json.parseToJsonElement("""{"kind":"complete","id":"next","outcome":"completed"}""")
+            else Json.parseToJsonElement("""{"kind":"action","id":"next","action":{"type":"navigate","screenId":"screen_welcome"},"outlets":{}}""")
+        val leg = JsonObject(original.leg + mapOf("entryStepId" to JsonPrimitive(if (owned) "present" else "link"), "routes" to (if (owned) Json.parseToJsonElement("""[{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"open","entryStepId":"link"}]""") else JsonArray(emptyList())),
+            "steps" to JsonArray(listOf(Json.parseToJsonElement("""{"kind":"action","id":"present","action":{"type":"navigate","screenId":"screen_welcome"},"outlets":{}}"""), buildJsonObject { put("kind", "action"); put("id", "link"); put("action", action); putJsonObject("outlets") { put("next", "next") } }, next))))
+        val envelope = JourneyReleaseEnvelope.authenticate(entry.getValue("envelope").toString().encodeToByteArray(),
+            mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP)))
+        val release = AuthenticatedJourneyRelease(envelope, original.identity, JsonObject(original.descriptor + ("leg" to leg)), original.publishedAtSeqToPromote)
+        val snapshot = baseline.copy(releasesByDigest = mapOf(release.descriptorSha256 to release))
+        val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(authority))
+        val captures = CopyOnWriteArrayList<Triple<String, Map<String, Any?>, String>>()
+        val opened = CopyOnWriteArrayList<String>()
+        var effectId: String? = null
+        val presenter = RecordingJourneyPresenter()
+        val recorder = JourneyEffectDispatcher(identity,
+            capture = { name, properties, id, _, admission, _ ->
+                if (recordingFails) error("Injected recording failure")
+                admission.commitIfCurrent { captures += Triple(name, properties, id); true } == true
+            }, deliverAppAction = { _, _ -> false })
+        val service = JourneyService(identity = identity, events = store, catalog = catalog, journalDirectory = directory, scope = scope,
+            capture = { name, properties, id, _ -> captures += Triple(name, properties, id); true }, presenter = presenter,
+            linkRecorder = recorder, openExternalLink = { value -> opened += value; effectId = journal.runs().first().effectReceipts["link"]; true }, nowMillis = { 100_000L })
+        service.initialize(); service.onAppWillEnterForeground(); service.profileDidCommit(snapshot, authority, "customer", 1)
+        if (owned) {
+            presenter.recordsOpenedLinks = true
+            val request = requireNotNull(presenter.request)
+            request.onEmissionBatch(JourneyScreenEmissionBatch(request.journeyId, 0, "open-link", JourneyScreenEmissionSource("screen_welcome", "runtime:1"),
+                listOf(JourneyScreenEmission("00000000-0000-7000-8000-000000000922", 0, 100_000L, "open", JsonObject(emptyMap())))), null)
+            service.onAppDidEnterBackground()
+            effectId = presenter.actions.first().second
+        }
+        assertEquals(if (opens && !owned) 1 else 0, opened.size)
+        val records = captures.filter { it.first == JourneyEventNames.LINK_OPENED }
+        assertEquals(if (opens && !recordingFails) 1 else 0, records.size)
+        records.firstOrNull()?.let { assertEquals(effectId, it.third); assertEquals(if (owned) "in_app" else "external", it.second["destination"]); assertEquals(target, it.second["target"]) }
+        if (complete) {
+            val names = captures.map { it.first }
+            assertTrue(names.indexOf(JourneyEventNames.LINK_OPENED) < names.indexOf(JourneyEventNames.LEG_COMPLETED))
+        } else {
+            assertEquals("next", journal.runs().first().stepId)
+            assertTrue(presenter.shutdowns.isEmpty())
+        }
     }
 
     @Test fun `second row frame reaches relative purchase through batch admission`() = runBlocking {
@@ -2481,8 +2546,7 @@ class JourneyServiceTest {
             val batch = JourneyScreenEmissionBatch(request.journeyId, 0, "second-row",
                 JourneyScreenEmissionSource("screen_welcome", "runtime:1"),
                 listOf(JourneyScreenEmission("00000000-0000-7000-8000-000000000911", 0, 100_000L, "buy", JsonObject(emptyMap()))))
-            request.eventSources.put(batch.invocationId, ai.nuxie.sdk.presentation.JourneyRuntimeEmissionSources(drafts = listOf(ai.nuxie.sdk.presentation.JourneyRuntimeEventSource(3, frame))).bound(batch))
-            assertTrue(request.onEmissionBatch(batch))
+            assertTrue(request.onEmissionBatch(batch, ai.nuxie.sdk.presentation.JourneyRuntimeEmissionSources(drafts = listOf(ai.nuxie.sdk.presentation.JourneyRuntimeEventSource(3, frame))).bound(batch)))
             withTimeout(5_000L) { while (presenter.actions.isEmpty()) kotlinx.coroutines.delay(10) }
             assertEquals(JsonPrimitive("golden:monthly"), presenter.actions.single().first["placementId"])
             assertEquals(3L, presenter.resolvedNativeIds.single())
@@ -2564,6 +2628,7 @@ class JourneyServiceTest {
         val shutdowns = CopyOnWriteArrayList<String>()
         val shownCount = AtomicInteger()
         val actions = CopyOnWriteArrayList<Pair<JsonObject, String>>()
+        var recordsOpenedLinks = false
 
         override fun reserve(ownerDistinctId: String): JourneyPresentationReservation? =
             if (available) Reservation() else null
@@ -2611,6 +2676,11 @@ class JourneyServiceTest {
             effectId: String,
         ): JourneyPresentationActionResult {
             actions += action to effectId
+            if (recordsOpenedLinks && action["type"] == JsonPrimitive("open_link")) {
+                request?.onLinkOpened?.invoke(ai.nuxie.sdk.presentation.JourneyOpenedLink(action.getValue("url").jsonPrimitive.content,
+                    action.getValue("target").jsonPrimitive.content, request?.screenId, effectId = effectId, destination = "in_app"))
+                return JourneyPresentationActionResult.Advanced("next")
+            }
             return actionResult ?: JourneyPresentationActionResult.Failed
         }
 
@@ -2812,5 +2882,4 @@ class JourneyServiceTest {
 
 private fun testDispatcher(dispatch: suspend (JourneyDispatchRequest) -> JourneyDispatchResult): JourneyDispatching = object : JourneyDispatching {
     override suspend fun dispatch(request: JourneyDispatchRequest) = dispatch.invoke(request)
-    override suspend fun captureLinkOpened(link: ai.nuxie.sdk.presentation.JourneyOpenedLink, request: JourneyDispatchRequest): Boolean = error("Unexpected link recording")
 }
