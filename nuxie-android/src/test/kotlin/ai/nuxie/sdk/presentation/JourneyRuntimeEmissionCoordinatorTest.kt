@@ -40,16 +40,16 @@ class JourneyRuntimeEmissionCoordinatorTest {
         } catch (failure: kotlinx.coroutines.CancellationException) { org.junit.Assert.assertSame(cancelled, failure) }
     }
 
-    @Test fun `links run after batch handoff outside publication gate`() = runTest {
+    @Test fun `rejected frame links run after batch handoff outside publication gate`() = runTest {
         val order = mutableListOf<String>()
         lateinit var coordinator: JourneyRuntimeEmissionCoordinator
         coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", JsonObject(emptyMap()), 0, 0,
-            onEmissionBatch = { it, _ -> order += "batch"; true }, onPresentationRevealed = {},
+            onEmissionBatch = { it, _ -> order += "batch"; false }, onPresentationRevealed = {},
             onOpenLink = { order += "link"; coordinator.close() })
         assertTrue(coordinator.reveal())
         val events = listOf(NuxieRuntimeEvent(0, 131, "", "https://example.test", "_self", 0f, emptyList(), 99),
             NuxieRuntimeEvent(1, 128, "sibling", "", "", 0f, emptyList()))
-        assertTrue(coordinator.publish(NuxiePlayerStepOutcome(false, emptyList(), events, emptyList(), emptyList()), 1uL))
+        assertFalse(coordinator.publish(NuxiePlayerStepOutcome(false, emptyList(), events, emptyList(), emptyList()), 1uL))
         assertEquals(listOf("batch", "link"), order)
     }
 
