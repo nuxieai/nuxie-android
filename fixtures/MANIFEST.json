@@ -13,10 +13,11 @@
     "encodings/text-size-device-properties.json": "d39d96c7164111c854c4c2ce0bbb430018018c97db31baae871a3022a031f02f",
     "events/atomic-purchase-sync.json": "00ad8a8acfcc8b5531de8312a6ad9e13cae2ec6fc386a4b3263fde3d574f0764",
     "events/batch-item-encoding.json": "f0ba212c3428ea8efc5defd7dc67c4d97c310dbcdcfd529e9cd9556c237b6172",
-    "events/catalog.json": "19cb3d59c27b5f9c138cfdbc046ed9bb4c06cd4c2e52c8288c37630a7f8017cc",
+    "events/catalog.json": "3eea71bde1d6eec511fce3e3b6c7658ee628608cefbc9a4f89dfa3edc09a16cf",
     "events/delivery-disposition.json": "bf2e48165a90e6bf568f00ba804cfa8c2f1efcdc9a5867533a24bbf99a31575d",
     "events/generated-control-routing.json": "f461826c8a2e79d2f08178a1b3a27b03cbcda52ed208f572b995fa7165fef77a",
     "events/runtime-event-sources.json": "16b9ede4fef9006249e261ccdbbc2f8ecf207284dc6c245b01a8a96fa5af834f",
+    "events/runtime-link-opened.json": "4d5d02636a95f22094bdc2c3c7ea220857ccd9bb12e009acd99998b3028e240f",
     "events/runtime-link-targets.json": "f41c7ee07b8b879d4451261bd2dad650490d50f817660ad770d0d400445cd369",
     "events/runtime-relative-values.json": "4cc477e570d02850d6c8372acb5d66dbcec7543a8e8e381ceeeb59b3ec6aef6f",
     "features/command-recovery.json": "cf79db0033a62cb5dd30703f82599e001177b4f2ef0aad1f3cf177e03913c214",
@@ -242,7 +243,9 @@
     "video/waiting.nux": "0312918deeabae4853fc84e8a00ab7daf5f30e80e4c0dc14326aae4efb3872d2"
   },
   "sourceCommitOverrides": {
+    "events/catalog.json": "3eb979d9788f4d4655596cfe04bf4260cd79e4fc",
     "events/runtime-event-sources.json": "375d313a185dee9104cb1bfc0efc02cc4428e569",
+    "events/runtime-link-opened.json": "3eb979d9788f4d4655596cfe04bf4260cd79e4fc",
     "events/runtime-link-targets.json": "530b48124f4b7899535a61917c75f1cd51ec27ef",
     "events/runtime-relative-values.json": "95c0ffd8efff00e05baab900d224cf0b0d81e657",
     "journeys/planes/runtime-layout-transform.json": "c3caef3e808f4a45f730fb3a99db97dd01a242ec",

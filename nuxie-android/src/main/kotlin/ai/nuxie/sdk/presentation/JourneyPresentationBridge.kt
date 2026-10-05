@@ -63,6 +63,7 @@ internal data class JourneyPresentationRequest(
     ) -> JourneyScreenDismissalResult = { _, _, _ ->
         JourneyScreenDismissalResult.HANDLED
     },
+    val onLinkOpened: suspend (JourneyOpenedLink) -> Unit = {},
     val eventSources: JourneyRuntimeEventSources = JourneyRuntimeEventSources(),
     val onEmissionBatch: suspend (JourneyScreenEmissionBatch) -> Boolean = { true },
     val onPresentationRevealed: suspend (String) -> Unit = {},
