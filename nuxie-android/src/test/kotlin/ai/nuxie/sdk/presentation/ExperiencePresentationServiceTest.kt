@@ -2015,6 +2015,37 @@ class ExperiencePresentationServiceTest {
         assertEquals(vector.getValue("outcomeCount").jsonPrimitive.int, outcomes)
     }
 
+    @Test fun `runtime and journey links open and record through the same function`() = runTest {
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        val launched = mutableListOf<String>()
+        val opened = mutableListOf<String>()
+        val records = mutableListOf<JourneyOpenedLink>()
+        val service = ExperiencePresentationService(scope = this, emit = { _, _, _ -> },
+            runtimeAvailable = { true }, launch = launched::add,
+            openLink = { url, _ -> opened += url; true })
+        val presentation = async {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
+                onLinkOpened = { records += it }, onOutcome = {})
+        }
+        runCurrent()
+        val id = launched.single()
+        PresentationRegistry.reportFirstFrame(id)
+        presentation.await()
+        val events = listOf(
+            ai.nuxie.sdk.runtime.NuxieRuntimeEvent(0, 131, "", "https://example.test/runtime", "_self", 0f, emptyList(), 3),
+            ai.nuxie.sdk.runtime.NuxieRuntimeEvent(1, 131, "", "not a url", "_self", 0f, emptyList(), 3))
+        PresentationRegistry.reportRuntimeStep(id, ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome(true,
+            emptyList(), events, emptyList(), emptyList()), 1uL, null)
+        runCurrent()
+        val owner = JourneyPresentationOwner("journey-1", "customer-1")
+        val action = Json.parseToJsonElement("""{"type":"open_link","url":"https://example.test/step","target":"in_app"}""").jsonObject
+        assertEquals(JourneyPresentationActionResult.Advanced("next"), service.dispatchJourneyAction(owner, action, "link-effect"))
+        assertEquals(listOf("https://example.test/runtime", "https://example.test/step"), opened)
+        assertEquals(opened, records.map { it.url })
+        assertTrue(records.all { it.screenId == "screen_welcome" && it.instanceId == null })
+    }
+
     private fun service(
         scope: CoroutineScope,
         runtimeAvailable: () -> Boolean = { true },

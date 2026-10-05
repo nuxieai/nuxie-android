@@ -128,6 +128,7 @@ internal sealed interface JourneyDispatchResult {
 
 internal fun interface JourneyDispatching {
     suspend fun dispatch(request: JourneyDispatchRequest): JourneyDispatchResult
+    suspend fun captureLinkOpened(link: ai.nuxie.sdk.presentation.JourneyOpenedLink, request: JourneyDispatchRequest): Boolean = false
 }
 
 /**
@@ -2243,6 +2244,14 @@ internal class JourneyService(
                             screenId = revealedScreenId,
                             executionFenceToken = executionToken,
                         )
+                    },
+                    onLinkOpened = { link ->
+                        val identityScope = identity.captureScope()
+                        if (identityScope.distinctId == target.distinctId && executionFence.isCurrent(executionToken)) {
+                            dispatcher.captureLinkOpened(link, JourneyDispatchRequest(run, release, run.stepId,
+                                JsonObject(emptyMap()), java.util.UUID.randomUUID().toString(), target.distinctId,
+                                identityScope, executionFence, executionToken))
+                        }
                     },
                     eventSources = eventSources,
                     onEmissionBatch = { batch ->

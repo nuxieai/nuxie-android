@@ -95,6 +95,15 @@ internal class JourneyEffectDispatcher(
         return captureThenAdvance(APP_ACTION_REQUESTED, properties, request)
     }
 
+    override suspend fun captureLinkOpened(link: ai.nuxie.sdk.presentation.JourneyOpenedLink, request: JourneyDispatchRequest): Boolean {
+        val properties = attribution(request).toMutableMap()
+        properties["url"] = link.url
+        properties["target"] = link.target?.takeIf(String::isNotEmpty) ?: "_self"
+        properties["screen_id"] = link.screenId
+        link.instanceId?.let { properties["instance_id"] = it }
+        return captureThenAdvance(JourneyEventNames.LINK_OPENED, properties, request) is JourneyDispatchResult.Outlet
+    }
+
     private suspend fun captureThenAdvance(
         name: String,
         properties: Map<String, Any?>,
