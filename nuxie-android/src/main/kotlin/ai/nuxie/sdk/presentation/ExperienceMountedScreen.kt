@@ -51,6 +51,10 @@ internal class ExperienceMountedScreen(
         clearColor = prepared.clearColor,
         artboardSize = prepared.artboardSize,
         listener = object : ExperienceSurfaceHost.Listener by listener {
+            override fun onLayoutBounds(bounds: ExperienceArtboardSize) {
+                textOverlay?.updateLayoutBounds(bounds)
+                listener.onLayoutBounds(bounds)
+            }
             override fun onVideoCaptions(captions: Map<Long, ai.nuxie.sdk.runtime.NuxieVideoCaption>) {
                 captionOverlay?.update(captions)
                 listener.onVideoCaptions(captions)

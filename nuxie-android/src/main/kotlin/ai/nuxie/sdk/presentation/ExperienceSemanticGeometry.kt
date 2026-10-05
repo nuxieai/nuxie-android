@@ -8,9 +8,10 @@ import android.view.View
 import kotlin.math.ceil
 import kotlin.math.floor
 
-/** Same centered-contain coordinates as native rendering, followed by Android view transforms. */
+/** Root layout coordinates as native rendering, followed by Android view transforms. */
 internal fun semanticBounds(host: View, size: ExperienceArtboardSize?, node: NativeSemanticNode): ExperienceAccessibilityProvider.Bounds? {
-    val transform = ContainCenterTransform.create(size ?: return null, host.width, host.height) ?: return null
+    val transform = ExperienceLayoutTransform.create(size ?: return null, host.width.toFloat(), host.height.toFloat(),
+        host.resources.displayMetrics.density) ?: return null
     val local = RectF(
         node.minX * transform.scale + transform.contentLeft,
         node.minY * transform.scale + transform.contentTop,
