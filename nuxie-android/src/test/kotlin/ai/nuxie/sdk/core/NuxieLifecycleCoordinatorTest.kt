@@ -19,6 +19,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -145,7 +146,7 @@ class NuxieLifecycleCoordinatorTest {
     }
 
     @Test
-    fun lateSetupDoesNotTreatVisiblePausedHostAsResumed() = runBlocking {
+    fun lateSetupTreatsVisiblePausedHostAsForegroundWithoutAnInAppHost() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val context = RuntimeEnvironment.getApplication()
         val coordinator = NuxieLifecycleCoordinator(
@@ -156,10 +157,12 @@ class NuxieLifecycleCoordinatorTest {
             coordinator.admitVisibleActivity(host.get())
             org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
             assertEquals(null, coordinator.resumedActivity())
+            assertTrue(coordinator.isAppForeground())
             coordinator.close()
             coordinator.admitVisibleActivity(host.get())
             org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
             assertEquals(null, coordinator.resumedActivity())
+            assertFalse(coordinator.isAppForeground())
         } finally { host.stop().destroy(); scope.cancel() }
     }
 

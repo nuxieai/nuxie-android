@@ -136,6 +136,8 @@ internal class NuxieLifecycleCoordinator(
             ?: startedActivities.firstOrNull { usable(it) && it.hasWindowFocus() }
             ?: startedActivities.firstOrNull(::usable)
     }
+    internal fun isAppForeground(): Boolean = !closed.get() && startedActivities.isNotEmpty()
+
     internal fun resumedActivity(): Activity? {
         if (closed.get()) return null
         fun usable(activity: Activity) = activity in resumedActivities && activity in startedActivities && !activity.isDestroyed
