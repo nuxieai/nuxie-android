@@ -550,7 +550,7 @@ internal class ExperiencePresentationService(
     private val runtimeAvailable: () -> Boolean,
     private val launch: (String) -> Unit,
     private val commerce: JourneyCommercePreparing = JourneyCommercePreparing.NONE,
-    private val openLink: (String, String?) -> Boolean = { _, _ -> false },
+    private val openLink: (JourneyLinkRouting.Destination, Activity?) -> Boolean = { _, _ -> false },
     private val firstFrameTimeoutMillis: Long = FIRST_FRAME_TIMEOUT_MILLIS,
     private val beforeHostTeardownForTesting: () -> Unit = {},
 ) {
@@ -566,28 +566,33 @@ internal class ExperiencePresentationService(
         runtimeAvailable = runtimeAvailable,
         launch = AndroidPresentationLauncher(context.applicationContext ?: context),
         commerce = commerce,
-        openLink = { url, target ->
-            val owner = context.applicationContext ?: context
+        openLink = { destination, activity ->
+            val owner = activity ?: context.applicationContext ?: context
             kotlin.runCatching {
-                JourneyLinkRouting.open(url, target,
-                    inApp = { value ->
+                when (destination) {
+                    is JourneyLinkRouting.Destination.InApp -> {
                         val tab = CustomTabsIntent.Builder().build()
-                        tab.intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        tab.launchUrl(owner, Uri.parse(value))
-                        true
-                    }, external = { value ->
-                        owner.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(value))
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                        true
-                    })
+                        if (activity == null) tab.intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        tab.launchUrl(owner, destination.uri)
+                    }
+                    is JourneyLinkRouting.Destination.External -> {
+                        val intent = Intent(Intent.ACTION_VIEW, destination.uri)
+                        if (activity == null) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        owner.startActivity(intent)
+                    }
+                }
+                true
             }.getOrDefault(false)
         },
         firstFrameTimeoutMillis = FIRST_FRAME_TIMEOUT_MILLIS,
     )
 
     private suspend fun openAndRecord(link: JourneyOpenedLink, record: suspend (JourneyOpenedLink) -> Unit): Boolean {
-        if (JourneyLinkRouting.destination(link.url, link.target) == null ||
-            !runCatching { openLink(link.url, link.target) }.getOrDefault(false)) return false
+        val destination = JourneyLinkRouting.destination(link.url, link.target) ?: return false
+        val opened = withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+            runCatching { openLink(destination, purchaseActivity()?.takeUnless { it.isFinishing || it.isDestroyed }) }.getOrDefault(false)
+        }
+        if (!opened) return false
         record(link.copy(target = link.target?.takeIf(String::isNotEmpty) ?: "_self"))
         return true
     }
@@ -1248,7 +1253,7 @@ internal class ExperiencePresentationService(
                     }
                     if (relative == true) {
                         eventSource?.snapshot?.resolveNativeString(path, model, eventSource.nativeId)
-                    } else active.latestViewModelSnapshot.get()?.resolveScopedString(path, model, source?.instanceId, relative)
+                    } else active.latestViewModelSnapshot.get()?.resolveScopedString(path, model, if (relative == false) null else source?.instanceId)
                 }
                 else -> null
             }
@@ -1336,11 +1341,8 @@ internal class ExperiencePresentationService(
                     ?: return JourneyPresentationActionResult.Failed
                 val target = action.string("target")
                     ?: return JourneyPresentationActionResult.Failed
-                if (!active.journey.openLink(JourneyOpenedLink(url, target, active.journey.screenId))) {
-                    JourneyPresentationActionResult.Failed
-                } else {
-                    JourneyPresentationActionResult.Advanced("next")
-                }
+                active.journey.openLink(JourneyOpenedLink(url, target, active.journey.screenId, effectId = effectId))
+                JourneyPresentationActionResult.Advanced("next")
             }
             JourneyActionType.DISMISS -> {
                 PresentationRegistry.dismiss(active.id, CloseReason.UserDismissed)

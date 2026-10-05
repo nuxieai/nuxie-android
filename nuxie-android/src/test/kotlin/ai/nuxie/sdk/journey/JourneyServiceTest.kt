@@ -1520,7 +1520,7 @@ class JourneyServiceTest {
                 journalDirectory = directory,
                 scope = scope,
                 capture = { _, _, _, _ -> true },
-                dispatcher = JourneyDispatching {
+                dispatcher = testDispatcher {
                     dispatches.incrementAndGet()
                     JourneyDispatchResult.Unsupported
                 },
@@ -1579,7 +1579,7 @@ class JourneyServiceTest {
                 journalDirectory = directory,
                 scope = scope,
                 capture = { _, _, _, _ -> true },
-                dispatcher = JourneyDispatching {
+                dispatcher = testDispatcher {
                     dispatches.incrementAndGet()
                     JourneyDispatchResult.Unsupported
                 },
@@ -2042,7 +2042,7 @@ class JourneyServiceTest {
         val dispatchStarted = CompletableDeferred<JourneyDispatchRequest>()
         val resumeDispatch = CompletableDeferred<Unit>()
         val effectPublications = AtomicInteger()
-        val dispatcher = JourneyDispatching { request ->
+        val dispatcher = testDispatcher { request ->
             dispatchStarted.complete(request)
             resumeDispatch.await()
             val published = request.executionFence.performIfCurrent(
@@ -2110,7 +2110,7 @@ class JourneyServiceTest {
         val dispatchStarted = CompletableDeferred<JourneyDispatchRequest>()
         val resumeDispatch = CompletableDeferred<Unit>()
         val effectPublications = AtomicInteger()
-        val dispatcher = JourneyDispatching { request ->
+        val dispatcher = testDispatcher { request ->
             dispatchStarted.complete(request)
             resumeDispatch.await()
             val published = request.executionFence.performIfCurrent(
@@ -2279,6 +2279,10 @@ class JourneyServiceTest {
         assertEquals(request.run.generation, captures.single().second["leg_generation"])
     }
 
+    @Test fun `second row frame reaches relative purchase through batch admission`() = runBlocking {
+        assertPurchaseOfferRoute(ai.nuxie.sdk.features.FeatureAccess(false, false, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN), relativeRow = true)
+    }
+
     @Test fun `purchase advances only from its correlated Journey outcome`() = runBlocking {
         assertPurchaseOfferRoute(ai.nuxie.sdk.features.FeatureAccess(false, false, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN))
     }
@@ -2309,6 +2313,7 @@ class JourneyServiceTest {
         access: ai.nuxie.sdk.features.FeatureAccess?,
         dismissAlternative: JsonObject? = null,
         expectedOutcome: String = "continue",
+        relativeRow: Boolean = false,
     ) {
         val directory = java.io.File(this.directory, java.util.UUID.randomUUID().toString()).apply { mkdirs() }
         val identity = IdentityService(context).also { it.setDistinctId("customer") }
@@ -2325,7 +2330,7 @@ class JourneyServiceTest {
             put("id", "purchase")
             putJsonObject("action") {
                 put("type", "purchase")
-                put("placementId", "golden:monthly")
+                put("placementId", if (relativeRow) Json.parseToJsonElement("""{"ref":{"kind":"path","path":"placementId","isRelative":true}}""") else JsonPrimitive("golden:monthly"))
             }
             putJsonObject("outlets") {
                 put("completed", "completed")
@@ -2361,7 +2366,7 @@ class JourneyServiceTest {
                                 put("kind", "screen")
                                 put("screenId", "screen_welcome")
                             }
-                            put("eventName", SystemEventNames.SCREEN_SHOWN)
+                            put("eventName", if (relativeRow) "buy" else SystemEventNames.SCREEN_SHOWN)
                             put("entryStepId", "purchase")
                         },
                         buildJsonObject {
@@ -2467,7 +2472,21 @@ class JourneyServiceTest {
             return
         }
 
-        assertTrue(requireNotNull(presenter.request).onScreenChanged("screen_welcome"))
+        val request = requireNotNull(presenter.request)
+        if (relativeRow) {
+            val frame = ai.nuxie.sdk.runtime.NuxieViewModelSnapshot.fromNative(ai.nuxie.sdk.runtime.NativeViewModelSnapshot(1,
+                (1L..4L).map { ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(it, 0) }.toTypedArray(),
+                (listOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue(1, 0, "rows", ai.nuxie.sdk.runtime.NuxieViewModelPropertyKind.LIST.nativeValue, byteArrayOf(), 0, listItemIds = longArrayOf(2, 3, 4))) +
+                    listOf(2L to "first", 3L to "golden:monthly", 4L to "third").map { (id, value) -> ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue(id, 0, "placementId", ai.nuxie.sdk.runtime.NuxieViewModelPropertyKind.STRING.nativeValue, value.encodeToByteArray(), 0) }).toTypedArray()))
+            val batch = JourneyScreenEmissionBatch(request.journeyId, 0, "second-row",
+                JourneyScreenEmissionSource("screen_welcome", "runtime:1"),
+                listOf(JourneyScreenEmission("00000000-0000-7000-8000-000000000911", 0, 100_000L, "buy", JsonObject(emptyMap()))))
+            request.eventSources.put(batch.invocationId, ai.nuxie.sdk.presentation.JourneyRuntimeEmissionSources(drafts = listOf(ai.nuxie.sdk.presentation.JourneyRuntimeEventSource(3, frame))).bound(batch))
+            assertTrue(request.onEmissionBatch(batch))
+            withTimeout(5_000L) { while (presenter.actions.isEmpty()) kotlinx.coroutines.delay(10) }
+            assertEquals(JsonPrimitive("golden:monthly"), presenter.actions.single().first["placementId"])
+            assertEquals(3L, presenter.resolvedNativeIds.single())
+        } else assertTrue(request.onScreenChanged("screen_welcome"))
         val effectId = presenter.actions.single().second
         val journal = JourneyRunJournal(
             directory,
@@ -2508,7 +2527,7 @@ class JourneyServiceTest {
         assertTrue(journal.runs().isEmpty())
         assertEquals("continue", journal.checkmark(release.identity.experienceId)?.outcome)
         assertEquals(
-            listOf(JourneyEventNames.LEG_STARTED, JourneyEventNames.LEG_COMPLETED),
+            listOf(JourneyEventNames.LEG_STARTED) + (if (relativeRow) listOf("buy") else emptyList()) + JourneyEventNames.LEG_COMPLETED,
             captures.map { it.first },
         )
     }
@@ -2574,6 +2593,17 @@ class JourneyServiceTest {
             request?.takeIf {
                 it.journeyId == owner.journeyId && it.ownerDistinctId == owner.distinctId
             }?.screenId
+
+        val resolvedNativeIds = mutableListOf<Long>()
+        override fun resolveAction(owner: JourneyPresentationOwner, action: JsonObject,
+            source: JourneyScreenEmissionSource?, eventSource: ai.nuxie.sdk.presentation.JourneyRuntimeEventSource?): JsonObject? {
+            val ref = (action["placementId"] as? JsonObject)?.get("ref") as? JsonObject ?: return action
+            if (ref["isRelative"] != JsonPrimitive(true)) return action
+            val frame = eventSource ?: return null
+            resolvedNativeIds += frame.nativeId
+            val value = frame.snapshot.resolveNativeString(ref.getValue("path").jsonPrimitive.content, null, frame.nativeId) ?: return null
+            return JsonObject(action + ("placementId" to JsonPrimitive(value)))
+        }
 
         override suspend fun dispatchAction(
             owner: JourneyPresentationOwner,
@@ -2778,4 +2808,9 @@ class JourneyServiceTest {
         const val ARTIFACT_DIGEST =
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
+}
+
+private fun testDispatcher(dispatch: suspend (JourneyDispatchRequest) -> JourneyDispatchResult): JourneyDispatching = object : JourneyDispatching {
+    override suspend fun dispatch(request: JourneyDispatchRequest) = dispatch.invoke(request)
+    override suspend fun captureLinkOpened(link: ai.nuxie.sdk.presentation.JourneyOpenedLink, request: JourneyDispatchRequest): Boolean = error("Unexpected link recording")
 }

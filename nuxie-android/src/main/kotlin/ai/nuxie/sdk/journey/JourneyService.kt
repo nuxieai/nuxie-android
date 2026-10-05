@@ -126,9 +126,9 @@ internal sealed interface JourneyDispatchResult {
     data object Failed : JourneyDispatchResult
 }
 
-internal fun interface JourneyDispatching {
+internal interface JourneyDispatching {
     suspend fun dispatch(request: JourneyDispatchRequest): JourneyDispatchResult
-    suspend fun captureLinkOpened(link: ai.nuxie.sdk.presentation.JourneyOpenedLink, request: JourneyDispatchRequest): Boolean = false
+    suspend fun captureLinkOpened(link: ai.nuxie.sdk.presentation.JourneyOpenedLink, request: JourneyDispatchRequest): Boolean
 }
 
 /**
@@ -182,8 +182,10 @@ internal class JourneyService(
     },
     private val featureAccess: suspend (String) -> FeatureAccess? = { null },
     private val offerFeatureAccess: suspend (String) -> FeatureAccess? = featureAccess,
-    private val dispatcher: JourneyDispatching = JourneyDispatching {
-        JourneyDispatchResult.Unsupported
+    private val dispatcher: JourneyDispatching = object : JourneyDispatching {
+        override suspend fun dispatch(request: JourneyDispatchRequest) = JourneyDispatchResult.Unsupported
+        override suspend fun captureLinkOpened(link: ai.nuxie.sdk.presentation.JourneyOpenedLink, request: JourneyDispatchRequest): Boolean =
+            error("Journey link recording requires a dispatcher")
     },
     private val presenter: JourneyPresenting? = null,
     private val pinnedReleaseAuthenticator: (
@@ -2249,7 +2251,7 @@ internal class JourneyService(
                         val identityScope = identity.captureScope()
                         if (identityScope.distinctId == target.distinctId && executionFence.isCurrent(executionToken)) {
                             dispatcher.captureLinkOpened(link, JourneyDispatchRequest(run, release, run.stepId,
-                                JsonObject(emptyMap()), java.util.UUID.randomUUID().toString(), target.distinctId,
+                                JsonObject(emptyMap()), link.effectId ?: ai.nuxie.sdk.events.TimeBasedEpochGenerator.shared.next(), target.distinctId,
                                 identityScope, executionFence, executionToken))
                         }
                     },

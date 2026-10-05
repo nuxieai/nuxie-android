@@ -5,6 +5,7 @@ import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
 class JourneyLinkRoutingTest {
     @Test fun `shared targets call exactly one opener`() {
         val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
