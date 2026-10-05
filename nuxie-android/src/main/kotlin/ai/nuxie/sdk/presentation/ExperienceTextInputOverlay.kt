@@ -35,7 +35,6 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import java.io.File
 import java.util.Locale
-import kotlin.math.min
 import kotlin.math.roundToInt
 
 /** Native editors share the renderer's layout coordinate space. UI-thread owned. */
