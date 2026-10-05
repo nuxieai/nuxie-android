@@ -1,29 +1,40 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.fixtures.FixtureRunner
+import android.app.Activity
+import android.content.Intent
+import androidx.browser.customtabs.CustomTabsIntent
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
+import org.robolectric.Robolectric
+import org.robolectric.Shadows.shadowOf
 
 @org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
 class JourneyLinkRoutingTest {
-    @Test fun `shared targets call exactly one opener`() {
-        val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
-            .resolve("events/runtime-link-targets.json").readText()).jsonObject
+    @Test fun `shared targets use the platform opener`() {
+        val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot().resolve("events/runtime-link-targets.json").readText()).jsonObject
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         for (entry in fixture.getValue("cases").jsonArray) {
             val vector = entry.jsonObject
             val url = vector.getValue("url").jsonPrimitive.content
-            val target = vector["target"]?.jsonPrimitive?.contentOrNull
-            val destination = vector["destination"]?.jsonPrimitive?.contentOrNull
-            val calls = mutableListOf<String>()
-            val opened = JourneyLinkRouting.open(url, target,
-                { calls += "in_app"; true }, { calls += "external"; true })
-            assertEquals(url, destination?.let(::listOf) ?: emptyList<String>(), calls)
-            assertEquals(url, destination != null, opened)
+            val expected = vector["destination"]?.jsonPrimitive?.contentOrNull
+            val route = JourneyLinkRouting.destination(url, vector["target"]?.jsonPrimitive?.contentOrNull)
+            if (expected == null) { assertNull(url, route); continue }
+            assertNotNull(url, route)
+            assertTrue(openActivityLink(activity, requireNotNull(route), activity))
+            val intent = shadowOf(activity).nextStartedActivity
+            assertEquals(Intent.ACTION_VIEW, intent.action)
+            assertEquals(0, intent.flags and Intent.FLAG_ACTIVITY_NEW_TASK)
+            assertEquals(expected == "in_app", intent.hasExtra(CustomTabsIntent.EXTRA_SESSION))
+            assertEquals(route.uri.scheme?.lowercase(), intent.data?.scheme)
         }
     }
 
-    @Test fun `an unavailable external handler does not report success`() {
-        assertFalse(JourneyLinkRouting.open("sampleapp://item", "_blank", { fail("Unexpected in-app route"); false }, { false }))
+    @Test fun `application fallback adds new task`() {
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val route = requireNotNull(JourneyLinkRouting.destination("https://example.test", "_self"))
+        assertTrue(openActivityLink(context, route, null))
+        assertNotEquals(0, shadowOf(context).nextStartedActivity.flags and Intent.FLAG_ACTIVITY_NEW_TASK)
     }
 }

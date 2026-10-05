@@ -31,13 +31,11 @@ class JourneyRuntimeEventScopeTest {
             val snapshot = if (live.isEmpty()) null else NuxieViewModelSnapshot.fromNative(
                 NativeViewModelSnapshot(1, live.map { NativeViewModelSnapshotInstance(it, 0) }.toTypedArray(),
                     emptyArray()), instanceIds = aliases)
-            val sources = JourneyRuntimeEventSources()
             val batches = mutableListOf<JourneyScreenEmissionBatch>()
             var resolved: JourneyRuntimeEventSource? = null
             val coordinator = JourneyRuntimeEmissionCoordinator(journeyId = "journey", screenId = "screen",
                 descriptor = JsonObject(emptyMap()), nextBatchSequence = 0, nextEmissionSequence = 0,
-                eventSources = sources,
-                onEmissionBatch = { batches += it; resolved = sources.take(it.invocationId)?.source(it.emissions.first().id); true },
+                onEmissionBatch = { it, frameSources -> batches += it; resolved = frameSources?.source(it.emissions.first().id); true },
                 onPresentationRevealed = {})
             assertTrue(coordinator.reveal())
             val properties = mutableListOf(NuxieRuntimeEventProperty("value",
@@ -62,7 +60,6 @@ class JourneyRuntimeEventScopeTest {
                 assertEquals(name, alias?.let(::JsonPrimitive), batch.emissions.first().payload["instanceId"])
                 assertEquals(name, if (native == 0L) 1L else native, resolved?.nativeId)
             }
-            assertNull(sources.take(batch.invocationId))
         }
     }
 }

@@ -156,7 +156,7 @@ The [`nuxie-android/api/nuxie-android.api`](nuxie-android/api/nuxie-android.api)
 `apiCheck` dump is the Android binding wrapper contract, sibling to the
 `nuxie-ios` `api/public-api.txt`. Wrappers may bind only symbols listed in that
 allowlist. `NuxieActivity.LinkOpened` is part of this wrapper contract and forwards
-`$link_opened` with the URL, target, screen/source attribution and Journey leg.
+`$link_opened` with the URL, actual `destination` (`in_app` or `external`), authored target, screen/source attribution and Journey leg.
 
 ## Setup
 

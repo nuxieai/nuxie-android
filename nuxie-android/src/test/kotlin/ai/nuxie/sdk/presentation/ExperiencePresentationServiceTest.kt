@@ -99,7 +99,7 @@ class ExperiencePresentationServiceTest {
         val presentation = async {
             service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
-                onEmissionBatch = { batches += it; true }, onOutcome = { outcomes += it })
+                onEmissionBatch = { it, _ -> batches += it; true }, onOutcome = { outcomes += it })
         }
         runCurrent()
         val id = launched.single()
@@ -176,17 +176,17 @@ class ExperiencePresentationServiceTest {
         val rootId = fixture.getValue("root").jsonPrimitive.content.toLong()
         val rows = fixture.getValue("rows").jsonArray.map { it.jsonPrimitive.content.toLong() }
         val frame = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(rootId,
-            values.keys.map { NativeViewModelSnapshotInstance(it.toLong(), 0) }.toTypedArray(),
+            values.keys.map { NativeViewModelSnapshotInstance(it.toLong(), if (it.toLong() == rootId) 0 else 1) }.toTypedArray(),
             (values.map { (id, value) -> NativeViewModelSnapshotValue(id.toLong(), 0, "placementId",
                 NuxieViewModelPropertyKind.STRING.nativeValue, value.jsonPrimitive.content.encodeToByteArray(), 0)
             } + NativeViewModelSnapshotValue(rootId, 1, "rows", NuxieViewModelPropertyKind.LIST.nativeValue,
-                byteArrayOf(), 0, listItemIds = rows.toLongArray())).toTypedArray()))
+                byteArrayOf(), 0, listItemIds = rows.toLongArray())).toTypedArray()), schemaNames = mapOf(0L to fixture.getValue("rootModelName").jsonPrimitive.content, 1L to fixture.getValue("rowModelName").jsonPrimitive.content))
         for (entry in fixture.getValue("cases").jsonArray) {
             val vector = entry.jsonObject
             val frameSource = vector["source"]?.jsonPrimitive?.contentOrNull?.toLong()?.let { JourneyRuntimeEventSource(it, frame) }
             val expected = vector["expected"]?.jsonPrimitive?.contentOrNull
             assertEquals(vector.getValue("name").jsonPrimitive.content, expected,
-                service.resolveJourneyAction(owner, if (vector["viewModelName"] != null) Json.parseToJsonElement("""{"type":"purchase","placementId":{"ref":{"kind":"path","path":"placementId","isRelative":true,"viewModelName":"OtherModel"}}}""").jsonObject else scoped(true), null, frameSource)?.get("placementId")?.jsonPrimitive?.content)
+                service.resolveJourneyAction(owner, Json.parseToJsonElement("""{"type":"purchase","placementId":{"ref":{"kind":"path","path":"placementId","isRelative":true,"viewModelName":${vector.getValue("viewModelName")}}}}""").jsonObject, null, frameSource)?.get("placementId")?.jsonPrimitive?.content)
         }
 
     }
@@ -1503,7 +1503,7 @@ class ExperiencePresentationServiceTest {
                     ownerDistinctId = "customer-1",
                     reservation = reservation,
                     acquire = { acquired(selectedRelease.identity, Lease()) },
-                    onEmissionBatch = { batches += it; true },
+                    onEmissionBatch = { it, _ -> batches += it; true },
                     onOutcome = {},
                 )
             }
@@ -2033,6 +2033,30 @@ class ExperiencePresentationServiceTest {
         val action = Json.parseToJsonElement("""{"type":"open_link","url":"missing-app://item","target":"external"}""").jsonObject
         assertEquals(JourneyPresentationActionResult.Advanced("next"), service.dispatchJourneyAction(owner, action, "link-effect"))
         assertTrue(service.ownsJourney(owner))
+    }
+
+    @Test fun `closing presentation during batch skips its queued link`() = runTest {
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        val launched = mutableListOf<String>()
+        val opened = mutableListOf<String>()
+        lateinit var service: ExperiencePresentationService
+        service = ExperiencePresentationService(scope = this, emit = { _, _, _ -> }, runtimeAvailable = { true }, launch = launched::add,
+            openLink = { destination, _ -> opened += destination.uri.toString(); true })
+        val presentation = async {
+            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1", service.reserveJourney("customer-1"),
+                acquire = { acquired(release.identity, Lease()) },
+                onEmissionBatch = { _, _ -> PresentationRegistry.dismiss(launched.single(), CloseReason.HostDismissed); true },
+                onLinkOpened = { error("Retired presentation recorded a link") }, onOutcome = {})
+        }
+        runCurrent()
+        val id = launched.single()
+        PresentationRegistry.reportFirstFrame(id)
+        presentation.await()
+        val events = listOf(ai.nuxie.sdk.runtime.NuxieRuntimeEvent(0, 128, "sibling", "", "", 0f, emptyList()),
+            ai.nuxie.sdk.runtime.NuxieRuntimeEvent(1, 131, "", "https://example.test", "_self", 0f, emptyList()))
+        PresentationRegistry.reportRuntimeStep(id, ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome(true, emptyList(), events, emptyList(), emptyList()), 1uL, null)
+        runCurrent()
+        assertTrue(opened.isEmpty())
     }
 
     @Test fun `runtime and journey links open and record through the same function`() = runTest {
