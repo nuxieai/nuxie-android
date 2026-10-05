@@ -55,6 +55,8 @@ internal class PublishedConverterJourneyHarness(
             it.journeyId == owner.journeyId && it.ownerDistinctId == owner.distinctId
         } == true
         override fun screenId(owner: JourneyPresentationOwner) = request?.screenId
+        override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest): JourneyOpenedLink? =
+            error("Converter harness does not support link actions")
         override suspend fun shutdownOwnedBy(ownerDistinctId: String) = Unit
     }
     private val service = JourneyService(
