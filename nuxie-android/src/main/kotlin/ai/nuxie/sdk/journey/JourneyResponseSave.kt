@@ -139,12 +139,19 @@ internal data class JourneyResponseSaveReply(val code: Code, val sequence: Long?
                 val value = JourneyReleaseEnvelope.parseObject(bytes)
                 val status = value.getValue("status").jsonPrimitive
                 if (!status.isString) return noAnswer
+                if (status.content == "error") {
+                    val rawCode = value["code"]?.jsonPrimitive ?: return noAnswer
+                    if (!rawCode.isString) return noAnswer
+                    val code = Code.entries.firstOrNull { it.wire == rawCode.content } ?: return noAnswer
+                    if (code in setOf(Code.SAVED, Code.REPLAYED, Code.STALE, Code.NO_ANSWER)) return noAnswer
+                    return JourneyResponseSaveReply(code)
+                }
                 val code = Code.entries.firstOrNull { it.wire == status.content } ?: return noAnswer
+                if (code !in setOf(Code.SAVED, Code.REPLAYED, Code.STALE)) return noAnswer
                 val sequenceValue = value["sequence"]?.jsonPrimitive
                 val sequence = sequenceValue?.takeUnless { it.isString || it == JsonNull }?.long
-                val reply = JourneyResponseSaveReply(code, sequence)
-                if (reply.confirmed && (sequence == null || sequence < attemptedSequence ||
-                    sequence <= 0 || sequence > JourneyResponseSave.MAXIMUM_SEQUENCE)) noAnswer else reply
+                if (sequence == null || sequence < attemptedSequence || sequence <= 0 ||
+                    sequence > JourneyResponseSave.MAXIMUM_SEQUENCE) noAnswer else JourneyResponseSaveReply(code, sequence)
             } catch (_: Exception) { noAnswer }
         }
     }
