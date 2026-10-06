@@ -660,6 +660,9 @@ internal class ExperienceSurfaceHost(
         }
     }
 
+    private fun stepAndRefreshFocus(step: () -> NuxiePlayerStepOutcome): NuxiePlayerStepOutcome =
+        step().also { riveFocusState = it.focusState ?: NuxieFocusState(false, false) }
+
     /** UI entry point. Native edits and optional response commits share the frame lane. */
     fun writeNativeText(target: ExperienceTextFieldTarget, write: ExperienceSemanticTextDraft.Write,
         completion: (ExperienceSemanticTextDraft.Outcome) -> Unit) {
@@ -692,9 +695,10 @@ internal class ExperienceSurfaceHost(
                     // Settle reverse bindings on the ordinary player before reading the typed source.
                     val correlationId = nextCorrelationId
                     nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
-                    val outcome = active.stepAfterStateMutation(correlationId = correlationId,
-                        textRunNames = textInputs.values.filter { it.editableValueName == null }.map { it.runName }.distinct())
-                    outcome.focusState?.let { riveFocusState = it }
+                    val outcome = stepAndRefreshFocus {
+                        active.stepAfterStateMutation(correlationId = correlationId,
+                            textRunNames = textInputs.values.filter { it.editableValueName == null }.map { it.runName }.distinct())
+                    }
                     val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
                     root?.let { retainScreenValues(it) }
                     if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, root))
@@ -748,8 +752,9 @@ internal class ExperienceSurfaceHost(
                     if (scripted) {
                         val correlationId = nextCorrelationId
                         nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
-                        val outcome = checkNotNull(player).stepAfterStateMutation(correlationId = correlationId)
-                        outcome.focusState?.let { riveFocusState = it }
+                        val outcome = stepAndRefreshFocus {
+                            checkNotNull(player).stepAfterStateMutation(correlationId = correlationId)
+                        }
                         val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
                         root?.let { retainScreenValues(it) }
                         if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, root))
@@ -782,12 +787,13 @@ internal class ExperienceSurfaceHost(
                         check(!input.secure) { "Converted secure input is unsupported" }
                         val correlationId = nextCorrelationId
                         nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
-                        val outcome = checkNotNull(player).stepTyped(
-                            elapsedSeconds = 0.0,
-                            correlationId = correlationId,
-                            textRunNames = textInputs.values.map { it.runName }.distinct(),
-                        )
-                        outcome.focusState?.let { riveFocusState = it }
+                        val outcome = stepAndRefreshFocus {
+                            checkNotNull(player).stepTyped(
+                                elapsedSeconds = 0.0,
+                                correlationId = correlationId,
+                                textRunNames = textInputs.values.map { it.runName }.distinct(),
+                            )
+                        }
                         val captured = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
                         captured?.let { retainScreenValues(it) }
                         if (outcome.hasPublishableEffects()) {
@@ -1117,14 +1123,15 @@ internal class ExperienceSurfaceHost(
                             queuedFocusGeneration = currentFocusGeneration
                         }
                         val focusBatch = focusInput.takeBatch()
-                        val hadFocus = riveFocusState.hasFocus
-                        player.stepTyped(
-                            elapsedSeconds = elapsedSeconds,
-                            pointers = pointerInput.takeBatch(),
-                            focusInputs = focusBatch,
-                            correlationId = correlationId,
-                            textRunNames = textInputs.values.map { it.runName }.distinct(),
-                        ).also {
+                        stepAndRefreshFocus {
+                            player.stepTyped(
+                                elapsedSeconds = elapsedSeconds,
+                                pointers = pointerInput.takeBatch(),
+                                focusInputs = focusBatch,
+                                correlationId = correlationId,
+                                textRunNames = textInputs.values.map { it.runName }.distinct(),
+                            )
+                        }.also {
                             if (layoutStepPending) {
                                 val size = player.layoutSize()
                                 val bounds = ExperienceArtboardSize(size.first, size.second)
@@ -1138,9 +1145,9 @@ internal class ExperienceSurfaceHost(
                                     }
                                 }
                             }
-                            it.focusState?.let { state -> riveFocusState = state }
-                            if (!hadFocus && it.focusState?.hasFocus == false) {
-                                val direction = focusBatch.zip(it.focusResults).firstNotNullOfOrNull { (input, moved) ->
+                            if (it.focusState?.hasFocus != true) {
+                                val direction = focusBatch.withIndex().firstNotNullOfOrNull { (index, input) ->
+                                    val moved = it.focusResults.getOrNull(index) == true
                                     if (moved) null else when (input) {
                                         NuxieFocusInput.Next -> android.view.View.FOCUS_FORWARD
                                         NuxieFocusInput.Previous -> android.view.View.FOCUS_BACKWARD
@@ -1151,8 +1158,10 @@ internal class ExperienceSurfaceHost(
                                     if (!released.get() && running && sceneInputEnabled.get() &&
                                         generation == frameGeneration.get() && currentFocusGeneration == focusGeneration.get() &&
                                         !riveFocusState.hasFocus) {
-                                        val current = rootView.findFocus() ?: this
-                                        current.focusSearch(direction)?.takeIf { target -> target !== current }?.requestFocus(direction)
+                                        if (!accessibility.enterKeyboardOrder(direction)) {
+                                            val current = rootView.findFocus() ?: this
+                                            current.focusSearch(direction)?.takeIf { target -> target !== current }?.requestFocus(direction)
+                                        }
                                     }
                                 }
                             }
