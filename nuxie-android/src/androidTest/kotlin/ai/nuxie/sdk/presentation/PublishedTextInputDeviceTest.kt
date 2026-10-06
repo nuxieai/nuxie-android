@@ -3512,10 +3512,31 @@ class PublishedTextInputDeviceTest {
         return checkNotNull(bitmap) { "Runtime texture must contain a composed frame" }
     }
 
+    @Test
+    fun pixelDifferenceCountsOnlyTheRequestedRegion() {
+        val before = Bitmap.createBitmap(3, 2, Bitmap.Config.ARGB_8888).apply { eraseColor(0xff123456.toInt()) }
+        val after = before.copy(Bitmap.Config.ARGB_8888, true)
+        try {
+            after.setPixel(0, 0, 0xffabcdef.toInt())
+            after.setPixel(2, 1, 0)
+            assertEquals(2, changedPixels(before, after, Rect(0, 0, 3, 2)))
+            assertEquals(1, changedPixels(before, after, Rect(0, 0, 3, 1)))
+            assertEquals(0, changedPixels(before, after, Rect(0, 1, 2, 2)))
+            assertEquals(0, changedPixels(before, after, Rect()))
+        } finally { before.recycle(); after.recycle() }
+    }
+
     private fun changedPixels(before: Bitmap, after: Bitmap, region: Rect): Int {
+        if (region.isEmpty) return 0
+        val width = region.width()
+        val height = region.height()
+        val beforePixels = IntArray(width * height)
+        val afterPixels = IntArray(width * height)
+        before.getPixels(beforePixels, 0, width, region.left, region.top, width, height)
+        after.getPixels(afterPixels, 0, width, region.left, region.top, width, height)
         var changed = 0
-        for (y in region.top until region.bottom) for (x in region.left until region.right) {
-            if (before.getPixel(x, y) != after.getPixel(x, y)) changed++
+        for (index in beforePixels.indices) {
+            if (beforePixels[index] != afterPixels[index]) changed++
         }
         return changed
     }
