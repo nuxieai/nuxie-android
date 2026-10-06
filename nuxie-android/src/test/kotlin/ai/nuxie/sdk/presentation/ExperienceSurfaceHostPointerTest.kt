@@ -107,11 +107,12 @@ class ExperienceSurfaceHostPointerTest {
     @Test
     fun `pending surface submission polls without stepping or publishing effects`() {
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val values = ExperienceRunValues()
+        val lane = values.lane
         val published = mutableListOf<ULong>()
         var composed = 0
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
-            runtime = NuxieRuntime(native), listener = object : ExperienceSurfaceHost.Listener {
+            runtime = NuxieRuntime(native), runValues = values, listener = object : ExperienceSurfaceHost.Listener {
                 override fun onFirstFrame() { composed++ }
                 override fun onFailure(error: ExperiencePresentationException) { throw error }
                 override fun onRuntimeStep(
@@ -155,6 +156,7 @@ class ExperienceSurfaceHostPointerTest {
                 0, 0, "nx_exit_done:resized", "", "", 0f, emptyArray()))
             host.doFrame(1_080_000_000L)
             drain(lane)
+            val detachBeforeResize = native.detachCount
             val resizeQueued = CountDownLatch(1)
             val allowResize = CountDownLatch(1)
             lane.enqueue { resizeQueued.countDown(); allowResize.await(2, TimeUnit.SECONDS) }
@@ -168,10 +170,43 @@ class ExperienceSurfaceHostPointerTest {
             }
             drain(lane)
             assertEquals("Resize settles with a zero step", listOf(0f, 0.064f, 0.016f, 0f), native.elapsedSteps)
+            assertEquals("Resize cancels the native submission before replacing its capture", detachBeforeResize + 1, native.detachCount)
+            assertEquals("Resize retires the pending frame and requires a fresh step", 4, native.elapsedSteps.size)
             assertEquals("Retired frame effects await the replacement delivery", listOf(1uL, 3uL), published)
             host.doFrame(1_112_000_000L)
             drain(lane)
             assertEquals("The next animation step includes time spent settling layout", 0.032f, native.elapsedSteps.last(), 0.000001f)
+        } finally {
+            host.release()
+            kotlinx.coroutines.runBlocking { values.retire() }
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
+    @Test
+    fun `hiding a pending surface releases its native submission without destroying the texture`() {
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
+            runtime = NuxieRuntime(native))
+        val texture = SurfaceTexture(0)
+        try {
+            host.loadArtboard(byteArrayOf(1), null)
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            native.presentation = 4
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            val before = native.detachCount
+            host.setPresentationVisible(false)
+            drain(lane)
+            assertEquals("A hidden screen cannot leave another screen waiting on its renderer", before + 1, native.detachCount)
+            native.presentation = 1
+            host.setPresentationVisible(true)
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            assertEquals("Resuming steps a replacement frame", 2, native.elapsedSteps.size)
         } finally {
             host.release()
             lane.shutdown()
@@ -938,7 +973,7 @@ class ExperienceSurfaceHostPointerTest {
                     override fun onFailure(error: ExperiencePresentationException) { throw error }
                     override fun onTextInputSnapshot(snapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot, geometry: ai.nuxie.sdk.runtime.NuxieTextGeometryCapture) {
                         delivered++
-                        assertEquals(ai.nuxie.sdk.runtime.NuxieTextGeometryCapture.Failed(3), geometry)
+                        assertEquals(ai.nuxie.sdk.runtime.NuxieTextGeometryCapture.Failed(if (boundary == "pending-hide") 4 else 3), geometry)
                     }
                 })
             controller.get().setContentView(host)
@@ -967,6 +1002,7 @@ class ExperienceSurfaceHostPointerTest {
                         host.doFrame(1_016_000_000L)
                     }
                     "pending-hide" -> {
+                        native.geometryStatus = 4
                         host.setPresentationVisible(false)
                         host.setPresentationVisible(true)
                         native.presentation = 1
@@ -981,7 +1017,8 @@ class ExperienceSurfaceHostPointerTest {
                 drain(lane)
                 android.view.Choreographer.getInstance().removeFrameCallback(host)
                 org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-                assertEquals("Queued snapshot at $boundary", if (boundary == "current" || boundary == "pending-current" || boundary == "newer") 1 else 0, delivered)
+                assertEquals("Queued snapshot at $boundary", if (boundary == "current" || boundary == "pending-current" || boundary == "pending-hide" || boundary == "newer") 1 else 0, delivered)
+                if (boundary == "pending-hide") assertEquals("Only the replacement frame delivers", 2, native.elapsedSteps.size)
             } finally {
                 host.release()
                 lane.shutdown()
@@ -1454,7 +1491,8 @@ class ExperienceSurfaceHostPointerTest {
         override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long = 4L
         override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int = 0
 
-        override fun detachRendererSurface(rendererHandle: Long): Int = 0
+        var detachCount = 0
+        override fun detachRendererSurface(rendererHandle: Long): Int { detachCount++; return 0 }
 
         var resizeStatus = 0
         override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int = resizeStatus

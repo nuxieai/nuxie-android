@@ -353,6 +353,22 @@ internal class JourneyService(
     private val foreground = JourneyForegroundAdmission()
     private var profileState: ProfileState? = null
     private var journal: JourneyRunJournal? = null
+    private val nativeValuesByRun = mutableMapOf<String, Pair<String, ai.nuxie.sdk.presentation.ExperienceRunValues>>()
+
+    private fun nativeValues(runId: String, owner: String): ai.nuxie.sdk.presentation.ExperienceRunValues =
+        nativeValuesByRun.getOrPut(runId) { owner to ai.nuxie.sdk.presentation.ExperienceRunValues() }.also {
+            check(it.first == owner)
+        }.second
+
+    private suspend fun retireNativeValues(runId: String) {
+        nativeValuesByRun.remove(runId)?.second?.retire()
+    }
+
+    private suspend fun retireOwnerValues(owner: String?) {
+        val entries = nativeValuesByRun.filterValues { owner == null || it.first == owner }
+        entries.keys.forEach(nativeValuesByRun::remove)
+        entries.values.forEach { it.second.retire() }
+    }
     private val retainedReleasesByDigest = linkedMapOf<String, AuthenticatedJourneyRelease>()
     private val retainedReleaseOrder = mutableListOf<String>()
     private var retainedReleaseBytes = 0
@@ -772,6 +788,7 @@ internal class JourneyService(
             profileState?.distinctId != distinctId &&
             currentJournal?.distinctId != distinctId
         ) return
+        retireOwnerValues(distinctId)
         cancelWake()
         profileGeneration.incrementAndGet()
         profileState?.artifacts?.close()
@@ -950,6 +967,7 @@ internal class JourneyService(
     }
 
     private suspend fun userDidChangeNow(from: String, to: String) {
+        retireOwnerValues(from)
         cancelWake()
         val departing = journal?.takeIf { it.distinctId == from }
         var departingRevoked = true
@@ -1088,6 +1106,7 @@ internal class JourneyService(
             Log.w(LOG_TAG, "Journey journal revocation failed", it)
         }.getOrDefault(false)
         if (!revoked) return false
+        retireOwnerValues(target.distinctId)
         runCatching {
             flushPendingReports(target)
             if (target.finalizeRevocation()) revokingCustomers.remove(target.distinctId)
@@ -2229,6 +2248,7 @@ internal class JourneyService(
             presentation.present(
                 JourneyPresentationRequest(
                     fences = JourneyPresentationFences(identity, identityScope, executionFence, executionToken),
+                    runValues = nativeValues(run.id, target.distinctId),
                     release = release,
                     delivery = executionSnapshot.delivery,
                     screenId = screenId,
@@ -2763,6 +2783,7 @@ internal class JourneyService(
             projected?.getValue("event")?.jsonObject ?: JsonObject(emptyMap()),
             responseOutputs,
         )
+        retireNativeValues(run.id)
         flushPendingReports(target)
         scheduleNextWake()
     }
@@ -2775,6 +2796,7 @@ internal class JourneyService(
                 nowMillis(),
                 responseOutputs = run.context.getValue("responses").jsonObject,
             )
+            retireNativeValues(run.id)
             flushPendingReports(target)
         }.onFailure { Log.w(LOG_TAG, "Journey abandonment failed", it) }
     }
