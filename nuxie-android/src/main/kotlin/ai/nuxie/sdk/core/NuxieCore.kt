@@ -343,6 +343,7 @@ internal class NuxieCore(
             request: JourneyPresentationRequest,
         ): JourneyPresentationResult = try {
             presentations.presentJourney(
+                fences = request.fences,
                 release = request.release,
                 screenId = request.screenId,
                 transition = request.transition,
