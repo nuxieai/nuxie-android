@@ -306,6 +306,8 @@ internal class ExperienceAccessibilityProvider(
         return dispatch(tree, entry.node.id, nativeAction)
     }
 
+    val hasKeyboardTargets: Boolean get() = keyboardOrder().isNotEmpty()
+
     /** Return false at either edge so Android can move focus to a native sibling. */
     fun key(event: KeyEvent): Boolean {
         if (!host.isEnabled || event.action != KeyEvent.ACTION_DOWN) return false

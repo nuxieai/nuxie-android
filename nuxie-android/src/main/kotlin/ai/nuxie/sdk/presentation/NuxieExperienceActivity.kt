@@ -276,9 +276,9 @@ internal class NuxieExperienceActivity : Activity() {
             blocksInput = false
         }
 
-        fun setVisible(visible: Boolean) {
+        fun setVisible(visible: Boolean, preservePendingInput: Boolean = false) {
             animation?.setVisible(visible)
-            if (blocksInput) target.mounted?.setVisible(visible)
+            if (blocksInput) target.mounted?.setVisible(visible, preservePendingInput)
         }
 
         fun cancel() { animation?.cancel() }
@@ -627,8 +627,8 @@ internal class NuxieExperienceActivity : Activity() {
     override fun onStop() {
         visible = false
         loadingView?.setActive(false)
-        navigation?.setVisible(false)
-        screens.forEach { it.mounted?.setVisible(false) }
+        navigation?.setVisible(false, preservePendingInput = true)
+        screens.forEach { it.mounted?.setVisible(false, preservePendingInput = true) }
         super.onStop()
     }
 
