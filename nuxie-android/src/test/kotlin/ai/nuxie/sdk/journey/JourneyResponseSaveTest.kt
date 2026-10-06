@@ -73,7 +73,7 @@ internal fun json(value: String): JsonObject = Json.parseToJsonElement(value).js
 internal fun responseSaveRun(journal: JourneyRunJournal): JourneyRun = requireNotNull(journal.admit(
     JourneyPlaneProfile.Arm(
         reference = json("""{"experienceId":"experience-1","versionId":"version-1","legId":"${"a".repeat(64)}","descriptorSha256":"${"b".repeat(64)}"}"""),
-        binding = json("""{"type":"continue","journeyId":"journey-1","generation":1}"""),
+        binding = json("""{"type":"continue","journeyId":"01900000-0000-7000-8000-000000000001","generation":1}"""),
         entryCondition = json("""{"type":"app_foregrounded"}"""),
         context = json("""{"event":{},"responses":{}}"""),
     ), JourneyFrequency.EveryMatch, "screen", 1000,
