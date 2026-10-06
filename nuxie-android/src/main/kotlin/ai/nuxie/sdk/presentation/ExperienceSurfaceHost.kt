@@ -158,13 +158,24 @@ internal class ExperienceSurfaceHost(
         private set
 
     fun dispatchExperienceKeyEvent(event: KeyEvent): Boolean {
-        if (!running || !sceneInputEnabled.get() || released.get() ||
-            rootView.findFocus()?.onCheckIsTextEditor() == true) {
+        if (!running || !sceneInputEnabled.get() || released.get()) {
             semanticKeys.clear()
             riveKeys.clear()
             return false
         }
         val code = event.keyCode
+        if (rootView.findFocus()?.onCheckIsTextEditor() == true) {
+            riveKeys.clear()
+            val authoredTab = code == KeyEvent.KEYCODE_TAB &&
+                (event.hasNoModifiers() || event.hasModifiers(KeyEvent.META_SHIFT_ON))
+            if (!authoredTab) { semanticKeys.clear(); return false }
+            if (code in semanticKeys) {
+                if (event.action == KeyEvent.ACTION_UP) { semanticKeys.remove(code); return true }
+                return accessibility.key(event)
+            }
+            if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return false
+            return accessibility.key(event).also { if (it) semanticKeys.add(code) }
+        }
         if (code in semanticKeys) {
             if (event.action == KeyEvent.ACTION_UP) {
                 semanticKeys.remove(code)
@@ -184,6 +195,7 @@ internal class ExperienceSurfaceHost(
             if (accepted) semanticKeys.add(code)
             return accepted
         }
+        if (code != KeyEvent.KEYCODE_TAB && !riveFocusState.hasFocus) return false
         val input = ExperienceHardwareKey.input(event) ?: return false
         val accepted = receiveFocusInput(input)
         if (accepted && event.action == KeyEvent.ACTION_DOWN) riveKeys.add(code)
@@ -649,6 +661,7 @@ internal class ExperienceSurfaceHost(
                     nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
                     val outcome = active.stepAfterStateMutation(correlationId = correlationId,
                         textRunNames = textInputs.values.filter { it.editableValueName == null }.map { it.runName }.distinct())
+                    outcome.focusState?.let { riveFocusState = it }
                     val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
                     root?.let { retainedViewModel?.set(it) }
                     if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, root))
@@ -703,6 +716,7 @@ internal class ExperienceSurfaceHost(
                         val correlationId = nextCorrelationId
                         nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
                         val outcome = checkNotNull(player).stepAfterStateMutation(correlationId = correlationId)
+                        outcome.focusState?.let { riveFocusState = it }
                         val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
                         root?.let { retainedViewModel?.set(it) }
                         if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, root))
@@ -740,6 +754,7 @@ internal class ExperienceSurfaceHost(
                             correlationId = correlationId,
                             textRunNames = textInputs.values.map { it.runName }.distinct(),
                         )
+                        outcome.focusState?.let { riveFocusState = it }
                         val captured = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
                         captured?.let { retainedViewModel?.set(it) }
                         if (outcome.hasPublishableEffects()) {
@@ -1047,10 +1062,12 @@ internal class ExperienceSurfaceHost(
                             focusInput.clear()
                             queuedFocusGeneration = currentFocusGeneration
                         }
+                        val focusBatch = focusInput.takeBatch()
+                        val hadFocus = riveFocusState.hasFocus
                         player.stepTyped(
                             elapsedSeconds = elapsedSeconds,
                             pointers = pointerInput.takeBatch(),
-                            focusInputs = focusInput.takeBatch(),
+                            focusInputs = focusBatch,
                             correlationId = correlationId,
                             textRunNames = textInputs.values.map { it.runName }.distinct(),
                         ).also {
@@ -1068,6 +1085,23 @@ internal class ExperienceSurfaceHost(
                                 }
                             }
                             it.focusState?.let { state -> riveFocusState = state }
+                            if (!hadFocus && it.focusState?.hasFocus == false) {
+                                val direction = focusBatch.zip(it.focusResults).firstNotNullOfOrNull { (input, moved) ->
+                                    if (moved) null else when (input) {
+                                        NuxieFocusInput.Next -> android.view.View.FOCUS_FORWARD
+                                        NuxieFocusInput.Previous -> android.view.View.FOCUS_BACKWARD
+                                        else -> null
+                                    }
+                                }
+                                if (direction != null) post {
+                                    if (!released.get() && running && sceneInputEnabled.get() &&
+                                        generation == frameGeneration.get() && currentFocusGeneration == focusGeneration.get() &&
+                                        !riveFocusState.hasFocus) {
+                                        val current = rootView.findFocus() ?: this
+                                        current.focusSearch(direction)?.takeIf { target -> target !== current }?.requestFocus(direction)
+                                    }
+                                }
+                            }
                             videoPlayback?.advance(renderer, frameTimeNanos / 1_000_000_000.0)
                         }
                     } catch (error: Throwable) {

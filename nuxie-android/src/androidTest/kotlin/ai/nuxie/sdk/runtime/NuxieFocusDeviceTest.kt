@@ -63,8 +63,42 @@ class NuxieFocusDeviceTest {
             assertFalse(checkNotNull(cleared.focusState).hasFocus)
             val idle = player.stepTyped(elapsedSeconds = 0.0)
             assertTrue(idle.focusResults.isEmpty())
-            assertNull(idle.focusState)
+            assertEquals(NuxieFocusState(false, false), idle.focusState)
         }
+    @Test fun boundOpacityClearsFocusOnAnInputFreeStep() {
+        val runtime = NuxieRuntime.shared
+        val bytes = assets.open("runtime/rive-focus/focus_collapsing.riv").use { it.readBytes() }
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(64, 64))
+        try {
+            val file = checkNotNull(runtime.importFile(renderer, bytes))
+            try {
+                val artboard = checkNotNull(file.newArtboard())
+                try {
+                    val root = checkNotNull(native.newDefaultViewModel(artboard.requireHandle()).value)
+                    val schema = checkNotNull(native.viewModelRootSchemaIndex(root).value)
+                    val name = checkNotNull(native.viewModelCatalog(file.requireHandle()).value).toViewModelCatalog()
+                        .schemas.single { it.index.toLong() == schema }.name
+                    native.freeViewModel(root)
+                    artboard.bindDefaultViewModel(name, "root")
+                    val player = checkNotNull(artboard.newPlayer())
+                    try {
+                        player.stepTyped(elapsedSeconds = 0.016)
+                        repeat(2) { player.stepTyped(elapsedSeconds = 0.016, focusInputs = listOf(NuxieFocusInput.Next)) }
+                        assertTrue(checkNotNull(player.stepTyped(elapsedSeconds = 0.016).focusState).hasFocus)
+                        assertTrue(artboard.setDefaultViewModelValue("opacity", NuxieViewModelScalarValue.NumberValue(0.0)))
+                        player.stepAfterStateMutation(correlationId = 0u)
+                        assertFalse(checkNotNull(player.stepAfterStateMutation(correlationId = 0u).focusState).hasFocus)
+                        assertFalse(checkNotNull(player.stepTyped(elapsedSeconds = 0.016).focusState).hasFocus)
+                        assertTrue(artboard.setDefaultViewModelValue("opacity", NuxieViewModelScalarValue.NumberValue(1.0)))
+                        player.stepAfterStateMutation(correlationId = 0u)
+                        repeat(2) { player.stepTyped(elapsedSeconds = 0.016, focusInputs = listOf(NuxieFocusInput.Next)) }
+                        assertTrue(checkNotNull(player.stepTyped(elapsedSeconds = 0.016).focusState).hasFocus)
+                    } finally { player.close() }
+                } finally { artboard.close() }
+            } finally { file.close() }
+        } finally { renderer.close() }
+    }
+
     @Test fun compositePlayersMoveFocusOnlyOncePerInput() {
         val runtime = NuxieRuntime.shared
         assertTrue(runtime.isAvailable)

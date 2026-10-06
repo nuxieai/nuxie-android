@@ -499,6 +499,7 @@ internal class NuxieRuntimePlayer internal constructor(
     private var interactionPlayer: NuxieRuntimePlayer? = null
     private var interactionStepPending = true
     private var stepFailed = false
+    private val stateMachine by lazy(LazyThreadSafetyMode.NONE) { isStateMachine() }
 
     fun setLayoutSize(width: Float, height: Float) {
         require(width.isFinite() && width > 0f && height.isFinite() && height > 0f)
@@ -645,9 +646,7 @@ internal class NuxieRuntimePlayer internal constructor(
         require(nativeElapsed.isFinite()) { "Player elapsed seconds exceed the native Float range" }
         requireHandle()
         val auxiliary = interactionPlayer
-        val readsFocus = pointers.isNotEmpty() || focusInputs.isNotEmpty()
-        val focusPlayer = if (!readsFocus) null else if (isStateMachine()) this
-            else auxiliary?.takeIf { it.isStateMachine() }
+        val focusPlayer = if (stateMachine) this else auxiliary?.takeIf { it.stateMachine }
         val encodedFocus = if (focusPlayer != null) encodeFocusInputs(focusInputs) else emptyList()
         if (auxiliary == null) {
             return stepSingle(inputs, pointers, nativeElapsed, correlationId, textRunNames, encodedFocus)
@@ -659,7 +658,7 @@ internal class NuxieRuntimePlayer internal constructor(
             val primary = stepSingle(emptyList(), pointers, nativeElapsed, correlationId,
                 if (stepsInteraction) emptyList() else textRunNames,
                 if (focusPlayer === this) encodedFocus else emptyList())
-            if (!stepsInteraction) return primary
+            if (!stepsInteraction) return primary.copy(focusState = focusPlayer?.readFocusState())
             val interaction = auxiliary.stepSingle(inputs, pointers, 0f, correlationId, textRunNames,
                 if (focusPlayer === auxiliary) encodedFocus else emptyList())
             interactionStepPending = false
