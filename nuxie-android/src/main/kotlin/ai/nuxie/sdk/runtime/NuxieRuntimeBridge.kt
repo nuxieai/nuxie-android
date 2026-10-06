@@ -222,6 +222,10 @@ internal object NuxieRuntimeBridge {
 
     external fun nativePlayerStateMachineName(player: Long, statusOut: IntArray): String?
 
+    external fun nativePlayerKind(player: Long, statusOut: IntArray): Int
+
+    external fun nativePlayerFocusState(player: Long, statusOut: IntArray): BooleanArray?
+
     external fun nativePlayerEnableSemantics(player: Long): Int
 
     external fun nativePlayerSemanticSnapshot(player: Long, statusOut: IntArray): Long
@@ -294,6 +298,7 @@ internal object NuxieRuntimeBridge {
         elapsedSeconds: Float,
         correlationId: Long,
         textRunNames: Array<ByteArray>,
+        focusInputs: Array<NativeFocusInput>,
         statusOut: IntArray,
     ): NativePlayerStepOutcome?
 

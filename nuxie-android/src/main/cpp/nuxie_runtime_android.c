@@ -2445,6 +2445,141 @@ geometry_done:
   return (*env)->PopLocalFrame(env, capture);
 }
 
+struct owned_focus_inputs {
+  struct NuxPlayerFocusInput *values;
+  size_t count;
+};
+
+static void free_focus_inputs(struct owned_focus_inputs *inputs) {
+  if (inputs->values != NULL) {
+    for (size_t index = 0; index < inputs->count; index++) {
+      free((void *)inputs->values[index].text.data);
+    }
+  }
+  free(inputs->values);
+  inputs->values = NULL;
+  inputs->count = 0;
+}
+
+static NuxStatus copy_focus_inputs(JNIEnv *env, jobjectArray source,
+                                   struct owned_focus_inputs *out) {
+  if (source == NULL) return NUX_STATUS_NULL_ARGUMENT;
+  jsize count = (*env)->GetArrayLength(env, source);
+  if (clear_jni_exception(env)) return NUX_STATUS_RUNTIME_ERROR;
+  if (count > NUX_PLAYER_STEP_MAX_FOCUS_INPUTS) return NUX_STATUS_INVALID_ARGUMENT;
+  if (count == 0) return NUX_STATUS_OK;
+  if ((*env)->PushLocalFrame(env, 4) < 0) {
+    clear_jni_exception(env);
+    return NUX_STATUS_RUNTIME_ERROR;
+  }
+  NuxStatus status = NUX_STATUS_RUNTIME_ERROR;
+  jclass cls = (*env)->FindClass(env, "ai/nuxie/sdk/runtime/NativeFocusInput");
+  if (clear_jni_exception(env) || cls == NULL) goto focus_done;
+  jfieldID kind_field = (*env)->GetFieldID(env, cls, "kind", "I");
+  if (clear_jni_exception(env) || kind_field == NULL) goto focus_done;
+  jfieldID code_field = (*env)->GetFieldID(env, cls, "code", "I");
+  if (clear_jni_exception(env) || code_field == NULL) goto focus_done;
+  jfieldID modifiers_field = (*env)->GetFieldID(env, cls, "modifiers", "I");
+  if (clear_jni_exception(env) || modifiers_field == NULL) goto focus_done;
+  jfieldID pressed_field = (*env)->GetFieldID(env, cls, "pressed", "Z");
+  if (clear_jni_exception(env) || pressed_field == NULL) goto focus_done;
+  jfieldID repeated_field = (*env)->GetFieldID(env, cls, "repeated", "Z");
+  if (clear_jni_exception(env) || repeated_field == NULL) goto focus_done;
+  jfieldID text_field = (*env)->GetFieldID(env, cls, "text", "[B");
+  if (clear_jni_exception(env) || text_field == NULL) goto focus_done;
+  out->values = calloc((size_t)count, sizeof(*out->values));
+  if (out->values == NULL) goto focus_done;
+  out->count = (size_t)count;
+  size_t total_bytes = 0;
+  for (jsize index = 0; index < count; index++) {
+    jobject item = (*env)->GetObjectArrayElement(env, source, index);
+    if (clear_jni_exception(env) || item == NULL) goto focus_done;
+    struct NuxPlayerFocusInput *value = &out->values[index];
+    jint kind = (*env)->GetIntField(env, item, kind_field);
+    if (clear_jni_exception(env)) goto focus_done;
+    if (kind < NUX_PLAYER_FOCUS_KIND_NEXT || kind > NUX_PLAYER_FOCUS_KIND_TEXT) {
+      status = NUX_STATUS_INVALID_ARGUMENT;
+      goto focus_done;
+    }
+    value->kind = (uint32_t)kind;
+    if (kind == NUX_PLAYER_FOCUS_KIND_KEY) {
+      jint code = (*env)->GetIntField(env, item, code_field);
+      jint modifiers = (*env)->GetIntField(env, item, modifiers_field);
+      jboolean pressed = (*env)->GetBooleanField(env, item, pressed_field);
+      jboolean repeated = (*env)->GetBooleanField(env, item, repeated_field);
+      if (clear_jni_exception(env)) goto focus_done;
+      if (code < 0 || code > UINT16_MAX || modifiers < 0 || modifiers > 15) {
+        status = NUX_STATUS_INVALID_ARGUMENT;
+        goto focus_done;
+      }
+      value->key_code = (uint32_t)code;
+      value->modifiers = (uint32_t)modifiers;
+      value->pressed = pressed == JNI_TRUE ? 1u : 0u;
+      value->repeat = repeated == JNI_TRUE ? 1u : 0u;
+    } else if (kind == NUX_PLAYER_FOCUS_KIND_TEXT) {
+      jbyteArray text = (jbyteArray)(*env)->GetObjectField(env, item, text_field);
+      if (clear_jni_exception(env) || text == NULL) goto focus_done;
+      jsize length = (*env)->GetArrayLength(env, text);
+      if (clear_jni_exception(env)) goto focus_done;
+      if (length > NUX_PLAYER_STEP_MAX_TEXT_BYTES ||
+          total_bytes > NUX_PLAYER_STEP_MAX_TEXT_BYTES_TOTAL - (size_t)length) {
+        status = NUX_STATUS_INVALID_ARGUMENT;
+        goto focus_done;
+      }
+      total_bytes += (size_t)length;
+      char *bytes = malloc(length == 0 ? 1u : (size_t)length);
+      if (bytes == NULL) goto focus_done;
+      value->text.data = bytes;
+      value->text.len = (size_t)length;
+      if (length != 0) (*env)->GetByteArrayRegion(env, text, 0, length, (jbyte *)bytes);
+      if (clear_jni_exception(env)) goto focus_done;
+      (*env)->DeleteLocalRef(env, text);
+    }
+    (*env)->DeleteLocalRef(env, item);
+  }
+  status = NUX_STATUS_OK;
+focus_done:
+  (*env)->PopLocalFrame(env, NULL);
+  if (status != NUX_STATUS_OK) free_focus_inputs(out);
+  return status;
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerKind(
+    JNIEnv *env, jobject self, jlong player, jintArray status_out) {
+  (void)self;
+  struct NuxPlayerInfo info = {0};
+  info.struct_size = sizeof(info);
+  NuxStatus status = nux_player_info((const struct NuxPlayer *)from_handle(player), &info);
+  if (!set_status_out(env, status_out, status)) return -1;
+  return status == NUX_STATUS_OK ? (jint)info.kind : -1;
+}
+
+JNIEXPORT jbooleanArray JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerFocusState(
+    JNIEnv *env, jobject self, jlong player, jintArray status_out) {
+  (void)self;
+  struct NuxPlayerFocusState state = {0};
+  state.struct_size = sizeof(state);
+  NuxStatus status = nux_player_focus_state((const struct NuxPlayer *)from_handle(player), &state);
+  jbooleanArray result = NULL;
+  if (status == NUX_STATUS_OK) {
+    result = (*env)->NewBooleanArray(env, 2);
+    if (clear_jni_exception(env) || result == NULL) status = NUX_STATUS_RUNTIME_ERROR;
+    if (status == NUX_STATUS_OK) {
+      jboolean values[2] = {state.has_focus == 1u ? JNI_TRUE : JNI_FALSE,
+                            state.expects_keyboard_input == 1u ? JNI_TRUE : JNI_FALSE};
+      (*env)->SetBooleanArrayRegion(env, result, 0, 2, values);
+      if (clear_jni_exception(env)) status = NUX_STATUS_RUNTIME_ERROR;
+    }
+  }
+  if (!set_status_out(env, status_out, status) || status != NUX_STATUS_OK) {
+    if (result != NULL) (*env)->DeleteLocalRef(env, result);
+    return NULL;
+  }
+  return result;
+}
+
 JNIEXPORT jobject JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     JNIEnv *env, jobject self, jlong player, jintArray input_kind_array,
@@ -2453,7 +2588,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     jfloatArray pointer_x_array, jfloatArray pointer_y_array,
     jintArray pointer_id_array, jfloatArray pointer_timestamp_array,
     jfloat elapsed_seconds, jlong correlation_id, jobjectArray text_run_names,
-    jintArray status_out) {
+    jobjectArray focus_input_array, jintArray status_out) {
   (void)self;
   NuxStatus reported_status = NUX_STATUS_RUNTIME_ERROR;
   if (status_out == NULL) return NULL;
@@ -2466,6 +2601,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     return NULL;
   }
 
+  struct owned_focus_inputs focus_inputs = {0};
+  jbooleanArray focus_results = NULL;
   jint *kinds = NULL;
   jboolean *bool_values = NULL;
   jfloat *number_values = NULL;
@@ -2649,6 +2786,12 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     inputs[index].number_value = number_values[index];
   }
 
+  reported_status = copy_focus_inputs(env, focus_input_array, &focus_inputs);
+  if (reported_status != NUX_STATUS_OK) {
+    failed = 1;
+    goto typed_step_cleanup;
+  }
+
   struct NuxPlayerStep step;
   memset(&step, 0, sizeof(step));
   step.struct_size = (uint32_t)sizeof(step);
@@ -2656,6 +2799,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
   step.input_count = (size_t)count;
   step.pointers = pointer_count == 0 ? NULL : pointers;
   step.pointer_count = (size_t)pointer_count;
+  step.focus_inputs = focus_inputs.values;
+  step.focus_input_count = focus_inputs.count;
   step.elapsed_seconds = elapsed_seconds;
   step.correlation_id = (uint64_t)correlation_id;
   NuxStatus call_status = nux_player_step(
@@ -2700,7 +2845,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     failed = 1;
     goto typed_step_cleanup;
   }
-  if (info.pointer_result_count > INT32_MAX ||
+  if (info.focus_input_result_count > INT32_MAX ||
+      info.pointer_result_count > INT32_MAX ||
       info.event_count > INT32_MAX || info.host_command_count > INT32_MAX ||
       info.view_model_change_count > INT32_MAX) {
     failed = 1;
@@ -2796,10 +2942,31 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
       "(Z[I[Lai/nuxie/sdk/runtime/NativeRuntimeEvent;"
       "[Lai/nuxie/sdk/runtime/NativeHostCommand;"
       "[Lai/nuxie/sdk/runtime/NativeViewModelChange;"
-      "Lai/nuxie/sdk/runtime/NativeTextGeometryCapture;)V");
+      "Lai/nuxie/sdk/runtime/NativeTextGeometryCapture;[Z)V");
   if (clear_jni_exception(env) || outcome_constructor == NULL) {
     failed = 1;
     goto typed_step_cleanup;
+  }
+
+  focus_results = (*env)->NewBooleanArray(env, (jsize)info.focus_input_result_count);
+  if (clear_jni_exception(env) || focus_results == NULL) {
+    failed = 1;
+    goto typed_step_cleanup;
+  }
+  for (size_t index = 0; index < info.focus_input_result_count; index++) {
+    uint32_t accepted = 0;
+    accessor_status = nux_player_step_result_focus_input(step_result, index, &accepted);
+    if (accessor_status != NUX_STATUS_OK) {
+      reported_status = accessor_status;
+      failed = 1;
+      goto typed_step_cleanup;
+    }
+    jboolean value = accepted == 1u ? JNI_TRUE : JNI_FALSE;
+    (*env)->SetBooleanArrayRegion(env, focus_results, (jsize)index, 1, &value);
+    if (clear_jni_exception(env)) {
+      failed = 1;
+      goto typed_step_cleanup;
+    }
   }
 
   pointer_hits = (*env)->NewIntArray(env, (jsize)info.pointer_result_count);
@@ -3104,11 +3271,13 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepTyped(
     outcome = (*env)->NewObject(
         env, outcome_class, outcome_constructor,
         (jboolean)(info.keep_going ? JNI_TRUE : JNI_FALSE), pointer_hits,
-        events, host_commands, changes, text_geometry);
+        events, host_commands, changes, text_geometry, focus_results);
     if (clear_jni_exception(env) || outcome == NULL) failed = 1;
   }
 
 typed_step_cleanup:
+  free_focus_inputs(&focus_inputs);
+  if (focus_results != NULL) (*env)->DeleteLocalRef(env, focus_results);
   if (step_result != NULL) {
     NuxStatus free_status = nux_player_step_result_free(step_result);
     log_cleanup_failure("player_step_result_free", free_status);

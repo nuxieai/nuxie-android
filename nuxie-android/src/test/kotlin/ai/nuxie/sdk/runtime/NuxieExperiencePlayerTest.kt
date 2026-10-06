@@ -114,8 +114,72 @@ class NuxieExperiencePlayerTest {
         } finally { snapshot.close(); player.close() }
     }
 
+    @Test fun `focus inputs reach only the first state machine and state follows both steps`() {
+        val native = RecordingNative()
+        val player = NuxieRuntimePlayer(10, native)
+        player.installInteractionPlayer(NuxieRuntimePlayer(11, native))
+        player.stepTyped(elapsedSeconds = 0.0)
+        native.steps.clear()
+        native.focusBatches.clear()
+        val outcome = player.stepTyped(elapsedSeconds = 0.016,
+            focusInputs = listOf(NuxieFocusInput.Next, NuxieFocusInput.Text("é")))
+        assertEquals(listOf(10L, 11L), native.steps.map { it.handle })
+        assertEquals(listOf(0, 4), native.focusBatches[0].second.map { it.kind })
+        assertTrue(native.focusBatches[1].second.isEmpty())
+        assertArrayEquals(byteArrayOf(-61, -87), native.focusBatches[0].second[1].text)
+        assertEquals(listOf(true, true), outcome.focusResults)
+        assertEquals(NuxieFocusState(true, false), outcome.focusState)
+        assertEquals(listOf(10L to 2), native.focusReads)
+        player.stepTyped(elapsedSeconds = 0.016)
+        assertEquals(1, native.focusReads.size)
+        player.close()
+    }
+
+    @Test fun `focus skips static primary and reaches auxiliary once`() {
+        val native = RecordingNative().apply { playerKinds[10L] = 0 }
+        val player = NuxieRuntimePlayer(10, native)
+        player.installInteractionPlayer(NuxieRuntimePlayer(11, native))
+        val outcome = player.stepTyped(elapsedSeconds = 0.0, focusInputs = listOf(NuxieFocusInput.Previous))
+        assertTrue(native.focusBatches[0].second.isEmpty())
+        assertEquals(listOf(1), native.focusBatches[1].second.map { it.kind })
+        assertEquals(listOf(true), outcome.focusResults)
+        assertEquals(listOf(11L to 2), native.focusReads)
+        player.close()
+    }
+
+    @Test fun `static and linear players receive no focus input or state query`() {
+        for (kind in listOf(0, 2)) {
+            val native = RecordingNative().apply { playerKinds[10L] = kind }
+            val player = NuxieRuntimePlayer(10, native)
+            val outcome = player.stepTyped(elapsedSeconds = 0.0,
+                focusInputs = listOf(NuxieFocusInput.Next, NuxieFocusInput.Text("b")))
+            assertTrue(native.focusBatches.single().second.isEmpty())
+            assertTrue(outcome.focusResults.isEmpty())
+            assertNull(outcome.focusState)
+            assertTrue(native.focusReads.isEmpty())
+            player.close()
+        }
+    }
+
+    @Test fun `unnamed state machine still receives focus`() {
+        val native = RecordingNative().apply { primaryName = "" }
+        val player = NuxieRuntimePlayer(10, native)
+        player.stepTyped(elapsedSeconds = 0.0, focusInputs = listOf(NuxieFocusInput.Clear))
+        assertEquals(listOf(2), native.focusBatches.single().second.map { it.kind })
+        assertEquals(listOf(10L to 1), native.focusReads)
+        player.close()
+    }
+
     private data class Step(val handle: Long, val elapsed: Float, val inputs: List<String>, val pointers: Int, val correlation: Long)
     private class RecordingNative : NuxieTypedRuntimeNative {
+        val playerKinds = mutableMapOf(10L to 1, 11L to 1)
+        val focusBatches = mutableListOf<Pair<Long, List<NativeFocusInput>>>()
+        val focusReads = mutableListOf<Pair<Long, Int>>()
+        override fun playerKind(playerHandle: Long) = NativeCallResult(0, playerKinds.getValue(playerHandle))
+        override fun playerFocusState(playerHandle: Long): NativeCallResult<NuxieFocusState> {
+            focusReads += playerHandle to steps.size
+            return NativeCallResult(0, NuxieFocusState(true, false))
+        }
         var semanticActionStatus = 0
         override fun captureSemantics(player: Long) = NativeCallResult(0, 99L)
         override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(1, 1, 0))
@@ -139,8 +203,9 @@ class NuxieExperiencePlayerTest {
         override fun freePlayer(handle: Long) { freed += handle }
         override fun freeArtboard(handle: Long) { freed += handle }
         override fun freeFile(handle: Long) { freed += handle }
-        override fun stepPlayer(playerHandle: Long, inputs: List<NativePlayerInput>, pointers: List<NativePlayerPointer>, elapsedSeconds: Float, correlationId: Long, textRunNames: List<String>): NativeCallResult<NativePlayerStepOutcome> {
+        override fun stepPlayer(playerHandle: Long, inputs: List<NativePlayerInput>, pointers: List<NativePlayerPointer>, elapsedSeconds: Float, correlationId: Long, textRunNames: List<String>, focusInputs: List<NativeFocusInput>): NativeCallResult<NativePlayerStepOutcome> {
             steps += Step(playerHandle, elapsedSeconds, inputs.map { it.name }, pointers.size, correlationId)
+            focusBatches += playerHandle to focusInputs
             if (playerHandle == 11L && failAuxiliaryStep) return NativeCallResult(4, null)
             return NativeCallResult(0, NativePlayerStepOutcome(
                 playerHandle == 11L,
@@ -148,6 +213,7 @@ class NuxieExperiencePlayerTest {
                 arrayOf(NativeRuntimeEvent(0, 0, "event-$playerHandle", "", "", 0f, emptyArray())),
                 arrayOf(NativeHostCommand("command-$playerHandle", NativeHostValue(0, false, 0.0, "", emptyArray(), emptyArray()))),
                 emptyArray(),
+                focusResults = BooleanArray(focusInputs.size) { true },
             ))
         }
     }

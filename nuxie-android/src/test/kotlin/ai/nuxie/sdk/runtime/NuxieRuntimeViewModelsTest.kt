@@ -113,6 +113,7 @@ class NuxieRuntimeViewModelsTest {
             elapsedSeconds: Float,
             correlationId: Long,
             textRunNames: List<String>,
+            focusInputs: List<NativeFocusInput>,
         ): NativeCallResult<NativePlayerStepOutcome> {
             record("step")
             assertEquals(listOf(NativePlayerInput(2, "submit", false, 0f)), inputs)
