@@ -311,6 +311,9 @@ class SharedValuesJourneyDeviceTest {
             current = service(true)
             withTimeout(15_000) { current.initialize() }
             if (revokeRestore) {
+                withTimeout(15_000) { current.onAppWillEnterForeground() }
+                withTimeout(15_000) { current.profileDidCommit(checkNotNull(catalog.snapshot(owner)), fixture.authority, owner, 1) }
+                assertEquals(1, restorations)
                 assertNotNull(journal.runs().single().park)
                 assertEquals(JsonPrimitive(30f), journal.runs().single().nativeSnapshot?.journeyValues?.get("trip_days"))
                 assertTrue(completed.isEmpty())
