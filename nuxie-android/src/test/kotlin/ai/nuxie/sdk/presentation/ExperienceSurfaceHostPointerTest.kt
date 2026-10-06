@@ -163,11 +163,11 @@ class ExperienceSurfaceHostPointerTest {
                 allowResize.countDown()
             }
             drain(lane)
-            assertEquals("Resize retires the pending frame and requires a fresh step", 4, native.elapsedSteps.size)
+            assertEquals("Resize settles with a zero step", listOf(0f, 0.064f, 0.016f, 0f), native.elapsedSteps)
             assertEquals("Retired frame effects await the replacement delivery", listOf(1uL, 3uL), published)
             host.doFrame(1_112_000_000L)
             drain(lane)
-            assertEquals("A queued resize must not count the same elapsed time twice", 0.016f, native.elapsedSteps.last(), 0.000001f)
+            assertEquals("The next animation step includes time spent settling layout", 0.032f, native.elapsedSteps.last(), 0.000001f)
         } finally {
             host.release()
             lane.shutdown()
