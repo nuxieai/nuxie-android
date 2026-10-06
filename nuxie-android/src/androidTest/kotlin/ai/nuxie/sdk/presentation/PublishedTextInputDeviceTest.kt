@@ -1934,16 +1934,13 @@ class PublishedTextInputDeviceTest {
         val releaseCheckpoint = CompletableDeferred<Unit>()
         var holdCheckpoint = false
         var pendingNavigation: Deferred<Activity>? = null
-        var nextBatch = 0L
-        var nextEmission = 0L
         fun present(screenId: String): Activity {
             runBlocking {
                 service.presentJourney(testPresentationFences(), fixture.release, screenId, journey, owner, service.reserveJourney(owner),
                     acquire = { AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv,
                         protection = Closeable {}) },
-                    nextBatchSequence = nextBatch, nextEmissionSequence = nextEmission,
                     onScreenChanged = { screens.add(it); true },
-                    onEmissionBatch = { batch, frameSources ->
+                    onEmissionBatch = { batch, _ ->
                         batches.add(batch)
                         true
                     }, onScreenDismissed = { _, _, _ ->
@@ -1960,22 +1957,23 @@ class PublishedTextInputDeviceTest {
             assertHostedScreen(instrumentation, host, screenId)
             return host
         }
-        fun response(value: String) {
-            val batch = checkNotNull(batches.poll(10, TimeUnit.SECONDS)) { "Native commit must reach the response coordinator" }
-            assertEquals(journey, batch.journeyId)
-            assertEquals(nextBatch++, batch.batchSequence)
-            assertEquals(JourneyScreenEmissionSource("screen_1", "text_input:$inputId", inputId, null), batch.source)
-            val emission = batch.emissions.single()
-            assertEquals(nextEmission++, emission.sequence)
-            assertEquals("\$response_set", emission.name)
-            assertEquals("email", emission.payload.getValue("field").jsonPrimitive.content)
-            assertEquals(value, emission.payload.getValue("value").jsonPrimitive.content)
+        fun committedValue(value: String) {
+            val host = checkNotNull(hostActivity)
+            val id = checkNotNull(host.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
+            val state = checkNotNull(PresentationRegistry.resolve(id)).textInputState
+            val deadline = SystemClock.elapsedRealtime() + 10_000
+            while (state.committedValue(inputId) != value && SystemClock.elapsedRealtime() < deadline) {
+                SystemClock.sleep(20)
+            }
+            assertEquals("Accepted native text must reach the retained screen state", value, state.committedValue(inputId))
+            assertNull("Native edits must not synthesize answer events", batches.poll(300, TimeUnit.MILLISECONDS))
         }
+
         try {
             val first = present(navigationScreens[0])
             val field = awaitEditor(instrumentation, first, inputId)
             edit(instrumentation, field, "saved@example.com")
-            response("saved@example.com")
+            committedValue("saved@example.com")
             instrumentation.runOnMainSync { field.setSelection(2, 7) }
             val outgoingSurface = checkNotNull(findSurface(first.window.decorView))
             val beforeFailure = stableSurface(outgoingSurface)
@@ -2039,9 +2037,9 @@ class PublishedTextInputDeviceTest {
                 assertTrue(retained.requestFocus())
                 retained.clearFocus()
             }
-            assertEquals("Unchanged retained text must not emit a second response", null, batches.poll(300, TimeUnit.MILLISECONDS))
+            assertEquals("Unchanged retained text must not synthesize an answer event", null, batches.poll(300, TimeUnit.MILLISECONDS))
             edit(instrumentation, retained, "next@example.com")
-            response("next@example.com")
+            committedValue("next@example.com")
             runBlocking { service.shutdownOwnedBy(owner) }
             assertEquals(null, service.journeyScreenId(JourneyPresentationOwner(journey, owner)))
         } finally {
