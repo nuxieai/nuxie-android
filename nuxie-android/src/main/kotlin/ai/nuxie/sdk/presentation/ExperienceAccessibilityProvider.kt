@@ -308,6 +308,12 @@ internal class ExperienceAccessibilityProvider(
 
     val hasKeyboardTargets: Boolean get() = keyboardOrder().isNotEmpty()
 
+    fun enterKeyboardOrder(direction: Int): Boolean {
+        val order = keyboardOrder()
+        val target = if (direction == View.FOCUS_BACKWARD) order.lastOrNull() else order.firstOrNull()
+        return target?.let { focusKeyboardTarget(it, direction) } ?: false
+    }
+
     /** Return false at either edge so Android can move focus to a native sibling. */
     fun key(event: KeyEvent): Boolean {
         if (!host.isEnabled || event.action != KeyEvent.ACTION_DOWN) return false
