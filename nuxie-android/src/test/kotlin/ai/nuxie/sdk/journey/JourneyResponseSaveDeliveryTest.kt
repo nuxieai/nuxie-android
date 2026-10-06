@@ -30,10 +30,12 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.SQLiteMode
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [23])
+@SQLiteMode(SQLiteMode.Mode.NATIVE)
 class JourneyResponseSaveDeliveryTest {
     private lateinit var directory: File
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -199,6 +201,69 @@ class JourneyResponseSaveDeliveryTest {
         delivery.activate(JourneyStorageScope.testFixture)
         withTimeout(5_000) { while (journal.pendingResponseSaves().isNotEmpty()) delay(10) }
         assertEquals("unreadable", damaged.readText())
+    }
+
+    @Test fun `background callback keeps an accepted save in flight`() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val journal = JourneyRunJournal(directory, "anon")
+        val run = responseSaveRun(journal)
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val requests = CopyOnWriteArrayList<Long>()
+        val delivery = worker(JourneyResponseSaveTransport { sheet ->
+            requests += sheet.sequence
+            started.complete(Unit)
+            release.await()
+            reply("""{"status":"saved","sequence":1}""")
+        })
+        val store = ai.nuxie.sdk.events.SQLiteEventStore(context)
+        try {
+            val catalog = ai.nuxie.sdk.experiences.JourneyProfileCatalog(emptyMap(),
+                ai.nuxie.sdk.experiences.JourneyReleaseHighWaterStore(context)) { null }
+            val service = JourneyService(ai.nuxie.sdk.identity.IdentityService(context), store, catalog, directory, scope,
+                capture = { _, _, _, _ -> true }, responseSaveDelivery = delivery)
+            delivery.activate(JourneyStorageScope.testFixture)
+            delivery.enqueue(journal, run, "feedback", json("{}"))
+            withTimeout(5_000) { started.await() }
+            service.settleAppBackground()
+            release.complete(Unit)
+            withTimeout(5_000) { while (journal.pendingResponseSaves().isNotEmpty()) delay(10) }
+            assertEquals(listOf(1L), requests)
+        } finally { release.complete(Unit); store.close() }
+    }
+
+    @Test fun `receipt write failure never sends a replaced snapshot`() = runBlocking {
+        val journal = JourneyRunJournal(directory, "anon")
+        val run = responseSaveRun(journal)
+        journal.reserveResponseSave(run, "first", json("{}"), true)
+        journal.reserveResponseSave(run, "second", json("{}"), true)
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val requests = CopyOnWriteArrayList<JourneyResponseSave>()
+        val delivery = worker(JourneyResponseSaveTransport { sheet ->
+            requests += sheet
+            if (requests.size == 1) { started.complete(Unit); release.await() }
+            reply("""{"status":"saved","sequence":2}""")
+        })
+        delivery.activate(JourneyStorageScope.testFixture)
+        withTimeout(5_000) { started.await() }
+        val other = if (requests.first().formName == "first") "second" else "first"
+        delivery.enqueue(journal, run, other, json("""{"new":true}"""))
+        val journals = File(directory, "journey-state-v2/journals")
+        val retained = File(directory, "retained-journals")
+        assertTrue(journals.renameTo(retained))
+        journals.writeText("blocks receipt persistence")
+        try {
+            release.complete(Unit)
+            delay(200)
+            assertFalse(requests.any { it.formName == other && it.sequence == 1L })
+            delivery.shutdown()
+        } finally {
+            delivery.shutdown()
+            journals.delete()
+            assertTrue(retained.renameTo(journals))
+        }
+        assertEquals(2, journal.pendingResponseSaves().size)
     }
 
     @Test fun `worker reselects sheets after an awaited send`() = runBlocking {

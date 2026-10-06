@@ -235,14 +235,6 @@ internal class NuxieApi(
         return ProfileCacheValidator(raw, resourceScope, authority)
     }
 
-    /**
-     * Post pre-encoded batch items (canonical JSON text from the
-     * conformance-tested encoder; assembled by concatenation so item bytes
-     * reach the wire exactly as encoded). Validates per-item acceptance on 2xx.
-     *
-     * @throws IOException on transport failure (retryable)
-     * @throws BatchRejectedException on a non-2xx response
-     */
     override suspend fun sendResponseSave(sheet: JourneyResponseSave): JourneyResponseSaveReply = withContext(Dispatchers.IO) {
         val body = JsonObject(sheet.toJson() + ("apiKey" to JsonPrimitive(apiKey))).toString().encodeToByteArray()
         val response = transport.execute(HttpTransport.Request(
@@ -254,6 +246,14 @@ internal class NuxieApi(
         JourneyResponseSaveReply.decode(response.body, sheet.sequence)
     }
 
+    /**
+     * Post pre-encoded batch items (canonical JSON text from the
+     * conformance-tested encoder; assembled by concatenation so item bytes
+     * reach the wire exactly as encoded). Validates per-item acceptance on 2xx.
+     *
+     * @throws IOException on transport failure (retryable)
+     * @throws BatchRejectedException on a non-2xx response
+     */
     fun postBatch(encodedItems: List<String>): BatchAcknowledgment {
         require(encodedItems.isNotEmpty()) { "postBatch requires at least one item." }
         val body = buildString {
