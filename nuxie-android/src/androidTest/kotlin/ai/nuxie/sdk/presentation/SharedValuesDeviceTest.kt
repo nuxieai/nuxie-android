@@ -120,20 +120,88 @@ class SharedValuesDeviceTest {
                     assertTrue(board.linkDefaultViewModel("experience", checkNotNull(native.values)))
                     val player = native.file.newExperiencePlayer(board, "long")
                     try {
-                        val catalog = native.file.viewModelCatalog()
-                        val schema = catalog.schemas.single { it.name == "Untitled" }
-                        val property = catalog.properties.single { it.schemaIndex == schema.index && it.name == "state:" + expected.getValue("privateValue").jsonPrimitive.content }
                         native.renderer.resize(393, 852)
+                        fun pixels(value: ai.nuxie.sdk.runtime.NuxieRuntimePlayer) =
+                            native.renderer.renderToCpuFrame(value, 0xff112233.toInt(), true).rgba
                         player.step(0.0)
-                        native.renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        pixels(player)
                         repeat(20) { player.step(0.016) }
-                        for (key in listOf("afterOneTap", "afterTwoTaps")) {
-                            val down = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(ai.nuxie.sdk.runtime.NuxiePlayerPointerEvent(ai.nuxie.sdk.runtime.NuxiePlayerPointerKind.DOWN, 100f, 60f, 1, 0f)))
-                            val up = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(ai.nuxie.sdk.runtime.NuxiePlayerPointerEvent(ai.nuxie.sdk.runtime.NuxiePlayerPointerKind.UP, 100f, 60f, 1, 0.1f)))
-                            val numbers = (down.viewModelChanges + up.viewModelChanges).filter { it.propertyIndex == property.index }
-                                .mapNotNull { (it.value as? ai.nuxie.sdk.runtime.NuxieViewModelValue.Number)?.value }
-                            assertTrue("Counter changes=$numbers, hits=${down.pointerHits}, ${up.pointerHits}", numbers.contains(expected.getValue(key).jsonPrimitive.float))
+                        val initial = pixels(player)
+                        var point: Pair<Float, Float>? = null
+                        // Measure ink rendered with Android's font and test the copy's own hit region.
+                        search@ for (y in 0 until 852) for (x in 0 until 393) {
+                            val offset = (y * 393 + x) * 4
+                            val background = (y * 393 + 392) * 4
+                            if ((0..2).all { initial[offset + it] == initial[background + it] }) continue
+                            for (subpixel in listOf(0.125f, 0.375f, 0.625f, 0.875f)) {
+                                val px = x + 0.5f
+                                val py = y + subpixel
+                                val hit = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
+                                    ai.nuxie.sdk.runtime.NuxiePlayerPointerEvent(ai.nuxie.sdk.runtime.NuxiePlayerPointerKind.DOWN, px, py, 0, 0f)))
+                                player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
+                                    ai.nuxie.sdk.runtime.NuxiePlayerPointerEvent(ai.nuxie.sdk.runtime.NuxiePlayerPointerKind.EXIT, px, py, 0, 0f)))
+                                if (hit.pointerHits.any { it != ai.nuxie.sdk.runtime.NuxiePlayerPointerHit.NONE }) {
+                                    point = px to py
+                                    break@search
+                                }
+                            }
                         }
+                        val ink = checkNotNull(point) { "The rendered copy has interactive ink" }
+                        fun hits(x: Float, y: Float): Boolean {
+                            val result = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
+                                ai.nuxie.sdk.runtime.NuxiePlayerPointerEvent(ai.nuxie.sdk.runtime.NuxiePlayerPointerKind.DOWN, x, y, 0, 0f)))
+                            player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
+                                ai.nuxie.sdk.runtime.NuxiePlayerPointerEvent(ai.nuxie.sdk.runtime.NuxiePlayerPointerKind.EXIT, x, y, 0, 0f)))
+                            return result.pointerHits.any { it != ai.nuxie.sdk.runtime.NuxiePlayerPointerHit.NONE }
+                        }
+                        fun edge(inside: Float, outside: Float, probe: (Float) -> Boolean): Float {
+                            var yes = inside
+                            var no = outside
+                            repeat(20) {
+                                val mid = (yes + no) / 2
+                                if (probe(mid)) yes = mid else no = mid
+                            }
+                            return yes
+                        }
+                        val left = edge(ink.first, 0f) { hits(it, ink.second) }
+                        val right = edge(ink.first, 393f) { hits(it, ink.second) }
+                        val x = (left + right) / 2
+                        val top = edge(ink.second, 0f) { hits(x, it) }
+                        val bottom = edge(ink.second, 852f) { hits(x, it) }
+                        assertTrue(right > left && bottom > top)
+                        val tap = x to (top + bottom) / 2
+                        assertArrayEquals("Probing without releasing a press leaves the count unchanged", initial, pixels(player))
+                        // Use the device's physical pixel density for the count readback.
+                        val density = InstrumentationRegistry.getInstrumentation().targetContext.resources.displayMetrics.density
+                        native.renderer.resize((393 * density).toInt(), (852 * density).toInt())
+                        var previous = pixels(player)
+                        val otherBoard = checkNotNull(native.file.newArtboard("long"))
+                        try {
+                            otherBoard.bindDefaultViewModel("Runtime long scr_screens_slong")
+                            assertTrue(otherBoard.linkDefaultViewModel("experience", checkNotNull(native.values)))
+                            val other = native.file.newExperiencePlayer(otherBoard, "long")
+                            try {
+                                other.step(0.0)
+                                pixels(other)
+                                repeat(20) { other.step(0.016) }
+                                val untouched = pixels(other)
+                                val days = checkNotNull(native.values).snapshot().resolveScalar(listOf("trip_days"))
+                                repeat(2) {
+                                    val down = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
+                                        ai.nuxie.sdk.runtime.NuxiePlayerPointerEvent(ai.nuxie.sdk.runtime.NuxiePlayerPointerKind.DOWN, tap.first, tap.second, 0, 0f)))
+                                    val up = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
+                                        ai.nuxie.sdk.runtime.NuxiePlayerPointerEvent(ai.nuxie.sdk.runtime.NuxiePlayerPointerKind.UP, tap.first, tap.second, 0, 0f)))
+                                    assertTrue(down.pointerHits.any { it != ai.nuxie.sdk.runtime.NuxiePlayerPointerHit.NONE })
+                                    assertTrue(up.pointerHits.any { it != ai.nuxie.sdk.runtime.NuxiePlayerPointerHit.NONE })
+                                    repeat(3) { player.step(1.0 / 60.0) }
+                                    val next = pixels(player)
+                                    assertFalse("The private copy redraws its count on tap $it at $tap", previous.contentEquals(next))
+                                    assertArrayEquals("Another copy sharing the run keeps its own counter", untouched, pixels(other))
+                                    assertEquals(days, checkNotNull(native.values).snapshot().resolveScalar(listOf("trip_days")))
+                                    previous = next
+                                }
+                            } finally { other.close() }
+                        } finally { otherBoard.close() }
                     } finally { player.close() }
                 } finally { board.close() }
             }
