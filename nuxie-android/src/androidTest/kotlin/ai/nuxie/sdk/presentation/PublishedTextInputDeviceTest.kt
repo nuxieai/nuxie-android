@@ -1380,8 +1380,9 @@ class PublishedTextInputDeviceTest {
             val field = checkNotNull(editor) { "Signed default model must expose live field geometry: ${failure.get()}" }
             val surface = checkNotNull(findSurface(activity!!.window.decorView))
             instrumentation.runOnMainSync { field.clearFocus() }
-            SystemClock.sleep(100)
-            val original = copySurface(surface)
+            val original = awaitPublishedSurface(surface,
+                timeoutMillis = (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0),
+            ) { true }
             val region = Rect()
             instrumentation.runOnMainSync {
                 val fieldOrigin = IntArray(2)
@@ -3192,7 +3193,11 @@ class PublishedTextInputDeviceTest {
         error("Surface bounds did not stabilize inside the composed display")
     }
 
-    private fun awaitPublishedSurface(surface: TextureView, matchesSize: (Bitmap) -> Boolean): Bitmap {
+    private fun awaitPublishedSurface(
+        surface: TextureView,
+        timeoutMillis: Long = 10_000,
+        matchesSize: (Bitmap) -> Boolean,
+    ): Bitmap {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val frames = LinkedBlockingQueue<Bitmap>(1)
         val captured = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -3229,7 +3234,7 @@ class PublishedTextInputDeviceTest {
             }
         }
         try {
-            return checkNotNull(frames.poll(10, TimeUnit.SECONDS)) {
+            return checkNotNull(frames.poll(timeoutMillis, TimeUnit.MILLISECONDS)) {
                 "A composed published frame must establish the initial surface"
             }
         } finally {
