@@ -99,7 +99,7 @@ class ExperiencePresentationServiceTest {
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val service = service(this, launch = launched::add)
         val presentation = async {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
                 onEmissionBatch = { it, _ -> batches += it; true }, onOutcome = { outcomes += it })
         }
@@ -125,7 +125,7 @@ class ExperiencePresentationServiceTest {
         val launched = mutableListOf<String>()
         val service = service(this, launch = launched::add)
         val presentation = async {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
                 onOutcome = {})
         }
@@ -200,7 +200,7 @@ class ExperiencePresentationServiceTest {
         val service = service(this, launch = launched::add)
         var checkpoints = 0
         val first = async {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
                 onScreenDismissed = { _, _, _ -> checkpoints++; JourneyScreenDismissalResult.HANDLED }, onOutcome = {})
         }
@@ -232,7 +232,7 @@ class ExperiencePresentationServiceTest {
         }
         PresentationRegistry.attach(sourceId, host)
         val next = async {
-            service.presentJourney(release, "screen_details", "journey-1", "customer-1", null,
+            service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1", null,
                 acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
         }
         try {
@@ -262,7 +262,7 @@ class ExperiencePresentationServiceTest {
         val launched = mutableListOf<String>()
         val service = service(this, launch = launched::add)
         val presentation = async {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
                 transition = contract.getValue("transition").jsonObject, onOutcome = {})
         }
@@ -288,7 +288,7 @@ class ExperiencePresentationServiceTest {
             var dismissalReports = 0
             var allowed = true
             val first = async {
-                service.presentJourney(
+                service.presentJourney(testPresentationFences(),
                     release, "screen_welcome", "journey-1", "customer-1",
                     service.reserveJourney("customer-1"),
                     acquire = { acquired(release.identity, outgoingLease) },
@@ -305,7 +305,7 @@ class ExperiencePresentationServiceTest {
             val acquisition = CompletableDeferred<AcquiredJourneyRelease>()
             val next = async {
                 runCatching {
-                    service.presentJourney(
+                    service.presentJourney(testPresentationFences(),
                         release, "screen_details", "journey-1", "customer-1", null,
                         canPresent = { allowed }, acquire = {
                             if (action in listOf("hostClose", "identityShutdown")) withContext(NonCancellable) { acquisition.await() }
@@ -352,7 +352,7 @@ class ExperiencePresentationServiceTest {
                 if (retained) assertEquals(action, 0, dismissalReports)
                 if (action in listOf("failure", "cancel")) {
                     val retry = async {
-                        service.presentJourney(
+                        service.presentJourney(testPresentationFences(),
                             release, "screen_details", "journey-1", "customer-1", null,
                             acquire = { acquired(release.identity, destinationLease) }, onOutcome = {},
                         )
@@ -383,7 +383,7 @@ class ExperiencePresentationServiceTest {
         var destinationCloses = 0
         var checkpoints = 0
         var attempts = 0
-        val first = async { service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+        val first = async { service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
             service.reserveJourney("customer-1"), acquire = { acquired(release.identity, sourceLease) },
             onScreenDismissed = { _, _, _ -> checkpoints++; JourneyScreenDismissalResult.HANDLED }, onOutcome = {}) }
         runCurrent()
@@ -414,7 +414,7 @@ class ExperiencePresentationServiceTest {
             }
         }
         assertTrue(PresentationRegistry.attach(sourceId, host))
-        val next = async { service.presentJourney(release, "screen_details", "journey-1", "customer-1", null,
+        val next = async { service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1", null,
             acquire = { acquired(release.identity, Closeable { destinationCloses++ }) }, onOutcome = {}) }
         runCurrent()
         val recovery = checkNotNull((PresentationRegistry.observe(sourceId)?.value as PresentationContentState.Ready).navigationRecovery)
@@ -444,7 +444,7 @@ class ExperiencePresentationServiceTest {
         val sourceLease = Lease()
         var checkpoints = 0
         val first = async {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, sourceLease) },
                 onScreenDismissed = { _, _, method ->
                     assertEquals("user", method)
@@ -460,7 +460,7 @@ class ExperiencePresentationServiceTest {
         assertTrue(PresentationRegistry.attach(sourceId, host))
         val next = async {
             runCatching {
-                service.presentJourney(release, "screen_details", "journey-1", "customer-1", null,
+                service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1", null,
                     acquire = { throw java.io.IOException("offline") }, onOutcome = {})
             }
         }
@@ -495,7 +495,7 @@ class ExperiencePresentationServiceTest {
         val destinationLease = Lease()
         var checkpoints = 0
         val first = async {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, outgoingLease) },
                 onScreenDismissed = { _, _, _ -> checkpoints++; JourneyScreenDismissalResult.HANDLED }, onOutcome = {})
         }
@@ -528,7 +528,7 @@ class ExperiencePresentationServiceTest {
         }
         assertTrue(PresentationRegistry.attach(outgoingId, host))
         val next = async {
-            service.presentJourney(release, "screen_details", "journey-1", "customer-1", null,
+            service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1", null,
                 acquire = { acquired(release.identity, destinationLease) }, onOutcome = {})
         }
         try {
@@ -564,7 +564,7 @@ class ExperiencePresentationServiceTest {
         val started = CompletableDeferred<Unit>()
         var checkpointCalls = 0
         val first = async {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, firstLease) },
                 onScreenDismissed = { _, _, _ ->
                     checkpointCalls++
@@ -576,14 +576,14 @@ class ExperiencePresentationServiceTest {
         PresentationRegistry.reportFirstFrame(launched.single())
         first.await()
         suspend fun navigate() = runCatching {
-            service.presentJourney(release, contract.getValue("destination").jsonPrimitive.content, "journey-1", "customer-1", null,
+            service.presentJourney(testPresentationFences(), release, contract.getValue("destination").jsonPrimitive.content, "journey-1", "customer-1", null,
                 acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
         }
         val cancelled = async { navigate() }
         started.await()
         cancelled.cancelAndJoin()
         val conflict = expectPresentationFailure {
-            service.presentJourney(release, contract.getValue("conflictingDestination").jsonPrimitive.content,
+            service.presentJourney(testPresentationFences(), release, contract.getValue("conflictingDestination").jsonPrimitive.content,
                 "journey-1", "customer-1", null, acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
         }
         assertEquals(contract.getValue("conflictReason").jsonPrimitive.content, conflict.reason.name)
@@ -623,7 +623,7 @@ class ExperiencePresentationServiceTest {
             val releaseOutcome = CompletableDeferred<Unit>()
             var calls = 0
             val first = async {
-                service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                     service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
                     onScreenDismissed = { _, _, _ ->
                         calls++
@@ -640,7 +640,7 @@ class ExperiencePresentationServiceTest {
             first.await()
             val navigation = async {
                 runCatching {
-                    service.presentJourney(release, "screen_details", "journey-1", "customer-1", null,
+                    service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1", null,
                         acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
                 }
             }
@@ -735,7 +735,7 @@ class ExperiencePresentationServiceTest {
             val service = service(this, launch = launched::add, emit = { name, _, _ -> events += name })
             val pending = async {
                 runCatching {
-                    service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                    service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                         service.reserveJourney("customer-1"), acquire = { acquired(release.identity, lease) },
                         onPresentationRevealed = {
                             if (phase == "admission") { entered.complete(Unit); releaseWork.await() }
@@ -801,7 +801,7 @@ class ExperiencePresentationServiceTest {
         var oldVisible = false
         var replacementVisible = false
         val pending = async {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
                 onPresentationRevealed = { admissions++; admission.await() }, onOutcome = {})
         }
@@ -853,7 +853,7 @@ class ExperiencePresentationServiceTest {
         val reservation = service.reserveJourney("customer-1")
         val pending = async {
             runCatching {
-                service.presentJourney(release, "screen_welcome", "journey-1", "customer-1", reservation,
+                service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1", reservation,
                     acquire = {
                         withContext(NonCancellable) { started.complete(Unit); releaseWork.await() }
                         acquired(release.identity, lease)
@@ -864,7 +864,7 @@ class ExperiencePresentationServiceTest {
         var competitorAcquisitions = 0
         val competitor = async {
             runCatching {
-                service.presentJourney(release, "screen_welcome", "journey-1", "customer-1", reservation,
+                service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1", reservation,
                     acquire = { competitorAcquisitions++; error("Competing acquisition must not start") }, onOutcome = {})
             }
         }
@@ -923,7 +923,7 @@ class ExperiencePresentationServiceTest {
             )
             val pending = async {
                 runCatching {
-                    service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                    service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                         service.reserveJourney("customer-1"), acquire = {
                             acquisitions++
                             if (phase == "acquisition") waitForRelease()
@@ -971,7 +971,7 @@ class ExperiencePresentationServiceTest {
         val service = service(this, launch = launched::add)
         val pending = async {
             val result = runCatching {
-                service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+                service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                     service.reserveJourney("customer-1"), acquire = {
                         try { releaseWork.await(); error("Work was not cancelled") }
                         finally { cancelled.complete(Unit) }
@@ -1007,7 +1007,7 @@ class ExperiencePresentationServiceTest {
             if (name == SystemEventNames.EXPERIENCE_SHOWN) shown++
         })
         val pending = async {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = {
                     ready.await()
                     acquired(release.identity, lease)
@@ -1067,7 +1067,7 @@ class ExperiencePresentationServiceTest {
         val failure = ExperiencePresentationException(ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE, "No Vulkan surface")
         val service = service(this, launch = { PresentationRegistry.reportFailure(it, failure) })
         val observed = expectPresentationFailure {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { error("Failed host cannot acquire") }, onOutcome = {})
         }
         org.junit.Assert.assertSame(failure, observed)
@@ -1107,7 +1107,7 @@ class ExperiencePresentationServiceTest {
         val reservation = requireNotNull(service.reserveJourney("customer-1"))
 
         val presentation = async(SupervisorJob()) {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
@@ -1171,7 +1171,7 @@ class ExperiencePresentationServiceTest {
         val reservation = requireNotNull(service.reserveJourney("customer-1"))
 
         val presentation = async(SupervisorJob()) {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
@@ -1208,7 +1208,7 @@ class ExperiencePresentationServiceTest {
         val reservation = requireNotNull(service.reserveJourney("customer-1"))
 
         val error = expectPresentationFailure {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
@@ -1234,7 +1234,7 @@ class ExperiencePresentationServiceTest {
         val lease = Lease()
         var attempts = 0
         val pending = async {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = {
                     if (++attempts == 1) throw java.io.IOException("transport failed")
                     acquired(release.identity, lease)
@@ -1269,7 +1269,7 @@ class ExperiencePresentationServiceTest {
         val service = service(this, launch = launched::add)
         val reservation = requireNotNull(service.reserveJourney("customer-1"))
         val presentation = async(SupervisorJob()) {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
@@ -1306,7 +1306,7 @@ class ExperiencePresentationServiceTest {
         val service = service(this, launch = launched::add)
         val reservation = requireNotNull(service.reserveJourney("customer-1"))
         val first = async {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
@@ -1321,7 +1321,7 @@ class ExperiencePresentationServiceTest {
         first.await()
 
         val error = expectPresentationFailure {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-2",
@@ -1359,7 +1359,7 @@ class ExperiencePresentationServiceTest {
         )
         val reservation = requireNotNull(service.reserveJourney("customer-1"))
         val first = async {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
@@ -1382,7 +1382,7 @@ class ExperiencePresentationServiceTest {
         assertTrue(originalDraft.write("input_email", draft))
 
         val second = async {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
@@ -1419,7 +1419,7 @@ class ExperiencePresentationServiceTest {
 
         val nextReservation = requireNotNull(service.reserveJourney("customer-1"))
         val nextJourney = async {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-2",
@@ -1449,7 +1449,7 @@ class ExperiencePresentationServiceTest {
             val reservation = if (first) service.reserveJourney("customer-1") else null
             first = false
             val pending = async {
-                service.presentJourney(release = selected, screenId = screenId, journeyId = "journey-1",
+                service.presentJourney(testPresentationFences(), release = selected, screenId = screenId, journeyId = "journey-1",
                     ownerDistinctId = "customer-1", reservation = reservation,
                     acquire = { acquired(selected.identity, Lease()) }, onOutcome = {})
             }
@@ -1499,7 +1499,7 @@ class ExperiencePresentationServiceTest {
             val reservation = if (first) service.reserveJourney("customer-1") else null
             first = false
             val pending = async {
-                service.presentJourney(
+                service.presentJourney(testPresentationFences(),
                     release = selectedRelease,
                     screenId = screenId,
                     journeyId = "journey-1",
@@ -1574,7 +1574,7 @@ class ExperiencePresentationServiceTest {
         val service = service(this, launch = launched::add)
         val reservation = requireNotNull(service.reserveJourney("customer-1"))
         val first = async {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
@@ -1590,7 +1590,7 @@ class ExperiencePresentationServiceTest {
         first.await()
 
         val error = expectPresentationFailure {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
@@ -1623,7 +1623,7 @@ class ExperiencePresentationServiceTest {
         )
         val reservation = requireNotNull(service.reserveJourney("customer-1"))
         val presentation = async(SupervisorJob()) {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
@@ -1664,7 +1664,7 @@ class ExperiencePresentationServiceTest {
             val service = service(this, launch = launched::add,
                 emit = { name, properties, owner -> emitted += Emitted(name, properties, owner) })
             val pending = async(SupervisorJob()) {
-                service.presentJourney(release, "screen_welcome", "font-failure", "customer-1",
+                service.presentJourney(testPresentationFences(), release, "screen_welcome", "font-failure", "customer-1",
                     service.reserveJourney("customer-1"), acquire = { acquired(release.identity, lease) },
                     onOutcome = outcomes::add)
             }
@@ -1717,7 +1717,7 @@ class ExperiencePresentationServiceTest {
         val lease = Lease()
         val service = service(this, launch = launched::add)
         val pending = async {
-            service.presentJourney(release, "screen_welcome", "native-retry", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "native-retry", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, lease) }, onOutcome = {})
         }
         runCurrent()
@@ -1770,7 +1770,7 @@ class ExperiencePresentationServiceTest {
             var checkpoints = 0
             val service = service(this, launch = launched::add, emit = { name, _, _ -> emitted += name })
             val presentation = async {
-                runCatching { service.presentJourney(release, "screen_welcome", "native-drain-$kind", "customer-1",
+                runCatching { service.presentJourney(testPresentationFences(), release, "screen_welcome", "native-drain-$kind", "customer-1",
                     service.reserveJourney("customer-1"), acquire = {
                         acquired(release.identity, Closeable { leaseCloses++ })
                     }, onScreenDismissed = { _, _, _ -> checkpoints++; JourneyScreenDismissalResult.HANDLED }, onOutcome = outcomes::add) }
@@ -1837,7 +1837,7 @@ class ExperiencePresentationServiceTest {
         val lease = Lease()
         val service = service(this, launch = launched::add)
         val presentation = async {
-            service.presentJourney(release, "screen_welcome", "native-recreated-drain", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "native-recreated-drain", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, lease) }, onOutcome = {})
         }
         runCurrent()
@@ -1877,7 +1877,7 @@ class ExperiencePresentationServiceTest {
         val service = service(this, launch = launched::add)
         val reservation = requireNotNull(service.reserveJourney("customer-1"))
         val presentation = async(SupervisorJob()) {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
@@ -1911,7 +1911,7 @@ class ExperiencePresentationServiceTest {
         )
         val reservation = requireNotNull(service.reserveJourney("customer-1"))
         val presentation = async {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
@@ -1944,7 +1944,7 @@ class ExperiencePresentationServiceTest {
         val service = service(this, launch = launched::add)
         val reservation = requireNotNull(service.reserveJourney("customer-1"))
         val presentation = async {
-            service.presentJourney(
+            service.presentJourney(testPresentationFences(),
                 release = release,
                 screenId = "screen_welcome",
                 journeyId = "journey-1",
@@ -1988,7 +1988,7 @@ class ExperiencePresentationServiceTest {
         val finishOutcome = CompletableDeferred<Unit>()
         var outcomes = 0
         val presentation = async {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
                 onOutcome = { outcomes++; finishOutcome.await() })
         }
@@ -2027,7 +2027,7 @@ class ExperiencePresentationServiceTest {
             foregroundActivity = { foreground },
             openLink = { _, _ -> throw android.content.ActivityNotFoundException() })
         val presentation = async {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
                 onLinkOpened = { error("An unopenable link must not be recorded") }, onOutcome = { error("Link must not dismiss") })
         }
@@ -2049,7 +2049,7 @@ class ExperiencePresentationServiceTest {
             foregroundActivity = { foreground },
             openLink = { destination, _ -> opened += destination.uri.toString(); true })
         val presentation = async {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1", service.reserveJourney("customer-1"),
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1", service.reserveJourney("customer-1"),
                 acquire = { acquired(release.identity, Lease()) },
                 onEmissionBatch = { _, _ -> PresentationRegistry.dismiss(launched.single(), CloseReason.HostDismissed); true },
                 onLinkOpened = { assertEquals("external", it.destination) }, onOutcome = {})
@@ -2076,7 +2076,7 @@ class ExperiencePresentationServiceTest {
             foregroundActivity = { foreground },
             openLink = { destination, _ -> opened += destination.uri.toString(); true })
         val presentation = async {
-            service.presentJourney(release, "screen_welcome", "journey-1", "customer-1",
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
                 onLinkOpened = { records += it }, onOutcome = {})
         }
@@ -2197,4 +2197,16 @@ class ExperiencePresentationServiceTest {
             replayPolicy = JourneyReleaseReplayPolicy.Active(0),
         )
     }
+
+    private fun testPresentationFences(): JourneyPresentationFences {
+        val identity = object : ai.nuxie.sdk.identity.IdentityProvider {
+            override fun distinctId() = "customer-1"
+            override fun anonymousId() = "anonymous"
+            override fun rawDistinctId() = "customer-1"
+            override val isIdentified = true
+        }
+        val execution = ai.nuxie.sdk.journey.JourneyExecutionFence()
+        return JourneyPresentationFences(identity, identity.captureScope(), execution, execution.token())
+    }
+
 }

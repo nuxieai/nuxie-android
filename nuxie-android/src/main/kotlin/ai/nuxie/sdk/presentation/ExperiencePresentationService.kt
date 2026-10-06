@@ -587,6 +587,7 @@ internal class ExperiencePresentationService(
             val activity = foregroundActivity()?.takeUnless { it.isDestroyed }
             val screen = active?.let { PresentationRegistry.currentScreen(it.id) }
             val live = active != null && active.ownerDistinctId == currentDistinctId() &&
+                active.journey.fences.isCurrent() &&
                 synchronized(stateLock) { current === active && !transitionInProgress } &&
                 active.shown.get() && !active.closed.get() &&
                 active.outcomeReason.get() == null && screen?.screenCloseReason() == null &&
@@ -632,6 +633,7 @@ internal class ExperiencePresentationService(
     )
 
     private class JourneyOutcome(
+        val fences: JourneyPresentationFences,
         val screenId: String,
         val onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
         val onScreenDismissed: suspend (
@@ -761,6 +763,7 @@ internal class ExperiencePresentationService(
         }
 
     suspend fun presentJourney(
+        fences: JourneyPresentationFences,
         release: AuthenticatedJourneyRelease,
         screenId: String,
         journeyId: String,
@@ -790,6 +793,7 @@ internal class ExperiencePresentationService(
         val selectedScreen = AuthenticatedPresentationScreen.resolve(release, screenId)
         lateinit var journey: JourneyOutcome
         journey = JourneyOutcome(
+            fences = fences,
             screenId = screenId,
             onOutcome = onOutcome,
             onScreenDismissed = onScreenDismissed,
