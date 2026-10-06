@@ -111,10 +111,15 @@ class SemanticTraversalDeviceTest {
         val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
             SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         lateinit var host: SemanticView
+        lateinit var field: EditText
         try {
             instrumentation.runOnMainSync {
                 host = SemanticView(activity).apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES }
-                activity.setContentView(host)
+                field = EditText(activity).apply { id = View.generateViewId(); visibility = View.GONE }
+                activity.setContentView(FrameLayout(activity).apply {
+                    addView(host, FrameLayout.LayoutParams(400, 400))
+                    addView(field, FrameLayout.LayoutParams(300, 80).apply { topMargin = 100 })
+                })
             }
             fixture.getValue("cases").jsonArray.forEachIndexed { index, item ->
                 val case = item.jsonObject
@@ -123,10 +128,13 @@ class SemanticTraversalDeviceTest {
                 fun text(key: String) = case.getValue(key).jsonPrimitive.content
                 val label = "State vector " + text("id")
                 instrumentation.runOnMainSync {
+                    val isField = int("role") == 6
+                    field.visibility = if (isField) View.VISIBLE else View.GONE
+                    if (isField) field.setText(label)
                     host.semantics.publish(NuxieSemanticTree(index.toLong(), index.toLong(), listOf(
                         node(1, 0, int("role"), 100f, label).copy(
                             traitFlags = int("traits"), stateFlags = int("state"), value = text("value")),
-                    )))
+                    )), if (isField) mapOf(1L to field) else emptyMap())
                 }
                 instrumentation.waitForIdleSync()
                 instrumentation.uiAutomation.waitForIdle(100, 5000)
@@ -146,8 +154,17 @@ class SemanticTraversalDeviceTest {
                     }, info.expandedState)
                 } else assertEquals(label, bool("checked") && !bool("mixed"), info.isChecked)
                 if (Build.VERSION.SDK_INT >= 30) {
-                    assertEquals(label, text("value").takeIf { it.isNotEmpty() && int("state") and 4096 == 0 },
-                        info.stateDescription?.toString())
+                    val expected = when (text("id")) {
+                        "authored-checkable-mixed" -> if (Build.VERSION.SDK_INT < 36) "Partially checked" else null
+                        "localized-value" -> text("iosValue")
+                        "expanded" -> if (Build.VERSION.SDK_INT < 36) "Expanded" else null
+                        "collapsed" -> if (Build.VERSION.SDK_INT < 36) "Collapsed" else null
+                        "mixed-with-value" -> "2 of 3, Partially checked"
+                        "required-read-only", "required-toggle-on" -> text("iosValue")
+                        "expanded-required-with-value" -> text(if (Build.VERSION.SDK_INT < 36) "iosValueBefore18" else "iosValue")
+                        else -> null
+                    }
+                    assertEquals(label, expected, info.stateDescription?.toString())
                 }
             }
         } finally { instrumentation.runOnMainSync { activity.finish() } }
