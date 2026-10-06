@@ -14,6 +14,51 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class ExperienceLayoutTypographyTest {
+    @Test fun `blank runtime text retains its baseline through density changes`() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val activity = controller.get()
+        val previous = activity.resources.displayMetrics.density
+        val input = ExperienceTextInput("answer", "run", "hello", "answer", null, null,
+            false, true, null, emptyMap(),
+            ExperienceTextInput.Style("sans-serif", "400", false, 18f, 24f,
+                0f, 0xff000000.toInt(), "font", null))
+        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(400f, 400f),
+            listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
+        try {
+            activity.setContentView(overlay)
+            val snapshot = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(1,
+                arrayOf(NativeViewModelSnapshotInstance(1, 0)), emptyArray()))
+            val transform = NuxieTextRunGeometry.Transform(1f, 0f, 0f, 1f, 0f, 0f)
+            val bounds = NuxieTextRunGeometry.Bounds(0f, 0f, 240f, 180f)
+            fun update(density: Float, baseline: Float?) {
+                activity.resources.displayMetrics.density = density
+                val size = (400 * density).toInt()
+                fun layout() {
+                    val spec = View.MeasureSpec.makeMeasureSpec(size, View.MeasureSpec.EXACTLY)
+                    overlay.measure(spec, spec)
+                    overlay.layout(0, 0, size, size)
+                }
+                layout()
+                overlay.update(snapshot, NuxieTextGeometryCapture.Captured(mapOf("run" to NuxieTextRunGeometry(
+                    1uL, transform, transform, bounds, NuxieTextRunGeometry.Layout(transform, bounds), baseline))))
+                layout()
+            }
+            update(2.625f, 18f)
+            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-answer")
+            assertEquals(47, editor.baseline)
+            update(2.625f, null)
+            assertEquals(47, editor.baseline)
+            update(3f, null)
+            assertEquals(54, editor.baseline)
+            update(3f, 20f)
+            assertEquals(60, editor.baseline)
+        } finally {
+            overlay.close()
+            activity.resources.displayMetrics.density = previous
+            controller.pause().stop().destroy()
+        }
+    }
+
     @Test fun `shared typography stays point-sized at smaller view extents and fractional density`() {
         val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/text-input-typography.json").readText()).jsonObject
