@@ -266,6 +266,88 @@ class JourneyResponseSaveDeliveryTest {
         } finally { release.complete(Unit); store.close() }
     }
 
+    @Test fun `enqueue during send does not reinstate receipt backoff`() = runBlocking {
+        val journal = JourneyRunJournal(directory, "anon")
+        val run = responseSaveRun(journal)
+        journal.reserveResponseSave(run, "first", json("{}"), true)
+        val root = File(directory, "journey-state-v2/journals")
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val requests = CopyOnWriteArrayList<JourneyResponseSave>()
+        val sleeps = CopyOnWriteArrayList<Long>()
+        val delivery = JourneyResponseSaveDelivery(directory, JourneyResponseSaveTransport { sheet ->
+            requests += sheet
+            if (requests.size == 1) {
+                started.complete(Unit)
+                release.await()
+                assertTrue(root.setWritable(false))
+            } else assertTrue(root.setWritable(true))
+            JourneyResponseSaveReply(JourneyResponseSaveReply.Code.SAVED, sheet.sequence)
+        }, scope, nowMillis = { 1_000_000 }, sleep = { sleeps += it; kotlinx.coroutines.awaitCancellation() })
+            .also { workers += it }
+        try {
+            delivery.activate(JourneyStorageScope.testFixture)
+            withTimeout(3_000) { started.await() }
+            delivery.enqueue(journal, run, "new", json("{}"))
+            release.complete(Unit)
+            withTimeout(3_000) { while (journal.pendingResponseSaves().isNotEmpty()) delay(10) }
+            assertTrue(sleeps.isEmpty())
+            assertEquals(3, requests.size)
+        } finally { release.complete(Unit); delivery.shutdown(); root.setWritable(true) }
+    }
+
+    @Test fun `receipt writes back off and recover`() = runBlocking { assertReceiptBackoff(false) }
+
+    @Test fun `enqueue wakes receipt write backoff`() = runBlocking { assertReceiptBackoff(true) }
+
+    private suspend fun assertReceiptBackoff(enqueueDuringBackoff: Boolean) {
+        val journal = JourneyRunJournal(directory, "anon")
+        val run = responseSaveRun(journal)
+        journal.reserveResponseSave(run, "first", json("{}"), true)
+        val root = File(directory, "journey-state-v2/journals")
+        val time = java.util.concurrent.atomic.AtomicLong(1_000_000)
+        val failing = java.util.concurrent.atomic.AtomicBoolean(true)
+        val requests = CopyOnWriteArrayList<JourneyResponseSave>()
+        val sleeps = kotlinx.coroutines.channels.Channel<Pair<Long, CompletableDeferred<Unit>>>(10)
+        val delivery = JourneyResponseSaveDelivery(directory, JourneyResponseSaveTransport { sheet ->
+            requests += sheet
+            if (failing.get()) assertTrue(root.setWritable(false))
+            JourneyResponseSaveReply(JourneyResponseSaveReply.Code.SAVED, sheet.sequence)
+        }, scope, nowMillis = time::get, sleep = { duration ->
+            val release = CompletableDeferred<Unit>()
+            sleeps.send(duration to release)
+            release.await()
+        }).also { workers += it }
+        try {
+            delivery.activate(JourneyStorageScope.testFixture)
+            var pendingRelease: CompletableDeferred<Unit>? = null
+            for ((index, expected) in listOf(5_000L, 10_000L, 20_000L).withIndex()) {
+                val (duration, release) = withTimeout(3_000) { sleeps.receive() }
+                assertEquals(expected, duration)
+                assertEquals(index + 1, requests.size)
+                pendingRelease = release
+                if (index == 0) {
+                    time.addAndGet(-86_400_000)
+                    release.complete(Unit)
+                    val (remaining, rollbackRelease) = withTimeout(3_000) { sleeps.receive() }
+                    assertEquals(5_000L, remaining)
+                    assertEquals(1, requests.size)
+                    time.addAndGet(expected)
+                    rollbackRelease.complete(Unit)
+                } else if (index < 2) { time.addAndGet(expected); release.complete(Unit) }
+            }
+            failing.set(false)
+            assertTrue(root.setWritable(true))
+            if (enqueueDuringBackoff) delivery.enqueue(journal, run, "new", json("{}"))
+            else { time.addAndGet(20_000); checkNotNull(pendingRelease).complete(Unit) }
+            withTimeout(3_000) { while (journal.pendingResponseSaves().isNotEmpty()) delay(10) }
+            assertEquals(if (enqueueDuringBackoff) 5 else 4, requests.size)
+        } finally {
+            delivery.shutdown()
+            root.setWritable(true)
+        }
+    }
+
     @Test fun `receipt write failure never sends a replaced snapshot`() = runBlocking {
         val journal = JourneyRunJournal(directory, "anon")
         val run = responseSaveRun(journal)

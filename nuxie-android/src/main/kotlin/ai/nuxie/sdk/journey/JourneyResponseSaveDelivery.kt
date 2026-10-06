@@ -32,15 +32,15 @@ internal class JourneyResponseSaveDelivery(
     private val journals = linkedMapOf<String, JourneyRunJournal>()
     private var generation = 0L
     private var worker: Job? = null
-    private data class ReadBackoff(var delay: Long = 5_000, var retryAt: Long? = null) {
+    private data class RetryBackoff(var delay: Long = 5_000, var retryAt: Long? = null) {
         fun failed(now: Long) { retryAt = now + delay; delay = minOf(300_000, delay * 2) }
     }
     private val wakeups = Channel<Unit>(Channel.CONFLATED)
-    private var discoveryBackoff = ReadBackoff()
-    private val readBackoffs = mutableMapOf<String, ReadBackoff>()
+    private var discoveryBackoff = RetryBackoff()
+    private val readBackoffs = mutableMapOf<String, RetryBackoff>()
     private var lastClockReading: Long? = null
     private var discovered = false
-    private val receiptRetryAt = mutableMapOf<String, Long>()
+    private val receiptBackoffs = mutableMapOf<String, RetryBackoff>()
 
     fun activate(scope: JourneyStorageScope) = synchronized(lock) {
         if (storageScope != null && storageScope != scope) return@synchronized
@@ -103,7 +103,7 @@ internal class JourneyResponseSaveDelivery(
             val shift = now - previous
             discoveryBackoff.retryAt = discoveryBackoff.retryAt?.plus(shift)
             readBackoffs.values.forEach { it.retryAt = it.retryAt?.plus(shift) }
-            receiptRetryAt.entries.forEach { entry -> entry.setValue(entry.value + shift) }
+            receiptBackoffs.values.forEach { it.retryAt = it.retryAt?.plus(shift) }
         }
         lastClockReading = now
         return now
@@ -128,8 +128,9 @@ internal class JourneyResponseSaveDelivery(
                         checkNotNull(storageScope) to generation
                     }
                     if (seenGeneration != observedGeneration) {
-                        discoveryBackoff = ReadBackoff()
+                        discoveryBackoff = RetryBackoff()
                         readBackoffs.clear()
+                        receiptBackoffs.clear()
                         seenGeneration = observedGeneration
                     }
                     val now = currentTime()
@@ -157,20 +158,19 @@ internal class JourneyResponseSaveDelivery(
                             nextDelay = minOf(nextDelay ?: Long.MAX_VALUE, readRetryAt - now)
                             continue
                         }
-                        val retryAt = receiptRetryAt[journal.distinctId]
+                        val retryAt = receiptBackoffs[journal.distinctId]?.retryAt
                         if (retryAt != null) {
                             val remaining = retryAt - currentTime()
                             if (remaining > 0) {
                                 nextDelay = minOf(nextDelay ?: remaining, remaining)
                                 continue
                             }
-                            receiptRetryAt.remove(journal.distinctId)
                         }
                         val attempts = try { journal.responseSaveAttempts(currentTime()) }
                         catch (error: CancellationException) { throw error }
                         catch (_: Exception) {
                             Log.w(TAG, "Response save journal could not be read")
-                            val backoff = readBackoffs.getOrPut(journal.distinctId) { ReadBackoff() }
+                            val backoff = readBackoffs.getOrPut(journal.distinctId) { RetryBackoff() }
                             backoff.failed(currentTime())
                             nextDelay = minOf(nextDelay ?: Long.MAX_VALUE, checkNotNull(backoff.retryAt) - currentTime())
                             continue
@@ -197,10 +197,11 @@ internal class JourneyResponseSaveDelivery(
                             catch (error: CancellationException) { throw error }
                             catch (_: Exception) {
                                 Log.w(TAG, "Response save receipt could not be persisted")
-                                receiptRetryAt[journal.distinctId] = currentTime() + 5_000
+                                receiptBackoffs.getOrPut(journal.distinctId) { RetryBackoff() }.failed(currentTime())
                                 handedOff = true
                                 break@deliveryPass
                             }
+                            receiptBackoffs.remove(journal.distinctId)
                             if (stopped) Log.w(TAG, "Response save stopped", null,
                                 Log.sensitive("code", reply.code.wire), Log.sensitive("journey", attempt.sheet.journeyId),
                                 Log.sensitive("form", attempt.sheet.formName), Log.sensitive("owner", attempt.sheet.distinctId))
