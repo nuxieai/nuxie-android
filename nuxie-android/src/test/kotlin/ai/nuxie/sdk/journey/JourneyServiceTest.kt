@@ -117,6 +117,45 @@ class JourneyServiceTest {
         entry.getValue("locator").jsonObject.getValue("environment").jsonPrimitive.content,
     )
 
+    @Test fun `killed screen run abandons on relaunch without presenting again`() = runBlocking {
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
+        catalog.commit("customer", prepared)
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val presenter = RecordingJourneyPresenter()
+            val service = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
+                journalDirectory = directory, scope = firstScope, capture = { _, _, _, _ -> true },
+                presenter = presenter, nowMillis = { 100_000L })
+            service.initialize()
+            service.onAppWillEnterForeground()
+            service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+            assertEquals("screen_welcome", requireNotNull(presenter.request).screenId)
+            val run = JourneyRunJournal(directory, "customer", JourneyStorageScope(renderedAuthority)).runs().single()
+            assertNull(run.park)
+            assertNull(run.completion)
+            assertNull(run.pendingPresentationPublication)
+        } finally {
+            firstScope.cancel()
+        }
+        val presenter = RecordingJourneyPresenter()
+        val completions = CopyOnWriteArrayList<Map<String, Any?>>()
+        val recovered = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
+            journalDirectory = directory, scope = scope,
+            capture = { name, properties, _, _ ->
+                if (name == JourneyEventNames.LEG_COMPLETED) completions += properties
+                true
+            }, presenter = presenter, fixedStorageScope = JourneyStorageScope(renderedAuthority),
+            nowMillis = { 200_000L })
+        recovered.initialize()
+        assertEquals(1, completions.size)
+        assertEquals("abandoned", completions.single()["outcome"])
+        assertNull(presenter.request)
+    }
+
     @Before fun setUp() {
         File(context.filesDir, "nuxie").deleteRecursively()
         directory = File(context.filesDir, "nuxie")
