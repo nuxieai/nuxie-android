@@ -103,7 +103,7 @@ internal class JourneyResponseSaveDelivery(
             val shift = now - previous
             discoveryBackoff.retryAt = discoveryBackoff.retryAt?.plus(shift)
             readBackoffs.values.forEach { it.retryAt = it.retryAt?.plus(shift) }
-            receiptRetryAt.replaceAll { _, at -> at + shift }
+            receiptRetryAt.entries.forEach { entry -> entry.setValue(entry.value + shift) }
         }
         lastClockReading = now
         return now
