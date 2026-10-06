@@ -2168,11 +2168,11 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun nativeResponseIsDurableBeforeItsAuthoredJourneyNavigation() = exerciseDurableNativeEmission(PublishedBehavior.TEXT_INPUT)
+    fun nativeTextIsRetainedBeforeItsAuthoredJourneyNavigation() = exerciseDurableNativeEmission(PublishedBehavior.TEXT_INPUT)
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun compiledScriptResponseIsDurableBeforeItsAuthoredJourneyNavigation() = exerciseDurableNativeEmission(PublishedBehavior.SCRIPT)
+    fun compiledScriptActionIsDurableWithoutLegacyResponseBeforeNavigation() = exerciseDurableNativeEmission(PublishedBehavior.SCRIPT)
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
@@ -2190,7 +2190,7 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun accessibilityTextEditIsDurableBeforeAuthoredJourneyNavigation() =
+    fun accessibilityTextEditIsRetainedBeforeAuthoredJourneyNavigation() =
         exerciseDurableNativeEmission(PublishedBehavior.TEXT_INPUT, accessibilityEdit = true)
 
     @Test
@@ -2377,7 +2377,7 @@ class PublishedTextInputDeviceTest {
     }
 
     @Test
-    fun signedConditionReadsResponseAndEventFromTheSameNativeEmission() {
+    fun signedConditionIgnoresReservedResponseCommandInNativeEmission() {
         exerciseDurableNativeEmission(PublishedBehavior.SCRIPT, conditionGate = true)
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_SCRIPT, conditionGate = true)
     }
@@ -2744,9 +2744,15 @@ class PublishedTextInputDeviceTest {
                 assertTrue("Failed script must drain and destroy its Activity", destroyed)
                 return
             }
-            val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS)) { "Journey service must durably accept native input" }
+            val retainedText = if (!scripted) awaitCommittedText(first, "text-input/screen_1/email_input", "durable@example.com") else null
+            val batch = if (scripted) checkNotNull(accepted.poll(10, TimeUnit.SECONDS)) {
+                "Journey service must durably accept the authored action"
+            } else {
+                assertNull("Native text must not synthesize an answer event", accepted.poll(300, TimeUnit.MILLISECONDS))
+                null
+            }
             if (shutdownAfterAdmission) {
-                assertEquals(listOf("\$response_set", "script_control_activated"), batch.emissions.map { it.name })
+                assertEquals(listOf("script_control_activated"), checkNotNull(batch).emissions.map { it.name })
                 runBlocking { kotlinx.coroutines.withTimeout(10_000) { presentations.shutdownOwnedBy(owner) } }
                 val completed = JourneyRunJournal(directory, owner, JourneyStorageScope(authority))
                 assertTrue(completed.runs().isEmpty())
@@ -2760,21 +2766,33 @@ class PublishedTextInputDeviceTest {
                 assertTrue("Terminal action shutdown must destroy its Activity", destroyed)
                 return
             }
+            if (conditionGate) {
+                val completed = JourneyRunJournal(directory, owner, JourneyStorageScope(authority))
+                val deadline = SystemClock.elapsedRealtime() + 10_000
+                while (completed.checkmark(fixture.release.identity.experienceId) == null &&
+                    SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(20)
+                assertEquals("A reserved response command cannot satisfy a Journey value condition",
+                    "selection_missing", checkNotNull(completed.checkmark(fixture.release.identity.experienceId)).outcome)
+                assertTrue(completed.runs().isEmpty())
+                assertEquals(listOf("script_control_activated"), checkNotNull(batch).emissions.map { it.name })
+                assertEquals(1, presentationCount.get())
+                assertNull(accepted.poll(300, TimeUnit.MILLISECONDS))
+                return
+            }
             val reopened = journalRun()
-            val responseKey = if (scripted) "selection" else "email"
-            val expectedValue = if (scripted) "pro" else "durable@example.com"
-            assertEquals(expectedValue, reopened.context.getValue("responses").jsonObject.getValue(responseKey).jsonPrimitive.content)
-            assertEquals(batch.batchSequence + 1, reopened.nextPresentationBatchSequence)
-            assertEquals(batch.emissions.last().sequence + 1, reopened.nextPresentationEmissionSequence)
+            assertTrue("Native edits and reserved commands must not populate the removed response store",
+                reopened.context.getValue("responses").jsonObject.isEmpty())
             if (scripted) {
+                val committed = checkNotNull(batch)
+                assertEquals(committed.batchSequence + 1, reopened.nextPresentationBatchSequence)
+                assertEquals(committed.emissions.last().sequence + 1, reopened.nextPresentationEmissionSequence)
+                assertEquals(listOf("script_control_activated"), committed.emissions.map { it.name })
+                assertEquals("compiled", committed.emissions.single().payload.getValue("source").jsonPrimitive.content)
                 runBlocking { kotlinx.coroutines.withTimeout(10_000) {
                     while (responsesBeforeNavigation.get() == null) kotlinx.coroutines.delay(20)
                 } }
-                assertEquals("pro", checkNotNull(responsesBeforeNavigation.get()).getValue("selection").jsonPrimitive.content)
-                assertEquals(listOf("\$response_set", "script_control_activated"), batch.emissions.map { it.name })
-                assertEquals("compiled", batch.emissions.last().payload.getValue("source").jsonPrimitive.content)
-                assertEquals(batch.emissions.first().sequence + 1, batch.emissions.last().sequence)
-                val captured = runBlocking { checkNotNull(store.stableEvent(batch.emissions.last().id)) }
+                assertTrue(checkNotNull(responsesBeforeNavigation.get()).isEmpty())
+                val captured = runBlocking { checkNotNull(store.stableEvent(committed.emissions.single().id)) }
                 assertEquals("script_control_activated", captured.name)
                 assertEquals(owner, captured.distinctId)
                 assertTrue("Authored navigation must finish presenting", navigationPresented.await(10, TimeUnit.SECONDS))
@@ -2799,7 +2817,8 @@ class PublishedTextInputDeviceTest {
             assertHostedScreen(instrumentation, first, "screen_2")
             assertEquals(1, monitor.hits)
             assertEquals("screen_2", presentations.journeyScreenId(JourneyPresentationOwner(reopened.journeyId, owner)))
-            assertEquals("durable@example.com", journalRun().context.getValue("responses").jsonObject.getValue("email").jsonPrimitive.content)
+            assertEquals("durable@example.com", checkNotNull(retainedText).committedValue("text-input/screen_1/email_input"))
+            assertTrue(journalRun().context.getValue("responses").jsonObject.isEmpty())
         } finally {
             releaseOldLane.countDown()
             runBlocking {
@@ -3047,8 +3066,9 @@ class PublishedTextInputDeviceTest {
         assertTrue(named("Password").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_FOCUS))
         assertTrue(named("Password").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, arguments))
         instrumentation.runOnMainSync { editor.onEditorAction(android.view.inputmethod.EditorInfo.IME_ACTION_DONE) }
-        awaitEmission("\$response_set")
-        assertEquals("typed-password", responses().getValue("password").jsonPrimitive.content)
+        awaitCommittedText(activity, "text-input/screen_1/password", "typed-password")
+        assertNull("Native password editing must not synthesize an answer event", accepted.poll(300, TimeUnit.MILLISECONDS))
+        assertTrue(responses().isEmpty())
         assertFalse(nodes().any { it.text?.toString() == "typed-password" || it.contentDescription?.toString() == "typed-password" })
         assertEquals(1, nodes().count { it.isEditable })
         assertEquals(null, accepted.poll(300, TimeUnit.MILLISECONDS))
@@ -3246,6 +3266,17 @@ class PublishedTextInputDeviceTest {
                 "context" to obj("event" to empty, "responses" to empty),
             ))),
         )
+    }
+
+    private fun awaitCommittedText(activity: Activity, inputId: String, expected: String): ExperienceTextInputState {
+        val id = checkNotNull(activity.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
+        val state = checkNotNull(PresentationRegistry.resolve(id)).textInputState
+        val deadline = SystemClock.elapsedRealtime() + 10_000
+        while (state.committedValue(inputId) != expected && SystemClock.elapsedRealtime() < deadline) {
+            SystemClock.sleep(20)
+        }
+        assertEquals("Accepted native text must reach the retained screen state", expected, state.committedValue(inputId))
+        return state
     }
 
     private fun awaitEditor(instrumentation: Instrumentation, activity: Activity, inputId: String): EditText {
