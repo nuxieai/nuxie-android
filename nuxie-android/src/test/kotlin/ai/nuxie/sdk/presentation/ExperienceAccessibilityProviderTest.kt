@@ -518,7 +518,7 @@ class ExperienceAccessibilityProviderTest {
             }
             val expected = when (id) {
                 "authored-checkable-mixed" -> if (Build.VERSION.SDK_INT < 36) "Partially checked" else null
-                "localized-value" -> "Activé, On"
+                "localized-value" -> text("iosValue")
                 "expanded" -> if (Build.VERSION.SDK_INT < 36) "Expanded" else null
                 "collapsed" -> if (Build.VERSION.SDK_INT < 36) "Collapsed" else null
                 "mixed-with-value" -> "2 of 3, Partially checked"
