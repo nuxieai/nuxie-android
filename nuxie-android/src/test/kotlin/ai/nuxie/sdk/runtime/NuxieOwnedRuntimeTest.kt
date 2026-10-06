@@ -188,6 +188,33 @@ class NuxieOwnedRuntimeTest {
     }
 
     @Test
+    fun `another screen cannot replace a pending native surface`() {
+        val native = RecordingNative()
+        val renderer = NuxieAndroidVulkanRenderer(50L, native)
+        val first = NuxieRuntimeWindow(40L, native)
+        val second = NuxieRuntimeWindow(41L, native)
+        val player = NuxieRuntimePlayer(30L, native)
+        try {
+            native.presentation = 4
+            assertEquals(4, renderer.renderAndPresent(player, first, 0, true))
+            assertEquals(0, renderer.resizeIfIdle(320, 100))
+            assertEquals(4, renderer.renderAndPresent(player, second, 0, true))
+            assertEquals(listOf("attach:40"), native.surfaceCalls)
+            native.presentation = 1
+            assertEquals(1, renderer.renderAndPresent(player, first, 0, true))
+            assertEquals(1, renderer.renderAndPresent(player, second, 0, true))
+            assertEquals(listOf("attach:40", "detach", "attach:41"), native.surfaceCalls)
+            assertEquals(0, renderer.detachSurface(first))
+            assertEquals(listOf("attach:40", "detach", "attach:41"), native.surfaceCalls)
+        } finally {
+            renderer.close()
+            player.close()
+            second.close()
+            first.close()
+        }
+    }
+
+    @Test
     fun `surface attachment survives unavailable frames and renews after suboptimal`() {
         val native = RecordingNative()
         val runtime = NuxieRuntime(native)
