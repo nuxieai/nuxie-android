@@ -2814,6 +2814,7 @@ class PublishedTextInputDeviceTest {
                         System.currentTimeMillis(), "corpus_next_0", JsonObject(emptyMap()))),
                 ), null))
             }
+            assertTrue("Accepted navigation must finish presenting", navigationPresented.await(10, TimeUnit.SECONDS))
             assertHostedScreen(instrumentation, first, "screen_2")
             assertEquals(1, monitor.hits)
             assertEquals("screen_2", presentations.journeyScreenId(JourneyPresentationOwner(reopened.journeyId, owner)))
