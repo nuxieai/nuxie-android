@@ -120,6 +120,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     private val ids: TimeBasedEpochGenerator = TimeBasedEpochGenerator.shared,
     private val maximumRunCount: Int = MAX_RUN_COUNT,
 ) {
+    internal val responseSaveNamespace = storageScope.conversionNamespace
     private val root = File(directory, "journey-state-v2")
     private val journals = File(root, "journals")
     private val customerDigest = storageScope.customerDigest(distinctId)
@@ -135,6 +136,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         val stateArmReceipts: MutableSet<String> = linkedSetOf(),
         val conversionWatches: MutableMap<String, JourneyConversionWatch> = linkedMapOf(),
         val conversionReceipts: MutableMap<String, Long> = linkedMapOf(),
+        var responseSaves: JourneyResponseSaveState? = null,
     )
 
     /** The caller authenticates the arm's release before admitting it here. */
@@ -244,6 +246,37 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
                 state.conversionReceipts[event.id] = acceptedAt
             }
         }
+    }
+
+    fun reserveResponseSave(run: JourneyRun, formName: String, answers: JsonObject, queued: Boolean): JourneyResponseSave = update { state ->
+        val saves = state.responseSaves ?: JourneyResponseSaveState(responseSaveNamespace, distinctId)
+        check(saves.namespace == responseSaveNamespace && saves.distinctId == distinctId) { "Wrong response save owner" }
+        check(state.runs[run.id]?.startedEventId == run.startedEventId || saves.journeys[run.journeyId]?.containsKey(formName) == true) {
+            "Wrong response save owner"
+        }
+        val forms = saves.journeys.getOrPut(run.journeyId) { linkedMapOf() }
+        val lane = forms.getOrPut(formName) { JourneyResponseSaveLane() }
+        check(lane.sequence < JourneyResponseSave.MAXIMUM_SEQUENCE) { "Response save sequence exhausted" }
+        lane.sequence += 1
+        val sheet = JourneyResponseSave(distinctId, run.journeyId, run.experienceId,
+            run.reference.text("versionId"), formName, lane.sequence, answers)
+        if (queued) lane.pending = sheet
+        state.responseSaves = saves
+        sheet
+    }
+
+    fun pendingResponseSaves(): List<JourneyResponseSave> = read { state ->
+        state.responseSaves?.journeys?.values?.flatMap { forms -> forms.values.mapNotNull { it.pending } }.orEmpty()
+    }
+
+    fun confirmResponseSave(sheet: JourneyResponseSave, storedSequence: Long) = update { state ->
+        check(sheet.distinctId == distinctId) { "Wrong response save owner" }
+        check(sheet.sequence > 0 && storedSequence >= sheet.sequence && storedSequence <= JourneyResponseSave.MAXIMUM_SEQUENCE) {
+            "Invalid response save receipt"
+        }
+        val lane = checkNotNull(state.responseSaves?.journeys?.get(sheet.journeyId)?.get(sheet.formName))
+        lane.sequence = maxOf(lane.sequence, storedSequence)
+        if (lane.pending?.let { it.sequence <= sheet.sequence } == true) lane.pending = null
     }
 
     fun runs(): List<JourneyRun> = read { it.runs.values.sortedBy(JourneyRun::startedEventId) }
@@ -628,6 +661,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     private fun persist(state: Snapshot) {
         val bytes = buildJsonObject {
             put("schemaVersion", JsonPrimitive(VERSION))
+            state.responseSaves?.let { put("responseSaves", it.toJson()) }
             put("conversionWatches", JsonObject(state.conversionWatches.mapValues { it.value.toJson() }))
             put("conversionReceipts", JsonObject(state.conversionReceipts.mapValues { JsonPrimitive(it.value) }))
             put("runs", JsonObject(state.runs.mapValues { encodeRun(it.value) }))
@@ -704,7 +738,8 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         val conversionReceipts = value.getValue("conversionReceipts").jsonObject.mapValues {
             it.value.jsonPrimitive.long
         }.toMutableMap()
-        return Snapshot(runs, checklist, receipts, watches, conversionReceipts)
+        return Snapshot(runs, checklist, receipts, watches, conversionReceipts,
+            value["responseSaves"]?.jsonObject?.let(JourneyResponseSaveState::fromJson))
     }
 
     private fun encodeRun(run: JourneyRun) = buildJsonObject {
