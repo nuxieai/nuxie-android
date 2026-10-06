@@ -1,5 +1,10 @@
 package ai.nuxie.sdk.network
 
+import ai.nuxie.sdk.journey.JourneyResponseSave
+import ai.nuxie.sdk.journey.JourneyResponseSaveReply
+import ai.nuxie.sdk.journey.JourneyResponseSaveTransport
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.SdkVersion
 import ai.nuxie.sdk.events.CanonicalJson
@@ -28,7 +33,7 @@ internal class NuxieApi(
     environment: NuxieEnvironment,
     private val transport: HttpTransport = HttpUrlConnectionTransport(),
     baseUrlOverride: URL? = null,
-) {
+) : JourneyResponseSaveTransport {
     private val baseUrl: String = baseUrlOverride?.let(::normalizedBaseUrl) ?: when (environment) {
         NuxieEnvironment.PRODUCTION -> "https://i.nuxie.ai"
         NuxieEnvironment.DEVELOPMENT -> "https://dev-i.nuxie.ai"
@@ -238,6 +243,17 @@ internal class NuxieApi(
      * @throws IOException on transport failure (retryable)
      * @throws BatchRejectedException on a non-2xx response
      */
+    override suspend fun sendResponseSave(sheet: JourneyResponseSave): JourneyResponseSaveReply = withContext(Dispatchers.IO) {
+        val body = JsonObject(sheet.toJson() + ("apiKey" to JsonPrimitive(apiKey))).toString().encodeToByteArray()
+        val response = transport.execute(HttpTransport.Request(
+            url = URL("$baseUrl/responses/save"),
+            headers = mapOf("Content-Type" to "application/json", "Accept-Encoding" to "gzip",
+                "User-Agent" to "Nuxie-Android-SDK/${SdkVersion.VALUE}"),
+            body = body,
+        ))
+        JourneyResponseSaveReply.decode(response.body, sheet.sequence)
+    }
+
     fun postBatch(encodedItems: List<String>): BatchAcknowledgment {
         require(encodedItems.isNotEmpty()) { "postBatch requires at least one item." }
         val body = buildString {

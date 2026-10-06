@@ -423,11 +423,16 @@ internal class NuxieCore(
         deliverAppAction = Nuxie::deliverAppAction,
     )
 
+    private val responseSaveDelivery = ai.nuxie.sdk.journey.JourneyResponseSaveDelivery(
+        directory = File(appContext.filesDir, "nuxie"), transport = api, coroutineScope = scope,
+    )
+
     val journeys = JourneyService(
         identity = identity,
         events = store,
         catalog = journeyProfiles,
         journalDirectory = File(appContext.filesDir, "nuxie"),
+        responseSaveDelivery = responseSaveDelivery,
         scope = scope,
         capture = eventLog::captureIdempotently,
         captureScreenEvent = eventLog::captureScreenEvent,
@@ -604,6 +609,7 @@ internal class NuxieCore(
         { profile.close() },
         { featureUsage.close() },
         { journeys.profileDidClearAll() },
+        { responseSaveDelivery.shutdown() },
         { delivery.close() },
         { eventLog.closeWorkers() },
         {
