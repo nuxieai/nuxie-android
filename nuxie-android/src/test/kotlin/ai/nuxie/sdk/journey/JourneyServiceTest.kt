@@ -2297,7 +2297,20 @@ class JourneyServiceTest {
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Config(shadows = [LinkStateRenderCapabilityShadow::class, LinkStateNativeMountShadow::class],
         instrumentedPackages = ["ai.nuxie.sdk.presentation.NuxieExperienceActivity", "ai.nuxie.sdk.presentation.AndroidRenderCapability"])
-    @Test fun `shared link states and same frame completion use real Journey and Activity paths`() = runTest {
+    @Test fun `shared link states and same frame completion use real Journey and Activity paths`() = sharedLinkStates()
+
+    @Config(shadows = [LinkStateRenderCapabilityShadow::class, LinkStateNativeMountShadow::class],
+        instrumentedPackages = ["ai.nuxie.sdk.presentation.NuxieExperienceActivity", "ai.nuxie.sdk.presentation.AndroidRenderCapability"])
+    @Test fun `profile clear routes runtime link externally before shutdown`() =
+        sharedLinkStates("profile-clear-runtime-before-shutdown")
+
+    @Config(shadows = [LinkStateRenderCapabilityShadow::class, LinkStateNativeMountShadow::class],
+        instrumentedPackages = ["ai.nuxie.sdk.presentation.NuxieExperienceActivity", "ai.nuxie.sdk.presentation.AndroidRenderCapability"])
+    @Test fun `identity roundtrip routes runtime link externally before shutdown`() =
+        sharedLinkStates("identity-roundtrip-runtime-before-shutdown")
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private fun sharedLinkStates(onlyName: String? = null) = runTest {
         Dispatchers.setMain(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
         val vectors = Json.parseToJsonElement(FixtureRunner.fixturesRoot().resolve("events/link-open-states.json").readText())
             .jsonObject.getValue("cases").jsonArray + Json.parseToJsonElement("""{
@@ -2305,6 +2318,7 @@ class JourneyServiceTest {
                 "link":{"kind":"runtime","url":{"type":"String","value":"https://example.test/path"},"target":"_self","canOpen":true},
                 "expected":{"destination":"in_app","opened":true,"recorded":true}}
             """)
+        if (onlyName != null) require(vectors.any { it.jsonObject["name"] == JsonPrimitive(onlyName) })
         val app = RuntimeEnvironment.getApplication()
         val lifecycle = ai.nuxie.sdk.core.NuxieLifecycleCoordinator(
             ai.nuxie.sdk.core.AppLifecycleTracker(app.getSharedPreferences("link-state-lifecycle", 0), { "1" }, { 100_000L }, { _, _ -> }),
@@ -2314,6 +2328,7 @@ class JourneyServiceTest {
             for (item in vectors) {
                 val vector = item.jsonObject
                 val name = vector.getValue("name").jsonPrimitive.content
+                if (onlyName != null && name != onlyName) continue
                 val state = vector.getValue("state").jsonPrimitive.content
                 val link = vector.getValue("link").jsonObject
                 val expected = vector.getValue("expected").jsonObject
@@ -2326,6 +2341,8 @@ class JourneyServiceTest {
                 var dialog: android.app.Dialog? = null
                 var pendingClose: kotlinx.coroutines.Deferred<Unit>? = null
                 val allowIdentityShutdown = CompletableDeferred<Unit>()
+                val beforeShutdown = vector["beforeShutdown"] == JsonPrimitive(true)
+                var profileShutdownEntered = false
                 var retirementCloseReason: CloseReason? = null
                 var handoffCount = 0
                 var handoffWhileResumed = false
@@ -2372,7 +2389,7 @@ class JourneyServiceTest {
                         handoffBeforeShutdown = controller?.get()?.isFinishing == false &&
                             launched.singleOrNull()?.let(PresentationRegistry::currentScreen)?.screenCloseReason() == null
                         val opened = openActivityLink(app, route, activity)
-                        if (vector["retirement"] == JsonPrimitive("identity_change")) {
+                        if (vector["retirement"] == JsonPrimitive("identity_change") || beforeShutdown) {
                             // The route is chosen before queued shutdown starts, while the Activity stays resumed.
                             allowIdentityShutdown.complete(Unit)
                             runCurrent()
@@ -2401,14 +2418,22 @@ class JourneyServiceTest {
                         "host_dismissed" -> presentations.dismiss(CloseReason.HostDismissed)
                         "owner_retired", "presentation_finished" -> {
                             val retirement = if (state == "owner_retired") vector.getValue("retirement").jsonPrimitive.content else null
-                            if (retirement == "identity_change") identity.setDistinctId("replacement-owner")
+                            if (retirement == "identity_change" || retirement == "identity_roundtrip") {
+                                identity.setDistinctId("replacement-owner")
+                                if (retirement == "identity_roundtrip") identity.setDistinctId("customer")
+                            }
                             val close = async {
                                 when (retirement) {
                                     null -> presentations.shutdownJourney("customer", requireNotNull(currentRequest).journeyId)
-                                    "identity_change" -> {
+                                    "identity_change", "identity_roundtrip" -> {
                                         transitions.enqueue(ai.nuxie.sdk.identity.UserTransitionCoordinator.Transition(
                                             ai.nuxie.sdk.identity.UserTransitionCoordinator.Kind.IDENTIFY,
                                             "customer", "replacement-owner", migrateEvents = false))
+                                        if (retirement == "identity_roundtrip") {
+                                            transitions.enqueue(ai.nuxie.sdk.identity.UserTransitionCoordinator.Transition(
+                                                ai.nuxie.sdk.identity.UserTransitionCoordinator.Kind.IDENTIFY,
+                                                "replacement-owner", "customer", migrateEvents = false))
+                                        }
                                         transitions.drain()
                                     }
                                     "profile_clear" -> journeys.profileDidClear("customer", 2)
@@ -2417,6 +2442,9 @@ class JourneyServiceTest {
                             }
                             runCurrent()
                             retirementCloseReason = PresentationRegistry.currentScreen(launched.single())?.screenCloseReason()
+                            if (retirement == "profile_clear" && beforeShutdown) {
+                                assertTrue("$name must reach shutdown after revoking execution", profileShutdownEntered)
+                            }
                             pendingClose = close
                         }
                         "background" -> { controller!!.pause().stop(); host.stop() }
@@ -2432,7 +2460,7 @@ class JourneyServiceTest {
                     override suspend fun present(request: JourneyPresentationRequest): JourneyPresentationResult {
                         currentRequest = request
                         val file = File(directory, "link-scene").apply { writeBytes(byteArrayOf(1)) }
-                        presentations.presentJourney(request.release, request.screenId, request.journeyId, request.ownerDistinctId, request.reservation,
+                        presentations.presentJourney(request.fences, request.release, request.screenId, request.journeyId, request.ownerDistinctId, request.reservation,
                             acquire = { AcquiredJourneyRelease(identity = request.release.identity, artifactsByKey = mapOf("renders/main.riv" to file), sceneFile = file, protection = Closeable {}) },
                             onScreenChanged = request.onScreenChanged, onScreenDismissed = request.onScreenDismissed,
                             onPresentationRevealed = request.onPresentationRevealed, onLinkOpened = request.onLinkOpened,
@@ -2440,7 +2468,13 @@ class JourneyServiceTest {
                         return JourneyPresentationResult.Shown
                     }
                     override suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) { presentations.shutdownJourney(ownerDistinctId, journeyId) }
-                    override suspend fun shutdownOwnedBy(ownerDistinctId: String) { presentations.shutdownOwnedBy(ownerDistinctId) }
+                    override suspend fun shutdownOwnedBy(ownerDistinctId: String) {
+                        if (beforeShutdown) {
+                            profileShutdownEntered = true
+                            allowIdentityShutdown.await()
+                        }
+                        presentations.shutdownOwnedBy(ownerDistinctId)
+                    }
                 }
                 currentRequest = null
                 val journeyScope = CoroutineScope(backgroundScope.coroutineContext + SupervisorJob(backgroundScope.coroutineContext[kotlinx.coroutines.Job]))
@@ -2476,7 +2510,7 @@ class JourneyServiceTest {
                 pendingClose?.let { close ->
                     allowIdentityShutdown.complete(Unit)
                     runCurrent()
-                    if (vector["retirement"] == JsonPrimitive("identity_change")) {
+                    if (vector["retirement"] == JsonPrimitive("identity_change") || beforeShutdown) {
                         retirementCloseReason = PresentationRegistry.currentScreen(launched.single())?.screenCloseReason()
                     }
                     controller!!.pause().stop().destroy(); host.resume(); runCurrent()
@@ -2487,7 +2521,7 @@ class JourneyServiceTest {
                     assertEquals(name, 1, handoffCount)
                     assertTrue("$name must hand off before the test destroys the resumed Activity", handoffWhileResumed)
                     assertEquals(name, CloseReason.IdentityChanged, retirementCloseReason)
-                    if (vector["retirement"] == JsonPrimitive("identity_change")) {
+                    if (vector["retirement"] == JsonPrimitive("identity_change") || beforeShutdown) {
                         assertTrue("$name must route before queued identity shutdown starts", handoffBeforeShutdown)
                     }
                 }

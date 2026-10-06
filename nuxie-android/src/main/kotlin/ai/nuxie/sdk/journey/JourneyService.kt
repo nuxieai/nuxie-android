@@ -17,6 +17,7 @@ import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.network.ProfileDeliveryAuthority
 import ai.nuxie.sdk.presentation.JourneyPresentationActionResult
+import ai.nuxie.sdk.presentation.JourneyPresentationFences
 import ai.nuxie.sdk.presentation.JourneyPresentationOwner
 import ai.nuxie.sdk.presentation.JourneyPresentationRequest
 import ai.nuxie.sdk.presentation.JourneyPresentationReservation
@@ -2225,6 +2226,7 @@ internal class JourneyService(
         val result = try {
             presentation.present(
                 JourneyPresentationRequest(
+                    fences = JourneyPresentationFences(identity, identityScope, executionFence, executionToken),
                     release = release,
                     delivery = executionSnapshot.delivery,
                     screenId = screenId,
