@@ -199,6 +199,7 @@ internal class JourneyService(
     private val currentDeviceTimezoneIdentifier: () -> String = {
         java.util.TimeZone.getDefault().id
     },
+    private val responseSaveDelivery: JourneyResponseSaveDelivery? = null,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val beforeAdmission: suspend () -> Unit = {},
     private val beforeParkedResume: suspend () -> Unit = {},
@@ -733,6 +734,7 @@ internal class JourneyService(
                 }
                 storageScope = authenticated
             }
+            storageScope?.let { responseSaveDelivery?.activate(it) }
             val generation = profileGeneration.incrementAndGet()
             val state = ProfileState(
                 distinctId,
