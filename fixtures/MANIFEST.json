@@ -2,7 +2,7 @@
   "sourceRepo": "nuxieai/nuxie-ios",
   "sourceCommit": "7fb80bb4d6a933286f7a8d0f89b3547395e84508",
   "files": {
-    "README.md": "ab87003c6f2a442a62936f9b8b6d0b1d5f5ce7634f8b2c7eeb31391e7356cfaa",
+    "README.md": "3e4062fe1586a83f5b22b3e6ad7ecb00bd3957abfca8d2216778d79a2becfa03",
     "accessibility/control-state.json": "6a4e35c6c2f55575344f4a26a2bdb5f22728a41845464c3beeb93251082e97f2",
     "accessibility/focus-restoration.json": "65b3d626a9229eab9ce215513b12d1d1cc5e79c51339bc05b0c5d5633826933e",
     "encodings/activity-identity.json": "6f6c5010911fac834706a986f4a94d7d7a63c7f34bfb7cdf7f616246b1f896a2",
@@ -13,7 +13,7 @@
     "encodings/text-size-device-properties.json": "d39d96c7164111c854c4c2ce0bbb430018018c97db31baae871a3022a031f02f",
     "events/atomic-purchase-sync.json": "00ad8a8acfcc8b5531de8312a6ad9e13cae2ec6fc386a4b3263fde3d574f0764",
     "events/batch-item-encoding.json": "f0ba212c3428ea8efc5defd7dc67c4d97c310dbcdcfd529e9cd9556c237b6172",
-    "events/catalog.json": "7de8c6f0a4d0835a537b44c34839279cb398345fc3448c154f53dfe011b0dd33",
+    "events/catalog.json": "d2e44d89076d4df02401331c9d641c42af78da9ae5dbdb55588fb1d48b9b99c0",
     "events/delivery-disposition.json": "bf2e48165a90e6bf568f00ba804cfa8c2f1efcdc9a5867533a24bbf99a31575d",
     "events/generated-control-routing.json": "f461826c8a2e79d2f08178a1b3a27b03cbcda52ed208f572b995fa7165fef77a",
     "events/link-open-states.json": "eca2b9118eb26f12338c8b76f0ecfdb68a4b506f176c932f600809ea3d0469df",
@@ -54,7 +54,7 @@
     "journeys/planes/profile-fact-admission.json": "dbf86b437fb01ed8ec06250bdf075ae3604827d99464f5580266b022cb850b6f",
     "journeys/planes/publication-admission.json": "d9f145e80d78ba68bb3197f4597947da31b837d509610b41b8134cf48aaf78d2",
     "journeys/planes/purchase-reference-scopes.json": "d676b6b68f763c3c592c04ccc6916cd67c39fc16531e0432f556f43ff43e8de2",
-    "journeys/planes/release.json": "58003bd2adeebda14e84b2a533a3aa740d93f2ec16991cdd12352e66038b1f1e",
+    "journeys/planes/release.json": "2fa1cf388df69887554994d78691b8dd7b4a44ea571bce0d4436ffe5d1d3bca8",
     "journeys/planes/reports.json": "6d5ff79acd668b02c4aeac84b1154425c720ba16b50beb5ef30f9b0899322d39",
     "journeys/planes/run-recovery.json": "4bf67b161af433a1d3c18332f3444d86aee7cbc60bf34286dcf3b63359746d88",
     "journeys/planes/runtime-bound-state.json": "23873be2849c7bc924fa62c80057e7de32857a100d57b22611fc82bf08fd3463",
@@ -76,8 +76,7 @@
     "journeys/planes/text-input-effective-metrics.json": "2243efd14213801aff77efbffebd4f2744c33efeb491aa2a0ab676d260465af9",
     "journeys/planes/text-input-geometry.json": "4db9f6c82327b31cb25202c8c13231ab857366bf55c6b592526e37495ff30089",
     "journeys/planes/text-input-limits.json": "7e3aa09d75d43b0326f13ff97de1b279e147e8fb8935c68b279640e2428b4137",
-    "journeys/planes/text-input-navigation.json": "c6d0c6d36583472aad710b40f6f7f05a91f72359e216756f9ac1f3d60e612e0b",
-    "journeys/planes/text-input-response-capture.json": "083e306aee584a7c1ed58ac38ac85c9b5be514e2dc34a2be01544f686b5a59f5",
+    "journeys/planes/text-input-navigation.json": "5b259f26f37f64c6b03358d4689e119b710cdffa119d1bea984c2e5aa68019ec",
     "journeys/planes/text-input-typography.json": "a9c6217a7eba1b0f8ee0f063fa3764880d0b6b0149160def566d5a1b331feae1",
     "journeys/planes/values.json": "e6f7b54cb33bb8d024638760c54221e858124affcbe182b4593924bfcca47bee",
     "journeys/planes/video-actions.json": "846f8cec51cf49304d0284cac4421fc0b633f0a73df5c28a3ae33cd3cc1a01e5",
@@ -282,7 +281,7 @@
     "runtime/shared-values/source/screens/short/index.html": "d24a2cada3cec193163d4b319fd9bd4ff0f67850c7e0869916629232b2964021"
   },
   "sourceCommitOverrides": {
-    "events/catalog.json": "69672d8483f8167ce92fd499d0347935aa28bb08",
+    "events/catalog.json": "6503e6a6bdf3ba9cad88fc598c5fa3783ba39490",
     "events/link-open-states.json": "53104f10800c24d9d180a79cab8f5f32908ca059",
     "events/reserved-event-filtering.json": "c34928bf7bc529faf7ba0b52b8ee8e91497f5558",
     "events/runtime-event-sources.json": "f2af92c33d46ff0ba546b2d6a417ccf47d918a1b",
@@ -330,6 +329,9 @@
     "runtime/shared-values/source/screens/long/frame.json": "de84536f2204900e3b1ee46a0b2eea8810616026",
     "runtime/shared-values/source/screens/long/index.html": "de84536f2204900e3b1ee46a0b2eea8810616026",
     "runtime/shared-values/source/screens/short/frame.json": "de84536f2204900e3b1ee46a0b2eea8810616026",
-    "runtime/shared-values/source/screens/short/index.html": "de84536f2204900e3b1ee46a0b2eea8810616026"
+    "runtime/shared-values/source/screens/short/index.html": "de84536f2204900e3b1ee46a0b2eea8810616026",
+    "journeys/planes/release.json": "6503e6a6bdf3ba9cad88fc598c5fa3783ba39490",
+    "journeys/planes/text-input-navigation.json": "6503e6a6bdf3ba9cad88fc598c5fa3783ba39490",
+    "README.md": "8e3446c399a090152a6fb4ae5944c1e72310888a"
   }
 }
