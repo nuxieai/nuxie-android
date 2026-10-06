@@ -8,6 +8,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import kotlinx.serialization.json.doubleOrNull
 
 internal data class JourneyResponseSave(
     val distinctId: String,
@@ -149,7 +150,10 @@ internal data class JourneyResponseSaveReply(val code: Code, val sequence: Long?
                 val code = Code.entries.firstOrNull { it.wire == status.content } ?: return noAnswer
                 if (code !in setOf(Code.SAVED, Code.REPLAYED, Code.STALE)) return noAnswer
                 val sequenceValue = value["sequence"]?.jsonPrimitive
-                val sequence = sequenceValue?.takeUnless { it.isString || it == JsonNull }?.long
+                val sequence = sequenceValue?.takeUnless { it.isString || it == JsonNull }?.doubleOrNull
+                    ?.takeIf { it.isFinite() && it == kotlin.math.floor(it) &&
+                        it in 1.0..JourneyResponseSave.MAXIMUM_SEQUENCE.toDouble() }
+                    ?.toLong()
                 if (sequence == null || sequence < attemptedSequence || sequence <= 0 ||
                     sequence > JourneyResponseSave.MAXIMUM_SEQUENCE) noAnswer else JourneyResponseSaveReply(code, sequence)
             } catch (_: Exception) { noAnswer }
