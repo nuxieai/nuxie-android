@@ -8,6 +8,8 @@ import ai.nuxie.sdk.runtime.NativeViewModelWrite
 import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
 import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import ai.nuxie.sdk.runtime.NativeCallResult
+import ai.nuxie.sdk.runtime.NativeFocusInput
+import ai.nuxie.sdk.runtime.NuxieFocusState
 import ai.nuxie.sdk.runtime.NativePlayerInput
 import ai.nuxie.sdk.runtime.NativePlayerPointer
 import ai.nuxie.sdk.runtime.NativePlayerStepOutcome
@@ -1085,6 +1087,9 @@ class ExperienceSurfaceHostPointerTest {
         override fun acquireWindow(surface: android.view.Surface): Long = 5L.also { windowsAcquired += 1 }
         override fun releaseWindow(handle: Long) = Unit
 
+        override fun playerKind(playerHandle: Long) = NativeCallResult(0, 1)
+        override fun playerFocusState(playerHandle: Long) = NativeCallResult(0, NuxieFocusState(false, false))
+
         override fun stepPlayer(
             playerHandle: Long,
             inputs: List<NativePlayerInput>,
@@ -1092,6 +1097,7 @@ class ExperienceSurfaceHostPointerTest {
             elapsedSeconds: Float,
             correlationId: Long,
             textRunNames: List<String>,
+            focusInputs: List<NativeFocusInput>,
         ): NativeCallResult<NativePlayerStepOutcome> {
             requestedTextRuns += textRunNames
             pointerSteps += pointers

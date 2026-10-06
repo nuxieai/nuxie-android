@@ -241,7 +241,20 @@
     "video/multilingual.mp4": "db01aede12e87d4357aabcc76ef7f518ec766a7684afe0e6da7229decf93196b",
     "video/waiting-inventory.json": "3c707b124011c110dad62acc0f16e6f09940326e2d6fa59e1afd3202595412e4",
     "video/waiting-journey.json": "8cc61bdb05b2d1f3bd9e8b616fd1f6848b49d794f63becda0d12929be57cca8b",
-    "video/waiting.nux": "0312918deeabae4853fc84e8a00ab7daf5f30e80e4c0dc14326aae4efb3872d2"
+    "video/waiting.nux": "0312918deeabae4853fc84e8a00ab7daf5f30e80e4c0dc14326aae4efb3872d2",
+    "input/hardware-keys.json": "60020696bf3398bf3410755dc0964052128d73729f4c8ef47260fe3438c41fd9",
+    "runtime/composite-focus/generate.py": "faf9c0d67bd3f9592dee08cbd13f517e7f6c99df7fad76bb42e37d7188810099",
+    "runtime/composite-focus/provenance.json": "603a0c46cca05a1d4402a076bd2f3e42a56e0800a2cb3d272702b017ec43e8b7",
+    "runtime/composite-focus/screen.riv": "2305aceee95d11b05f2cce704a6d0a2934f007b0001e8739b15097ed86ee624e",
+    "runtime/rive-focus/LICENSE.txt": "fa43eb0d7fbf66f9504182d92dd097311278bb80111a5bf1403c366d6a403144",
+    "runtime/rive-focus/expectations.json": "9da506245955f9aa793702899e2a7b126f3a2815c16b27b1f49f232388839eb7",
+    "runtime/rive-focus/keyboard_listener.riv": "cf7355e3064fdb87bf979910bab0f340364bc89ca9850795e2add7374898252d",
+    "runtime/rive-focus/provenance.json": "8e97cb504397639d25144672dc430379528ee51c7fb3eae886f1be7c3105625f",
+    "runtime/rive-focus/text_input_event.riv": "0d851dc67f9efc6382d400263931fd1be57fad92a9b90e709f174b6b72c20df2",
+    "runtime/text-editing-experiment/LICENSE.txt": "fa43eb0d7fbf66f9504182d92dd097311278bb80111a5bf1403c366d6a403144",
+    "runtime/text-editing-experiment/provenance.json": "ce7b0c8fe49ad0902e49ff1ef54c17e8456fd24be75893788fc0508a12117a88",
+    "runtime/text-editing-experiment/text_input.riv": "718b80e13fc25f89c34b66fb01732f7ea1eac924ff06ca6b2caa5ed882324a72",
+    "runtime/text-editing-experiment/text_input_secure.riv": "01a4d8b44e9a1c08bd1df0d49062b2cc838a714171da71d82816fcd166dcafda"
   },
   "sourceCommitOverrides": {
     "events/catalog.json": "69672d8483f8167ce92fd499d0347935aa28bb08",
@@ -254,6 +267,19 @@
     "journeys/planes/runtime-safe-area.json": "c3caef3e808f4a45f730fb3a99db97dd01a242ec",
     "journeys/planes/runtime-window-insets-android.json": "c3caef3e808f4a45f730fb3a99db97dd01a242ec",
     "journeys/planes/text-input-typography.json": "c3caef3e808f4a45f730fb3a99db97dd01a242ec",
-    "journeys/planes/purchase-reference-scopes.json": "313cf0e203927e1fdf929cb4744ae1e32c389501"
+    "journeys/planes/purchase-reference-scopes.json": "313cf0e203927e1fdf929cb4744ae1e32c389501",
+    "input/hardware-keys.json": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
+    "runtime/composite-focus/generate.py": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
+    "runtime/composite-focus/provenance.json": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
+    "runtime/composite-focus/screen.riv": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
+    "runtime/rive-focus/LICENSE.txt": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
+    "runtime/rive-focus/expectations.json": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
+    "runtime/rive-focus/keyboard_listener.riv": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
+    "runtime/rive-focus/provenance.json": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
+    "runtime/rive-focus/text_input_event.riv": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
+    "runtime/text-editing-experiment/LICENSE.txt": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
+    "runtime/text-editing-experiment/provenance.json": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
+    "runtime/text-editing-experiment/text_input.riv": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
+    "runtime/text-editing-experiment/text_input_secure.riv": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4"
   }
 }
