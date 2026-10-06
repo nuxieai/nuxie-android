@@ -31,7 +31,8 @@ internal class ExperienceMountedScreen(
             val key = (asset["key"] as? JsonPrimitive)?.content ?: return@mapNotNull null
             prepared.artifactsByKey[key]?.let { name to it }
         }.toMap()
-    private val lane = NuxieRuntimeLane()
+    private val runValues = prepared.runValues?.also { it.retainScreen() }
+    private val lane = runValues?.lane ?: NuxieRuntimeLane()
     private var captionOverlay: ExperienceVideoCaptionOverlay? = null
     private var textOverlay: ExperienceTextInputOverlay? = null
     private var captionInsets: ExperienceWindowInsets? = null
@@ -47,6 +48,7 @@ internal class ExperienceMountedScreen(
     val surface = ExperienceSurfaceHost(
         context = activity,
         lane = lane,
+        runValues = runValues,
         videoDecoderPool = videoDecoderPool,
         clearColor = prepared.clearColor,
         artboardSize = prepared.artboardSize,
@@ -198,6 +200,7 @@ internal class ExperienceMountedScreen(
             else lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN)
         val retirement = ExperienceScreenRetirement(completion)
         surface.release(finalState, retirement::mediaReleased)
-        lane.shutdown(retirement::nativeReleased)
+        if (runValues != null) runValues.releaseScreen(retirement::nativeReleased)
+        else lane.shutdown(retirement::nativeReleased)
     }
 }

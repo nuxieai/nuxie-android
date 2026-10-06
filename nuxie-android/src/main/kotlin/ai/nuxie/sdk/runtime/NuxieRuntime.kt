@@ -232,6 +232,14 @@ internal class NuxieRuntimeFile(
         "read view-model catalog",
     ).toViewModelCatalog()
 
+    fun newAuthoredViewModel(name: String, authoredIndex: Int): NuxieRuntimeViewModelState? {
+        val catalog = viewModelCatalog()
+        val schema = catalog.schemas.singleOrNull { it.name == name } ?: return null
+        val root = requireNativeValue(native.newViewModel(owned.require(), schema.index, authoredIndex),
+            "create authored view model")
+        return NuxieRuntimeViewModelState(root, emptyList(), native, catalog, schema.index)
+    }
+
     fun close() = owned.close()
 
     internal fun requireHandle(): Long = owned.require()
@@ -261,6 +269,11 @@ internal class NuxieRuntimeArtboard internal constructor(
         writeBoundScalar(native, model.require(), checkNotNull(boundCatalog),
             checkNotNull(boundRootSchemaIndex), path, value)
         return true
+    }
+
+    fun linkDefaultViewModel(property: String, value: NuxieRuntimeViewModelState): Boolean {
+        val root = defaultViewModel ?: return false
+        return value.linkInto(root.require(), property, checkNotNull(boundCatalog), checkNotNull(boundRootSchemaIndex))
     }
 
     /** Write one exact authored TextValueRun on the owning runtime lane. */
@@ -394,6 +407,21 @@ internal class NuxieRuntimeViewModelState(
     fun setValue(path: String, value: NuxieViewModelScalarValue) {
         val rootHandle = checkNotNull(root) { "Runtime view-model state is closed" }
         writeBoundScalar(native, rootHandle, catalog, rootSchemaIndex, path, value)
+    }
+
+    fun linkViewModel(property: String, value: NuxieRuntimeViewModelState): Boolean =
+        value.linkInto(checkNotNull(root), property, catalog, rootSchemaIndex)
+
+    internal fun linkInto(target: Long, property: String, targetCatalog: NuxieViewModelCatalog, targetSchema: Int): Boolean {
+        val declaration = targetCatalog.properties.singleOrNull {
+            it.schemaIndex == targetSchema && it.name == property
+        } ?: return false
+        if (declaration.kind != NuxieViewModelPropertyKind.VIEW_MODEL ||
+            declaration.referencedSchemaIndex != rootSchemaIndex) return false
+        requireNativeSuccess(native.mutateViewModel(target, NativeViewModelWrite(
+            kind = NuxieViewModelMutationKind.SET_VIEW_MODEL, path = property,
+            relatedViewModel = checkNotNull(root))), "link shared view model")
+        return true
     }
 
     /** Must be called on the owning runtime lane before the next player step. */
@@ -761,6 +789,11 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
 
     private var attachedWindow: Long? = null
     private var copiesToWindow = false
+    private var pixelSize: Pair<Int, Int>? = null
+    private var pendingWindow: Long? = null
+
+    fun detachSurface(window: NuxieRuntimeWindow): Int =
+        if (attachedWindow == window.requireHandle()) detachSurface() else NUX_STATUS_OK
 
     fun detachSurface(): Int {
         val handle = owned.require()
@@ -768,29 +801,49 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
         val status = if (copiesToWindow) NUX_STATUS_OK else native.detachRendererSurface(handle)
         if (status == NUX_STATUS_OK) {
             attachedWindow = null
+            pendingWindow = null
             copiesToWindow = false
         }
         return status
     }
 
+    fun resizeIfIdle(pixelWidth: Int, pixelHeight: Int): Int =
+        if (pendingWindow != null) NUX_STATUS_OK else resize(pixelWidth, pixelHeight)
+
+    private fun ensureSize(pixelWidth: Int, pixelHeight: Int): Int =
+        if (pixelSize == (pixelWidth to pixelHeight)) NUX_STATUS_OK else resize(pixelWidth, pixelHeight)
+
     fun resize(pixelWidth: Int, pixelHeight: Int): Int {
         // Android keeps the CPU producer connected after unlockAndPost. Resize
         // that producer in place instead of attempting Vulkan on the same window.
-        if (copiesToWindow) return native.resizeRenderer(owned.require(), pixelWidth, pixelHeight)
+        if (copiesToWindow) return resizeNative(pixelWidth, pixelHeight)
         val status = detachSurface()
         if (status != NUX_STATUS_OK) return status
-        return native.resizeRenderer(owned.require(), pixelWidth, pixelHeight)
+        return resizeNative(pixelWidth, pixelHeight)
     }
+
+    private fun resizeNative(width: Int, height: Int): Int =
+        native.resizeRenderer(owned.require(), width, height).also {
+            if (it == NUX_STATUS_OK) pixelSize = width to height
+        }
 
     fun renderAndPresent(
         player: NuxieRuntimePlayer,
         window: NuxieRuntimeWindow,
         clearColor: Int,
         layoutScaleFactor: Float,
+        pixelWidth: Int? = null,
+        pixelHeight: Int? = null,
     ): Int {
         val rendererHandle = owned.require()
         val playerHandle = player.requireHandle()
         val windowHandle = window.requireHandle()
+        // A native pending frame must complete on its original surface.
+        if (pendingWindow != null && pendingWindow != windowHandle) return 4
+        if (pendingWindow == null && pixelWidth != null && pixelHeight != null) {
+            val resized = ensureSize(pixelWidth, pixelHeight)
+            if (resized != NUX_STATUS_OK) return -resized
+        }
         if (attachedWindow != windowHandle) {
             val detached = detachSurface()
             if (detached != NUX_STATUS_OK) return -detached
@@ -805,12 +858,14 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
             val disposition = native.copyPlayerToWindow(
                 rendererHandle, playerHandle, windowHandle, clearColor, layoutScaleFactor,
             )
+            pendingWindow = windowHandle.takeIf { disposition == 4 }
             if (disposition < 0) detachSurface()
             return disposition
         }
         val disposition = native.renderAndPresent(
             rendererHandle, playerHandle, windowHandle, clearColor, layoutScaleFactor,
         )
+        pendingWindow = windowHandle.takeIf { disposition == 4 }
         // REATTACH retires the surface without delivering a frame. Let the host
         // schedule its next frame normally, without activating an unseen screen.
         if (disposition == 3) {
