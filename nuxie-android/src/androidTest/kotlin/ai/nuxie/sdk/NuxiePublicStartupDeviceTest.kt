@@ -390,9 +390,9 @@ class NuxiePublicStartupDeviceTest {
                 val target = checkNotNull(surface)
                 val down = SystemClock.uptimeMillis()
                 instrumentation.runOnMainSync {
-                    val scale = minOf(target.width / 390f, target.height / 844f)
-                    val x = (target.width - 390f * scale) / 2f + 100f * scale
-                    val y = (target.height - 844f * scale) / 2f + 728f * scale
+                    val density = target.resources.displayMetrics.density
+                    val x = 100f * density
+                    val y = 728f * density
                     for (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
                         val event = MotionEvent.obtain(down, SystemClock.uptimeMillis(), action, x, y, 0)
                         try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }

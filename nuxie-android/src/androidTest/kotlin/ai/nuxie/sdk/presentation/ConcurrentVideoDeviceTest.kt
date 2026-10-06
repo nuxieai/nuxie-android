@@ -89,9 +89,9 @@ class ConcurrentVideoDeviceTest {
             instrumentation.runOnMainSync {
                 screens.forEachIndexed { index, screen ->
                     if (index !in retired) screen.surface.bitmap?.let { bitmap ->
-                        val scale = minOf(bitmap.width / 320f, bitmap.height / 640f)
-                        val x = ((bitmap.width - 320f * scale) / 2 + 100f * scale).toInt()
-                        val y = ((bitmap.height - 640f * scale) / 2 + 80f * scale).toInt()
+                        val density = screen.surface.resources.displayMetrics.density
+                        val x = (100f * density).toInt()
+                        val y = (80f * density).toInt()
                         val pixel = bitmap.getPixel(x, y)
                         result[index] = when {
                             Color.red(pixel) > 180 && Color.blue(pixel) < 70 -> true
