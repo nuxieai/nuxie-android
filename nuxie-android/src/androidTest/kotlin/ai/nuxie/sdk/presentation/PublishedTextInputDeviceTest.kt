@@ -593,16 +593,11 @@ class PublishedTextInputDeviceTest {
                     PresentationRegistry.currentScreen(id)?.purchaseActivity())
             }
             instrumentation.waitForIdleSync()
-            SystemClock.sleep(150)
-            val portraitDeadline = SystemClock.elapsedRealtime() + 10_000
-            var initial = copySurface(checkNotNull(findSurface(original.window.decorView)))
-            while (initial.width >= initial.height && SystemClock.elapsedRealtime() < portraitDeadline) {
-                initial.recycle()
-                SystemClock.sleep(50)
-                initial = copySurface(checkNotNull(findSurface(original.window.decorView)))
+            // The first-frame latch can precede the requested portrait resize.
+            // Capture a composed published frame, not the new texture's empty buffer.
+            before = awaitPublishedSurface(checkNotNull(findSurface(original.window.decorView))) {
+                it.height > it.width
             }
-            assertTrue("Initial portrait frame must be established", initial.height > initial.width)
-            before = initial
             val stopped = CountDownLatch(1)
             val resumed = CountDownLatch(1)
             val application = original.application
@@ -3195,6 +3190,52 @@ class PublishedTextInputDeviceTest {
             SystemClock.sleep(50)
         } while (SystemClock.elapsedRealtime() < deadline)
         error("Surface bounds did not stabilize inside the composed display")
+    }
+
+    private fun awaitPublishedSurface(surface: TextureView, matchesSize: (Bitmap) -> Boolean): Bitmap {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val frames = LinkedBlockingQueue<Bitmap>(1)
+        val captured = java.util.concurrent.atomic.AtomicBoolean(false)
+        var previous: TextureView.SurfaceTextureListener? = null
+        instrumentation.runOnMainSync {
+            previous = surface.surfaceTextureListener
+            surface.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                override fun onSurfaceTextureAvailable(texture: android.graphics.SurfaceTexture, width: Int, height: Int) {
+                    previous?.onSurfaceTextureAvailable(texture, width, height)
+                }
+                override fun onSurfaceTextureSizeChanged(texture: android.graphics.SurfaceTexture, width: Int, height: Int) {
+                    previous?.onSurfaceTextureSizeChanged(texture, width, height)
+                }
+                override fun onSurfaceTextureDestroyed(texture: android.graphics.SurfaceTexture): Boolean =
+                    previous?.onSurfaceTextureDestroyed(texture) ?: true
+                override fun onSurfaceTextureUpdated(texture: android.graphics.SurfaceTexture) {
+                    previous?.onSurfaceTextureUpdated(texture)
+                    if (captured.get()) return
+                    val frame = surface.bitmap ?: return
+                    val pixels = IntArray(frame.width * frame.height)
+                    frame.getPixels(pixels, 0, frame.width, 0, 0, frame.width, frame.height)
+                    // The published fixture has text and several colored controls.
+                    // A correctly sized but empty texture is not its initial frame.
+                    val colors = HashSet<Int>()
+                    for (pixel in pixels) {
+                        colors.add(pixel)
+                        if (colors.size > 8) break
+                    }
+                    if (matchesSize(frame) && colors.size > 8) {
+                        captured.set(true)
+                        frames.add(frame)
+                    } else frame.recycle()
+                }
+            }
+        }
+        try {
+            return checkNotNull(frames.poll(10, TimeUnit.SECONDS)) {
+                "A composed published frame must establish the initial surface"
+            }
+        } finally {
+            instrumentation.runOnMainSync { surface.surfaceTextureListener = previous }
+            frames.poll()?.recycle()
+        }
     }
 
     private fun copySurfaceAtSize(surface: TextureView, width: Int, height: Int): Bitmap {
