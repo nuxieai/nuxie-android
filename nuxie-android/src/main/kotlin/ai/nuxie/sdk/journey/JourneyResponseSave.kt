@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.journey
 
+import ai.nuxie.sdk.experiences.JourneyReleaseEnvelope
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -43,15 +44,18 @@ internal data class JourneyResponseSave(
 internal data class JourneyResponseSaveLane(
     var sequence: Long = 0,
     var pending: JourneyResponseSave? = null,
+    var retry: JourneyResponseSaveRetry? = null,
 ) {
     fun toJson() = buildJsonObject {
         put("sequence", JsonPrimitive(sequence))
         pending?.let { put("pending", it.toJson()) }
+        retry?.let { put("retry", it.toJson()) }
     }
     companion object {
         fun fromJson(value: JsonObject) = JourneyResponseSaveLane(
             value.getValue("sequence").jsonPrimitive.long,
             value["pending"]?.jsonObject?.let(JourneyResponseSave::fromJson),
+            value["retry"]?.jsonObject?.let(JourneyResponseSaveRetry::fromJson),
         )
     }
 }
@@ -76,3 +80,77 @@ internal data class JourneyResponseSaveState(
         )
     }
 }
+
+internal data class JourneyResponseSaveRetry(
+    var attempts: Int,
+    var observedAt: Long,
+    var nextAttemptAt: Long,
+    var unknownFormSince: Long?,
+    var lastCode: JourneyResponseSaveReply.Code,
+) {
+    fun normalizeClock(now: Long) {
+        if (now >= observedAt) return
+        val shift = now - observedAt
+        nextAttemptAt += shift
+        unknownFormSince = unknownFormSince?.plus(shift)
+        observedAt = now
+    }
+    fun toJson() = buildJsonObject {
+        put("attempts", JsonPrimitive(attempts))
+        put("observedAt", JsonPrimitive(observedAt))
+        put("nextAttemptAt", JsonPrimitive(nextAttemptAt))
+        unknownFormSince?.let { put("unknownFormSince", JsonPrimitive(it)) }
+        put("lastCode", JsonPrimitive(lastCode.wire))
+    }
+    companion object {
+        fun fromJson(value: JsonObject) = JourneyResponseSaveRetry(
+            value.getValue("attempts").jsonPrimitive.long.toInt(),
+            value.getValue("observedAt").jsonPrimitive.long,
+            value.getValue("nextAttemptAt").jsonPrimitive.long,
+            value["unknownFormSince"]?.jsonPrimitive?.long,
+            JourneyResponseSaveReply.Code.entries.first { it.wire == value.getValue("lastCode").jsonPrimitive.content },
+        )
+    }
+}
+
+internal data class JourneyResponseSaveAttempt(val sheet: JourneyResponseSave, val retry: JourneyResponseSaveRetry?) {
+    fun delay(now: Long): Long = maxOf(0, (retry?.nextAttemptAt ?: now) - now)
+    fun unknownFormExpired(now: Long): Boolean = retry?.lastCode == JourneyResponseSaveReply.Code.UNKNOWN_FORM &&
+        retry.unknownFormSince?.let { now - it >= 600_000 } == true
+}
+
+internal data class JourneyResponseSaveReply(val code: Code, val sequence: Long? = null) {
+    enum class Code(val wire: String) {
+        SAVED("saved"), REPLAYED("replayed"), STALE("stale"),
+        MERGE_IN_PROGRESS("merge_in_progress"), CUSTOMER_UNAVAILABLE("customer_unavailable"),
+        CUSTOMER_REDIRECT_LOOP("customer_redirect_loop"), SAVE_UNAVAILABLE("save_unavailable"), UNKNOWN_FORM("unknown_form"),
+        INVALID_REQUEST("invalid_request"), AUTHENTICATION_FAILED("authentication_failed"),
+        UNKNOWN_EXPERIENCE_VERSION("unknown_experience_version"), PINNED_VERSION_MISMATCH("pinned_version_mismatch"),
+        SEQUENCE_CONFLICT("sequence_conflict"), CUSTOMER_DELETED("customer_deleted"), NO_ANSWER("no_answer"),
+    }
+    val confirmed get() = code in setOf(Code.SAVED, Code.REPLAYED, Code.STALE)
+    val terminal get() = code in setOf(Code.INVALID_REQUEST, Code.AUTHENTICATION_FAILED, Code.UNKNOWN_EXPERIENCE_VERSION,
+        Code.PINNED_VERSION_MISMATCH, Code.SEQUENCE_CONFLICT, Code.CUSTOMER_DELETED)
+    companion object {
+        val noAnswer = JourneyResponseSaveReply(Code.NO_ANSWER)
+        fun decode(bytes: ByteArray, attemptedSequence: Long): JourneyResponseSaveReply {
+            return try {
+                val value = JourneyReleaseEnvelope.parseObject(bytes)
+                val status = value.getValue("status").jsonPrimitive
+                if (!status.isString) return noAnswer
+                val code = Code.entries.firstOrNull { it.wire == status.content } ?: return noAnswer
+                val sequenceValue = value["sequence"]?.jsonPrimitive
+                val sequence = sequenceValue?.takeUnless { it.isString }?.long
+                val reply = JourneyResponseSaveReply(code, sequence)
+                if (reply.confirmed && (sequence == null || sequence < attemptedSequence ||
+                    sequence <= 0 || sequence > JourneyResponseSave.MAXIMUM_SEQUENCE)) noAnswer else reply
+            } catch (_: Exception) { noAnswer }
+        }
+    }
+}
+
+internal fun interface JourneyResponseSaveTransport {
+    suspend fun sendResponseSave(sheet: JourneyResponseSave): JourneyResponseSaveReply
+}
+
+internal data class JourneyResponseSaveRecovery(val owners: List<String>, val needsRetry: Boolean)

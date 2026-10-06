@@ -260,7 +260,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         lane.sequence += 1
         val sheet = JourneyResponseSave(distinctId, run.journeyId, run.experienceId,
             run.reference.text("versionId"), formName, lane.sequence, answers)
-        if (queued) lane.pending = sheet
+        if (queued) { lane.pending = sheet; lane.retry = null }
         state.responseSaves = saves
         sheet
     }
@@ -276,7 +276,46 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         }
         val lane = checkNotNull(state.responseSaves?.journeys?.get(sheet.journeyId)?.get(sheet.formName))
         lane.sequence = maxOf(lane.sequence, storedSequence)
-        if (lane.pending?.let { it.sequence <= sheet.sequence } == true) lane.pending = null
+        if (lane.pending?.let { it.sequence <= sheet.sequence } == true) { lane.pending = null; lane.retry = null }
+    }
+
+    fun responseSaveAttempts(now: Long): List<JourneyResponseSaveAttempt> {
+        val attempts = read { state -> state.responseSaves?.journeys?.values?.flatMap { forms ->
+            forms.values.mapNotNull { lane -> lane.pending?.let { JourneyResponseSaveAttempt(it, lane.retry) } }
+        }.orEmpty() }
+        if (attempts.none { it.retry?.let { retry -> now < retry.observedAt } == true }) return attempts
+        update { state -> state.responseSaves?.journeys?.values?.forEach { forms ->
+            forms.values.forEach { it.retry?.normalizeClock(now) }
+        } }
+        return responseSaveAttempts(now)
+    }
+
+    fun recordResponseSaveReply(sheet: JourneyResponseSave, reply: JourneyResponseSaveReply, now: Long): Boolean {
+        if (reply.confirmed) {
+            confirmResponseSave(sheet, checkNotNull(reply.sequence))
+            return false
+        }
+        check(sheet.distinctId == distinctId) { "Wrong response save owner" }
+        return update { state ->
+            val lane = state.responseSaves?.journeys?.get(sheet.journeyId)?.get(sheet.formName) ?: return@update false
+            if (lane.pending?.sequence != sheet.sequence) return@update false
+            val retry = lane.retry ?: JourneyResponseSaveRetry(0, now, now, null, reply.code)
+            retry.normalizeClock(now)
+            retry.attempts = minOf(64, retry.attempts + 1)
+            retry.observedAt = now
+            retry.lastCode = reply.code
+            if (reply.code == JourneyResponseSaveReply.Code.UNKNOWN_FORM && retry.unknownFormSince == null) retry.unknownFormSince = now
+            val expired = reply.code == JourneyResponseSaveReply.Code.UNKNOWN_FORM && retry.unknownFormSince?.let { now - it >= 600_000 } == true
+            val stopped = reply.terminal || expired
+            if (stopped) {
+                lane.pending = null
+                lane.retry = null
+            } else {
+                retry.nextAttemptAt = now + minOf(300_000L, 5_000L * (1L shl minOf(6, retry.attempts - 1)))
+                lane.retry = retry
+            }
+            stopped
+        }
     }
 
     fun runs(): List<JourneyRun> = read { it.runs.values.sortedBy(JourneyRun::startedEventId) }
@@ -1172,16 +1211,36 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         completion = JourneyRun.Completion(outcome, atMillis),
     )
 
-    private companion object {
-        const val VERSION = "nuxie.journey-journal.v2"
+    companion object {
+        fun recoverResponseSaveOwners(directory: File, scope: JourneyStorageScope): JourneyResponseSaveRecovery {
+            val root = File(directory, "journey-state-v2")
+            val journals = File(root, "journals")
+            if (!journals.exists()) return JourneyResponseSaveRecovery(emptyList(), false)
+            return CacheFilesystemLock(root).withLock {
+                val owners = mutableListOf<String>()
+                var needsRetry = false
+                val reader = JourneyRunJournal(directory, "", scope)
+                val files = journals.listFiles() ?: throw IOException("Could not list response save journals")
+                for (file in files.filter { it.extension == "json" }) {
+                    val state = try { reader.load(file) } catch (error: kotlinx.coroutines.CancellationException) { throw error }
+                    catch (_: Exception) { needsRetry = true; continue }
+                    val saves = state.responseSaves ?: continue
+                    if (saves.namespace != scope.conversionNamespace || file.name != scope.customerDigest(saves.distinctId) + ".json") continue
+                    if (saves.journeys.values.any { forms -> forms.values.any { it.pending != null } }) owners += saves.distinctId
+                }
+                JourneyResponseSaveRecovery(owners, needsRetry)
+            }
+        }
+
+        private const val VERSION = "nuxie.journey-journal.v2"
         // A canonical profile may contribute up to 24 MiB of admitted context.
         // Preserve headroom for cursors, responses, receipts, and checkmarks.
-        const val MAX_BYTES = 40 * 1024 * 1024
-        const val MAX_RELEASE_PIN_BYTES = 6L * 1024L * 1024L
-        const val MAX_RELEASE_PIN_TOTAL_BYTES = 256L * 1024L * 1024L
-        const val MAX_RELEASE_PIN_COUNT = 1_024
-        const val MAX_RUN_COUNT = 1_024
-        val DIGEST = Regex("^[a-f0-9]{64}$")
+        private const val MAX_BYTES = 40 * 1024 * 1024
+        private const val MAX_RELEASE_PIN_BYTES = 6L * 1024L * 1024L
+        private const val MAX_RELEASE_PIN_TOTAL_BYTES = 256L * 1024L * 1024L
+        private const val MAX_RELEASE_PIN_COUNT = 1_024
+        private const val MAX_RUN_COUNT = 1_024
+        private val DIGEST = Regex("^[a-f0-9]{64}$")
     }
 }
 
