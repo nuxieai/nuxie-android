@@ -51,7 +51,7 @@ class JourneyResponseSaveDeliveryTest {
         val vectors = json(FixtureRunner.fixturesRoot().resolve("responses/save-cases.json").readText())
         val expected = vectors.getValue("request").jsonObject
         val rows = vectors.getValue("replies").jsonArray
-        assertEquals(20, rows.size)
+        assertEquals(47, rows.size)
         for ((index, element) in rows.withIndex()) {
             val row = element.jsonObject
             for (status in listOf(row.getValue("httpStatus").jsonPrimitive.int, 201)) {
@@ -72,6 +72,10 @@ class JourneyResponseSaveDeliveryTest {
                 assertEquals(outcome == "stopped", stopped)
                 assertEquals(if (outcome.startsWith("retry")) 1 else 0, journal.pendingResponseSaves().size)
                 if (outcome.startsWith("retry")) assertEquals(5_000L, journal.responseSaveAttempts(1_000_000).single().delay(1_000_000))
+                if (outcome == "retry_until_deadline") {
+                    assertEquals(JourneyResponseSaveReply.Code.UNKNOWN_FORM, received.code)
+                    assertTrue(journal.responseSaveAttempts(1_600_000).single().unknownFormExpired(1_600_000))
+                }
             }
         }
     }
@@ -86,7 +90,7 @@ class JourneyResponseSaveDeliveryTest {
             val sheet = JourneyResponseSave.fromJson(json(request.body.decodeToString()))
             requests += sheet.sequence
             assertEquals("anon", sheet.distinctId)
-            val body = if (sheet.sequence == 2L) """{"status":"save_unavailable"}""" else """{"status":"replayed","sequence":3}"""
+            val body = if (sheet.sequence == 2L) """{"status":"error","code":"save_unavailable"}""" else """{"status":"replayed","sequence":3}"""
             HttpTransport.Response(503, body.encodeToByteArray())
         }))
         delivery.activate(JourneyStorageScope.testFixture)
@@ -108,7 +112,7 @@ class JourneyResponseSaveDeliveryTest {
         for (answers in listOf(json("{}"), large)) {
             val delivery = worker(api(HttpTransport { request ->
                 assertEquals(answers, json(request.body.decodeToString()).getValue("answers"))
-                HttpTransport.Response(200, """{"status":"invalid_request"}""".encodeToByteArray())
+                HttpTransport.Response(200, """{"status":"error","code":"invalid_request"}""".encodeToByteArray())
             }))
             delivery.activate(JourneyStorageScope.testFixture)
             assertEquals(JourneyResponseSaveReply.Code.INVALID_REQUEST, delivery.sendWaiting(journal, run, "feedback", answers).code)
@@ -169,7 +173,7 @@ class JourneyResponseSaveDeliveryTest {
         val journal = JourneyRunJournal(directory, "anon")
         val run = responseSaveRun(journal)
         val sheet = journal.reserveResponseSave(run, "feedback", json("{}"), true)
-        val unknown = reply("""{"status":"unknown_form"}""")
+        val unknown = reply("""{"status":"error","code":"unknown_form"}""")
         journal.recordResponseSaveReply(sheet, unknown, 1_000_000)
         val reopened = JourneyRunJournal(directory, "anon")
         val backward = reopened.responseSaveAttempts(900_000).single()
@@ -209,7 +213,7 @@ class JourneyResponseSaveDeliveryTest {
         }))
         second.activate(JourneyStorageScope.testFixture)
         withTimeout(5_000) { while (journal.pendingResponseSaves().isNotEmpty()) delay(10) }
-        assertEquals(listOf(json("""{"apiKey":"test-key","distinct_id":"anon","journey_id":"journey-1","experience_id":"experience-1","experience_version_id":"version-1","form_name":"feedback","sequence":2,"answers":{"stars":2}}""")), requests)
+        assertEquals(listOf(json("""{"apiKey":"test-key","distinct_id":"anon","journey_id":"01900000-0000-7000-8000-000000000001","experience_id":"experience-1","experience_version_id":"version-1","form_name":"feedback","sequence":2,"answers":{"stars":2}}""")), requests)
     }
 
     @Test fun `unreadable owner does not block a valid journal`() = runBlocking {
@@ -287,6 +291,61 @@ class JourneyResponseSaveDeliveryTest {
             assertTrue(retained.renameTo(journals))
         }
         assertEquals(2, journal.pendingResponseSaves().size)
+    }
+
+    @Test fun `long backoff sleeps once and enqueue wakes it`() = runBlocking {
+        val journal = JourneyRunJournal(directory, "anon")
+        val run = responseSaveRun(journal)
+        val old = journal.reserveResponseSave(run, "old", json("{}"), true)
+        repeat(7) { journal.recordResponseSaveReply(old, JourneyResponseSaveReply.noAnswer, 1_000_000) }
+        val sleeps = CopyOnWriteArrayList<Long>()
+        val sent = CompletableDeferred<Unit>()
+        val delivery = JourneyResponseSaveDelivery(directory, JourneyResponseSaveTransport { sheet ->
+            assertEquals("new", sheet.formName)
+            sent.complete(Unit)
+            reply("""{"status":"saved","sequence":1}""")
+        }, scope, nowMillis = { 1_000_000 }, sleep = { sleeps += it; kotlinx.coroutines.awaitCancellation() })
+            .also { workers += it }
+        delivery.activate(JourneyStorageScope.testFixture)
+        withTimeout(3_000) { while (sleeps.isEmpty()) delay(10) }
+        assertEquals(listOf(300_000L), sleeps)
+        delivery.enqueue(journal, run, "new", json("{}"))
+        withTimeout(3_000) { sent.await() }
+    }
+
+    @Test fun `corrupt discovery backs off while valid owners deliver`() = runBlocking {
+        val journal = JourneyRunJournal(directory, "anon")
+        val run = responseSaveRun(journal)
+        journal.reserveResponseSave(run, "feedback", json("{}"), true)
+        File(directory, "journey-state-v2/journals/" + "c".repeat(64) + ".json").writeText("broken")
+        val time = java.util.concurrent.atomic.AtomicLong(1_000_000)
+        val sleeps = kotlinx.coroutines.channels.Channel<Pair<Long, CompletableDeferred<Unit>>>(10)
+        val sent = CompletableDeferred<Unit>()
+        val delivery = JourneyResponseSaveDelivery(directory, JourneyResponseSaveTransport {
+            sent.complete(Unit)
+            reply("""{"status":"saved","sequence":1}""")
+        }, scope, nowMillis = time::get, sleep = { duration ->
+            val release = CompletableDeferred<Unit>()
+            sleeps.send(duration to release)
+            release.await()
+        }).also { workers += it }
+        delivery.activate(JourneyStorageScope.testFixture)
+        withTimeout(3_000) { sent.await() }
+        for (expected in listOf(5_000L, 10_000L, 20_000L)) {
+            val (duration, release) = withTimeout(3_000) { sleeps.receive() }
+            assertEquals(expected, duration)
+            if (expected == 5_000L) {
+                time.addAndGet(-86_400_000)
+                release.complete(Unit)
+                val (rollbackDuration, rollbackRelease) = withTimeout(3_000) { sleeps.receive() }
+                assertEquals(5_000L, rollbackDuration)
+                time.addAndGet(expected)
+                rollbackRelease.complete(Unit)
+                continue
+            }
+            time.addAndGet(expected)
+            release.complete(Unit)
+        }
     }
 
     @Test fun `worker reselects sheets after an awaited send`() = runBlocking {

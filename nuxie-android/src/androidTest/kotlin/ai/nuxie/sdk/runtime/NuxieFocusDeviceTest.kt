@@ -67,6 +67,7 @@ class NuxieFocusDeviceTest {
         }
     @Test fun boundOpacityClearsFocusOnAnInputFreeStep() {
         val runtime = NuxieRuntime.shared
+        assertTrue(runtime.isAvailable)
         val bytes = assets.open("runtime/rive-focus/focus_collapsing.riv").use { it.readBytes() }
         val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(64, 64))
         try {
