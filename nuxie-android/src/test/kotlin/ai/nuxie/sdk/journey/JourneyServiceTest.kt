@@ -2539,10 +2539,12 @@ class JourneyServiceTest {
                     PresentationRegistry.reportRuntimeStep(launched.single(), NuxiePlayerStepOutcome(true, emptyList(), runtimeEvents, emptyList(), emptyList()), 1uL, null)
                     runCurrent()
                 } else { admission.await(); runCurrent() }
-                if (expected.getValue("recorded").jsonPrimitive.boolean) {
+                if (expected.getValue("opened").jsonPrimitive.boolean) {
                     for (attempt in 0 until 200) {
                         runCurrent()
-                        if (captures.any { it.first == JourneyEventNames.LINK_OPENED }) break
+                        val recorded = captures.any { it.first == JourneyEventNames.LINK_OPENED }
+                        val completed = !completes || captures.any { it.first == JourneyEventNames.LEG_COMPLETED }
+                        if (handoffCount > 0 && completed && (!expected.getValue("recorded").jsonPrimitive.boolean || recorded)) break
                         Thread.sleep(10)
                     }
                 }
