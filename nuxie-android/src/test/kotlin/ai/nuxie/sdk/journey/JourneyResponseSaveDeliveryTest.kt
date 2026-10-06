@@ -12,6 +12,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -71,6 +72,72 @@ class JourneyResponseSaveDeliveryTest {
                 if (outcome.startsWith("retry")) assertEquals(5_000L, journal.responseSaveAttempts(1_000_000).single().delay(1_000_000))
             }
         }
+    }
+
+    @Test fun `waiting failure preserves older sheet and a new tap confirms once`() = runBlocking {
+        val journal = JourneyRunJournal(directory, "anon")
+        val run = responseSaveRun(journal)
+        val older = journal.reserveResponseSave(run, "feedback", json("""{"stars":1}"""), true)
+        journal.recordResponseSaveReply(older, JourneyResponseSaveReply.noAnswer, 1_000_000)
+        val requests = CopyOnWriteArrayList<Long>()
+        val delivery = worker(api(HttpTransport { request ->
+            val sheet = JourneyResponseSave.fromJson(json(request.body.decodeToString()))
+            requests += sheet.sequence
+            assertEquals("anon", sheet.distinctId)
+            val body = if (sheet.sequence == 2L) """{"status":"save_unavailable"}""" else """{"status":"replayed","sequence":3}"""
+            HttpTransport.Response(503, body.encodeToByteArray())
+        }))
+        delivery.activate(JourneyStorageScope.testFixture)
+        assertFalse(delivery.sendWaiting(journal, run, "feedback", json("{}")).confirmed)
+        assertEquals(listOf(older), journal.pendingResponseSaves())
+        assertTrue(delivery.sendWaiting(journal, run, "feedback", json("{}")).confirmed)
+        assertTrue(journal.pendingResponseSaves().isEmpty())
+        assertEquals(listOf(2L, 3L), requests)
+        assertEquals(4L, JourneyRunJournal(directory, "anon").reserveResponseSave(run, "feedback", json("{}"), false).sequence)
+    }
+
+    @Test fun `waiting transport sends empty and large exact sheets without filtering`() = runBlocking {
+        val journal = JourneyRunJournal(directory, "anon")
+        val run = responseSaveRun(journal)
+        val large = JsonObject(buildMap {
+            for (index in 0..<300) put("field-$index", JsonPrimitive("invalid as typed"))
+            put("é", JsonPrimitive("composed")); put("e\u0301", JsonPrimitive("decomposed")); put("__proto__", JsonPrimitive(false))
+        })
+        for (answers in listOf(json("{}"), large)) {
+            val delivery = worker(api(HttpTransport { request ->
+                assertEquals(answers, json(request.body.decodeToString()).getValue("answers"))
+                HttpTransport.Response(200, """{"status":"invalid_request"}""".encodeToByteArray())
+            }))
+            delivery.activate(JourneyStorageScope.testFixture)
+            assertEquals(JourneyResponseSaveReply.Code.INVALID_REQUEST, delivery.sendWaiting(journal, run, "feedback", answers).code)
+            delivery.shutdown()
+        }
+    }
+
+    @Test fun `waiting reply after run ends never erases a newer sheet`() = runBlocking {
+        val journal = JourneyRunJournal(directory, "anon")
+        val run = responseSaveRun(journal)
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val requests = CopyOnWriteArrayList<Long>()
+        val delivery = worker(JourneyResponseSaveTransport { sheet ->
+            requests += sheet.sequence
+            started.complete(Unit)
+            release.await()
+            reply("""{"status":"saved","sequence":1}""")
+        })
+        delivery.activate(JourneyStorageScope.testFixture)
+        val waiting = async { delivery.sendWaiting(journal, run, "feedback", json("{}")) }
+        withTimeout(5_000) { started.await() }
+        delivery.shutdown()
+        val replacement = journal.reserveResponseSave(run, "feedback", json("""{"stars":2}"""), true)
+        journal.markStartedQueued(run)
+        journal.complete(run.id, "done", 2000)
+        journal.markCompletionQueued(run)
+        release.complete(Unit)
+        assertTrue(waiting.await().confirmed)
+        assertEquals(listOf(replacement), journal.pendingResponseSaves())
+        assertEquals(listOf(1L), requests)
     }
 
     @Test fun `unknown form deadline and backoff survive restart and backward clock`() {
