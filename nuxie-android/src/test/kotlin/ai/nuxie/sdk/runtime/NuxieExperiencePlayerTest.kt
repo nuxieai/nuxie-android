@@ -129,9 +129,10 @@ class NuxieExperiencePlayerTest {
         assertArrayEquals(byteArrayOf(-61, -87), native.focusBatches[0].second[1].text)
         assertEquals(listOf(true, true), outcome.focusResults)
         assertEquals(NuxieFocusState(true, false), outcome.focusState)
-        assertEquals(listOf(10L to 2), native.focusReads)
-        player.stepTyped(elapsedSeconds = 0.016)
-        assertEquals(1, native.focusReads.size)
+        assertEquals(listOf(10L to 2, 10L to 2), native.focusReads)
+        val idle = player.stepTyped(elapsedSeconds = 0.016)
+        assertEquals(NuxieFocusState(true, false), idle.focusState)
+        assertEquals(3, native.focusReads.size)
         player.close()
     }
 
