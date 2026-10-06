@@ -29,26 +29,29 @@ class JourneyRuntimeEmissionCoordinatorTest {
     @Test fun `shared frame changes produce no events and emissions retain their settled snapshot`() = runTest {
         val vectors = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("events/runtime-frame-writes.json").readText()).jsonObject.getValue("cases").jsonArray
+        var expectedValue = ""
+        val published = mutableListOf<String>()
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", JsonObject(emptyMap()), 0, 0,
+            onEmissionBatch = { batch, sources ->
+                batch.emissions.forEach { emission ->
+                    published += emission.name
+                    val source = requireNotNull(sources?.source(emission.id))
+                    assertEquals(expectedValue, source.snapshot.resolveNativeString("placementId", null, source.nativeId))
+                }
+                true
+            }, onPresentationRevealed = {})
+        assertTrue(coordinator.reveal())
         for (element in vectors) {
             val vector = element.jsonObject
             val value = vector.getValue("value").jsonPrimitive.content
+            expectedValue = value
+            published.clear()
             val snapshot = ai.nuxie.sdk.runtime.NuxieViewModelSnapshot.fromNative(
                 ai.nuxie.sdk.runtime.NativeViewModelSnapshot(71,
                     arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(71, 0)),
                     arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue(71, 0, "placementId",
                         ai.nuxie.sdk.runtime.NuxieViewModelPropertyKind.STRING.nativeValue,
                         value.encodeToByteArray(), 0))))
-            val published = mutableListOf<String>()
-            val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", JsonObject(emptyMap()), 0, 0,
-                onEmissionBatch = { batch, sources ->
-                    batch.emissions.forEach { emission ->
-                        published += emission.name
-                        val source = requireNotNull(sources?.source(emission.id))
-                        assertEquals(value, source.snapshot.resolveNativeString("placementId", null, source.nativeId))
-                    }
-                    true
-                }, onPresentationRevealed = {})
-            assertTrue(coordinator.reveal())
             val events = vector.getValue("events").jsonArray.mapIndexed { index, name ->
                 NuxieRuntimeEvent(index, 128, name.jsonPrimitive.content, "", "", 0f, emptyList())
             }
