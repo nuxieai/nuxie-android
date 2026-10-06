@@ -64,6 +64,20 @@ class JourneyRunJournalTest {
         Unit
     }
 
+    @Test fun `completion discards timed wait values and checkpoint`() {
+        val journal = JourneyRunJournal(directory, "customer")
+        val run = requireNotNull(journal.admit(arm(), JourneyFrequency.OneTime, "wait", 100))
+        val snapshot = ai.nuxie.sdk.presentation.ExperienceRunSnapshot(Json.parseToJsonElement(
+            """[{"path":"trip_days","kind":2,"value":30}]""").jsonArray)
+        journal.markStartedQueued(run)
+        journal.transition(run.id, "wait", run.context, JourneyControlExecutor.Checkpoint(100, 200), nativeSnapshot = snapshot)
+        assertEquals(snapshot, JourneyRunJournal(directory, "customer").runs().single().nativeSnapshot)
+        journal.complete(run.id, "closed", 150)
+        val completed = JourneyRunJournal(directory, "customer").runs().single()
+        assertNull(completed.nativeSnapshot)
+        assertNull(completed.park)
+    }
+
     @Test fun `policy cut ignores retired journal without touching purchase evidence`() {
         val retired = File(directory, "journey-state-v1/journals").apply { mkdirs() }
         val digest = JourneyStorageScope.testFixture.customerDigest("customer")
@@ -148,7 +162,6 @@ class JourneyRunJournalTest {
             val run = requireNotNull(journal.admit(arm(vector.getValue("binding").jsonObject), JourneyFrequency.EveryMatch,
                 "step", suite.number("startedAtMillis")))
             journal.markStartedQueued(run)
-            journal.recordResponses(run.id, vector.getValue("responses").jsonObject)
             val state = vector.text("beforeDeath")
             if (state == "parked") journal.park(run.id, "wait", vector.number("wakeAtMillis"))
             if (state == "completed") {
@@ -170,11 +183,11 @@ class JourneyRunJournalTest {
             } else {
                 recovered.outputs.getValue("responses")
             }
-            assertEquals(vector.getValue("responses"), retainedResponses)
+            assertEquals(if (state == "completed") vector.getValue("responses") else JsonObject(emptyMap()), retainedResponses)
             if (state == "parked") {
                 assertEquals(listOf(run.id), resumable.map { it.id })
                 assertEquals(300_000L, resumable.single().park?.wakeAtMillis)
-                reopened.resumeParked(run.id)
+                reopened.resumeParked(run.id, recovered.stepId, checkNotNull(recovered.park))
                 val again = JourneyRunJournal(directory, "customer")
                 assertTrue(again.recover(500_000).isEmpty())
                 assertEquals("abandoned", again.runs().single().completion?.outcome)
@@ -234,34 +247,6 @@ class JourneyRunJournalTest {
         assertEquals("done", completed.completion?.outcome)
     }
 
-    @Test fun `large collected responses are not duplicated before completion`() {
-        val journal = JourneyRunJournal(directory, "customer")
-        val run = requireNotNull(
-            journal.admit(arm(), JourneyFrequency.EveryMatch, "survey", 100_000),
-        )
-        val answer = "y".repeat(21 * 1024 * 1024)
-        val responses = JsonObject(mapOf("answer" to JsonPrimitive(answer)))
-
-        journal.recordResponses(run.id, responses)
-
-        val pending = JourneyRunJournal(directory, "customer").runs().single()
-        assertEquals(answer, pending.context.getValue("responses").jsonObject
-            .getValue("answer").jsonPrimitive.content)
-        assertEquals(JsonObject(emptyMap()), pending.outputs.getValue("responses"))
-
-        journal.complete(
-            run.id,
-            "done",
-            200_000,
-            responseOutputs = responses,
-        )
-
-        val completed = JourneyRunJournal(directory, "customer").runs().single()
-        assertEquals(JsonObject(emptyMap()), completed.context.getValue("responses"))
-        assertEquals(answer, completed.outputs.getValue("responses").jsonObject
-            .getValue("answer").jsonPrimitive.content)
-    }
-
     @Test fun `routed component source survives reopen and clears on a new event`() {
         val journal = JourneyRunJournal(directory, "customer")
         val run = requireNotNull(journal.admit(arm(), JourneyFrequency.EveryMatch, "screen", 100))
@@ -270,7 +255,7 @@ class JourneyRunJournalTest {
         val publication = JourneyRun.PendingPresentationPublication(
             invocationId = "buy-first", batchSequence = 0, nextEmissionSequence = 1,
             sourceScreenId = "screen", sourceActionId = "buy", sourceComponentId = "card",
-            sourceInstanceId = "plan.first", responsesChanged = false,
+            sourceInstanceId = "plan.first",
             items = listOf(JourneyRun.PendingPresentationPublication.Item(
                 name = "purchase_requested", properties = JsonObject(emptyMap()),
                 eventId = "purchase-event", occurredAtMillis = 101,
@@ -341,7 +326,6 @@ class JourneyRunJournalTest {
             sourceActionId = input.text("action_id"),
             sourceComponentId = input.text("component_id"),
             sourceInstanceId = input.text("instance_id"),
-            responsesChanged = true,
             items = eventEffects.mapIndexed { index, effect ->
                 JourneyRun.PendingPresentationPublication.Item(
                     name = effect.text("name"),
@@ -361,7 +345,7 @@ class JourneyRunJournalTest {
 
         val staged = JourneyRunJournal(directory, customerId).runs().single()
         assertEquals(publication, staged.pendingPresentationPublication)
-        assertEquals(expected.getValue("response_values"), staged.context.getValue("responses"))
+        assertEquals(context.getValue("responses"), staged.context.getValue("responses"))
         assertEquals(expected.number("batch_sequence"), staged.nextPresentationBatchSequence)
         assertEquals(emissionSequences.first(), staged.nextPresentationEmissionSequence)
         assertEquals(emissionIds.size, emissionSequences.size)
@@ -371,7 +355,6 @@ class JourneyRunJournalTest {
                 .clearPresentationPublication(
                     run.id,
                     "fixture-invocation",
-                    retainResponsesChanged = true,
                 ),
         )
         assertNull(cleared.pendingPresentationPublication)
@@ -380,8 +363,7 @@ class JourneyRunJournalTest {
         ).size.toLong())
         assertEquals(expected.number("batch_sequence") + 1, cleared.nextPresentationBatchSequence)
         assertEquals(emissionSequences.last() + 1, cleared.nextPresentationEmissionSequence)
-        assertEquals(expected.getValue("response_values"), cleared.context.getValue("responses"))
-        assertTrue(cleared.park?.pendingResponsesChanged == true)
+        assertEquals(context.getValue("responses"), cleared.context.getValue("responses"))
 
         assertNull(
             JourneyRunJournal(directory, customerId)
@@ -396,8 +378,7 @@ class JourneyRunJournalTest {
             replayResponseVersionIncrement,
         )
         assertEquals(cleared.nextPresentationEmissionSequence, replayed.nextPresentationEmissionSequence)
-        assertEquals(expected.getValue("response_values"), replayed.context.getValue("responses"))
-        assertTrue(replayed.park?.pendingResponsesChanged == true)
+        assertEquals(context.getValue("responses"), replayed.context.getValue("responses"))
     }
 
     @Test fun `partially published renderer batch abandons with responses before report retirement`() {
@@ -417,7 +398,6 @@ class JourneyRunJournalTest {
             nextEmissionSequence = 1,
             sourceScreenId = "survey",
             sourceActionId = "submit",
-            responsesChanged = true,
             items = listOf(
                 JourneyRun.PendingPresentationPublication.Item(
                     name = "survey_submitted",
@@ -575,22 +555,6 @@ class JourneyRunJournalTest {
             assertEquals(timestamp, expected, delivered.single().timestampMillis)
             assertEquals(950_000L, delivered.single().receivedAtMillis)
         }
-    }
-
-    @Test fun `invalid buffered JSON cannot replace the last readable snapshot`() {
-        val journal = JourneyRunJournal(directory, "customer")
-        val run = requireNotNull(journal.admit(arm(), JourneyFrequency.EveryMatch, "step", 100_000))
-        journal.recordResponses(run.id, JsonObject(mapOf("answer" to JsonPrimitive("yes"))))
-        try {
-            journal.recordResponses(run.id, JsonObject(mapOf("answer" to JsonPrimitive(Double.NaN))))
-            fail("Non-finite JSON must fail before publishing a journal snapshot")
-        } catch (_: ai.nuxie.sdk.experiences.JourneyReleaseAuthenticationException) { }
-        val buffered = JourneyRunJournal(directory, "customer").runs().single()
-        assertEquals(
-            JsonPrimitive("yes"),
-            buffered.context.getValue("responses").jsonObject["answer"],
-        )
-        assertEquals(JsonObject(emptyMap()), buffered.outputs.getValue("responses"))
     }
 
     @Test fun `authenticated app scope survives key rotation and isolates another app`() {
@@ -940,7 +904,6 @@ class JourneyRunJournalTest {
             val run = requireNotNull(journal.admit(arm(vector.getValue("binding").jsonObject), JourneyFrequency.EveryMatch,
                 "step", vector.number("startedAtMillis")))
             val outputs = vector.getValue("outputs").jsonObject
-            journal.recordResponses(run.id, outputs.getValue("responses").jsonObject)
             journal.complete(
                 run.id,
                 vector.text("outcome"),

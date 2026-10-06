@@ -448,6 +448,12 @@ internal class NuxieCore(
         nowMillis = nowMillis,
         replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
         artifactManager = releaseArtifactAcquirer,
+        prepareNativeValues = { values, release, delivery ->
+            if (release.descriptor["render"] is kotlinx.serialization.json.JsonObject) releaseArtifactAcquirer.acquire(release, delivery).use { acquired ->
+                val bytes = acquired.sceneFile.readBytes()
+                values.lane.call { values.prepare(bytes, release.descriptor, acquired.artifactsByKey) }
+            }
+        },
     )
 
     val profile = ProfileService(

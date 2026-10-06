@@ -207,7 +207,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
         val run = fixture.getValue("run").jsonObject
         val input = fixture.getValue("input").jsonObject
         val expected = fixture.getValue("expected").jsonObject
-        val expectedIds = expected.getValue("emission_ids").jsonArray.map {
+        val expectedIds = expected.getValue("customer_event_ids").jsonArray.map {
             it.jsonPrimitive.content
         }
         val order = mutableListOf<String>()
@@ -249,23 +249,17 @@ class JourneyRuntimeEmissionCoordinatorTest {
         assertEquals(input.getValue("component_id").jsonPrimitive.content, batch.source.componentId)
         assertEquals(input.getValue("instance_id").jsonPrimitive.content, batch.source.instanceId)
         assertEquals(
-            expected.getValue("emission_sequences").jsonArray.map { it.jsonPrimitive.long },
+            listOf(0L),
             batch.emissions.map { it.sequence },
         )
         assertEquals(expectedIds, batch.emissions.map { it.id })
         assertEquals(
-            fixture.getValue("effects").jsonArray.map { effect ->
-                when (effect.jsonObject.getValue("kind").jsonPrimitive.content) {
-                    "response_set" -> "\$response_set"
-                    "event" -> effect.jsonObject.getValue("name").jsonPrimitive.content
-                    else -> error("unsupported fixture effect")
-                }
-            },
+            listOf("survey_submitted"),
             batch.emissions.map { it.name },
         )
         assertEquals(
-            expected.getValue("response_values").jsonObject.getValue("answer"),
-            batch.emissions[0].payload.getValue("value"),
+            input.getValue("value"),
+            batch.emissions[0].payload.getValue("answer"),
         )
         assertEquals(
             expected.getValue("customer_event_ids").jsonArray.map { it.jsonPrimitive.content },
@@ -274,7 +268,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
     }
 
     @Test
-    fun `runtime event and host response preserve native transaction order`() = runTest {
+    fun `reserved host answer is dropped while ordinary runtime event publishes`() = runTest {
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val coordinator = JourneyRuntimeEmissionCoordinator(
             journeyId = "journey-1",
@@ -311,7 +305,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
         )
 
         val batch = batches.single()
-        assertEquals(listOf("survey_viewed", "\$response_unset"), batch.emissions.map { it.name })
+        assertEquals(listOf("survey_viewed"), batch.emissions.map { it.name })
         assertEquals("runtime:23", batch.source.actionId)
         assertEquals("survey", batch.source.screenId)
     }
@@ -560,16 +554,11 @@ class JourneyRuntimeEmissionCoordinatorTest {
     private fun controlDescriptor(): JsonObject {
         val run = screenEmissionFixture.getValue("run").jsonObject
         val input = screenEmissionFixture.getValue("input").jsonObject
-        val program = screenEmissionFixture.getValue("effects").jsonArray.map { element ->
+        val program = screenEmissionFixture.getValue("effects").jsonArray.filter {
+            it.jsonObject.getValue("kind").jsonPrimitive.content == "event"
+        }.map { element ->
             val effect = element.jsonObject
             when (effect.getValue("kind").jsonPrimitive.content) {
-                "response_set" -> buildJsonObject {
-                    put("type", JsonPrimitive("response_set"))
-                    put("field", effect.getValue("field"))
-                    put("value", buildJsonObject {
-                        put("source", JsonPrimitive("invocation_value"))
-                    })
-                }
                 "event" -> buildJsonObject {
                     put("type", JsonPrimitive("emit"))
                     put("eventName", effect.getValue("name"))

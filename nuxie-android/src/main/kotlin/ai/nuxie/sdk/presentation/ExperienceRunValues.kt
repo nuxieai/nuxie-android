@@ -16,7 +16,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 
 /** One run's file, renderer domain and authored values, confined to one native lane. */
-internal class ExperienceRunValues {
+internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSnapshot? = null) {
     val lane = NuxieRuntimeLane()
     private val admission = Any()
     private val retired = AtomicBoolean(false)
@@ -48,6 +48,7 @@ internal class ExperienceRunValues {
         val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(1, 1)) { "Run renderer creation failed" }
         val leases = mutableListOf<SystemFontCache.Lease>()
         var file: NuxieRuntimeFile? = null
+        var values: NuxieRuntimeViewModelState? = null
         try {
             val imports = descriptor?.let {
                 ExperienceAssetImportBuilder.build(it, artifactsByKey,
@@ -58,7 +59,8 @@ internal class ExperienceRunValues {
                 expectedAssets = imports?.expectedAssets.orEmpty(),
                 externalAssets = imports?.externalAssets.orEmpty(),
                 videoEnabled = imports?.videos?.isNotEmpty() == true)) { "Run file import failed" }
-            val values = file.newAuthoredViewModel("Experience", 0)
+            values = file.newAuthoredViewModel("Experience", 0)
+            restoredSnapshot?.let { values?.restoreWrites(it.writes()) }
             return Native(renderer, file, imports, values).also {
                 bytes = sceneBytes.copyOf()
                 prepared = it
@@ -66,11 +68,21 @@ internal class ExperienceRunValues {
             }
         } catch (error: Throwable) {
             fonts.didFailImport(leases)
+            runCatching { values?.close() }.exceptionOrNull()?.let(error::addSuppressed)
             runCatching { file?.close() }.exceptionOrNull()?.let(error::addSuppressed)
             runCatching { renderer.close() }.exceptionOrNull()?.let(error::addSuppressed)
             throw error
         }
     }
+
+    suspend fun snapshot(): ExperienceRunSnapshot? = lane.call {
+        check(!retired.get()) { "The run has ended" }
+        prepared?.values?.nativeSnapshot()?.let(ExperienceRunSnapshot::capture)
+    }
+
+    suspend fun journeyValues(): JsonObject = snapshot()?.journeyValues ?: JsonObject(emptyMap())
+
+    suspend fun isPrepared(): Boolean = lane.call { prepared != null }
 
     fun retainScreen() {
         synchronized(admission) {
