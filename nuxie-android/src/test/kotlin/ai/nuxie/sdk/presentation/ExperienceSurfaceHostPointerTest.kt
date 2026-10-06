@@ -1068,6 +1068,29 @@ class ExperienceSurfaceHostPointerTest {
         } finally { activity.pause().stop().destroy() }
     }
 
+    @Test fun `binding commit retires Rive focus without another frame`() {
+        val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+        try {
+            val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single()
+                .copy(responseCapture = ExperienceTextInput.ResponseCapture.BINDING)
+            withFocusHost(context = activity.get(), native = RecordingNative().apply {
+                focusState = NuxieFocusState(true, false)
+            }, textInputs = listOf(input)) { host, native, lane, _ ->
+                val container = ExperienceInputContainer(activity.get(), host::dispatchExperienceKeyEvent) { null }
+                container.addView(host)
+                activity.get().setContentView(container)
+                assertTrue(host.riveFocusState.hasFocus)
+                native.onStep = { native.focusState = NuxieFocusState(false, false) }
+                host.writeText("name", "changed", true) { assertTrue(it.isSuccess) }
+                drain(lane)
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                assertFalse(host.riveFocusState.hasFocus)
+                assertFalse(container.dispatchKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN,
+                    android.view.KeyEvent.KEYCODE_ESCAPE)))
+            }
+        } finally { activity.pause().stop().destroy() }
+    }
+
     @Test fun `unmoved Rive Tab gives focus to the next native view`() {
         val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
         try {
@@ -1086,6 +1109,76 @@ class ExperienceSurfaceHostPointerTest {
                 org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
                 assertEquals(listOf(0), native.focusSteps.flatten().map { it.kind })
                 assertTrue("A failed focus-next must leave the Rive group", next.hasFocus())
+            }
+        } finally { activity.pause().stop().destroy() }
+    }
+
+    @Test fun `Tab without a state machine gives focus to the next native view`() {
+        val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+        try {
+            withFocusHost(context = activity.get(), native = RecordingNative().apply { playerKind = 0 }) { host, native, lane, _ ->
+                val container = ExperienceInputContainer(activity.get(), host::dispatchExperienceKeyEvent) { null }
+                val next = android.widget.FrameLayout(activity.get()).apply { isFocusableInTouchMode = true; id = 912 }
+                host.isFocusableInTouchMode = true
+                host.nextFocusForwardId = next.id
+                container.addView(host)
+                container.addView(next)
+                activity.get().setContentView(container)
+                assertTrue(host.requestFocus())
+                assertTrue(container.dispatchKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_TAB)))
+                host.doFrame(1_000_000_000L)
+                drain(lane)
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                assertTrue(native.focusSteps.flatten().isEmpty())
+                assertTrue("A failed focus-next must leave the Rive group", next.hasFocus())
+            }
+        } finally { activity.pause().stop().destroy() }
+    }
+
+    @Test fun `last Rive stop hands Tab to the app`() = assertRiveEdgeHandsOn(backwards = false, stopScope = false)
+
+    @Test fun `first Rive stop hands Shift Tab to the app`() = assertRiveEdgeHandsOn(backwards = true, stopScope = false)
+
+    @Test fun `Stop scope keeps focus at its edge`() = assertRiveEdgeHandsOn(backwards = false, stopScope = true)
+
+    @Test fun `Rive edge enters first semantic keyboard target`() = assertRiveEdgeHandsOn(false, false, true)
+
+    @Test fun `reverse Rive edge enters last semantic keyboard target`() = assertRiveEdgeHandsOn(true, false, true)
+
+    private fun assertRiveEdgeHandsOn(backwards: Boolean, stopScope: Boolean, semantics: Boolean = false) {
+        val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+        try {
+            withFocusHost(context = activity.get(), native = RecordingNative().apply {
+                focusState = NuxieFocusState(true, false)
+                semanticNodeCount = 2
+            }, semantics = semantics) { host, native, lane, _ ->
+                val container = ExperienceInputContainer(activity.get(), host::dispatchExperienceKeyEvent) { null }
+                val sibling = android.widget.FrameLayout(activity.get()).apply { isFocusableInTouchMode = true; id = 912 }
+                host.isFocusableInTouchMode = true
+                host.id = 913
+                host.nextFocusForwardId = sibling.id
+                sibling.nextFocusForwardId = host.id
+                if (backwards) container.addView(sibling)
+                container.addView(host)
+                if (!backwards) container.addView(sibling)
+                activity.get().setContentView(container)
+                assertTrue(host.requestFocus())
+                native.onStep = { native.focusState = NuxieFocusState(stopScope, false) }
+                val modifiers = if (backwards) android.view.KeyEvent.META_SHIFT_ON else 0
+                assertTrue(container.dispatchKeyEvent(android.view.KeyEvent(0, 1, android.view.KeyEvent.ACTION_DOWN,
+                    android.view.KeyEvent.KEYCODE_TAB, 0, modifiers)))
+                host.doFrame(1_000_000_000L)
+                drain(lane)
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                assertEquals(listOf(if (backwards) 1 else 0), native.focusSteps.flatten().map { it.kind })
+                if (semantics) {
+                    assertFalse(sibling.hasFocus())
+                    assertEquals(if (backwards) "Continue 2" else "Continue 1", host.accessibilityNodeProvider
+                        .findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+                } else {
+                    assertEquals("Only a Stop scope retains Rive focus", stopScope, host.hasFocus())
+                    assertEquals(!stopScope, sibling.hasFocus())
+                }
             }
         } finally { activity.pause().stop().destroy() }
     }
@@ -1367,13 +1460,16 @@ class ExperienceSurfaceHostPointerTest {
 
     private fun withFocusHost(
         context: android.content.Context = RuntimeEnvironment.getApplication(),
+        native: RecordingNative = RecordingNative(),
+        semantics: Boolean = false,
+        textInputs: List<ExperienceTextInput> = emptyList(),
         onPublish: (ExperienceSurfaceHost) -> Unit = {},
         block: (ExperienceSurfaceHost, RecordingNative, NuxieRuntimeLane, SurfaceTexture) -> Unit,
     ) {
-        val native = RecordingNative()
         val lane = NuxieRuntimeLane()
         lateinit var host: ExperienceSurfaceHost
-        host = ExperienceSurfaceHost(context, lane, runtime = NuxieRuntime(native), usesSystemFrameCallbacks = false,
+        host = ExperienceSurfaceHost(context, lane, runtime = NuxieRuntime(native),
+            artboardSize = ExperienceArtboardSize(100f, 100f), usesSystemFrameCallbacks = false,
             listener = object : ExperienceSurfaceHost.Listener {
                 override fun onFirstFrame() = Unit
                 override fun onFailure(error: ExperiencePresentationException) { throw error }
@@ -1382,7 +1478,13 @@ class ExperienceSurfaceHostPointerTest {
             })
         val texture = SurfaceTexture(0)
         try {
-            host.loadArtboard(byteArrayOf(1), null)
+            host.layout(0, 0, 100, 100)
+            val descriptor = if (semantics) Json.parseToJsonElement("""{
+                "requirements":{"requiredCapabilities":["experience-accessibility"]},
+                "render":{"assets":[],"screens":[{"id":"screen","artboardName":"Main"}]},
+                "leg":{"screens":[{"id":"screen"}]}
+            }""").jsonObject else null
+            host.loadArtboard(byteArrayOf(1), null, descriptor, textInputs = textInputs)
             host.onSurfaceTextureAvailable(texture, 100, 100)
             drain(lane)
             host.doFrame(0L)
@@ -1499,7 +1601,8 @@ class ExperienceSurfaceHostPointerTest {
         override fun acquireWindow(surface: android.view.Surface): Long = 5L.also { windowsAcquired += 1 }
         override fun releaseWindow(handle: Long) = Unit
 
-        override fun playerKind(playerHandle: Long) = NativeCallResult(0, 1)
+        var playerKind = 1
+        override fun playerKind(playerHandle: Long) = NativeCallResult(0, playerKind)
         override fun playerFocusState(playerHandle: Long) = NativeCallResult(0, focusState)
 
         override fun stepPlayer(
