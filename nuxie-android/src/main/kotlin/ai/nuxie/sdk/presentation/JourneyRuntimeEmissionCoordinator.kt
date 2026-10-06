@@ -148,13 +148,8 @@ internal class JourneyRuntimeEmissionCoordinator(
             val previous = state.committedValue(commitKey)
                 ?: ExperienceTextInputLimit.apply(input.value, input.maxLength)
             if (previous == text) return@withLock true
-            val field = input.responseField
-            val accepted = field == null || publishDrafts(
-                listOf(Draft.ResponseSet(field, input.captureResponse(text, snapshot))),
-                JourneyScreenEmissionSource(screenId, "text_input:$inputId", inputId, null),
-            )
-            if (accepted) state.recordCommit(commitKey, text)
-            accepted
+            state.recordCommit(commitKey, text)
+            true
         }
     }
 
@@ -335,17 +330,6 @@ internal class JourneyRuntimeEmissionCoordinator(
             val payload = command.value.toJsonElement() ?: return@forEach
             val properties = payload.properties()
             when (command.name) {
-                RESPONSE_SET_EVENT -> {
-                    val field = properties["field"]?.jsonPrimitive?.contentOrNull
-                    val value = properties["value"]
-                    if (field != null && field.isNotEmpty() && value != null) {
-                        drafts += Draft.ResponseSet(field, value)
-                    }
-                }
-                RESPONSE_UNSET_EVENT -> {
-                    val field = properties["field"]?.jsonPrimitive?.contentOrNull
-                    if (field != null && field.isNotEmpty()) drafts += Draft.ResponseUnset(field)
-                }
                 NAVIGATE_EVENT -> Log.w(
                     LOG_TAG,
                     "Rejected renderer \$navigate command: Journey routes own navigation",
@@ -414,16 +398,6 @@ internal class JourneyRuntimeEmissionCoordinator(
                             resolveSource(it.value.jsonObject, control.invocation)
                         }.let(::JsonObject),
                     )
-                    "response_set" -> Draft.ResponseSet(
-                        field = requireNotNull(action.string("field")),
-                        value = resolveSource(
-                            requireNotNull(action["value"]) { "response value is missing" }.jsonObject,
-                            control.invocation,
-                        ),
-                    )
-                    "response_unset" -> Draft.ResponseUnset(
-                        field = requireNotNull(action.string("field")),
-                    )
                     else -> error("unsupported declarative screen action")
                 }
             }
@@ -448,35 +422,11 @@ internal class JourneyRuntimeEmissionCoordinator(
 
     private sealed interface Draft {
         fun isReservedEvent(): Boolean = this is Event && name.startsWith('$')
-
-        fun isInvalid(): Boolean = when (this) {
-            is Event -> name.isEmpty()
-            is ResponseSet -> field.isEmpty()
-            is ResponseUnset -> field.isEmpty()
+        fun isInvalid(): Boolean = this is Event && name.isEmpty()
+        fun materialize(id: String, sequence: Long, occurredAtMillis: Long) = when (this) {
+            is Event -> JourneyScreenEmission(id, sequence, occurredAtMillis, name, payload)
         }
-
-        fun materialize(id: String, sequence: Long, occurredAtMillis: Long) =
-            when (this) {
-                is Event -> JourneyScreenEmission(id, sequence, occurredAtMillis, name, payload)
-                is ResponseSet -> JourneyScreenEmission(
-                    id,
-                    sequence,
-                    occurredAtMillis,
-                    RESPONSE_SET_EVENT,
-                    JsonObject(mapOf("field" to JsonPrimitive(field), "value" to value)),
-                )
-                is ResponseUnset -> JourneyScreenEmission(
-                    id,
-                    sequence,
-                    occurredAtMillis,
-                    RESPONSE_UNSET_EVENT,
-                    JsonObject(mapOf("field" to JsonPrimitive(field))),
-                )
-            }
-
         data class Event(val name: String, val payload: JsonObject) : Draft
-        data class ResponseSet(val field: String, val value: JsonElement) : Draft
-        data class ResponseUnset(val field: String) : Draft
     }
 
     private data class Projection(
@@ -502,8 +452,6 @@ internal class JourneyRuntimeEmissionCoordinator(
         const val LOG_TAG = "Nuxie"
         const val GENERATED_INTERACTION_EVENT = "Nuxie Interaction"
         const val GENERATED_INTERACTION_CORE_TYPE = 128
-        const val RESPONSE_SET_EVENT = "\$response_set"
-        const val RESPONSE_UNSET_EVENT = "\$response_unset"
         const val NAVIGATE_EVENT = "\$navigate"
 
         fun controlsForScreen(descriptor: JsonObject, screenId: String): Map<String, JsonObject> =

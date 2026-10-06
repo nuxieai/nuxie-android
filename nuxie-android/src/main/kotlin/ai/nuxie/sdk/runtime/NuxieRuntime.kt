@@ -438,6 +438,14 @@ internal class NuxieRuntimeViewModelState(
         )
     }
 
+    fun nativeSnapshot(): NativeViewModelSnapshot = requireNativeValue(
+        native.snapshotViewModel(checkNotNull(root)), "snapshot run view model")
+
+    fun restoreWrites(writes: List<NativeViewModelWrite>) {
+        val handle = checkNotNull(root)
+        for (write in writes) requireNativeSuccess(native.mutateViewModel(handle, write), "restore run value")
+    }
+
     fun close() {
         val rootHandle = root ?: return
         root = null
