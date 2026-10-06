@@ -181,6 +181,17 @@ internal class NuxieViewModelSnapshot private constructor(
     /** Native occurrence identity, not an authored alias or a retained handle. */
     internal val nativeRootInstanceId: Long get() = rootInstanceId
 
+    fun withoutRootProperty(name: String): NuxieViewModelSnapshot {
+        val archive = retainedGraph.withoutRootProperty(name)
+        val kept = archive.instanceIdentities
+        return NuxieViewModelSnapshot(rootInstanceId, instancesById.values.filter { it.id in kept }.map { instance ->
+            instance.copy(values = instance.values.filter { (key, value) ->
+                !(instance.id == rootInstanceId && key == name) &&
+                    (value !is Value.Reference || value.instanceId in kept)
+            })
+        }, instanceIds.filterValues { it in kept }, archive)
+    }
+
     /** Authored geometry paths may include the root view-model label. */
     fun resolveGeometryNumber(path: String): Float? =
         (resolveGeometryValue(path) as? Value.NumberValue)?.value?.takeIf(Float::isFinite)

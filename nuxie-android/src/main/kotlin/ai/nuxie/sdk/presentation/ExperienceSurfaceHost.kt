@@ -68,6 +68,7 @@ internal class ExperienceSurfaceHost(
     private val systemFontCache: SystemFontCache = SystemFontCache.shared,
     private val videoDecoderPool: ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool? = null,
     private val usesSystemFrameCallbacks: Boolean = true,
+    private val runValues: ExperienceRunValues? = null,
 ) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
     @Volatile private var layoutBounds = artboardSize
     private var surfaceWidth = 0
@@ -384,6 +385,13 @@ internal class ExperienceSurfaceHost(
     private val captionPublication = AtomicLong()
     private var submittedSnapshot: SubmittedTextSnapshot? = null
     private val textPublication = AtomicLong()
+    private var sharedValuesLinked = false
+    private var surfaceWidth = 1
+    private var surfaceHeight = 1
+    private fun retainScreenValues(snapshot: NuxieViewModelSnapshot) {
+        retainedViewModel?.set(if (sharedValuesLinked) snapshot.withoutRootProperty("experience") else snapshot)
+    }
+
     private var retainedViewModel: java.util.concurrent.atomic.AtomicReference<NuxieViewModelSnapshot?>? = null
     private var textInputs: Map<String, ExperienceTextInput> = emptyMap()
     private val runtimeValues = linkedMapOf<String, NuxieViewModelScalarValue>()
@@ -471,6 +479,14 @@ internal class ExperienceSurfaceHost(
                 textInputs.any { it.editableValueName != null }
             this.textInputs = textInputs.associateBy(ExperienceTextInput::id)
             this.retainedViewModel = retainedViewModel
+            val shared = try { runValues?.prepare(sceneBytes, descriptor, artifactsByKey, runtime, systemFontCache) }
+            catch (error: Exception) {
+                reportFailure(ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                    "Experience run values could not be prepared", error)
+                onLoaded?.invoke(false)
+                return@enqueue
+            }
+            if (shared != null) renderer = shared.renderer
             val activeRenderer = ensureRenderer(1, 1)
             if (activeRenderer == null) {
                 reportFailure(
@@ -482,7 +498,11 @@ internal class ExperienceSurfaceHost(
             }
             var videoBindings: List<ExperienceVideoAssetBinding> = emptyList()
             var videoTargets: List<ExperienceVideoElement> = emptyList()
-            file = if (descriptor == null) {
+            file = if (shared != null) {
+                videoBindings = shared.imports?.videos.orEmpty()
+                videoTargets = shared.imports?.videoElements.orEmpty()
+                shared.file
+            } else if (descriptor == null) {
                 runtime.importFile(activeRenderer, sceneBytes)
             } else {
                 val inspectedCatalog = runtime.inspectFileAssets(sceneBytes)
@@ -538,6 +558,14 @@ internal class ExperienceSurfaceHost(
                     return@enqueue
                 }
             }
+            if (shared != null && videoBindings.isNotEmpty()) {
+                val render = descriptor?.get("render") as? JsonObject
+                val screen = (render?.get("screens") as? JsonArray)?.filterIsInstance<JsonObject>()
+                    ?.singleOrNull { (it["artboardName"] as? JsonPrimitive)?.content == artboardName }
+                val sceneWidth = (screen?.get("width") as? JsonPrimitive)?.content?.toFloatOrNull()
+                val sceneHeight = (screen?.get("height") as? JsonPrimitive)?.content?.toFloatOrNull()
+                videoArtboardSize = if (sceneWidth != null && sceneHeight != null) sceneWidth to sceneHeight else null
+            }
             val loadedFile = file
             if (loadedFile == null) {
                 Log.w(LOG_TAG, "Runtime rejected the scene bytes")
@@ -583,13 +611,18 @@ internal class ExperienceSurfaceHost(
                         }
                     }
                 }
+                val values = shared?.values
+                if (values != null) {
+                    sharedValuesLinked = viewModelState?.linkViewModel("experience", values)
+                        ?: loadedArtboard.linkDefaultViewModel("experience", values)
+                }
             } catch (error: Exception) {
                 // Do not retain a partially bound graph after a signed state
                 // contract failure. The renderer remains available for retry.
                 artboard = null
                 file = null
                 runCatching { loadedArtboard.close() }.exceptionOrNull()?.let(error::addSuppressed)
-                runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                if (shared == null) runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 reportFailure(
                     ExperiencePresentationException.Reason.PREPARATION_FAILED,
                     "Experience view-model binding failed",
@@ -614,7 +647,7 @@ internal class ExperienceSurfaceHost(
                 artboard = null
                 file = null
                 runCatching { loadedArtboard.close() }.exceptionOrNull()?.let(error::addSuppressed)
-                runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                if (shared == null) runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 reportFailure(
                     ExperiencePresentationException.Reason.HOST_FAILED,
                     "Experience player creation failed",
@@ -663,7 +696,7 @@ internal class ExperienceSurfaceHost(
                         textRunNames = textInputs.values.filter { it.editableValueName == null }.map { it.runName }.distinct())
                     outcome.focusState?.let { riveFocusState = it }
                     val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
-                    root?.let { retainedViewModel?.set(it) }
+                    root?.let { retainScreenValues(it) }
                     if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, root))
                     val evaluated = checkNotNull(owner).snapshot()
                     check(evaluated.nativeRootInstanceId == field.ownerId) { "Native field owner changed during write" }
@@ -718,7 +751,7 @@ internal class ExperienceSurfaceHost(
                         val outcome = checkNotNull(player).stepAfterStateMutation(correlationId = correlationId)
                         outcome.focusState?.let { riveFocusState = it }
                         val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
-                        root?.let { retainedViewModel?.set(it) }
+                        root?.let { retainScreenValues(it) }
                         if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, root))
                         publishSteps()
                     } else listener?.onTextInputEvent(target.inputId, event)
@@ -756,7 +789,7 @@ internal class ExperienceSurfaceHost(
                         )
                         outcome.focusState?.let { riveFocusState = it }
                         val captured = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
-                        captured?.let { retainedViewModel?.set(it) }
+                        captured?.let { retainScreenValues(it) }
                         if (outcome.hasPublishableEffects()) {
                             unpublishedSteps.addLast(PublishedStep(correlationId, outcome, captured))
                         }
@@ -815,7 +848,10 @@ internal class ExperienceSurfaceHost(
         } else {
             // Reset after any staging operation that already started on this
             // lane; clearing on the UI thread could race its final enqueue.
-            lane.enqueue { pointerInput.reset() }
+            lane.enqueue {
+                pointerInput.reset()
+                retireSubmission()
+            }
             Choreographer.getInstance().removeFrameCallback(this)
         }
     }
@@ -839,7 +875,7 @@ internal class ExperienceSurfaceHost(
                 )
                 return@enqueue
             }
-            if (activeRenderer.resize(width.coerceAtLeast(1), height.coerceAtLeast(1)) != NUX_STATUS_OK) {
+            if ((if (runValues == null) activeRenderer.resize(width.coerceAtLeast(1), height.coerceAtLeast(1)) else activeRenderer.resizeIfIdle(width.coerceAtLeast(1), height.coerceAtLeast(1))) != NUX_STATUS_OK) {
                 Log.w(LOG_TAG, "Android Vulkan renderer resize failed")
                 reportFailure(
                     ExperiencePresentationException.Reason.HOST_FAILED,
@@ -897,6 +933,23 @@ internal class ExperienceSurfaceHost(
         }
     }
 
+    /** Cancels only this window's native work before discarding its captured frame. */
+    private fun retireSubmission(): Boolean {
+        val status = window?.let { renderer?.detachSurface(it) } ?: NUX_STATUS_OK
+        if (status != NUX_STATUS_OK) {
+            attached = false
+            reportFailure(
+                ExperiencePresentationException.Reason.HOST_FAILED,
+                "Experience renderer detach failed with status $status",
+            )
+            return false
+        }
+        pendingPresentation = false
+        submittedSnapshot = null
+        submittedCaptions = null
+        return true
+    }
+
     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
         resizeSurface(width, height)
     }
@@ -913,10 +966,11 @@ internal class ExperienceSurfaceHost(
             appliedLayout = null
             pointerInput.reset()
             if (attached) {
-                pendingPresentation = false
-                submittedSnapshot = null
-                submittedCaptions = null
-                val status = renderer?.resize(width.coerceAtLeast(1), height.coerceAtLeast(1))
+                if (!retireSubmission()) return@enqueue
+                val status = if (runValues != null) renderer?.resizeIfIdle(width.coerceAtLeast(1), height.coerceAtLeast(1)) else renderer?.resize(
+                    width.coerceAtLeast(1),
+                    height.coerceAtLeast(1),
+                )
                 if (status != NUX_STATUS_OK) {
                     attached = false
                     reportFailure(
@@ -949,7 +1003,7 @@ internal class ExperienceSurfaceHost(
                 submittedSnapshot = null
                 submittedCaptions = null
                 try {
-                    renderer?.detachSurface()
+                    window?.let { renderer?.detachSurface(it) }
                 } finally {
                     window?.close()
                     window = null
@@ -1128,7 +1182,7 @@ internal class ExperienceSurfaceHost(
                     } else {
                         null
                     }
-                    viewModelSnapshot?.let { retainedViewModel?.set(it) }
+                    viewModelSnapshot?.let { retainScreenValues(it) }
                     if (outcome.hasPublishableEffects()) {
                         unpublishedSteps.addLast(PublishedStep(correlationId, outcome, viewModelSnapshot))
                     }
@@ -1145,7 +1199,7 @@ internal class ExperienceSurfaceHost(
                         return@enqueue
                     }
                 }
-                val disposition = renderer.renderAndPresent(player, window, clearColor, layout.density)
+                val disposition = renderer.renderAndPresent(player, window, clearColor, layout.density, surfaceWidth, surfaceHeight)
                 pendingPresentation = disposition == 4
                 if (disposition < 0) {
                     Log.w(LOG_TAG, "render_player failed", null, Log.status("status", -disposition))
@@ -1239,18 +1293,18 @@ internal class ExperienceSurfaceHost(
             applyRuntimeValues(finalValues)
             // Capture on the original lane after input/exit writes and before releasing handles.
             var firstFailure = retainedViewModel?.let { retained -> runCatching {
-                (viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot())?.let(retained::set)
+                (viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot())?.let(::retainScreenValues)
             }.exceptionOrNull() }
             attached = false
             val closeHandles = listOfNotNull(
-                renderer?.let { active -> { active.detachSurface(); Unit } },
+                window?.let { ownedWindow -> renderer?.let { active -> { active.detachSurface(ownedWindow); Unit } } },
                 window?.let { it::close },
                 videoPlayback?.let { owner -> { owner.closeAfterRetirement(onMediaReleased) } } ?: onMediaReleased,
                 player?.let { it::close },
                 viewModelState?.let { it::close },
                 artboard?.let { it::close },
-                file?.let { it::close },
-                renderer?.let { it::close },
+                file?.takeIf { runValues == null }?.let { it::close },
+                renderer?.takeIf { runValues == null }?.let { it::close },
             )
             window = null
             player = null

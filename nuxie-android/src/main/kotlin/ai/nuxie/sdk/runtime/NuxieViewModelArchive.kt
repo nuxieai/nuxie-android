@@ -8,6 +8,29 @@ internal class NuxieViewModelArchive private constructor(
 ) {
     private data class Instance(val id: Long, val schemaIndex: Int, val schemaName: String?, val values: List<NativeViewModelSnapshotValue>)
 
+    internal val instanceIdentities: Set<Long> get() = instances.map { it.id }.toSet()
+
+    fun withoutRootProperty(name: String): NuxieViewModelArchive {
+        fun children(value: NativeViewModelSnapshotValue): List<Long> = when (value.kind) {
+            NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue -> listOfNotNull(value.referencedInstanceId.takeUnless { it == 0L })
+            NuxieViewModelPropertyKind.LIST.nativeValue -> value.listItemIds.toList()
+            else -> emptyList()
+        }
+        val byId = instances.associateBy { it.id }
+        val excluded = mutableSetOf<Long>()
+        val pending = ArrayDeque(byId.getValue(rootId).values.filter { it.name == name }.flatMap(::children))
+        while (pending.isNotEmpty()) {
+            val id = pending.removeFirst()
+            if (excluded.add(id)) byId[id]?.values.orEmpty().flatMap(::children).forEach(pending::addLast)
+        }
+        val kept = instances.filter { it.id !in excluded }.map { instance ->
+            instance.copy(values = instance.values.filter {
+                !(instance.id == rootId && it.name == name) && children(it).none(excluded::contains)
+            })
+        }
+        return NuxieViewModelArchive(rootId, kept, aliases.filterValues { it !in excluded })
+    }
+
     fun restore(
         native: NuxieTypedRuntimeNative,
         file: NuxieRuntimeFile,

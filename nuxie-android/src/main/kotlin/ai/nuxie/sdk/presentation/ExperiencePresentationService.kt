@@ -91,6 +91,7 @@ internal data class PreparedPresentation(
     val screenLifecycle: ExperienceScreenLifecycle = ExperienceScreenLifecycle(),
     val transition: JsonObject? = null,
     val retainedViewModel: AtomicReference<NuxieViewModelSnapshot?> = AtomicReference(),
+    val runValues: ExperienceRunValues? = null,
 )
 
 internal sealed interface PresentationShell {
@@ -643,6 +644,7 @@ internal class ExperiencePresentationService(
         ) -> JourneyScreenDismissalResult,
         val emissions: JourneyRuntimeEmissionCoordinator,
         val openLink: suspend (JourneyLinkRequest) -> Boolean,
+        val runValues: ExperienceRunValues?,
         val screenDismissed: AtomicBoolean = AtomicBoolean(false),
         var navigationDismissal: NavigationDismissal? = null,
         var navigationHistory: List<String> = emptyList(),
@@ -786,6 +788,7 @@ internal class ExperiencePresentationService(
         onPresentationRevealed: suspend (String) -> Unit = {},
         onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
         transition: JsonObject? = null,
+        runValues: ExperienceRunValues? = null,
     ): ExperienceRef {
         val reserved = reservation as? JourneyReservation
         val request = reserved?.request ?: captureRequest(ownerDistinctId)
@@ -794,6 +797,7 @@ internal class ExperiencePresentationService(
         lateinit var journey: JourneyOutcome
         journey = JourneyOutcome(
             fences = fences,
+            runValues = runValues,
             screenId = screenId,
             onOutcome = onOutcome,
             onScreenDismissed = onScreenDismissed,
@@ -953,7 +957,7 @@ internal class ExperiencePresentationService(
                     return PreparedPresentation(source.acquired.sceneFile, source.screen.artboardName, source.screen.clearColor,
                         source.screen.shell, source.screen.screenId, source.descriptor, source.acquired.artifactsByKey,
                         source.screen.artboardSize, source.viewModelProjection, text, lifecycle, transition,
-                        AtomicReference(retained))
+                        AtomicReference(retained), journey.runValues)
                 }
                 data class Destination(val source: PreparedSource, val content: PreparedPresentation, val navigation: PreparedScreenNavigation?)
                 suspend fun acquireInitial(): PreparedSource = try {
