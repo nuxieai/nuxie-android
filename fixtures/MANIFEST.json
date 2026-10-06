@@ -252,14 +252,17 @@
     "runtime/rive-focus/provenance.json": "8e97cb504397639d25144672dc430379528ee51c7fb3eae886f1be7c3105625f",
     "runtime/rive-focus/text_input_event.riv": "0d851dc67f9efc6382d400263931fd1be57fad92a9b90e709f174b6b72c20df2",
     "runtime/text-editing-experiment/LICENSE.txt": "fa43eb0d7fbf66f9504182d92dd097311278bb80111a5bf1403c366d6a403144",
-    "runtime/text-editing-experiment/provenance.json": "ce7b0c8fe49ad0902e49ff1ef54c17e8456fd24be75893788fc0508a12117a88",
+    "runtime/text-editing-experiment/provenance.json": "c0d87915c3bb76e61a98fe8694cff2d92211f271a9fa22deed8d4e30faf33ff7",
     "runtime/text-editing-experiment/text_input.riv": "718b80e13fc25f89c34b66fb01732f7ea1eac924ff06ca6b2caa5ed882324a72",
     "runtime/text-editing-experiment/text_input_secure.riv": "01a4d8b44e9a1c08bd1df0d49062b2cc838a714171da71d82816fcd166dcafda",
     "input/text-boundaries.json": "0f9a7e1351010c666ae93d2c66ac17b50979e37656532ff6862e1c62fa1289e2",
     "input/unicode16/GraphemeBreakTest.txt": "ee2b9354d270ac061b29f09662cafea06341d77e704b8cc6bd72aaeeda363cb5",
     "input/unicode16/LICENSE.txt": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96",
     "input/unicode16/properties.json": "e9254b78490baf7daf882c2b329742c2b97a3fc170b69c7278a99ab060af57c4",
-    "input/unicode16/provenance.json": "40e832cd4023a794f13290c695c1f9af3cd977ab57bc67b5ff649aad1fbfb2cb"
+    "input/unicode16/provenance.json": "40e832cd4023a794f13290c695c1f9af3cd977ab57bc67b5ff649aad1fbfb2cb",
+    "runtime/text-editing-experiment/generate.py": "7ac383fa1d04b4118194ee979e9bb55169f123951cd5925ac4b3d2a88ea8673c",
+    "runtime/text-editing-experiment/text_input_observed.riv": "e069ad0766aa5edafb396b98c1e5172ba5cbf71b7742aeee0d5297276ba292f5",
+    "runtime/text-editing-experiment/text_input_secure_observed.riv": "4baab6ffdaf1c4ee30e0dffcf980144916b2aeb76ce4566504f0486129fff04a"
   },
   "sourceCommitOverrides": {
     "events/catalog.json": "69672d8483f8167ce92fd499d0347935aa28bb08",
@@ -283,13 +286,16 @@
     "runtime/rive-focus/provenance.json": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
     "runtime/rive-focus/text_input_event.riv": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
     "runtime/text-editing-experiment/LICENSE.txt": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
-    "runtime/text-editing-experiment/provenance.json": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
+    "runtime/text-editing-experiment/provenance.json": "5a1e249b39e047e4583d648cb5323e54ebbcaa83",
     "runtime/text-editing-experiment/text_input.riv": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
     "runtime/text-editing-experiment/text_input_secure.riv": "ab1d5b032b52c3d0f3f9b2d2bbba81a4b6e2d6e4",
     "input/text-boundaries.json": "ef402f572b443debdd25a74dc2b470eae79005f6",
     "input/unicode16/GraphemeBreakTest.txt": "ef402f572b443debdd25a74dc2b470eae79005f6",
     "input/unicode16/LICENSE.txt": "ef402f572b443debdd25a74dc2b470eae79005f6",
     "input/unicode16/properties.json": "ef402f572b443debdd25a74dc2b470eae79005f6",
-    "input/unicode16/provenance.json": "ef402f572b443debdd25a74dc2b470eae79005f6"
+    "input/unicode16/provenance.json": "ef402f572b443debdd25a74dc2b470eae79005f6",
+    "runtime/text-editing-experiment/generate.py": "5a1e249b39e047e4583d648cb5323e54ebbcaa83",
+    "runtime/text-editing-experiment/text_input_observed.riv": "5a1e249b39e047e4583d648cb5323e54ebbcaa83",
+    "runtime/text-editing-experiment/text_input_secure_observed.riv": "5a1e249b39e047e4583d648cb5323e54ebbcaa83"
   }
 }
