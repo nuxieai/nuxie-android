@@ -266,7 +266,20 @@
     "events/runtime-frame-writes.json": "859787db8e9f7e53a486d350d428ae28e88f1e82dc493be4157571775484ca59",
     "responses/save-cases.json": "b9140bfb0d9e25459102c44478c731b9bfb654b74e35376b73c7b09656632617",
     "runtime/rive-focus/focus_collapsing.riv": "5f9b979a23692919cece02ac6121c4c9575ef2e9a302f81cb299a04881ab9d74",
-    "journeys/planes/runtime-layout-transform.json": "05a6283f028f823b92d4b38175582db52ac8bac5eef4dfe3533cbf76436e97a0"
+    "journeys/planes/runtime-layout-transform.json": "05a6283f028f823b92d4b38175582db52ac8bac5eef4dfe3533cbf76436e97a0",
+    "runtime/shared-values/NOTES.md": "fb11772ebef9a692895cc821ed342b735f96cb87dee37b82380e6915457b8462",
+    "runtime/shared-values/expectations.json": "5f1051280469c567664018745b9a0a6193b7d629b823cf7b0dbcd1a37b07b9bc",
+    "runtime/shared-values/provenance.json": "44458d24065e0c29b4ad8d86bd2f61b81ab1a57bebd8ab0b16044f637a406869",
+    "runtime/shared-values/screen.riv": "aae36371904c55b88cc745d6cfb9b72e29128a7580293d286521973d112adfdf",
+    "runtime/shared-values/source/components/tap-count/frame.json": "61881deae2cadf3ca5a9eeee23a84bb89fda2d62612f8e1bf7aa75154a0e77d5",
+    "runtime/shared-values/source/components/tap-count/index.html": "6b8195f3a59dd529b35ecf6af28ffb055211db7a17932b0e8595062d14f427c2",
+    "runtime/shared-values/source/experience.json": "41638a35e823af94f037522d14847604ae2ac181dc688992eb4f8965cf7128ea",
+    "runtime/shared-values/source/screens/first/frame.json": "d8c3a8e2fe9f63cb57a7d673110228861a1a11edce2e581ffa7571a2b0be93bf",
+    "runtime/shared-values/source/screens/first/index.html": "6d53397b1eeccdb8501ada7bc901c4f6f50d67d67574c01844e2b3dcdbd10c13",
+    "runtime/shared-values/source/screens/long/frame.json": "854a573af0971343333054c33bd03cd2a2c567e770188285186ed8c475a00560",
+    "runtime/shared-values/source/screens/long/index.html": "4867d8d0dab06456b529f769ffd0472f5cf1553a7b334d8b24f8cd55434b258e",
+    "runtime/shared-values/source/screens/short/frame.json": "854a573af0971343333054c33bd03cd2a2c567e770188285186ed8c475a00560",
+    "runtime/shared-values/source/screens/short/index.html": "d24a2cada3cec193163d4b319fd9bd4ff0f67850c7e0869916629232b2964021"
   },
   "sourceCommitOverrides": {
     "events/catalog.json": "69672d8483f8167ce92fd499d0347935aa28bb08",
@@ -304,6 +317,19 @@
     "journeys/planes/runtime-layout-transform.json": "c3caef3e808f4a45f730fb3a99db97dd01a242ec",
     "journeys/planes/runtime-safe-area.json": "c3caef3e808f4a45f730fb3a99db97dd01a242ec",
     "journeys/planes/runtime-window-insets-android.json": "c3caef3e808f4a45f730fb3a99db97dd01a242ec",
-    "journeys/planes/text-input-typography.json": "c3caef3e808f4a45f730fb3a99db97dd01a242ec"
+    "journeys/planes/text-input-typography.json": "c3caef3e808f4a45f730fb3a99db97dd01a242ec",
+    "runtime/shared-values/NOTES.md": "de84536f2204900e3b1ee46a0b2eea8810616026",
+    "runtime/shared-values/expectations.json": "de84536f2204900e3b1ee46a0b2eea8810616026",
+    "runtime/shared-values/provenance.json": "de84536f2204900e3b1ee46a0b2eea8810616026",
+    "runtime/shared-values/screen.riv": "de84536f2204900e3b1ee46a0b2eea8810616026",
+    "runtime/shared-values/source/components/tap-count/frame.json": "de84536f2204900e3b1ee46a0b2eea8810616026",
+    "runtime/shared-values/source/components/tap-count/index.html": "de84536f2204900e3b1ee46a0b2eea8810616026",
+    "runtime/shared-values/source/experience.json": "de84536f2204900e3b1ee46a0b2eea8810616026",
+    "runtime/shared-values/source/screens/first/frame.json": "de84536f2204900e3b1ee46a0b2eea8810616026",
+    "runtime/shared-values/source/screens/first/index.html": "de84536f2204900e3b1ee46a0b2eea8810616026",
+    "runtime/shared-values/source/screens/long/frame.json": "de84536f2204900e3b1ee46a0b2eea8810616026",
+    "runtime/shared-values/source/screens/long/index.html": "de84536f2204900e3b1ee46a0b2eea8810616026",
+    "runtime/shared-values/source/screens/short/frame.json": "de84536f2204900e3b1ee46a0b2eea8810616026",
+    "runtime/shared-values/source/screens/short/index.html": "de84536f2204900e3b1ee46a0b2eea8810616026"
   }
 }
