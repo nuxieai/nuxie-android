@@ -38,6 +38,7 @@ internal data class JourneyRun(
     val startedQueued: Boolean = false,
     val stepId: String,
     val park: Park? = null,
+    val nativeSnapshot: ai.nuxie.sdk.presentation.ExperienceRunSnapshot? = null,
     val context: JsonObject,
     val outputs: JsonObject = emptyOutputs(),
     val completion: Completion? = null,
@@ -62,7 +63,8 @@ internal data class JourneyRun(
     data class Park(
         val wakeAtMillis: Long?,
         val anchorAtMillis: Long? = null,
-        val pendingResponsesChanged: Boolean = false,
+        val pendingEvent: JourneyControlExecutor.Event? = null,
+        val candidateEvents: List<JourneyControlExecutor.Event> = emptyList(),
     )
     data class Completion(val outcome: String, val atMillis: Long)
     data class ExperimentExposure(
@@ -89,7 +91,6 @@ internal data class JourneyRun(
         val sourceActionId: String,
         val sourceComponentId: String? = null,
         val sourceInstanceId: String? = null,
-        val responsesChanged: Boolean,
         val items: List<Item>,
     ) {
         data class Item(
@@ -368,15 +369,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         }
     }
 
-    fun recordResponses(id: String, values: JsonObject) = update { state ->
-        val run = checkNotNull(state.runs[id])
-        check(run.completion == null)
-        state.runs[id] = run.copy(
-            context = JsonObject(run.context + ("responses" to JsonObject(run.context.getValue("responses").jsonObject + values))),
-        )
-    }
-
-    /** Stages response mutations and ordinary renderer events in one durable run update. */
+    /** Stages ordinary renderer events in one durable run update. */
     fun stagePresentationPublication(
         id: String,
         expectedStepId: String,
@@ -408,21 +401,12 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     fun clearPresentationPublication(
         id: String,
         invocationId: String,
-        retainResponsesChanged: Boolean = false,
     ): JourneyRun? = update { state ->
         val run = state.runs[id] ?: return@update null
         val pending = run.pendingPresentationPublication
             ?.takeIf { it.invocationId == invocationId }
             ?: return@update null
-        settlePresentationPublication(run, pending).copy(
-            park = run.park?.let { park ->
-                if (retainResponsesChanged) {
-                    park.copy(pendingResponsesChanged = true)
-                } else {
-                    park
-                }
-            },
-        ).also { state.runs[id] = it }
+        settlePresentationPublication(run, pending).also { state.runs[id] = it }
     }
 
     /**
@@ -458,6 +442,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         clearingPresentationPublication: String? = null,
         presentationEventId: String? = null,
         clearPresentationSource: Boolean = false,
+        nativeSnapshot: ai.nuxie.sdk.presentation.ExperienceRunSnapshot? = null,
     ) = update { state ->
         val run = checkNotNull(state.runs[id])
         check(run.startedQueued && run.completion == null)
@@ -486,7 +471,8 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         } else {
             settled.experimentExposures
         }
-        state.runs[id] = settled.copy(stepId = stepId, context = context,
+        state.runs[id] = settled.copy(stepId = stepId, context = JsonObject(context + ("responses" to JsonObject(emptyMap()))),
+            nativeSnapshot = nativeSnapshot.takeIf { checkpoint != null },
             park = checkpoint?.let { JourneyRun.Park(it.wakeAtMillis, it.anchorAtMillis) },
             effectReceipts = settled.effectReceipts - settled.stepId,
             experimentExposures = exposures,
@@ -594,11 +580,36 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         state.runs.values.filter { it.park != null && it.completion == null }.sortedBy(JourneyRun::startedEventId)
     }
 
-    /** Consume durably before executing a continuation; only parks resume. */
-    fun resumeParked(id: String): JourneyRun = update { state ->
-        val run = checkNotNull(state.runs[id])
-        check(run.startedQueued && run.park != null && run.completion == null)
-        run.copy(park = null).also { state.runs[id] = it }
+    fun appendParkedCandidate(id: String, expectedStepId: String, expectedPark: JourneyRun.Park,
+        event: JourneyControlExecutor.Event): JourneyRun.Park? = update { state ->
+        val run = state.runs[id] ?: return@update null
+        val park = run.park ?: return@update null
+        if (run.completion != null || run.stepId != expectedStepId || park.wakeAtMillis != expectedPark.wakeAtMillis ||
+            park.anchorAtMillis != expectedPark.anchorAtMillis) return@update null
+        val updated = park.copy(candidateEvents = (park.candidateEvents + event).distinct())
+        state.runs[id] = run.copy(park = updated)
+        updated
+    }
+
+    fun selectParkedEvent(id: String, expectedStepId: String, expectedPark: JourneyRun.Park,
+        selected: JourneyControlExecutor.Event?): JourneyRun.Park? = update { state ->
+        val run = state.runs[id] ?: return@update null
+        val park = run.park ?: return@update null
+        if (run.completion != null || run.stepId != expectedStepId || park.wakeAtMillis != expectedPark.wakeAtMillis ||
+            park.anchorAtMillis != expectedPark.anchorAtMillis ||
+            (park.pendingEvent != null && park.pendingEvent != selected)) return@update null
+        val updated = park.copy(pendingEvent = selected,
+            candidateEvents = park.candidateEvents - expectedPark.candidateEvents.toSet())
+        state.runs[id] = run.copy(park = updated)
+        updated
+    }
+
+    /** Consume only the checkpoint observed before asynchronous preparation. */
+    fun resumeParked(id: String, expectedStepId: String, expectedPark: JourneyRun.Park): JourneyRun? = update { state ->
+        val run = state.runs[id] ?: return@update null
+        if (!run.startedQueued || run.completion != null || run.stepId != expectedStepId ||
+            run.park != expectedPark) return@update null
+        run.copy(park = null, nativeSnapshot = null).also { state.runs[id] = it }
     }
 
     /** Identity teardown blocks admission and retires parked work too. */
@@ -815,17 +826,26 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         run.pendingPresentationPublication?.let {
             put("pendingPresentationPublication", encodePresentationPublication(it))
         }
+        run.nativeSnapshot?.let { put("nativeSnapshot", it.fields) }
         run.park?.let { park -> put("park", buildJsonObject {
             park.wakeAtMillis?.let { put("wakeAtMillis", JsonPrimitive(it)) }
             park.anchorAtMillis?.let { put("anchorAtMillis", JsonPrimitive(it)) }
-            if (park.pendingResponsesChanged) {
-                put("pendingResponsesChanged", JsonPrimitive(true))
-            }
+            park.pendingEvent?.let { put("pendingEvent", encodeControlEvent(it)) }
+            put("candidateEvents", JsonArray(park.candidateEvents.map(::encodeControlEvent)))
         }) }
         run.completion?.let { completion -> put("completion", buildJsonObject {
             put("outcome", JsonPrimitive(completion.outcome)); put("atMillis", JsonPrimitive(completion.atMillis))
         }) }
     }
+
+    private fun encodeControlEvent(event: JourneyControlExecutor.Event) = buildJsonObject {
+        put("name", JsonPrimitive(event.name)); put("occurredAtMillis", JsonPrimitive(event.occurredAtMillis))
+        put("properties", event.properties); event.id?.let { put("id", JsonPrimitive(it)) }
+    }
+
+    private fun decodeControlEvent(value: JsonObject) = JourneyControlExecutor.Event(
+        value.text("name"), value.number("occurredAtMillis"), value.getValue("properties").jsonObject,
+        value["id"]?.jsonPrimitive?.content)
 
     private fun decodeRun(value: JsonObject) = JourneyRun(
         journeyId = value.text("journeyId"), generation = value.number("generation"), reference = value.getValue("reference").jsonObject,
@@ -835,11 +855,13 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             ?.let(::decodeExecutionSnapshot),
         startedQueued = value.getValue("startedQueued").jsonPrimitive.boolean, stepId = value.text("stepId"),
         context = value.getValue("context").jsonObject, outputs = value.getValue("outputs").jsonObject,
+        nativeSnapshot = (value["nativeSnapshot"] as? JsonArray)?.let { ai.nuxie.sdk.presentation.ExperienceRunSnapshot(it) },
         park = value["park"]?.jsonObject?.let {
             JourneyRun.Park(
                 it["wakeAtMillis"]?.jsonPrimitive?.long,
                 it["anchorAtMillis"]?.jsonPrimitive?.long,
-                it["pendingResponsesChanged"]?.jsonPrimitive?.boolean ?: false,
+                (it["pendingEvent"] as? JsonObject)?.let(::decodeControlEvent),
+                (it["candidateEvents"] as? JsonArray).orEmpty().map { event -> decodeControlEvent(event.jsonObject) },
             )
         },
         completion = value["completion"]?.jsonObject?.let { JourneyRun.Completion(it.text("outcome"), it.number("atMillis")) },
@@ -998,7 +1020,6 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         put("sourceActionId", JsonPrimitive(publication.sourceActionId))
         publication.sourceComponentId?.let { put("sourceComponentId", JsonPrimitive(it)) }
         publication.sourceInstanceId?.let { put("sourceInstanceId", JsonPrimitive(it)) }
-        put("responsesChanged", JsonPrimitive(publication.responsesChanged))
         put("items", JsonArray(publication.items.map { item ->
             buildJsonObject {
                 put("name", JsonPrimitive(item.name))
@@ -1020,7 +1041,6 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             sourceActionId = value.text("sourceActionId"),
             sourceComponentId = value["sourceComponentId"]?.jsonPrimitive?.content,
             sourceInstanceId = value["sourceInstanceId"]?.jsonPrimitive?.content,
-            responsesChanged = value.getValue("responsesChanged").jsonPrimitive.boolean,
             items = value.getValue("items").jsonArray.map { element ->
                 val item = element.jsonObject
                 JourneyRun.PendingPresentationPublication.Item(
@@ -1201,6 +1221,8 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         eventOutputs: JsonObject,
         responseOutputs: JsonObject,
     ) = run.copy(
+        park = null,
+        nativeSnapshot = null,
         context = emptyOutputs(),
         outputs = JsonObject(
             mapOf(

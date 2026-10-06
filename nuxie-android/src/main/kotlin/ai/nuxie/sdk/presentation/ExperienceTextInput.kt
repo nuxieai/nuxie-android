@@ -31,18 +31,6 @@ internal data class ExperienceTextInput(
 ) {
     enum class ResponseCapture { TEXT, BINDING }
 
-    /** Native bindings own conversion; a missing source is not a raw-text fallback. */
-    fun captureResponse(text: String, snapshot: NuxieViewModelSnapshot?): JsonPrimitive {
-        if (responseCapture == ResponseCapture.TEXT) return JsonPrimitive(text)
-        val field = checkNotNull(responseField) { "Converted input $id has no response field" }
-        return when (val value = snapshot?.resolveScalar(listOf("response", "values", field))) {
-            is NuxieViewModelScalarValue.StringValue -> JsonPrimitive(value.value)
-            is NuxieViewModelScalarValue.NumberValue -> JsonPrimitive(value.value)
-            is NuxieViewModelScalarValue.BooleanValue -> JsonPrimitive(value.value)
-            else -> error("Converted input $id has no valid evaluated response source")
-        }
-    }
-
     data class Style(
         val fontFamily: String,
         val fontWeight: String,

@@ -70,7 +70,7 @@ class ExperienceTextInputTest {
         coordinator.close()
     }
 
-    @Test fun `native response deduplication belongs to each occurrence owner`() = runTest {
+    @Test fun `native text commits from separate owners publish no answer events`() = runTest {
         val descriptor = Json.parseToJsonElement(textInputDescriptor().toString()
             .replace("\"textRunName\":", "\"editableValueName\":\"editable\",\"textRunName\":")) as JsonObject
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
@@ -84,7 +84,7 @@ class ExperienceTextInputTest {
         assertTrue(coordinator.publishTextCommit("name", "Al", snapshot = owner(10)))
         assertTrue(coordinator.publishTextCommit("name", "Al", snapshot = owner(10)))
         assertTrue(coordinator.publishTextCommit("name", "Al", snapshot = owner(20)))
-        assertEquals(2, batches.size)
+        assertTrue(batches.isEmpty())
         coordinator.close()
     }
 
@@ -108,78 +108,13 @@ class ExperienceTextInputTest {
         }
     }
 
-    @Test fun `shared response capture cases preserve scalar type and reject unavailable binding state`() {
-        val cases = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
-            .resolve("journeys/planes/text-input-response-capture.json").readText()).jsonObject.getValue("cases").jsonArray
-        for (item in cases) {
-            val case = item.jsonObject
-            val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(
-                secure = case.getValue("secure").jsonPrimitive.boolean,
-                responseCapture = if (case["mode"]?.jsonPrimitive?.content == "binding")
-                    ExperienceTextInput.ResponseCapture.BINDING else ExperienceTextInput.ResponseCapture.TEXT,
-            )
-            val snapshot = (case["source"] as? JsonPrimitive)?.let(::responseSnapshot)
-            val capture = runCatching { input.captureResponse(case.getValue("text").jsonPrimitive.content, snapshot) }
-            if (case["rejected"]?.jsonPrimitive?.booleanOrNull == true) {
-                assertTrue(case.getValue("name").toString(), capture.isFailure)
-            } else {
-                assertEquals(case.getValue("name").toString(), case["expected"], capture.getOrThrow())
-            }
-        }
-    }
-
-    @Test fun `invalid binding source fails without accepting or deduplicating the edit`() = runTest {
-        val descriptor = Json.parseToJsonElement(textInputDescriptor().toString()
-            .replace("\"responseFieldKey\":", "\"responseCapture\":\"binding\",\"responseFieldKey\":")) as JsonObject
-        val state = ExperienceTextInputState()
+    @Test fun `text commits do not publish answer events`() = runTest {
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
-        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", descriptor, 0, 0,
-            onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {})
-        coordinator.reveal()
-        for (snapshot in listOf(null, responseSnapshot(JsonPrimitive(Float.NaN)))) {
-            assertTrue(runCatching { coordinator.publishTextCommit("name", "50", state, snapshot = snapshot) }.isFailure)
-            assertNull(state.committedValue("name"))
-            assertTrue(batches.isEmpty())
-        }
-        assertTrue(coordinator.publishTextCommit("name", "50", state, snapshot = responseSnapshot(JsonPrimitive(0.5))))
-        assertEquals(JsonPrimitive(0.5), batches.single().emissions.single().payload["value"])
-        coordinator.close()
-    }
-
-    private fun responseSnapshot(value: JsonPrimitive): NuxieViewModelSnapshot {
-        val kind = when {
-            value.isString -> NuxieViewModelPropertyKind.STRING
-            value.booleanOrNull != null -> NuxieViewModelPropertyKind.BOOLEAN
-            else -> NuxieViewModelPropertyKind.NUMBER
-        }
-        return NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(1,
-            arrayOf(NativeViewModelSnapshotInstance(1, 0), NativeViewModelSnapshotInstance(2, 1), NativeViewModelSnapshotInstance(3, 2)),
-            arrayOf(
-                NativeViewModelSnapshotValue(1, 0, "response", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 2),
-                NativeViewModelSnapshotValue(2, 0, "values", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 3),
-                NativeViewModelSnapshotValue(3, 0, "answer", kind.nativeValue, value.content.encodeToByteArray(), 0,
-                    numberValue = if (kind == NuxieViewModelPropertyKind.NUMBER) value.float else 0f,
-                    boolValue = value.booleanOrNull ?: false),
-            )))
-    }
-
-    @Test fun `converted response commits capture evaluated source instead of displayed text`() = runTest {
-        val descriptor = Json.parseToJsonElement(textInputDescriptor().toString()
-            .replace("\"responseFieldKey\":", "\"responseCapture\":\"binding\",\"responseFieldKey\":")) as JsonObject
-        val batches = mutableListOf<JourneyScreenEmissionBatch>()
-        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", descriptor, 0, 0,
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", textInputDescriptor(), 0, 0,
             onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {})
         assertTrue(coordinator.reveal())
-        val snapshot = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(1,
-            arrayOf(NativeViewModelSnapshotInstance(1, 0), NativeViewModelSnapshotInstance(2, 1),
-                NativeViewModelSnapshotInstance(3, 2)),
-            arrayOf(
-                NativeViewModelSnapshotValue(1, 0, "response", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 2),
-                NativeViewModelSnapshotValue(2, 0, "values", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 3),
-                NativeViewModelSnapshotValue(3, 0, "answer", NuxieViewModelPropertyKind.NUMBER.nativeValue, byteArrayOf(), 0, numberValue = 0.5f),
-            )))
-        assertTrue(coordinator.publishTextCommit("name", "50", snapshot = snapshot))
-        assertEquals(JsonPrimitive(0.5), batches.single().emissions.single().payload["value"])
+        assertTrue(coordinator.publishTextCommit("name", "50"))
+        assertTrue(batches.isEmpty())
         coordinator.close()
     }
 
@@ -686,90 +621,46 @@ class ExperienceTextInputTest {
     }
 
     @Test
-    fun `a response accepted after preparation starts is not duplicated on arrival`() = runTest {
-        val accepted = kotlinx.coroutines.CompletableDeferred<Unit>()
-        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
-        val batches = mutableListOf<JourneyScreenEmissionBatch>()
-        val sourceState = ExperienceTextInputState()
-        val source = JourneyRuntimeEmissionCoordinator("journey", "survey", textInputDescriptor(), 0, 0,
-            onEmissionBatch = { it, _ -> entered.complete(Unit); accepted.await(); batches += it; true },
-            onPresentationRevealed = {})
-        assertTrue(source.reveal())
-        val pending = async { source.publishTextCommit("name", "Ada", sourceState) }
-        entered.await()
-        val destinationState = sourceState.copyForPreparation()
-        assertNull(destinationState.committedValue("name"))
-        accepted.complete(Unit)
-        assertTrue(pending.await())
-        val destination = JourneyRuntimeEmissionCoordinator("journey", "survey", textInputDescriptor(), 1, 1,
-            onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {})
-        assertTrue(destination.reveal())
-        assertTrue(destination.publishTextCommit("name", "Ada", destinationState))
-        assertEquals(1, batches.size)
-        source.close()
-        destination.close()
-    }
-
-    @Test
-    fun `text responses wait for reveal deduplicate and stop at close`() = runTest {
-        val batches = mutableListOf<JourneyScreenEmissionBatch>()
+    fun `text commits wait for reveal and stop at close without publications`() = runTest {
+        val state = ExperienceTextInputState()
         val coordinator = JourneyRuntimeEmissionCoordinator(
             "journey", "survey", textInputDescriptor(), 3, 7,
-            onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {},
+            onEmissionBatch = { _, _ -> error("Text commits cannot publish answers") },
+            onPresentationRevealed = {},
         )
-        val pending = async { coordinator.publishTextCommit("name", "Ada") }
+        val pending = async { coordinator.publishTextCommit("name", "Ada", state) }
         yield()
         assertFalse(pending.isCompleted)
         assertTrue(coordinator.reveal())
         assertTrue(pending.await())
-        assertEquals(3L, batches.single().batchSequence)
-        assertEquals(7L, batches.single().emissions.single().sequence)
-        assertEquals("text_input:name", batches.single().source.actionId)
-        assertEquals("name", batches.single().source.componentId)
-        assertEquals(JsonPrimitive("answer"), batches.single().emissions.single().payload["field"])
-        assertEquals(JsonPrimitive("Ada"), batches.single().emissions.single().payload["value"])
-        assertTrue(coordinator.publishTextCommit("name", "Ada"))
-        assertFalse(coordinator.publishTextCommit("other-screen-input", "injected"))
-        assertEquals(1, batches.size)
-        assertTrue(coordinator.publishTextCommit("name", ""))
-        assertEquals(4L, batches.last().batchSequence)
+        assertEquals("Ada", state.committedValue("name"))
+        assertTrue(coordinator.publishTextCommit("name", "", state))
+        assertEquals("", state.committedValue("name"))
         coordinator.close()
-        assertFalse(coordinator.publishTextCommit("name", "late"))
-        assertEquals(2, batches.size)
+        assertFalse(coordinator.publishTextCommit("name", "late", state))
+        assertEquals("", state.committedValue("name"))
     }
 
     @Test
-    fun `accepted text commits survive screen replacement but drafts and rejected commits do not suppress responses`() = runTest {
+    fun `accepted native text survives preparation and screen replacement`() = runTest {
         val state = ExperienceTextInputState()
-        val values = mutableListOf<JsonPrimitive>()
-        var accept = true
         fun coordinator() = JourneyRuntimeEmissionCoordinator(
             "journey", "survey", textInputDescriptor(), 0, 0,
-            onEmissionBatch = { it, _ ->
-                values += it.emissions.single().payload.getValue("value") as JsonPrimitive
-                accept
-            }, onPresentationRevealed = {},
+            onEmissionBatch = { _, _ -> error("Text commits cannot publish answers") },
+            onPresentationRevealed = {},
         )
         val first = coordinator()
         assertTrue(first.reveal())
         assertTrue(first.publishTextCommit("name", "Al", state))
+        val replacement = state.copyForPreparation()
         first.close()
         state.detach()
         val second = coordinator()
         assertTrue(second.reveal())
-        assertTrue(second.publishTextCommit("name", "Al", state))
-        assertEquals(listOf(JsonPrimitive("Al")), values)
-        accept = false
-        assertFalse(second.publishTextCommit("name", "Bo", state))
-        assertEquals("Al", state.committedValue("name"))
-        val third = coordinator()
-        assertTrue(third.reveal())
-        accept = true
-        state.bind().write("name", ExperienceTextInputState.Value("Bo", 2, 2))
-        assertTrue(third.publishTextCommit("name", "Bo", state))
-        assertTrue(third.publishTextCommit("name", "", state))
-        assertEquals(listOf("Al", "Bo", "Bo", ""), values.map { it.content })
-        third.close()
+        assertEquals("Al", replacement.committedValue("name"))
+        assertTrue(second.publishTextCommit("name", "Bo", replacement))
+        assertEquals("Bo", replacement.committedValue("name"))
+        second.close()
     }
 
     @Test
