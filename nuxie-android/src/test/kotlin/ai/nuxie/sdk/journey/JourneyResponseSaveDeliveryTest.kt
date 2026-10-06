@@ -51,7 +51,7 @@ class JourneyResponseSaveDeliveryTest {
         val vectors = json(FixtureRunner.fixturesRoot().resolve("responses/save-cases.json").readText())
         val expected = vectors.getValue("request").jsonObject
         val rows = vectors.getValue("replies").jsonArray
-        assertEquals(17, rows.size)
+        assertEquals(20, rows.size)
         for ((index, element) in rows.withIndex()) {
             val row = element.jsonObject
             for (status in listOf(row.getValue("httpStatus").jsonPrimitive.int, 201)) {
@@ -140,6 +140,29 @@ class JourneyResponseSaveDeliveryTest {
         assertTrue(waiting.await().confirmed)
         assertEquals(listOf(replacement), journal.pendingResponseSaves())
         assertEquals(listOf(1L), requests)
+    }
+
+    @Test fun `cancelled enqueue still wakes delivery after durable reservation`() = runBlocking {
+        val journal = JourneyRunJournal(directory, "anon")
+        val run = responseSaveRun(journal)
+        val sent = CompletableDeferred<Unit>()
+        val delivery = worker(JourneyResponseSaveTransport {
+            sent.complete(Unit)
+            reply("""{"status":"saved","sequence":1}""")
+        })
+        delivery.activate(JourneyStorageScope.testFixture)
+        withTimeout(5_000) { while (scope.coroutineContext[kotlinx.coroutines.Job]!!.children.any()) delay(10) }
+        val dispatcher = QueuedResponseSaveDispatcher()
+        val callerScope = CoroutineScope(SupervisorJob() + dispatcher)
+        try {
+            val enqueue = callerScope.async { delivery.enqueue(journal, run, "feedback", json("{}")) }
+            dispatcher.next().run()
+            val returnToCaller = dispatcher.next()
+            enqueue.cancel()
+            returnToCaller.run()
+            assertTrue(enqueue.isCancelled)
+            withTimeout(2_000) { sent.await() }
+        } finally { callerScope.cancel() }
     }
 
     @Test fun `unknown form deadline and backoff survive restart and backward clock`() {
@@ -287,4 +310,10 @@ class JourneyResponseSaveDeliveryTest {
         withTimeout(5_000) { while (journal.pendingResponseSaves().isNotEmpty()) delay(10) }
         assertEquals(listOf(2L), requests.filter { it.formName == other }.map { it.sequence })
     }
+}
+
+private class QueuedResponseSaveDispatcher : kotlinx.coroutines.CoroutineDispatcher() {
+    private val queue = java.util.concurrent.LinkedBlockingQueue<Runnable>()
+    override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) { queue.add(block) }
+    fun next(): Runnable = checkNotNull(queue.poll(5, java.util.concurrent.TimeUnit.SECONDS))
 }
