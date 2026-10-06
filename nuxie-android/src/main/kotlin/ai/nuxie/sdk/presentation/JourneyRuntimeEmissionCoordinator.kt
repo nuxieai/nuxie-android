@@ -184,11 +184,18 @@ internal class JourneyRuntimeEmissionCoordinator(
 
     /** Called only while holding the shared publication gate. */
     private suspend fun publishDrafts(
-        drafts: List<Draft>,
+        inputDrafts: List<Draft>,
         source: JourneyScreenEmissionSource,
         eventSource: JourneyRuntimeEmissionSources? = null,
     ): Boolean {
+        val drafts = inputDrafts.filterNot(Draft::isReservedEvent)
         if (drafts.isEmpty()) return true
+        val sources = eventSource?.let { sources ->
+            val controlCount = inputDrafts.size - sources.drafts.size
+            sources.copy(drafts = sources.drafts.filterIndexed { index, _ ->
+                !inputDrafts[controlCount + index].isReservedEvent()
+            })
+        }
         if (drafts.any(Draft::isInvalid)) {
             Log.w(LOG_TAG, "Rejected invalid renderer emission transaction", null, Log.sensitive("screen", screenId))
             return true
@@ -218,7 +225,7 @@ internal class JourneyRuntimeEmissionCoordinator(
             emissions = emissions,
         )
         val accepted = runCatching {
-            onEmissionBatch(batch, eventSource?.bound(batch))
+            onEmissionBatch(batch, sources?.bound(batch))
         }
             .onFailure { error ->
                 if (error is kotlinx.coroutines.CancellationException) throw error
@@ -395,8 +402,11 @@ internal class JourneyRuntimeEmissionCoordinator(
         }
         val program = behavior["program"] as? JsonArray ?: return null
         return runCatching {
-            program.map { element ->
+            program.mapNotNull { element ->
                 val action = element.jsonObject
+                if (action.string("type") == "emit" && action.string("eventName")?.startsWith('$') == true) {
+                    return@mapNotNull null
+                }
                 when (action.string("type")) {
                     "emit" -> Draft.Event(
                         name = requireNotNull(action.string("eventName")),
@@ -437,8 +447,10 @@ internal class JourneyRuntimeEmissionCoordinator(
         }
 
     private sealed interface Draft {
+        fun isReservedEvent(): Boolean = this is Event && name.startsWith('$')
+
         fun isInvalid(): Boolean = when (this) {
-            is Event -> name.isEmpty() || name.startsWith('$')
+            is Event -> name.isEmpty()
             is ResponseSet -> field.isEmpty()
             is ResponseUnset -> field.isEmpty()
         }

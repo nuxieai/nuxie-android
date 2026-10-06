@@ -265,7 +265,8 @@
     "runtime/text-editing-experiment/text_input_secure_observed.riv": "4baab6ffdaf1c4ee30e0dffcf980144916b2aeb76ce4566504f0486129fff04a",
     "events/runtime-frame-writes.json": "859787db8e9f7e53a486d350d428ae28e88f1e82dc493be4157571775484ca59",
     "responses/save-cases.json": "b9140bfb0d9e25459102c44478c731b9bfb654b74e35376b73c7b09656632617",
-    "runtime/rive-focus/focus_collapsing.riv": "5f9b979a23692919cece02ac6121c4c9575ef2e9a302f81cb299a04881ab9d74"
+    "runtime/rive-focus/focus_collapsing.riv": "5f9b979a23692919cece02ac6121c4c9575ef2e9a302f81cb299a04881ab9d74",
+    "events/reserved-event-filtering.json": "bd8e194ad58c287815609647a7930c51100c940c2f8d9e113efc0c237192b95d"
   },
   "sourceCommitOverrides": {
     "events/catalog.json": "69672d8483f8167ce92fd499d0347935aa28bb08",
@@ -302,6 +303,7 @@
     "runtime/text-editing-experiment/text_input_secure_observed.riv": "5f0f378c4eb3c4fbec1d6710fa6afdb6fb75cb71",
     "events/runtime-frame-writes.json": "124de9344f9bd4e6a699059f8fdc368fe25cfdb5",
     "responses/save-cases.json": "79d7712f337a0e69166f97590f605c1bbe6d2e14",
-    "runtime/rive-focus/focus_collapsing.riv": "279f58de50f8d1d77078e6d1e0328e8ce58509fe"
+    "runtime/rive-focus/focus_collapsing.riv": "279f58de50f8d1d77078e6d1e0328e8ce58509fe",
+    "events/reserved-event-filtering.json": "c34928bf7bc529faf7ba0b52b8ee8e91497f5558"
   }
 }
