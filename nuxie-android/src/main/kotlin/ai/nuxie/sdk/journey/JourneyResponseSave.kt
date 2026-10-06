@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.journey
 
 import ai.nuxie.sdk.experiences.JourneyReleaseEnvelope
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -140,7 +141,7 @@ internal data class JourneyResponseSaveReply(val code: Code, val sequence: Long?
                 if (!status.isString) return noAnswer
                 val code = Code.entries.firstOrNull { it.wire == status.content } ?: return noAnswer
                 val sequenceValue = value["sequence"]?.jsonPrimitive
-                val sequence = sequenceValue?.takeUnless { it.isString }?.long
+                val sequence = sequenceValue?.takeUnless { it.isString || it == JsonNull }?.long
                 val reply = JourneyResponseSaveReply(code, sequence)
                 if (reply.confirmed && (sequence == null || sequence < attemptedSequence ||
                     sequence <= 0 || sequence > JourneyResponseSave.MAXIMUM_SEQUENCE)) noAnswer else reply

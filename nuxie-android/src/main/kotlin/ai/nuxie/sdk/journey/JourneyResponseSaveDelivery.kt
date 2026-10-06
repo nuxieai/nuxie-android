@@ -40,13 +40,15 @@ internal class JourneyResponseSaveDelivery(
 
     suspend fun enqueue(journal: JourneyRunJournal, run: JourneyRun, formName: String, answers: JsonObject): JourneyResponseSave {
         requireOwner(journal)
-        val sheet = withContext(Dispatchers.IO) { journal.reserveResponseSave(run, formName, answers, true) }
-        synchronized(lock) {
-            journals[journal.distinctId] = journal
-            generation += 1
-            kick()
+        return withContext(Dispatchers.IO) {
+            val sheet = journal.reserveResponseSave(run, formName, answers, true)
+            synchronized(lock) {
+                journals[journal.distinctId] = journal
+                generation += 1
+                kick()
+            }
+            sheet
         }
-        return sheet
     }
 
     suspend fun sendWaiting(journal: JourneyRunJournal, run: JourneyRun, formName: String, answers: JsonObject): JourneyResponseSaveReply {
@@ -134,7 +136,9 @@ internal class JourneyResponseSaveDelivery(
                                 handedOff = true
                                 break@deliveryPass
                             }
-                            if (stopped) Log.w(TAG, "Response save stopped: code=${reply.code.wire}, journey=${attempt.sheet.journeyId}, form=${attempt.sheet.formName}, owner=${attempt.sheet.distinctId}")
+                            if (stopped) Log.w(TAG, "Response save stopped", null,
+                                Log.sensitive("code", reply.code.wire), Log.sensitive("journey", attempt.sheet.journeyId),
+                                Log.sensitive("form", attempt.sheet.formName), Log.sensitive("owner", attempt.sheet.distinctId))
                             handedOff = true
                             break@deliveryPass
                         }
