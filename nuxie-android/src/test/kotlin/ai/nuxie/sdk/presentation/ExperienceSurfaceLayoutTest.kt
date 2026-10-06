@@ -15,6 +15,22 @@ import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 class ExperienceSurfaceLayoutTest {
+    @Test fun `video viewport stays empty until the first layout settles`() {
+        withHost(3f, video = true) { host, texture, lane, _, _ ->
+            val field = ExperienceSurfaceHost::class.java.getDeclaredField("videoPlayback").apply { isAccessible = true }
+            val playback = field.get(host) as ExperienceVideoPlayback
+            val viewport = ExperienceVideoPlayback::class.java.getDeclaredField("viewport").apply { isAccessible = true }
+            assertEquals(VideoViewport(0f, 0f, 0f, 0f), viewport.get(playback))
+            assertEquals(0, playback.activeDecoderCount)
+            host.onSurfaceTextureAvailable(texture, 1179, 2556)
+            drain(lane)
+            assertEquals(VideoViewport(0f, 0f, 0f, 0f), viewport.get(playback))
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            assertEquals(VideoViewport(0f, 0f, 393f, 852f), viewport.get(playback))
+        }
+    }
+
     @Test fun `first frame and resized frame set points then settle read and render at view density`() {
         withHost(3f) { host, texture, lane, native, bounds ->
             host.onSurfaceTextureAvailable(texture, 1179, 2556)
@@ -38,6 +54,15 @@ class ExperienceSurfaceLayoutTest {
             assertEquals(listOf("size:375.0:667.0", "step:0.0", "read", "render:3.0"), native.calls)
             drainUi(host)
             assertEquals(ExperienceArtboardSize(375f, 667f), bounds.last())
+            native.presentation = 1
+            host.doFrame(1_040_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+            native.calls.clear()
+            host.doFrame(1_048_000_000L)
+            drain(lane)
+            assertEquals(listOf("step:0.032", "render:3.0"), native.calls)
         }
     }
 
@@ -100,13 +125,13 @@ class ExperienceSurfaceLayoutTest {
         }
     }
 
-    private fun withHost(density: Float, expectFailure: Boolean = false,
+    private fun withHost(density: Float, expectFailure: Boolean = false, video: Boolean = false,
         body: (ExperienceSurfaceHost, SurfaceTexture, NuxieRuntimeLane, RecordingNative, MutableList<ExperienceArtboardSize>) -> Unit) {
         val context = RuntimeEnvironment.getApplication()
         val previousDensity = context.resources.displayMetrics.density
         context.resources.displayMetrics.density = density
         val lane = NuxieRuntimeLane()
-        val native = RecordingNative()
+        val native = RecordingNative(video)
         val bounds = mutableListOf<ExperienceArtboardSize>()
         val failures = mutableListOf<ExperiencePresentationException>()
         val host = ExperienceSurfaceHost(context, lane, artboardSize = ExperienceArtboardSize(100f, 200f),
@@ -117,8 +142,16 @@ class ExperienceSurfaceLayoutTest {
             })
         val texture = SurfaceTexture(0)
         try {
-            host.loadArtboard(byteArrayOf(1), null)
+            val descriptor = if (video) kotlinx.serialization.json.Json.parseToJsonElement("""{
+                "render":{"assets":[{"kind":"video","authoredAssetId":1,"assetUniqueName":"clip-1",
+                    "key":"clip.mp4","sourceAssetKey":"asset:clip","required":false}],
+                    "screens":[{"id":"main","artboardName":"Main"}]},
+                "leg":{"screens":[{"id":"main"}]}
+            }""") as kotlinx.serialization.json.JsonObject else null
+            var loaded = false
+            host.loadArtboard(byteArrayOf(1), null, descriptor, onLoaded = { loaded = it })
             drain(lane)
+            assertTrue(failures.joinToString { it.stackTraceToString() }, loaded)
             body(host, texture, lane, native, bounds)
             drainUi(host)
             assertEquals(if (expectFailure) 1 else 0, failures.size)
@@ -142,7 +175,10 @@ class ExperienceSurfaceLayoutTest {
         assertTrue(done.await(2, TimeUnit.SECONDS))
     }
 
-    private class RecordingNative : NuxieTypedRuntimeNative {
+    private class RecordingNative(private val video: Boolean) : NuxieTypedRuntimeNative {
+        override fun inspectFileAssets(bytes: ByteArray) = if (video) listOf(
+            ExpectedFileAsset(0, FileAssetKind.VIDEO, 1, "clip", "mp4", false, false, 4)) else emptyList()
+        override fun videoOccurrences(player: Long) = emptyList<NuxieVideoOccurrence>()
         val calls = mutableListOf<String>()
         var size = floatArrayOf(100f, 200f)
         var presentation = 1
