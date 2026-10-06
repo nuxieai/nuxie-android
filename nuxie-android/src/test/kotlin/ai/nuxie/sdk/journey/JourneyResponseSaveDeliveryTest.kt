@@ -47,11 +47,18 @@ class JourneyResponseSaveDeliveryTest {
         JourneyResponseSaveDelivery(directory, transport, scope, now, sleep = { delay(it) }).also { workers += it }
     private fun reply(value: String, sequence: Long = 1) = JourneyResponseSaveReply.decode(value.encodeToByteArray(), sequence)
 
+    @Test fun `whole number receipt spellings retain numeric sequences`() {
+        val rows = json(FixtureRunner.fixturesRoot().resolve("responses/save-cases.json").readText()).getValue("replies").jsonArray.takeLast(4)
+        val sequences = rows.map { JourneyResponseSaveReply.decode(
+            it.jsonObject.getValue("bodyText").jsonPrimitive.content.encodeToByteArray(), 1).sequence }
+        assertEquals(listOf(1L, 7L, 1L, null), sequences)
+    }
+
     @Test fun `shared wire and reply cases ignore HTTP status`() = runBlocking {
         val vectors = json(FixtureRunner.fixturesRoot().resolve("responses/save-cases.json").readText())
         val expected = vectors.getValue("request").jsonObject
         val rows = vectors.getValue("replies").jsonArray
-        assertEquals(48, rows.size)
+        assertEquals(52, rows.size)
         for ((index, element) in rows.withIndex()) {
             val row = element.jsonObject
             for (status in listOf(row.getValue("httpStatus").jsonPrimitive.int, 201)) {
@@ -62,7 +69,7 @@ class JourneyResponseSaveDeliveryTest {
                     assertEquals("/responses/save", request.url.path)
                     assertEquals("POST", request.method)
                     assertEquals(expected, json(request.body.decodeToString()))
-                    HttpTransport.Response(status, row.getValue("body").toString().encodeToByteArray())
+                    HttpTransport.Response(status, row.getValue("bodyText").jsonPrimitive.content.encodeToByteArray())
                 }
                 val received = api(transport).sendResponseSave(sheet)
                 val stopped = journal.recordResponseSaveReply(sheet, received, 1_000_000)
