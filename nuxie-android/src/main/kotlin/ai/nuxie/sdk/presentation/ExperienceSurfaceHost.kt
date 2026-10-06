@@ -962,8 +962,9 @@ internal class ExperienceSurfaceHost(
             appliedLayout = null
             pointerInput.reset()
             if (attached) {
-                if (!retireSubmission()) return@enqueue
-                val status = if (runValues != null) renderer?.resizeIfIdle(width.coerceAtLeast(1), height.coerceAtLeast(1)) else renderer?.resize(
+                // The renderer retires GPU work during resize while preserving a
+                // connected CPU producer on this same window.
+                val status = renderer?.resize(
                     width.coerceAtLeast(1),
                     height.coerceAtLeast(1),
                 )
@@ -973,8 +974,12 @@ internal class ExperienceSurfaceHost(
                         ExperiencePresentationException.Reason.HOST_FAILED,
                         "Experience renderer resize failed with status $status",
                     )
+                    return@enqueue
                 }
-                if (attached) player?.let(::applyLayoutSize)
+                pendingPresentation = false
+                submittedSnapshot = null
+                submittedCaptions = null
+                player?.let(::applyLayoutSize)
                 if (layout == null) videoPlayback?.setViewport(ai.nuxie.sdk.runtime.VideoViewport(0f, 0f, 0f, 0f))
                 drainVideoCommands()
             }
