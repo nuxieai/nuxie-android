@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NuxieFocusInput
+import ai.nuxie.sdk.runtime.NuxieFocusState
 import ai.nuxie.sdk.runtime.ExperienceVideoPlayback
 import ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding
 import ai.nuxie.sdk.experiences.ExperienceVideoElement
@@ -65,6 +67,7 @@ internal class ExperienceSurfaceHost(
     private val runtime: NuxieRuntime = NuxieRuntime.shared,
     private val systemFontCache: SystemFontCache = SystemFontCache.shared,
     private val videoDecoderPool: ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool? = null,
+    private val usesSystemFrameCallbacks: Boolean = true,
 ) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
     @Volatile private var layoutBounds = artboardSize
     private var surfaceWidth = 0
@@ -149,10 +152,65 @@ internal class ExperienceSurfaceHost(
 
     fun semanticKeyboardEntry(direction: Int): android.view.View? = accessibility.keyboardEntry(direction)
 
-    fun dispatchSemanticKeyEvent(event: KeyEvent): Boolean = accessibility.key(event)
+    private val semanticKeys = mutableSetOf<Int>()
+    private val riveKeys = mutableSetOf<Int>()
+    @Volatile var riveFocusState = NuxieFocusState(false, false)
+        private set
+
+    fun dispatchExperienceKeyEvent(event: KeyEvent): Boolean {
+        if (!running || !sceneInputEnabled.get() || released.get() ||
+            rootView.findFocus()?.onCheckIsTextEditor() == true) {
+            semanticKeys.clear()
+            riveKeys.clear()
+            return false
+        }
+        val code = event.keyCode
+        if (code in semanticKeys) {
+            if (event.action == KeyEvent.ACTION_UP) {
+                semanticKeys.remove(code)
+                return true
+            }
+            return accessibility.key(event)
+        }
+        if (code in riveKeys) {
+            if (event.action == KeyEvent.ACTION_UP) riveKeys.remove(code)
+            ExperienceHardwareKey.input(event)?.let(::receiveFocusInput)
+            return true
+        }
+        // A repeat or release belongs to the owner that accepted its initial press.
+        if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return false
+        if (!riveFocusState.hasFocus && accessibility.hasKeyboardTargets) {
+            val accepted = accessibility.key(event)
+            if (accepted) semanticKeys.add(code)
+            return accepted
+        }
+        val input = ExperienceHardwareKey.input(event) ?: return false
+        val accepted = receiveFocusInput(input)
+        if (accepted && event.action == KeyEvent.ACTION_DOWN) riveKeys.add(code)
+        return accepted
+    }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean =
-        accessibility.key(event) || super.dispatchKeyEvent(event)
+        dispatchExperienceKeyEvent(event) || super.dispatchKeyEvent(event)
+
+    fun receiveFocusInput(input: NuxieFocusInput): Boolean {
+        if (!running || !sceneInputEnabled.get() || released.get() || failureReported.get()) return false
+        val generation = focusGeneration.get()
+        return lane.enqueue {
+            if (!released.get() && !failureReported.get() && generation == focusGeneration.get()) {
+                if (queuedFocusGeneration != generation) {
+                    focusInput.clear()
+                    queuedFocusGeneration = generation
+                }
+                focusInput.add(input)
+            }
+        }
+    }
+
+    private fun discardFocusInput() {
+        focusGeneration.incrementAndGet()
+        lane.enqueue { focusInput.clear() }
+    }
 
     override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: Rect?) {
         super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
@@ -367,6 +425,9 @@ internal class ExperienceSurfaceHost(
     private var lastFrameNanos = 0L
     private var lastSteppedGeneration = -1L
     private val pointerInput = ExperienceRuntimePointerInput(artboardSize)
+    private val focusInput = ExperienceFocusInputQueue()
+    private val focusGeneration = AtomicLong()
+    private var queuedFocusGeneration = 0L
 
     init {
         isOpaque = false
@@ -389,6 +450,8 @@ internal class ExperienceSurfaceHost(
         onLoaded: ((Boolean) -> Unit)? = null,
     ) {
         retireSemantics()
+        discardFocusInput()
+        riveFocusState = NuxieFocusState(false, false)
         lane.enqueue {
             val requirements = descriptor?.get("requirements") as? JsonObject
             semanticsEnabled = (requirements?.get("requiredCapabilities") as? JsonArray).orEmpty()
@@ -703,13 +766,21 @@ internal class ExperienceSurfaceHost(
         if (sceneInputEnabled.getAndSet(enabled) == enabled) return
         isEnabled = enabled
         semanticEpoch.incrementAndGet()
-        if (!enabled) lane.enqueue { pointerInput.reset() }
+        if (!enabled) {
+            semanticKeys.clear()
+            riveKeys.clear()
+            discardFocusInput()
+            lane.enqueue { pointerInput.reset() }
+        }
         if (!enabled) accessibility.withdraw() else accessibility.invalidateState()
     }
 
     /** UI-thread visibility input; a paused but visible Activity remains active. */
-    fun setPresentationVisible(visible: Boolean) {
+    fun setPresentationVisible(visible: Boolean, preservePendingInput: Boolean = false) {
         if (!visible) {
+            semanticKeys.clear()
+            riveKeys.clear()
+            if (!preservePendingInput) discardFocusInput()
             captionPublication.incrementAndGet()
             listener?.onVideoCaptions(emptyMap())
             retireSemantics(preserveFocus = true)
@@ -725,7 +796,7 @@ internal class ExperienceSurfaceHost(
         lane.enqueue { videoPlayback?.setVisible(shouldRun) }
         frameGeneration.incrementAndGet()
         if (shouldRun) {
-            Choreographer.getInstance().postFrameCallback(this)
+            if (usesSystemFrameCallbacks) Choreographer.getInstance().postFrameCallback(this)
         } else {
             // Reset after any staging operation that already started on this
             // lane; clearing on the UI thread could race its final enqueue.
@@ -917,7 +988,7 @@ internal class ExperienceSurfaceHost(
     override fun doFrame(frameTimeNanos: Long) {
         if (!running || failureReported.get()) return
         refreshLayoutDensity()
-        Choreographer.getInstance().postFrameCallback(this)
+        if (usesSystemFrameCallbacks) Choreographer.getInstance().postFrameCallback(this)
         if (!framePending.compareAndSet(false, true)) return
         // The preceding native frame can finish while this tick acquires the
         // slot. Wait for composition and the owner's preparation handoff before
@@ -971,9 +1042,15 @@ internal class ExperienceSurfaceHost(
                     }
                     val outcome = try {
                         if (!sceneInputEnabled.get()) pointerInput.reset()
+                        val currentFocusGeneration = focusGeneration.get()
+                        if (!sceneInputEnabled.get() || queuedFocusGeneration != currentFocusGeneration) {
+                            focusInput.clear()
+                            queuedFocusGeneration = currentFocusGeneration
+                        }
                         player.stepTyped(
                             elapsedSeconds = elapsedSeconds,
                             pointers = pointerInput.takeBatch(),
+                            focusInputs = focusInput.takeBatch(),
                             correlationId = correlationId,
                             textRunNames = textInputs.values.map { it.runName }.distinct(),
                         ).also {
@@ -990,6 +1067,7 @@ internal class ExperienceSurfaceHost(
                                     }
                                 }
                             }
+                            it.focusState?.let { state -> riveFocusState = state }
                             videoPlayback?.advance(renderer, frameTimeNanos / 1_000_000_000.0)
                         }
                     } catch (error: Throwable) {
@@ -1114,6 +1192,7 @@ internal class ExperienceSurfaceHost(
     /** Release every native handle. The host is not reusable afterwards. */
     fun release(finalState: Map<String, NuxieViewModelScalarValue> = emptyMap(), onMediaReleased: () -> Unit = {}) {
         if (!released.compareAndSet(false, true)) return
+        discardFocusInput()
         captionPublication.incrementAndGet()
         listener?.onVideoCaptions(emptyMap())
         retireSemantics()
@@ -1168,6 +1247,7 @@ internal class ExperienceSurfaceHost(
         cause: Throwable? = null,
     ) {
         if (!failureReported.compareAndSet(false, true)) return
+        discardFocusInput()
         captionPublication.incrementAndGet()
         lane.enqueue {
             while (videoCommands.isNotEmpty()) videoCommands.removeFirst().result.complete(false)

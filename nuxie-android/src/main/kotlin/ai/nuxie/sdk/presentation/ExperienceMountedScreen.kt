@@ -104,7 +104,7 @@ internal class ExperienceMountedScreen(
             textInputs = inputs,
             retainedViewModel = prepared.retainedViewModel,
         )
-        return ExperienceInputContainer(activity, surface::dispatchSemanticKeyEvent, surface::semanticKeyboardEntry).apply {
+        return ExperienceInputContainer(activity, surface::dispatchExperienceKeyEvent, surface::semanticKeyboardEntry).apply {
             if (awaitingSemanticPublication) {
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
             }
@@ -135,12 +135,12 @@ internal class ExperienceMountedScreen(
         }
     }
 
-    fun setVisible(visible: Boolean) {
+    fun setVisible(visible: Boolean, preservePendingInput: Boolean = false) {
         if (visible) {
             refreshFontScale(activity.resources.configuration.fontScale)
             reducedMotion?.refresh()
         }
-        surface.setPresentationVisible(visible)
+        surface.setPresentationVisible(visible, preservePendingInput)
     }
 
     /** Queued on the same lane as safe-area updates and frame-qualified native input capture. */

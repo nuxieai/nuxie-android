@@ -10,7 +10,7 @@ class NuxieFocusDeviceTest {
     private val native = JniNuxieTypedRuntimeNative
 
     private fun withPlayer(name: String, model: String, artboardName: String,
-        block: (NuxieRuntimePlayer, NativeViewModelSnapshot) -> Unit) {
+        block: (NuxieRuntimePlayer, Long, NativeViewModelSnapshot) -> Unit) {
         val runtime = NuxieRuntime.shared
         assertTrue(runtime.isAvailable)
         val bytes = assets.open("runtime/rive-focus/$name.riv").use { it.readBytes() }
@@ -29,7 +29,7 @@ class NuxieFocusDeviceTest {
                         val player = checkNotNull(artboard.newPlayer("State Machine 1"))
                         try {
                             player.stepTyped(elapsedSeconds = 0.0)
-                            block(player, checkNotNull(native.snapshotViewModel(root).value))
+                            block(player, root, checkNotNull(native.snapshotViewModel(root).value))
                         } finally { player.close() }
                     } finally { assertEquals(0, native.freeViewModel(root)) }
                 } finally { artboard.close() }
@@ -38,7 +38,7 @@ class NuxieFocusDeviceTest {
     }
 
     @Test fun textFocusAndKeyChangesComeBackInTheirStep() =
-        withPlayer("text_input_event", "ViewModel1", "Artboard") { player, snapshot ->
+        withPlayer("text_input_event", "ViewModel1", "Artboard") { player, _, snapshot ->
             val root = snapshot.rootInstanceId.toULong()
             val properties = snapshot.values.filter { it.ownerInstanceId == snapshot.rootInstanceId }
             val names = listOf("isFocused", "hasKeyed", "hasTexted")
@@ -99,7 +99,7 @@ class NuxieFocusDeviceTest {
     }
 
     @Test fun exactNativeLimitsAreAcceptedAndOversizedBatchesRefused() =
-        withPlayer("text_input_event", "ViewModel1", "Artboard") { player, _ ->
+        withPlayer("text_input_event", "ViewModel1", "Artboard") { player, _, _ ->
             assertEquals(List(4_096) { false }, player.stepTyped(elapsedSeconds = 0.0,
                 focusInputs = List(4_096) { NuxieFocusInput.Clear }).focusResults)
             assertEquals(listOf(false, false, false, false), player.stepTyped(elapsedSeconds = 0.0,
@@ -114,7 +114,16 @@ class NuxieFocusDeviceTest {
         }
 
     @Test fun jniRejectsInvalidFocusInputsBeforeStepping() =
-        withPlayer("text_input_event", "ViewModel1", "Artboard") { player, _ ->
+        withPlayer("text_input_event", "ViewModel1", "Artboard") { player, root, _ ->
+            fun assertUnchanged() {
+                assertEquals(NuxieFocusState(false, false), native.playerFocusState(player.requireHandle()).value)
+                val snapshot = checkNotNull(native.snapshotViewModel(root).value)
+                val values = snapshot.values.filter { it.ownerInstanceId == snapshot.rootInstanceId }
+                listOf("isFocused", "hasKeyed", "hasTexted").forEach { name ->
+                    assertFalse(values.single { it.name == name }.boolValue)
+                }
+            }
+            assertUnchanged()
             val invalid = listOf(
                 List(4_097) { NativeFocusInput(0) },
                 listOf(NativeFocusInput(4, text = ByteArray(1_048_577))),
@@ -128,9 +137,9 @@ class NuxieFocusDeviceTest {
                     focusInputs = inputs)
                 assertEquals(5, result.status)
                 assertNull(result.value)
+                assertUnchanged()
             }
             assertEquals(listOf(true), player.stepTyped(elapsedSeconds = 0.0,
                 focusInputs = listOf(NuxieFocusInput.Next)).focusResults)
         }
-
 }
