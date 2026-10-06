@@ -453,7 +453,12 @@ internal class ExperienceTextInputOverlay(
                 .takeIf { value -> value.isFinite() && value > -Int.MAX_VALUE && value < Int.MAX_VALUE }
         }
         editor.presentedTextOriginY = localBaseline(0f) ?: return false
-        editor.presentedFirstBaseline = field.firstBaseline?.let(::localBaseline)
+        // Blanking the bound runtime run during native editing removes its shaped
+        // baseline. Keep that baseline while typography matches, then transform it
+        // with the current field geometry so density and layout changes stay current.
+        editor.capturedFirstBaseline = field.firstBaseline?.let { metrics to it }
+            ?: editor.capturedFirstBaseline?.takeIf { it.first == metrics }
+        editor.presentedFirstBaseline = editor.capturedFirstBaseline?.second?.let(::localBaseline)
         editor.setTextSize(TypedValue.COMPLEX_UNIT_PX, metrics.fontSize * scale)
         editor.letterSpacing = input.style.letterSpacing * scale / editor.textSize
         val extraLineSpacing = if (metrics.lineHeight == -1f) 0f
@@ -465,6 +470,7 @@ internal class ExperienceTextInputOverlay(
 
     private inner class Editor(context: Context, private val input: ExperienceTextInput) : EditText(context) {
         var semanticNode: NativeSemanticNode? = null
+        var capturedFirstBaseline: Pair<ExperienceTextInput.EffectiveMetrics, Float>? = null
         var presentedTextOriginY: Float = 0f
             set(value) {
                 if (field == value) return
@@ -483,8 +489,7 @@ internal class ExperienceTextInputOverlay(
             // TextView's baseline includes top padding. Measure the actual native layout,
             // then align that baseline without moving or resizing the published field box.
             val desired = presentedFirstBaseline
-            // During native editing the runtime run is intentionally blank. Its text
-            // origin remains valid even when it has no shaped first-line baseline.
+            // A field without a captured baseline still has a valid text origin.
             val top = if (desired == null) presentedTextOriginY.roundToInt()
                 else (desired - (baseline - paddingTop)).roundToInt()
             if (paddingTop != top) {
