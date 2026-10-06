@@ -49,6 +49,19 @@ internal class JourneyResponseSaveDelivery(
         return sheet
     }
 
+    suspend fun sendWaiting(journal: JourneyRunJournal, run: JourneyRun, formName: String, answers: JsonObject): JourneyResponseSaveReply {
+        requireOwner(journal)
+        val sheet = withContext(Dispatchers.IO) { journal.reserveResponseSave(run, formName, answers, false) }
+        currentCoroutineContext().ensureActive()
+        if (!synchronized(lock) { active }) throw CancellationException("Response save delivery stopped")
+        val reply = try { transport.sendResponseSave(sheet) }
+        catch (error: CancellationException) { throw error }
+        catch (_: Exception) { currentCoroutineContext().ensureActive(); return JourneyResponseSaveReply.noAnswer }
+        currentCoroutineContext().ensureActive()
+        if (reply.confirmed) withContext(Dispatchers.IO) { journal.confirmResponseSave(sheet, checkNotNull(reply.sequence)) }
+        return reply
+    }
+
     private fun requireOwner(journal: JourneyRunJournal) = synchronized(lock) {
         check(active && journal.responseSaveNamespace == storageScope?.conversionNamespace) { "Wrong response save owner" }
     }
