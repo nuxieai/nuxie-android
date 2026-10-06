@@ -2,6 +2,10 @@ package ai.nuxie.sdk.journey
 
 import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.io.File
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -28,6 +32,13 @@ internal class JourneyResponseSaveDelivery(
     private val journals = linkedMapOf<String, JourneyRunJournal>()
     private var generation = 0L
     private var worker: Job? = null
+    private data class ReadBackoff(var delay: Long = 5_000, var retryAt: Long? = null) {
+        fun failed(now: Long) { retryAt = now + delay; delay = minOf(300_000, delay * 2) }
+    }
+    private val wakeups = Channel<Unit>(Channel.CONFLATED)
+    private var discoveryBackoff = ReadBackoff()
+    private val readBackoffs = mutableMapOf<String, ReadBackoff>()
+    private var lastClockReading: Long? = null
     private var discovered = false
     private val receiptRetryAt = mutableMapOf<String, Long>()
 
@@ -35,7 +46,7 @@ internal class JourneyResponseSaveDelivery(
         if (storageScope != null && storageScope != scope) return@synchronized
         storageScope = scope
         active = true
-        kick()
+        wake()
     }
 
     suspend fun enqueue(journal: JourneyRunJournal, run: JourneyRun, formName: String, answers: JsonObject): JourneyResponseSave {
@@ -44,8 +55,7 @@ internal class JourneyResponseSaveDelivery(
             val sheet = journal.reserveResponseSave(run, formName, answers, true)
             synchronized(lock) {
                 journals[journal.distinctId] = journal
-                generation += 1
-                kick()
+                wake()
             }
             sheet
         }
@@ -73,6 +83,32 @@ internal class JourneyResponseSaveDelivery(
         task?.cancelAndJoin()
     }
 
+    private fun wake() {
+        generation += 1
+        wakeups.trySend(Unit)
+        kick()
+    }
+
+    private suspend fun pause(duration: Long, observedGeneration: Long) = coroutineScope {
+        if (synchronized(lock) { generation != observedGeneration }) return@coroutineScope
+        val timer = async { sleep(maxOf(100, duration)) }
+        try { select { timer.onAwait { }; wakeups.onReceive { } } }
+        finally { timer.cancelAndJoin() }
+    }
+
+    // Deadlines in this worker are process-local. Preserve their remaining delay on a clock rollback.
+    private fun currentTime(): Long {
+        val now = nowMillis()
+        lastClockReading?.takeIf { now < it }?.let { previous ->
+            val shift = now - previous
+            discoveryBackoff.retryAt = discoveryBackoff.retryAt?.plus(shift)
+            readBackoffs.values.forEach { it.retryAt = it.retryAt?.plus(shift) }
+            receiptRetryAt.replaceAll { _, at -> at + shift }
+        }
+        lastClockReading = now
+        return now
+    }
+
     private fun kick() {
         if (!active || worker != null) return
         val job = coroutineScope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) { deliver() }
@@ -82,41 +118,70 @@ internal class JourneyResponseSaveDelivery(
 
     private suspend fun deliver() {
         val ownJob = currentCoroutineContext()[Job]
+        var seenGeneration = -1L
         try {
             while (synchronized(lock) { active }) {
                 currentCoroutineContext().ensureActive()
                 try {
-                    val scope = synchronized(lock) { checkNotNull(storageScope) }
-                    if (!discovered) {
-                        val recovery = JourneyRunJournal.recoverResponseSaveOwners(directory, scope)
-                        synchronized(lock) {
-                            recovery.owners.forEach { owner -> journals.getOrPut(owner) { JourneyRunJournal(directory, owner, scope) } }
-                        }
-                        discovered = !recovery.needsRetry
+                    val (scope, observedGeneration) = synchronized(lock) {
+                        wakeups.tryReceive()
+                        checkNotNull(storageScope) to generation
                     }
-                    val (observedGeneration, candidates) = synchronized(lock) { generation to journals.values.toList() }
-                    var nextDelay: Long? = if (discovered) null else 5_000
+                    if (seenGeneration != observedGeneration) {
+                        discoveryBackoff = ReadBackoff()
+                        readBackoffs.clear()
+                        seenGeneration = observedGeneration
+                    }
+                    val now = currentTime()
+                    if (!discovered && (discoveryBackoff.retryAt ?: Long.MIN_VALUE) <= now) {
+                        try {
+                            val recovery = JourneyRunJournal.recoverResponseSaveOwners(directory, scope)
+                            synchronized(lock) {
+                                recovery.owners.forEach { owner -> journals.getOrPut(owner) { JourneyRunJournal(directory, owner, scope) } }
+                            }
+                            discovered = !recovery.needsRetry
+                            if (recovery.needsRetry) discoveryBackoff.failed(currentTime())
+                        } catch (error: CancellationException) { throw error }
+                        catch (_: Exception) {
+                            Log.w(TAG, "Response save journals could not be discovered")
+                            discoveryBackoff.failed(currentTime())
+                        }
+                    }
+                    val currentCandidates = synchronized(lock) { journals.values.toList() }
+                    var nextDelay: Long? = if (discovered) null else discoveryBackoff.retryAt?.minus(currentTime())
                     var handedOff = false
-                    deliveryPass@ for (journal in candidates) {
+                    deliveryPass@ for (journal in currentCandidates) {
+                        val now = currentTime()
+                        val readRetryAt = readBackoffs[journal.distinctId]?.retryAt
+                        if (readRetryAt != null && readRetryAt > now) {
+                            nextDelay = minOf(nextDelay ?: Long.MAX_VALUE, readRetryAt - now)
+                            continue
+                        }
                         val retryAt = receiptRetryAt[journal.distinctId]
                         if (retryAt != null) {
-                            val remaining = minOf(5_000, retryAt - nowMillis())
+                            val remaining = retryAt - currentTime()
                             if (remaining > 0) {
                                 nextDelay = minOf(nextDelay ?: remaining, remaining)
                                 continue
                             }
                             receiptRetryAt.remove(journal.distinctId)
                         }
-                        val attempts = try { journal.responseSaveAttempts(nowMillis()) }
+                        val attempts = try { journal.responseSaveAttempts(currentTime()) }
                         catch (error: CancellationException) { throw error }
                         catch (_: Exception) {
                             Log.w(TAG, "Response save journal could not be read")
-                            nextDelay = minOf(nextDelay ?: 5_000, 5_000)
+                            val backoff = readBackoffs.getOrPut(journal.distinctId) { ReadBackoff() }
+                            backoff.failed(currentTime())
+                            nextDelay = minOf(nextDelay ?: Long.MAX_VALUE, checkNotNull(backoff.retryAt) - currentTime())
                             continue
+                        }
+                        readBackoffs.remove(journal.distinctId)
+                        if (attempts.isEmpty()) synchronized(lock) {
+                            if (generation == observedGeneration) journals.remove(journal.distinctId)
                         }
                         for (attempt in attempts) {
                             currentCoroutineContext().ensureActive()
-                            val now = nowMillis()
+                            val now = currentTime()
                             val reply = if (attempt.unknownFormExpired(now)) {
                                 JourneyResponseSaveReply(JourneyResponseSaveReply.Code.UNKNOWN_FORM)
                             } else if (attempt.delay(now) > 0) {
@@ -128,11 +193,11 @@ internal class JourneyResponseSaveDelivery(
                                 catch (_: Exception) { currentCoroutineContext().ensureActive(); JourneyResponseSaveReply.noAnswer }
                             }
                             currentCoroutineContext().ensureActive()
-                            val stopped = try { journal.recordResponseSaveReply(attempt.sheet, reply, nowMillis()) }
+                            val stopped = try { journal.recordResponseSaveReply(attempt.sheet, reply, currentTime()) }
                             catch (error: CancellationException) { throw error }
                             catch (_: Exception) {
                                 Log.w(TAG, "Response save receipt could not be persisted")
-                                receiptRetryAt[journal.distinctId] = nowMillis() + 5_000
+                                receiptRetryAt[journal.distinctId] = currentTime() + 5_000
                                 handedOff = true
                                 break@deliveryPass
                             }
@@ -151,9 +216,13 @@ internal class JourneyResponseSaveDelivery(
                     }
                     if (finished) return
                     if (synchronized(lock) { observedGeneration != generation }) continue
-                    sleep(minOf(5_000, maxOf(100, checkNotNull(nextDelay))))
+                    pause(checkNotNull(nextDelay), observedGeneration)
                 } catch (error: CancellationException) { throw error }
-                catch (_: Exception) { Log.w(TAG, "Response save delivery could not finish durable work"); sleep(5_000) }
+                catch (_: Exception) {
+                    Log.w(TAG, "Response save delivery could not finish durable work")
+                    discoveryBackoff.failed(currentTime())
+                    pause(checkNotNull(discoveryBackoff.retryAt) - currentTime(), synchronized(lock) { generation })
+                }
             }
         } finally {
             synchronized(lock) { if (worker === ownJob) worker = null }
