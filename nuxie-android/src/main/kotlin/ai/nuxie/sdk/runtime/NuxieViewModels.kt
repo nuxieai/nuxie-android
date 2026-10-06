@@ -436,6 +436,11 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
     fun stateMachineNames(fileHandle: Long, artboardName: String?): NativeCallResult<List<String>> =
         error("stateMachineNames is not implemented")
 
+    fun playerKind(playerHandle: Long): NativeCallResult<Int> = error("playerKind is not implemented")
+
+    fun playerFocusState(playerHandle: Long): NativeCallResult<NuxieFocusState> =
+        error("playerFocusState is not implemented")
+
     fun playerStateMachineName(playerHandle: Long): NativeCallResult<String> =
         error("playerStateMachineName is not implemented")
 
@@ -533,6 +538,7 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         elapsedSeconds: Float,
         correlationId: Long,
         textRunNames: List<String> = emptyList(),
+        focusInputs: List<NativeFocusInput> = emptyList(),
     ): NativeCallResult<NativePlayerStepOutcome> = error("stepPlayer is not implemented")
 
     fun freeViewModel(handle: Long): Int = error("freeViewModel is not implemented")
@@ -727,6 +733,22 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
     override fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int) =
         NuxieRuntimeBridge.nativePlayerQueueSemanticAction(player, snapshot, nodeId, action)
 
+    override fun playerKind(playerHandle: Long): NativeCallResult<Int> {
+        val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
+        val kind = NuxieRuntimeBridge.nativePlayerKind(playerHandle, status)
+        return NativeCallResult(status.single(), kind)
+    }
+
+    override fun playerFocusState(playerHandle: Long): NativeCallResult<NuxieFocusState> {
+        val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
+        val flags = NuxieRuntimeBridge.nativePlayerFocusState(playerHandle, status)
+        val value = flags?.let {
+            check(it.size == 2) { "Native focus state must have two flags" }
+            NuxieFocusState(it[0], it[1])
+        }
+        return NativeCallResult(status.single(), value)
+    }
+
     override fun playerStateMachineName(playerHandle: Long): NativeCallResult<String> {
         val status = intArrayOf(4)
         val name = NuxieRuntimeBridge.nativePlayerStateMachineName(playerHandle, status)
@@ -878,6 +900,7 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         elapsedSeconds: Float,
         correlationId: Long,
         textRunNames: List<String>,
+        focusInputs: List<NativeFocusInput>,
     ): NativeCallResult<NativePlayerStepOutcome> {
         val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
         val outcome = NuxieRuntimeBridge.nativePlayerStepTyped(
@@ -896,6 +919,7 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
             elapsedSeconds = elapsedSeconds,
             correlationId = correlationId,
             textRunNames = textRunNames.map { it.encodeToByteArray() }.toTypedArray(),
+            focusInputs = focusInputs.toTypedArray(),
             statusOut = status,
         )
         return NativeCallResult(status.single(), outcome)

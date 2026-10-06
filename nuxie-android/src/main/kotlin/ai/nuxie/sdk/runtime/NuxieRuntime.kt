@@ -636,6 +636,7 @@ internal class NuxieRuntimePlayer internal constructor(
         elapsedSeconds: Double,
         correlationId: ULong = 0uL,
         textRunNames: List<String> = emptyList(),
+        focusInputs: List<NuxieFocusInput> = emptyList(),
     ): NuxiePlayerStepOutcome {
         require(elapsedSeconds.isFinite() && elapsedSeconds >= 0.0) {
             "Player elapsed seconds must be finite and nonnegative"
@@ -644,13 +645,23 @@ internal class NuxieRuntimePlayer internal constructor(
         require(nativeElapsed.isFinite()) { "Player elapsed seconds exceed the native Float range" }
         requireHandle()
         val auxiliary = interactionPlayer
-        if (auxiliary == null) return stepSingle(inputs, pointers, nativeElapsed, correlationId, textRunNames)
+        val readsFocus = pointers.isNotEmpty() || focusInputs.isNotEmpty()
+        val focusPlayer = if (!readsFocus) null else if (isStateMachine()) this
+            else auxiliary?.takeIf { it.isStateMachine() }
+        val encodedFocus = if (focusPlayer != null) encodeFocusInputs(focusInputs) else emptyList()
+        if (auxiliary == null) {
+            return stepSingle(inputs, pointers, nativeElapsed, correlationId, textRunNames, encodedFocus)
+                .copy(focusState = focusPlayer?.readFocusState())
+        }
         try {
-            val stepsInteraction = interactionStepPending || inputs.isNotEmpty() || pointers.isNotEmpty()
+            val stepsInteraction = interactionStepPending || inputs.isNotEmpty() ||
+                pointers.isNotEmpty() || focusInputs.isNotEmpty()
             val primary = stepSingle(emptyList(), pointers, nativeElapsed, correlationId,
-                if (stepsInteraction) emptyList() else textRunNames)
+                if (stepsInteraction) emptyList() else textRunNames,
+                if (focusPlayer === this) encodedFocus else emptyList())
             if (!stepsInteraction) return primary
-            val interaction = auxiliary.stepTyped(inputs, pointers, 0.0, correlationId, textRunNames)
+            val interaction = auxiliary.stepSingle(inputs, pointers, 0f, correlationId, textRunNames,
+                if (focusPlayer === auxiliary) encodedFocus else emptyList())
             interactionStepPending = false
             return NuxiePlayerStepOutcome(
                 keepGoing = primary.keepGoing || interaction.keepGoing,
@@ -662,6 +673,8 @@ internal class NuxieRuntimePlayer internal constructor(
                 hostCommands = primary.hostCommands + interaction.hostCommands,
                 viewModelChanges = primary.viewModelChanges + interaction.viewModelChanges,
                 textGeometry = interaction.textGeometry,
+                focusResults = primary.focusResults + interaction.focusResults,
+                focusState = focusPlayer?.readFocusState(),
             )
         } catch (error: Throwable) {
             // Native mutations cannot be rolled back after a partial composite step.
@@ -671,12 +684,25 @@ internal class NuxieRuntimePlayer internal constructor(
         }
     }
 
+    private fun isStateMachine(): Boolean {
+        val result = native.playerKind(requireHandle())
+        if (result.status != NUX_STATUS_OK) throw NuxieRuntimeCallException("read player kind", result.status)
+        return checkNotNull(result.value) == 1
+    }
+
+    private fun readFocusState(): NuxieFocusState {
+        val result = native.playerFocusState(requireHandle())
+        if (result.status != NUX_STATUS_OK) throw NuxieRuntimeCallException("read focus state", result.status)
+        return checkNotNull(result.value) { "Native runtime returned no focus state" }
+    }
+
     private fun stepSingle(
         inputs: List<NuxiePlayerInput>,
         pointers: List<NuxiePlayerPointerEvent>,
         nativeElapsed: Float,
         correlationId: ULong,
         textRunNames: List<String>,
+        focusInputs: List<NativeFocusInput>,
     ): NuxiePlayerStepOutcome {
         val result = native.stepPlayer(
             playerHandle = owned.require(),
@@ -685,6 +711,7 @@ internal class NuxieRuntimePlayer internal constructor(
             elapsedSeconds = nativeElapsed,
             correlationId = correlationId.toLong(),
             textRunNames = textRunNames,
+            focusInputs = focusInputs,
         )
         if (result.status != NUX_STATUS_OK) {
             throw NuxieRuntimeCallException("step player", result.status)

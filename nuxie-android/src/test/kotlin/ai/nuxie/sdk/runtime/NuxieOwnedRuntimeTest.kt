@@ -413,6 +413,9 @@ class NuxieOwnedRuntimeTest {
             return 7
         }
 
+        override fun playerKind(playerHandle: Long) = NativeCallResult(0, 1)
+        override fun playerFocusState(playerHandle: Long) = NativeCallResult(0, NuxieFocusState(false, false))
+
         override fun stepPlayer(
             playerHandle: Long,
             inputs: List<NativePlayerInput>,
@@ -420,6 +423,7 @@ class NuxieOwnedRuntimeTest {
             elapsedSeconds: Float,
             correlationId: Long,
             textRunNames: List<String>,
+            focusInputs: List<NativeFocusInput>,
         ): NativeCallResult<NativePlayerStepOutcome> {
             typedFrameSteps += elapsedSeconds
             typedPointers = pointers
