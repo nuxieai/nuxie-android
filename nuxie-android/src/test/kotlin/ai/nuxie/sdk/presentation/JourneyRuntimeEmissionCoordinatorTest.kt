@@ -26,6 +26,36 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class JourneyRuntimeEmissionCoordinatorTest {
+    @Test fun `reserved event drops only itself and preserves the sibling source`() = runTest {
+        val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("events/reserved-event-filtering.json").readText()).jsonObject
+        val published = mutableListOf<String>()
+        val sequences = mutableListOf<Long>()
+        val sourceIds = mutableListOf<Long?>()
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", JsonObject(emptyMap()), 0, 0,
+            onEmissionBatch = { batch, sources ->
+                batch.emissions.forEach {
+                    published += it.name
+                    sequences += it.sequence
+                    sourceIds += sources?.source(it.id)?.nativeId
+                }
+                true
+            }, onPresentationRevealed = {})
+        assertTrue(coordinator.reveal())
+        val snapshot = ai.nuxie.sdk.runtime.NuxieViewModelSnapshot.fromNative(
+            ai.nuxie.sdk.runtime.NativeViewModelSnapshot(71,
+                arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(71, 0),
+                    ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(72, 1)), emptyArray()))
+        val events = vector.getValue("events").jsonArray.mapIndexed { index, name ->
+            NuxieRuntimeEvent(index, 128, name.jsonPrimitive.content, "", "", 0f, emptyList(), 71L + index)
+        }
+        assertTrue(coordinator.publish(NuxiePlayerStepOutcome(false, emptyList(), events, emptyList(), emptyList()),
+            1uL, snapshot = snapshot))
+        assertEquals(vector.getValue("expectedEvents").jsonArray.map { it.jsonPrimitive.content }, published)
+        assertEquals(vector.getValue("expectedSequences").jsonArray.map { it.jsonPrimitive.long }, sequences)
+        assertEquals(listOf(71L), sourceIds)
+    }
+
     @Test fun `shared frame changes produce no events and emissions retain their settled snapshot`() = runTest {
         val vectors = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("events/runtime-frame-writes.json").readText()).jsonObject.getValue("cases").jsonArray
