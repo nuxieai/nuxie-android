@@ -959,7 +959,9 @@ internal class ExperienceSurfaceHost(
                     } else {
                         (frameTimeNanos - lastFrameNanos) / 1_000_000_000.0
                     }
-                    lastFrameNanos = frameTimeNanos
+                    if (!layoutStepPending || lastSteppedGeneration != generation) {
+                        lastFrameNanos = frameTimeNanos
+                    }
                     lastSteppedGeneration = generation
                     val correlationId = nextCorrelationId
                     nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) {
