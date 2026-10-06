@@ -379,6 +379,28 @@ class JourneyServiceTest {
         assertEquals(listOf(entryEvent.id, goalEvent.id), store.queryPendingLocalRoutes("customer").map { it.id })
     }
 
+    @Test fun `production core completes a screenless release without native preparation`() = runBlocking {
+        val core = ai.nuxie.sdk.core.NuxieCore(
+            context = RuntimeEnvironment.getApplication(), apiKey = "pk_test_native_screenless",
+            environment = NuxieEnvironment.DEVELOPMENT, logLevel = LogLevel.NONE, beforeSend = null,
+            overrides = ai.nuxie.sdk.core.NuxieCore.Overrides(
+                transport = ai.nuxie.sdk.testsupport.FakeTransport(), registerLifecycle = false,
+                requestInitialProfileRefresh = false,
+                billingClientFactory = ai.nuxie.sdk.testsupport.InertBillingClientAdapter.factory,
+                eventDatabaseFile = File(directory, "core-screenless.db")))
+        try {
+            val owner = core.identity.distinctId()
+            val catalog = catalog()
+            catalog.commit(owner, catalog.prepare(profile(), authority))
+            val snapshot = checkNotNull(catalog.snapshot(owner))
+            assertTrue(snapshot.releasesByDigest.values.single().leg.getValue("screens").jsonArray.isEmpty())
+            core.journeys.initialize()
+            core.journeys.onAppWillEnterForeground()
+            core.journeys.profileDidCommit(snapshot, authority, owner, 1)
+            assertTrue(core.store.hasEvent(JourneyEventNames.LEG_COMPLETED, owner))
+        } finally { core.stopAndAwait() }
+    }
+
     @Test fun `foreground arm executes its authenticated leg once across revalidation`() = runBlocking {
         val identity = identity("customer")
         val catalog = catalog()
@@ -704,89 +726,6 @@ class JourneyServiceTest {
         )
     }
 
-    @Test fun `published converter responses survive journal reload without text coercion`() = runBlocking {
-        for (secure in listOf(false, true)) {
-            val prefix = "native-converter" + (if (secure) "-secure" else "") + "-validated"
-            val releaseEntry = Json.parseToJsonElement(requireNotNull(FixtureRunner.fixturesRoot().parentFile)
-                .resolve("nuxie-android/src/androidTest/assets/$prefix/release-entry.json").readText()).jsonObject
-            val customer = "converter-$secure"
-            val keys = mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(
-                "IVL40Zt5HSRFMkLhXy6rbLfP+ntqXtMAl5YOBpiB2xI=", Base64.NO_WRAP))
-            val catalog = JourneyProfileCatalog(keys, JourneyReleaseHighWaterStore(context)) {
-                // The device test independently proves the installed native binary.
-                supportedRuntimeForEmbeddedRuntime("journal-contract-test")
-            }
-            val deliveryAuthority = authority(releaseEntry)
-            catalog.commit(customer, catalog.prepare(profile(releaseEntry = releaseEntry), deliveryAuthority))
-            val snapshot = requireNotNull(catalog.snapshot(customer))
-            val presenter = RecordingJourneyPresenter()
-            val captured = linkedMapOf<String, StoredEvent>()
-            val service = JourneyService(identity = identity(customer), events = store,
-                catalog = catalog, journalDirectory = directory, scope = scope,
-                capture = { _, _, _, _ -> true },
-                captureScreenEvent = { name, properties, eventId, distinctId, occurredAt, admission, origin ->
-                    val event = StoredEvent(eventId, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId, journeyOrigin = origin)
-                    val settled = admission?.commitIfCurrent {
-                        captured.putIfAbsent(eventId, event)
-                        true
-                    } != null
-                    StableEventCaptureResult(settled, captured[eventId].takeIf { settled })
-                }, presenter = presenter, nowMillis = { 100_000L })
-            service.initialize()
-            service.onAppWillEnterForeground()
-            service.profileDidCommit(snapshot, deliveryAuthority, customer, 1)
-            val request = requireNotNull(presenter.request)
-            fun retained() = JourneyRunJournal(directory, customer, JourneyStorageScope(deliveryAuthority)).runs().single()
-            val run = retained()
-            val batches = mutableListOf<JourneyScreenEmissionBatch>()
-            val coordinator = JourneyRuntimeEmissionCoordinator(
-                journeyId = run.journeyId, screenId = request.screenId,
-                descriptor = snapshot.releasesByDigest.values.single().descriptor,
-                nextBatchSequence = run.nextPresentationBatchSequence,
-                nextEmissionSequence = run.nextPresentationEmissionSequence,
-                onEmissionBatch = { it, _ -> batches += it; request.onEmissionBatch(it, null) },
-                onPresentationRevealed = {}, nowMillis = { 100_001L })
-            assertTrue(coordinator.reveal())
-            fun outcome(seconds: Double?) = NuxiePlayerStepOutcome(
-                keepGoing = true, pointerHits = emptyList(), events = emptyList(), viewModelChanges = emptyList(),
-                hostCommands = if (seconds == null) emptyList() else listOf(
-                    NuxieHostCommand("\$response_set", NuxieHostValue.Object(listOf(
-                        NuxieHostValue.Object.Field("field", NuxieHostValue.String("durationSeconds")),
-                        NuxieHostValue.Object.Field("value", NuxieHostValue.Number(seconds))))),
-                    NuxieHostCommand("duration_ready", NuxieHostValue.Object(emptyList()))))
-            assertTrue(coordinator.publish(outcome(120.0), 1uL))
-            assertEquals(JsonPrimitive(120.0), retained().context.getValue("responses").jsonObject["durationSeconds"])
-            assertTrue(request.onEmissionBatch(batches.single(), null))
-            assertEquals(1, captured.size)
-            assertEquals(1L, retained().nextPresentationBatchSequence)
-            val unexpectedField = JourneyScreenEmissionBatch(
-                journeyId = run.journeyId, batchSequence = 1, invocationId = "unexpected-field",
-                source = JourneyScreenEmissionSource(request.screenId, "finish-input"),
-                emissions = listOf(JourneyScreenEmission(
-                    id = "unexpected-field-emission", sequence = 2, occurredAtMillis = 100_002L,
-                    name = "\$response_set", payload = buildJsonObject {
-                        put("field", "notDeclaredByThisScreen"); put("value", 999)
-                    })))
-            assertFalse(request.onEmissionBatch(unexpectedField, null))
-            assertEquals(1L, retained().nextPresentationBatchSequence)
-            assertEquals(setOf("durationSeconds"), retained().context.getValue("responses").jsonObject.keys)
-            // An invalid draft emits no commands; it must not erase the prior answer.
-            assertTrue(coordinator.publish(outcome(null), 2uL))
-            assertEquals(JsonPrimitive(120.0), retained().context.getValue("responses").jsonObject["durationSeconds"])
-            assertEquals(1, batches.size)
-            assertTrue(coordinator.publish(outcome(45.0), 3uL))
-            assertEquals(JsonPrimitive(45.0), retained().context.getValue("responses").jsonObject["durationSeconds"])
-            assertEquals(2, captured.size)
-            assertEquals(2L, retained().nextPresentationBatchSequence)
-            // A valid equivalent spelling still submits, despite an unchanged typed value.
-            assertTrue(coordinator.publish(outcome(45.0), 4uL))
-            assertEquals(JsonPrimitive(45.0), retained().context.getValue("responses").jsonObject["durationSeconds"])
-            assertEquals(3, captured.size)
-            assertEquals(3L, retained().nextPresentationBatchSequence)
-            service.onAppDidEnterBackground()
-        }
-    }
-
     @Test fun `shared renderer fixture replays one customer event through EventLog`() =
         runBlocking {
             val screenFixture = JourneyTestFixtures.rendererPublication
@@ -835,7 +774,7 @@ class JourneyServiceTest {
                 sourceActionId = input.getValue("action_id").jsonPrimitive.content,
                 sourceComponentId = input.getValue("component_id").jsonPrimitive.content,
                 sourceInstanceId = input.getValue("instance_id").jsonPrimitive.content,
-                responsesChanged = true,
+
                 items = eventEffects.mapIndexed { index, effect ->
                     JourneyRun.PendingPresentationPublication.Item(
                         name = effect.getValue("name").jsonPrimitive.content,
@@ -1857,7 +1796,7 @@ class JourneyServiceTest {
             1_000L, release = snapshot.profile.releases.single(), executionSnapshot = executionSnapshot(snapshot)))
         if (failureMode == "presentation") {
             val publication = JourneyRun.PendingPresentationPublication("retained-publication", 0, 1,
-                "retained-screen", "retained-action", responsesChanged = false,
+                "retained-screen", "retained-action",
                 items = listOf(JourneyRun.PendingPresentationPublication.Item("retained-event", JsonObject(emptyMap()),
                     "retained-event-id", 1_000L)))
             assertTrue(journal.stagePresentationPublication(retained.id, retained.stepId, retained.context, publication) != null)

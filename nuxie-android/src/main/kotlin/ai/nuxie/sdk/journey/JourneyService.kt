@@ -205,6 +205,8 @@ internal class JourneyService(
     private val beforeParkedResume: suspend () -> Unit = {},
     private val replayPendingLocalRoutes: suspend (String) -> Boolean = { true },
     private val artifactManager: JourneyArtifactManager? = null,
+    private val prepareNativeValues: suspend (ai.nuxie.sdk.presentation.ExperienceRunValues,
+        AuthenticatedJourneyRelease, ai.nuxie.sdk.experiences.JourneyReleaseDelivery) -> Unit = { _, _, _ -> },
     fixedStorageScope: JourneyStorageScope? = null,
 ) : JourneyProfileConsumer {
     private class WorkerContext(
@@ -295,6 +297,7 @@ internal class JourneyService(
         }
         data class ContinueExecution(
             val runId: String,
+            val identityScope: IdentityScope,
             val release: AuthenticatedJourneyRelease,
             val executionFenceToken: JourneyExecutionFenceToken,
             val signal: JourneyControlExecutor.Signal,
@@ -353,20 +356,36 @@ internal class JourneyService(
     private val foreground = JourneyForegroundAdmission()
     private var profileState: ProfileState? = null
     private var journal: JourneyRunJournal? = null
+    private val nativeRestoreRetryAt = mutableMapOf<String, Long>()
     private val nativeValuesByRun = mutableMapOf<String, Pair<String, ai.nuxie.sdk.presentation.ExperienceRunValues>>()
 
-    private fun nativeValues(runId: String, owner: String): ai.nuxie.sdk.presentation.ExperienceRunValues =
-        nativeValuesByRun.getOrPut(runId) { owner to ai.nuxie.sdk.presentation.ExperienceRunValues() }.also {
+    private fun nativeValues(run: JourneyRun, owner: String): ai.nuxie.sdk.presentation.ExperienceRunValues =
+        nativeValuesByRun.getOrPut(run.id) { owner to ai.nuxie.sdk.presentation.ExperienceRunValues(run.nativeSnapshot) }.also {
             check(it.first == owner)
         }.second
 
+    private suspend fun preparedNativeValues(run: JourneyRun, release: AuthenticatedJourneyRelease,
+        target: JourneyRunJournal): ai.nuxie.sdk.presentation.ExperienceRunValues {
+        val values = nativeValues(run, target.distinctId)
+        if (!values.isPrepared()) prepareNativeValues(values, release, checkNotNull(run.executionSnapshot).delivery)
+        return values
+    }
+
+    private fun readsNativeValues(value: JsonElement?): Boolean = when (value) {
+        is JsonObject -> value["type"] == JsonPrimitive("Response.Field") || value.values.any(::readsNativeValues)
+        is JsonArray -> value.any(::readsNativeValues)
+        else -> false
+    }
+
     private suspend fun retireNativeValues(runId: String) {
+        nativeRestoreRetryAt.remove(runId)
         nativeValuesByRun.remove(runId)?.second?.retire()
     }
 
     private suspend fun retireOwnerValues(owner: String?) {
         val entries = nativeValuesByRun.filterValues { owner == null || it.first == owner }
         entries.keys.forEach(nativeValuesByRun::remove)
+        entries.keys.forEach(nativeRestoreRetryAt::remove)
         entries.values.forEach { it.second.retire() }
     }
     private val retainedReleasesByDigest = linkedMapOf<String, AuthenticatedJourneyRelease>()
@@ -1353,7 +1372,7 @@ internal class JourneyService(
                 throw failure
             } ?: return
             if (!isExecutionCurrent(executionToken, currentJournal)) {
-                finish(run, "abandoned", release.leg, currentJournal)
+                abandonRun(run, currentJournal)
                 return
             }
             flushPendingReports(currentJournal)
@@ -1369,6 +1388,7 @@ internal class JourneyService(
                 null,
                 currentJournal,
                 presentationReservation,
+                originIdentityScope = identityScope,
             )
         } finally {
             if (!reservationHandedOff) presentationReservation?.close()
@@ -1421,7 +1441,8 @@ internal class JourneyService(
         event: StoredEvent?,
         excludingRunId: String? = null,
     ) {
-        if (!isCurrent(state) || (event == null && !foreground.get())) return
+        val identityScope = identity.captureScope()
+        if (identityScope.distinctId != state.distinctId || !isCurrent(state) || (event == null && !foreground.get())) return
         val currentJournal = journal?.takeIf { it.distinctId == state.distinctId } ?: return
         val executionToken = executionFence.token(state.executionFenceToken) ?: return
         for (parked in currentJournal.runs().filter {
@@ -1429,52 +1450,54 @@ internal class JourneyService(
                 it.pendingPresentationPublication == null
         }) {
             if (!isCurrent(state)) return
-            val park = parked.park ?: continue
-            if (event == null && !park.pendingResponsesChanged &&
-                (park.wakeAtMillis == null || park.wakeAtMillis > nowMillis())
-            ) {
+            var park = parked.park ?: continue
+            if (event == null && park.pendingEvent == null && park.candidateEvents.isEmpty() &&
+                (park.wakeAtMillis == null || park.wakeAtMillis!! > nowMillis())) continue
+            val release = releaseFor(parked, state, executionToken, currentJournal) ?: continue
+            if (!isExecutionCurrent(executionToken, currentJournal)) return
+            val step = release.leg.getValue("steps").jsonArray.map { it.jsonObject }
+                .firstOrNull { it.text("id") == parked.stepId } ?: continue
+            val candidate = executorSignal(event).event
+            if (candidate != null && (step["action"] as? JsonObject)?.text("type") == "wait_until") {
+                park = publishJournalIfCurrent(executionToken, identityScope) {
+                    currentJournal.appendParkedCandidate(parked.id, parked.stepId, park, candidate)
+                } ?: continue
+            }
+            val context = try {
+                val values = preparedNativeValues(parked, release, currentJournal)
+                JsonObject(parked.context + ("responses" to values.journeyValues())).also {
+                    nativeRestoreRetryAt.remove(parked.id)
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) {
+                if (!isExecutionCurrent(executionToken, currentJournal)) return
+                nativeRestoreRetryAt[parked.id] = nowMillis() + 5000
+                Log.w(LOG_TAG, "Parked native value restoration failed", error)
                 continue
             }
-            val release = releaseFor(
-                parked,
-                state,
-                executionToken,
-                currentJournal,
-            ) ?: continue
             if (!isExecutionCurrent(executionToken, currentJournal)) return
-            val presentationReservation = if (presenter != null && release.hasScreens()) {
-                presenter.reserve(state.distinctId) ?: continue
-            } else {
-                null
+            val checkpoint = controlCheckpoint(park)
+            val executor = JourneyControlExecutor(timezones, currentDeviceTimezoneIdentifier(),
+                (release.descriptor["metadata"] as? JsonObject)?.text("appDefaultTimezone"))
+            val snapshot = checkNotNull(parked.executionSnapshot)
+            val selected = park.pendingEvent ?: park.candidateEvents.firstOrNull { pending ->
+                val result = executor.evaluate(step, context, snapshot.assignments, pending.occurredAtMillis,
+                    checkpoint, JourneyControlExecutor.Signal(pending), snapshot.customer)
+                result is JourneyControlExecutor.Result.Advance && result.consumedEvent
             }
-            val checkpoint = park.wakeAtMillis?.let { wake ->
-                JourneyControlExecutor.Checkpoint(park.anchorAtMillis ?: wake, wake)
-            }
-            var reservationHandedOff = false
-            try {
-                beforeParkedResume()
-                val resumed = profileFence.performIfCurrent(state.profileFenceToken) {
-                    if (release.hasScreens() && !foreground.get()) {
-                        null
-                    } else {
-                        currentJournal.resumeParked(parked.id)
-                    }
-                } ?: continue
-                reservationHandedOff = true
-                execute(
-                    resumed,
-                    release,
-                    executionToken,
-                    executorSignal(event).copy(
-                        responsesChanged = park.pendingResponsesChanged,
-                    ),
-                    checkpoint,
-                    currentJournal,
-                    presentationReservation,
-                )
-            } finally {
-                if (!reservationHandedOff) presentationReservation?.close()
-            }
+            park = publishJournalIfCurrent(executionToken, identityScope) {
+                currentJournal.selectParkedEvent(parked.id, parked.stepId, park, selected)
+            } ?: continue
+            if (release.hasScreens() && !foreground.get()) continue
+            if (selected == null && park.wakeAtMillis?.let { it > nowMillis() } == true) continue
+            beforeParkedResume()
+            val resumed = profileFence.performIfCurrent(state.profileFenceToken) {
+                publishJournalIfCurrent(executionToken, identityScope) {
+                    if (release.hasScreens() && !foreground.get()) null else
+                        currentJournal.resumeParked(parked.id, parked.stepId, park)
+                }
+            } ?: continue
+            execute(resumed, release, executionToken, JourneyControlExecutor.Signal(selected), checkpoint, currentJournal, originIdentityScope = identityScope)
         }
     }
 
@@ -1547,7 +1570,7 @@ internal class JourneyService(
         )
         if (routeStepId == null) {
             if (command.unhandledOutcome != null) {
-                finish(run, command.unhandledOutcome, command.release.leg, target)
+                finish(run, command.unhandledOutcome, command.release.leg, target, command.executionFenceToken, identityScope)
                 val hadPresentation = activePresentedRunIds.remove(run.id) != null
                 if (hadPresentation) {
                     presenter?.shutdownPresentation(target.distinctId, run.journeyId)
@@ -1562,6 +1585,8 @@ internal class JourneyService(
                     if (command.method == "error") "abandoned" else HOST_DISMISSED_OUTCOME,
                     command.release.leg,
                     target,
+                    command.executionFenceToken,
+                    identityScope,
                 )
                 return PresentationLifecycleResult.COMPLETED
             }
@@ -1588,6 +1613,7 @@ internal class JourneyService(
         }.getOrNull() ?: return PresentationLifecycleResult.REJECTED
         val continuation = Command.ContinueExecution(
             transitioned.id,
+            identityScope,
             command.release,
             command.executionFenceToken,
             executorSignal(event),
@@ -1617,17 +1643,18 @@ internal class JourneyService(
 
     private suspend fun presentationEndedNow(command: Command.PresentationEnded) {
         activePresentedRunIds.remove(command.runId)
+        val identityScope = identity.captureScope()
         val target = journal ?: return
         if (!isExecutionCurrent(command.executionFenceToken, target)) return
         val run = target.runs().firstOrNull { it.id == command.runId }
             ?.takeIf { it.completion == null }
             ?: return
         if (!matches(command.release, run.reference)) {
-            finish(run, "abandoned", command.release.leg, target)
+            finish(run, "abandoned", command.release.leg, target, command.executionFenceToken, identityScope)
             return
         }
         if (command.outcome == JourneySurfaceOutcome.ABANDONED) {
-            finish(run, "abandoned", command.release.leg, target)
+            finish(run, "abandoned", command.release.leg, target, command.executionFenceToken, identityScope)
             return
         }
         val routeStepId = JourneyPresentationRouteResolver.resolve(
@@ -1636,11 +1663,11 @@ internal class JourneyService(
             command.screenId,
         )
         if (routeStepId == null) {
-            finish(run, HOST_DISMISSED_OUTCOME, command.release.leg, target)
+            finish(run, HOST_DISMISSED_OUTCOME, command.release.leg, target, command.executionFenceToken, identityScope)
             return
         }
         if (!isExecutionCurrent(command.executionFenceToken, target)) {
-            finish(run, "abandoned", command.release.leg, target)
+            finish(run, "abandoned", command.release.leg, target, command.executionFenceToken, identityScope)
             return
         }
         target.transition(run.id, routeStepId, run.context, clearPresentationSource = true)
@@ -1657,6 +1684,7 @@ internal class JourneyService(
             ),
             initialCheckpoint = null,
             target = target,
+            originIdentityScope = identityScope,
         )
     }
 
@@ -1687,17 +1715,6 @@ internal class JourneyService(
             .map(JsonElement::jsonObject)
             .firstOrNull { it.text("id") == command.expectedScreenId }
             ?: return false
-        val responseCaptures = (screen["responseCaptures"] as? JsonArray).orEmpty()
-            .mapNotNull { value ->
-                (value as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content
-            }
-            .toSet()
-        if (responseCaptures.size != (screen["responseCaptures"] as? JsonArray).orEmpty().size) {
-            return false
-        }
-
-        val responses = run.context.getValue("responses").jsonObject.toMutableMap()
-        var responsesChanged = false
         val items = mutableListOf<JourneyRun.PendingPresentationPublication.Item>()
         val eventIds = mutableSetOf<String>()
         var nextEmissionSequence = run.nextPresentationEmissionSequence
@@ -1711,39 +1728,14 @@ internal class JourneyService(
             } catch (_: ArithmeticException) {
                 return false
             }
-            when (emission.name) {
-                RESPONSE_SET_EVENT -> {
-                    val field = emission.payload.text("field") ?: return false
-                    val value = emission.payload["value"] ?: return false
-                    if (field !in responseCaptures) return false
-                    responses[field] = value
-                    responsesChanged = true
-                }
-                RESPONSE_UNSET_EVENT -> {
-                    val field = emission.payload.text("field") ?: return false
-                    if (field !in responseCaptures) return false
-                    responses.remove(field)
-                    responsesChanged = true
-                }
-                else -> {
-                    if (emission.name.isEmpty() || emission.name.startsWith('$')) return false
-                    val properties = attributedPresentationProperties(
-                        emission.payload,
-                        command.expectedScreenId,
-                        run,
-                    ) ?: return false
-                    items += JourneyRun.PendingPresentationPublication.Item(
-                        name = emission.name,
-                        properties = properties,
-                        eventId = emission.id,
-                        occurredAtMillis = emission.occurredAtMillis,
-                    )
-                }
-            }
+            if (emission.name.startsWith('$')) continue
+            if (emission.name.isEmpty()) return false
+            val properties = attributedPresentationProperties(emission.payload, command.expectedScreenId, run)
+                ?: return false
+            items += JourneyRun.PendingPresentationPublication.Item(emission.name, properties,
+                emission.id, emission.occurredAtMillis)
         }
-        val context = JsonObject(
-            run.context + ("responses" to JsonObject(responses)),
-        )
+        val context = JsonObject(run.context + ("responses" to JsonObject(emptyMap())))
         val publication = JourneyRun.PendingPresentationPublication(
             invocationId = batch.invocationId,
             batchSequence = batch.batchSequence,
@@ -1752,7 +1744,6 @@ internal class JourneyService(
             sourceActionId = batch.source.actionId,
             sourceComponentId = batch.source.componentId,
             sourceInstanceId = batch.source.instanceId,
-            responsesChanged = responsesChanged,
             items = items,
         )
         val identityScope = identity.captureScope()
@@ -1897,6 +1888,7 @@ internal class JourneyService(
             commands.trySend(
                 Command.ContinueExecution(
                     transitioned.id,
+                    identityScope,
                     release,
                     executionToken,
                     executorSignal(event),
@@ -1908,39 +1900,12 @@ internal class JourneyService(
             return true
         }
 
-        val checkpoint = controlCheckpoint(current.park)
-        val resumesForResponses = publication.responsesChanged &&
-            current.park != null &&
-            stepAcceptsResponseChange(current.stepId, release.leg)
-        val cleared = runCatching {
+        runCatching {
             publishJournalIfCurrent(executionToken, identityScope) {
-                target.clearPresentationPublication(
-                    current.id,
-                    publication.invocationId,
-                    retainResponsesChanged = resumesForResponses,
-                )
+                target.clearPresentationPublication(current.id, publication.invocationId)
             }
         }.getOrNull() ?: return acknowledgePublishedPresentationBatchFailure(
-            publishedOrdinaryEvents,
-            current,
-            publication,
-            target,
-            executionToken,
-            identityScope,
-        )
-        if (resumesForResponses) {
-            commands.trySend(
-                Command.ContinueExecution(
-                    cleared.id,
-                    release,
-                    executionToken,
-                    JourneyControlExecutor.Signal(responsesChanged = true),
-                    checkpoint,
-                    dismissPresentationOnCompletion = true,
-                    eventSource = eventSource?.source(routedEvent?.id),
-                ),
-            )
-        }
+            publishedOrdinaryEvents, current, publication, target, executionToken, identityScope)
         return true
     }
 
@@ -1987,13 +1952,14 @@ internal class JourneyService(
     }
 
     private suspend fun continueExecutionNow(command: Command.ContinueExecution) {
+        val identityScope = command.identityScope
         val target = journal ?: return
         if (!isExecutionCurrent(command.executionFenceToken, target)) return
         val run = target.runs().firstOrNull { it.id == command.runId }
             ?.takeIf { it.completion == null && it.pendingPresentationPublication == null }
             ?: return
         if (!matches(command.release, run.reference)) {
-            finish(run, "abandoned", command.release.leg, target)
+            finish(run, "abandoned", command.release.leg, target, command.executionFenceToken, identityScope)
             return
         }
         execute(
@@ -2005,6 +1971,7 @@ internal class JourneyService(
             target = target,
             dismissPresentationOnCompletion = command.dismissPresentationOnCompletion,
             eventSource = command.eventSource,
+            originIdentityScope = identityScope,
         )
     }
 
@@ -2085,18 +2052,6 @@ internal class JourneyService(
             directlyRoutedRunByEventId.remove(eventId, run.id)
         }
         return captured
-    }
-
-    private fun stepAcceptsResponseChange(stepId: String, leg: JsonObject): Boolean {
-        val step = leg.getValue("steps").jsonArray.map(JsonElement::jsonObject)
-            .firstOrNull { it.text("id") == stepId }
-            ?: return false
-        val action = step["action"] as? JsonObject ?: return false
-        if (action.text("type") != "wait_until") return false
-        return when ((action["trigger"] as? JsonObject)?.text("kind")) {
-            "response_change", "event_or_response_change" -> true
-            else -> false
-        }
     }
 
     private fun controlCheckpoint(
@@ -2248,7 +2203,7 @@ internal class JourneyService(
             presentation.present(
                 JourneyPresentationRequest(
                     fences = JourneyPresentationFences(identity, identityScope, executionFence, executionToken),
-                    runValues = nativeValues(run.id, target.distinctId),
+                    runValues = nativeValues(run, target.distinctId),
                     release = release,
                     delivery = executionSnapshot.delivery,
                     screenId = screenId,
@@ -2340,10 +2295,12 @@ internal class JourneyService(
         initialPresentationReservation: JourneyPresentationReservation? = null,
         dismissPresentationOnCompletion: Boolean = true,
         eventSource: JourneyRuntimeEventSource? = null,
+        originIdentityScope: IdentityScope = identity.captureScope(),
     ) {
+        val identityScope = originIdentityScope
         val leg = release.leg
         val executionSnapshot = initial.executionSnapshot ?: run {
-            finish(initial, "abandoned", leg, target)
+            finish(initial, "abandoned", leg, target, executionToken, identityScope)
             return
         }
         val steps = leg.getValue("steps").jsonArray.associate {
@@ -2358,7 +2315,7 @@ internal class JourneyService(
             appDefaultTimezone,
         )
         suspend fun finishExecution(currentRun: JourneyRun, outcome: String) {
-            finish(currentRun, outcome, leg, target)
+            finish(currentRun, outcome, leg, target, executionToken, identityScope)
             val hadPresentation = activePresentedRunIds.remove(currentRun.id) != null
             if (dismissPresentationOnCompletion && hadPresentation) {
                 presenter?.shutdownPresentation(target.distinctId, currentRun.journeyId)
@@ -2378,6 +2335,11 @@ internal class JourneyService(
                     finishExecution(run, "abandoned")
                     return
                 }
+                val values = if (readsNativeValues(step) || step.text("kind") == "complete")
+                    preparedNativeValues(run, release, target) else nativeValuesByRun[run.id]?.second
+                run = run.copy(context = JsonObject(run.context + ("responses" to
+                    (values?.journeyValues() ?: JsonObject(emptyMap())))))
+                if (!isExecutionCurrent(executionToken, target) || !identity.isCurrentScope(identityScope)) return
                 when (val result = executor.evaluate(
                     step,
                     run.context,
@@ -2397,13 +2359,13 @@ internal class JourneyService(
                                 }
                             }
                             ?.let(::experimentExposure)
-                        target.transition(
+                        publishJournalIfCurrent(executionToken, identityScope) { target.transition(
                             run.id,
                             result.stepId,
                             result.context,
                             experimentExposure = exposure,
                             clearPresentationSource = clearSource,
-                        )
+                        ) } ?: return
                         run = run.copy(
                             stepId = result.stepId,
                             context = result.context,
@@ -2418,7 +2380,14 @@ internal class JourneyService(
                         checkpoint = null
                     }
                     is JourneyControlExecutor.Result.Park -> {
-                        target.transition(run.id, result.stepId, run.context, result.checkpoint)
+                        if (identityScope.distinctId != target.distinctId) return
+                        val snapshot = values?.snapshot()
+                        publishJournalIfCurrent(executionToken, identityScope) {
+                            if (journal !== target) return@publishJournalIfCurrent false
+                            target.transition(run.id, result.stepId, run.context, result.checkpoint,
+                                nativeSnapshot = snapshot)
+                            true
+                        } ?: return
                         scheduleNextWake()
                         return
                     }
@@ -2427,12 +2396,13 @@ internal class JourneyService(
                         return
                     }
                     is JourneyControlExecutor.Result.Dispatch -> {
-                        val identityScope = identity.captureScope()
                         if (identityScope.distinctId != target.distinctId) {
                             finishExecution(run, "abandoned")
                             return
                         }
-                        val effectId = target.claimEffect(run.id, result.stepId)
+                        val effectId = publishJournalIfCurrent(executionToken, identityScope) {
+                            target.claimEffect(run.id, result.stepId)
+                        } ?: return
                         val current: () -> Boolean = {
                             isExecutionCurrent(executionToken, target) &&
                                 identity.isCurrentScope(identityScope)
@@ -2763,26 +2733,35 @@ internal class JourneyService(
         outcome: String,
         leg: JsonObject,
         target: JourneyRunJournal,
+        executionToken: JourneyExecutionFenceToken,
+        identityScope: IdentityScope,
     ) {
+        if (identityScope.distinctId != target.distinctId || journal !== target) return
         pendingPresentationPurchasePlacements.remove(run.id)
         val boundary = (leg.getValue("completionOutputs") as JsonObject)[outcome]
             as? JsonObject
+        val context = JsonObject(run.context + ("responses" to
+            (nativeValuesByRun[run.id]?.second?.journeyValues() ?: JsonObject(emptyMap()))))
         val projected = boundary?.let {
-            JourneyBoundaryProjector.project(run.context, it)
+            JourneyBoundaryProjector.project(context, it)
         }
         val finalOutcome = if (boundary != null && projected == null) "abandoned" else outcome
         val responseOutputs = if (finalOutcome == "abandoned") {
-            run.context.getValue("responses").jsonObject
+            context.getValue("responses").jsonObject
         } else {
             projected?.getValue("responses")?.jsonObject ?: JsonObject(emptyMap())
         }
-        target.complete(
-            run.id,
-            finalOutcome,
-            nowMillis(),
-            projected?.getValue("event")?.jsonObject ?: JsonObject(emptyMap()),
-            responseOutputs,
-        )
+        publishJournalIfCurrent(executionToken, identityScope) {
+            if (journal !== target) return@publishJournalIfCurrent false
+            target.complete(
+                run.id,
+                finalOutcome,
+                nowMillis(),
+                projected?.getValue("event")?.jsonObject ?: JsonObject(emptyMap()),
+                responseOutputs,
+            )
+            true
+        }?.takeIf { it } ?: return
         retireNativeValues(run.id)
         flushPendingReports(target)
         scheduleNextWake()
@@ -2873,8 +2852,10 @@ internal class JourneyService(
         if (!foreground.get() || currentState() == null) return
         val next = journal?.runs()?.asSequence()
             ?.filter { it.completion == null }
-            ?.mapNotNull { it.park?.wakeAtMillis }
-            ?.filter { it > nowMillis() }
+            ?.mapNotNull { run -> run.park?.let { park ->
+                nativeRestoreRetryAt[run.id] ?: if (park.pendingEvent != null || park.candidateEvents.isNotEmpty())
+                    nowMillis() else park.wakeAtMillis?.takeIf { it > nowMillis() }
+            } }
             ?.minOrNull() ?: return
         wakeGeneration += 1
         val generation = wakeGeneration
@@ -2905,8 +2886,6 @@ internal class JourneyService(
         const val HOST_DISMISSED_EVENT = "host_dismissed"
         const val HOST_DISMISSED_OUTCOME = "host_dismissed"
         const val PRODUCTS_UNAVAILABLE_OUTCOME = "products_unavailable"
-        const val RESPONSE_SET_EVENT = "\$response_set"
-        const val RESPONSE_UNSET_EVENT = "\$response_unset"
         const val MAX_TRANSITIONS = 10_000
         const val RETAINED_RELEASE_CACHE_BYTE_LIMIT = 64 * 1024 * 1024
         const val RETAINED_RELEASE_CACHE_COUNT_LIMIT = 256
