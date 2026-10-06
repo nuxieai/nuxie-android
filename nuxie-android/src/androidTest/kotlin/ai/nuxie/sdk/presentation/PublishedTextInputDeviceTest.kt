@@ -2532,10 +2532,9 @@ class PublishedTextInputDeviceTest {
                 var downTime = SystemClock.uptimeMillis()
                 fun dispatch(action: Int, authoredY: Float = 30f) = instrumentation.runOnMainSync {
                     if (action == MotionEvent.ACTION_DOWN) downTime = SystemClock.uptimeMillis()
-                    val authoredHeight = if (purchaseNavigationFixture) 150f else 100f
-                    val scale = minOf(target.width / 320f, target.height / authoredHeight)
-                    val x = (target.width - 320f * scale) / 2f + purchaseX * scale
-                    val y = (target.height - authoredHeight * scale) / 2f + authoredY * scale
+                    val density = target.resources.displayMetrics.density
+                    val x = purchaseX * density
+                    val y = authoredY * density
                     val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
                     try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }
                 }
@@ -2634,9 +2633,9 @@ class PublishedTextInputDeviceTest {
                 var downTime = SystemClock.uptimeMillis()
                 fun dispatch(action: Int) = instrumentation.runOnMainSync {
                     if (action == MotionEvent.ACTION_DOWN) downTime = SystemClock.uptimeMillis()
-                    val scale = minOf(target.width / 390f, target.height / 844f)
-                    val x = (target.width - 390f * scale) / 2f + 100f * scale
-                    val y = (target.height - 844f * scale) / 2f + 728f * scale
+                    val density = target.resources.displayMetrics.density
+                    val x = 100f * density
+                    val y = 728f * density
                     val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
                     try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }
                 }

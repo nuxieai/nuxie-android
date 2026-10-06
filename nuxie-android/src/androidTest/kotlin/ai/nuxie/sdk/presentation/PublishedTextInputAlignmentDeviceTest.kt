@@ -137,10 +137,13 @@ class PublishedTextInputAlignmentDeviceTest {
                     inputs.associate { it.style.fontAssetName to fontFile }, { _, _, _, done -> writes += 1; done(Result.success(Unit)) }, { throw it })
                 overlay = current
                 activity.setContentView(current)
+                val density = current.resources.displayMetrics.density
                 fun layout() {
-                    current.measure(View.MeasureSpec.makeMeasureSpec(390, View.MeasureSpec.EXACTLY),
-                        View.MeasureSpec.makeMeasureSpec(844, View.MeasureSpec.EXACTLY))
-                    current.layout(0, 0, 390, 844)
+                    val width = (390 * density).toInt()
+                    val height = (844 * density).toInt()
+                    current.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY))
+                    current.layout(0, 0, width, height)
                 }
                 // Password glyph layout is platform-owned. At sub-pixel sizes its
                 // measured baseline can differ from Paint.fontMetricsInt.ascent.
@@ -181,9 +184,9 @@ class PublishedTextInputAlignmentDeviceTest {
                     (editor.parent as View).matrix.mapPoints(point)
                     val geometry = capture.fields.getValue(input.runName)
                     if (input.secure) assertNull("Secure runtime text stays blank", geometry.firstBaseline)
-                    val baseline = if (input.secure) nativePasswordBaseline(editor.textSize, editor.width, editor.height)
+                    val baseline = if (input.secure) nativePasswordBaseline(editor.textSize, editor.width, editor.height) / density
                         else checkNotNull(geometry.firstBaseline)
-                    val expectedY = geometry.contentTransform.ty + geometry.contentTransform.d * baseline
+                    val expectedY = (geometry.contentTransform.ty + geometry.contentTransform.d * baseline) * density
                     assertEquals("${input.id} native baseline vs published text", expectedY, point[1], 0.5f)
                     val baselineBefore = editor.baseline
                     editor.setSelection(1, 4)
@@ -220,7 +223,7 @@ class PublishedTextInputAlignmentDeviceTest {
                     }
                     inputs.forEachIndexed { index, input ->
                         val editor = current.findViewWithTag<EditText>("nuxie-text-input-${input.id}")
-                        assertEquals(if (singleLine || index == 0) frame.fontSize else 18f, editor.textSize, 0.001f)
+                        assertEquals((if (singleLine || index == 0) frame.fontSize else 18f) * density, editor.textSize, 0.001f)
                         val effectiveHeight = if (singleLine || index == 0) frame.lineHeight else 24f
                         assertEquals(if (singleLine) 1 else 3, editor.layout.lineCount)
                         if (effectiveHeight == -1f) {
@@ -228,7 +231,7 @@ class PublishedTextInputAlignmentDeviceTest {
                         } else {
                             for (line in 1 until editor.layout.lineCount) {
                                 assertEquals("${input.id} effective baseline interval",
-                                    effectiveHeight, (editor.layout.getLineBaseline(line) - editor.layout.getLineBaseline(line - 1)).toFloat(), 0.5f)
+                                    effectiveHeight * density, (editor.layout.getLineBaseline(line) - editor.layout.getLineBaseline(line - 1)).toFloat(), 0.5f)
                             }
                         }
                         val captured = frame.geometry.fields.getValue(input.runName)
@@ -236,10 +239,10 @@ class PublishedTextInputAlignmentDeviceTest {
                         editor.matrix.mapPoints(point)
                         (editor.parent as View).matrix.mapPoints(point)
                         if (input.secure) assertNull("Secure runtime text stays blank", captured.firstBaseline)
-                        val baseline = if (input.secure) nativePasswordBaseline(editor.textSize, editor.width, editor.height)
+                        val baseline = if (input.secure) nativePasswordBaseline(editor.textSize, editor.width, editor.height) / density
                             else checkNotNull(captured.firstBaseline)
                         assertEquals("${input.id} baseline after effective metric change",
-                            captured.contentTransform.ty + captured.contentTransform.d * baseline, point[1], 0.5f)
+                            (captured.contentTransform.ty + captured.contentTransform.d * baseline) * density, point[1], 0.5f)
                         assertEquals("Metric frames are not user edits", writesBeforeFrames, writes)
                         assertEquals(1, editor.selectionStart)
                         assertEquals(4, editor.selectionEnd)
