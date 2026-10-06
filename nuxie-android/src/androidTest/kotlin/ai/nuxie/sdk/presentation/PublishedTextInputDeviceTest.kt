@@ -629,6 +629,10 @@ class PublishedTextInputDeviceTest {
                 SystemClock.sleep(150)
                 val returned = copySurfaceAtSize(checkNotNull(findSurface(original.window.decorView)), before.width, before.height)
                 try {
+                    if (changedPixels(before, returned, Rect(0, 0, before.width, before.height)) != 0) {
+                        File(context.filesDir, "recreation-home-before.png").outputStream().use { before.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                        File(context.filesDir, "recreation-home-returned.png").outputStream().use { returned.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    }
                     assertEquals(0, changedPixels(before, returned, Rect(0, 0, before.width, before.height)))
                 } finally { returned.recycle() }
             } finally { application.unregisterActivityLifecycleCallbacks(callbacks) }
@@ -688,9 +692,9 @@ class PublishedTextInputDeviceTest {
                 }
                 assertTrue("Portrait surface extent must be restored", portraitSized)
             }
-            val replacementSurface = checkNotNull(findSurface(replacement.window.decorView))
-            // Activity creation does not mean its asynchronous native frame is ready.
+            // Recreation drains the prior renderer before mounting its replacement.
             val renderDeadline = SystemClock.uptimeMillis() + 10_000
+            val replacementSurface = awaitSurfaceAttachment(replacement.window.decorView, renderDeadline)
             var rendered = copySurfaceAtSize(replacementSurface, before.width, before.height)
             after = rendered
             while (changedPixels(before, rendered, Rect(0, 0, before.width, before.height)) != 0 &&
@@ -3191,6 +3195,29 @@ class PublishedTextInputDeviceTest {
             SystemClock.sleep(50)
         } while (SystemClock.elapsedRealtime() < deadline)
         error("Surface bounds did not stabilize inside the composed display")
+    }
+
+    private fun awaitSurfaceAttachment(root: View, deadline: Long): TextureView {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val attached = CountDownLatch(1)
+        val surface = AtomicReference<TextureView?>()
+        val listener = android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            findSurface(root)?.takeIf { it.isAttachedToWindow }?.let {
+                surface.set(it)
+                attached.countDown()
+            }
+        }
+        instrumentation.runOnMainSync {
+            root.viewTreeObserver.addOnGlobalLayoutListener(listener)
+            listener.onGlobalLayout()
+        }
+        try {
+            assertTrue("Replacement surface must attach before the render deadline",
+                attached.await((deadline - SystemClock.uptimeMillis()).coerceAtLeast(0), TimeUnit.MILLISECONDS))
+            return checkNotNull(surface.get())
+        } finally {
+            instrumentation.runOnMainSync { root.viewTreeObserver.removeOnGlobalLayoutListener(listener) }
+        }
     }
 
     private fun awaitPublishedSurface(
