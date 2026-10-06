@@ -51,7 +51,7 @@ class JourneyResponseSaveDeliveryTest {
         val vectors = json(FixtureRunner.fixturesRoot().resolve("responses/save-cases.json").readText())
         val expected = vectors.getValue("request").jsonObject
         val rows = vectors.getValue("replies").jsonArray
-        assertEquals(47, rows.size)
+        assertEquals(48, rows.size)
         for ((index, element) in rows.withIndex()) {
             val row = element.jsonObject
             for (status in listOf(row.getValue("httpStatus").jsonPrimitive.int, 201)) {
