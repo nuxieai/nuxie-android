@@ -173,8 +173,8 @@ internal class ExperienceMountedScreen(
         transitionEvents.perform(screen?.get("exit") as? JsonObject, reduceMotionEnabled, ::exit)
     }
 
-    fun beginCustomTransition(id: String, outgoing: Boolean) {
-        surface.updateRuntimeValues(if (outgoing)
+    suspend fun beginCustomTransition(id: String, outgoing: Boolean) {
+        surface.applyTransitionValues(if (outgoing)
             lifecycle.move(ExperienceScreenLifecycle.Phase.EXITING, id)
         else lifecycle.beginPreparedTransition(id))
     }
