@@ -113,7 +113,6 @@ internal class NuxieExperienceActivity : Activity() {
         var failure: Throwable? = null
             private set
         var view: View? = null
-        var laidOutHeight: Float? = prepared.retainedDialogHeight.get()
             private set
         val ready = CompletableDeferred<Unit>()
         val closed = CompletableDeferred<Unit>()
@@ -202,14 +201,6 @@ internal class NuxieExperienceActivity : Activity() {
         override fun purchaseActivity(): Activity = this@NuxieExperienceActivity
         override suspend fun resolveJourneyPermission(request: JourneyPermissionRequest): Boolean =
             this@NuxieExperienceActivity.resolveJourneyPermission(request)
-
-        override fun onLayoutBounds(bounds: ExperienceArtboardSize) {
-            runOnUiThread {
-                laidOutHeight = bounds.height
-                if (prepared.shell is PresentationShell.Dialog) prepared.retainedDialogHeight.set(bounds.height)
-                layers.firstOrNull { it.screen === this }?.sheet?.updateLaidOutHeight(bounds.height)
-            }
-        }
 
         override fun onFirstFrame() {
             runOnUiThread {
@@ -419,7 +410,6 @@ internal class NuxieExperienceActivity : Activity() {
                 } else {
                     layers.lastOrNull()?.let {
                         it.screen = target
-                        target.laidOutHeight?.let { height -> it.sheet?.updateLaidOutHeight(height) }
                     }
                     target.view?.bringToFront()
                     source.view?.let(contentRoot::removeView)
@@ -729,7 +719,7 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private fun installLayerWindow(layer: Layer) {
-        layer.sheet = ExperienceNativeLayerWindow(this, layer.root, layer.shell, layer.screen.laidOutHeight) { requestLayerClose(layer) }.also {
+        layer.sheet = ExperienceNativeLayerWindow(this, layer.root, layer.shell) { requestLayerClose(layer) }.also {
             it.setInputEnabled(false)
             it.show()
         }

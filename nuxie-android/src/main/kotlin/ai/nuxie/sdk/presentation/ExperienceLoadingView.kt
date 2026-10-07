@@ -86,7 +86,7 @@ internal class ExperienceLoadingView(context: Context, backgroundColor: Int) : V
         super.onDraw(canvas)
         if (closed || !active || reducedMotion || !animator.isStarted) return
         val shader = gradient ?: return
-        // Pixel-space projection keeps the angle constant for sheets and narrow drawers.
+        // Pixel-space projection keeps the angle constant across native presentation sizes.
         // The band clears every corner before the short pause between sweeps.
         val radius = (width * AXIS_X + height * AXIS_Y) / 2f
         val band = hypot(width.toFloat(), height.toFloat()) * 0.45f

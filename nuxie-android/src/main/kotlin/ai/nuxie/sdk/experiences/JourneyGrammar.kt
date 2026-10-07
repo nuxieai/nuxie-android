@@ -125,7 +125,13 @@ internal object JourneyGrammar {
     private fun transition(input: JsonElement) {
         val value = record(input)
         when (text(value["type"])) {
-            "none", "push", "modal", "fade" -> exact(value, setOf("type"))
+            "none", "push", "fade" -> exact(value, setOf("type"))
+            "modal" -> {
+                exact(value, setOf("type"), setOf("present", "height", "closedby"))
+                value["present"]?.let { oneOf(it, "sheet", "fullscreen") }
+                value["height"]?.let { oneOf(it, "large", "medium", "fit-content") }
+                value["closedby"]?.let { oneOf(it, "any", "none") }
+            }
             "custom" -> { exact(value, setOf("type", "transitionId")); journeyId(value["transitionId"]) }
             else -> fail("transition")
         }

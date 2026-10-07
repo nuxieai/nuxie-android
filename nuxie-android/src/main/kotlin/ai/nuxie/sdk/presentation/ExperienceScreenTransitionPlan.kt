@@ -10,6 +10,7 @@ import kotlinx.serialization.json.long
 internal data class ExperienceScreenTransitionPlan(
     val kind: Kind,
     val custom: Custom? = null,
+    val presentation: PresentationShell? = null,
 ) {
     enum class Kind { NONE, PUSH, MODAL, FADE, CUSTOM }
 
@@ -39,7 +40,8 @@ internal data class ExperienceScreenTransitionPlan(
                 "custom" -> Kind.CUSTOM
                 else -> Kind.NONE
             }
-            if (kind != Kind.CUSTOM) return ExperienceScreenTransitionPlan(kind)
+            if (kind != Kind.CUSTOM) return ExperienceScreenTransitionPlan(kind,
+                presentation = if (kind == Kind.MODAL) PresentationShell.fromTransition(intent) else null)
             // Preserve the authored identifier; trimming is only an emptiness check.
             val id = intent?.string("transitionId")?.takeIf { it.isNotBlank() }
                 ?: return ExperienceScreenTransitionPlan(Kind.NONE)
