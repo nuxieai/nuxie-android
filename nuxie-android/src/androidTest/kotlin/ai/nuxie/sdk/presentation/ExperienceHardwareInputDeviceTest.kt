@@ -22,6 +22,58 @@ class ExperienceHardwareInputDeviceTest {
     private val assets get() = instrumentation.context.assets
     private val oracle get() = JSONObject(assets.open("runtime/rive-focus/expectations.json").bufferedReader().use { it.readText() })
 
+    @Test fun qualifiedSecureInputKeepsTextOutOfSemanticsAndSDKLogs() {
+        ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.VERBOSE, redactSensitiveData = false)
+        try {
+            withScreen("text_input_secure_observed", "Text Input - Multiline", null,
+                directory = "text-editing-experiment", semantics = true) { screen ->
+                val secret = java.util.UUID.randomUUID().toString()
+                lateinit var editor: android.widget.EditText
+                var nativeText = ""
+                instrumentation.runOnMainSync {
+                    editor = android.widget.EditText(screen.activity)
+                    editor.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    editor.showSoftInputOnFocus = false
+                    screen.activity.addContentView(editor, android.view.ViewGroup.LayoutParams(300, 60))
+                    assertTrue(editor.requestFocus())
+                    val connection = checkNotNull(editor.onCreateInputConnection(android.view.inputmethod.EditorInfo()))
+                    assertTrue(connection.commitText(secret, 1))
+                    nativeText = editor.text.toString()
+                }
+                assertTrue("Native secure control must retain typed text", nativeText == secret)
+                screen.advance { assertTrue(screen.host.receiveFocusInput(NuxieFocusInput.Next)) }
+                screen.advance {
+                    assertTrue(screen.host.receiveFocusInput(NuxieFocusInput.Key(65, 8, true, false)))
+                    assertTrue(screen.host.receiveFocusInput(NuxieFocusInput.Key(259, 0, true, false)))
+                }
+                screen.native.expectedSecureText = nativeText
+                screen.advance {
+                    assertTrue(screen.host.receiveFocusInput(NuxieFocusInput.Text(nativeText)))
+                }
+                assertTrue("Secure field must be obscured", screen.native.secureFieldObscured)
+                assertTrue("Qualified narrow read must retain typed text", screen.native.secureFieldMatches)
+                assertTrue("Secure text must be absent from every captured semantic node", screen.native.secureSemanticsEmpty)
+                assertTrue("Secure insertion must be accepted once", screen.native.secureInputMatches == listOf(true))
+                val marker = "Secure boundary " + java.util.UUID.randomUUID().toString()
+                ai.nuxie.sdk.logging.NuxieLog.e("NuxieSecureBoundary", marker)
+                var output: String
+                val deadline = SystemClock.elapsedRealtime() + 5_000
+                do {
+                    val descriptor = instrumentation.uiAutomation.executeShellCommand("logcat -d -v brief --pid=${android.os.Process.myPid()}")
+                    output = android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor).bufferedReader().use { it.readText() }
+                    if (output.contains(marker)) break
+                    SystemClock.sleep(10)
+                } while (SystemClock.elapsedRealtime() < deadline)
+                assertTrue("SDK log capture must be active", output.contains(marker))
+                assertFalse("Secure text must not enter SDK log output", output.contains(secret))
+                instrumentation.runOnMainSync {
+                    editor.text.clear()
+                    (editor.parent as? android.view.ViewGroup)?.removeView(editor)
+                }
+            }
+        } finally { ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.WARN) }
+    }
+
     @Test fun keysAndTypingReachTheShownSurface() = withScreen("text_input_event", "Artboard", "ViewModel1") { screen ->
         val names = listOf("isFocused", "hasKeyed", "hasTexted")
         fun flags() = names.map { (screen.changedValue(it) as NuxieViewModelValue.Bool).value }
