@@ -2,7 +2,7 @@
   "sourceRepo": "nuxieai/nuxie-ios",
   "sourceCommit": "7fb80bb4d6a933286f7a8d0f89b3547395e84508",
   "files": {
-    "README.md": "2d13eb1fb19a2563c9cf8418640e42019983f215f0a9a23b282dd46f62ecc149",
+    "README.md": "658775c9a3fa3b910906fd7cea4f60054e4f56e5dfaeb08aa6237aab420fc196",
     "accessibility/control-state.json": "6a4e35c6c2f55575344f4a26a2bdb5f22728a41845464c3beeb93251082e97f2",
     "accessibility/focus-restoration.json": "65b3d626a9229eab9ce215513b12d1d1cc5e79c51339bc05b0c5d5633826933e",
     "encodings/activity-identity.json": "6f6c5010911fac834706a986f4a94d7d7a63c7f34bfb7cdf7f616246b1f896a2",
@@ -289,7 +289,17 @@
     "runtime/run-values/source/screens/level/frame.json": "854a573af0971343333054c33bd03cd2a2c567e770188285186ed8c475a00560",
     "runtime/run-values/source/screens/level/index.html": "3a5261b715dd5c6c8490b61f8553bea4b03c82d01d45abde582e53a62d2a4c6b",
     "runtime/run-values/source/screens/tap/frame.json": "d8c3a8e2fe9f63cb57a7d673110228861a1a11edce2e581ffa7571a2b0be93bf",
-    "runtime/run-values/source/screens/tap/index.html": "5a4e501675a339bb167fb3451af44280dec2a9575c72419bb0bbecc32a4b4347"
+    "runtime/run-values/source/screens/tap/index.html": "5a4e501675a339bb167fb3451af44280dec2a9575c72419bb0bbecc32a4b4347",
+    "runtime/published-input/NOTES.md": "e1856f61f29d9cd3b3d90634cd480b168e9aadccc433fd8aa1eae167e6845cb1",
+    "runtime/published-input/expectations.json": "fbc6255f49f79894ac4e2cbbe9d0089aba9ef96f2efe1ac8a0fe9940a830c7d7",
+    "runtime/published-input/provenance.json": "57b935bdde2f9b91582ce30e0c437fc1517145e419e733aeb29e64103b176f85",
+    "runtime/published-input/screen.riv": "508bf2622f18c6ed2c20814a169cb829d64d6139b3149c11caac3e77c0f8fdc9",
+    "runtime/published-input/source/experience.json": "3f585e4bea920c974081d215908e5d93a2053f175d2a6d1a3627a3a91bcac9b5",
+    "runtime/published-input/source/screens/greeting/frame.json": "854a573af0971343333054c33bd03cd2a2c567e770188285186ed8c475a00560",
+    "runtime/published-input/source/screens/greeting/index.html": "71add267e98f4565eae652e0b4788d70b3cc5e212fa41c8a90992deb536dda6c",
+    "runtime/published-input/source/screens/input/frame.json": "c783391be8624324606fce86e80f70a879c6475d6e3514a0cdee1dd258926d3d",
+    "runtime/published-input/source/screens/input/index.html": "75ee57accba92f2b16241e7cc2281dd57304313b3f4ec4992ca2bfd46a3f34bf",
+    "runtime/published-input/text-inputs.json": "876cb9ee44130543dad0012db8ad1b97cfdd1af72c94286c1fc2068d7556af70"
   },
   "sourceCommitOverrides": {
     "events/catalog.json": "6503e6a6bdf3ba9cad88fc598c5fa3783ba39490",
@@ -343,7 +353,7 @@
     "runtime/shared-values/source/screens/short/index.html": "de84536f2204900e3b1ee46a0b2eea8810616026",
     "journeys/planes/release.json": "6503e6a6bdf3ba9cad88fc598c5fa3783ba39490",
     "journeys/planes/text-input-navigation.json": "6503e6a6bdf3ba9cad88fc598c5fa3783ba39490",
-    "README.md": "60480234fac15e9ac71b3be76a6e0bcae65b3c6c",
+    "README.md": "abf20db4771af17a95e14b2d4cbb5e80a98ea6c1",
     "runtime/run-values/NOTES.md": "60480234fac15e9ac71b3be76a6e0bcae65b3c6c",
     "runtime/run-values/expectations.json": "60480234fac15e9ac71b3be76a6e0bcae65b3c6c",
     "runtime/run-values/provenance.json": "60480234fac15e9ac71b3be76a6e0bcae65b3c6c",
@@ -354,6 +364,16 @@
     "runtime/run-values/source/screens/level/frame.json": "60480234fac15e9ac71b3be76a6e0bcae65b3c6c",
     "runtime/run-values/source/screens/level/index.html": "60480234fac15e9ac71b3be76a6e0bcae65b3c6c",
     "runtime/run-values/source/screens/tap/frame.json": "60480234fac15e9ac71b3be76a6e0bcae65b3c6c",
-    "runtime/run-values/source/screens/tap/index.html": "60480234fac15e9ac71b3be76a6e0bcae65b3c6c"
+    "runtime/run-values/source/screens/tap/index.html": "60480234fac15e9ac71b3be76a6e0bcae65b3c6c",
+    "runtime/published-input/NOTES.md": "abf20db4771af17a95e14b2d4cbb5e80a98ea6c1",
+    "runtime/published-input/expectations.json": "abf20db4771af17a95e14b2d4cbb5e80a98ea6c1",
+    "runtime/published-input/provenance.json": "abf20db4771af17a95e14b2d4cbb5e80a98ea6c1",
+    "runtime/published-input/screen.riv": "abf20db4771af17a95e14b2d4cbb5e80a98ea6c1",
+    "runtime/published-input/source/experience.json": "abf20db4771af17a95e14b2d4cbb5e80a98ea6c1",
+    "runtime/published-input/source/screens/greeting/frame.json": "abf20db4771af17a95e14b2d4cbb5e80a98ea6c1",
+    "runtime/published-input/source/screens/greeting/index.html": "abf20db4771af17a95e14b2d4cbb5e80a98ea6c1",
+    "runtime/published-input/source/screens/input/frame.json": "abf20db4771af17a95e14b2d4cbb5e80a98ea6c1",
+    "runtime/published-input/source/screens/input/index.html": "abf20db4771af17a95e14b2d4cbb5e80a98ea6c1",
+    "runtime/published-input/text-inputs.json": "abf20db4771af17a95e14b2d4cbb5e80a98ea6c1"
   }
 }

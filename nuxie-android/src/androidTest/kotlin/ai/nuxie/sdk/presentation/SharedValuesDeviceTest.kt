@@ -1,6 +1,8 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
+import ai.nuxie.sdk.runtime.NuxieFocusInput
+import ai.nuxie.sdk.runtime.NuxieFocusState
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
@@ -8,6 +10,66 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SharedValuesDeviceTest {
+    @Test fun publishedInputFocusTypingAndGreetingShareTheRun() = runBlocking {
+        assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
+        val assets = InstrumentationRegistry.getInstrumentation().context.assets
+        fun read(name: String) = assets.open("runtime/published-input/$name").use { it.readBytes() }
+        val expected = Json.parseToJsonElement(read("expectations.json").decodeToString()).jsonObject
+        val handlers = expected.getValue("handlers").jsonObject
+        val fonts = Json.parseToJsonElement(read("provenance.json").decodeToString()).jsonObject.getValue("fonts").jsonArray
+        val descriptor = buildJsonObject { putJsonObject("render") {
+            put("assets", JsonArray(fonts.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
+        } }
+        val run = ExperienceRunValues()
+        try {
+            run.lane.call {
+                val native = run.prepare(read("screen.riv"), descriptor, emptyMap())
+                val shared = checkNotNull(native.values)
+                val input = checkNotNull(native.file.newArtboard("input"))
+                try {
+                    input.bindDefaultViewModel("Runtime input scr_screens_sinput")
+                    assertTrue(input.linkDefaultViewModel("experience", shared))
+                    val player = native.file.newExperiencePlayer(input, "input")
+                    try {
+                        player.step(0.0)
+                        fun handler(event: String, phase: String) {
+                            val item = handlers.getValue(event).jsonObject
+                            assertEquals(NuxieViewModelScalarValue.NumberValue(item.getValue(phase).jsonPrimitive.double),
+                                checkNotNull(input.defaultViewModelSnapshot()).resolveScalar(
+                                    listOf("state", item.getValue("property").jsonPrimitive.content)))
+                        }
+                        handlers.keys.forEach { handler(it, "before") }
+                        assertEquals(expected.getValue("startingValues").jsonObject.getValue("name").jsonPrimitive.content,
+                            shared.snapshot().resolveString("name"))
+                        assertEquals(NuxieFocusState(true, true),
+                            player.stepTyped(elapsedSeconds = 0.0, focusInputs = listOf(NuxieFocusInput.Next)).focusState)
+                        handler("focus", "after")
+                        player.stepTyped(elapsedSeconds = 0.0,
+                            focusInputs = listOf(NuxieFocusInput.Key(269, 0, true, false)))
+                        handler("input", "before")
+                        val typing = expected.getValue("typing").jsonObject
+                        player.stepTyped(elapsedSeconds = 0.0,
+                            focusInputs = listOf(NuxieFocusInput.Text(typing.getValue("append").jsonPrimitive.content)))
+                        val after = typing.getValue("after").jsonPrimitive.content
+                        assertEquals(after, shared.snapshot().resolveString("name"))
+                        handler("input", "before")
+                        player.step(0.0)
+                        handler("input", "after")
+                        assertEquals(false,
+                            player.stepTyped(elapsedSeconds = 0.0, focusInputs = listOf(NuxieFocusInput.Next)).focusState?.hasFocus)
+                        handler("blur", "after")
+                        val greeting = checkNotNull(native.file.newArtboard("greeting"))
+                        try {
+                            greeting.bindDefaultViewModel("Runtime greeting scr_screens_sgreeting")
+                            assertTrue(greeting.linkDefaultViewModel("experience", shared))
+                            assertEquals(after, checkNotNull(greeting.defaultViewModelSnapshot()).resolveString("experience/name"))
+                        } finally { greeting.close() }
+                    } finally { player.close() }
+                } finally { input.close() }
+            }
+        } finally { run.retire() }
+    }
+
     @Test fun retainedScreensExcludeSharedValuesAndOtherRunsStartFresh() = runBlocking {
         assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
