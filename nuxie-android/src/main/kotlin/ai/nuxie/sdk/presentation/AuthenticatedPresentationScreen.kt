@@ -22,7 +22,7 @@ internal class AuthenticatedPresentationScreen private constructor(
                     "Authenticated journey screen is not renderable: $screenId",
                 )
             return AuthenticatedPresentationScreen(screenId, artboardName, descriptor.artboardSize(screenId),
-                descriptor.presentationClearColor(), PresentationShell.fromTransition(transition, firstLayer = true))
+                descriptor.presentationClearColor(), PresentationShell.fromTransition(transition))
         }
     }
 }

@@ -98,28 +98,39 @@ internal data class PreparedPresentation(
     val opensLayer: Boolean = false,
     val layerAncestors: List<String> = emptyList(),
     val closeLayer: (suspend (PreparedLayerReveal) -> Boolean)? = null,
-    val retainedDialogHeight: AtomicReference<Float?> = AtomicReference(null),
 )
 
 internal sealed interface PresentationShell {
     val dismissible: Boolean
+    val isAvailable: Boolean get() = this !is Sheet || detent != Sheet.Detent.FIT_CONTENT
 
     data class FullScreen(override val dismissible: Boolean = true) : PresentationShell
-
-    data class Dialog(override val dismissible: Boolean) : PresentationShell
 
     data class Sheet(
         val detent: Detent,
         override val dismissible: Boolean,
     ) : PresentationShell {
-        enum class Detent { MEDIUM, LARGE }
+        enum class Detent { MEDIUM, LARGE, FIT_CONTENT }
     }
 
 
     companion object {
-        fun fromTransition(transition: JsonObject?, firstLayer: Boolean = false): PresentationShell =
-            if ((transition?.get("type") as? JsonPrimitive)?.content == "modal") Sheet(Sheet.Detent.LARGE, true)
-            else FullScreen()
+        fun fromTransition(transition: JsonObject?): PresentationShell {
+            fun string(key: String) = (transition?.get(key) as? JsonPrimitive)?.takeIf { it.isString }?.content
+            if (string("type")?.trim()?.lowercase(java.util.Locale.ROOT) != "modal") return FullScreen()
+            val dismissible = string("closedby") != "none"
+            val present = if (transition?.containsKey("present") == true) string("present") else "sheet"
+            return when (present) {
+                "fullscreen" -> FullScreen(dismissible)
+                "sheet" -> Sheet(when (string("height")) {
+                    "medium" -> Sheet.Detent.MEDIUM
+                    "fit-content" -> Sheet.Detent.FIT_CONTENT
+                    else -> Sheet.Detent.LARGE
+                }, dismissible)
+                else -> throw ExperiencePresentationException(ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                    "Unsupported modal presentation")
+            }
+        }
     }
 
 }
@@ -809,6 +820,15 @@ internal class ExperiencePresentationService(
         transition: JsonObject? = null,
         runValues: ExperienceRunValues? = null,
     ): ExperienceRef {
+        val presentation = try { PresentationShell.fromTransition(transition) } catch (error: ExperiencePresentationException) {
+            reservation?.close()
+            throw error
+        }
+        if (!presentation.isAvailable) {
+            reservation?.close()
+            throw ExperiencePresentationException(ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                "Content-height sheets await the runtime root Hug seam")
+        }
         val reserved = reservation as? JourneyReservation
         val request = reserved?.request ?: captureRequest(ownerDistinctId)
         if (request.ownerDistinctId != ownerDistinctId) throw declinedPresentation()
@@ -988,7 +1008,7 @@ internal class ExperiencePresentationService(
                     val lifecycle = lifecycles[journey.screenId]?.let { if (isolated) it.copyForPreparation() else it } ?: ExperienceScreenLifecycle()
                     val retained = if (!opensLayer && existing?.acquired?.identity == source.identity)
                         existing.journey.viewModelsByScreen[journey.screenId]?.get() else null
-                    val shell = if (opensLayer) PresentationShell.Sheet(PresentationShell.Sheet.Detent.LARGE, true)
+                    val shell = if (opensLayer) PresentationShell.fromTransition(transition)
                         else existing?.let { PresentationRegistry.resolve(it.id)?.shell } ?: source.screen.shell
                     return PreparedPresentation(source.acquired.sceneFile, source.screen.artboardName, source.screen.clearColor,
                         shell,

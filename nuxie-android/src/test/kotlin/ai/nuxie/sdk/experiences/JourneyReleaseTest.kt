@@ -26,6 +26,21 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyReleaseTest {
+    @Test fun `release presentation keeps only orientation and background`() {
+        val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content,
+            Base64.NO_WRAP).decodeToString()).jsonObject
+        val presentation = JsonObject(mapOf("orientation" to JsonPrimitive("portrait"), "backgroundColor" to JsonPrimitive("#102030FF")))
+        JourneyReleaseSchema.validate(JsonObject(source + ("presentation" to presentation)))
+        for (key in listOf("style", "sheet", "drawer")) {
+            val extra = JsonObject(presentation + (key to JsonPrimitive("full_screen")))
+            assertThrows(JourneyReleaseAuthenticationException::class.java) {
+                JourneyReleaseSchema.validate(JsonObject(source + ("presentation" to extra)))
+            }
+        }
+    }
+
+
     @Test fun signedV3NestedObjectPolicyAuthenticatesExactMetadata() {
         val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
         val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")

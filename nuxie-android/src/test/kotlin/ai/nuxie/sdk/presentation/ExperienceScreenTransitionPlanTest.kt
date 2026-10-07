@@ -39,6 +39,46 @@ class ExperienceScreenTransitionPlanTest {
         }
     }
 
+    @Test fun `shared modal options validate and select each native layer`() {
+        val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/presentation-options.json").readText()).jsonObject
+        for (value in fixture.getValue("cases").jsonArray) {
+            val item = value.jsonObject
+            val transition = item.getValue("transition").jsonObject
+            val action = JsonObject(mapOf("type" to JsonPrimitive("navigate"), "screenId" to JsonPrimitive("one"), "transition" to transition))
+            ai.nuxie.sdk.experiences.JourneyGrammar.action(action, setOf("one"), emptySet())
+            val plan = ExperienceScreenTransitionPlan.resolve(transition, JsonArray(emptyList()), "one", "two")
+            val shell = checkNotNull(plan.presentation)
+            assertEquals(item.getValue("available").jsonPrimitive.boolean, shell.isAvailable)
+            assertEquals(item.getValue("closedby").jsonPrimitive.content == "any", shell.dismissible)
+            when (item.getValue("present").jsonPrimitive.content) {
+                "sheet" -> {
+                    assertTrue(shell is PresentationShell.Sheet)
+                    val expected = item.getValue("height").jsonPrimitive.content.replace('-', '_').uppercase(java.util.Locale.ROOT)
+                    assertEquals(expected, (shell as PresentationShell.Sheet).detent.name)
+                }
+                "fullscreen" -> assertTrue(shell is PresentationShell.FullScreen)
+            }
+            val first = PresentationShell.fromTransition(transition)
+            assertEquals(item.getValue("firstLayer").jsonPrimitive.content == "sheet", first is PresentationShell.Sheet)
+        }
+        for (transition in fixture.getValue("invalid").jsonArray) {
+            val action = JsonObject(mapOf("type" to JsonPrimitive("navigate"), "screenId" to JsonPrimitive("one"), "transition" to transition))
+            assertThrows(ai.nuxie.sdk.experiences.JourneyReleaseAuthenticationException::class.java) {
+                ai.nuxie.sdk.experiences.JourneyGrammar.action(action, setOf("one"), emptySet())
+            }
+        }
+    }
+
+    @Test fun `removed and unknown presentations are refused without a sheet fallback`() {
+        for (kind in listOf("dialog", "unknown")) {
+            val transition = buildJsonObject { put("type", "modal"); put("present", kind) }
+            assertThrows(ExperiencePresentationException::class.java) {
+                PresentationShell.fromTransition(transition)
+            }
+        }
+    }
+
     @Test
     fun `missing or non-string action kind resolves without animation`() {
         for (intent in listOf(null, buildJsonObject { put("type", 1) }, buildJsonObject { put("type", true) })) {

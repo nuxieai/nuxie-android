@@ -55,6 +55,24 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 @OptIn(ExperimentalCoroutinesApi::class)
 class ExperiencePresentationServiceTest {
+    @Test fun `presenting navigate selects medium sheet before acquisition`() {
+        val transition = Json.parseToJsonElement("""{"type":"modal","present":"sheet","height":"medium","closedby":"none"}""").jsonObject
+        val screen = AuthenticatedPresentationScreen.resolve(renderedJourneyRelease(), "screen_welcome", transition)
+        assertEquals(PresentationShell.Sheet(PresentationShell.Sheet.Detent.MEDIUM, false), screen.shell)
+    }
+
+    @Test fun `held content height releases reservation without acquiring or launching`() = runTest {
+        val service = service(this, launch = { error("Held height cannot launch") })
+        val transition = Json.parseToJsonElement("""{"type":"modal","height":"fit-content"}""").jsonObject
+        val error = expectPresentationFailure {
+            service.presentJourney(testPresentationFences(), renderedJourneyRelease(), "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { error("Held height cannot acquire") },
+                onOutcome = {}, transition = transition)
+        }
+        assertEquals(ExperiencePresentationException.Reason.PREPARATION_FAILED, error.reason)
+        assertNotNull(service.reserveJourney("customer-2"))
+    }
+
     private data class Emitted(
         val name: String,
         val properties: Map<String, Any?>,

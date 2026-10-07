@@ -16,29 +16,12 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], qualifiers = "w393dp-h852dp-mdpi")
 class ExperienceNativeLayerWindowTest {
-    @Test fun `dialog geometry comes from the shared oracle`() {
-        val vector = Json.parseToJsonElement(File("../fixtures/journeys/planes/presentation-geometry.json").readText()).jsonObject
-        val width = vector.getValue("window").jsonObject.getValue("width").jsonPrimitive.float
-        val height = vector.getValue("window").jsonObject.getValue("height").jsonPrimitive.float
-        val safe = vector.getValue("safeArea").jsonObject
-        for (element in vector.getValue("dialogCases").jsonArray) {
-            val item = element.jsonObject
-            val expected = item.getValue("expectedFrame").jsonObject
-            val frame = ExperienceNativeLayerWindow.dialogFrame(width, safe.getValue("top").jsonPrimitive.float,
-                height - safe.getValue("bottom").jsonPrimitive.float, item.getValue("laidOutHeight").jsonPrimitive.float)
-            assertEquals(expected.getValue("x").jsonPrimitive.float, frame.left, 0.0001f)
-            assertEquals(expected.getValue("y").jsonPrimitive.float, frame.top, 0.0001f)
-            assertEquals(expected.getValue("width").jsonPrimitive.float, frame.width(), 0.0001f)
-            assertEquals(expected.getValue("height").jsonPrimitive.float, frame.height(), 0.0001f)
-        }
-    }
-
-    @Test fun `fullscreen and dialog close only when the current layer permits it`() {
+    @Test fun `fullscreen closes only when the current layer permits it`() {
         for (allowed in listOf(false, true)) {
-            for (shell in listOf(PresentationShell.FullScreen(allowed), PresentationShell.Dialog(allowed))) {
+            for (shell in listOf(PresentationShell.FullScreen(allowed))) {
                 val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
                 var closes = 0
-                val window = ExperienceNativeLayerWindow(activity, FrameLayout(activity), shell, 200f) { closes++ }
+                val window = ExperienceNativeLayerWindow(activity, FrameLayout(activity), shell) { closes++ }
                 try {
                     window.setInputEnabled(true)
                     window.show()
@@ -50,6 +33,39 @@ class ExperienceNativeLayerWindowTest {
                 } finally { window.retire(); activity.finish() }
                 assertEquals(if (allowed) 1 else 0, closes)
             }
+        }
+    }
+
+    @Test @Config(sdk = [34])
+    fun `native predictive callback closes only the allowed top fullscreen layer`() {
+        org.robolectric.shadows.ShadowApplication.setEnableOnBackInvokedCallback(true)
+        for (allowed in listOf(false, true)) {
+            val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+            val openLayers = mutableListOf("base", "top")
+            val lower = ExperienceNativeLayerWindow(activity, FrameLayout(activity), PresentationShell.FullScreen()) {
+                error("Covered layer must not close")
+            }
+            val upper = ExperienceNativeLayerWindow(activity, FrameLayout(activity), PresentationShell.FullScreen(allowed)) {
+                openLayers.removeAt(openLayers.lastIndex)
+            }
+            try {
+                lower.setInputEnabled(false)
+                lower.show()
+                upper.setInputEnabled(true)
+                upper.show()
+                Shadows.shadowOf(Looper.getMainLooper()).idle()
+                // Invoke the callback actually registered by the native Dialog with its dispatcher.
+                val dispatcher = org.robolectric.util.ReflectionHelpers.getField<Any>(
+                    upper.dialog.onBackInvokedDispatcher, "mActualDispatcher")
+                assertNotNull(dispatcher)
+                val callback = org.robolectric.util.ReflectionHelpers.callInstanceMethod<android.window.OnBackInvokedCallback?>(
+                    dispatcher, "getTopCallback")
+                if (allowed) assertNotNull(callback)
+                callback?.onBackInvoked()
+                Shadows.shadowOf(Looper.getMainLooper()).idle()
+                assertEquals(if (allowed) listOf("base") else listOf("base", "top"), openLayers)
+                assertTrue(lower.dialog.isShowing)
+            } finally { upper.retire(); lower.retire(); activity.finish() }
         }
     }
 
