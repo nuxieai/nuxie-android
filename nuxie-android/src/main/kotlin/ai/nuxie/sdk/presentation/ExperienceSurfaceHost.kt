@@ -69,6 +69,8 @@ internal class ExperienceSurfaceHost(
     private val videoDecoderPool: ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool? = null,
     private val usesSystemFrameCallbacks: Boolean = true,
     private val runValues: ExperienceRunValues? = null,
+    private val fitsContentHeight: Boolean = false,
+    private val initialPresentationSize: ExperienceArtboardSize? = null,
 ) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
     @Volatile private var layoutBounds = artboardSize
     private var surfaceWidth = 0
@@ -77,10 +79,12 @@ internal class ExperienceSurfaceHost(
     private var surfaceLayout: ExperienceSurfaceLayout? = null
     private var appliedLayout: ExperienceSurfaceLayout? = null
     private var layoutStepPending = false
+    private val presentationHeight = ai.nuxie.sdk.runtime.NuxiePresentationHeight()
     private val mainHandler = Handler(Looper.getMainLooper())
     interface Listener {
         fun onVideoCaptions(captions: Map<Long, ai.nuxie.sdk.runtime.NuxieVideoCaption>) {}
         fun onLayoutBounds(bounds: ExperienceArtboardSize) {}
+        fun onPresentationHeight(height: Float?) {}
         fun onFirstFrame()
         fun onRuntimeStep(
             outcome: NuxiePlayerStepOutcome,
@@ -788,6 +792,32 @@ internal class ExperienceSurfaceHost(
                 onLoaded?.invoke(false)
                 return@enqueuePreparation
             }
+            try {
+                val active = checkNotNull(player)
+                initialPresentationSize?.let { size ->
+                    presentationHeight.apply(loadedFile, active, fitsContentHeight, size.width, size.height)
+                    val correlation = nextCorrelationId++
+                    val outcome = stepAndRefreshFocus { active.stepTyped(elapsedSeconds = 0.0, correlationId = correlation) }
+                    val snapshot = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
+                    snapshot?.let(::retainScreenValues)
+                    if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlation, outcome, snapshot))
+                    val laidOut = active.layoutSize()
+                    val bounds = ExperienceArtboardSize(laidOut.first, laidOut.second)
+                    layoutBounds = bounds
+                    pointerInput.updateBounds(bounds)
+                    val contentHeight = if (presentationHeight.measuresContent) bounds.height else null
+                    mainHandler.post {
+                        if (!released.get()) {
+                            listener?.onLayoutBounds(bounds)
+                            listener?.onPresentationHeight(contentHeight)
+                        }
+                    }
+                }
+            } catch (error: Throwable) {
+                reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Experience content measurement failed", error)
+                onLoaded?.invoke(false)
+                return@enqueue
+            }
             onLoaded?.invoke(true)
         }
     }
@@ -1065,7 +1095,7 @@ internal class ExperienceSurfaceHost(
         val layout = surfaceLayout ?: return false
         if (appliedLayout == layout) return true
         return try {
-            active.setLayoutSize(layout.widthPoints, layout.heightPoints)
+            presentationHeight.apply(checkNotNull(file), active, fitsContentHeight, layout.widthPoints, layout.heightPoints)
             appliedLayout = layout
             layoutStepPending = true
             true
@@ -1294,16 +1324,19 @@ internal class ExperienceSurfaceHost(
                                 textRunNames = emptyList(),
                             )
                         }.also {
-                            if (layoutStepPending) {
+                            if (layoutStepPending || presentationHeight.measuresContent) {
                                 val size = player.layoutSize()
                                 val bounds = ExperienceArtboardSize(size.first, size.second)
                                 layoutBounds = bounds
                                 pointerInput.updateBounds(bounds)
                                 layoutStepPending = false
                                 videoPlayback?.setViewport(currentVideoViewport(layout))
+                                val contentHeight = if (presentationHeight.measuresContent) bounds.height else null
                                 mainHandler.post {
                                     if (!released.get() && generation == frameGeneration.get() && epoch == semanticEpoch.get()) {
                                         listener?.onLayoutBounds(bounds)
+                                        if (fitsContentHeight) listener?.onPresentationHeight(
+                                            contentHeight)
                                     }
                                 }
                             }
@@ -1472,6 +1505,7 @@ internal class ExperienceSurfaceHost(
                 window?.let { it::close },
                 videoPlayback?.let { owner -> { owner.closeAfterRetirement(onMediaReleased) } } ?: onMediaReleased,
                 player?.let { it::close },
+                presentationHeight::close,
                 viewModelState?.let { it::close },
                 artboard?.let { it::close },
                 file?.takeIf { ownsRuntimeFile }?.let { it::close },

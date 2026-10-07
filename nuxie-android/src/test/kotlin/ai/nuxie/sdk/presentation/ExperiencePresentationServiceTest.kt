@@ -61,16 +61,23 @@ class ExperiencePresentationServiceTest {
         assertEquals(PresentationShell.Sheet(PresentationShell.Sheet.Detent.MEDIUM, false), screen.shell)
     }
 
-    @Test fun `held content height releases reservation without acquiring or launching`() = runTest {
-        val service = service(this, launch = { error("Held height cannot launch") })
+    @Test fun `content height is acquired and launched for first navigate`() = runTest {
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val release = renderedJourneyRelease()
         val transition = Json.parseToJsonElement("""{"type":"modal","height":"fit-content"}""").jsonObject
-        val error = expectPresentationFailure {
-            service.presentJourney(testPresentationFences(), renderedJourneyRelease(), "screen_welcome", "journey-1", "customer-1",
-                service.reserveJourney("customer-1"), acquire = { error("Held height cannot acquire") },
+        val presentation = async {
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
                 onOutcome = {}, transition = transition)
         }
-        assertEquals(ExperiencePresentationException.Reason.PREPARATION_FAILED, error.reason)
-        assertNotNull(service.reserveJourney("customer-2"))
+        runCurrent()
+        val id = launched.single()
+        val content = checkNotNull(PresentationRegistry.resolve(id))
+        assertTrue(content.fitsContentHeight)
+        assertTrue(content.shell.fitsContent)
+        PresentationRegistry.reportFirstFrame(id)
+        presentation.await()
     }
 
     private data class Emitted(
@@ -2492,7 +2499,16 @@ class ExperiencePresentationServiceTest {
                 }
             }
             // Exercise whole-Experience cleanup while covered layers are present too.
-            navigate("screen_details", JsonObject(mapOf("type" to JsonPrimitive("modal"))))
+            navigate("screen_details", JsonObject(mapOf("type" to JsonPrimitive("modal"), "height" to JsonPrimitive("fit-content"))))
+            val hugging = checkNotNull(PresentationRegistry.resolve(nativeLayers.last()))
+            assertTrue(hugging.fitsContentHeight)
+            hugging.layerContentHeight.set(152f)
+            navigate("screen_welcome")
+            val fixed = checkNotNull(PresentationRegistry.resolve(nativeLayers.last()))
+            assertFalse(fixed.fitsContentHeight)
+            assertTrue(fixed.shell.fitsContent)
+            assertTrue(hugging.layerContentHeight === fixed.layerContentHeight)
+            assertEquals(152f, fixed.layerContentHeight.get())
             service.dismissFromHost("customer-1")
             nativeLayers.forEach { id -> hosts[id]?.let { PresentationRegistry.detach(id, it) } }
             runCurrent()

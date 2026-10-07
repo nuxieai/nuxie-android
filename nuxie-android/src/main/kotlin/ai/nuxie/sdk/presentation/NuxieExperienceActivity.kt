@@ -202,6 +202,18 @@ internal class NuxieExperienceActivity : Activity() {
         override suspend fun resolveJourneyPermission(request: JourneyPermissionRequest): Boolean =
             this@NuxieExperienceActivity.resolveJourneyPermission(request)
 
+        var measuredContentHeight: Float? = null
+            private set
+        var contentHeightReady = false
+            private set
+        override fun onPresentationHeight(height: Float?) {
+            if (closing || isDestroyed || isFinishing) return
+            if (prepared.fitsContentHeight) prepared.layerContentHeight.set(height)
+            measuredContentHeight = prepared.layerContentHeight.get()
+            contentHeightReady = true
+            layers.firstOrNull { it.screen === this }?.sheet?.updateContentHeight(measuredContentHeight)
+        }
+
         override fun onFirstFrame() {
             runOnUiThread {
                 if (isDestroyed || isFinishing) return@runOnUiThread
@@ -453,7 +465,13 @@ internal class NuxieExperienceActivity : Activity() {
                 candidate.freezeInput()
                 prepared.textInputState.refreshBeforeMount()
                 screens += target
-                contentRoot.addView(target.mount().apply { alpha = 0f }, 0, FrameLayout.LayoutParams(-1, -1))
+                val targetView = target.mount().apply { alpha = 0f }
+                val params = if (prepared.fitsContentHeight) {
+                    val size = ExperienceNativeLayerWindow.availableSize(this@NuxieExperienceActivity, prepared.shell)
+                    val density = resources.displayMetrics.density
+                    FrameLayout.LayoutParams((size.width * density).toInt(), (size.height * density).toInt())
+                } else FrameLayout.LayoutParams(-1, -1)
+                contentRoot.addView(targetView, 0, params)
                 target.mounted?.observeWindow()
                 target.mounted?.setVisible(visible)
                 target.ready.await()
@@ -639,6 +657,7 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private fun showNativeRecovery(id: String, prepared: PreparedPresentation, progress: AcquisitionProgress) {
+        layers.lastOrNull()?.sheet?.updateContentHeight(null)
         removeRecoveryView()
         loadingView?.setActive(false)
         loadingView?.visibility = View.INVISIBLE
@@ -721,6 +740,7 @@ internal class NuxieExperienceActivity : Activity() {
     private fun installLayerWindow(layer: Layer) {
         layer.sheet = ExperienceNativeLayerWindow(this, layer.root, layer.shell) { requestLayerClose(layer) }.also {
             it.setInputEnabled(false)
+            if (layer.screen.contentHeightReady) it.updateContentHeight(layer.screen.measuredContentHeight)
             it.show()
         }
     }
@@ -866,6 +886,7 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private fun showAcquisitionRecovery(id: String, screen: AuthenticatedPresentationScreen, progress: AcquisitionProgress) {
+        baseWindow?.updateContentHeight(null)
         removeRecoveryView()
         loadingView?.setActive(false)
         loadingView?.visibility = View.INVISIBLE
