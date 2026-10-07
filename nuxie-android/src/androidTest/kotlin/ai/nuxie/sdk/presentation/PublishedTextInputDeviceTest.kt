@@ -393,7 +393,8 @@ class PublishedTextInputDeviceTest {
                             val player = checkNotNull(artboard.newPlayer())
                             try {
                                 fun verify(state: Map<String, NuxieViewModelScalarValue>) {
-                                    // This signed legacy fixture predates fontScale. Its absence is pinned below;
+                                    // Production tolerates this absent field in ExperienceSurfaceHost.applyRuntimeValues (line 487).
+                                    // This signed fixture predates fontScale. Its absence is pinned below;
                                     // TextMetricsBindingDeviceTest covers the published font-scale contract.
                                     val values = state - "fontScale"
                                     values.forEach { (path, value) -> assertTrue(artboard.setDefaultViewModelValue(path, value)) }
@@ -589,6 +590,7 @@ class PublishedTextInputDeviceTest {
             })
             val original = checkNotNull(monitor.waitForActivityWithTimeout(15_000))
             activity = original
+            val portraitRequestedAt = SystemClock.elapsedRealtime()
             instrumentation.runOnMainSync {
                 // This corpus compares identical portrait extents before/after Home.
                 // Do not inherit another app's transient display orientation.
@@ -605,9 +607,13 @@ class PublishedTextInputDeviceTest {
             instrumentation.waitForIdleSync()
             // The first-frame latch can precede the requested portrait resize.
             // Capture a composed published frame, not the new texture's empty buffer.
-            before = awaitPublishedSurface(checkNotNull(findSurface(original.window.decorView))) {
+            // Bound the empty resized surface by the existing ten-second composition budget.
+            // Timing from the orientation request includes any surface replacement delay.
+            before = awaitPublishedSurface(checkNotNull(findSurface(original.window.decorView)),
+                timeoutMillis = (portraitRequestedAt + 10_000 - SystemClock.elapsedRealtime()).coerceAtLeast(0)) {
                 it.height > it.width
             }
+            android.util.Log.i("NuxieDeviceQualification", "portrait_request_to_pixels_ms=${SystemClock.elapsedRealtime() - portraitRequestedAt}")
             val stopped = CountDownLatch(1)
             val resumed = CountDownLatch(1)
             val application = original.application
@@ -639,11 +645,12 @@ class PublishedTextInputDeviceTest {
                 SystemClock.sleep(150)
                 val returned = copySurfaceAtSize(checkNotNull(findSurface(original.window.decorView)), before.width, before.height)
                 try {
-                    if (changedPixels(before, returned, Rect(0, 0, before.width, before.height)) != 0) {
+                    val changed = changedPixels(before, returned, Rect(0, 0, before.width, before.height))
+                    if (changed != 0) {
                         File(context.filesDir, "recreation-home-before.png").outputStream().use { before.compress(Bitmap.CompressFormat.PNG, 100, it) }
                         File(context.filesDir, "recreation-home-returned.png").outputStream().use { returned.compress(Bitmap.CompressFormat.PNG, 100, it) }
                     }
-                    assertEquals(0, changedPixels(before, returned, Rect(0, 0, before.width, before.height)))
+                    assertEquals(0, changed)
                 } finally { returned.recycle() }
             } finally { application.unregisterActivityLifecycleCallbacks(callbacks) }
             instrumentation.removeMonitor(monitor)
@@ -1394,6 +1401,7 @@ class PublishedTextInputDeviceTest {
             val field = checkNotNull(editor) { "Signed default model must expose live field geometry: ${failure.get()}" }
             val surface = checkNotNull(findSurface(activity!!.window.decorView))
             instrumentation.runOnMainSync { field.clearFocus() }
+            // Composition shares the field geometry readiness deadline, including time spent empty.
             val original = awaitPublishedSurface(surface,
                 timeoutMillis = (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0),
             ) { true }
@@ -1537,6 +1545,14 @@ class PublishedTextInputDeviceTest {
             do {
                 val screenshot = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
                 observed = screenshot.getPixel(bounds.left + 2, bounds.top + 2)
+                var recoveryPresent = false
+                instrumentation.runOnMainSync {
+                    val container = checkNotNull(root) as ViewGroup
+                    recoveryPresent = (0 until container.childCount).any { container.getChildAt(it) is ExperienceRecoveryView }
+                }
+                if (!recoveryPresent && observed == expected) {
+                    observed = screenshot.getPixel(bounds.centerX(), bounds.centerY())
+                }
                 screenshot.recycle()
                 if (observed != expected) SystemClock.sleep(30)
             } while (observed != expected && SystemClock.elapsedRealtime() < deadline)
@@ -3275,9 +3291,29 @@ class PublishedTextInputDeviceTest {
         matchesSize: (Bitmap) -> Boolean,
     ): Bitmap {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val startedAt = SystemClock.elapsedRealtime()
+        val deadline = startedAt + timeoutMillis
         val frames = LinkedBlockingQueue<Bitmap>(1)
         val captured = java.util.concurrent.atomic.AtomicBoolean(false)
         var previous: TextureView.SurfaceTextureListener? = null
+        fun captureComposedFrame() {
+            if (captured.get()) return
+            val frame = surface.bitmap ?: return
+            val pixels = IntArray(frame.width * frame.height)
+            frame.getPixels(pixels, 0, frame.width, 0, 0, frame.width, frame.height)
+            // This oracle is specific to the signed fixture's text and colored controls.
+            // A correctly sized but empty texture is not its initial frame.
+            val colors = HashSet<Int>()
+            for (pixel in pixels) {
+                colors.add(pixel)
+                if (colors.size > 8) break
+            }
+            if (SystemClock.elapsedRealtime() <= deadline && matchesSize(frame) && colors.size > 8) {
+                captured.set(true)
+                frames.add(frame)
+            } else frame.recycle()
+        }
+        check(timeoutMillis > 0) { "Composition readiness budget is exhausted" }
         instrumentation.runOnMainSync {
             previous = surface.surfaceTextureListener
             surface.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
@@ -3291,27 +3327,17 @@ class PublishedTextInputDeviceTest {
                     previous?.onSurfaceTextureDestroyed(texture) ?: true
                 override fun onSurfaceTextureUpdated(texture: android.graphics.SurfaceTexture) {
                     previous?.onSurfaceTextureUpdated(texture)
-                    if (captured.get()) return
-                    val frame = surface.bitmap ?: return
-                    val pixels = IntArray(frame.width * frame.height)
-                    frame.getPixels(pixels, 0, frame.width, 0, 0, frame.width, frame.height)
-                    // The published fixture has text and several colored controls.
-                    // A correctly sized but empty texture is not its initial frame.
-                    val colors = HashSet<Int>()
-                    for (pixel in pixels) {
-                        colors.add(pixel)
-                        if (colors.size > 8) break
-                    }
-                    if (matchesSize(frame) && colors.size > 8) {
-                        captured.set(true)
-                        frames.add(frame)
-                    } else frame.recycle()
+                    captureComposedFrame()
                 }
             }
+            // An idle renderer may already have composed its last frame.
+            captureComposedFrame()
         }
         try {
-            return checkNotNull(frames.poll(timeoutMillis, TimeUnit.MILLISECONDS)) {
-                "A composed published frame must establish the initial surface"
+            return checkNotNull(frames.poll((deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0), TimeUnit.MILLISECONDS)) {
+                "A composed published frame must arrive within ${timeoutMillis}ms of readiness observation"
+            }.also {
+                android.util.Log.i("NuxieDeviceQualification", "published_frame_wait_ms=${SystemClock.elapsedRealtime() - startedAt}")
             }
         } finally {
             instrumentation.runOnMainSync { surface.surfaceTextureListener = previous }
