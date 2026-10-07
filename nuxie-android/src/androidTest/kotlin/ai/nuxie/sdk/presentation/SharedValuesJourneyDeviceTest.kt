@@ -214,6 +214,7 @@ class SharedValuesJourneyDeviceTest {
         }
     }
 
+    @Test fun publishedGoalsTimedWaitRestoresBeforeContinuing() = timedWait(goals = true)
     @Test fun threeDayWaitRestoresBeforeScreenPreparation() = timedWait()
     @Test fun abandonmentKeepsTheLastNativeValues() = timedWait(abandon = true)
     @Test fun failedRestoreRetainsCheckpointAndRetries() = timedWait(failFirstRestore = true)
@@ -224,12 +225,14 @@ class SharedValuesJourneyDeviceTest {
     @Test fun revokedIdentityCannotParkAfterNativeRead() = timedWait(revokePark = true)
     @Test fun revokedIdentityCannotConsumeRestoredCheckpoint() = timedWait(revokeRestore = true)
 
-    private fun timedWait(revokeCompletion: Boolean = false, revokeCapture: Boolean = false, failFirstRestore: Boolean = false, abandon: Boolean = false, revokePark: Boolean = false, revokeRestore: Boolean = false) = runBlocking {
+    private fun timedWait(revokeCompletion: Boolean = false, revokeCapture: Boolean = false, failFirstRestore: Boolean = false, abandon: Boolean = false, revokePark: Boolean = false, revokeRestore: Boolean = false, goals: Boolean = false) = runBlocking {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val owner = "native-wait-${UUID.randomUUID()}"
         val directory = File(context.cacheDir, owner).apply { mkdirs() }
-        val fixture = fixture(branch = true, wait = true)
+        val fixture = fixture(branch = true, wait = true, goals = goals)
+        val valueKey = if (goals) "goals" else "trip_days"
+        val expectedValue = if (goals) Json.parseToJsonElement("""[{"title":"Walk"},{"title":"Sleep"},{"title":"Read"}]""") else JsonPrimitive(30f)
         val catalog = JourneyProfileCatalog(fixture.keys, JourneyReleaseHighWaterStore(context)) { fixture.supported }
         val store = SQLiteEventStore(context, databaseFile = File(directory, "events.db"))
         val identityGeneration = java.util.concurrent.atomic.AtomicLong(0)
@@ -291,7 +294,8 @@ class SharedValuesJourneyDeviceTest {
                 }
                 values.lane.call { values.prepare(fixture.scene, release.descriptor, emptyMap()) }
                 if (restore) {
-                    restoredDays = values.journeyValues()["trip_days"]
+                    restoredDays = values.journeyValues()[valueKey]
+                    if (goals) assertTrue("Restore must precede completion", completed.isEmpty())
                     if (revokeRestore) identityGeneration.addAndGet(2)
                 }
             })
@@ -304,7 +308,19 @@ class SharedValuesJourneyDeviceTest {
             val active = checkNotNull(request.get())
             checkNotNull(active.runValues).lane.call {
                 val native = checkNotNull(active.runValues).prepare(fixture.scene, active.release.descriptor, emptyMap(), runtime = runtime)
-                checkNotNull(native.values).setValue("trip_days", NuxieViewModelScalarValue.NumberValue(30.0))
+                val values = checkNotNull(native.values)
+                if (goals) {
+                    val before = values.nativeSnapshot()
+                    val ids = before.values.single { it.ownerInstanceId == before.rootInstanceId && it.name == "goals" }.listItemIds
+                    val schema = before.instances.single { it.id == ids[0] }.schemaIndex.toInt()
+                    val added = native.file.newSchemaViewModel(schema)
+                    try {
+                        added.setValue("title", NuxieViewModelScalarValue.StringValue("Sleep"))
+                        values.restoreWrites(listOf(NativeViewModelWrite(NuxieViewModelMutationKind.LIST_MOVE,
+                            "goals", index = 1, secondIndex = 0)))
+                        values.insertListItem("goals", 1, added)
+                    } finally { added.close() }
+                } else values.setValue("trip_days", NuxieViewModelScalarValue.NumberValue(30.0))
             }
             if (abandon) {
                 active.onOutcome(JourneySurfaceOutcome.ABANDONED)
@@ -338,7 +354,7 @@ class SharedValuesJourneyDeviceTest {
             }
             if (revokePark) holdSnapshot.set(true)
             assertTrue(active.onEmissionBatch(JourneyScreenEmissionBatch(active.journeyId, 0, "wait-continue",
-                JourneyScreenEmissionSource("first", "scr_screens_sfirst::v3::on-click"),
+                JourneyScreenEmissionSource(if (goals) "goals" else "first", "scr_screens_sfirst::v3::on-click"),
                 listOf(JourneyScreenEmission("wait-event", 0, clock, "continue", JsonObject(emptyMap())))), null))
             val journal = JourneyRunJournal(directory, owner, JourneyStorageScope(fixture.authority))
             if (revokePark) {
@@ -354,7 +370,7 @@ class SharedValuesJourneyDeviceTest {
             val parked = journal.runs().single()
             assertEquals(clock + 259200000, parked.park?.wakeAtMillis)
             assertTrue(parked.context.getValue("responses").jsonObject.isEmpty())
-            assertEquals(JsonPrimitive(30f), parked.nativeSnapshot?.journeyValues?.get("trip_days"))
+            assertEquals(expectedValue, parked.nativeSnapshot?.journeyValues?.get(valueKey))
             withTimeout(15_000) { current.onAppDidEnterBackground() }
             scope.cancel()
             withTimeout(15_000) { checkNotNull(active.runValues).retire() }
@@ -384,7 +400,7 @@ class SharedValuesJourneyDeviceTest {
             val event = completed.poll(10, TimeUnit.SECONDS)
             assertEquals("long", event?.get("outcome"))
             assertEquals(if (failFirstRestore) 2 else 1, restorations)
-            assertEquals(JsonPrimitive(30f), restoredDays)
+            assertEquals(expectedValue, restoredDays)
             assertNull(request.get())
         } finally {
             releaseSnapshot.countDown()
@@ -399,17 +415,17 @@ class SharedValuesJourneyDeviceTest {
     private data class Fixture(val scene: ByteArray, val profile: JsonObject, val keys: Map<String, ByteArray>,
         val supported: JourneyReleaseSupportedRuntime, val authority: ProfileDeliveryAuthority)
 
-    private fun fixture(branch: Boolean = false, wait: Boolean = false, published: Boolean = false): Fixture {
+    private fun fixture(branch: Boolean = false, wait: Boolean = false, published: Boolean = false, goals: Boolean = false): Fixture {
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         fun read(path: String) = assets.open(path).use { it.readBytes() }
         val entry = Json.parseToJsonElement(read("journeys/rendered-text-input/release-entry.json").decodeToString()).jsonObject
         val envelope = entry.getValue("envelope").jsonObject
         val original = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
-        val folder = if (published) "run-values" else "shared-values"
+        val folder = if (goals) "forms-saves/goals" else if (published) "run-values" else "shared-values"
         val scene = read("runtime/$folder/screen.riv")
         val provenance = Json.parseToJsonElement(read("runtime/$folder/provenance.json").decodeToString()).jsonObject
         fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-        val names = if (published) PublishedRunValuesFixture.expectations.getValue("screens").jsonArray
+        val names = if (goals) listOf("goals", "quiet") else if (published) PublishedRunValuesFixture.expectations.getValue("screens").jsonArray
             .map { it.jsonPrimitive.content } else listOf("first", "long", "short")
         val supported = checkNotNull(supportedRuntimeForEmbeddedRuntime(nuxieRuntimeSourceRevision()))
         val requirements = JsonObject(original.getValue("requirements").jsonObject + mapOf(
@@ -429,6 +445,13 @@ class SharedValuesJourneyDeviceTest {
             val delay = Json.parseToJsonElement("""{"kind":"action","id":"next","action":{"type":"delay","durationMs":259200000},"outlets":{"next":"branch"}}""").jsonObject
             fun complete(outcome: String) = buildJsonObject { put("kind", "complete"); put("id", outcome); put("outcome", outcome) }
             steps = listOf(navigate("show", "first"), delay, parkedBranch, complete("long"), complete("short"))
+        }
+        if (goals) {
+            val delay = Json.parseToJsonElement("""{"kind":"action","id":"next","action":{"type":"delay","durationMs":259200000},"outlets":{"next":"restored"}}""").jsonObject
+            val restored = Json.parseToJsonElement("""{"kind":"action","id":"restored","action":{"type":"condition","branches":[{"id":"saved","condition":{"type":"Compare","op":"==","left":{"type":"Response.Field","key":"goals"},"right":{"type":"Array","items":[{"type":"Object","fields":{"title":{"type":"String","value":"Walk"}}},{"type":"Object","fields":{"title":{"type":"String","value":"Sleep"}}},{"type":"Object","fields":{"title":{"type":"String","value":"Read"}}}]}}}]},"outlets":{"saved":"long","default":"lost"}}""").jsonObject
+            steps = listOf(navigate("show", "goals"), delay, restored,
+                buildJsonObject { put("kind", "complete"); put("id", "long"); put("outcome", "long") },
+                buildJsonObject { put("kind", "complete"); put("id", "lost"); put("outcome", "lost") })
         }
         if (published) {
             val condition = Json.parseToJsonElement("""{"kind":"action","id":"next","action":{"type":"condition","branches":[{"id":"changed","condition":{"type":"Compare","op":"==","left":{"type":"Response.Field","key":"trip_days"},"right":{"type":"Number","value":${PublishedRunValuesFixture.expectations.getValue("tap").jsonObject.getValue("after")}}}}]},"outlets":{"changed":"level","default":"stale"}}""").jsonObject
@@ -450,7 +473,7 @@ class SharedValuesJourneyDeviceTest {
             "viewModelValues" to JsonArray(emptyList()),
             "screenBehaviors" to JsonArray(names.sorted().map { buildJsonObject {
                 put("screenId", it); putJsonArray("controls") {
-                    if (it == "first") addJsonObject {
+                    if (it == "first" || (goals && it == "goals")) addJsonObject {
                         put("actionId", "scr_screens_sfirst::v3::on-click")
                         putJsonObject("behavior") { put("kind", "declarative"); putJsonArray("program") {
                             addJsonObject { put("type", "emit"); put("eventName", "continue"); putJsonObject("payload") {} }

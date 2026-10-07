@@ -186,6 +186,10 @@ internal object NuxieRuntimeBridge {
 
     external fun nativeViewModelInstanceNewDefault(artboard: Long, statusOut: IntArray): Long
 
+    external fun nativeViewModelListItemAcquire(
+        owner: Long, path: ByteArray, index: Int, expectedIdentity: Long, statusOut: IntArray,
+    ): Long
+
     external fun nativeViewModelRootSchemaIndex(viewModel: Long, statusOut: IntArray): Long
 
     /** Copies one retained instance's complete graph into JVM-owned values. */
@@ -208,6 +212,7 @@ internal object NuxieRuntimeBridge {
         boolValue: Boolean,
         relatedViewModel: Long,
         index: Long,
+        secondIndex: Long,
     ): Int
 
     external fun nativeViewModelInstanceFree(viewModel: Long): Int

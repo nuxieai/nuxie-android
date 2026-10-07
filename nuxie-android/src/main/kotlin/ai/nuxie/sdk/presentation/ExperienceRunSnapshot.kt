@@ -7,7 +7,7 @@ import ai.nuxie.sdk.runtime.NuxieViewModelPropertyKind
 import kotlinx.serialization.json.*
 
 /** A timed wait's durable values, without process-local native identities. */
-internal data class ExperienceRunSnapshot(val fields: JsonArray) {
+internal data class ExperienceRunSnapshot(val fields: JsonArray, val lists: ExperienceRunListSnapshot? = null) {
     fun writes(): List<NativeViewModelWrite> = fields.map { entry ->
         val field = entry.jsonObject
         val path = field.getValue("path").jsonPrimitive.content
@@ -34,10 +34,16 @@ internal data class ExperienceRunSnapshot(val fields: JsonArray) {
     val journeyValues: JsonObject get() = JsonObject(fields.associate { entry ->
         val field = entry.jsonObject
         field.getValue("path").jsonPrimitive.content to field.getValue("value")
-    })
+    } + lists?.journeyLists.orEmpty())
 
     companion object {
-        fun capture(snapshot: NativeViewModelSnapshot): ExperienceRunSnapshot {
+        fun capture(snapshot: NativeViewModelSnapshot,
+            origins: Map<Long, List<ExperienceRunListSnapshot.OriginStep>> = emptyMap(),
+            authoredIds: Set<Long> = emptySet()): ExperienceRunSnapshot = ExperienceRunSnapshot(
+                captureFields(snapshot, snapshot.rootInstanceId),
+                ExperienceRunListSnapshot.capture(snapshot, origins, authoredIds))
+
+        fun captureFields(snapshot: NativeViewModelSnapshot, root: Long): JsonArray {
             val values = snapshot.values.groupBy { it.ownerInstanceId }
             val fields = mutableListOf<JsonElement>()
             fun visit(id: Long, prefix: String, ancestors: Set<Long>) {
@@ -59,8 +65,8 @@ internal data class ExperienceRunSnapshot(val fields: JsonArray) {
                     fields += buildJsonObject { put("path", path); put("kind", entry.kind); put("value", value) }
                 }
             }
-            visit(snapshot.rootInstanceId, "", emptySet())
-            return ExperienceRunSnapshot(JsonArray(fields))
+            visit(root, "", emptySet())
+            return JsonArray(fields)
         }
     }
 }
