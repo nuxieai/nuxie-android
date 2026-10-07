@@ -56,7 +56,7 @@ class RenderSmokeTest {
                 rivFile,
                 null,
                 SENTINEL_CLEAR,
-                PresentationShell.FullScreen,
+                PresentationShell.FullScreen(),
             ),
             onFirstFrame = {
                 kotlinx.coroutines.runBlocking { assertTrue(PresentationRegistry.reveal(presentationId)) }

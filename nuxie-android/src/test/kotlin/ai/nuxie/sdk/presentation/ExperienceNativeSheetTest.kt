@@ -3,6 +3,7 @@ package ai.nuxie.sdk.presentation
 import android.app.Activity
 import android.widget.FrameLayout
 import com.google.android.material.bottomsheet.BottomSheetBehavior
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -17,20 +18,20 @@ class ExperienceNativeSheetTest {
         val upper = FrameLayout(activity)
         var lowerCloses = 0
         var upperCloses = 0
-        val first = ExperienceNativeSheet(activity, lower) { lowerCloses++ }
-        val second = ExperienceNativeSheet(activity, upper) { upperCloses++ }
+        val first = ExperienceNativeLayerWindow(activity, lower, PresentationShell.Sheet(PresentationShell.Sheet.Detent.LARGE, true)) { lowerCloses++ }
+        val second = ExperienceNativeLayerWindow(activity, upper, PresentationShell.Sheet(PresentationShell.Sheet.Detent.LARGE, true)) { upperCloses++ }
         try {
             first.show()
             second.show()
             assertNotNull(lower.parent)
             assertNotNull(upper.parent)
-            assertEquals(BottomSheetBehavior.STATE_EXPANDED, second.dialog.behavior.state)
+            assertEquals(BottomSheetBehavior.STATE_EXPANDED, (second.dialog as BottomSheetDialog).behavior.state)
             second.setInputEnabled(false)
-            assertFalse(second.dialog.behavior.isDraggable)
-            assertFalse(second.dialog.behavior.isHideable)
+            assertFalse((second.dialog as BottomSheetDialog).behavior.isDraggable)
+            assertFalse((second.dialog as BottomSheetDialog).behavior.isHideable)
             second.setInputEnabled(true)
-            assertTrue(second.dialog.behavior.isDraggable)
-            assertTrue(second.dialog.behavior.isHideable)
+            assertTrue((second.dialog as BottomSheetDialog).behavior.isDraggable)
+            assertTrue((second.dialog as BottomSheetDialog).behavior.isHideable)
             second.closeFromUser()
             org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
             assertEquals(1, upperCloses)

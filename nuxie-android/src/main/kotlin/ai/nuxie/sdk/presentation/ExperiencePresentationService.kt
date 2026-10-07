@@ -98,14 +98,15 @@ internal data class PreparedPresentation(
     val opensLayer: Boolean = false,
     val layerAncestors: List<String> = emptyList(),
     val closeLayer: (suspend (PreparedLayerReveal) -> Boolean)? = null,
+    val retainedDialogHeight: AtomicReference<Float?> = AtomicReference(null),
 )
 
 internal sealed interface PresentationShell {
     val dismissible: Boolean
 
-    data object FullScreen : PresentationShell {
-        override val dismissible: Boolean = true
-    }
+    data class FullScreen(override val dismissible: Boolean = true) : PresentationShell
+
+    data class Dialog(override val dismissible: Boolean) : PresentationShell
 
     data class Sheet(
         val detent: Detent,

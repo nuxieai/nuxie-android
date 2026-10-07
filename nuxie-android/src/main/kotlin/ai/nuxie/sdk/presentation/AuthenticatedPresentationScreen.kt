@@ -72,11 +72,11 @@ private fun JsonObject.presentationClearColor(): Int {
 
 private fun JsonObject.presentationShell(): PresentationShell {
     val presentation = this["presentation"] as? JsonObject
-        ?: return PresentationShell.FullScreen
+        ?: return PresentationShell.FullScreen()
     return when (presentation.string("style")) {
         "sheet" -> {
             val sheet = presentation["sheet"] as? JsonObject
-                ?: return PresentationShell.FullScreen
+                ?: return PresentationShell.FullScreen()
             PresentationShell.Sheet(
                 detent = when (sheet.string("detent")) {
                     "medium" -> PresentationShell.Sheet.Detent.MEDIUM
@@ -87,7 +87,7 @@ private fun JsonObject.presentationShell(): PresentationShell {
         }
         "drawer" -> {
             val drawer = presentation["drawer"] as? JsonObject
-                ?: return PresentationShell.FullScreen
+                ?: return PresentationShell.FullScreen()
             PresentationShell.Drawer(
                 edge = when (drawer.string("edge")) {
                     "top" -> PresentationShell.Drawer.Edge.TOP
@@ -100,7 +100,7 @@ private fun JsonObject.presentationShell(): PresentationShell {
                 dismissible = drawer.boolean("dismissible") ?: true,
             )
         }
-        else -> PresentationShell.FullScreen
+        else -> PresentationShell.FullScreen()
     }
 }
 

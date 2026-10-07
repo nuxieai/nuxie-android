@@ -69,6 +69,7 @@ internal class ExperienceSurfaceHost(
     private val videoDecoderPool: ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool? = null,
     private val usesSystemFrameCallbacks: Boolean = true,
     private val runValues: ExperienceRunValues? = null,
+    private val preservesRootHeight: Boolean = false,
 ) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
     @Volatile private var layoutBounds = artboardSize
     private var surfaceWidth = 0
@@ -77,6 +78,7 @@ internal class ExperienceSurfaceHost(
     private var surfaceLayout: ExperienceSurfaceLayout? = null
     private var appliedLayout: ExperienceSurfaceLayout? = null
     private var layoutStepPending = false
+    private var unhostedRootHeight: Float? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     interface Listener {
         fun onVideoCaptions(captions: Map<Long, ai.nuxie.sdk.runtime.NuxieVideoCaption>) {}
@@ -766,6 +768,9 @@ internal class ExperienceSurfaceHost(
             try {
                 player = loadedFile.newExperiencePlayer(loadedArtboard, artboardName)
                 environment?.let { checkNotNull(player).bindGlobalViewModel("env", it) }
+                unhostedRootHeight = if (preservesRootHeight) checkNotNull(player).layoutSize().second.also {
+                    require(it.isFinite() && it > 0f) { "Dialog root has no positive runtime height" }
+                } else null
                 if (semanticsEnabled) checkNotNull(player).enableSemantics()
                 if (videoBindings.isNotEmpty()) {
                     videoPlayback = ExperienceVideoPlayback(context.applicationContext, checkNotNull(player), videoBindings, videoTargets,
@@ -1065,7 +1070,7 @@ internal class ExperienceSurfaceHost(
         val layout = surfaceLayout ?: return false
         if (appliedLayout == layout) return true
         return try {
-            active.setLayoutSize(layout.widthPoints, layout.heightPoints)
+            active.setLayoutSize(layout.widthPoints, unhostedRootHeight ?: layout.heightPoints)
             appliedLayout = layout
             layoutStepPending = true
             true

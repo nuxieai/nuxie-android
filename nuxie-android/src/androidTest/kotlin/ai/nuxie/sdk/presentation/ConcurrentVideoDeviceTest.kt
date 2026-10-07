@@ -53,7 +53,7 @@ class ConcurrentVideoDeviceTest {
                 videoLegWithBoundValues(Json.parseToJsonElement(it.readText()).jsonObject)
             })
         }
-        val prepared = PreparedPresentation(scene, "Video Frame", Color.BLACK, PresentationShell.FullScreen,
+        val prepared = PreparedPresentation(scene, "Video Frame", Color.BLACK, PresentationShell.FullScreen(),
             "screen", descriptor, mapOf(key to video), ExperienceArtboardSize(320f, 640f))
         val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
             SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))

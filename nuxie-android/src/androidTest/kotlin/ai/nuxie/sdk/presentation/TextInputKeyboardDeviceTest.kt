@@ -72,7 +72,7 @@ class TextInputKeyboardDeviceTest {
         val rendered = CountDownLatch(1)
         val failure = AtomicReference<Throwable>()
         PresentationRegistry.register(id,
-            PreparedPresentation(file, null, 0xffdddddd.toInt(), PresentationShell.FullScreen),
+            PreparedPresentation(file, null, 0xffdddddd.toInt(), PresentationShell.FullScreen()),
             onFirstFrame = {
                 kotlinx.coroutines.runBlocking { assertTrue(PresentationRegistry.reveal(id)) }
                 rendered.countDown()
