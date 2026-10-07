@@ -82,10 +82,10 @@ internal class ExperienceMountedScreen(
     )
     private var reducedMotion: ExperienceReducedMotion? = null
 
-    fun mount(): View {
+    fun mount(entering: Boolean = true): View {
         lifecycle.updateFontScale(activity.resources.configuration.fontScale)
         surface.updateRuntimeValues(prepared.commerceValues.get())
-        surface.updateRuntimeValues(if (lifecycle.phase == ExperienceScreenLifecycle.Phase.HIDDEN)
+        surface.updateRuntimeValues(if (entering && lifecycle.phase == ExperienceScreenLifecycle.Phase.HIDDEN)
             lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE) else lifecycle.snapshot())
         reducedMotion = ExperienceReducedMotion(activity) { reduced ->
             reduceMotionEnabled = reduced
@@ -171,6 +171,16 @@ internal class ExperienceMountedScreen(
         surface.applyTransitionValues(if (outgoing)
             lifecycle.move(ExperienceScreenLifecycle.Phase.EXITING, id, exitReason = ExperienceScreenLifecycle.ExitReason.NAVIGATION)
         else lifecycle.beginPreparedTransition(id))
+    }
+
+    fun enter() {
+        surface.updateRuntimeValues(lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE))
+    }
+
+    fun hide() {
+        surface.updateRuntimeValues(lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN, exitReason = ExperienceScreenLifecycle.ExitReason.NONE))
+        setVisible(false)
+        setInputEnabled(false)
     }
 
     fun exit(reason: ExperienceScreenLifecycle.ExitReason) {

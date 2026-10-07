@@ -9,3 +9,11 @@ Use `androidx.browser:browser` for Custom Tabs. Web targets `_self`, `_parent`, 
 Browser 1.8.0 provides the required Java Custom Tabs API and works with the existing Kotlin 2.0 toolchain. The dependency is implementation-scoped.
 
 References: [AndroidX Browser releases](https://developer.android.com/jetpack/androidx/releases/browser), [CustomTabsIntent](https://developer.android.com/reference/androidx/browser/customtabs/CustomTabsIntent).
+
+## 2026-10-06: modal layers use Material bottom sheets
+
+Levi approved Material's bottom sheet in Q2 of brief 10, confirmed by `10-start.md`. The native sheet owns its slide, dimming, back handling and drag to close. Covered layers keep their mounted screen and disable input until revealed.
+
+Use the implementation-scoped `com.google.android.material:material:1.12.0` dependency. This is the explicit dependency decision required by `AGENTS.md`. Appearance uses Material's theme defaults; no custom corner, shadow or scrim values are introduced here.
+
+References: [Material bottom sheets](https://github.com/material-components/material-components-android/blob/master/docs/components/BottomSheet.md), [BottomSheetDialog](https://github.com/material-components/material-components-android/blob/master/lib/java/com/google/android/material/bottomsheet/BottomSheetDialog.java).
