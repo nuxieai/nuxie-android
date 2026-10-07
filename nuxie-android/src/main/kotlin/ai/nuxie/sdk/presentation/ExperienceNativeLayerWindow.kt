@@ -19,12 +19,14 @@ internal class ExperienceNativeLayerWindow(
     onClosed: () -> Unit,
 ) {
     internal val dialog: Dialog
+    private var heightReady = !shell.fitsContent
+    private var measuredHeight: Float? = null
+    private var showRequested = false
     private var retired = false
     private var inputEnabled = false
     private val layoutListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateBounds() }
 
     init {
-        require(shell.isAvailable) { "Content-height sheets await the runtime root Hug seam" }
         val looks = checkNotNull(javaClass.getResourceAsStream("presentation-looks.json")) {
             "Missing presentation looks resource"
         }.use { Json.parseToJsonElement(it.bufferedReader().readText()).jsonObject.getValue("android").jsonObject }
@@ -45,6 +47,8 @@ internal class ExperienceNativeLayerWindow(
     }
 
     fun show() {
+        showRequested = true
+        if (retired || !heightReady) return
         dialog.show()
         updateBounds()
         (dialog as? BottomSheetDialog)?.behavior?.state = BottomSheetBehavior.STATE_EXPANDED
@@ -53,25 +57,59 @@ internal class ExperienceNativeLayerWindow(
     private fun updateBounds() {
         if (!dialog.isShowing) return
         val window = dialog.window ?: return
-        val bounds = Rect()
-        if (android.os.Build.VERSION.SDK_INT >= 30) bounds.set(activity.windowManager.currentWindowMetrics.bounds)
-        else {
-            @Suppress("DEPRECATION")
-            activity.windowManager.defaultDisplay.getRectSize(bounds)
-            if (activity.window.decorView.width > 0 && activity.window.decorView.height > 0)
-                bounds.set(0, 0, activity.window.decorView.width, activity.window.decorView.height)
-        }
+        val bounds = windowBounds(activity)
         when (shell) {
             is PresentationShell.FullScreen -> window.setLayout(-1, -1)
             is PresentationShell.Sheet -> {
                 val sheet = dialog as BottomSheetDialog
-                val height = if (shell.detent == PresentationShell.Sheet.Detent.MEDIUM) bounds.height() / 2 else bounds.height()
+                val height = when (shell.detent) {
+                    PresentationShell.Sheet.Detent.MEDIUM -> bounds.height() / 2
+                    PresentationShell.Sheet.Detent.LARGE -> bounds.height()
+                    PresentationShell.Sheet.Detent.FIT_CONTENT -> measuredHeight?.let {
+                        kotlin.math.ceil(it * activity.resources.displayMetrics.density).toInt().coerceIn(1, bounds.height())
+                    } ?: bounds.height()
+                }
                 sheet.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)?.let { view ->
                     if (view.layoutParams.height != height) view.layoutParams = view.layoutParams.apply { this.height = height }
                 }
                 sheet.behavior.state = BottomSheetBehavior.STATE_EXPANDED
             }
 
+        }
+    }
+
+    /** Null means the file has no presentation binding: show the large fallback. */
+    fun updateContentHeight(points: Float?) {
+        if (retired || !shell.fitsContent) return
+        measuredHeight = points?.takeIf { it.isFinite() && it > 0f }
+        heightReady = true
+        if (showRequested && !dialog.isShowing) show() else updateBounds()
+    }
+
+    companion object {
+        fun windowBounds(activity: Activity): Rect {
+            if (android.os.Build.VERSION.SDK_INT >= 30) return Rect(activity.windowManager.currentWindowMetrics.bounds)
+            val bounds = Rect()
+            @Suppress("DEPRECATION")
+            activity.windowManager.defaultDisplay.getRectSize(bounds)
+            if (activity.window.decorView.width > 0 && activity.window.decorView.height > 0) {
+                bounds.set(0, 0, activity.window.decorView.width, activity.window.decorView.height)
+            }
+            return bounds
+        }
+
+        /** Use Material's width cap before a hidden screen's first native step. */
+        fun availableSize(activity: Activity, shell: PresentationShell): ExperienceArtboardSize {
+            val bounds = windowBounds(activity)
+            val maxWidth = if (shell is PresentationShell.Sheet) {
+                val probe = BottomSheetDialog(activity,
+                    com.google.android.material.R.style.Theme_MaterialComponents_DayNight_BottomSheetDialog)
+                try { probe.setContentView(View(activity)); probe.behavior.maxWidth }
+                finally { probe.dismiss() }
+            } else -1
+            val width = if (maxWidth > 0) minOf(bounds.width(), maxWidth) else bounds.width()
+            val density = activity.resources.displayMetrics.density
+            return ExperienceArtboardSize(width / density, bounds.height() / density)
         }
     }
 

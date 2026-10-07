@@ -52,6 +52,12 @@ internal class ExperienceMountedScreen(
         videoDecoderPool = videoDecoderPool,
         clearColor = prepared.clearColor,
         artboardSize = prepared.artboardSize,
+        fitsContentHeight = prepared.fitsContentHeight,
+        initialPresentationSize = ExperienceNativeLayerWindow.availableSize(activity, prepared.shell).let { available ->
+            val retained = prepared.layerContentHeight.get()
+            if (!prepared.fitsContentHeight && retained != null) available.copy(height = minOf(available.height, retained))
+            else available
+        },
         listener = object : ExperienceSurfaceHost.Listener by listener {
             override fun onLayoutBounds(bounds: ExperienceArtboardSize) {
                 textOverlay?.updateLayoutBounds(bounds)

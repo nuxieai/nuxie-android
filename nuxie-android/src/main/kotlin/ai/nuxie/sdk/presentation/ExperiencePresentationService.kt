@@ -98,11 +98,13 @@ internal data class PreparedPresentation(
     val opensLayer: Boolean = false,
     val layerAncestors: List<String> = emptyList(),
     val closeLayer: (suspend (PreparedLayerReveal) -> Boolean)? = null,
+    val fitsContentHeight: Boolean = shell.fitsContent,
+    val layerContentHeight: AtomicReference<Float?> = AtomicReference(null),
 )
 
 internal sealed interface PresentationShell {
     val dismissible: Boolean
-    val isAvailable: Boolean get() = this !is Sheet || detent != Sheet.Detent.FIT_CONTENT
+    val fitsContent: Boolean get() = this is Sheet && detent == Sheet.Detent.FIT_CONTENT
 
     data class FullScreen(override val dismissible: Boolean = true) : PresentationShell
 
@@ -824,11 +826,6 @@ internal class ExperiencePresentationService(
             reservation?.close()
             throw error
         }
-        if (!presentation.isAvailable) {
-            reservation?.close()
-            throw ExperiencePresentationException(ExperiencePresentationException.Reason.PREPARATION_FAILED,
-                "Content-height sheets await the runtime root Hug seam")
-        }
         val reserved = reservation as? JourneyReservation
         val request = reserved?.request ?: captureRequest(ownerDistinctId)
         if (request.ownerDistinctId != ownerDistinctId) throw declinedPresentation()
@@ -1019,7 +1016,10 @@ internal class ExperiencePresentationService(
                             ?.get(journey.screenId) ?: AtomicReference(emptyMap()),
                         opensLayer,
                         synchronized(stateLock) { coveredLayers.map { it.id } + if (opensLayer) listOf(checkNotNull(existing).id) else emptyList() },
-                        closeLayer = { reveal -> closeLayer(id, reveal) })
+                        closeLayer = { reveal -> closeLayer(id, reveal) },
+                        fitsContentHeight = (existing == null || opensLayer) && shell.fitsContent,
+                        layerContentHeight = if (opensLayer) AtomicReference(null) else
+                            existing?.let { PresentationRegistry.resolve(it.id)?.layerContentHeight } ?: AtomicReference(null))
                 }
                 data class Destination(val source: PreparedSource, val content: PreparedPresentation, val navigation: PreparedScreenNavigation?)
                 suspend fun acquireInitial(): PreparedSource = try {

@@ -218,6 +218,8 @@ class ExperienceSurfaceLayoutTest {
         override fun newFile(rendererHandle: Long, bytes: ByteArray, expectedAssets: List<ExpectedFileAsset>,
             externalAssets: Map<Int, ByteArray>, imageDecoder: NuxImageDecoder, videoEnabled: Boolean) = 1L
         override fun freeFile(handle: Long) = Unit
+        override fun viewModelCatalog(fileHandle: Long) =
+            NativeCallResult(0, NativeViewModelCatalog(emptyArray(), emptyArray(), emptyArray()))
         override fun newDefaultArtboard(fileHandle: Long) = 2L
         override fun freeArtboard(handle: Long) = Unit
         override fun stateMachineNames(fileHandle: Long, artboardName: String?) = NativeCallResult(0, emptyList<String>())

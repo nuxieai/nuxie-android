@@ -49,7 +49,7 @@ class ExperienceScreenTransitionPlanTest {
             ai.nuxie.sdk.experiences.JourneyGrammar.action(action, setOf("one"), emptySet())
             val plan = ExperienceScreenTransitionPlan.resolve(transition, JsonArray(emptyList()), "one", "two")
             val shell = checkNotNull(plan.presentation)
-            assertEquals(item.getValue("available").jsonPrimitive.boolean, shell.isAvailable)
+            assertTrue(item.getValue("available").jsonPrimitive.boolean)
             assertEquals(item.getValue("closedby").jsonPrimitive.content == "any", shell.dismissible)
             when (item.getValue("present").jsonPrimitive.content) {
                 "sheet" -> {
