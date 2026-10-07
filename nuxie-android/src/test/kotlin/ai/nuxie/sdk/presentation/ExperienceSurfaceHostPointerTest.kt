@@ -32,6 +32,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import kotlinx.coroutines.async
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.boolean
@@ -43,6 +44,123 @@ import kotlinx.serialization.json.long
 
 @RunWith(RobolectricTestRunner::class)
 class ExperienceSurfaceHostPointerTest {
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test fun `custom watchdog waits for pending frame phase writes and zero delta step`() = kotlinx.coroutines.test.runTest {
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
+        val texture = SurfaceTexture(0)
+        val outgoing = ExperienceScreenExitHandshake()
+        val incoming = ExperienceScreenExitHandshake()
+        val plan = ExperienceScreenTransitionPlan.Custom("test", 450, true, "out", "in")
+        try {
+            host.loadArtboard(byteArrayOf(1), null,
+                viewModelProjection = NuxieViewModelListProjection("Root", "products", null, "Product", emptyList()))
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            native.presentation = 4
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            val transition = async {
+                outgoing.performWith(incoming, plan) {
+                    host.applyTransitionValues(mapOf("safeArea/top" to NuxieViewModelScalarValue.NumberValue(2.0)))
+                }
+            }
+            testScheduler.runCurrent()
+            drain(lane)
+            testScheduler.advanceTimeBy(plan.watchdogMs + 1)
+            testScheduler.runCurrent()
+            assertTrue("A pending frame cannot consume the transition watchdog", transition.isActive)
+            assertTrue(native.stateWrites.isEmpty())
+            native.presentation = 1
+            host.doFrame(1_032_000_000L)
+            drain(lane)
+            testScheduler.runCurrent()
+            native.presentation = 4
+            host.doFrame(1_048_000_000L)
+            drain(lane)
+            testScheduler.runCurrent()
+            assertEquals(listOf(2f), native.stateWrites)
+            assertEquals("Phase application includes a zero-delta step", 0f, native.elapsedSteps.last())
+            testScheduler.advanceTimeBy(plan.watchdogMs + 1)
+            testScheduler.runCurrent()
+            assertTrue("The phase frame must complete before the watchdog starts", transition.isActive)
+            native.presentation = 1
+            host.doFrame(1_064_000_000L)
+            drain(lane)
+            testScheduler.runCurrent()
+            testScheduler.advanceTimeBy(plan.watchdogMs - 1)
+            testScheduler.runCurrent()
+            assertTrue(transition.isActive)
+            testScheduler.advanceTimeBy(1)
+            testScheduler.runCurrent()
+            transition.await()
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test fun `hidden transition settles without rendering and closed transition cancels`() = kotlinx.coroutines.test.runTest {
+        for (mode in listOf("queued-hidden", "preceding-frame", "phase-frame", "closed")) {
+            val native = RecordingNative()
+            var renders = 0
+            native.onRender = { renders++ }
+            val lane = NuxieRuntimeLane()
+            val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
+            val texture = SurfaceTexture(0)
+            try {
+                host.loadArtboard(byteArrayOf(1), null,
+                    viewModelProjection = NuxieViewModelListProjection("Root", "products", null, "Product", emptyList()))
+                host.onSurfaceTextureAvailable(texture, 100, 100)
+                drain(lane)
+                host.doFrame(1_000_000_000L)
+                drain(lane)
+                host.onSurfaceTextureUpdated(texture)
+                if (mode == "queued-hidden") host.setPresentationVisible(false)
+                if (mode == "preceding-frame" || mode == "closed") {
+                    native.presentation = 4
+                    host.doFrame(1_016_000_000L)
+                }
+                drain(lane)
+                val phase = async { host.applyTransitionValues(mapOf("safeArea/top" to NuxieViewModelScalarValue.NumberValue(2.0))) }
+                testScheduler.runCurrent()
+                drain(lane)
+                if (mode == "phase-frame") {
+                    native.presentation = 4
+                    host.doFrame(1_032_000_000L)
+                    drain(lane)
+                }
+                val rendersBeforeHide = renders
+                if (mode == "closed") host.release() else host.setPresentationVisible(false)
+                drain(lane)
+                testScheduler.runCurrent()
+                assertTrue("An invisible host cannot leave the phase waiting for a frame tick", phase.isCompleted)
+                assertEquals("Hidden settlement must not submit a render", rendersBeforeHide, renders)
+                if (mode == "closed") {
+                    assertTrue(phase.isCancelled)
+                    assertTrue(native.stateWrites.isEmpty())
+                } else {
+                    phase.await()
+                    assertEquals(listOf(2f), native.stateWrites)
+                    assertEquals(0f, native.elapsedSteps.last())
+                    assertEquals(if (mode == "preceding-frame") 3 else 2, native.elapsedSteps.size)
+                }
+            } finally {
+                host.release()
+                lane.shutdown()
+                assertTrue(lane.awaitQuiescence(2_000))
+                texture.release()
+            }
+        }
+    }
+
     @Test fun `converted text settles on the native lane after pending render and before capture`() {
         val native = RecordingNative()
         val lane = NuxieRuntimeLane()

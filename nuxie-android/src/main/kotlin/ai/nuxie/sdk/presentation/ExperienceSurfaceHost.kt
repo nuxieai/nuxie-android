@@ -408,6 +408,78 @@ internal class ExperienceSurfaceHost(
         }
     }
 
+    private data class TransitionWrite(
+        val values: Map<String, NuxieViewModelScalarValue>,
+        val completion: CompletableDeferred<Unit>,
+    )
+    private val transitionWrites = ArrayDeque<TransitionWrite>()
+    private var presentedTransitionWrite: TransitionWrite? = null
+
+    /** Match iOS: apply the phase and settle it before the transition watchdog starts. */
+    suspend fun applyTransitionValues(values: Map<String, NuxieViewModelScalarValue>) {
+        val completion = CompletableDeferred<Unit>()
+        val write = TransitionWrite(values.toMap(), completion)
+        val accepted = lane.enqueue {
+            if (released.get() || failureReported.get()) {
+                completion.cancel()
+            } else {
+                transitionWrites.addLast(write)
+                settleHiddenTransitions()
+            }
+        }
+        if (!accepted) completion.cancel()
+        try { completion.await() } finally { completion.cancel() }
+    }
+
+    private fun applyNextTransitionWrite() {
+        if (presentedTransitionWrite != null) return
+        while (transitionWrites.isNotEmpty()) {
+            val write = transitionWrites.removeFirst()
+            if (!write.completion.isActive) continue
+            runtimeValues.putAll(write.values)
+            applyRuntimeValues(runtimeValues)
+            runtimeValuesPending = false
+            presentedTransitionWrite = write
+            return
+        }
+    }
+
+    /** A hidden screen settles its phase without presenting, matching the iOS zero-delta path. */
+    private fun settleHiddenTransitions() {
+        if (running || pendingPresentation) return
+        if (released.get() || failureReported.get()) {
+            cancelTransitionWrites()
+            return
+        }
+        // Retirement completed a frame whose phase was already stepped.
+        presentedTransitionWrite?.completion?.complete(Unit)
+        presentedTransitionWrite = null
+        while (transitionWrites.isNotEmpty()) {
+            applyNextTransitionWrite()
+            val write = presentedTransitionWrite ?: break
+            val result = runCatching {
+                val correlationId = nextCorrelationId
+                nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
+                val outcome = stepAndRefreshFocus {
+                    checkNotNull(player).stepTyped(elapsedSeconds = 0.0, correlationId = correlationId,
+                        textRunNames = textInputs.values.map { it.runName }.distinct())
+                }
+                val snapshot = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
+                snapshot?.let(::retainScreenValues)
+                if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, snapshot))
+                publishSteps()
+            }
+            presentedTransitionWrite = null
+            result.fold({ write.completion.complete(Unit) }, { write.completion.completeExceptionally(it) })
+        }
+    }
+
+    private fun cancelTransitionWrites() {
+        presentedTransitionWrite?.completion?.cancel()
+        presentedTransitionWrite = null
+        while (transitionWrites.isNotEmpty()) transitionWrites.removeFirst().completion.cancel()
+    }
+
     private fun applyRuntimeValues(values: Map<String, NuxieViewModelScalarValue>) {
         val boundArtboard = artboard ?: return
         for ((path, value) in values) {
@@ -846,7 +918,7 @@ internal class ExperienceSurfaceHost(
             // lane; clearing on the UI thread could race its final enqueue.
             lane.enqueue {
                 pointerInput.reset()
-                retireSubmission()
+                if (retireSubmission()) settleHiddenTransitions()
             }
             Choreographer.getInstance().removeFrameCallback(this)
         }
@@ -1087,6 +1159,7 @@ internal class ExperienceSurfaceHost(
                 if (!applyLayoutSize(player)) return@enqueue
                 if (!pendingPresentation) {
                     drainTextWrites()
+                    applyNextTransitionWrite()
                     // A submitted frame owns its model revision through completion and semantic capture.
                     // Coalesce newer environment values and apply them before advancing the next frame.
                     if (runtimeValuesPending) {
@@ -1096,7 +1169,7 @@ internal class ExperienceSurfaceHost(
                     // Keep the clock on the lane: a resize queued ahead of this
                     // tick may have retired its pending submission. Polling does
                     // not consume time, and visibility generations reset it.
-                    val elapsedSeconds = if (layoutStepPending || lastSteppedGeneration != generation) {
+                    val elapsedSeconds = if (layoutStepPending || presentedTransitionWrite != null || lastSteppedGeneration != generation) {
                         0.0
                     } else {
                         (frameTimeNanos - lastFrameNanos) / 1_000_000_000.0
@@ -1245,6 +1318,8 @@ internal class ExperienceSurfaceHost(
                         firstFramePresented = true
                     }
                     publishSteps()
+                    presentedTransitionWrite?.completion?.complete(Unit)
+                    presentedTransitionWrite = null
                     drainTextWrites()
                     drainSemanticAction()
                     drainVideoCommands()
@@ -1294,6 +1369,7 @@ internal class ExperienceSurfaceHost(
         updateFrameScheduling()
         lane.enqueue {
             pendingPresentation = false
+            cancelTransitionWrites()
             drainTextWrites() // Complete queued edits as failed before closing native handles.
             applyRuntimeValues(finalValues)
             // Capture on the original lane after input/exit writes and before releasing handles.
@@ -1343,6 +1419,7 @@ internal class ExperienceSurfaceHost(
         discardFocusInput()
         captionPublication.incrementAndGet()
         lane.enqueue {
+            cancelTransitionWrites()
             while (videoCommands.isNotEmpty()) videoCommands.removeFirst().result.complete(false)
             videoPlayback?.setVisible(false)
         }

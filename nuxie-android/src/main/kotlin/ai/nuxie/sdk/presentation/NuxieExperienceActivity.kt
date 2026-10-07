@@ -26,6 +26,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -311,9 +313,13 @@ internal class NuxieExperienceActivity : Activity() {
                     outgoingScreen.transitionEvents.performWith(incomingScreen.transitionEvents, custom) {
                         incoming.alpha = 1f
                         if (custom.incomingOnTop) incoming.bringToFront() else outgoing.bringToFront()
-                        outgoingScreen.beginCustomTransition(custom.id, outgoing = true)
-                        incomingScreen.beginCustomTransition(custom.id, outgoing = false)
                         incomingScreen.setVisible(visible)
+                        coroutineScope {
+                            val outgoingPhase = async { outgoingScreen.beginCustomTransition(custom.id, outgoing = true) }
+                            val incomingPhase = async { incomingScreen.beginCustomTransition(custom.id, outgoing = false) }
+                            outgoingPhase.await()
+                            incomingPhase.await()
+                        }
                     }
                 } else {
                     animation = ExperienceScreenViewTransition(outgoing, incoming, plan.kind)

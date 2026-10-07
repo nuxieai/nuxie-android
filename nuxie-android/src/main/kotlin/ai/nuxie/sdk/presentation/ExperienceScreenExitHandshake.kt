@@ -39,7 +39,7 @@ internal class ExperienceScreenExitHandshake {
     suspend fun performWith(
         incoming: ExperienceScreenExitHandshake,
         plan: ExperienceScreenTransitionPlan.Custom,
-        requestTransition: () -> Unit,
+        requestTransition: suspend () -> Unit,
     ) {
         val outgoingCompletion = CompletableDeferred<Unit>()
         val incomingCompletion = CompletableDeferred<Unit>()
