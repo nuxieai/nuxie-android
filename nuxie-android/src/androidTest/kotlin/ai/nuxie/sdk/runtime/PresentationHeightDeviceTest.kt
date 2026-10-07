@@ -2,10 +2,68 @@ package ai.nuxie.sdk.runtime
 
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 
 class PresentationHeightDeviceTest {
+    @Test fun compilerPublishedHeightMatrixUsesSourceOracle() = runBlocking {
+        val assets = InstrumentationRegistry.getInstrumentation().context.assets
+        val prefix = "runtime/published-fit-content/"
+        val oracle = assets.open(prefix + "expectations.json").bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject }
+        val fixedHeight = oracle.getValue("fixedHeight").jsonPrimitive.float
+        val independent = oracle.getValue("independentPlayer").jsonObject
+        val otherWidth = independent.getValue("width").jsonPrimitive.float
+        val otherHeight = independent.getValue("height").jsonPrimitive.float
+        val lane = NuxieRuntimeLane()
+        try { lane.call {
+            val runtime = NuxieRuntime.shared
+            assertTrue(runtime.isAvailable)
+            val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(500, 700))
+            try {
+                for (control in listOf(false, true)) {
+                    val bytes = assets.open(prefix + "published/" + (if (control) "no-binding.riv" else "screen.riv")).use { it.readBytes() }
+                    val file = checkNotNull(runtime.importFile(renderer, bytes))
+                    try {
+                        for (order in oracle.getValue("orders").jsonArray) {
+                            for (visit in oracle.getValue("screenVisits").jsonArray) {
+                                val name = visit.jsonPrimitive.content
+                                val artboard = checkNotNull(file.newArtboard(name))
+                                val otherBoard = checkNotNull(file.newArtboard(name))
+                                try {
+                                    val player = file.newExperiencePlayer(artboard, name)
+                                    val other = file.newExperiencePlayer(otherBoard, name)
+                                    val height = NuxiePresentationHeight()
+                                    val independentHeight = NuxiePresentationHeight()
+                                    try {
+                                        independentHeight.apply(file, other, false, otherWidth, otherHeight)
+                                        for (widthValue in oracle.getValue("widths").jsonArray) {
+                                            val width = widthValue.jsonPrimitive.float
+                                            for (modeValue in order.jsonArray) {
+                                                val mode = modeValue.jsonPrimitive.int
+                                                height.apply(file, player, mode == 2, width, fixedHeight)
+                                                player.stepTyped(elapsedSeconds = 0.0)
+                                                other.stepTyped(elapsedSeconds = 0.0)
+                                                val expected = when {
+                                                    control -> oracle.getValue("unboundHeightForEitherMode").jsonPrimitive.float
+                                                    mode == 0 -> fixedHeight
+                                                    name == "sheet" -> oracle.getValue("sheetHugHeight").jsonPrimitive.float
+                                                    else -> oracle.getValue("upstreamEdgeObservations").jsonObject.getValue(name).jsonPrimitive.float
+                                                }
+                                                assertEquals("$name, mode $mode", width to expected, player.layoutSize())
+                                                assertEquals(otherWidth to otherHeight, other.layoutSize())
+                                            }
+                                        }
+                                    } finally { height.close(); independentHeight.close(); player.close(); other.close() }
+                                } finally { artboard.close(); otherBoard.close() }
+                            }
+                        }
+                    } finally { file.close() }
+                }
+            } finally { renderer.close() }
+        } } finally { lane.shutdown(); assertTrue(lane.awaitQuiescence(2000)) }
+    }
+
     @Test fun boundHeightRestoresFixedAndControlNeverHugs() = runBlocking {
         val lane = NuxieRuntimeLane()
         try { lane.call {
