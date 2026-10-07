@@ -137,26 +137,29 @@ class ExperienceHardwareInputDeviceTest {
         }
         withScreen("text_input_secure_observed", "Text Input - Multiline", null,
             directory = "text-editing-experiment", semantics = true) { screen ->
-            fun apply(vararg inputs: NuxieFocusInput): ObservedField {
+            fun apply(expected: String, vararg inputs: NuxieFocusInput) {
+                screen.native.expectedSecureText = expected
                 screen.advance { inputs.forEach { assertTrue(screen.host.receiveFocusInput(it)) } }
-                return screen.field()
+                assertTrue("Secure field must retain the expected text", screen.native.secureFieldMatches)
             }
             val clear = arrayOf(NuxieFocusInput.Key(65, 8, true, false), NuxieFocusInput.Key(259, 0, true, false))
-            apply(NuxieFocusInput.Next)
-            apply(*clear)
-            val field = apply(NuxieFocusInput.Text("private-test"))
-            assertTrue(field.node.stateFlags and NativeSemanticState.OBSCURED != 0)
-            assertFalse(field.node.value.contains("private-test"))
-            assertEquals("private-test", field.text)
+            screen.advance { assertTrue(screen.host.receiveFocusInput(NuxieFocusInput.Next)) }
+            apply("", *clear)
+            apply("private-test", NuxieFocusInput.Text("private-test"))
+            assertTrue("Secure field must be obscured", screen.native.secureFieldObscured)
+            assertTrue("Secure semantic values must be absent", screen.native.secureSemanticsEmpty)
             val first = screen.pixels()
-            apply(*clear, NuxieFocusInput.Text("hidden-value"))
+            apply("hidden-value", *clear, NuxieFocusInput.Text("hidden-value"))
             val sameLength = screen.pixels()
-            apply(*clear, NuxieFocusInput.Text("tiny"))
+            apply("tiny", *clear, NuxieFocusInput.Text("tiny"))
             val shorter = screen.pixels()
-            assertArrayEquals("Secure drawing conceals which same-length text was typed", first, sameLength)
-            assertFalse("Typing must change the secure drawing", first.contentEquals(shorter))
-            assertEquals(listOf("private-test" to true, "hidden-value" to true, "tiny" to true), screen.native.textInputs)
-            riveResult.put("secureObscured", true).put("sameLengthPixelsMatch", true).put("shorterPixelsDiffer", true)
+            val sameLengthPixelsMatch = first.contentEquals(sameLength)
+            val shorterPixelsDiffer = !first.contentEquals(shorter)
+            assertTrue("Secure drawing conceals which same-length text was typed", sameLengthPixelsMatch)
+            assertTrue("Typing must change the secure drawing", shorterPixelsDiffer)
+            assertTrue("All secure insertions must be accepted", screen.native.secureInputMatches == listOf(true, true, true))
+            riveResult.put("secureObscured", screen.native.secureFieldObscured)
+                .put("sameLengthPixelsMatch", sameLengthPixelsMatch).put("shorterPixelsDiffer", shorterPixelsDiffer)
         }
         println("TYPING_EXPERIMENT " + JSONObject().put("native", nativeResult).put("rive", riveResult))
     }
@@ -190,6 +193,8 @@ class ExperienceHardwareInputDeviceTest {
         fun advance(input: () -> Unit = {}) {
             native.disposition = 0
             native.field = null
+            native.secureFieldMatches = false
+            native.secureFieldObscured = false
             val before = native.steps
             val composedBefore = compositions.get()
             instrumentation.runOnMainSync { input(); host.doFrame(time) }
@@ -251,7 +256,7 @@ class ExperienceHardwareInputDeviceTest {
         val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
             SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val lane = NuxieRuntimeLane()
-        val native = ObservedNative(model != null, semantics)
+        val native = ObservedNative(model != null, semantics, fixture == "text_input_secure_observed")
         val failure = AtomicReference<Throwable?>()
         val firstFrame = CountDownLatch(1)
         val changes = java.util.concurrent.ConcurrentLinkedQueue<NuxieViewModelChange>()
@@ -315,7 +320,7 @@ class ExperienceHardwareInputDeviceTest {
 
     private data class ObservedField(val node: NativeSemanticNode, val text: String)
 
-    private class ObservedNative(private val bindModel: Boolean, private val semantics: Boolean) :
+    private class ObservedNative(private val bindModel: Boolean, private val semantics: Boolean, private val secure: Boolean) :
         NuxieTypedRuntimeNative by JniNuxieTypedRuntimeNative {
         // Upstream fixtures carry embedded fonts, not a signed release asset table.
         override fun newFile(rendererHandle: Long, bytes: ByteArray, expectedAssets: List<ExpectedFileAsset>,
@@ -345,12 +350,25 @@ class ExperienceHardwareInputDeviceTest {
         @Volatile var disposition = 0
         @Volatile var field: ObservedField? = null
         private var player = 0L
+        @Volatile var expectedSecureText = ""
+        @Volatile var secureFieldMatches = false
+        @Volatile var secureFieldObscured = false
+        @Volatile var secureSemanticsEmpty = true
+        val secureInputMatches = mutableListOf<Boolean>()
         val textInputs = mutableListOf<Pair<String, Boolean>>()
         override fun semanticNode(snapshot: Long, index: Int) = JniNuxieTypedRuntimeNative.semanticNode(snapshot, index).also {
+            if (secure) it.value?.let { node ->
+                secureSemanticsEmpty = secureSemanticsEmpty &&
+                    (node.stateFlags and NativeSemanticState.OBSCURED == 0 || node.value.isEmpty()) &&
+                    (expectedSecureText.isEmpty() || !node.toString().contains(expectedSecureText))
+            }
             it.value?.takeIf { node -> node.role == NativeSemanticRole.TEXT_FIELD }?.let { node ->
                 val text = checkNotNull(JniNuxieTypedRuntimeNative.fieldStringCopy(
                     player, snapshot, node.id, "experiment-input").value).decodeToString()
-                field = ObservedField(node, text)
+                if (secure) {
+                    secureFieldMatches = text == expectedSecureText
+                    secureFieldObscured = node.stateFlags and NativeSemanticState.OBSCURED != 0
+                } else field = ObservedField(node, text)
             }
         }
         override fun newDefaultViewModel(artboardHandle: Long) =
@@ -367,8 +385,11 @@ class ExperienceHardwareInputDeviceTest {
                     player = playerHandle
                     steps++
                     focusInputs.forEachIndexed { index, input ->
-                        if (input.kind == 4) textInputs.add(input.text.decodeToString() to
-                            (result.value?.focusResults?.getOrNull(index) == true))
+                        if (input.kind == 4) {
+                            val accepted = result.value?.focusResults?.getOrNull(index) == true
+                            if (secure) secureInputMatches.add(input.text.decodeToString() == expectedSecureText && accepted)
+                            else textInputs.add(input.text.decodeToString() to accepted)
+                        }
                     }
                 }
         override fun renderAndPresent(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
