@@ -10,6 +10,32 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SharedValuesDeviceTest {
+    @Test fun publishedGoalsCheckpointCapturesAuthoredRows() = runBlocking {
+        assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
+        val assets = InstrumentationRegistry.getInstrumentation().context.assets
+        fun read(name: String) = assets.open("runtime/forms-saves/goals/$name").use { it.readBytes() }
+        val oracle = Json.parseToJsonElement(read("expectations.json").decodeToString()).jsonObject
+        val fonts = Json.parseToJsonElement(read("provenance.json").decodeToString()).jsonObject.getValue("fonts").jsonArray
+        val descriptor = buildJsonObject { putJsonObject("render") {
+            put("assets", JsonArray(fonts.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
+        } }
+        val run = ExperienceRunValues()
+        try {
+            run.lane.call {
+                val native = run.prepare(read("screen.riv"), descriptor, emptyMap())
+                val live = checkNotNull(native.values).nativeSnapshot()
+                val list = live.values.single { it.ownerInstanceId == live.rootInstanceId && it.name == "goals" }
+                val titles = list.listItemIds.map { id ->
+                    live.values.single { it.ownerInstanceId == id && it.name == "title" }.bytesValue.decodeToString()
+                }
+                assertEquals(listOf("Read", "Walk"), titles)
+            }
+            val checkpoint = checkNotNull(run.snapshot())
+            val decoded = ExperienceRunSnapshot(Json.parseToJsonElement(checkpoint.fields.toString()).jsonArray)
+            assertEquals(oracle.getValue("startingValues").jsonObject.getValue("goals"), decoded.journeyValues["goals"])
+        } finally { run.retire() }
+    }
+
     @Test fun publishedInputFocusTypingAndGreetingShareTheRun() = runBlocking {
         assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
