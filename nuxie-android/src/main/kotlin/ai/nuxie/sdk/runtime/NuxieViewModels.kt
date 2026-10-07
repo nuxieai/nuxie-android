@@ -118,6 +118,8 @@ internal enum class NuxieViewModelMutationKind(val nativeValue: Int) {
     SET_IMAGE(7),
     SET_VIEW_MODEL(8),
     LIST_INSERT(9),
+    LIST_REMOVE(10),
+    LIST_MOVE(12),
     LIST_SET(13),
     LIST_CLEAR(14),
 }
@@ -132,6 +134,7 @@ internal data class NativeViewModelWrite(
     val boolValue: Boolean = false,
     val relatedViewModel: Long = 0,
     val index: Long = 0,
+    val secondIndex: Long = 0,
 )
 
 internal sealed interface NuxieViewModelScalarValue {
@@ -527,6 +530,9 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         authoredInstanceIndex: Int?,
     ): NativeCallResult<Long> = error("newViewModel is not implemented")
 
+    fun acquireListItem(owner: Long, path: String, index: Int, expectedIdentity: Long): NativeCallResult<Long> =
+        error("acquireListItem is not implemented")
+
     fun newDefaultViewModel(artboardHandle: Long): NativeCallResult<Long> =
         error("newDefaultViewModel is not implemented")
 
@@ -870,6 +876,14 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         return NativeCallResult(status.single(), handle.takeUnless { it == 0L })
     }
 
+    override fun acquireListItem(owner: Long, path: String, index: Int, expectedIdentity: Long): NativeCallResult<Long> {
+        val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
+        val handle = NuxieRuntimeBridge.nativeViewModelListItemAcquire(
+            owner, path.encodeToByteArray(), index, expectedIdentity, status,
+        )
+        return NativeCallResult(status.single(), handle.takeUnless { it == 0L })
+    }
+
     override fun newDefaultViewModel(artboardHandle: Long): NativeCallResult<Long> {
         val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
         val handle = NuxieRuntimeBridge.nativeViewModelInstanceNewDefault(artboardHandle, status)
@@ -902,6 +916,7 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
             boolValue = write.boolValue,
             relatedViewModel = write.relatedViewModel,
             index = write.index,
+            secondIndex = write.secondIndex,
         )
 
     override fun stepPlayer(

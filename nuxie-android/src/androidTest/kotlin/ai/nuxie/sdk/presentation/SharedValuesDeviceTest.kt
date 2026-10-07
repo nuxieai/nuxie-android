@@ -1,5 +1,8 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NativeViewModelWrite
+import ai.nuxie.sdk.runtime.NuxieViewModelMutationKind
+import ai.nuxie.sdk.runtime.NuxieRuntimeCallException
 import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import ai.nuxie.sdk.runtime.NuxieFocusInput
 import ai.nuxie.sdk.runtime.NuxieFocusState
@@ -10,6 +13,54 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SharedValuesDeviceTest {
+    @Test fun publishedListChildAcquisitionKeepsIdentityAndRejectsStaleSlot() = runBlocking {
+        assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
+        val assets = InstrumentationRegistry.getInstrumentation().context.assets
+        fun read(name: String) = assets.open("runtime/forms-saves/goals/$name").use { it.readBytes() }
+        val fonts = Json.parseToJsonElement(read("provenance.json").decodeToString()).jsonObject.getValue("fonts").jsonArray
+        val descriptor = buildJsonObject { putJsonObject("render") {
+            put("assets", JsonArray(fonts.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
+        } }
+        val run = ExperienceRunValues()
+        try {
+            run.lane.call {
+                val root = checkNotNull(run.prepare(read("screen.riv"), descriptor, emptyMap()).values)
+                fun ids() = root.nativeSnapshot().let { snapshot ->
+                    snapshot.values.single { it.ownerInstanceId == snapshot.rootInstanceId && it.name == "goals" }.listItemIds.toList()
+                }
+                val before = ids()
+                assertEquals(2, before.size)
+                val child = root.acquireListItem("goals", 0, before[0])
+                try {
+                    assertEquals(before, ids())
+                    child.setValue("title", NuxieViewModelScalarValue.StringValue("Rest"))
+                    root.restoreWrites(listOf(NativeViewModelWrite(
+                        kind = NuxieViewModelMutationKind.LIST_MOVE, path = "goals", index = 0, secondIndex = 1,
+                    )))
+                    assertEquals(listOf(before[1], before[0]), ids())
+                    assertEquals("Rest", root.nativeSnapshot().values.single {
+                        it.ownerInstanceId == before[0] && it.name == "title"
+                    }.bytesValue.decodeToString())
+                    try {
+                        root.acquireListItem("goals", 0, before[0]).close()
+                        fail("An old list position must not acquire a different row")
+                    } catch (error: NuxieRuntimeCallException) {
+                        assertEquals("Identity mismatch returns INVALID_ARGUMENT", 5, error.status)
+                    }
+                    val retained = root.acquireListItem("goals", 1, before[0])
+                    try { assertEquals(child.nativeSnapshot().rootInstanceId, retained.nativeSnapshot().rootInstanceId) }
+                    finally { retained.close() }
+                    root.restoreWrites(listOf(NativeViewModelWrite(
+                        kind = NuxieViewModelMutationKind.LIST_REMOVE, path = "goals", index = 1,
+                    )))
+                    child.setValue("title", NuxieViewModelScalarValue.StringValue("Still retained"))
+                    assertEquals(before[0], child.nativeSnapshot().rootInstanceId)
+                    assertEquals("Still retained", child.snapshot().resolveString("title"))
+                } finally { child.close() }
+            }
+        } finally { run.retire() }
+    }
+
     @Test fun publishedGoalsCheckpointCapturesAuthoredRows() = runBlocking {
         assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
@@ -31,7 +82,8 @@ class SharedValuesDeviceTest {
                 assertEquals(listOf("Read", "Walk"), titles)
             }
             val checkpoint = checkNotNull(run.snapshot())
-            val decoded = ExperienceRunSnapshot(Json.parseToJsonElement(checkpoint.fields.toString()).jsonArray)
+            val decoded = ExperienceRunSnapshot(Json.parseToJsonElement(checkpoint.fields.toString()).jsonArray,
+                checkpoint.lists?.let { ExperienceRunListSnapshot.decode(Json.parseToJsonElement(it.encode().toString())) })
             assertEquals(oracle.getValue("startingValues").jsonObject.getValue("goals"), decoded.journeyValues["goals"])
         } finally { run.retire() }
     }
