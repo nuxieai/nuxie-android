@@ -393,7 +393,7 @@ class PublishedTextInputDeviceTest {
                             val player = checkNotNull(artboard.newPlayer())
                             try {
                                 fun verify(state: Map<String, NuxieViewModelScalarValue>) {
-                                    // Production tolerates this absent field in ExperienceSurfaceHost.applyRuntimeValues (line 487).
+                                    // Production tolerates this absent field in ExperienceSurfaceHost.applyRuntimeValues.
                                     // This signed fixture predates fontScale. Its absence is pinned below;
                                     // TextMetricsBindingDeviceTest covers the published font-scale contract.
                                     val values = state - "fontScale"
