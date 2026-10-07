@@ -1,13 +1,23 @@
 package ai.nuxie.sdk.runtime
 
+import kotlinx.serialization.json.*
+
 /** One height-mode instance per player, confined to that player's native lane. */
 internal class NuxiePresentationHeight {
-    // Temporary until the coordinator names the shared presentation-schema.json commit.
+    private data class Contract(val globalName: String, val propertyName: String, val fixed: Double, val hug: Double)
     private companion object {
-        const val GLOBAL_NAME = "\$nuxie.presentation"
-        const val PROPERTY_NAME = "heightMode"
-        const val FIXED = 0.0
-        const val HUG = 2.0
+        val contract: Contract by lazy {
+            val schema = checkNotNull(NuxiePresentationHeight::class.java.getResourceAsStream("presentation-schema.json")) {
+                "Missing presentation schema resource"
+            }.use { Json.parseToJsonElement(it.bufferedReader().readText()).jsonObject }
+            val property = schema.getValue("property").jsonObject
+            check(schema.getValue("version").jsonPrimitive.int == 1 && property.getValue("type").jsonPrimitive.content == "number") {
+                "Unsupported presentation schema"
+            }
+            val values = property.getValue("values").jsonObject
+            Contract(schema.getValue("globalName").jsonPrimitive.content, property.getValue("name").jsonPrimitive.content,
+                values.getValue("fixed").jsonPrimitive.double, values.getValue("hug").jsonPrimitive.double)
+        }
     }
     private var resolved = false
     private var instance: NuxieRuntimeViewModelState? = null
@@ -18,19 +28,19 @@ internal class NuxiePresentationHeight {
         require(width.isFinite() && width > 0 && height.isFinite() && height > 0)
         if (!resolved) {
             val catalog = file.viewModelCatalog()
-            val schema = catalog.schemas.singleOrNull { it.isGlobal && it.name == GLOBAL_NAME }
+            val schema = catalog.schemas.singleOrNull { it.isGlobal && it.name == contract.globalName }
             if (schema != null && catalog.properties.any {
-                it.schemaIndex == schema.index && it.name == PROPERTY_NAME && it.kind == NuxieViewModelPropertyKind.NUMBER
+                it.schemaIndex == schema.index && it.name == contract.propertyName && it.kind == NuxieViewModelPropertyKind.NUMBER
             }) {
-                val created = checkNotNull(file.newAuthoredViewModel(GLOBAL_NAME, schema.defaultAuthoredInstance ?: -1))
-                try { player.setGlobalViewModel(GLOBAL_NAME, created) }
+                val created = checkNotNull(file.newAuthoredViewModel(contract.globalName, schema.defaultAuthoredInstance ?: -1))
+                try { player.setGlobalViewModel(contract.globalName, created) }
                 catch (error: Throwable) { created.close(); throw error }
                 instance = created
             }
             resolved = true
         }
         player.setLayoutSize(width, height)
-        instance?.setValue(PROPERTY_NAME, NuxieViewModelScalarValue.NumberValue(if (fitContent) HUG else FIXED))
+        instance?.setValue(contract.propertyName, NuxieViewModelScalarValue.NumberValue(if (fitContent) contract.hug else contract.fixed))
         measuresContent = fitContent && instance != null
         return instance != null
     }
