@@ -185,6 +185,40 @@ class ExperienceSurfaceHostPointerTest {
     }
 
     @Test
+    fun `resizing another shared host preserves the pending window`() {
+        val native = RecordingNative()
+        val values = ExperienceRunValues()
+        val lane = values.lane
+        val hosts = List(2) { ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
+            runtime = NuxieRuntime(native), runValues = values) }
+        val textures = List(2) { SurfaceTexture(0) }
+        try {
+            hosts.forEachIndexed { index, host ->
+                host.loadArtboard(byteArrayOf(1), null)
+                host.onSurfaceTextureAvailable(textures[index], 100, 100)
+                drain(lane)
+            }
+            native.presentation = 4
+            hosts[0].doFrame(1_000_000_000L)
+            drain(lane)
+            val detached = native.detachCount
+            val steps = native.elapsedSteps.size
+            hosts[1].onSurfaceTextureSizeChanged(textures[1], 200, 100)
+            drain(lane)
+            assertEquals("Another host cannot retire this window's submission", detached, native.detachCount)
+            native.presentation = 1
+            hosts[0].doFrame(1_016_000_000L)
+            drain(lane)
+            assertEquals("The original frame must complete without stepping again", steps, native.elapsedSteps.size)
+        } finally {
+            hosts.forEach { it.release() }
+            kotlinx.coroutines.runBlocking { values.retire() }
+            assertTrue(lane.awaitQuiescence(2_000))
+            textures.forEach { it.release() }
+        }
+    }
+
+    @Test
     fun `hiding a pending surface releases its native submission without destroying the texture`() {
         val native = RecordingNative()
         val lane = NuxieRuntimeLane()
@@ -1598,7 +1632,7 @@ class ExperienceSurfaceHostPointerTest {
 
         var resizeStatus = 0
         override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int = resizeStatus
-        override fun acquireWindow(surface: android.view.Surface): Long = 5L.also { windowsAcquired += 1 }
+        override fun acquireWindow(surface: android.view.Surface): Long = (5L + windowsAcquired).also { windowsAcquired += 1 }
         override fun releaseWindow(handle: Long) = Unit
 
         var playerKind = 1
