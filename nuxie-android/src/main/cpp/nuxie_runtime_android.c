@@ -1420,6 +1420,51 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelInstanceNew(
 }
 
 JNIEXPORT jlong JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelListItemAcquire(
+    JNIEnv *env, jobject self, jlong owner, jbyteArray path, jint index,
+    jlong expected_identity, jintArray status_out) {
+  (void)self;
+  if (status_out == NULL) return 0;
+  NuxStatus status = NUX_STATUS_NULL_ARGUMENT;
+  struct NuxViewModelInstance *child = NULL;
+  if (index < 0) {
+    status = NUX_STATUS_INVALID_ARGUMENT;
+  } else if (owner != 0 && path != NULL) {
+    jsize length = (*env)->GetArrayLength(env, path);
+    if (clear_jni_exception(env)) {
+      status = NUX_STATUS_RUNTIME_ERROR;
+    } else if (length > 4096) {
+      status = NUX_STATUS_LIMIT_EXCEEDED;
+    } else {
+      jbyte *bytes = (*env)->GetByteArrayElements(env, path, NULL);
+      if (clear_jni_exception(env) || bytes == NULL) {
+        if (bytes != NULL) (*env)->ReleaseByteArrayElements(env, path, bytes, JNI_ABORT);
+        status = NUX_STATUS_RUNTIME_ERROR;
+      } else {
+        struct NuxStringView key = {(const char *)bytes, (size_t)length};
+        status = nux_view_model_instance_list_item_acquire(
+            (const struct NuxViewModelInstance *)from_handle(owner), key, (size_t)index, &child);
+        (*env)->ReleaseByteArrayElements(env, path, bytes, JNI_ABORT);
+        if (status == NUX_STATUS_OK && child == NULL) status = NUX_STATUS_RUNTIME_ERROR;
+        if (status == NUX_STATUS_OK) {
+          uint64_t identity = 0;
+          status = nux_view_model_instance_identity(child, &identity);
+          if (status == NUX_STATUS_OK && identity != (uint64_t)expected_identity) {
+            status = NUX_STATUS_INVALID_ARGUMENT;
+          }
+        }
+      }
+    }
+  }
+  int returned_status = set_status_out(env, status_out, status);
+  if (status != NUX_STATUS_OK || !returned_status) {
+    if (child != NULL) nux_view_model_instance_free(child);
+    return 0;
+  }
+  return as_handle(child);
+}
+
+JNIEXPORT jlong JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelInstanceNewDefault(
     JNIEnv *env, jobject self, jlong artboard, jintArray status_out) {
   (void)self;
@@ -1748,7 +1793,7 @@ JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
     JNIEnv *env, jobject self, jlong view_model, jint kind, jbyteArray path,
     jbyteArray bytes_value, jfloat number_value, jlong integer_value,
-    jboolean bool_value, jlong related_view_model, jlong index) {
+    jboolean bool_value, jlong related_view_model, jlong index, jlong second_index) {
   (void)self;
   if (view_model == 0 || path == NULL || bytes_value == NULL) {
     return (jint)NUX_STATUS_NULL_ARGUMENT;
@@ -1757,6 +1802,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
          kind <= NUX_VIEW_MODEL_MUTATION_KIND_SET_IMAGE) ||
         kind == NUX_VIEW_MODEL_MUTATION_KIND_SET_VIEW_MODEL ||
         kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_INSERT ||
+        kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_REMOVE ||
+        kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_MOVE ||
         kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_CLEAR ||
         kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_SET)) {
     return (jint)NUX_STATUS_INVALID_ARGUMENT;
@@ -1767,7 +1814,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
       related_view_model == 0) {
     return (jint)NUX_STATUS_NULL_ARGUMENT;
   }
-  if (index < 0) return (jint)NUX_STATUS_INVALID_ARGUMENT;
+  if (index < 0 || second_index < 0) return (jint)NUX_STATUS_INVALID_ARGUMENT;
   jsize path_len = (*env)->GetArrayLength(env, path);
   if (clear_jni_exception(env)) return (jint)NUX_STATUS_RUNTIME_ERROR;
   jsize bytes_len = (*env)->GetArrayLength(env, bytes_value);
@@ -1802,6 +1849,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
   mutation.related_instance =
       (struct NuxViewModelInstance *)from_handle(related_view_model);
   mutation.index = (size_t)index;
+  mutation.second_index = (size_t)second_index;
   struct NuxViewModelMutationBatch batch;
   memset(&batch, 0, sizeof(batch));
   batch.struct_size = (uint32_t)sizeof(batch);
