@@ -66,6 +66,24 @@ class ExperienceSurfaceLayoutTest {
         }
     }
 
+    @Test fun `queued frame keeps its layout and pixel size until the resize reaches the lane`() {
+        withHost(3f) { host, texture, lane, native, _ ->
+            host.onSurfaceTextureAvailable(texture, 1179, 2556)
+            drain(lane)
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            assertTrue(lane.enqueue { entered.countDown(); check(release.await(2, TimeUnit.SECONDS)) })
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            try {
+                host.doFrame(1_000_000_000L)
+                host.onSurfaceTextureSizeChanged(texture, 1125, 2001)
+            } finally { release.countDown() }
+            drain(lane)
+            assertEquals(listOf(1179 to 2556), native.renderSizes)
+            assertEquals(listOf("size:393.0:852.0", "step:0.0", "read", "render:3.0", "size:375.0:667.0"), native.calls)
+        }
+    }
+
     @Test fun `fractional density and configuration-only changes use current view resources`() {
         withHost(2.625f) { host, texture, lane, native, bounds ->
             host.onSurfaceTextureAvailable(texture, 1050, 2100)
@@ -180,6 +198,8 @@ class ExperienceSurfaceLayoutTest {
             ExpectedFileAsset(0, FileAssetKind.VIDEO, 1, "clip", "mp4", false, false, 4)) else emptyList()
         override fun videoOccurrences(player: Long) = emptyList<NuxieVideoOccurrence>()
         val calls = mutableListOf<String>()
+        val renderSizes = mutableListOf<Pair<Int, Int>>()
+        private var rendererSize = 0 to 0
         var size = floatArrayOf(100f, 200f)
         var presentation = 1
         var failSize = false
@@ -194,7 +214,10 @@ class ExperienceSurfaceLayoutTest {
         override fun freePlayer(handle: Long) = Unit
         override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int) = 4L
         override fun freeRenderer(handle: Long) = Unit
-        override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int) = 0
+        override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int {
+            rendererSize = pixelWidth to pixelHeight
+            return 0
+        }
         override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long) = 0
         override fun detachRendererSurface(rendererHandle: Long) = 0
         override fun acquireWindow(surface: android.view.Surface) = 5L
@@ -208,14 +231,17 @@ class ExperienceSurfaceLayoutTest {
             calls += "read"
             return if (failRead) NativeCallResult(4, null) else NativeCallResult(0, size)
         }
+        override fun playerKind(playerHandle: Long) = NativeCallResult(0, 1)
+        override fun playerFocusState(playerHandle: Long) = NativeCallResult(0, NuxieFocusState(false, false))
         override fun stepPlayer(playerHandle: Long, inputs: List<NativePlayerInput>, pointers: List<NativePlayerPointer>,
-            elapsedSeconds: Float, correlationId: Long, textRunNames: List<String>): NativeCallResult<NativePlayerStepOutcome> {
+            elapsedSeconds: Float, correlationId: Long, textRunNames: List<String>, focusInputs: List<NativeFocusInput>): NativeCallResult<NativePlayerStepOutcome> {
             calls += "step:$elapsedSeconds"
             return NativeCallResult(0, NativePlayerStepOutcome(true, intArrayOf(), emptyArray(), emptyArray(), emptyArray()))
         }
         override fun renderAndPresent(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
             clearColor: Int, layoutScaleFactor: Float): Int {
             calls += "render:$layoutScaleFactor"
+            renderSizes += rendererSize
             return presentation
         }
     }

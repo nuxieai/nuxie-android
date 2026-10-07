@@ -196,13 +196,13 @@ class NuxieOwnedRuntimeTest {
         val player = NuxieRuntimePlayer(30L, native)
         try {
             native.presentation = 4
-            assertEquals(4, renderer.renderAndPresent(player, first, 0, true))
+            assertEquals(4, renderer.renderAndPresent(player, first, 0, 1f))
             assertEquals(0, renderer.resizeIfIdle(320, 100))
-            assertEquals(4, renderer.renderAndPresent(player, second, 0, true))
+            assertEquals(4, renderer.renderAndPresent(player, second, 0, 1f))
             assertEquals(listOf("attach:40"), native.surfaceCalls)
             native.presentation = 1
-            assertEquals(1, renderer.renderAndPresent(player, first, 0, true))
-            assertEquals(1, renderer.renderAndPresent(player, second, 0, true))
+            assertEquals(1, renderer.renderAndPresent(player, first, 0, 1f))
+            assertEquals(1, renderer.renderAndPresent(player, second, 0, 1f))
             assertEquals(listOf("attach:40", "detach", "attach:41"), native.surfaceCalls)
             assertEquals(0, renderer.detachSurface(first))
             assertEquals(listOf("attach:40", "detach", "attach:41"), native.surfaceCalls)
