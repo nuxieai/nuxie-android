@@ -14,7 +14,7 @@ internal class AuthenticatedPresentationScreen private constructor(
     val shell: PresentationShell,
 ) {
     companion object {
-        fun resolve(release: AuthenticatedJourneyRelease, screenId: String): AuthenticatedPresentationScreen {
+        fun resolve(release: AuthenticatedJourneyRelease, screenId: String, transition: JsonObject? = null): AuthenticatedPresentationScreen {
             val descriptor = release.descriptor
             val artboardName = descriptor.artboardName(screenId)
                 ?: throw ExperiencePresentationException(
@@ -22,7 +22,7 @@ internal class AuthenticatedPresentationScreen private constructor(
                     "Authenticated journey screen is not renderable: $screenId",
                 )
             return AuthenticatedPresentationScreen(screenId, artboardName, descriptor.artboardSize(screenId),
-                descriptor.presentationClearColor(), descriptor.presentationShell())
+                descriptor.presentationClearColor(), PresentationShell.fromTransition(transition, firstLayer = true))
         }
     }
 }
@@ -69,43 +69,6 @@ private fun JsonObject.presentationClearColor(): Int {
         }
     }.getOrDefault(OPAQUE_BLACK)
 }
-
-private fun JsonObject.presentationShell(): PresentationShell {
-    val presentation = this["presentation"] as? JsonObject
-        ?: return PresentationShell.FullScreen()
-    return when (presentation.string("style")) {
-        "sheet" -> {
-            val sheet = presentation["sheet"] as? JsonObject
-                ?: return PresentationShell.FullScreen()
-            PresentationShell.Sheet(
-                detent = when (sheet.string("detent")) {
-                    "medium" -> PresentationShell.Sheet.Detent.MEDIUM
-                    else -> PresentationShell.Sheet.Detent.LARGE
-                },
-                dismissible = sheet.boolean("dismissible") ?: true,
-            )
-        }
-        "drawer" -> {
-            val drawer = presentation["drawer"] as? JsonObject
-                ?: return PresentationShell.FullScreen()
-            PresentationShell.Drawer(
-                edge = when (drawer.string("edge")) {
-                    "top" -> PresentationShell.Drawer.Edge.TOP
-                    "leading", "left" -> PresentationShell.Drawer.Edge.LEADING
-                    "trailing", "right" -> PresentationShell.Drawer.Edge.TRAILING
-                    else -> PresentationShell.Drawer.Edge.BOTTOM
-                },
-                extentRatio = drawer.float("extentRatio")?.coerceIn(0.1f, 1f) ?: 0.5f,
-                cornerRadiusDp = drawer.float("cornerRadius")?.coerceAtLeast(0f) ?: 0f,
-                dismissible = drawer.boolean("dismissible") ?: true,
-            )
-        }
-        else -> PresentationShell.FullScreen()
-    }
-}
-
-private fun JsonObject.boolean(key: String): Boolean? =
-    (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toBooleanStrictOrNull()
 
 private fun JsonObject.float(key: String): Float? =
     (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toFloatOrNull()
