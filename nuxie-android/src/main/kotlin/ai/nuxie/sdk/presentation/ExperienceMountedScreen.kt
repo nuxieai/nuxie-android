@@ -52,6 +52,7 @@ internal class ExperienceMountedScreen(
         videoDecoderPool = videoDecoderPool,
         clearColor = prepared.clearColor,
         artboardSize = prepared.artboardSize,
+        preservesRootHeight = prepared.shell is PresentationShell.Dialog,
         listener = object : ExperienceSurfaceHost.Listener by listener {
             override fun onLayoutBounds(bounds: ExperienceArtboardSize) {
                 textOverlay?.updateLayoutBounds(bounds)

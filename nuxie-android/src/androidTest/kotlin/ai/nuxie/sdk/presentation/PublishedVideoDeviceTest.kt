@@ -77,7 +77,7 @@ class PublishedVideoDeviceTest {
         val width = screen.getValue("width").jsonPrimitive.float
         val height = screen.getValue("height").jsonPrimitive.float
         val prepared = PreparedPresentation(scene, screen.getValue("artboardName").jsonPrimitive.content,
-            Color.BLACK, PresentationShell.FullScreen,
+            Color.BLACK, PresentationShell.FullScreen(),
             "screen", descriptor, mapOf(key to video), ExperienceArtboardSize(width, height))
         val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
             SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))

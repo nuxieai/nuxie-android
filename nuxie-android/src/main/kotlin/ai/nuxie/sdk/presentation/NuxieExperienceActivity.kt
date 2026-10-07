@@ -74,7 +74,7 @@ internal class NuxieExperienceActivity : Activity() {
     private var recoveryOwnerToken: String? = null
     private var currentScreen: Screen? = null
     private inner class Layer(val root: FrameLayout, var screen: Screen, val shell: PresentationShell) {
-        var sheet: ExperienceNativeSheet? = null
+        var sheet: ExperienceNativeLayerWindow? = null
     }
     private val layers = mutableListOf<Layer>()
     private var closingLayer: Layer? = null
@@ -113,6 +113,8 @@ internal class NuxieExperienceActivity : Activity() {
         var failure: Throwable? = null
             private set
         var view: View? = null
+        var laidOutHeight: Float? = prepared.retainedDialogHeight.get()
+            private set
         val ready = CompletableDeferred<Unit>()
         val closed = CompletableDeferred<Unit>()
         private var closing = false
@@ -198,6 +200,14 @@ internal class NuxieExperienceActivity : Activity() {
         override fun purchaseActivity(): Activity = this@NuxieExperienceActivity
         override suspend fun resolveJourneyPermission(request: JourneyPermissionRequest): Boolean =
             this@NuxieExperienceActivity.resolveJourneyPermission(request)
+
+        override fun onLayoutBounds(bounds: ExperienceArtboardSize) {
+            runOnUiThread {
+                laidOutHeight = bounds.height
+                if (prepared.shell is PresentationShell.Dialog) prepared.retainedDialogHeight.set(bounds.height)
+                layers.firstOrNull { it.screen === this }?.sheet?.updateLaidOutHeight(bounds.height)
+            }
+        }
 
         override fun onFirstFrame() {
             runOnUiThread {
@@ -403,9 +413,12 @@ internal class NuxieExperienceActivity : Activity() {
                     val layer = Layer(root, target, target.prepared.shell)
                     layers += layer
                     contentRoot = root
-                    installSheet(layer)
+                    installLayerWindow(layer)
                 } else {
-                    layers.lastOrNull()?.screen = target
+                    layers.lastOrNull()?.let {
+                        it.screen = target
+                        target.laidOutHeight?.let { height -> it.sheet?.updateLaidOutHeight(height) }
+                    }
                     target.view?.bringToFront()
                     source.view?.let(contentRoot::removeView)
                     source.close(false)
@@ -660,7 +673,7 @@ internal class NuxieExperienceActivity : Activity() {
                     root.addView(retained.mount(covered = true), FrameLayout.LayoutParams(-1, -1))
                     val layer = Layer(root, retained, ancestor.shell)
                     layers += layer
-                    if (layers.size == 1) setContentView(shellView(root, ancestor.shell)) else installSheet(layer)
+                    if (layers.size == 1) setContentView(shellView(root, ancestor.shell)) else installLayerWindow(layer)
                     retained.mounted?.observeWindow()
                     restoringLayerScreen = retained
                     retained.mounted?.setInputEnabled(false)
@@ -696,7 +709,7 @@ internal class NuxieExperienceActivity : Activity() {
             if (retryLayer != null) retryLayer.screen = screen else {
                 val layer = Layer(contentRoot, screen, prepared.shell)
                 layers += layer
-                if (restoredUpperLayer) installSheet(layer)
+                if (restoredUpperLayer) installLayerWindow(layer)
                 else if (newRoot) setContentView(shellView(contentRoot, prepared.shell))
             }
             contentRoot.setBackgroundColor(prepared.clearColor)
@@ -707,8 +720,8 @@ internal class NuxieExperienceActivity : Activity() {
         }
     }
 
-    private fun installSheet(layer: Layer) {
-        layer.sheet = ExperienceNativeSheet(this, layer.root) { requestLayerClose(layer) }.also {
+    private fun installLayerWindow(layer: Layer) {
+        layer.sheet = ExperienceNativeLayerWindow(this, layer.root, layer.shell, layer.screen.laidOutHeight) { requestLayerClose(layer) }.also {
             it.setInputEnabled(false)
             it.show()
         }
@@ -992,10 +1005,11 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private fun shellLayoutParams(shell: PresentationShell): FrameLayout.LayoutParams = when (shell) {
-        PresentationShell.FullScreen -> FrameLayout.LayoutParams(
+        is PresentationShell.FullScreen -> FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT,
         )
+        is PresentationShell.Dialog -> FrameLayout.LayoutParams(-1, -1)
         is PresentationShell.Sheet -> {
             val height = when (shell.detent) {
                 PresentationShell.Sheet.Detent.MEDIUM -> resources.displayMetrics.heightPixels / 2

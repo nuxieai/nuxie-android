@@ -79,7 +79,7 @@ class PublishedNativeConverterDeviceTest {
         }
         val artifacts = (render.getValue("assets").jsonArray.map { it.jsonObject } + scripts).map(::stage).toMap()
         val prepared = PreparedPresentation(scene, screen.getValue("artboardName").jsonPrimitive.content,
-            0xffdddddd.toInt(), PresentationShell.FullScreen, screenId, descriptor, artifacts,
+            0xffdddddd.toInt(), PresentationShell.FullScreen(), screenId, descriptor, artifacts,
             ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float))
         val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
             SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))

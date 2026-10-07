@@ -867,7 +867,7 @@ class PublishedTextInputDeviceTest {
         val dismissed = CountDownLatch(1)
         val failure = AtomicReference<Throwable?>()
         val prepared = PreparedPresentation(fixture.riv, screen.getValue("artboardName").jsonPrimitive.content,
-            0xff000000.toInt(), PresentationShell.FullScreen, screen.getValue("id").jsonPrimitive.content,
+            0xff000000.toInt(), PresentationShell.FullScreen(), screen.getValue("id").jsonPrimitive.content,
             fixture.release.descriptor, fixture.assets,
             ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float))
         fun awaitFontScale(value: Float) {
@@ -1207,7 +1207,7 @@ class PublishedTextInputDeviceTest {
         fun content(index: Int, background: Int): PreparedPresentation {
             val screen = screens[index]
             return PreparedPresentation(fixture.riv, screen.getValue("artboardName").jsonPrimitive.content,
-                background, PresentationShell.FullScreen, screen.getValue("id").jsonPrimitive.content,
+                background, PresentationShell.FullScreen(), screen.getValue("id").jsonPrimitive.content,
                 fixture.release.descriptor, fixture.assets,
                 ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float,
                     screen.getValue("height").jsonPrimitive.float))
@@ -1361,7 +1361,7 @@ class PublishedTextInputDeviceTest {
         val screen = fixture.release.descriptor.getValue("render").jsonObject
             .getValue("screens").jsonArray.first().jsonObject
         val source = PreparedPresentation(fixture.riv, screen.getValue("artboardName").jsonPrimitive.content,
-            android.graphics.Color.WHITE, PresentationShell.FullScreen, screen.getValue("id").jsonPrimitive.content,
+            android.graphics.Color.WHITE, PresentationShell.FullScreen(), screen.getValue("id").jsonPrimitive.content,
             fixture.release.descriptor, fixture.assets,
             ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float))
         val id = UUID.randomUUID().toString()
@@ -1712,7 +1712,7 @@ class PublishedTextInputDeviceTest {
         var activity: Activity? = null
         PresentationRegistry.register(presentationId, PreparedPresentation(
             riv, screen.getValue("artboardName").jsonPrimitive.content, 0xff000000.toInt(),
-            PresentationShell.FullScreen, screen.getValue("id").jsonPrimitive.content,
+            PresentationShell.FullScreen(), screen.getValue("id").jsonPrimitive.content,
             release.descriptor, assets,
             ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float),
         ), onFirstFrame = { approveFixtureFrame(presentationId); firstFrame.countDown() }, onFailure = { failure.set(it) },
@@ -2621,7 +2621,7 @@ class PublishedTextInputDeviceTest {
         val descriptor = fixture.release.descriptor
         val authored = descriptor.getValue("render").jsonObject.getValue("screens").jsonArray.first().jsonObject
         val prepared = PreparedPresentation(fixture.riv, authored.getValue("artboardName").jsonPrimitive.content,
-            0xff000000.toInt(), PresentationShell.FullScreen, authored.getValue("id").jsonPrimitive.content,
+            0xff000000.toInt(), PresentationShell.FullScreen(), authored.getValue("id").jsonPrimitive.content,
             descriptor, fixture.assets,
             ExperienceArtboardSize(authored.getValue("width").jsonPrimitive.float, authored.getValue("height").jsonPrimitive.float))
         val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,

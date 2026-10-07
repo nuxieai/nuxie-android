@@ -865,7 +865,7 @@ class ExperiencePresentationServiceTest {
     fun `text commits require the current attached Activity and an open presentation`() {
         val received = mutableListOf<String>()
         PresentationRegistry.register("edit-owner",
-            PreparedPresentation(File("unused.riv"), null, 0, PresentationShell.FullScreen),
+            PreparedPresentation(File("unused.riv"), null, 0, PresentationShell.FullScreen()),
             {}, {}, {}, {}, onTextCommitted = { _, text, _, _ -> received += text })
         val old = AttachedHost()
         val current = AttachedHost()
@@ -884,7 +884,7 @@ class ExperiencePresentationServiceTest {
         val received = mutableListOf<ULong>()
         val lifetimes = mutableListOf<RendererEffectLifetime?>()
         PresentationRegistry.register("effect-owner",
-            PreparedPresentation(File("unused.riv"), null, 0, PresentationShell.FullScreen),
+            PreparedPresentation(File("unused.riv"), null, 0, PresentationShell.FullScreen()),
             {}, {}, {}, {}, onRuntimeStep = { _, correlation, _, lifetime, _ ->
                 received += correlation; lifetimes += lifetime
             })
@@ -1270,7 +1270,7 @@ class ExperiencePresentationServiceTest {
         assertEquals("screen_welcome", screen.screenId)
         assertEquals("Welcome", screen.artboardName)
         assertEquals(0xff0a0a0a.toInt(), screen.clearColor)
-        assertEquals(PresentationShell.FullScreen, screen.shell)
+        assertEquals(PresentationShell.FullScreen(), screen.shell)
         assertEquals(ExperienceArtboardSize(390f, 844f), screen.artboardSize)
         val error = org.junit.Assert.assertThrows(ExperiencePresentationException::class.java) {
             AuthenticatedPresentationScreen.resolve(release, "not-a-signed-screen")

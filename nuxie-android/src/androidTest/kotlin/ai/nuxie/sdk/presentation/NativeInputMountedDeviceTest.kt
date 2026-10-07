@@ -43,7 +43,7 @@ class NativeInputMountedDeviceTest {
               "fontSize":16,"lineHeight":20,"letterSpacing":0,"color":4278190080,"fontAssetUniqueName":""}
           }]}}
         """).jsonObject
-        val prepared = PreparedPresentation(scene, null, 0xffdddddd.toInt(), PresentationShell.FullScreen,
+        val prepared = PreparedPresentation(scene, null, 0xffdddddd.toInt(), PresentationShell.FullScreen(),
             "screen", descriptor, artifactsByKey = mapOf("font" to font), artboardSize = ExperienceArtboardSize(200f, 80f))
         val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
             SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
