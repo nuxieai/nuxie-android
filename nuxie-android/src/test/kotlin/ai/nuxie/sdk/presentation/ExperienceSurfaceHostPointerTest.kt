@@ -302,6 +302,33 @@ class ExperienceSurfaceHostPointerTest {
         }
     }
 
+    @Test fun `CPU surface stays connected across host resize`() {
+        val native = RecordingNative().apply { attachStatus = -1 }
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
+        val texture = SurfaceTexture(0)
+        try {
+            host.loadArtboard(byteArrayOf(1), null)
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            host.onSurfaceTextureSizeChanged(texture, 200, 100)
+            drain(lane)
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            assertEquals(2, native.copyCalls)
+            assertEquals("The CPU producer must not be replaced by another Vulkan attach", 1, native.attachCount)
+            assertEquals(0, native.detachCount)
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
     @Test
     fun `resizing another shared host preserves the pending window`() {
         val native = RecordingNative()
@@ -534,13 +561,19 @@ class ExperienceSurfaceHostPointerTest {
         )
         val texture = SurfaceTexture(0)
         try {
-            host.loadArtboard(byteArrayOf(1), null)
+            host.loadArtboard(byteArrayOf(1), null,
+                viewModelProjection = NuxieViewModelListProjection("Root", "products", null, "Product", emptyList()))
+            native.events = arrayOf(ai.nuxie.sdk.runtime.NativeRuntimeEvent(0, 0, "test", "", "", 0f, emptyArray()))
+            native.presentation = 4
             host.onSurfaceTextureAvailable(texture, 100, 100)
             drain(lane)
             host.doFrame(1_000_000_000L)
             drain(lane)
             val submitted = native.elapsedSteps.size
             assertTrue(submitted > 0)
+            assertTrue(org.robolectric.util.ReflectionHelpers.getField<Boolean>(host, "pendingPresentation"))
+            assertNotNull(org.robolectric.util.ReflectionHelpers.getField<Any?>(host, "submittedSnapshot"))
+            assertNotNull(org.robolectric.util.ReflectionHelpers.getField<Any?>(host, "submittedCaptions"))
             native.resizeStatus = 5
             host.onSurfaceTextureSizeChanged(texture, 200, 100)
             drain(lane)
@@ -550,6 +583,9 @@ class ExperienceSurfaceHostPointerTest {
             assertEquals(1, failures.size)
             assertTrue(failures.single().message.orEmpty().contains("resize failed"))
             assertEquals(submitted, native.elapsedSteps.size)
+            assertFalse(org.robolectric.util.ReflectionHelpers.getField<Boolean>(host, "pendingPresentation"))
+            assertNull(org.robolectric.util.ReflectionHelpers.getField<Any?>(host, "submittedSnapshot"))
+            assertNull(org.robolectric.util.ReflectionHelpers.getField<Any?>(host, "submittedCaptions"))
         } finally {
             host.release()
             lane.shutdown()
@@ -1743,7 +1779,12 @@ class ExperienceSurfaceHostPointerTest {
         override fun playerLayoutSize(playerHandle: Long) = NativeCallResult(0, layoutSize)
         override fun freePlayer(handle: Long) = Unit
         override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long = 4L
-        override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int = 0
+        var attachStatus = 0
+        var attachCount = 0
+        var copyCalls = 0
+        override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int { attachCount++; return attachStatus }
+        override fun copyPlayerToWindow(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
+            clearColor: Int, fitContainCenter: Boolean): Int { copyCalls++; return presentation }
 
         var detachCount = 0
         override fun detachRendererSurface(rendererHandle: Long): Int { detachCount++; return 0 }
