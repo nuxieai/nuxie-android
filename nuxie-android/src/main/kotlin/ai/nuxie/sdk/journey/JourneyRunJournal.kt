@@ -826,7 +826,10 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         run.pendingPresentationPublication?.let {
             put("pendingPresentationPublication", encodePresentationPublication(it))
         }
-        run.nativeSnapshot?.let { put("nativeSnapshot", it.fields) }
+        run.nativeSnapshot?.let {
+            put("nativeSnapshot", it.fields)
+            it.lists?.let { lists -> put("nativeLists", lists.encode()) }
+        }
         run.park?.let { park -> put("park", buildJsonObject {
             park.wakeAtMillis?.let { put("wakeAtMillis", JsonPrimitive(it)) }
             park.anchorAtMillis?.let { put("anchorAtMillis", JsonPrimitive(it)) }
@@ -855,7 +858,8 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             ?.let(::decodeExecutionSnapshot),
         startedQueued = value.getValue("startedQueued").jsonPrimitive.boolean, stepId = value.text("stepId"),
         context = value.getValue("context").jsonObject, outputs = value.getValue("outputs").jsonObject,
-        nativeSnapshot = (value["nativeSnapshot"] as? JsonArray)?.let { ai.nuxie.sdk.presentation.ExperienceRunSnapshot(it) },
+        nativeSnapshot = (value["nativeSnapshot"] as? JsonArray)?.let { ai.nuxie.sdk.presentation.ExperienceRunSnapshot(it,
+            value["nativeLists"]?.let(ai.nuxie.sdk.presentation.ExperienceRunListSnapshot::decode)) },
         park = value["park"]?.jsonObject?.let {
             JourneyRun.Park(
                 it["wakeAtMillis"]?.jsonPrimitive?.long,

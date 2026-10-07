@@ -240,6 +240,14 @@ internal class NuxieRuntimeFile(
         return NuxieRuntimeViewModelState(root, emptyList(), native, catalog, schema.index)
     }
 
+    fun newSchemaViewModel(schemaIndex: Int): NuxieRuntimeViewModelState {
+        val catalog = viewModelCatalog()
+        require(catalog.schemas.any { it.index == schemaIndex }) { "Unknown row schema" }
+        val root = requireNativeValue(native.newViewModel(owned.require(), schemaIndex, null),
+            "create row view model")
+        return NuxieRuntimeViewModelState(root, emptyList(), native, catalog, schemaIndex)
+    }
+
     fun close() = owned.close()
 
     internal fun requireHandle(): Long = owned.require()
@@ -438,8 +446,36 @@ internal class NuxieRuntimeViewModelState(
         )
     }
 
+    /** Retains the actual child on the owning lane; the caller closes the returned state. */
+    fun acquireListItem(path: String, index: Int, expectedIdentity: Long): NuxieRuntimeViewModelState {
+        require(index >= 0) { "List index must be nonnegative" }
+        val handle = requireNativeValue(
+            native.acquireListItem(checkNotNull(root), path, index, expectedIdentity), "acquire existing list child",
+        )
+        try {
+            val schema = requireNativeValue(native.viewModelRootSchemaIndex(handle), "read list child schema")
+            check(schema in 0..Int.MAX_VALUE.toLong()) { "Invalid list child schema" }
+            return NuxieRuntimeViewModelState(handle, emptyList(), native, catalog, schema.toInt())
+        } catch (error: Throwable) {
+            val status = native.freeViewModel(handle)
+            if (status != NUX_STATUS_OK) error.addSuppressed(NuxieRuntimeCallException("free acquired child", status))
+            throw error
+        }
+    }
+
     fun nativeSnapshot(): NativeViewModelSnapshot = requireNativeValue(
         native.snapshotViewModel(checkNotNull(root)), "snapshot run view model")
+
+    /** A checkpoint reconnects retained rows on the same runtime lane. */
+    fun restoreReference(path: String, value: NuxieRuntimeViewModelState) {
+        restoreWrites(listOf(NativeViewModelWrite(NuxieViewModelMutationKind.SET_VIEW_MODEL,
+            path, relatedViewModel = checkNotNull(value.root))))
+    }
+
+    fun insertListItem(path: String, index: Int, value: NuxieRuntimeViewModelState) {
+        restoreWrites(listOf(NativeViewModelWrite(NuxieViewModelMutationKind.LIST_INSERT,
+            path, index = index.toLong(), relatedViewModel = checkNotNull(value.root))))
+    }
 
     fun restoreWrites(writes: List<NativeViewModelWrite>) {
         val handle = checkNotNull(root)

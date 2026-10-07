@@ -30,6 +30,8 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
         val file: NuxieRuntimeFile,
         val imports: ExperienceAssetImport?,
         val values: NuxieRuntimeViewModelState?,
+        val origins: Map<Long, List<ExperienceRunListSnapshot.OriginStep>>,
+        val authoredIds: Set<Long>,
     )
 
     /** Called on the lane before binding any screen root. */
@@ -60,8 +62,14 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
                 externalAssets = imports?.externalAssets.orEmpty(),
                 videoEnabled = imports?.videos?.isNotEmpty() == true)) { "Run file import failed" }
             values = file.newAuthoredViewModel("Experience", 0)
-            restoredSnapshot?.let { values?.restoreWrites(it.writes()) }
-            return Native(renderer, file, imports, values).also {
+            val initial = values?.nativeSnapshot()
+            val origins = initial?.let(ExperienceRunListSnapshot::authoredOrigins).orEmpty()
+            if (values != null && restoredSnapshot != null) {
+                val lists = restoredSnapshot.lists
+                if (lists != null) lists.restore(file, values) else values.restoreWrites(restoredSnapshot.writes())
+            }
+            return Native(renderer, file, imports, values, origins,
+                initial?.instances?.map { it.id }?.toSet().orEmpty()).also {
                 bytes = sceneBytes.copyOf()
                 prepared = it
                 fonts.didImport(leases)
@@ -77,7 +85,9 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
 
     suspend fun snapshot(): ExperienceRunSnapshot? = lane.call {
         check(!retired.get()) { "The run has ended" }
-        prepared?.values?.nativeSnapshot()?.let(ExperienceRunSnapshot::capture)
+        prepared?.let { state -> state.values?.nativeSnapshot()?.let {
+            ExperienceRunSnapshot.capture(it, state.origins, state.authoredIds)
+        } }
     }
 
     suspend fun journeyValues(): JsonObject = snapshot()?.journeyValues ?: JsonObject(emptyMap())
