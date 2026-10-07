@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NuxieRuntime
 import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import android.content.Intent
 import android.graphics.Bitmap
@@ -17,6 +18,7 @@ import org.junit.Test
 
 class PublishedRunValuesDeviceTest {
     @Test fun publishedCopyDrawsSelectedValueOnItsFirstFrame() = runBlocking {
+        assertTrue(NuxieRuntime.shared.isAvailable)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val expected = PublishedRunValuesFixture.expectations.getValue("level").jsonObject
         val selected = expected.getValue("tickValue").jsonPrimitive.double
