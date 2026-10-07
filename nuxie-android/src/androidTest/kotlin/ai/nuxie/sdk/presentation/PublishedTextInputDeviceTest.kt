@@ -392,7 +392,10 @@ class PublishedTextInputDeviceTest {
                             artboard.bindDefaultViewModel(schema)
                             val player = checkNotNull(artboard.newPlayer())
                             try {
-                                fun verify(values: Map<String, NuxieViewModelScalarValue>) {
+                                fun verify(state: Map<String, NuxieViewModelScalarValue>) {
+                                    // This signed legacy fixture predates fontScale. Its absence is pinned below;
+                                    // TextMetricsBindingDeviceTest covers the published font-scale contract.
+                                    val values = state - "fontScale"
                                     values.forEach { (path, value) -> assertTrue(artboard.setDefaultViewModelValue(path, value)) }
                                     val result = native.snapshotViewModel(root)
                                     assertEquals(0, result.status)
@@ -426,6 +429,13 @@ class PublishedTextInputDeviceTest {
                                         }
                                     }
                                 }
+                                val schemaSnapshot = checkNotNull(native.snapshotViewModel(root).value)
+                                assertEquals(setOf("screen", "env", "safeArea", "response", "nuxieTextInputs"),
+                                    schemaSnapshot.values.filter { it.ownerInstanceId == schemaSnapshot.rootInstanceId }
+                                        .map { it.name }.toSet())
+                                assertTrue(runCatching {
+                                    artboard.setDefaultViewModelValue("fontScale", NuxieViewModelScalarValue.NumberValue(1.0))
+                                }.exceptionOrNull() is IllegalArgumentException)
                                 val lifecycle = ExperienceScreenLifecycle()
                                 verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING))
                                 verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ACTIVE))
