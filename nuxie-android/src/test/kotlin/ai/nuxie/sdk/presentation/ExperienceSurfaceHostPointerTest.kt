@@ -1784,7 +1784,7 @@ class ExperienceSurfaceHostPointerTest {
         var copyCalls = 0
         override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int { attachCount++; return attachStatus }
         override fun copyPlayerToWindow(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
-            clearColor: Int, fitContainCenter: Boolean): Int { copyCalls++; return presentation }
+            clearColor: Int, layoutScaleFactor: Float): Int { copyCalls++; return presentation }
 
         var detachCount = 0
         override fun detachRendererSurface(rendererHandle: Long): Int { detachCount++; return 0 }
