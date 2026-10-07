@@ -1041,6 +1041,9 @@ internal class ExperienceSurfaceHost(
                     width.coerceAtLeast(1),
                     height.coerceAtLeast(1),
                 )
+                pendingPresentation = false
+                submittedSnapshot = null
+                submittedCaptions = null
                 if (status != NUX_STATUS_OK) {
                     attached = false
                     reportFailure(
@@ -1049,9 +1052,6 @@ internal class ExperienceSurfaceHost(
                     )
                     return@enqueue
                 }
-                pendingPresentation = false
-                submittedSnapshot = null
-                submittedCaptions = null
                 player?.let(::applyLayoutSize)
                 if (layout == null) videoPlayback?.setViewport(ai.nuxie.sdk.runtime.VideoViewport(0f, 0f, 0f, 0f))
                 drainVideoCommands()
