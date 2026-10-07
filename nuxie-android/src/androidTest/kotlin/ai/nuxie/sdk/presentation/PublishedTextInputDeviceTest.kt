@@ -958,9 +958,19 @@ class PublishedTextInputDeviceTest {
             assertTrue("Destination must finish native preparation", pending != null)
             val during = composedSurface(instrumentation, surface, captureBounds)
             try {
+                val provisionalChangedPixels = changedPixels(before, during, Rect(0, 0, before.width, before.height))
+                if (provisionalChangedPixels != 0) {
+                    File(instrumentation.targetContext.cacheDir, "provisional-before.png").outputStream().use {
+                        before.compress(Bitmap.CompressFormat.PNG, 100, it)
+                    }
+                    File(instrumentation.targetContext.cacheDir, "provisional-during.png").outputStream().use {
+                        during.compress(Bitmap.CompressFormat.PNG, 100, it)
+                    }
+                    File(instrumentation.targetContext.cacheDir, "provisional-context.txt").writeText(
+                        "transition=$transitionKind signed=$signedCustom reverse=$reverse changedPixels=$provisionalChangedPixels bounds=$captureBounds")
+                }
                 assertEquals("Transparent source must not expose a provisional destination",
-                    contract.getValue("composedPixelsChanged").jsonPrimitive.long.toInt(),
-                    changedPixels(before, during, Rect(0, 0, before.width, before.height)))
+                    contract.getValue("composedPixelsChanged").jsonPrimitive.long.toInt(), provisionalChangedPixels)
                 if (transitionKind != null) {
                     val started = SystemClock.uptimeMillis()
                     runBlocking { kotlinx.coroutines.withTimeout(10_000) { checkNotNull(pending).awaitExit() } }
