@@ -386,8 +386,6 @@ internal class ExperienceSurfaceHost(
     private var submittedSnapshot: SubmittedTextSnapshot? = null
     private val textPublication = AtomicLong()
     private var sharedValuesLinked = false
-    private var surfaceWidth = 1
-    private var surfaceHeight = 1
     private fun retainScreenValues(snapshot: NuxieViewModelSnapshot) {
         retainedViewModel?.set(if (sharedValuesLinked) snapshot.withoutRootProperty("experience") else snapshot)
     }
@@ -557,14 +555,6 @@ internal class ExperienceSurfaceHost(
                     onLoaded?.invoke(false)
                     return@enqueue
                 }
-            }
-            if (shared != null && videoBindings.isNotEmpty()) {
-                val render = descriptor?.get("render") as? JsonObject
-                val screen = (render?.get("screens") as? JsonArray)?.filterIsInstance<JsonObject>()
-                    ?.singleOrNull { (it["artboardName"] as? JsonPrimitive)?.content == artboardName }
-                val sceneWidth = (screen?.get("width") as? JsonPrimitive)?.content?.toFloatOrNull()
-                val sceneHeight = (screen?.get("height") as? JsonPrimitive)?.content?.toFloatOrNull()
-                videoArtboardSize = if (sceneWidth != null && sceneHeight != null) sceneWidth to sceneHeight else null
             }
             val loadedFile = file
             if (loadedFile == null) {
@@ -1208,7 +1198,7 @@ internal class ExperienceSurfaceHost(
                         return@enqueue
                     }
                 }
-                val disposition = renderer.renderAndPresent(player, window, clearColor, layout.density, surfaceWidth, surfaceHeight)
+                val disposition = renderer.renderAndPresent(player, window, clearColor, layout.density, layout.pixelWidth, layout.pixelHeight)
                 pendingPresentation = disposition == 4
                 if (disposition < 0) {
                     Log.w(LOG_TAG, "render_player failed", null, Log.status("status", -disposition))

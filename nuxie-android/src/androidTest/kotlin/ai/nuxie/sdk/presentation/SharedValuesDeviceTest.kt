@@ -121,8 +121,9 @@ class SharedValuesDeviceTest {
                     val player = native.file.newExperiencePlayer(board, "long")
                     try {
                         native.renderer.resize(393, 852)
+                        var layoutScaleFactor = 1f
                         fun pixels(value: ai.nuxie.sdk.runtime.NuxieRuntimePlayer) =
-                            native.renderer.renderToCpuFrame(value, 0xff112233.toInt(), true).rgba
+                            native.renderer.renderToCpuFrame(value, 0xff112233.toInt(), layoutScaleFactor).rgba
                         player.step(0.0)
                         pixels(player)
                         repeat(20) { player.step(0.016) }
@@ -173,6 +174,7 @@ class SharedValuesDeviceTest {
                         assertArrayEquals("Probing without releasing a press leaves the count unchanged", initial, pixels(player))
                         // Use the device's physical pixel density for the count readback.
                         val density = InstrumentationRegistry.getInstrumentation().targetContext.resources.displayMetrics.density
+                        layoutScaleFactor = density
                         native.renderer.resize((393 * density).toInt(), (852 * density).toInt())
                         var previous = pixels(player)
                         val otherBoard = checkNotNull(native.file.newArtboard("long"))

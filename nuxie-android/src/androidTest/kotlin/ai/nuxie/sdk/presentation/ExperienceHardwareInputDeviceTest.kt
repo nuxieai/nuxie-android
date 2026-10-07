@@ -372,10 +372,10 @@ class ExperienceHardwareInputDeviceTest {
                     }
                 }
         override fun renderAndPresent(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
-            clearColor: Int, fitContainCenter: Boolean) = JniNuxieTypedRuntimeNative.renderAndPresent(
-                rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter).also { observePresented(playerHandle, it) }
+            clearColor: Int, layoutScaleFactor: Float) = JniNuxieTypedRuntimeNative.renderAndPresent(
+                rendererHandle, playerHandle, windowHandle, clearColor, layoutScaleFactor).also { observePresented(playerHandle, it) }
         override fun copyPlayerToWindow(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
-            clearColor: Int, fitContainCenter: Boolean) = JniNuxieTypedRuntimeNative.copyPlayerToWindow(
-                rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter).also { observePresented(playerHandle, it) }
+            clearColor: Int, layoutScaleFactor: Float) = JniNuxieTypedRuntimeNative.copyPlayerToWindow(
+                rendererHandle, playerHandle, windowHandle, clearColor, layoutScaleFactor).also { observePresented(playerHandle, it) }
     }
 }
