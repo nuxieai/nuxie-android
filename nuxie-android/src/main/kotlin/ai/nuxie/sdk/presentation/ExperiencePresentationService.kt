@@ -95,6 +95,9 @@ internal data class PreparedPresentation(
     val retainedViewModel: AtomicReference<NuxieViewModelSnapshot?> = AtomicReference(),
     val runValues: ExperienceRunValues? = null,
     val commerceValues: AtomicReference<Map<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>> = AtomicReference(emptyMap()),
+    val opensLayer: Boolean = false,
+    val layerAncestors: List<String> = emptyList(),
+    val closeLayer: (suspend (PreparedLayerReveal) -> Boolean)? = null,
 )
 
 internal sealed interface PresentationShell {
@@ -655,9 +658,12 @@ internal class ExperiencePresentationService(
         val emissions: JourneyRuntimeEmissionCoordinator,
         val openLink: suspend (JourneyLinkRequest) -> Boolean,
         val runValues: ExperienceRunValues?,
+        var layerEmissions: ExperienceLayerEmissionCursor,
         val screenDismissed: AtomicBoolean = AtomicBoolean(false),
         var navigationDismissal: NavigationDismissal? = null,
-        var navigationHistory: List<String> = emptyList(),
+        var layerHistory: ExperienceLayerHistory = ExperienceLayerHistory(listOf(screenId)),
+        val onScreenChanged: suspend (String) -> Boolean,
+        val onPresentationRevealed: suspend (String) -> Unit,
         var lifecycleByScreen: MutableMap<String, ExperienceScreenLifecycle> = mutableMapOf(),
         var textInputsByScreen: MutableMap<String, ExperienceTextInputState> = mutableMapOf(),
         var viewModelsByScreen: MutableMap<String, AtomicReference<NuxieViewModelSnapshot?>> = mutableMapOf(),
@@ -671,7 +677,7 @@ internal class ExperiencePresentationService(
         val result: Deferred<JourneyScreenDismissalResult>,
     )
 
-    private suspend fun dismissForNavigation(outgoing: JourneyOutcome, destination: String): JourneyScreenDismissalResult {
+    private suspend fun dismissForNavigation(outgoing: JourneyOutcome, destination: String, method: String = "navigate"): JourneyScreenDismissalResult {
         val checkpoint = synchronized(outgoing) {
             outgoing.navigationDismissal?.let {
                 if (it.destination != destination) throw supersededByIdentityTransition()
@@ -682,7 +688,7 @@ internal class ExperiencePresentationService(
             // but must not cancel or forget a checkpoint that can durably commit.
             NavigationDismissal(destination, scope.async {
                 try {
-                    outgoing.onScreenDismissed(outgoing.screenId, destination, "navigate")
+                    outgoing.onScreenDismissed(outgoing.screenId, destination, method)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Throwable) {
@@ -729,6 +735,7 @@ internal class ExperiencePresentationService(
 
     private val stateLock = Any()
     private var current: ActivePresentation? = null
+    private val coveredLayers = mutableListOf<ActivePresentation>()
     private var pendingReservation: PendingReservation? = null
     private var transitionInProgress = false
     private var pendingBackNavigation: PendingBackNavigation? = null
@@ -737,7 +744,7 @@ internal class ExperiencePresentationService(
     private data class PendingBackNavigation(
         val owner: JourneyPresentationOwner,
         val target: String,
-        val history: List<String>,
+        val history: ExperienceLayerHistory,
     )
 
     private data class PresentationRequest(
@@ -810,9 +817,12 @@ internal class ExperiencePresentationService(
         journey = JourneyOutcome(
             fences = fences,
             runValues = runValues,
+            layerEmissions = ExperienceLayerEmissionCursor(nextBatchSequence, nextEmissionSequence),
             screenId = screenId,
             onOutcome = onOutcome,
             onScreenDismissed = onScreenDismissed,
+            onScreenChanged = onScreenChanged,
+            onPresentationRevealed = onPresentationRevealed,
             openLink = { link -> openAndRecord(journey, link, onLinkOpened) },
             emissions = JourneyRuntimeEmissionCoordinator(
                 journeyId = journeyId,
@@ -820,7 +830,11 @@ internal class ExperiencePresentationService(
                 descriptor = release.descriptor,
                 nextBatchSequence = nextBatchSequence,
                 nextEmissionSequence = nextEmissionSequence,
-                onEmissionBatch = onEmissionBatch,
+                onEmissionBatch = { batch, sources ->
+                    journey.layerEmissions.publish(batch, sources, isCurrent = {
+                        synchronized(stateLock) { current?.journey === journey && current?.outcomeReason?.get() == null }
+                    }, accept = onEmissionBatch)
+                },
                 onScreenChanged = onScreenChanged,
                 onPresentationRevealed = onPresentationRevealed,
                 onOpenLink = { link -> openAndRecord(journey, link, onLinkOpened); Unit },
@@ -951,12 +965,20 @@ internal class ExperiencePresentationService(
                 }
 
                 val id = acquiringId ?: UUID.randomUUID().toString()
+                val opensLayer = existing != null && transition?.string("type") == "modal" &&
+                    synchronized(stateLock) {
+                        pendingBackNavigation?.takeIf {
+                            it.owner == JourneyPresentationOwner(checkNotNull(journeyId), checkNotNull(request.ownerDistinctId)) &&
+                                it.target == journey.screenId
+                        } == null
+                    }
+
                 fun checkOwnership() = synchronized(stateLock) {
                     if (!attempt.job.isActive || !isCurrentIdentity(request) || !canPresent() || current !== existing ||
                         existing?.outcomeReason?.get() != null) throw supersededByIdentityTransition()
                 }
                 fun contentFor(source: PreparedSource, isolated: Boolean): PreparedPresentation {
-                    val sameRelease = existing?.acquired?.identity?.let { previous ->
+                    val sameRelease = !opensLayer && existing?.acquired?.identity?.let { previous ->
                         previous.streamKey == source.identity.streamKey && previous.experienceVersionId == source.identity.experienceVersionId &&
                             previous.buildId == source.identity.buildId
                     } == true
@@ -964,14 +986,20 @@ internal class ExperiencePresentationService(
                     val lifecycles = if (sameRelease) existing!!.journey.lifecycleByScreen else journey.lifecycleByScreen
                     val text = texts[journey.screenId]?.let { if (isolated) it.copyForPreparation() else it } ?: ExperienceTextInputState()
                     val lifecycle = lifecycles[journey.screenId]?.let { if (isolated) it.copyForPreparation() else it } ?: ExperienceScreenLifecycle()
-                    val retained = if (existing?.acquired?.identity == source.identity)
+                    val retained = if (!opensLayer && existing?.acquired?.identity == source.identity)
                         existing.journey.viewModelsByScreen[journey.screenId]?.get() else null
+                    val shell = if (opensLayer) PresentationShell.Sheet(PresentationShell.Sheet.Detent.LARGE, true)
+                        else existing?.let { PresentationRegistry.resolve(it.id)?.shell } ?: source.screen.shell
                     return PreparedPresentation(source.acquired.sceneFile, source.screen.artboardName, source.screen.clearColor,
-                        source.screen.shell, source.screen.screenId, source.descriptor, source.acquired.artifactsByKey,
+                        shell,
+                        source.screen.screenId, source.descriptor, source.acquired.artifactsByKey,
                         source.screen.artboardSize, source.viewModelProjection, text, lifecycle, transition,
                         AtomicReference(retained), journey.runValues,
-                        existing?.takeIf { it.acquired.identity == source.identity }?.journey?.commerceValuesByScreen
-                            ?.get(journey.screenId) ?: AtomicReference(emptyMap()))
+                        existing?.takeIf { !opensLayer && it.acquired.identity == source.identity }?.journey?.commerceValuesByScreen
+                            ?.get(journey.screenId) ?: AtomicReference(emptyMap()),
+                        opensLayer,
+                        synchronized(stateLock) { coveredLayers.map { it.id } + if (opensLayer) listOf(checkNotNull(existing).id) else emptyList() },
+                        closeLayer = { reveal -> closeLayer(id, reveal) })
                 }
                 data class Destination(val source: PreparedSource, val content: PreparedPresentation, val navigation: PreparedScreenNavigation?)
                 suspend fun acquireInitial(): PreparedSource = try {
@@ -1036,6 +1064,7 @@ internal class ExperiencePresentationService(
                                     provisional = withTimeout(firstFrameTimeoutMillis) {
                                         PresentationRegistry.currentScreen(existing.id)?.prepareNavigation(id, content).also { provisional = it }
                                     }
+                                    check(!opensLayer || provisional != null) { "Modal navigation requires its current native host" }
                                     provisional?.awaitExit()
                                     currentCoroutineContext().ensureActive()
                                     checkOwnership()
@@ -1067,7 +1096,7 @@ internal class ExperiencePresentationService(
                 journey.commerce = source.commerceSession
                 existing?.takeIf {
                     val previous = it.acquired.identity
-                    previous.streamKey == source.identity.streamKey && previous.experienceVersionId == source.identity.experienceVersionId &&
+                    !opensLayer && previous.streamKey == source.identity.streamKey && previous.experienceVersionId == source.identity.experienceVersionId &&
                         previous.buildId == source.identity.buildId
                 }?.let {
                     journey.textInputsByScreen = it.journey.textInputsByScreen
@@ -1087,6 +1116,7 @@ internal class ExperiencePresentationService(
                 existing?.let {
                     val outgoing = it.journey
                     val incoming = journey
+                    incoming.layerEmissions = outgoing.layerEmissions
                     val owner = JourneyPresentationOwner(
                         journeyId = checkNotNull(journeyId),
                         distinctId = checkNotNull(request.ownerDistinctId),
@@ -1096,8 +1126,8 @@ internal class ExperiencePresentationService(
                             pending.owner == owner && pending.target == incoming.screenId
                         }
                     }
-                    incoming.navigationHistory = back?.history
-                        ?: (outgoing.navigationHistory + outgoing.screenId)
+                    incoming.layerHistory = if (opensLayer) ExperienceLayerHistory(listOf(incoming.screenId))
+                        else back?.history ?: outgoing.layerHistory.navigate(incoming.screenId, transition?.string("type") == "push")
                     val dismissal = dismissForNavigation(outgoing, incoming.screenId)
                     synchronized(stateLock) {
                         if (!attempt.job.isActive || !isCurrentIdentity(request) || !canPresent() || current !== existing ||
@@ -1110,10 +1140,12 @@ internal class ExperiencePresentationService(
                         navigation?.abort()
                         navigation = null
                     }
-                    outgoing.textInputsByScreen[outgoing.screenId]?.detach()
-                    PresentationRegistry.dismiss(it.id, CloseReason.JourneyNavigation)
-                    attemptOutcome(it, CloseReason.JourneyNavigation)
-                    if (navigation == null) it.finished.await()
+                    if (!opensLayer) outgoing.textInputsByScreen[outgoing.screenId]?.detach()
+                    if (!opensLayer || dismissal != JourneyScreenDismissalResult.HANDLED) {
+                        PresentationRegistry.dismiss(it.id, CloseReason.JourneyNavigation)
+                        attemptOutcome(it, CloseReason.JourneyNavigation)
+                        if (navigation == null) it.finished.await()
+                    }
                     when (dismissal) {
                         JourneyScreenDismissalResult.COMPLETED ->
                             throw ExperiencePresentationException(
@@ -1181,6 +1213,7 @@ internal class ExperiencePresentationService(
                             current = existing
                             throw error
                         }
+                        if (opensLayer) coveredLayers += checkNotNull(existing)
                         unownedAcquisition = null // The registered presentation now owns cleanup.
                         try {
                             if (navigation != null) navigation.activate()
@@ -1251,6 +1284,47 @@ internal class ExperiencePresentationService(
                 PresentationRegistry.reportFailure(active.id, timeout)
                 throw timeout
             }
+        }
+    }
+
+    internal fun layerScreenIds(): List<List<String>> = synchronized(stateLock) {
+        (coveredLayers + listOfNotNull(current)).map { it.journey.layerHistory.screens }
+    }
+
+    private suspend fun closeLayer(id: String, reveal: PreparedLayerReveal): Boolean {
+        val (outgoing, incoming) = synchronized(stateLock) {
+            val outgoing = current ?: return false
+            val incoming = coveredLayers.lastOrNull() ?: return false
+            if (outgoing.id != id || transitionInProgress || !outgoing.journey.fences.isCurrent()) return false
+            transitionInProgress = true
+            outgoing to incoming
+        }
+        return try {
+            val dismissal = dismissForNavigation(outgoing.journey, incoming.journey.screenId, "native_sheet")
+            if (dismissal != JourneyScreenDismissalResult.HANDLED) return false
+            synchronized(stateLock) {
+                if (current !== outgoing || coveredLayers.lastOrNull() !== incoming ||
+                    outgoing.outcomeReason.get() != null || !incoming.journey.fences.isCurrent()) return false
+                coveredLayers.removeAt(coveredLayers.lastIndex)
+                current = incoming
+                incoming.journey.screenDismissed.set(false)
+                incoming.journey.navigationDismissal = null
+                pendingBackNavigation = null
+            }
+            PresentationRegistry.dismiss(outgoing.id, CloseReason.JourneyNavigation)
+            attemptOutcome(outgoing, CloseReason.JourneyNavigation)
+            reveal.prepare()
+            fun ownsIncoming() = synchronized(stateLock) {
+                current === incoming && incoming.outcomeReason.get() == null && incoming.journey.fences.isCurrent()
+            }
+            if (!ownsIncoming() || !incoming.journey.onScreenChanged(incoming.journey.screenId)) return false
+            if (!ownsIncoming()) return false
+            incoming.journey.onPresentationRevealed(incoming.journey.screenId)
+            if (!ownsIncoming()) return false
+            reveal.activate()
+            true
+        } finally {
+            synchronized(stateLock) { transitionInProgress = false }
         }
     }
 
@@ -1429,18 +1503,20 @@ internal class ExperiencePresentationService(
                 ?.toInt()
             else -> null
         } ?: return JourneyPresentationActionResult.Failed
-        val history = active.journey.navigationHistory
-        if (history.isEmpty()) return JourneyPresentationActionResult.Failed
-        val targetIndex = (history.size - steps).coerceAtLeast(0)
-        val target = history[targetIndex]
+        val history = active.journey.layerHistory
+        val target = history.backTarget(steps)
         synchronized(stateLock) {
             if (current !== active || !active.isOwnedBy(owner.journeyId, owner.distinctId)) {
                 return JourneyPresentationActionResult.NoPresentation
             }
+            if (target == active.journey.screenId) {
+                pendingBackNavigation = null
+                return JourneyPresentationActionResult.Handled
+            }
             pendingBackNavigation = PendingBackNavigation(
                 owner,
                 target,
-                history.subList(0, targetIndex).toList(),
+                history.navigate(target, push = false),
             )
         }
         return JourneyPresentationActionResult.Navigate(target)
@@ -1519,12 +1595,14 @@ internal class ExperiencePresentationService(
         } else {
             CloseReason.IdentityChanged
         }
+        val retainedLayers = synchronized(stateLock) { coveredLayers.toList() }
         // Screen teardown is unconditional and starts before outcome work.
         beforeHostTeardownForTesting()
         PresentationRegistry.dismiss(active.id, teardownReason)
         attemptOutcome(active, teardownReason)
         val nativePreparation = synchronized(stateLock) { active.nativePreparationFinished }
         joinAll(active.finished, active.runTransitionFinished)
+        retainedLayers.forEach { it.finished.await() }
         nativePreparation?.await()
         attempt?.finished?.await()
     }
@@ -1549,10 +1627,12 @@ internal class ExperiencePresentationService(
             attempt?.finished?.await()
             return
         }
+        val retainedLayers = synchronized(stateLock) { coveredLayers.toList() }
         PresentationRegistry.dismiss(active.id, CloseReason.IdentityChanged)
         attemptOutcome(active, CloseReason.IdentityChanged)
         val nativePreparation = synchronized(stateLock) { active.nativePreparationFinished }
         joinAll(active.finished, active.runTransitionFinished)
+        retainedLayers.forEach { it.finished.await() }
         nativePreparation?.await()
         attempt?.finished?.await()
     }
@@ -1569,6 +1649,11 @@ internal class ExperiencePresentationService(
             attempt?.finished?.await()
             return
         }
+        val covered = synchronized(stateLock) { coveredLayers.toList().also { coveredLayers.clear() } }
+        covered.forEach {
+            PresentationRegistry.dismiss(it.id, CloseReason.JourneyNavigation)
+            attemptOutcome(it, CloseReason.JourneyNavigation)
+        }
         PresentationRegistry.dismiss(active.id, CloseReason.JourneyDismissed)
         attemptOutcome(active, CloseReason.JourneyDismissed)
         // The caller may be the Journey worker completing a terminal action.
@@ -1576,6 +1661,7 @@ internal class ExperiencePresentationService(
         // joining it here would prevent the worker from ever processing it.
         // Its outer shutdown owner still joins runTransitionFinished.
         active.finished.await()
+        covered.forEach { it.finished.await() }
         attempt?.finished?.await()
     }
 
@@ -1651,6 +1737,7 @@ internal class ExperiencePresentationService(
     }
 
     private fun publishScreenEffects(active: ActivePresentation, publish: suspend () -> Boolean) {
+        if (synchronized(stateLock) { active in coveredLayers }) return
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             val accepted = runCatching { publish() }
                 .onFailure { if (it is CancellationException) throw it }.getOrDefault(false)
@@ -1710,6 +1797,11 @@ internal class ExperiencePresentationService(
             }
             active.runTransitionFinished.complete(Unit)
             return
+        }
+        val covered = synchronized(stateLock) { coveredLayers.toList().also { coveredLayers.clear() } }
+        covered.forEach {
+            PresentationRegistry.dismiss(it.id, CloseReason.JourneyNavigation)
+            attemptOutcome(it, CloseReason.JourneyNavigation)
         }
         synchronized(stateLock) {
             if (current === active || current == null) {

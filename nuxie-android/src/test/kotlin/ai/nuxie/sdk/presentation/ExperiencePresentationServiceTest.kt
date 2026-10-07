@@ -33,6 +33,8 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.test.resetMain
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
@@ -2316,6 +2318,171 @@ class ExperiencePresentationServiceTest {
         assertEquals(opened, records.map { it.url })
         assertNull(records.single().effectId)
         assertTrue(records.all { it.screenId == "screen_welcome" && it.instanceId == null })
+    }
+
+    @Test
+    fun `shared layer vectors retain covered owners and isolate duplicate screen state`() = runTest {
+        val vectors = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/presentation-layers.json").readText()).jsonObject.getValue("cases").jsonArray
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        fun screen(id: String) = if (id == "screen") "screen_welcome" else "screen_details"
+        for (value in vectors) {
+            val vector = value.jsonObject
+            val hosts = mutableMapOf<String, PresentationScreenHandle>()
+            val nativeLayers = mutableListOf<String>()
+            val leases = mutableListOf<Lease>()
+            val edges = mutableListOf<String>()
+            val batches = mutableListOf<JourneyScreenEmissionBatch>()
+            val sharedValues = ExperienceRunValues()
+            class Host(val id: String) : PresentationScreenHandle {
+                var reason: CloseReason? = null
+                override fun requestCloseFromService(reason: CloseReason): Boolean { this.reason = reason; return true }
+                override fun screenCloseReason() = reason
+                override fun finishAfterServiceClose() {
+                    if (reason != CloseReason.JourneyNavigation) {
+                        nativeLayers.forEach { owned -> hosts[owned]?.let { PresentationRegistry.detach(owned, it) } }
+                    }
+                }
+                override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation {
+                    val outgoing = this
+                    return object : PreparedScreenNavigation {
+                        override fun activate() {
+                            val target = Host(id)
+                            hosts[id] = target
+                            check(PresentationRegistry.attach(id, target))
+                            if (content.opensLayer) nativeLayers += id else {
+                                nativeLayers[nativeLayers.lastIndex] = id
+                                PresentationRegistry.detach(outgoing.id, outgoing)
+                            }
+                            PresentationRegistry.reportFirstFrame(id)
+                        }
+                        override suspend fun abort() = Unit
+                    }
+                }
+            }
+            val service = service(this, launch = { id ->
+                val host = Host(id)
+                hosts[id] = host
+                nativeLayers += id
+                check(PresentationRegistry.attach(id, host))
+                PresentationRegistry.reportFirstFrame(id)
+            })
+            suspend fun navigate(target: String, transition: JsonObject? = null, initial: Boolean = false) {
+                val presentation = async { service.presentJourney(testPresentationFences(), release, target, "journey-1", "customer-1",
+                    if (initial) service.reserveJourney("customer-1") else null,
+                    acquire = { acquired(release.identity, Lease().also { leases += it }) },
+                    onScreenDismissed = { hidden, shown, method ->
+                        edges += "hidden:$hidden:$shown:$method"
+                        JourneyScreenDismissalResult.HANDLED
+                    }, onScreenChanged = { edges += "active:$it"; true },
+                    onPresentationRevealed = { edges += "reveal:$it" },
+                    onEmissionBatch = { batch, _ -> batches += batch; true },
+                    onOutcome = {}, transition = transition, runValues = sharedValues) }
+                runCurrent()
+                if (initial) PresentationRegistry.reportFirstFrame(nativeLayers.single())
+                presentation.await()
+            }
+            navigate(screen(vector.getValue("root").jsonPrimitive.content), initial = true)
+            val baseId = nativeLayers.single()
+            val baseHost = hosts.getValue(baseId)
+            val baseContent = checkNotNull(PresentationRegistry.resolve(baseId))
+            val draft = ExperienceTextInputState.Value("retained", 0, 8)
+            val baseInput = baseContent.textInputState.bind()
+            baseInput.write("input_email", draft)
+            val draftsByLayer = mutableListOf(mutableMapOf(baseContent.screenId to draft))
+            for (raw in vector.getValue("steps").jsonArray) {
+                val step = raw.jsonObject
+                when (val operation = step.getValue("operation").jsonPrimitive.content) {
+                    "close" -> {
+                        val outgoingId = nativeLayers.last()
+                        val lowerId = nativeLayers[nativeLayers.lastIndex - 1]
+                        val content = checkNotNull(PresentationRegistry.resolve(outgoingId))
+                        val lower = checkNotNull(PresentationRegistry.resolve(lowerId))
+                        edges.clear()
+                        assertTrue(checkNotNull(content.closeLayer).invoke(object : PreparedLayerReveal {
+                            override suspend fun prepare() {
+                                PresentationRegistry.detach(outgoingId, hosts.getValue(outgoingId))
+                                nativeLayers.removeAt(nativeLayers.lastIndex)
+                                edges += "enter:${lower.screenId}"
+                            }
+                            override fun activate() { edges += "publish:${lower.screenId}" }
+                        }))
+                        draftsByLayer.removeAt(draftsByLayer.lastIndex)
+                        assertEquals(listOf("hidden:${content.screenId}:${lower.screenId}:native_sheet",
+                            "enter:${lower.screenId}", "active:${lower.screenId}", "reveal:${lower.screenId}",
+                            "publish:${lower.screenId}"), edges)
+                    }
+                    "back" -> {
+                        val atRoot = service.layerScreenIds().last().size == 1
+                        val retainedId = nativeLayers.last()
+                        val result = service.dispatchJourneyAction(JourneyPresentationOwner("journey-1", "customer-1"),
+                            JsonObject(mapOf("type" to JsonPrimitive("back"), "steps" to (step["count"] ?: JsonPrimitive(1)))), "back")
+                        if (atRoot) {
+                            assertEquals(JourneyPresentationActionResult.Handled, result)
+                            assertEquals(retainedId, nativeLayers.last())
+                        }
+                        when (result) {
+                            is JourneyPresentationActionResult.Navigate -> navigate(result.screenId, step["transition"] as? JsonObject)
+                            JourneyPresentationActionResult.Handled -> assertEquals(1, service.layerScreenIds().last().size)
+                            else -> fail("Back must navigate within its layer or stay at its root")
+                        }
+                    }
+                    else -> {
+                        val type = if (operation == "replace") "none" else operation
+                        val transition = mutableMapOf<String, kotlinx.serialization.json.JsonElement>("type" to JsonPrimitive(type))
+                        if (type == "custom") transition["transitionId"] = JsonPrimitive("not-declared")
+                        navigate(screen(step.getValue("screen").jsonPrimitive.content), JsonObject(transition))
+                        if (operation == "modal") draftsByLayer += mutableMapOf()
+                    }
+                }
+                val retained = checkNotNull(PresentationRegistry.resolve(nativeLayers.last()))
+                val input = if (retained === baseContent) baseInput else retained.textInputState.bind()
+                assertEquals(draftsByLayer.last()[retained.screenId], input.read("input_email"))
+                if (!draftsByLayer.last().containsKey(retained.screenId)) {
+                    val value = ExperienceTextInputState.Value("layer-${draftsByLayer.lastIndex}-${retained.screenId}", 0, 0)
+                    assertTrue(input.write("input_email", value))
+                    draftsByLayer.last()[retained.screenId] = value
+                }
+                val before = batches.size
+                PresentationRegistry.reportRuntimeStep(nativeLayers.last(), ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome(
+                    true, emptyList(), listOf(ai.nuxie.sdk.runtime.NuxieRuntimeEvent(0, 128, "layer_event", "", "", 0f, emptyList())),
+                    emptyList(), emptyList()), 1uL, null)
+                runCurrent()
+                assertEquals(before + 1, batches.size)
+                assertEquals((0L..before.toLong()).toList(), batches.map { it.batchSequence })
+                assertEquals((0L..before.toLong()).toList(), batches.flatMap { it.emissions }.map { it.sequence })
+                val expected = step.getValue("layers").jsonArray.map { layer -> layer.jsonArray.map { screen(it.jsonPrimitive.content) } }
+                assertEquals(vector.getValue("name").jsonPrimitive.content, expected, service.layerScreenIds())
+                if (expected.size > 1) {
+                    assertTrue(PresentationRegistry.currentScreen(baseId) === baseHost)
+                    assertFalse(leases.first().closed.get())
+                    val top = checkNotNull(PresentationRegistry.resolve(nativeLayers.last()))
+                    assertTrue(top.textInputState !== baseContent.textInputState)
+                    assertTrue(top.screenLifecycle !== baseContent.screenLifecycle)
+                    assertTrue(top.runValues === sharedValues && baseContent.runValues === sharedValues)
+                    val published = batches.size
+                    PresentationRegistry.reportRuntimeStep(baseId, ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome(
+                        true, emptyList(), listOf(ai.nuxie.sdk.runtime.NuxieRuntimeEvent(0, 128, "covered_event", "", "", 0f, emptyList())),
+                        emptyList(), emptyList()), 2uL, null)
+                    runCurrent()
+                    assertEquals(published, batches.size)
+                }
+                if (nativeLayers.last() == baseId) {
+                    assertTrue(baseInput.isCurrent())
+                    assertEquals(draft, baseInput.read("input_email"))
+                    assertTrue(baseInput.write("input_email", draft))
+                }
+            }
+            // Exercise whole-Experience cleanup while covered layers are present too.
+            navigate("screen_details", JsonObject(mapOf("type" to JsonPrimitive("modal"))))
+            service.dismissFromHost("customer-1")
+            nativeLayers.forEach { id -> hosts[id]?.let { PresentationRegistry.detach(id, it) } }
+            runCurrent()
+            assertTrue(leases.all { it.closed.get() })
+            assertTrue(service.layerScreenIds().isEmpty())
+            sharedValues.retire()
+            PresentationRegistry.clearForTesting()
+        }
     }
 
     private fun service(
