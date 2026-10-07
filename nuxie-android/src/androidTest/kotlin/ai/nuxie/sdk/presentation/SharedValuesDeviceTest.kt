@@ -70,6 +70,126 @@ class SharedValuesDeviceTest {
         } finally { run.retire() }
     }
 
+    @Test fun publishedInputLocatorReadsFocusedOccurrence() = runBlocking {
+        assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
+        val assets = InstrumentationRegistry.getInstrumentation().context.assets
+        fun read(name: String) = assets.open("runtime/published-input/$name").use { it.readBytes() }
+        val fonts = Json.parseToJsonElement(read("provenance.json").decodeToString()).jsonObject.getValue("fonts").jsonArray
+        val descriptor = buildJsonObject { putJsonObject("render") {
+            put("assets", JsonArray(fonts.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
+        } }
+        val run = ExperienceRunValues()
+        try {
+            run.lane.call {
+                val native = run.prepare(read("screen.riv"), descriptor, emptyMap())
+                val input = checkNotNull(native.file.newArtboard("input"))
+                try {
+                    input.bindDefaultViewModel("Runtime input scr_screens_sinput")
+                    assertTrue(input.linkDefaultViewModel("experience", checkNotNull(native.values)))
+                    val player = native.file.newExperiencePlayer(input, "input")
+                    try {
+                        player.enableSemantics()
+                        player.step(0.0)
+                        player.stepTyped(elapsedSeconds = 0.0, focusInputs = listOf(NuxieFocusInput.Next))
+                        val locator = Json.parseToJsonElement(read("text-inputs.json").decodeToString())
+                            .jsonArray.single().jsonObject.getValue("textInputName").jsonPrimitive.content
+                        native.renderer.resize(393, 852)
+                        native.renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
+                        val capture = player.captureSemantics()
+                        try {
+                            val occurrence = capture.tree.nodes.single { it.role == ai.nuxie.sdk.runtime.NativeSemanticRole.TEXT_FIELD }
+                            assertEquals(0, occurrence.stateFlags and (ai.nuxie.sdk.runtime.NativeSemanticState.HIDDEN or
+                                ai.nuxie.sdk.runtime.NativeSemanticState.DISABLED))
+                            val seed = capture.readFieldString(player.requireHandle(), occurrence.id, locator).decodeToString()
+                            assertEquals("Ada", seed)
+                        } finally { capture.close() }
+                    } finally { player.close() }
+                } finally { input.close() }
+            }
+        } finally { run.retire() }
+    }
+
+    @Test fun publishedInputReplacementPreservesNativeCompositionAndCorrection() = runBlocking {
+        assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val activity = instrumentation.startActivitySync(android.content.Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+        val run = ExperienceRunValues()
+        try {
+            lateinit var editor: android.widget.EditText
+            lateinit var connection: android.view.inputmethod.InputConnection
+            instrumentation.runOnMainSync {
+                editor = android.widget.EditText(activity)
+                editor.showSoftInputOnFocus = false
+                activity.setContentView(editor)
+                editor.setText("Ada")
+                assertTrue(editor.requestFocus())
+                connection = checkNotNull(editor.onCreateInputConnection(android.view.inputmethod.EditorInfo()))
+            }
+            fun read(name: String) = instrumentation.context.assets.open("runtime/published-input/$name").use { it.readBytes() }
+            val fonts = Json.parseToJsonElement(read("provenance.json").decodeToString()).jsonObject.getValue("fonts").jsonArray
+            val descriptor = buildJsonObject { putJsonObject("render") {
+                put("assets", JsonArray(fonts.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
+            } }
+            run.lane.call {
+                val native = run.prepare(read("screen.riv"), descriptor, emptyMap())
+                val shared = checkNotNull(native.values)
+                val input = checkNotNull(native.file.newArtboard("input"))
+                try {
+                    input.bindDefaultViewModel("Runtime input scr_screens_sinput")
+                    assertTrue(input.linkDefaultViewModel("experience", shared))
+                    val player = native.file.newExperiencePlayer(input, "input")
+                    try {
+                        player.step(0.0)
+                        player.stepTyped(elapsedSeconds = 0.0, focusInputs = listOf(NuxieFocusInput.Next))
+                        fun replace(expected: String, edit: () -> Unit) {
+                            var text = ""
+                            instrumentation.runOnMainSync { edit(); text = editor.text.toString() }
+                            assertEquals(expected, text)
+                            player.step(0.0)
+                            input.setDefaultViewModelValue("state/typed", NuxieViewModelScalarValue.NumberValue(0.0))
+                            val replacement = if (text.isEmpty()) NuxieFocusInput.Key(259, 0, true, false)
+                                else NuxieFocusInput.Text(text)
+                            player.stepTyped(elapsedSeconds = 0.0, focusInputs = listOf(
+                                NuxieFocusInput.Key(65, 8, true, false), replacement))
+                            assertEquals(expected, shared.snapshot().resolveString("name"))
+                            assertEquals(NuxieViewModelScalarValue.NumberValue(0.0),
+                                checkNotNull(input.defaultViewModelSnapshot()).resolveScalar(listOf("state", "typed")))
+                            // F3 delivers its input handler on the next advance.
+                            player.step(0.0)
+                            assertEquals(NuxieViewModelScalarValue.NumberValue(1.0),
+                                checkNotNull(input.defaultViewModelSnapshot()).resolveScalar(listOf("state", "typed")))
+                        }
+                        replace("に") {
+                            assertTrue(connection.setSelection(0, editor.length()))
+                            assertTrue(connection.setComposingText("に", 1))
+                            assertTrue(android.view.inputmethod.BaseInputConnection.getComposingSpanStart(editor.text) >= 0)
+                        }
+                        replace("日本") {
+                            assertTrue(connection.setComposingText("日本", 1))
+                            assertTrue(android.view.inputmethod.BaseInputConnection.getComposingSpanStart(editor.text) >= 0)
+                        }
+                        replace("teh") {
+                            assertTrue(connection.finishComposingText())
+                            assertTrue(connection.setSelection(0, editor.length()))
+                            assertTrue(connection.commitText("teh", 1))
+                        }
+                        replace("the") {
+                            assertTrue(connection.setSelection(0, editor.length()))
+                            assertTrue(connection.commitText("the", 1))
+                        }
+                        replace("") {
+                            assertTrue(connection.setSelection(0, editor.length()))
+                            assertTrue(connection.commitText("", 1))
+                        }
+                    } finally { player.close() }
+                } finally { input.close() }
+            }
+        } finally {
+            try { run.retire() } finally { instrumentation.runOnMainSync { activity.finish() } }
+        }
+    }
+
     @Test fun retainedScreensExcludeSharedValuesAndOtherRunsStartFresh() = runBlocking {
         assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
