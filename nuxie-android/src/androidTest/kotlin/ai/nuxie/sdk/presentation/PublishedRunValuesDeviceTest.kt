@@ -88,8 +88,8 @@ class PublishedRunValuesDeviceTest {
             assertFalse("Selection changes the actual first frame", frames[0].sameAs(frames[1]))
             assertEquals(frames[0].width, frames[1].width)
             assertEquals(frames[0].height, frames[1].height)
-            // The source places its two text items at the top; this corner is clear background.
-            val background = frames[1].getPixel(frames[1].width - 1, frames[1].height - 1)
+            // Text is at the top. Sample the interior canvas, not the exterior letterbox.
+            val background = frames[1].getPixel(frames[1].width / 2, frames[1].height / 2)
             var ink = 0
             for (y in 0 until frames[0].height) for (x in 0 until frames[0].width) {
                 if (frames[0].getPixel(x, y) != frames[1].getPixel(x, y)) {
