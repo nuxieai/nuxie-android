@@ -1450,7 +1450,13 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun authenticatedShellPrecedesAcquisitionAndReusesActivityForNativeReveal() {
+    fun authenticatedShellPrecedesAcquisitionAndReusesActivityForNativeReveal() = verifyAuthenticatedShell(false)
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun authenticatedShellKeepsNativeContentHiddenDuringRecovery() = verifyAuthenticatedShell(true)
+
+    private fun verifyAuthenticatedShell(waitForRecovery: Boolean) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         assertTrue(NuxieRuntime.shared.isAvailable)
         val fixture = loadPublishedFixture(instrumentation)
@@ -1465,7 +1471,30 @@ class PublishedTextInputDeviceTest {
         }, scope, { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "early-owner" })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
-        val before = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
+        val host = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val ground = android.graphics.Color.rgb(24, 48, 72)
+        instrumentation.runOnMainSync { host.setContentView(View(host).apply { setBackgroundColor(ground) }) }
+        instrumentation.waitForIdleSync()
+        fun assertLoadingShell(container: ViewGroup, nativeContent: Boolean) {
+            val children = (0 until container.childCount).map { container.getChildAt(it) }
+            val loading = children.filterIsInstance<ExperienceLoadingView>().single()
+            val recovery = children.filterIsInstance<ExperienceRecoveryView>().singleOrNull()
+            val content = children.filter { it !is ExperienceLoadingView && it !is ExperienceRecoveryView }
+            assertEquals(if (nativeContent) 1 else 0, content.size)
+            assertEquals(if (nativeContent) 2 else 1, children.size - if (recovery == null) 0 else 1)
+            assertEquals("Experience loading", loading.contentDescription)
+            if (nativeContent) {
+                assertTrue(content.single() is ExperienceInputContainer)
+                assertSame(content.single(), children.first())
+                assertEquals(0f, content.single().alpha)
+            }
+            assertEquals(if (recovery == null) View.VISIBLE else View.INVISIBLE, loading.visibility)
+            recovery?.let {
+                assertEquals(View.VISIBLE, it.visibility)
+                assertSame(it, children.last())
+            }
+        }
         val pending = scope.async {
             service.presentJourney(testPresentationFences(), fixture.release, "screen_1", "early-shell", "early-owner",
                 service.reserveJourney("early-owner"), acquire = {
@@ -1490,16 +1519,14 @@ class PublishedTextInputDeviceTest {
             instrumentation.runOnMainSync {
                 assertEquals(0, (checkNotNull(root).background as android.graphics.drawable.ColorDrawable).color)
                 val container = checkNotNull(root) as ViewGroup
-                assertEquals(1, container.childCount)
-                assertTrue(container.getChildAt(0) is ExperienceLoadingView)
-                assertEquals("Experience loading", container.getChildAt(0).contentDescription)
+                assertLoadingShell(container, nativeContent = false)
             }
-            val expected = before.getPixel(bounds.centerX(), bounds.centerY())
+            val expected = ground
             var observed = 0
             val deadline = SystemClock.elapsedRealtime() + 5_000
             do {
                 val screenshot = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
-                observed = screenshot.getPixel(bounds.centerX(), bounds.centerY())
+                observed = screenshot.getPixel(bounds.left + 2, bounds.top + 2)
                 screenshot.recycle()
                 if (observed != expected) SystemClock.sleep(30)
             } while (observed != expected && SystemClock.elapsedRealtime() < deadline)
@@ -1507,14 +1534,26 @@ class PublishedTextInputDeviceTest {
             assertEquals(0, shown.get())
             assertFalse(pending.isCompleted)
             releaseAcquisition.complete(Unit)
+            val revealDeadline = SystemClock.elapsedRealtime() + 15_000
             assertTrue(revealStarted.await(15, TimeUnit.SECONDS))
+            if (waitForRecovery) {
+                var recoveryShown = false
+                while (!recoveryShown && SystemClock.elapsedRealtime() < revealDeadline) {
+                    instrumentation.runOnMainSync {
+                        val container = checkNotNull(root) as ViewGroup
+                        recoveryShown = (0 until container.childCount).any {
+                            container.getChildAt(it) is ExperienceRecoveryView
+                        }
+                    }
+                    if (!recoveryShown) SystemClock.sleep(20)
+                }
+                assertTrue("Withheld reveal must expose recovery within the existing readiness budget", recoveryShown)
+            }
             assertFalse(pending.isCompleted)
             assertEquals(0, shown.get())
             instrumentation.runOnMainSync {
                 val container = checkNotNull(root) as ViewGroup
-                assertEquals(2, container.childCount)
-                assertEquals(0f, container.getChildAt(0).alpha)
-                assertTrue(container.getChildAt(1) is ExperienceLoadingView)
+                assertLoadingShell(container, nativeContent = true)
                 assertEquals(0, (container.background as android.graphics.drawable.ColorDrawable).color)
             }
             releaseReveal.complete(Unit)
@@ -1531,12 +1570,12 @@ class PublishedTextInputDeviceTest {
                 assertNull(container.background)
             }
         } finally {
-            before.recycle()
             releaseReveal.complete(Unit)
             releaseAcquisition.complete(Unit)
             runBlocking { service.shutdownOwnedBy("early-owner"); scope.coroutineContext[Job]?.cancelAndJoin() }
             instrumentation.removeMonitor(monitor)
             PresentationRegistry.clearForTesting()
+            instrumentation.runOnMainSync { host.finish() }
         }
     }
 
