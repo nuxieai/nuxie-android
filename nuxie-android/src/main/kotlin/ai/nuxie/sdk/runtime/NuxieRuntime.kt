@@ -815,6 +815,11 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
         return status
     }
 
+    /** A host can retire its own frame, but cannot resize beneath another window's pending frame. */
+    fun resizeForWindow(window: NuxieRuntimeWindow, pixelWidth: Int, pixelHeight: Int): Int =
+        if (pendingWindow != null && pendingWindow != window.requireHandle()) NUX_STATUS_OK
+        else resize(pixelWidth, pixelHeight)
+
     fun resizeIfIdle(pixelWidth: Int, pixelHeight: Int): Int =
         if (pendingWindow != null) NUX_STATUS_OK else resize(pixelWidth, pixelHeight)
 

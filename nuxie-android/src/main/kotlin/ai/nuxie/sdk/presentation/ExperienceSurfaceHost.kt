@@ -964,7 +964,8 @@ internal class ExperienceSurfaceHost(
             if (attached) {
                 // The renderer retires GPU work during resize while preserving a
                 // connected CPU producer on this same window.
-                val status = renderer?.resize(
+                val status = renderer?.resizeForWindow(
+                    checkNotNull(window),
                     width.coerceAtLeast(1),
                     height.coerceAtLeast(1),
                 )
