@@ -308,6 +308,9 @@ tasks.withType<Test>().configureEach {
   inputs.dir(rootProject.layout.projectDirectory.dir("fixtures"))
     .withPathSensitivity(PathSensitivity.RELATIVE)
     .withPropertyName("crossSdkFixtures")
+  inputs.files(fileTree("src/androidTest/assets") { include("native-converter*/release-entry.json") })
+    .withPathSensitivity(PathSensitivity.RELATIVE)
+    .withPropertyName("nativeConverterReleaseFixtures")
 }
 
 // Native readiness invokes this module's test task; keep shipped lint rules qualified too.
