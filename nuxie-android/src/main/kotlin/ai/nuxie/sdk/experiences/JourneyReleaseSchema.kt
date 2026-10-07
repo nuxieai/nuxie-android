@@ -96,26 +96,9 @@ internal object JourneyReleaseSchema {
     }
 
     private fun presentation(input: JsonElement?) {
-        val value = record(input)
-        val common = setOf("style", "orientation", "backgroundColor")
+        val value = exact(input, setOf("orientation", "backgroundColor"))
         oneOf(value["orientation"], "portrait", "landscape", "any")
         if (!text(value["backgroundColor"]).matches(Regex("^#[a-fA-F0-9]{8}$"))) fail("background color")
-        when (text(value["style"])) {
-            "full_screen" -> exact(value, common)
-            "sheet" -> {
-                exact(value, common + "sheet")
-                val sheet = exact(value["sheet"], setOf("detent", "dismissible"))
-                oneOf(sheet["detent"], "medium", "large"); boolean(sheet["dismissible"])
-            }
-            "drawer" -> {
-                exact(value, common + "drawer")
-                val drawer = exact(value["drawer"], setOf("edge", "extentRatio", "cornerRadius", "dismissible"))
-                oneOf(drawer["edge"], "bottom", "top", "leading", "trailing")
-                if (number(drawer["extentRatio"], 0.0, 1.0) == 0.0) fail("drawer extent")
-                number(drawer["cornerRadius"], 0.0, 128.0); boolean(drawer["dismissible"])
-            }
-            else -> fail("presentation style")
-        }
     }
 
     private fun product(input: JsonElement): ProductIdentity {

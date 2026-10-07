@@ -115,14 +115,13 @@ internal sealed interface PresentationShell {
         enum class Detent { MEDIUM, LARGE }
     }
 
-    data class Drawer(
-        val edge: Edge,
-        val extentRatio: Float,
-        val cornerRadiusDp: Float,
-        override val dismissible: Boolean,
-    ) : PresentationShell {
-        enum class Edge { TOP, BOTTOM, LEADING, TRAILING }
+
+    companion object {
+        fun fromTransition(transition: JsonObject?, firstLayer: Boolean = false): PresentationShell =
+            if ((transition?.get("type") as? JsonPrimitive)?.content == "modal") Sheet(Sheet.Detent.LARGE, true)
+            else FullScreen()
     }
+
 }
 
 /** Screen-scoped close operations and access to its hosting Activity. */
@@ -813,7 +812,7 @@ internal class ExperiencePresentationService(
         val reserved = reservation as? JourneyReservation
         val request = reserved?.request ?: captureRequest(ownerDistinctId)
         if (request.ownerDistinctId != ownerDistinctId) throw declinedPresentation()
-        val selectedScreen = AuthenticatedPresentationScreen.resolve(release, screenId)
+        val selectedScreen = AuthenticatedPresentationScreen.resolve(release, screenId, transition)
         lateinit var journey: JourneyOutcome
         journey = JourneyOutcome(
             fences = fences,

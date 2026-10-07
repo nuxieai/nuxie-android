@@ -11,14 +11,11 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import ai.nuxie.sdk.logging.NuxieLog as Log
-import android.graphics.Outline
-import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
 import android.view.MotionEvent
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -77,6 +74,9 @@ internal class NuxieExperienceActivity : Activity() {
         var sheet: ExperienceNativeLayerWindow? = null
     }
     private val layers = mutableListOf<Layer>()
+    private var baseWindow: ExperienceNativeLayerWindow? = null
+    /** The platform already finished dismissing the base sheet window; nothing is left to animate. */
+    private var baseWindowDismissed = false
     private var closingLayer: Layer? = null
     private var restoringLayerScreen: Screen? = null
     private val screens = mutableSetOf<Screen>()
@@ -169,10 +169,12 @@ internal class NuxieExperienceActivity : Activity() {
                     (navigation?.source === this || currentScreen !== this || closingLayer?.screen === this)) {
                     // A navigation source, a covered layer or a closing layer never finishes the Activity.
                     mounted?.exit(reason)
-                } else if (revealed && currentScreen === this && closingLayer?.screen !== this &&
+                } else if (revealed && currentScreen === this && closingLayer?.screen !== this && !baseWindowDismissed &&
                         (closeState.reason == CloseReason.UserDismissed ||
                             closeState.reason == CloseReason.HostDismissed ||
                             closeState.reason == CloseReason.JourneyDismissed)) {
+                    // Only the revealed current screen plays its compiled exit. A sheet the
+                    // platform already dismissed has no window left, so it finishes at once.
                     finishingAfterExit = true
                     registryScope.launch {
                         try {
@@ -673,7 +675,10 @@ internal class NuxieExperienceActivity : Activity() {
                     root.addView(retained.mount(covered = true), FrameLayout.LayoutParams(-1, -1))
                     val layer = Layer(root, retained, ancestor.shell)
                     layers += layer
-                    if (layers.size == 1) setContentView(shellView(root, ancestor.shell)) else installLayerWindow(layer)
+                    if (layers.size == 1) {
+                        setContentView(shellView(root, ancestor.shell))
+                        layer.sheet = baseWindow
+                    } else installLayerWindow(layer)
                     retained.mounted?.observeWindow()
                     restoringLayerScreen = retained
                     retained.mounted?.setInputEnabled(false)
@@ -710,7 +715,10 @@ internal class NuxieExperienceActivity : Activity() {
                 val layer = Layer(contentRoot, screen, prepared.shell)
                 layers += layer
                 if (restoredUpperLayer) installLayerWindow(layer)
-                else if (newRoot) setContentView(shellView(contentRoot, prepared.shell))
+                else {
+                    if (newRoot) setContentView(shellView(contentRoot, prepared.shell))
+                    layer.sheet = baseWindow
+                }
             }
             contentRoot.setBackgroundColor(prepared.clearColor)
             screen.mounted?.observeWindow()
@@ -825,6 +833,8 @@ internal class NuxieExperienceActivity : Activity() {
         unregisterPredictiveBack()
         super.onDestroy()
         layers.forEach { it.sheet?.retire() }
+        baseWindow?.retire()
+        baseWindow = null
         screens.forEach {
             if (!isChangingConfigurations && it !== currentScreen) it.requestCloseFromService(CloseReason.JourneyNavigation)
             it.close(isChangingConfigurations && (it !== navigation?.target))
@@ -974,85 +984,19 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private fun shellView(host: View, shell: PresentationShell): View {
-        host.clipToOutline = false
-        host.outlineProvider = ViewOutlineProvider.BACKGROUND
-        host.background = null
-        host.isClickable = false
+        baseWindow?.retire()
+        baseWindow = null
         host.layoutParams = FrameLayout.LayoutParams(-1, -1)
         if (shell is PresentationShell.FullScreen) return host
-
-        val root = ExperienceFocusRoot(this)
-        val scrim = View(this).apply {
-            setBackgroundColor(SCRIM_COLOR)
-            if (shell.dismissible) {
-                setOnClickListener { finishTerminal(CloseReason.UserDismissed) }
-            }
+        // The first layer uses the same native sheet as upper layers, including acquisition.
+        val window = ExperienceNativeLayerWindow(this, host, shell) {
+            baseWindowDismissed = true
+            finishTerminal(CloseReason.UserDismissed)
         }
-        root.addView(
-            scrim,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT,
-            ),
-        )
-        host.isClickable = true
-        if (shell is PresentationShell.Drawer) {
-            // Clip the runtime texture and the native editable controls to the same shell.
-            applyRoundedOutline(host, shell.cornerRadiusDp)
-        }
-        root.addView(host, shellLayoutParams(shell))
-        return root
-    }
-
-    private fun shellLayoutParams(shell: PresentationShell): FrameLayout.LayoutParams = when (shell) {
-        is PresentationShell.FullScreen -> FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT,
-        )
-        is PresentationShell.Dialog -> FrameLayout.LayoutParams(-1, -1)
-        is PresentationShell.Sheet -> {
-            val height = when (shell.detent) {
-                PresentationShell.Sheet.Detent.MEDIUM -> resources.displayMetrics.heightPixels / 2
-                PresentationShell.Sheet.Detent.LARGE -> FrameLayout.LayoutParams.MATCH_PARENT
-            }
-            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, height, Gravity.BOTTOM)
-        }
-        is PresentationShell.Drawer -> {
-            val vertical = shell.edge == PresentationShell.Drawer.Edge.TOP ||
-                shell.edge == PresentationShell.Drawer.Edge.BOTTOM
-            val width = if (vertical) {
-                FrameLayout.LayoutParams.MATCH_PARENT
-            } else {
-                (resources.displayMetrics.widthPixels * shell.extentRatio).toInt().coerceAtLeast(1)
-            }
-            val height = if (vertical) {
-                (resources.displayMetrics.heightPixels * shell.extentRatio).toInt().coerceAtLeast(1)
-            } else {
-                FrameLayout.LayoutParams.MATCH_PARENT
-            }
-            val gravity = when (shell.edge) {
-                PresentationShell.Drawer.Edge.TOP -> Gravity.TOP
-                PresentationShell.Drawer.Edge.BOTTOM -> Gravity.BOTTOM
-                PresentationShell.Drawer.Edge.LEADING -> Gravity.START
-                PresentationShell.Drawer.Edge.TRAILING -> Gravity.END
-            }
-            FrameLayout.LayoutParams(width, height, gravity)
-        }
-    }
-
-    private fun applyRoundedOutline(content: View, cornerRadiusDp: Float) {
-        if (cornerRadiusDp <= 0f) return
-        val radius = cornerRadiusDp * resources.displayMetrics.density
-        content.background = GradientDrawable().apply {
-            setColor(android.graphics.Color.TRANSPARENT)
-            cornerRadius = radius
-        }
-        content.outlineProvider = object : ViewOutlineProvider() {
-            override fun getOutline(view: View, outline: Outline) {
-                outline.setRoundRect(0, 0, view.width, view.height, radius)
-            }
-        }
-        content.clipToOutline = true
+        baseWindow = window
+        window.setInputEnabled(true)
+        window.show()
+        return ExperienceFocusRoot(this)
     }
 
     private fun registerPredictiveBack() {
@@ -1075,7 +1019,6 @@ internal class NuxieExperienceActivity : Activity() {
 
     internal companion object {
         const val LOG_TAG = "Nuxie"
-        const val SCRIM_COLOR = 0x66000000
 
         const val EXTRA_PRESENTATION_ID = "ai.nuxie.sdk.internal.PRESENTATION_ID"
         const val PERMISSION_REQUEST_CODE_START = 0x4E00

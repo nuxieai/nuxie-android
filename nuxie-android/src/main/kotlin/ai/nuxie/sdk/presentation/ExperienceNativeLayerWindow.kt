@@ -20,7 +20,7 @@ import kotlin.math.roundToInt
 /** Each modal owns a native window; the platform owns its scrim, animation and back handling. */
 internal class ExperienceNativeLayerWindow(
     private val activity: Activity,
-    content: View,
+    private val content: View,
     private val shell: PresentationShell,
     private var laidOutHeight: Float? = null,
     onClosed: () -> Unit,
@@ -54,7 +54,6 @@ internal class ExperienceNativeLayerWindow(
             is PresentationShell.FullScreen -> Dialog(activity, android.R.style.Theme_Translucent_NoTitleBar_Fullscreen).apply {
                 setContentView(content, ViewGroup.LayoutParams(-1, -1))
             }
-            is PresentationShell.Drawer -> error("Drawer is not a modal layer")
         }
         dialog.setOnDismissListener { if (!retired) onClosed() }
         activity.window.decorView.addOnLayoutChangeListener(layoutListener)
@@ -116,7 +115,6 @@ internal class ExperienceNativeLayerWindow(
                     this.height = (frame.height() * density).roundToInt()
                 }
             }
-            is PresentationShell.Drawer -> Unit
         }
     }
 
@@ -134,6 +132,7 @@ internal class ExperienceNativeLayerWindow(
         activity.window.decorView.removeOnLayoutChangeListener(layoutListener)
         dialog.setOnDismissListener(null)
         dialog.dismiss()
+        (content.parent as? ViewGroup)?.removeView(content)
     }
 
     companion object {

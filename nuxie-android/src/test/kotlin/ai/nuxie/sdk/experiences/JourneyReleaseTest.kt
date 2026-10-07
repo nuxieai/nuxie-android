@@ -128,6 +128,7 @@ class JourneyReleaseTest {
         }
     }
 
+<<<<<<< HEAD
     @Test fun formSelectorRejectsMalformedNamesAndOtherFieldKinds() {
         fun field(type: String = "Response.Field", form: kotlinx.serialization.json.JsonElement) = buildJsonObject {
             put("type", type); put("key", "trip_days"); put("form", form)
@@ -280,6 +281,8 @@ class JourneyReleaseTest {
         }
     }
 
+=======
+>>>>>>> 9a7c8215 (feat: select the Android app shell from the presenting navigate)
     @Test fun `open links allow host dismissal and screenless legs while screen actions do not`() {
         for (entry in listOf("entry", "renderedEntry")) {
             val envelope = fixture.getValue(entry).jsonObject.getValue("envelope").jsonObject
