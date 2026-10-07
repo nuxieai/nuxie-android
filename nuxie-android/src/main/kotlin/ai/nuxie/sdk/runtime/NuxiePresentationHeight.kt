@@ -7,7 +7,7 @@ internal class NuxiePresentationHeight {
     private data class Contract(val globalName: String, val propertyName: String, val fixed: Double, val hug: Double)
     private companion object {
         val contract: Contract by lazy {
-            val schema = checkNotNull(NuxiePresentationHeight::class.java.getResourceAsStream("presentation-schema.json")) {
+            val schema = checkNotNull(NuxiePresentationHeight::class.java.getResourceAsStream("/ai/nuxie/sdk/runtime/presentation-schema.json")) {
                 "Missing presentation schema resource"
             }.use { Json.parseToJsonElement(it.bufferedReader().readText()).jsonObject }
             val property = schema.getValue("property").jsonObject
