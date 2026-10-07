@@ -4,6 +4,8 @@ import ai.nuxie.sdk.runtime.NuxieTextRunGeometry
 import ai.nuxie.sdk.runtime.NativeSemanticNode
 import ai.nuxie.sdk.runtime.NativeSemanticState
 import android.view.accessibility.AccessibilityNodeInfo
+import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
 import android.graphics.Canvas
@@ -396,6 +398,8 @@ internal class ExperienceTextInputOverlay(
         return true
     }
 
+    // Rive supplies the text appearance; this editor needs platform IME behavior without AppCompat tinting.
+    @SuppressLint("AppCompatCustomView")
     private inner class Editor(context: Context, private val input: ExperienceTextInput) : EditText(context) {
         var semanticNode: NativeSemanticNode? = null
         var capturedFirstBaseline: Pair<ExperienceTextInput.EffectiveMetrics, Float>? = null
