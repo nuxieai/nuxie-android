@@ -17,3 +17,11 @@ Signed-transition qualification has the same graphics dependency. With the exact
 A follow-up phase probe narrows that observation: the outgoing phase applied at watchdog start and the incoming phase 23 ms later. Native completion events emerged at 699 ms and 700 ms, but the outgoing event reached its waiter at 820 ms, after rendering and publication. iOS awaits phase application and a zero-delta step before its watchdog; Round 1 Android queued phase application while preserving an in-flight frame's model revision. The probe does not establish equivalence between those sequences, but phase-write delay alone does not explain the measured late delivery. Round 2 corrects the sequencing difference by awaiting phase writes and their zero-delta step before starting the unchanged watchdog. This fixes budget consumption by pending frames; it does not establish that every driver delivery delay is resolved.
 
 The round 1 69-method sample used `-gpu host` alone, without the lane feature flags. Those results are a sample from four device classes, not the full device suite. Software comparison failures and intermittent host-graphics destruction/recreation failures remain open.
+
+## Qualification limits after round 2
+
+[UNIV-3977](https://universe.basis.dev/issue/UNIV-3977) and [UNIV-3974](https://universe.basis.dev/issue/UNIV-3974) are not qualified on the lane flags: their transition methods fail before the transition starts, at the provisional-screen pixel assertion. A passing custom-phase unit test does not qualify those device paths. The source/flags control preserves the assertion and saves both bitmaps when pixels change.
+
+The phase-write correction applies to custom transitions. The single-screen exit handshake still starts its watchdog before its fire-and-forget exit write lands, unlike iOS. This remains outside the claimed correction.
+
+The custom-phase frame wait has no elapsed-time bound. Native frame completion, hidden submission retirement or settlement, host failure or release, and caller cancellation settle or cancel it. A permanently pending visible frame can wait indefinitely, matching the iOS reference. No timeout is added by this carry.
