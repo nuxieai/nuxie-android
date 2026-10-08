@@ -49,6 +49,53 @@ class SharedValuesDeviceTest {
         } finally { directory.deleteRecursively() }
     }
 
+    @Test fun publishedF5ReadsLiveAnswersWithoutFilteringMarkingFailures() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val assets = instrumentation.context.assets
+        fun read(name: String) = assets.open("runtime/forms-saves/$name").use { it.readBytes() }
+        val descriptor = Json.parseToJsonElement(read("release.json").decodeToString()).jsonObject
+        val oracle = Json.parseToJsonElement(assets.open("events/response-native-sheets.json")
+            .use { it.readBytes() }.decodeToString()).jsonObject
+        val directory = java.io.File(instrumentation.targetContext.cacheDir, "f5-sheet-${java.util.UUID.randomUUID()}").apply { mkdirs() }
+        val run = ExperienceRunValues()
+        try {
+            val artifacts = descriptor.getValue("render").jsonObject.getValue("assets").jsonArray
+                .map { it.jsonObject }.filter { it["key"] != null }.associate { asset ->
+                    val key = asset.getValue("key").jsonPrimitive.content
+                    key to java.io.File(directory, asset.getValue("sha256").jsonPrimitive.content).apply { writeBytes(read(key)) }
+                }
+            run.lane.call { run.prepare(read("screen.riv"), descriptor, artifacts) }
+            assertEquals(oracle.getValue("initial"), run.responseAnswers("feedback", descriptor))
+            run.lane.call {
+                val values = checkNotNull(run.prepare(read("screen.riv"), descriptor, artifacts).values)
+                values.setValue("responses:feedback/stars", NuxieViewModelScalarValue.NumberValue(0.0))
+                values.setValue("responses:feedback/email", NuxieViewModelScalarValue.StringValue("invalid"))
+                values.setValue("responses:feedback/comment", NuxieViewModelScalarValue.StringValue("hello"))
+                values.setValue("responses:onboarding/wants_reminder", NuxieViewModelScalarValue.BooleanValue(false))
+                values.setValue("responses:onboarding/italian_level", NuxieViewModelScalarValue.StringValue("basics"))
+                val snapshot = values.nativeSnapshot()
+                val feedback = snapshot.values.single { it.ownerInstanceId == snapshot.rootInstanceId && it.name == "responses:feedback" }.referencedInstanceId
+                val ids = snapshot.values.single { it.ownerInstanceId == feedback && it.name == "interests" }.listItemIds
+                val child = values.acquireListItem("responses:feedback/interests", 1, ids[1])
+                try { child.setValue("picked", NuxieViewModelScalarValue.BooleanValue(true)) } finally { child.close() }
+            }
+            assertEquals(oracle.getValue("feedback"), run.responseAnswers("feedback", descriptor))
+            assertEquals(oracle.getValue("onboarding"), run.responseAnswers("onboarding", descriptor))
+            run.lane.call {
+                val values = checkNotNull(run.prepare(read("screen.riv"), descriptor, artifacts).values)
+                values.setValue("responses:feedback/isset:stars", NuxieViewModelScalarValue.BooleanValue(false))
+                values.setValue("responses:feedback/email", NuxieViewModelScalarValue.StringValue(""))
+                values.setValue("responses:feedback/comment", NuxieViewModelScalarValue.StringValue(""))
+                val snapshot = values.nativeSnapshot()
+                val feedback = snapshot.values.single { it.ownerInstanceId == snapshot.rootInstanceId && it.name == "responses:feedback" }.referencedInstanceId
+                val ids = snapshot.values.single { it.ownerInstanceId == feedback && it.name == "interests" }.listItemIds
+                val child = values.acquireListItem("responses:feedback/interests", 1, ids[1])
+                try { child.setValue("picked", NuxieViewModelScalarValue.BooleanValue(false)) } finally { child.close() }
+            }
+            assertEquals(oracle.getValue("cleared"), run.responseAnswers("feedback", descriptor))
+        } finally { run.retire(); directory.deleteRecursively() }
+    }
+
     @Test fun publishedListChildAcquisitionKeepsIdentityAndRejectsStaleSlot() = runBlocking {
         assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
