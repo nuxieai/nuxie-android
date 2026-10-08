@@ -9,6 +9,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.boolean
 
 internal data class JourneyResponseSave(
     val distinctId: String,
@@ -47,17 +48,46 @@ internal data class JourneyResponseSaveLane(
     var sequence: Long = 0,
     var pending: JourneyResponseSave? = null,
     var retry: JourneyResponseSaveRetry? = null,
+    var display: JourneyResponseSaveDisplay? = null,
 ) {
     fun toJson() = buildJsonObject {
         put("sequence", JsonPrimitive(sequence))
         pending?.let { put("pending", it.toJson()) }
         retry?.let { put("retry", it.toJson()) }
+        display?.let { put("display", it.toJson()) }
     }
     companion object {
         fun fromJson(value: JsonObject) = JourneyResponseSaveLane(
             value.getValue("sequence").jsonPrimitive.long,
             value["pending"]?.jsonObject?.let(JourneyResponseSave::fromJson),
             value["retry"]?.jsonObject?.let(JourneyResponseSaveRetry::fromJson),
+            value["display"]?.jsonObject?.let(JourneyResponseSaveDisplay::fromJson),
+        )
+    }
+}
+
+/** Durable display metadata; answers remain in the run's native values. */
+internal data class JourneyResponseSaveDisplay(
+    val sequence: Long,
+    val saving: Boolean,
+    val saved: Boolean,
+    val saveError: String,
+) {
+    fun finish(reply: JourneyResponseSaveReply) = copy(saving = false, saved = reply.confirmed,
+        saveError = if (reply.confirmed) "" else reply.code.wire)
+    fun toJson() = buildJsonObject {
+        put("sequence", JsonPrimitive(sequence))
+        put("saving", JsonPrimitive(saving))
+        put("saved", JsonPrimitive(saved))
+        put("saveError", JsonPrimitive(saveError))
+    }
+    companion object {
+        fun saving(sequence: Long) = JourneyResponseSaveDisplay(sequence, true, false, "")
+        fun fromJson(value: JsonObject) = JourneyResponseSaveDisplay(
+            value.getValue("sequence").jsonPrimitive.long,
+            value.getValue("saving").jsonPrimitive.boolean,
+            value.getValue("saved").jsonPrimitive.boolean,
+            value.getValue("saveError").jsonPrimitive.content,
         )
     }
 }

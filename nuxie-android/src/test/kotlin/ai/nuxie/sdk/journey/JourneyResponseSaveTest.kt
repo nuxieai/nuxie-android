@@ -1,5 +1,11 @@
 package ai.nuxie.sdk.journey
 
+import ai.nuxie.sdk.events.StableEventCommitAdmission
+import ai.nuxie.sdk.fixtures.FixtureRunner
+import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import ai.nuxie.sdk.experiences.JourneyPlaneProfile
 import java.io.File
 import kotlinx.serialization.json.Json
@@ -21,6 +27,56 @@ class JourneyResponseSaveTest {
     private lateinit var directory: File
     @Before fun setup() { directory = File(RuntimeEnvironment.getApplication().filesDir, "response-saves").apply { mkdirs() } }
     @After fun cleanup() { directory.deleteRecursively() }
+
+    @Test fun `latest display follows shared vectors across restarts`() {
+        var journal = JourneyRunJournal(directory, "anon")
+        val run = responseSaveRun(journal)
+        val sheets = mutableMapOf<Long, JourneyResponseSave>()
+        val steps = json(FixtureRunner.fixturesRoot().resolve("responses/save-display.json").readText())
+            .getValue("steps").jsonArray
+        for (element in steps) {
+            val row = element.jsonObject
+            val sequence = row.getValue("sequence").jsonPrimitive.long
+            val code = row["code"]?.jsonPrimitive?.content?.let { raw ->
+                JourneyResponseSaveReply.Code.entries.single { it.wire == raw }
+            }
+            when (row.getValue("action").jsonPrimitive.content) {
+                "queue", "wait" -> {
+                    val sheet = journal.reserveResponseSave(run, "feedback", json("{}"),
+                        row.getValue("action").jsonPrimitive.content == "queue")
+                    assertEquals(sequence, sheet.sequence)
+                    sheets[sequence] = sheet
+                }
+                "retry", "stop" -> journal.recordResponseSaveReply(sheets.getValue(sequence),
+                    JourneyResponseSaveReply(checkNotNull(code)), 1_000_000)
+                "fail_wait" -> journal.recordWaitingResponseSaveReply(sheets.getValue(sequence),
+                    JourneyResponseSaveReply(checkNotNull(code)))
+                "confirm" -> journal.confirmResponseSave(sheets.getValue(sequence), sequence)
+                else -> error("Unknown shared action")
+            }
+            journal = JourneyRunJournal(directory, "anon")
+            val display = checkNotNull(journal.responseSaveDisplays(run.journeyId)["feedback"])
+            assertEquals(row.getValue("saving"), JsonPrimitive(display.saving))
+            assertEquals(row.getValue("saved"), JsonPrimitive(display.saved))
+            assertEquals(row.getValue("saveError"), JsonPrimitive(display.saveError))
+            assertEquals(row.getValue("pending").jsonArray.map { it.jsonPrimitive.long },
+                journal.pendingResponseSaves().map { it.sequence })
+        }
+    }
+
+    @Test fun `revoked save admission cannot consume sequence or queue`() {
+        for (queued in listOf(false, true)) {
+            val journal = JourneyRunJournal(File(directory, "$queued"), "anon")
+            val run = responseSaveRun(journal)
+            assertThrows(CancellationException::class.java) {
+                journal.reserveResponseSave(run, "feedback", json("{}"), queued,
+                    StableEventCommitAdmission { null })
+            }
+            assertTrue(journal.pendingResponseSaves().isEmpty())
+            assertTrue(journal.responseSaveDisplays(run.journeyId).isEmpty())
+            assertEquals(1L, journal.reserveResponseSave(run, "feedback", json("{}"), queued).sequence)
+        }
+    }
 
     @Test fun `sheets outlive run and restart with independent durable sequences`() {
         val journal = JourneyRunJournal(directory, "anon")
