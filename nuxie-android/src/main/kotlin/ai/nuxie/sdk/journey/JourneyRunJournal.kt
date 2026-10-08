@@ -1,5 +1,8 @@
 package ai.nuxie.sdk.journey
 
+import ai.nuxie.sdk.events.StableEventCommitAdmission
+import kotlinx.coroutines.CancellationException
+
 import ai.nuxie.sdk.presentation.JourneyScreenEmissionSource
 import ai.nuxie.sdk.events.PendingConversionOccurrence
 import ai.nuxie.sdk.events.StoredEvent
@@ -249,21 +252,32 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         }
     }
 
-    fun reserveResponseSave(run: JourneyRun, formName: String, answers: JsonObject, queued: Boolean): JourneyResponseSave = update { state ->
-        val saves = state.responseSaves ?: JourneyResponseSaveState(responseSaveNamespace, distinctId)
-        check(saves.namespace == responseSaveNamespace && saves.distinctId == distinctId) { "Wrong response save owner" }
-        check(state.runs[run.id]?.startedEventId == run.startedEventId || saves.journeys[run.journeyId]?.containsKey(formName) == true) {
-            "Wrong response save owner"
+    fun reserveResponseSave(run: JourneyRun, formName: String, answers: JsonObject, queued: Boolean,
+        admission: StableEventCommitAdmission? = null): JourneyResponseSave {
+        var sheet: JourneyResponseSave? = null
+        val reserve = {
+            sheet = update { state ->
+                val saves = state.responseSaves ?: JourneyResponseSaveState(responseSaveNamespace, distinctId)
+                check(saves.namespace == responseSaveNamespace && saves.distinctId == distinctId) { "Wrong response save owner" }
+                check(state.runs[run.id]?.startedEventId == run.startedEventId || saves.journeys[run.journeyId]?.containsKey(formName) == true) {
+                    "Wrong response save owner"
+                }
+                val forms = saves.journeys.getOrPut(run.journeyId) { linkedMapOf() }
+                val lane = forms.getOrPut(formName) { JourneyResponseSaveLane() }
+                check(lane.sequence < JourneyResponseSave.MAXIMUM_SEQUENCE) { "Response save sequence exhausted" }
+                lane.sequence += 1
+                val sheet = JourneyResponseSave(distinctId, run.journeyId, run.experienceId,
+                    run.reference.text("versionId"), formName, lane.sequence, answers)
+                if (queued) { lane.pending = sheet; lane.retry = null }
+                lane.display = JourneyResponseSaveDisplay.saving(sheet.sequence)
+                state.responseSaves = saves
+                sheet
+            }
+            true
         }
-        val forms = saves.journeys.getOrPut(run.journeyId) { linkedMapOf() }
-        val lane = forms.getOrPut(formName) { JourneyResponseSaveLane() }
-        check(lane.sequence < JourneyResponseSave.MAXIMUM_SEQUENCE) { "Response save sequence exhausted" }
-        lane.sequence += 1
-        val sheet = JourneyResponseSave(distinctId, run.journeyId, run.experienceId,
-            run.reference.text("versionId"), formName, lane.sequence, answers)
-        if (queued) { lane.pending = sheet; lane.retry = null }
-        state.responseSaves = saves
-        sheet
+        if (admission == null) reserve()
+        else if (admission.commitIfCurrent(reserve) != true) throw CancellationException("Save admission revoked")
+        return checkNotNull(sheet)
     }
 
     fun pendingResponseSaves(): List<JourneyResponseSave> = read { state ->
@@ -277,7 +291,28 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         }
         val lane = checkNotNull(state.responseSaves?.journeys?.get(sheet.journeyId)?.get(sheet.formName))
         lane.sequence = maxOf(lane.sequence, storedSequence)
+        if (lane.display?.sequence == sheet.sequence) {
+            lane.display = lane.display?.finish(JourneyResponseSaveReply(JourneyResponseSaveReply.Code.SAVED, storedSequence))
+        }
         if (lane.pending?.let { it.sequence <= sheet.sequence } == true) { lane.pending = null; lane.retry = null }
+    }
+
+    fun responseSaveDisplays(journeyId: String): Map<String, JourneyResponseSaveDisplay> = read { state ->
+        state.responseSaves?.journeys?.get(journeyId)?.mapNotNull { (form, lane) ->
+            lane.display?.let { form to it }
+        }?.toMap().orEmpty()
+    }
+
+    fun recordWaitingResponseSaveReply(sheet: JourneyResponseSave, reply: JourneyResponseSaveReply) {
+        if (reply.confirmed) {
+            confirmResponseSave(sheet, checkNotNull(reply.sequence))
+            return
+        }
+        check(sheet.distinctId == distinctId) { "Wrong response save owner" }
+        update { state ->
+            val lane = checkNotNull(state.responseSaves?.journeys?.get(sheet.journeyId)?.get(sheet.formName))
+            if (lane.display?.sequence == sheet.sequence) lane.display = lane.display?.finish(reply)
+        }
     }
 
     fun responseSaveAttempts(now: Long): List<JourneyResponseSaveAttempt> {
@@ -309,6 +344,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             val expired = reply.code == JourneyResponseSaveReply.Code.UNKNOWN_FORM && retry.unknownFormSince?.let { now - it >= 600_000 } == true
             val stopped = reply.terminal || expired
             if (stopped) {
+                if (lane.display?.sequence == sheet.sequence) lane.display = lane.display?.finish(reply)
                 lane.pending = null
                 lane.retry = null
             } else {

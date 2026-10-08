@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.journey
 
 import ai.nuxie.sdk.logging.NuxieLog as Log
+import ai.nuxie.sdk.events.StableEventCommitAdmission
 import java.io.File
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -29,6 +30,7 @@ internal class JourneyResponseSaveDelivery(
     private val lock = Any()
     private var storageScope: JourneyStorageScope? = null
     private var active = false
+    private var displayObserver: (suspend (JourneyRunJournal, String) -> Unit)? = null
     private val journals = linkedMapOf<String, JourneyRunJournal>()
     private var generation = 0L
     private var worker: Job? = null
@@ -42,6 +44,17 @@ internal class JourneyResponseSaveDelivery(
     private var discovered = false
     private val receiptBackoffs = mutableMapOf<String, RetryBackoff>()
 
+    fun setDisplayObserver(observer: suspend (JourneyRunJournal, String) -> Unit) = synchronized(lock) {
+        displayObserver = observer
+    }
+
+    private suspend fun notifyDisplay(journal: JourneyRunJournal, journeyId: String) {
+        val observer = synchronized(lock) { displayObserver }
+        try { observer?.invoke(journal, journeyId) }
+        catch (error: CancellationException) { throw error }
+        catch (_: Exception) { Log.w(TAG, "Response save display could not be refreshed") }
+    }
+
     fun activate(scope: JourneyStorageScope) = synchronized(lock) {
         if (storageScope != null && storageScope != scope) return@synchronized
         storageScope = scope
@@ -49,10 +62,11 @@ internal class JourneyResponseSaveDelivery(
         wake()
     }
 
-    suspend fun enqueue(journal: JourneyRunJournal, run: JourneyRun, formName: String, answers: JsonObject): JourneyResponseSave {
+    suspend fun enqueue(journal: JourneyRunJournal, run: JourneyRun, formName: String, answers: JsonObject,
+        admission: StableEventCommitAdmission? = null): JourneyResponseSave {
         requireOwner(journal)
         return withContext(Dispatchers.IO) {
-            val sheet = journal.reserveResponseSave(run, formName, answers, true)
+            val sheet = journal.reserveResponseSave(run, formName, answers, true, admission)
             synchronized(lock) {
                 journals[journal.distinctId] = journal
                 wake()
@@ -61,16 +75,26 @@ internal class JourneyResponseSaveDelivery(
         }
     }
 
-    suspend fun sendWaiting(journal: JourneyRunJournal, run: JourneyRun, formName: String, answers: JsonObject): JourneyResponseSaveReply {
+    suspend fun reserveWaiting(journal: JourneyRunJournal, run: JourneyRun, formName: String, answers: JsonObject,
+        admission: StableEventCommitAdmission? = null): JourneyResponseSave {
         requireOwner(journal)
-        val sheet = withContext(Dispatchers.IO) { journal.reserveResponseSave(run, formName, answers, false) }
+        return withContext(Dispatchers.IO) { journal.reserveResponseSave(run, formName, answers, false, admission) }
+    }
+
+    suspend fun sendWaiting(journal: JourneyRunJournal, run: JourneyRun, formName: String, answers: JsonObject): JourneyResponseSaveReply =
+        sendWaiting(reserveWaiting(journal, run, formName, answers), journal)
+
+    suspend fun sendWaiting(sheet: JourneyResponseSave, journal: JourneyRunJournal): JourneyResponseSaveReply {
+        requireOwner(journal)
+        check(sheet.distinctId == journal.distinctId) { "Wrong response save owner" }
         currentCoroutineContext().ensureActive()
         if (!synchronized(lock) { active }) throw CancellationException("Response save delivery stopped")
         val reply = try { transport.sendResponseSave(sheet) }
         catch (error: CancellationException) { throw error }
-        catch (_: Exception) { currentCoroutineContext().ensureActive(); return JourneyResponseSaveReply.noAnswer }
+        catch (_: Exception) { currentCoroutineContext().ensureActive(); JourneyResponseSaveReply.noAnswer }
         currentCoroutineContext().ensureActive()
-        if (reply.confirmed) withContext(Dispatchers.IO) { journal.confirmResponseSave(sheet, checkNotNull(reply.sequence)) }
+        withContext(Dispatchers.IO) { journal.recordWaitingResponseSaveReply(sheet, reply) }
+        notifyDisplay(journal, sheet.journeyId)
         return reply
     }
 
@@ -79,7 +103,7 @@ internal class JourneyResponseSaveDelivery(
     }
 
     suspend fun shutdown() {
-        val task = synchronized(lock) { active = false; worker.also { worker = null } }
+        val task = synchronized(lock) { active = false; displayObserver = null; worker.also { worker = null } }
         task?.cancelAndJoin()
     }
 
@@ -202,6 +226,7 @@ internal class JourneyResponseSaveDelivery(
                                 break@deliveryPass
                             }
                             receiptBackoffs.remove(journal.distinctId)
+                            if (reply.confirmed || stopped) notifyDisplay(journal, attempt.sheet.journeyId)
                             if (stopped) Log.w(TAG, "Response save stopped", null,
                                 Log.sensitive("code", reply.code.wire), Log.sensitive("journey", attempt.sheet.journeyId),
                                 Log.sensitive("form", attempt.sheet.formName), Log.sensitive("owner", attempt.sheet.distinctId))
