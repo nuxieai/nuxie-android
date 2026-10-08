@@ -356,6 +356,7 @@ internal class ExperienceSurfaceHost(
     private val unpublishedSteps = ArrayDeque<PublishedStep>()
     // SUBMITTED retains the exact frame until native completion. Polling must
     // neither step the player nor publish effects from its unfinished frame.
+    private val saveFrameOwner = java.util.UUID.randomUUID().toString()
     private var pendingPresentation = false
     private val pendingTextWrites = ArrayDeque<() -> Unit>()
 
@@ -1030,6 +1031,7 @@ internal class ExperienceSurfaceHost(
             return false
         }
         pendingPresentation = false
+        runValues?.setPresentationPending(saveFrameOwner, false)
         submittedSnapshot = null
         submittedCaptions = null
         return true
@@ -1061,6 +1063,7 @@ internal class ExperienceSurfaceHost(
                 pendingPresentation = false
                 submittedSnapshot = null
                 submittedCaptions = null
+                if (status == NUX_STATUS_OK) runValues?.setPresentationPending(saveFrameOwner, false)
                 if (status != NUX_STATUS_OK) {
                     attached = false
                     reportFailure(
@@ -1099,6 +1102,7 @@ internal class ExperienceSurfaceHost(
                     window?.close()
                     window = null
                 }
+                runValues?.setPresentationPending(saveFrameOwner, false)
                 drainVideoCommands()
             } finally {
                 releaseTexture()
@@ -1342,6 +1346,7 @@ internal class ExperienceSurfaceHost(
                     drainVideoCommands()
                 }
             } finally {
+                runValues?.setPresentationPending(saveFrameOwner, pendingPresentation)
                 framePending.set(false)
                 drainVideoCommands()
             }
@@ -1423,6 +1428,7 @@ internal class ExperienceSurfaceHost(
                     if (firstFailure == null) firstFailure = error else firstFailure?.addSuppressed(error)
                 }
             }
+            runValues?.setPresentationPending(saveFrameOwner, false)
             firstFailure?.let { throw it }
         }
     }
