@@ -46,6 +46,7 @@ internal class ExperienceTextInputOverlay(
         (ExperienceSemanticTextDraft.Outcome) -> Unit) -> Unit)? = null,
     private val nativeNotification: (ExperienceTextFieldTarget, String) -> Unit = { _, _ -> },
     private val nativeEvent: (ExperienceTextFieldTarget, Long, ExperienceSemanticTextDraft.Event) -> Unit = { _, _, _ -> },
+    private val nativeFocus: ((ExperienceTextFieldTarget, Pair<Float, Float>?, (Boolean) -> Unit) -> Unit)? = null,
 ) : FrameLayout(context) {
     private class Binding(val input: ExperienceTextInput, val editor: Editor, val container: FrameLayout,
         var geometryAvailable: Boolean = true, var field: ExperienceNativeTextField,
@@ -100,7 +101,7 @@ internal class ExperienceTextInputOverlay(
             val binding = bindings.firstOrNull { it.field.target == field.target } ?: run {
                 val editor = Editor(context, input.copy(value = field.text))
                 editor.tag = "nuxie-text-input-${input.id}-${field.target.nodeId}"
-                editor.setTextColor(input.style.color)
+                editor.setTextColor(Color.TRANSPARENT)
                 editor.visibility = View.INVISIBLE
                 val container = FrameLayout(context).apply {
                     importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
@@ -112,6 +113,14 @@ internal class ExperienceTextInputOverlay(
                 Binding(input, editor, container, field = field,
                     draft = ExperienceSemanticTextDraft(field.text)).also { created ->
                     bindings += created
+                    editor.onBeginEditing = { point ->
+                        if (!closed && session.isCurrent() && inputEnabled && editor.isEnabled && created in bindings) {
+                            val ownerId = created.field.ownerId
+                            nativeFocus?.invoke(created.field.target, point) { accepted ->
+                                if (!accepted && !closed && created in bindings && created.field.ownerId == ownerId && editor.hasFocus()) clearEditorFocus()
+                            }
+                        }
+                    }
                     editor.onChange = { commit ->
                         if (!closed && session.isCurrent() && inputEnabled && editor.isEnabled && created in bindings) {
                             created.draft.replaceText(editor.text.toString(), editor.isComposingText())
@@ -452,6 +461,15 @@ internal class ExperienceTextInputOverlay(
         }
 
         var onChange: (Boolean) -> Unit = {}
+        var onBeginEditing: ((Pair<Float, Float>?) -> Unit)? = null
+        private var editingTouch: Pair<Float, Float>? = null
+
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) editingTouch = event.rawX to event.rawY
+            val handled = super.onTouchEvent(event)
+            if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) editingTouch = null
+            return handled
+        }
         var onSelection: (() -> Unit)? = null
         var onReturn: (() -> Unit)? = null
         private var normalizing = false
@@ -467,7 +485,7 @@ internal class ExperienceTextInputOverlay(
             imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI or
                 if (input.multiline && !input.secure) EditorInfo.IME_ACTION_NONE else EditorInfo.IME_ACTION_DONE
             hint = input.placeholder
-            setTextColor(if (input.secure) input.style.color else Color.TRANSPARENT)
+            setTextColor(Color.TRANSPARENT)
             setHintTextColor(input.style.color)
             gravity = Gravity.TOP or when (input.style.textAlign?.lowercase(Locale.ROOT)) {
                 "center" -> Gravity.CENTER_HORIZONTAL
@@ -508,6 +526,11 @@ internal class ExperienceTextInputOverlay(
                 }
             })
             onFocusChangeListener = OnFocusChangeListener { _, focused ->
+                if (focused) {
+                    val touch = editingTouch
+                    editingTouch = null
+                    onBeginEditing?.invoke(touch)
+                }
                 if (!focused) {
                     limitText()
                     BaseInputConnection.removeComposingSpans(text)

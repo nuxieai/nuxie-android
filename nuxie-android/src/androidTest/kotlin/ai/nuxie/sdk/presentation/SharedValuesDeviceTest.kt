@@ -148,11 +148,7 @@ class SharedValuesDeviceTest {
         } finally { run.retire() }
     }
 
-    @Test fun publishedInputLocatorReadsFocusedOccurrence() = verifyPublishedInputField(false)
-
-    @Test fun publishedInputFieldSetterSettlesItsNativeBinding() = verifyPublishedInputField(true)
-
-    private fun verifyPublishedInputField(write: Boolean) = runBlocking {
+    @Test fun publishedInputLocatorReadsFocusedOccurrence() = runBlocking {
         assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         fun read(name: String) = assets.open("runtime/published-input/$name").use { it.readBytes() }
@@ -184,18 +180,6 @@ class SharedValuesDeviceTest {
                                 ai.nuxie.sdk.runtime.NativeSemanticState.DISABLED))
                             val seed = capture.readFieldString(player.requireHandle(), occurrence.id, locator).decodeToString()
                             assertEquals("Ada", seed)
-                            if (write) {
-                                assertEquals("The occurrence-checked setter must accept the edit", 0,
-                                    capture.writeFieldString(player.requireHandle(), occurrence.id, locator, "Grace".encodeToByteArray()))
-                                player.step(0.0)
-                                native.renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
-                                val fresh = player.captureSemantics()
-                                try {
-                                    assertEquals("Grace", fresh.readFieldString(player.requireHandle(), occurrence.id, locator).decodeToString())
-                                } finally { fresh.close() }
-                                assertEquals(NuxieViewModelScalarValue.StringValue("Grace"),
-                                    checkNotNull(native.values).snapshot().resolveScalar(listOf("name")))
-                            }
                         } finally { capture.close() }
                     } finally { player.close() }
                 } finally { input.close() }

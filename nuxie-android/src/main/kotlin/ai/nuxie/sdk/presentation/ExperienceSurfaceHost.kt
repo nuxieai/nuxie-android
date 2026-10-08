@@ -717,6 +717,70 @@ internal class ExperienceSurfaceHost(
     private fun stepAndRefreshFocus(step: () -> NuxiePlayerStepOutcome): NuxiePlayerStepOutcome =
         step().also { riveFocusState = it.focusState ?: NuxieFocusState(false, false) }
 
+    private var nativeEditingTarget: ExperienceTextFieldTarget? = null
+    private var nativeEditingOwnerId: Long? = null
+
+    /** Runs on the frame lane, with the same effects and values as a scene step. */
+    private fun nativeEditingStep(
+        pointers: List<ai.nuxie.sdk.runtime.NuxiePlayerPointerEvent> = emptyList(),
+        inputs: List<NuxieFocusInput> = emptyList(),
+    ) {
+        val correlationId = nextCorrelationId
+        nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
+        val outcome = stepAndRefreshFocus {
+            checkNotNull(player).stepTyped(elapsedSeconds = 0.0, pointers = pointers, focusInputs = inputs, correlationId = correlationId)
+        }
+        val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
+        root?.let { retainScreenValues(it) }
+        if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, root))
+    }
+
+    private fun focusNativeField(field: ExperienceNativeTextField, point: Pair<Float, Float>? = null): Boolean {
+        nativeEditingTarget = null
+        val geometry = field.geometry
+        val x = (geometry.textBounds.minX + geometry.textBounds.maxX) / 2f
+        val y = (geometry.textBounds.minY + geometry.textBounds.maxY) / 2f
+        val transform = geometry.worldTransform
+        val position = point ?: (transform.a * x + transform.c * y + transform.tx to
+            transform.b * x + transform.d * y + transform.ty)
+        for (pointers in pointerInput.takeNativeTap(position.first, position.second)) {
+            check(!released.get() && running && sceneInputEnabled.get()) { "Native input is no longer eligible" }
+            nativeEditingStep(pointers = pointers)
+        }
+        val accepted = riveFocusState.hasFocus && riveFocusState.expectsKeyboardInput
+        if (accepted) { nativeEditingTarget = field.target; nativeEditingOwnerId = field.ownerId }
+        return accepted
+    }
+
+    fun beginNativeEditing(target: ExperienceTextFieldTarget, screenPoint: Pair<Float, Float>?, completion: (Boolean) -> Unit) {
+        val generation = frameGeneration.get()
+        val epoch = semanticEpoch.get()
+        val location = IntArray(2)
+        getLocationOnScreen(location)
+        val point = screenPoint?.let { touch ->
+            layoutBounds?.let { bounds ->
+                ExperienceLayoutTransform.create(bounds, width.toFloat(), height.toFloat(), resources.displayMetrics.density)
+                    ?.project(touch.first - location[0], touch.second - location[1])
+            }
+        }
+        val queued = lane.enqueue {
+            pendingTextWrites.addLast {
+                val field = nativeTextFields.singleOrNull { it.target == target }
+                val accepted = if (released.get() || !running || !sceneInputEnabled.get() ||
+                    generation != frameGeneration.get() || epoch != semanticEpoch.get() || field == null) false
+                else try {
+                    focusNativeField(field, point).also { publishSteps() }
+                } catch (error: Exception) {
+                    if (error is kotlinx.coroutines.CancellationException) throw error
+                    false
+                }
+                post { completion(accepted) }
+            }
+            drainTextWrites()
+        }
+        if (!queued) post { completion(false) }
+    }
+
     /** UI entry point. Native edits and optional response commits share the frame lane. */
     fun writeNativeText(target: ExperienceTextFieldTarget, write: ExperienceSemanticTextDraft.Write,
         completion: (ExperienceSemanticTextDraft.Outcome) -> Unit) {
@@ -743,19 +807,17 @@ internal class ExperienceSurfaceHost(
                 var owner: ai.nuxie.sdk.runtime.NuxieFieldViewModel? = null
                 val result = runCatching {
                     owner = checkNotNull(active.fieldOwner(capture, target.nodeId, input.textInputName))
-                    val status = capture.writeFieldString(active.requireHandle(), target.nodeId,
-                        input.textInputName, write.text.encodeToByteArray())
-                    if (status != 0) throw ai.nuxie.sdk.runtime.NuxieRuntimeCallException("write native input", status)
-                    // Settle reverse bindings on the ordinary player before reading the typed source.
-                    val correlationId = nextCorrelationId
-                    nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
-                    val outcome = stepAndRefreshFocus {
-                        active.stepAfterStateMutation(correlationId = correlationId,
-                            textRunNames = emptyList())
+                    if (nativeEditingTarget != target || nativeEditingOwnerId != field.ownerId || !riveFocusState.hasFocus || !riveFocusState.expectsKeyboardInput) {
+                        check(focusNativeField(field)) { "Native field did not accept keyboard focus" }
                     }
-                    val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
-                    root?.let { retainScreenValues(it) }
-                    if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, root))
+                    val inputs = ExperienceFocusInputQueue()
+                    inputs.add(NuxieFocusInput.Key(65, 8, true, false))
+                    inputs.add(NuxieFocusInput.Key(65, 8, false, false))
+                    if (write.text.isEmpty()) {
+                        inputs.add(NuxieFocusInput.Key(259, 0, true, false))
+                        inputs.add(NuxieFocusInput.Key(259, 0, false, false))
+                    } else inputs.add(NuxieFocusInput.Text(write.text))
+                    while (!inputs.isEmpty) nativeEditingStep(inputs = inputs.takeBatch())
                     val evaluated = checkNotNull(owner).snapshot()
                     check(evaluated.nativeRootInstanceId == field.ownerId) { "Native field owner changed during write" }
                     acceptedNativeText[target] = AcceptedNativeText(write.text, evaluated)
@@ -764,6 +826,7 @@ internal class ExperienceSurfaceHost(
                 try { owner?.close() } catch (error: Exception) {
                     reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Native input owner cleanup failed", error)
                 }
+                result.exceptionOrNull()?.let { if (it is kotlinx.coroutines.CancellationException) throw it }
                 val status = (result.exceptionOrNull() as? ai.nuxie.sdk.runtime.NuxieRuntimeCallException)?.status
                 complete(if (result.isSuccess) ExperienceSemanticTextDraft.Outcome.ACCEPTED
                     else if (status == 9) ExperienceSemanticTextDraft.Outcome.STALE_CAPTURE
@@ -796,6 +859,11 @@ internal class ExperienceSurfaceHost(
             pendingTextWrites.addLast {
                 if (released.get() || !running || !sceneInputEnabled.get() || generation != frameGeneration.get() ||
                     epoch != semanticEpoch.get()) return@addLast
+                if (event.kind == ExperienceSemanticTextDraft.EventKind.EDITING_ENDED && nativeEditingTarget == target && nativeEditingOwnerId == ownerId) {
+                    nativeEditingTarget = null
+                    nativeEditingStep(inputs = listOf(NuxieFocusInput.Clear))
+                    publishSteps()
+                }
                 val input = textInputs[target.inputId] ?: return@addLast
                 if (event.kind != input.actionEvent) return@addLast
                 val field = nativeTextFields.singleOrNull { it.target == target && it.ownerId == ownerId } ?: return@addLast
