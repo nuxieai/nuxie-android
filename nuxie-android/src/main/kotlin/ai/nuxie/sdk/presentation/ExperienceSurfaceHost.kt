@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.experiences.JourneyReleaseValuePolicy
 import ai.nuxie.sdk.runtime.NuxieFocusInput
 import ai.nuxie.sdk.runtime.NuxieFocusState
 import ai.nuxie.sdk.runtime.ExperienceVideoPlayback
@@ -605,6 +606,7 @@ internal class ExperienceSurfaceHost(
                         expectedAssets = import.expectedAssets,
                         externalAssets = import.externalAssets,
                         videoEnabled = videoBindings.isNotEmpty(),
+                        valuePolicy = JourneyReleaseValuePolicy.parse(descriptor),
                     ).also { imported ->
                         if (imported == null) systemFontCache.didFailImport(systemFonts)
                         else systemFontCache.didImport(systemFonts)

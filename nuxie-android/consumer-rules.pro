@@ -22,3 +22,9 @@
 
 # Focus inputs are read by field name for the synchronous JNI step.
 -keep class ai.nuxie.sdk.runtime.NativeFocusInput { *; }
+
+# Native table operands are read by field name during synchronous JNI installation.
+-keep class ai.nuxie.sdk.runtime.NativeValueMarker { *; }
+-keep class ai.nuxie.sdk.runtime.NativeValueRule { *; }
+-keep class ai.nuxie.sdk.runtime.NativeRuleGroupMember { *; }
+-keep class ai.nuxie.sdk.runtime.NativeRuleGroup { *; }

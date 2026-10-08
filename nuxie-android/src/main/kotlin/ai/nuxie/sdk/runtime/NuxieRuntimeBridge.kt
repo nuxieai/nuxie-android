@@ -362,4 +362,8 @@ internal object NuxieRuntimeBridge {
     private const val HOST_BUILD_COMMAND =
         "cargo build -p nux-capi --features android-authored-wgsl,android-vulkan,scripting"
     private const val NUX_STATUS_OK = 0
+
+    external fun nativeFileSetValueMarkers(file: Long, entries: Array<NativeValueMarker>): Int
+    external fun nativeFileSetValueRules(file: Long, entries: Array<NativeValueRule>, diagnostic: Array<String?>): Int
+    external fun nativeFileSetRuleGroups(file: Long, entries: Array<NativeRuleGroup>): Int
 }
