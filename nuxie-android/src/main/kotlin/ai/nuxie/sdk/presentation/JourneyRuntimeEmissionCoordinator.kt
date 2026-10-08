@@ -143,8 +143,7 @@ internal class JourneyRuntimeEmissionCoordinator(
             if (closed) return@withLock false
             if (lifetime?.isRetired == true) return@withLock true
             val input = textInputs[inputId] ?: return@withLock false
-            val commitKey = if (input.editableValueName == null) inputId else
-                "$inputId:${checkNotNull(snapshot) { "Native input requires its evaluated owner" }.nativeRootInstanceId}"
+            val commitKey = "$inputId:${checkNotNull(snapshot) { "Native input requires its evaluated owner" }.nativeRootInstanceId}"
             val previous = state.committedValue(commitKey)
                 ?: ExperienceTextInputLimit.apply(input.value, input.maxLength)
             if (previous == text) return@withLock true

@@ -15,16 +15,16 @@ internal object ExperienceNativeTextFieldCapture {
         readText: (Long, String) -> ByteArray,
         readOwner: (Long, String) -> NuxieViewModelSnapshot,
     ): List<ExperienceNativeTextField> {
-        val endpoints = inputs.filter { it.editableValueName != null }
+        val endpoints = inputs
         val captured = mutableListOf<ExperienceNativeTextField>()
         for (node in nodes.filter { it.role == NativeSemanticRole.TEXT_FIELD }) {
             val matches = endpoints.mapNotNull { input ->
-                geometry(node.id, checkNotNull(input.editableValueName))?.let { input to it }
+                geometry(node.id, input.textInputName)?.let { input to it }
             }
             check(matches.size <= 1) { "Multiple input declarations match one native occurrence" }
             val (input, fieldGeometry) = matches.singleOrNull() ?: continue
             check(fieldGeometry.obscured == input.secure) { "Native input obscuring does not match its declaration" }
-            val name = checkNotNull(input.editableValueName)
+            val name = input.textInputName
             val bytes = readText(node.id, name)
             val text = try { bytes.decodeToString(throwOnInvalidSequence = true) }
                 catch (_: CharacterCodingException) { error("Native input contains invalid UTF-8") }
