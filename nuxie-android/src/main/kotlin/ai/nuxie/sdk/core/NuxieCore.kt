@@ -451,7 +451,7 @@ internal class NuxieCore(
         prepareNativeValues = { values, release, delivery ->
             if (release.descriptor["render"] is kotlinx.serialization.json.JsonObject) releaseArtifactAcquirer.acquire(release, delivery).use { acquired ->
                 val bytes = acquired.sceneFile.readBytes()
-                values.lane.call { values.prepare(bytes, release.descriptor, acquired.artifactsByKey) }
+                values.lane.call { values.prepareForRun(bytes, release.descriptor, acquired.artifactsByKey) }
             }
         },
     )
