@@ -250,7 +250,6 @@ internal class NuxieViewModelSnapshot private constructor(
         return (resolveValue(path, selected) as? Value.StringValue)?.value
     }
 
-
     /** Capture stable aliases before playback; never reassign them when a reference changes. */
     fun captureInstanceIds(bindings: List<NuxieViewModelInstanceBinding>): Map<String, Long> {
         val aliases = instanceIds.toMutableMap()
@@ -437,9 +436,6 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         error("newNamedArtboard is not implemented")
 
     fun freeArtboard(handle: Long): Unit = error("freeArtboard is not implemented")
-
-    fun setTextRun(handle: Long, name: String, text: String): NativeCallResult<Boolean> =
-        error("setTextRun is not implemented")
 
     fun newDefaultPlayer(artboardHandle: Long): Long =
         error("newDefaultPlayer is not implemented")
@@ -690,16 +686,6 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         NuxieRuntimeBridge.nativeArtboardInstanceFree(handle)
     }
 
-    override fun setTextRun(handle: Long, name: String, text: String): NativeCallResult<Boolean> {
-        val status = IntArray(1)
-        val changed = NuxieRuntimeBridge.nativeArtboardSetTextRun(
-            handle, name.toByteArray(Charsets.UTF_8), text.toByteArray(Charsets.UTF_8), status,
-        )
-        if (status[0] != NUX_STATUS_OK) return NativeCallResult(status[0], null)
-        check(changed == 0 || changed == 1) { "Native runtime returned a non-canonical text mutation result" }
-        return NativeCallResult(status[0], changed == 1)
-    }
-
     override fun stateMachineNames(fileHandle: Long, artboardName: String?): NativeCallResult<List<String>> {
         val status = intArrayOf(4)
         val names = NuxieRuntimeBridge.nativeFileStateMachineNames(fileHandle, artboardName?.encodeToByteArray(), status)
@@ -733,8 +719,6 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         val value = NuxieRuntimeBridge.nativePlayerFieldStringCopy(player, snapshot, nodeId, name.encodeToByteArray(), status)
         return NativeCallResult(status.single(), value)
     }
-    override fun fieldStringSet(player: Long, snapshot: Long, nodeId: Long, name: String, value: ByteArray): Int =
-        NuxieRuntimeBridge.nativePlayerFieldStringSet(player, snapshot, nodeId, name.encodeToByteArray(), value)
     override fun textInputGeometry(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<NativeTextInputGeometry> {
         val status = intArrayOf(4)
         val geometry = NuxieRuntimeBridge.nativePlayerTextInputGeometry(player, snapshot, nodeId, name.encodeToByteArray(), status)

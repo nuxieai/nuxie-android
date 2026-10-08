@@ -200,8 +200,6 @@ internal object NuxieRuntimeBridge {
 
     external fun nativeArtboardInstanceBindViewModel(artboard: Long, viewModel: Long): Int
 
-    external fun nativeArtboardSetTextRun(artboard: Long, name: ByteArray, text: ByteArray, statusOut: IntArray): Int
-
     external fun nativeViewModelMutate(
         viewModel: Long,
         kind: Int,
@@ -243,8 +241,6 @@ internal object NuxieRuntimeBridge {
     external fun nativePlayerSemanticNodeForTextRun(player: Long, snapshot: Long, name: ByteArray, statusOut: IntArray): Long
 
     external fun nativePlayerFieldStringCopy(player: Long, snapshot: Long, nodeId: Long, name: ByteArray, statusOut: IntArray): ByteArray?
-
-    external fun nativePlayerFieldStringSet(player: Long, snapshot: Long, nodeId: Long, name: ByteArray, value: ByteArray): Int
 
     external fun nativePlayerTextInputGeometry(player: Long, snapshot: Long, nodeId: Long, name: ByteArray, statusOut: IntArray): NativeTextInputGeometry?
 

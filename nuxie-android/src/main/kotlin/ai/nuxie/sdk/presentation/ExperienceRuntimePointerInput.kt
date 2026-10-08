@@ -49,6 +49,11 @@ internal class ExperienceRuntimePointerInput(
         return true
     }
 
+    /** The already queued native edit must not consume a later scene gesture. */
+    fun takeNativeTap(x: Float, y: Float): List<List<NuxiePlayerPointerEvent>> = synchronized(lock) {
+        if (released) emptyList() else listOf(queue.takeNativeTap(x, y))
+    }
+
     fun takeBatch(): List<NuxiePlayerPointerEvent> = synchronized(lock) {
         if (released) emptyList() else queue.takeBatch()
     }
@@ -99,8 +104,18 @@ internal class ExperienceRuntimePointerInput(
             }
         }
 
-        fun takeBatch(): List<NuxiePlayerPointerEvent> {
-            val count = min(events.size, MAXIMUM_ACTIVE_POINTERS)
+        fun takeNativeTap(x: Float, y: Float): List<NuxiePlayerPointerEvent> {
+            // A reserved two-event slot belongs to the admitted native edit.
+            // Ordinary scene pointers keep their place for the next frame.
+            events.addAll(0, listOf(
+                NuxiePlayerPointerEvent(NuxiePlayerPointerKind.DOWN, x, y, 63, 0f),
+                NuxiePlayerPointerEvent(NuxiePlayerPointerKind.UP, x, y, 63, 0f),
+            ))
+            return takeBatch(maximumCount = 2)
+        }
+
+        fun takeBatch(maximumCount: Int = MAXIMUM_ACTIVE_POINTERS): List<NuxiePlayerPointerEvent> {
+            val count = min(events.size, maximumCount)
             if (count == 0) return emptyList()
             return events.subList(0, count).toList().also { batch ->
                 events.subList(0, count).clear()

@@ -111,7 +111,7 @@ internal class ExperienceMountedScreen(
             inputSize?.let { size ->
                 val overlay = ExperienceTextInputOverlay(activity, size, inputs, fonts,
                     prepared.textInputState,
-                    surface::writeNativeText, surface::notifyNativeText, surface::nativeTextEvent)
+                    surface::writeNativeText, surface::notifyNativeText, surface::nativeTextEvent, surface::beginNativeEditing)
                 textOverlay = overlay
                 addView(overlay, FrameLayout.LayoutParams(-1, -1))
             }

@@ -62,8 +62,6 @@ internal interface NuxieSemanticNative {
         error("semanticNodeForTextRun is not implemented")
     fun fieldStringCopy(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<ByteArray> =
         error("fieldStringCopy is not implemented")
-    fun fieldStringSet(player: Long, snapshot: Long, nodeId: Long, name: String, value: ByteArray): Int =
-        error("fieldStringSet is not implemented")
     fun textInputGeometry(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<NativeTextInputGeometry> =
         error("textInputGeometry is not implemented")
     fun fieldViewModel(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<Long> =
@@ -127,10 +125,6 @@ internal class NuxieSemanticSnapshot private constructor(
         val handle = requireFieldHandle(nodeId)
         return native.fieldStringCopy(player, handle, nodeId, name).required("read field value")
     }
-
-    /** Success reports a property write, not reverse-conversion acceptance. */
-    fun writeFieldString(player: Long, nodeId: Long, name: String, value: ByteArray): Int =
-        native.fieldStringSet(player, requireFieldHandle(nodeId), nodeId, name, value)
 
     /** Missing endpoints do not borrow geometry from another occurrence. */
     fun textInputGeometry(player: Long, nodeId: Long, name: String): NuxieTextInputGeometry? {
