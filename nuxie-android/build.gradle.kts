@@ -60,6 +60,8 @@ android {
     // by compiling it with JVM tests; it is never part of an Android variant/AAR.
     java.srcDir("src/hostRenderHarness/kotlin")
   }
+  sourceSets.getByName("test").java.srcDir("src/sharedTest/kotlin")
+  sourceSets.getByName("androidTest").java.srcDir("src/sharedTest/kotlin")
   sourceSets.getByName("androidTest").assets.srcDir(rootProject.file("fixtures"))
   defaultConfig {
     ndk {

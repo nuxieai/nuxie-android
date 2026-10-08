@@ -22,7 +22,7 @@ class ExperienceLayoutTypographyTest {
             false, true, null, emptyMap(),
             ExperienceTextInput.Style("sans-serif", "400", false, 18f, 24f,
                 0f, 0xff000000.toInt(), "font", null))
-        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(400f, 400f),
+        val overlay = nativeInputOverlayFixture(activity, ExperienceArtboardSize(400f, 400f),
             listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
         try {
             activity.setContentView(overlay)
@@ -39,7 +39,7 @@ class ExperienceLayoutTypographyTest {
                     overlay.layout(0, 0, size, size)
                 }
                 layout()
-                overlay.update(snapshot, NuxieTextGeometryCapture.Captured(mapOf("run" to NuxieTextRunGeometry(
+                overlay.updateNativeFixture(snapshot, NuxieTextGeometryCapture.Captured(mapOf("run" to NuxieTextRunGeometry(
                     1uL, transform, transform, bounds, NuxieTextRunGeometry.Layout(transform, bounds), baseline))))
                 layout()
             }
@@ -77,7 +77,7 @@ class ExperienceLayoutTypographyTest {
                             .associate { "${it}Path" to it },
                         ExperienceTextInput.Style("sans-serif", "400", false, number("fontSize"), number("lineHeight"),
                             0f, 0xff000000.toInt(), "font", null))
-                    val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(400f, 400f),
+                    val overlay = nativeInputOverlayFixture(activity, ExperienceArtboardSize(400f, 400f),
                         listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
                     try {
                         activity.setContentView(overlay)
@@ -92,7 +92,7 @@ class ExperienceLayoutTypographyTest {
                                 NativeViewModelSnapshotValue(1, 0, name, NuxieViewModelPropertyKind.NUMBER.nativeValue,
                                     byteArrayOf(), 0, value)
                             }.toTypedArray()))
-                        overlay.update(snapshot, NuxieTextGeometryCapture.Captured(mapOf("run" to NuxieTextRunGeometry(
+                        overlay.updateNativeFixture(snapshot, NuxieTextGeometryCapture.Captured(mapOf("run" to NuxieTextRunGeometry(
                             1uL, transform, transform, bounds, NuxieTextRunGeometry.Layout(transform, bounds), null))))
                         val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-answer")
                         assertEquals(View.VISIBLE, editor.visibility)

@@ -77,6 +77,7 @@
     }
   ],
   "frameBackpressure": {
+    "settlement": "An accepted native field write advances a zero-delta step before the next display frame.",
     "firstFrameNanos": 1000000000,
     "busyFrameCount": 100,
     "busyTickNanos": 1000000,
@@ -84,9 +85,11 @@
     "expectedOrder": [
       "frame:0",
       "write:headline:ok",
+      "frame:0",
       "frame:0"
     ],
     "expectedElapsed": [
+      0,
       0,
       0.101
     ]
