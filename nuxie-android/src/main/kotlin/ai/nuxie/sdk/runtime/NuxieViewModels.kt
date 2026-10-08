@@ -538,6 +538,15 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
     fun snapshotViewModel(viewModelHandle: Long): NativeCallResult<NativeViewModelSnapshot> =
         error("snapshotViewModel is not implemented")
 
+    fun installValueMarkers(file: Long, entries: Array<NativeValueMarker>): Int =
+        error("installValueMarkers is not implemented")
+
+    fun installValueRules(file: Long, entries: Array<NativeValueRule>): NativeRuleInstallResult =
+        error("installValueRules is not implemented")
+
+    fun installRuleGroups(file: Long, entries: Array<NativeRuleGroup>): Int =
+        error("installRuleGroups is not implemented")
+
     fun bindViewModel(artboardHandle: Long, viewModelHandle: Long): Int =
         error("bindViewModel is not implemented")
 
@@ -886,6 +895,18 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         return NativeCallResult(status.single(), snapshot)
     }
 
+    override fun installValueMarkers(file: Long, entries: Array<NativeValueMarker>): Int =
+        NuxieRuntimeBridge.nativeFileSetValueMarkers(file, entries)
+
+    override fun installValueRules(file: Long, entries: Array<NativeValueRule>): NativeRuleInstallResult {
+        val diagnostic = arrayOfNulls<String>(2)
+        val status = NuxieRuntimeBridge.nativeFileSetValueRules(file, entries, diagnostic)
+        return NativeRuleInstallResult(status, diagnostic[0], diagnostic[1])
+    }
+
+    override fun installRuleGroups(file: Long, entries: Array<NativeRuleGroup>): Int =
+        NuxieRuntimeBridge.nativeFileSetRuleGroups(file, entries)
+
     override fun bindViewModel(artboardHandle: Long, viewModelHandle: Long): Int =
         NuxieRuntimeBridge.nativeArtboardInstanceBindViewModel(artboardHandle, viewModelHandle)
 
@@ -1171,6 +1192,8 @@ internal class NuxieBoundViewModel(
 internal class NuxieRuntimeCallException(
     operation: String,
     val status: Int,
+    val diagnosticCode: String? = null,
+    val diagnosticMessage: String? = null,
 ) : IllegalStateException("Native runtime $operation failed with status $status")
 
 internal fun requireNativeSuccess(status: Int, operation: String) {

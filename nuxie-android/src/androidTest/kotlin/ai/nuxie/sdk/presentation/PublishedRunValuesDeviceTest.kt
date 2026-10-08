@@ -111,6 +111,7 @@ internal object PublishedRunValuesFixture {
     val bytes get() = read("screen.riv")
     val expectations get() = Json.parseToJsonElement(read("expectations.json").decodeToString()).jsonObject
     val descriptor get() = buildJsonObject {
+        put("state", JsonObject(emptyMap())); put("responses", JsonObject(emptyMap())); put("ruleGroups", JsonArray(emptyList()))
         putJsonObject("requirements") { put("requiredCapabilities", JsonArray(listOf("nux", "system-fonts").map(::JsonPrimitive))) }
         putJsonObject("leg") {
             putJsonArray("screens") { addJsonObject {

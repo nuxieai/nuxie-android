@@ -15,7 +15,7 @@ class ListCheckpointDeviceTest {
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         fun read(name: String) = assets.open("runtime/$folder/$name").use { it.readBytes() }
         val provenance = Json.parseToJsonElement(read("provenance.json").decodeToString()).jsonObject
-        val descriptor = provenance["fonts"]?.let { fonts -> buildJsonObject { putJsonObject("render") {
+        val descriptor = provenance["fonts"]?.let { fonts -> buildJsonObject { put("state", JsonObject(emptyMap())); put("responses", JsonObject(emptyMap())); put("ruleGroups", JsonArray(emptyList())); putJsonObject("render") {
             put("assets", JsonArray(fonts.jsonArray.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
         } } }
         return Fixture(read("screen.riv"), descriptor)
