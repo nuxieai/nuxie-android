@@ -98,6 +98,129 @@ import org.junit.Test
 
 /** Real publisher bytes, signed defaults, runtime geometry and runtime text writer. */
 class PublishedTextInputDeviceTest {
+    @Test
+    fun nativeEditingUsesRiveFocusAndWholeValueReplacement() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val fixture = loadPublishedFixture(instrumentation)
+        val descriptor = fixture.release.descriptor
+        val screen = descriptor.getValue("render").jsonObject.getValue("screens").jsonArray.first().jsonObject
+        val inputs = ExperienceTextInput.forScreen(descriptor, screen.getValue("id").jsonPrimitive.content)
+        // This is explicitly a test control, not a replacement signed release.
+        val bytes = instrumentation.context.assets.open("runtime/typing-probes/f3-field-in-flow.riv").use { it.readBytes() }
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val run = ExperienceRunValues()
+        val lane = run.lane
+        val nativeField = AtomicReference<ExperienceNativeTextField>()
+        val firstFrame = CountDownLatch(1)
+        val fieldReady = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>()
+        val commits = LinkedBlockingQueue<String>()
+        val callbacks = mutableListOf<String>()
+        lateinit var overlay: ExperienceTextInputOverlay
+        lateinit var surface: ExperienceSurfaceHost
+        val size = ExperienceArtboardSize(393f, 852f)
+        try {
+            instrumentation.runOnMainSync {
+                surface = ExperienceSurfaceHost(activity, lane, artboardSize = size, runValues = run,
+                    listener = object : ExperienceSurfaceHost.Listener {
+                        override fun onFirstFrame() { firstFrame.countDown() }
+                        override fun onNativeTextFields(fields: List<ExperienceNativeTextField>): Map<Long, View> {
+                            fields.singleOrNull()?.let { nativeField.set(it); fieldReady.countDown() }
+                            overlay.updateNativeFields(fields)
+                            return overlay.semanticViews()
+                        }
+                        override fun onTextCommitted(inputId: String, text: String, snapshot: NuxieViewModelSnapshot?) {
+                            commits.add(text)
+                        }
+                        override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
+                    })
+                overlay = ExperienceTextInputOverlay(activity, size, inputs, emptyMap(),
+                    nativeWriter = surface::writeNativeText, nativeNotification = surface::notifyNativeText,
+                    nativeEvent = surface::nativeTextEvent, nativeFocus = surface::beginNativeEditing)
+                activity.setContentView(android.widget.FrameLayout(activity).apply {
+                    addView(surface, android.widget.FrameLayout.LayoutParams(-1, -1))
+                    addView(overlay, android.widget.FrameLayout.LayoutParams(-1, -1))
+                })
+                surface.loadArtboard(bytes, "input", descriptor, fixture.assets, textInputs = inputs)
+            }
+            assertTrue("First frame must be presented", firstFrame.await(30, TimeUnit.SECONDS))
+            assertTrue("Native field must be presented", fieldReady.await(10, TimeUnit.SECONDS))
+            lateinit var editor: EditText
+            instrumentation.runOnMainSync {
+                editor = overlay.semanticViews().values.single() as EditText
+                assertEquals("Ada", editor.text.toString())
+                editor.addTextChangedListener(object : android.text.TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                    override fun afterTextChanged(value: android.text.Editable?) {
+                        callbacks.add("text=$value, composing=${value?.let { android.view.inputmethod.BaseInputConnection.getComposingSpanStart(it) >= 0 } == true}")
+                    }
+                })
+                assertTrue(editor.requestFocus())
+            }
+            fun waitFor(message: String, predicate: () -> Boolean) {
+                val deadline = SystemClock.elapsedRealtime() + 10_000
+                while (!predicate() && failure.get() == null && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(25)
+                assertNull(failure.get())
+                assertTrue(message, predicate())
+            }
+            waitFor("Begin editing must focus Rive") { surface.riveFocusState.hasFocus && surface.riveFocusState.expectsKeyboardInput }
+            fun verify(expected: String) {
+                waitFor("Rive field and its binding must contain the replacement") {
+                    nativeField.get()?.let { it.text == expected && it.snapshot.resolveString("experience/name") == expected } == true
+                }
+                instrumentation.runOnMainSync { assertEquals(expected, editor.text.toString()) }
+            }
+            fun replace(value: String) {
+                instrumentation.runOnMainSync {
+                    editor.selectAll()
+                    checkNotNull(editor.onCreateInputConnection(EditorInfo())).commitText(value, 1)
+                }
+                verify(value)
+            }
+            replace("Grace")
+            replace("")
+            replace("👍🏽")
+            instrumentation.runOnMainSync {
+                editor.selectAll()
+                checkNotNull(editor.onCreateInputConnection(EditorInfo())).setComposingText("ぐれ", 1)
+            }
+            verify("ぐれ")
+            instrumentation.runOnMainSync {
+                val image = Bitmap.createBitmap(editor.width, editor.height, Bitmap.Config.ARGB_8888)
+                try {
+                    editor.draw(android.graphics.Canvas(image))
+                    File(instrumentation.targetContext.cacheDir, "a0-native-composition.png").outputStream().use {
+                        check(image.compress(Bitmap.CompressFormat.PNG, 100, it))
+                    }
+                } finally { image.recycle() }
+            }
+            instrumentation.runOnMainSync {
+                checkNotNull(editor.onCreateInputConnection(EditorInfo())).commitText("グレース", 1)
+            }
+            verify("グレース")
+            instrumentation.runOnMainSync {
+                checkNotNull(editor.onCreateInputConnection(EditorInfo())).performEditorAction(EditorInfo.IME_ACTION_DONE)
+            }
+            waitFor("Done must clear Rive focus") { !surface.riveFocusState.hasFocus }
+            instrumentation.runOnMainSync {
+                assertFalse(editor.hasFocus())
+                val arguments = android.os.Bundle().apply {
+                    putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Grace")
+                }
+                assertTrue(editor.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, arguments))
+            }
+            verify("Grace")
+            assertTrue(surface.riveFocusState.expectsKeyboardInput)
+            instrumentation.runOnMainSync { android.util.Log.i("F3-A0", callbacks.joinToString("; ")) }
+        } finally {
+            instrumentation.runOnMainSync { overlay.close(); surface.release(); activity.finish() }
+            runBlocking { run.retire() }
+            assertTrue(lane.awaitQuiescence(30_000))
+        }
+    }
+
     /** API 23 supports the SDK through the documented non-rendering degradation contract. */
     @Test
     @SdkSuppress(maxSdkVersion = 23)

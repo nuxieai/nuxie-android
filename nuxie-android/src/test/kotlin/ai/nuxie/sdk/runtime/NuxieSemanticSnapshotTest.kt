@@ -86,15 +86,6 @@ class NuxieSemanticSnapshotTest {
             fieldCalls++
             return NativeCallResult(fieldStatus, fieldValue.copyOf().takeIf { fieldStatus == 0 })
         }
-        override fun fieldStringSet(player: Long, snapshot: Long, nodeId: Long, name: String, value: ByteArray): Int {
-            assertEquals(10L, player)
-            assertEquals(99L, snapshot)
-            assertEquals(0xffff_ffffL, nodeId)
-            assertEquals("editable", name)
-            fieldCalls++
-            if (fieldStatus == 0) fieldValue = value.copyOf()
-            return fieldStatus
-        }
         override fun semanticNodeForTextRun(player: Long, snapshot: Long, name: String) =
             NativeCallResult(associationStatus, 0xffff_ffffL.takeIf { associationStatus == 0 })
         val freed = mutableListOf<Long>()
@@ -149,15 +140,11 @@ class NuxieSemanticSnapshotTest {
     @Test fun `field bytes use captured ownership without entering semantic text`() {
         val native = RecordingNative().apply { role = NativeSemanticRole.TEXT_FIELD }
         val snapshot = NuxieSemanticSnapshot.capture(10, native)
-        assertEquals("private 😀", snapshot.readFieldString(10, 0xffff_ffffL, "editable").decodeToString())
-        val next = "changed é".encodeToByteArray()
-        assertEquals(0, snapshot.writeFieldString(10, 0xffff_ffffL, "editable", next))
-        assertArrayEquals(next, snapshot.readFieldString(10, 0xffff_ffffL, "editable"))
+        assertTrue("Occurrence read must retain the value", snapshot.readFieldString(10, 0xffff_ffffL, "editable").decodeToString() == "private 😀")
         assertEquals("", snapshot.tree.nodes.single().value)
         snapshot.close()
         val callsBeforeClose = native.fieldCalls
         assertThrows(IllegalStateException::class.java) { snapshot.readFieldString(10, 0xffff_ffffL, "editable") }
-        assertThrows(IllegalStateException::class.java) { snapshot.writeFieldString(10, 0xffff_ffffL, "editable", next) }
         assertEquals(callsBeforeClose, native.fieldCalls)
     }
 
@@ -169,7 +156,6 @@ class NuxieSemanticSnapshotTest {
         }
         assertEquals(9, error.status)
         assertFalse(error.message.orEmpty().contains("private"))
-        assertEquals(9, snapshot.writeFieldString(10, 0xffff_ffffL, "editable", byteArrayOf()))
         snapshot.close()
     }
 
@@ -178,7 +164,6 @@ class NuxieSemanticSnapshotTest {
         val snapshot = NuxieSemanticSnapshot.capture(10, native)
         for (id in listOf(123L, 0xffff_ffffL)) {
             assertThrows(IllegalStateException::class.java) { snapshot.readFieldString(10, id, "editable") }
-            assertThrows(IllegalStateException::class.java) { snapshot.writeFieldString(10, id, "editable", byteArrayOf()) }
         }
         assertEquals(0, native.fieldCalls)
         snapshot.close()

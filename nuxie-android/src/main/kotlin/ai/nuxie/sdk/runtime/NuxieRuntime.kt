@@ -285,11 +285,6 @@ internal class NuxieRuntimeArtboard internal constructor(
     }
 
     /** Write one exact authored TextValueRun on the owning runtime lane. */
-    fun setTextRun(name: String, text: String): Boolean {
-        val result = native.setTextRun(owned.require(), name, text)
-        if (result.status != NUX_STATUS_OK) throw NuxieRuntimeCallException("set text run", result.status)
-        return checkNotNull(result.value) { "Native runtime returned no text mutation result" }
-    }
 
     /** Snapshot only the signed default bound to this artboard, on its owning lane. */
     fun defaultViewModelSnapshot(): NuxieViewModelSnapshot? {
@@ -675,7 +670,6 @@ internal class NuxieRuntimePlayer internal constructor(
         check(interactionPlayer == null)
         interactionPlayer = player
     }
-
 
     fun step(elapsedSeconds: Double): Int {
         if (interactionPlayer == null) return native.stepPlayerFrame(requireHandle(), elapsedSeconds)
