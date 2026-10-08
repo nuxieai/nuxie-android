@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.journey.JourneyResponseSaveDisplay
+import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import ai.nuxie.sdk.experiences.JourneyReleaseValuePolicy
 import ai.nuxie.sdk.experiences.ExperienceAssetImport
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
@@ -13,6 +15,7 @@ import ai.nuxie.sdk.runtime.NuxieValuePolicy
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
@@ -28,6 +31,8 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
     private var bytes: ByteArray? = null
     private var policy: NuxieValuePolicy? = null
     private var prepared: Native? = null
+    private val appliedSaveDisplays = mutableMapOf<String, JourneyResponseSaveDisplay>()
+    private val mutations = ExperienceRunMutationGate()
 
     internal class Native(
         val renderer: NuxieAndroidVulkanRenderer,
@@ -119,6 +124,39 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
         ExperienceResponseSheet.read(form, declaration, values.nativeSnapshot(), native.file.viewModelCatalog())
     }
 
+    /** Called on the run lane after capture or after native submission retirement. */
+    fun setPresentationPending(owner: String, pending: Boolean) = mutations.setPresentationPending(owner, pending)
+
+    suspend fun applyResponseSaveDisplays(displays: Map<String, JourneyResponseSaveDisplay>, descriptor: JsonObject) {
+        val completion = CompletableDeferred<Unit>()
+        if (!lane.enqueue {
+            mutations.submit({
+                try {
+                    if (!retired.get()) writeResponseSaveDisplays(displays, descriptor)
+                    completion.complete(Unit)
+                } catch (error: Throwable) { completion.completeExceptionally(error) }
+            }, { completion.complete(Unit) })
+        }) completion.complete(Unit)
+        completion.await()
+    }
+
+    private fun writeResponseSaveDisplays(displays: Map<String, JourneyResponseSaveDisplay>, descriptor: JsonObject) {
+        check(!retired.get()) { "The run has ended" }
+        val values = checkNotNull(prepared?.values) { "Run values are unavailable" }
+        val declarations = descriptor["responses"]?.jsonObject.orEmpty()
+        for ((form, display) in displays) {
+            require(form in declarations) { "Response form is unavailable" }
+            val applied = appliedSaveDisplays[form]
+            if (applied != null && (display.sequence < applied.sequence ||
+                display.sequence == applied.sequence && (!applied.saving || display == applied))) continue
+            check(!retired.get()) { "The run has ended" }
+            values.setValue("responses:$form/saving", NuxieViewModelScalarValue.BooleanValue(display.saving))
+            values.setValue("responses:$form/saved", NuxieViewModelScalarValue.BooleanValue(display.saved))
+            values.setValue("responses:$form/saveError", NuxieViewModelScalarValue.StringValue(display.saveError))
+            appliedSaveDisplays[form] = display
+        }
+    }
+
     suspend fun journeyValues(): JsonObject = snapshot()?.journeyValues ?: JsonObject(emptyMap())
 
     suspend fun isPrepared(): Boolean = lane.call { prepared != null }
@@ -144,6 +182,7 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
         if (!synchronized(admission) { retired.compareAndSet(false, true) }) return
         withContext(NonCancellable) {
             lane.call {
+                mutations.retire()
                 nativeRetired = true
                 try { prepared?.values?.close() }
                 finally { closeIfRetired() }
