@@ -25,7 +25,7 @@ class TextInputLimitDeviceTest {
             val input = ExperienceTextInput("name", "headline", "", "answer", null, null,
                 false, false, 2, emptyMap(), ExperienceTextInput.Style(
                     "sans-serif", "400", false, 16f, 20f, 0f, 0xff000000.toInt(), "font", null))
-            val overlay = ExperienceTextInputOverlay(context, ExperienceArtboardSize(200f, 100f),
+            val overlay = nativeInputOverlayFixture(context, ExperienceArtboardSize(200f, 100f),
                 listOf(input), emptyMap(), { _, text, _, done ->
                     writes += text
                     done(Result.success(Unit))
@@ -66,7 +66,7 @@ class TextInputLimitDeviceTest {
                 val input = ExperienceTextInput("name", "headline", current, "answer", null, null,
                     false, false, maximum, emptyMap(), ExperienceTextInput.Style(
                         "sans-serif", "400", false, 16f, 20f, 0f, 0xff000000.toInt(), "font", null))
-                val overlay = ExperienceTextInputOverlay(context, ExperienceArtboardSize(200f, 100f),
+                val overlay = nativeInputOverlayFixture(context, ExperienceArtboardSize(200f, 100f),
                     listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw AssertionError(it) })
                 try {
                     val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
@@ -101,7 +101,7 @@ class TextInputLimitDeviceTest {
                     false, false, maximum, emptyMap(), ExperienceTextInput.Style(
                         "sans-serif", "400", false, 16f, 20f, 0f, 0xff000000.toInt(), "font", null))
                 var lastWrite: Pair<String, Boolean>? = null
-                val overlay = ExperienceTextInputOverlay(context, ExperienceArtboardSize(200f, 100f),
+                val overlay = nativeInputOverlayFixture(context, ExperienceArtboardSize(200f, 100f),
                     listOf(input), emptyMap(), { _, text, commit, done ->
                         lastWrite = text to commit; done(Result.success(Unit))
                     }, { throw AssertionError(it) })

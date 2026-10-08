@@ -27,7 +27,7 @@ class SystemFontInputDeviceTest {
                     val input = ExperienceTextInput("name", "headline", "Native text", "answer", null, null,
                         false, false, null, emptyMap(), ExperienceTextInput.Style(
                             "System", "$weight", false, 24f, 32f, 0f, 0xff000000.toInt(), "system-font", null))
-                    val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(400f, 200f),
+                    val overlay = nativeInputOverlayFixture(activity, ExperienceArtboardSize(400f, 200f),
                         listOf(input), emptyMap(), { id, text, commit, done ->
                             commits += Triple(id, text, commit)
                             done(Result.success(Unit))

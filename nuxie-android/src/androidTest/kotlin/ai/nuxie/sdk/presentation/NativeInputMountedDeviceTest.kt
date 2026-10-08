@@ -37,7 +37,7 @@ class NativeInputMountedDeviceTest {
           "render":{"assets":[{"kind":"font","authoredAssetId":${fontAsset.authoredId},
             "assetUniqueName":"${fontAsset.name}-${fontAsset.authoredId}","key":"font","required":true}],
             "screens":[{"id":"screen","artboardName":"Form"}],"textInputs":[{
-            "id":"name","screenId":"screen","textRunName":"unused","editableValueName":"editable",
+            "id":"name","screenId":"screen","textInputName":"editable",
             "value":"","editable":true,"secureTextEntry":false,"multiline":false,
             "geometry":{},"style":{"fontFamily":"sans-serif","fontWeight":"400","fontStyle":"normal",
               "fontSize":16,"lineHeight":20,"letterSpacing":0,"color":4278190080,"fontAssetUniqueName":""}

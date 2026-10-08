@@ -431,7 +431,7 @@ class PublishedTextInputDeviceTest {
                                     }
                                 }
                                 val schemaSnapshot = checkNotNull(native.snapshotViewModel(root).value)
-                                assertEquals(setOf("screen", "env", "safeArea", "response", "nuxieTextInputs"),
+                                assertEquals(setOf("experience", "state", "screen", "env", "safeArea", "nuxieTextInputs"),
                                     schemaSnapshot.values.filter { it.ownerInstanceId == schemaSnapshot.rootInstanceId }
                                         .map { it.name }.toSet())
                                 assertTrue(runCatching {
@@ -1253,6 +1253,9 @@ class PublishedTextInputDeviceTest {
         val freed = java.util.concurrent.atomic.AtomicInteger()
         val firstFrame = CountDownLatch(1)
         val commits = LinkedBlockingQueue<Pair<String, String>>()
+        val nativeField = AtomicReference<ExperienceNativeTextField>()
+        val fieldReady = CountDownLatch(1)
+        lateinit var textOverlay: ExperienceTextInputOverlay
         val failure = AtomicReference<Throwable?>()
         val releaseNative = CountDownLatch(1)
         val native = object : ai.nuxie.sdk.runtime.NuxieTypedRuntimeNative by ai.nuxie.sdk.runtime.JniNuxieTypedRuntimeNative {
@@ -1281,25 +1284,42 @@ class PublishedTextInputDeviceTest {
                         screen.getValue("height").jsonPrimitive.float), runtime = NuxieRuntime(native),
                     listener = object : ExperienceSurfaceHost.Listener {
                         override fun onFirstFrame() { firstFrame.countDown() }
+                        override fun onNativeTextFields(fields: List<ExperienceNativeTextField>): Map<Long, View> {
+                            val field = fields.singleOrNull() ?: return emptyMap()
+                            nativeField.set(field)
+                            textOverlay.updateNativeFields(fields)
+                            fieldReady.countDown()
+                            return textOverlay.semanticViews()
+                        }
                         override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
                         override fun onTextCommitted(inputId: String, text: String, snapshot: NuxieViewModelSnapshot?) { commits.add(inputId to text) }
                     })
+                // Keep the real draft admission loop, but leave its view unmounted so these
+                // pixel assertions can only observe text rendered by the native runtime.
+                textOverlay = ExperienceTextInputOverlay(activity,
+                    ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float,
+                        screen.getValue("height").jsonPrimitive.float), inputs, emptyMap(),
+                    nativeWriter = checkNotNull(surface)::writeNativeText,
+                    nativeNotification = checkNotNull(surface)::notifyNativeText,
+                    nativeEvent = checkNotNull(surface)::nativeTextEvent).apply { layout(0, 0, 393, 852) }
                 checkNotNull(surface).loadArtboard(fixture.riv.readBytes(), screen.getValue("artboardName").jsonPrimitive.content,
                     fixture.release.descriptor, fixture.assets, textInputs = inputs)
                 activity.setContentView(checkNotNull(surface))
             }
             assertTrue("Window-copy first frame must compose: ${failure.get()}", firstFrame.await(30, TimeUnit.SECONDS))
+            assertTrue("Native occurrence must be presented", fieldReady.await(10, TimeUnit.SECONDS))
+            val originalText = checkNotNull(nativeField.get()).text
+            assertEquals("Ada", originalText)
             val original = copySurface(checkNotNull(surface))
             val region = Rect(0, 0, original.width, original.height)
             fun write(text: String) {
-                val finished = CountDownLatch(1)
-                val result = AtomicReference<Result<Unit>>()
                 instrumentation.runOnMainSync {
-                    checkNotNull(surface).writeText(inputs.single().id, text, true) { result.set(it); finished.countDown() }
+                    val editor = textOverlay.semanticViews().values.single() as EditText
+                    assertTrue("Presented native editor must admit input", editor.isEnabled)
+                    editor.setText(text)
                 }
-                assertTrue(finished.await(10, TimeUnit.SECONDS))
-                checkNotNull(result.get()).getOrThrow()
                 assertEquals(inputs.single().id to text, commits.poll(10, TimeUnit.SECONDS))
+                assertTrue("One accepted edit must notify once", commits.isEmpty())
             }
             write("")
             var cleared = copySurface(checkNotNull(surface))
@@ -1311,7 +1331,7 @@ class PublishedTextInputDeviceTest {
             }
             assertTrue("Native window copy must expose actual rendered glyph changes", changedPixels(original, cleared, region) >= 20)
             cleared.recycle()
-            write(inputs.single().value)
+            write(originalText)
             var restored = copySurface(checkNotNull(surface))
             val restoreDeadline = SystemClock.elapsedRealtime() + 10_000
             while (changedPixels(original, restored, region) != 0 && SystemClock.elapsedRealtime() < restoreDeadline) {
@@ -1358,7 +1378,8 @@ class PublishedTextInputDeviceTest {
             assertEquals(1, freed.get())
         } finally {
             releaseNative.countDown()
-            instrumentation.runOnMainSync { surface?.release(); activity.finish() }
+            instrumentation.runOnMainSync { textOverlay.close()
+                surface?.release(); activity.finish() }
             lane.shutdown()
             assertTrue(lane.awaitQuiescence(30_000))
         }
@@ -1403,7 +1424,7 @@ class PublishedTextInputDeviceTest {
             val deadline = SystemClock.elapsedRealtime() + 10_000
             while (editor == null && SystemClock.elapsedRealtime() < deadline) {
                 instrumentation.runOnMainSync {
-                    editor = activity!!.window.decorView.findViewWithTag<EditText>("nuxie-text-input-$inputId")
+                    editor = findNativeEditor(activity!!.window.decorView, inputId)
                         ?.takeIf { it.isShown && it.width > 1 && it.height > 1 }
                 }
                 if (editor == null) SystemClock.sleep(50)
@@ -1441,8 +1462,8 @@ class PublishedTextInputDeviceTest {
             assertTrue("Clearing must remove Rive glyphs: region=$region changed=${changedPixels(original, cleared, region)}, full=${changedPixels(original, cleared, Rect(0, 0, original.width, original.height))}",
                 changedPixels(original, cleared, region) >= 20)
             commits.clear()
-            edit(instrumentation, field, input.getValue("value").jsonPrimitive.content)
-            assertEquals(inputId to input.getValue("value").jsonPrimitive.content, commits.poll(10, TimeUnit.SECONDS))
+            edit(instrumentation, field, "Ada")
+            assertEquals(inputId to "Ada", commits.poll(10, TimeUnit.SECONDS))
             var restored = copySurface(surface)
             val restoreDeadline = SystemClock.elapsedRealtime() + 5_000
             while (changedPixels(original, restored, region) > 0 && SystemClock.elapsedRealtime() < restoreDeadline) {
@@ -1460,7 +1481,7 @@ class PublishedTextInputDeviceTest {
             commits.clear()
             val replacement = "native@example.com"
             instrumentation.runOnMainSync {
-                assertEquals(input.getValue("value").jsonPrimitive.content, field.text.toString())
+                assertEquals("Ada", field.text.toString())
                 assertTrue(field.requestFocus())
                 field.selectAll()
                 val connection = checkNotNull(field.onCreateInputConnection(EditorInfo()))
@@ -2036,11 +2057,12 @@ class PublishedTextInputDeviceTest {
             val host = checkNotNull(hostActivity)
             val id = checkNotNull(host.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
             val state = checkNotNull(PresentationRegistry.resolve(id)).textInputState
+            val key = nativeCommitKey(host, inputId)
             val deadline = SystemClock.elapsedRealtime() + 10_000
-            while (state.committedValue(inputId) != value && SystemClock.elapsedRealtime() < deadline) {
+            while (state.committedValue(key) != value && SystemClock.elapsedRealtime() < deadline) {
                 SystemClock.sleep(20)
             }
-            assertEquals("Accepted native text must reach the retained screen state", value, state.committedValue(inputId))
+            assertEquals("Accepted native text must reach the retained screen state", value, state.committedValue(key))
             assertNull("Native edits must not synthesize answer events", batches.poll(300, TimeUnit.MILLISECONDS))
         }
 
@@ -2291,7 +2313,7 @@ class PublishedTextInputDeviceTest {
         val automation = instrumentation.uiAutomation
         val originalFlags = automation.serviceInfo.flags
         val fixture = loadPublishedFixture(instrumentation,
-            if (candidateSemantics) "journeys/rendered-semantic-roles" else "journeys/rendered-text-input", candidateSemantics)
+            if (candidateSemantics) "journeys/rendered-semantic-roles" else "journeys/rendered-custom-transition", candidateSemantics)
         val descriptor = fixture.release.descriptor
         val authored = descriptor.getValue("render").jsonObject.getValue("screens").jsonArray.first().jsonObject
         val prepared = PreparedPresentation(fixture.riv, authored.getValue("artboardName").jsonPrimitive.content,
@@ -2337,13 +2359,13 @@ class PublishedTextInputDeviceTest {
             val deadline = SystemClock.uptimeMillis() + 10_000
             var published = nodes()
             while (SystemClock.uptimeMillis() < deadline &&
-                !(published.any { it.text?.toString() == "Choose your plan" } && published.any { it.isEditable })) {
+                !(published.any { it.text?.toString() == "Choose your plan" } && published.any { it.text?.toString() == "Seats" })) {
                 failure.get()?.let { throw AssertionError("Semantic publication failed", it) }
                 SystemClock.sleep(20)
                 published = nodes()
             }
             assertTrue("The heading must become accessible after publication", published.any { it.text?.toString() == "Choose your plan" })
-            assertEquals("The same publication exposes exactly one native editor", 1, published.count { it.isEditable })
+            assertEquals("The retained roles scene has no native input declaration", 0, published.count { it.isEditable })
         } finally {
             try {
                 mounted?.let { owner ->
@@ -2363,7 +2385,7 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun signedAuthoredRolesExposeSecureEditorAndDurableNativeActions() =
+    fun signedAuthoredRolesExposeDurableNativeActions() =
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES)
 
     @Test
@@ -2379,7 +2401,8 @@ class PublishedTextInputDeviceTest {
         org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
         repeat(2) { iteration ->
             try {
-                exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.EDITOR_ENTRY)
+                exerciseDurableNativeEmission(PublishedBehavior.TEXT_INPUT, roleProbe = AuthoredRoleProbe.EDITOR_ENTRY)
+                exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.HEADING_ENTRY)
             } catch (failure: AssertionError) {
                 throw AssertionError("Entry presentation ${iteration + 1}: ${failure.message}", failure)
             }
@@ -2390,7 +2413,7 @@ class PublishedTextInputDeviceTest {
     @SdkSuppress(minSdkVersion = 34)
     fun signedAuthoredRolesRestoreTalkBackEditorAfterHome() {
         org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
-        exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.EDITOR_HOME_RETURN)
+        exerciseDurableNativeEmission(PublishedBehavior.TEXT_INPUT, roleProbe = AuthoredRoleProbe.EDITOR_HOME_RETURN)
     }
 
     @Test
@@ -2796,6 +2819,12 @@ class PublishedTextInputDeviceTest {
                     dispatch(MotionEvent.ACTION_UP)
                 }
             } else {
+                if (roleProbe == AuthoredRoleProbe.EDITOR_ENTRY || roleProbe == AuthoredRoleProbe.EDITOR_HOME_RETURN) {
+                    assertF3EditorTalkBack(instrumentation, first, roleProbe == AuthoredRoleProbe.EDITOR_HOME_RETURN)
+                    assertTrue(journalRun().context.getValue("responses").jsonObject.isEmpty())
+                    assertTrue(accepted.isEmpty())
+                    return
+                }
                 val field = awaitEditor(instrumentation, first, "text-input/screen_1/email_input")
                 if (accessibilityEdit) editUsingAccessibility(instrumentation, "durable@example.com")
                 else edit(instrumentation, field, "durable@example.com")
@@ -2893,7 +2922,7 @@ class PublishedTextInputDeviceTest {
             assertHostedScreen(instrumentation, first, "screen_2")
             assertEquals(1, monitor.hits)
             assertEquals("screen_2", presentations.journeyScreenId(JourneyPresentationOwner(reopened.journeyId, owner)))
-            assertEquals("durable@example.com", checkNotNull(retainedText).committedValue("text-input/screen_1/email_input"))
+            assertEquals("durable@example.com", checkNotNull(retainedText).let { (state, key) -> state.committedValue(key) })
             assertTrue(journalRun().context.getValue("responses").jsonObject.isEmpty())
         } finally {
             releaseOldLane.countDown()
@@ -2913,7 +2942,7 @@ class PublishedTextInputDeviceTest {
         input: TalkBackEmulatorInput,
         targetBeforeHome: android.view.accessibility.AccessibilityNodeInfo,
         restoredTarget: () -> android.view.accessibility.AccessibilityNodeInfo?,
-        nextAfterTarget: () -> android.view.accessibility.AccessibilityNodeInfo,
+        nextAfterTarget: (() -> android.view.accessibility.AccessibilityNodeInfo)? = null,
     ) {
         val automation = instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
         val stopped = CountDownLatch(1)
@@ -2955,7 +2984,8 @@ class PublishedTextInputDeviceTest {
             assertEquals("Restored focus must preserve secure-entry semantics", targetBeforeHome.isPassword, checkNotNull(restored).isPassword)
             // Backgrounding withdraws virtual targets. Compare traversal with the
             // newly presented target, not a retired pre-background platform ID.
-            val expectedNext = nextAfterTarget()
+            // F3 has a single input; roles retain the resumed traversal oracle.
+            val expectedNext = nextAfterTarget?.invoke() ?: return
             input.swipeForward()
             val nextDeadline = SystemClock.uptimeMillis() + 2_000
             var next = focused()
@@ -2978,6 +3008,27 @@ class PublishedTextInputDeviceTest {
         }
     }
 
+    private fun assertF3EditorTalkBack(instrumentation: Instrumentation, activity: Activity, homeReturn: Boolean) {
+        val automation = instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+        val input = TalkBackEmulatorInput(automation,
+            checkNotNull(InstrumentationRegistry.getArguments().getString("nuxieTalkBackInputDevice")))
+        fun editable(): android.view.accessibility.AccessibilityNodeInfo? {
+            fun collect(node: android.view.accessibility.AccessibilityNodeInfo): List<android.view.accessibility.AccessibilityNodeInfo> =
+                listOf(node) + (0 until node.childCount).mapNotNull(node::getChild).flatMap(::collect)
+            return automation.rootInActiveWindow?.let(::collect)?.singleOrNull { it.isEditable }
+        }
+        awaitEditor(instrumentation, activity, "text-input/screen_1/email_input")
+        val deadline = SystemClock.uptimeMillis() + 5_000
+        while (editable()?.isAccessibilityFocused != true && SystemClock.uptimeMillis() < deadline) {
+            input.swipeForward()
+            SystemClock.sleep(20)
+        }
+        val field = checkNotNull(editable())
+        assertTrue("TalkBack must reach F3's native editor", field.isAccessibilityFocused)
+        assertEquals("android.widget.EditText", field.className.toString())
+        if (homeReturn) assertTalkBackHomeReturn(instrumentation, activity, input, field, { editable() })
+    }
+
     private fun assertAuthoredRoles(
         instrumentation: Instrumentation,
         activity: Activity,
@@ -2988,7 +3039,7 @@ class PublishedTextInputDeviceTest {
         val useTalkBack = InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true"
         val automation = if (useTalkBack) instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
             else instrumentation.uiAutomation
-        val expectedLabels = listOf("Choose your plan", "Continue", "Annual plan", "Seats", "Password", "Unavailable", "Plan option", "Plan option", "Optional extras", "Choose the options that suit you.")
+        val expectedLabels = listOf("Choose your plan", "Continue", "Annual plan", "Seats", "Unavailable", "Plan option", "Plan option", "Optional extras", "Choose the options that suit you.")
         fun nodes(): List<android.view.accessibility.AccessibilityNodeInfo> {
             fun collect(node: android.view.accessibility.AccessibilityNodeInfo): List<android.view.accessibility.AccessibilityNodeInfo> =
                 listOf(node) + (0 until node.childCount).mapNotNull { node.getChild(it) }.flatMap { collect(it) }
@@ -3050,7 +3101,7 @@ class PublishedTextInputDeviceTest {
                         try {
                             assertTalkBackHomeReturn(instrumentation, activity, input, next,
                                 { nodes().singleOrNull { label(it) == "Seats" } },
-                                { nodes().single { label(it) == "Password" } })
+                                { nodes().single { label(it) == "Unavailable" } })
                         } catch (failure: AssertionError) {
                             throw AssertionError("Virtual Home/return cycle ${cycle + 1}: ${failure.message}", failure)
                         }
@@ -3059,16 +3110,7 @@ class PublishedTextInputDeviceTest {
                     assertTrue("Home/return must not commit a response", responses().isEmpty())
                     return
                 }
-                if (expected == "Password" && roleProbe in setOf(AuthoredRoleProbe.EDITOR_ENTRY, AuthoredRoleProbe.EDITOR_HOME_RETURN)) {
-                    assertTrue("The prior presentation must finish on the native editor", next.isEditable)
-                    assertEquals("android.widget.EditText", next.className.toString())
-                    if (roleProbe == AuthoredRoleProbe.EDITOR_HOME_RETURN) {
-                        assertTalkBackHomeReturn(instrumentation, activity, input, next, { next }) { nodes().single { label(it) == "Unavailable" } }
-                        assertTrue("Home/return must not produce authored effects", accepted.isEmpty())
-                        assertTrue("Home/return must not commit an untouched editor", responses().isEmpty())
-                    }
-                    return
-                }
+
             }
             assertEquals("Repeated labels must retain distinct TalkBack identities", expectedLabels.size, visited.distinct().size)
             assertEquals(expectedLabels, visited.mapNotNull { label(it) })
@@ -3103,14 +3145,7 @@ class PublishedTextInputDeviceTest {
         assertFalse(disabled.isEnabled)
         assertFalse(disabled.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK))
         assertEquals(2, published.filter { label(it) == "Plan option" }.distinct().size)
-        val field = named("Password")
-        assertTrue(field.isEditable)
-        assertTrue(field.isPassword)
-        assertEquals(1, nodes().count { it.isEditable })
-        val editor = awaitEditor(instrumentation, activity, "text-input/screen_1/password")
-        instrumentation.runOnMainSync { assertEquals("", editor.text.toString()) }
-        assertTrue("An empty Android editor may expose its placeholder", field.text.isNullOrEmpty() || field.isShowingHintText)
-        assertEquals("Password", field.hintText?.toString())
+        assertEquals("Retired text-run declarations do not create native fields", 0, nodes().count { it.isEditable })
         fun awaitEmission(name: String) {
             val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS)) { "Authored native action must reach durable Journey admission: $name" }
             assertEquals(listOf(name), batch.emissions.map { it.name })
@@ -3136,17 +3171,7 @@ class PublishedTextInputDeviceTest {
         if (hardwareInput != null) hardwareInput.swipeDown()
         else assertTrue(named("Seats").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD))
         awaitEmission("seat_decreased")
-        val arguments = Bundle().apply {
-            putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "typed-password")
-        }
-        assertTrue(named("Password").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_FOCUS))
-        assertTrue(named("Password").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, arguments))
-        instrumentation.runOnMainSync { editor.onEditorAction(android.view.inputmethod.EditorInfo.IME_ACTION_DONE) }
-        awaitCommittedText(activity, "text-input/screen_1/password", "typed-password")
-        assertNull("Native password editing must not synthesize an answer event", accepted.poll(300, TimeUnit.MILLISECONDS))
         assertTrue(responses().isEmpty())
-        assertFalse(nodes().any { it.text?.toString() == "typed-password" || it.contentDescription?.toString() == "typed-password" })
-        assertEquals(1, nodes().count { it.isEditable })
         assertEquals(null, accepted.poll(300, TimeUnit.MILLISECONDS))
     }
 
@@ -3233,13 +3258,7 @@ class PublishedTextInputDeviceTest {
             assertEquals("One key must produce one ordered authored action", null, accepted.poll(300, TimeUnit.MILLISECONDS))
         }
         instrumentation.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_TAB)
-        awaitFocus("Password")
-        val editor = awaitEditor(instrumentation, activity, "text-input/screen_1/password")
-        instrumentation.runOnMainSync {
-            assertTrue(editor.hasFocus())
-            assertEquals(direction, editor.layoutDirection)
-            assertEquals("", editor.text.toString())
-        }
+        awaitFocus("Plan option")
         val now = SystemClock.uptimeMillis()
         for (action in listOf(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.ACTION_UP)) {
             instrumentation.sendKeySync(android.view.KeyEvent(now, now, action, android.view.KeyEvent.KEYCODE_TAB,
@@ -3427,15 +3446,37 @@ class PublishedTextInputDeviceTest {
         )
     }
 
-    private fun awaitCommittedText(activity: Activity, inputId: String, expected: String): ExperienceTextInputState {
+    private fun nativeCommitKey(activity: Activity, inputId: String): String {
+        lateinit var surface: ExperienceSurfaceHost
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            surface = checkNotNull(findSurface(activity.window.decorView) as? ExperienceSurfaceHost)
+        }
+        val lane = ExperienceSurfaceHost::class.java.getDeclaredField("lane")
+            .apply { isAccessible = true }.get(surface) as NuxieRuntimeLane
+        val key = AtomicReference<String>()
+        val captured = CountDownLatch(1)
+        assertTrue(lane.enqueue {
+            try {
+                @Suppress("UNCHECKED_CAST")
+                val fields = ExperienceSurfaceHost::class.java.getDeclaredField("nativeTextFields")
+                    .apply { isAccessible = true }.get(surface) as List<ExperienceNativeTextField>
+                fields.singleOrNull { it.target.inputId == inputId }?.let { key.set("$inputId:${it.ownerId}") }
+            } finally { captured.countDown() }
+        })
+        assertTrue("Native occurrence owner must be captured", captured.await(10, TimeUnit.SECONDS))
+        return checkNotNull(key.get()) { "Expected one presented native input owner" }
+    }
+
+    private fun awaitCommittedText(activity: Activity, inputId: String, expected: String): Pair<ExperienceTextInputState, String> {
         val id = checkNotNull(activity.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
         val state = checkNotNull(PresentationRegistry.resolve(id)).textInputState
+        val key = nativeCommitKey(activity, inputId)
         val deadline = SystemClock.elapsedRealtime() + 10_000
-        while (state.committedValue(inputId) != expected && SystemClock.elapsedRealtime() < deadline) {
+        while (state.committedValue(key) != expected && SystemClock.elapsedRealtime() < deadline) {
             SystemClock.sleep(20)
         }
-        assertEquals("Accepted native text must reach the retained screen state", expected, state.committedValue(inputId))
-        return state
+        assertEquals("Accepted native text must reach the retained screen state", expected, state.committedValue(key))
+        return state to key
     }
 
     private fun awaitEditor(instrumentation: Instrumentation, activity: Activity, inputId: String): EditText {
@@ -3443,12 +3484,19 @@ class PublishedTextInputDeviceTest {
         val deadline = SystemClock.elapsedRealtime() + 10_000
         while (editor == null && SystemClock.elapsedRealtime() < deadline) {
             instrumentation.runOnMainSync {
-                editor = activity.window.decorView.findViewWithTag<EditText>("nuxie-text-input-$inputId")
+                editor = findNativeEditor(activity.window.decorView, inputId)
                     ?.takeIf { it.isShown && it.width > 1 && it.height > 1 }
             }
             if (editor == null) SystemClock.sleep(50)
         }
         return checkNotNull(editor) { "Published input must obtain visible live geometry" }
+    }
+
+    private fun findNativeEditor(root: View, inputId: String): EditText? {
+        if (root is EditText && root.tag?.toString()?.startsWith("nuxie-text-input-$inputId-") == true) return root
+        if (root is android.view.ViewGroup) return (0 until root.childCount)
+            .firstNotNullOfOrNull { findNativeEditor(root.getChildAt(it), inputId) }
+        return null
     }
 
     private data class PublishedFixture(
@@ -3508,8 +3556,8 @@ class PublishedTextInputDeviceTest {
         val scripts = (release.descriptor["screenBehaviors"] as? JsonArray).orEmpty().mapNotNull {
             (it.jsonObject["script"] as? JsonObject)?.get("artifact")?.jsonObject
         }
-        val assets = (render.getValue("assets").jsonArray.map { it.jsonObject } + scripts).associate { stage(it) }
-        val references = render.getValue("assets").jsonArray.map { it.jsonObject } + scripts + render.getValue("nux").jsonObject
+        val assets = (render.getValue("assets").jsonArray.map { it.jsonObject }.filter { it["location"]?.jsonPrimitive?.content != "system" } + scripts).associate { stage(it) }
+        val references = render.getValue("assets").jsonArray.map { it.jsonObject }.filter { it["location"]?.jsonPrimitive?.content != "system" } + scripts + render.getValue("nux").jsonObject
         val contentTypes = references.associate { it.getValue("key").jsonPrimitive.content to it.getValue("contentType").jsonPrimitive.content }
         return PublishedFixture(release, riv, assets, entry, trustedKeys, contentTypes)
     }
@@ -3551,7 +3599,7 @@ class PublishedTextInputDeviceTest {
             val root = instrumentation.uiAutomation.rootInActiveWindow
             if (root != null) {
                 try {
-                    val matches = root.findAccessibilityNodeInfosByText("levi@nuxie.dev")
+                    val matches = root.findAccessibilityNodeInfosByText("Ada")
                     editor = matches.firstOrNull { it.isEditable && it.isVisibleToUser }
                     matches.filter { it !== editor }.forEach { it.recycle() }
                 } finally { root.recycle() }

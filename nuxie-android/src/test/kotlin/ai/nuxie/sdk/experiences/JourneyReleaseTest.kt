@@ -25,6 +25,73 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyReleaseTest {
+    @Test fun `version three requires native input names and rejects retired identities`() {
+        val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/native-input-admission.json").readText()).jsonObject
+        val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val render = source.getValue("render").jsonObject
+        val removed = corpus.getValue("removedFields").jsonArray.map { it.jsonPrimitive.content }.toSet()
+        val inputs = render.getValue("textInputs").jsonArray.map {
+            JsonObject(it.jsonObject - removed + ("textInputName" to JsonPrimitive("Email editable value")))
+        }
+        fun candidate(input: JsonObject = inputs.first(), version: String = "nuxie.journey-release.v3") =
+            JsonObject(source + mapOf("schemaVersion" to JsonPrimitive(version),
+                "render" to JsonObject(render + ("textInputs" to JsonArray(listOf(input) + inputs.drop(1))))))
+        JourneySchemaValidator.validate(candidate())
+        for (version in corpus.getValue("retiredVersions").jsonArray) {
+            assertThrows(JourneyReleaseAuthenticationException::class.java) {
+                JourneySchemaValidator.validate(candidate(version = version.jsonPrimitive.content))
+            }
+        }
+        for (field in removed) assertThrows(field, JourneyReleaseAuthenticationException::class.java) {
+            JourneySchemaValidator.validate(candidate(JsonObject(inputs.first() + (field to JsonPrimitive("retired")))))
+        }
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneySchemaValidator.validate(candidate(JsonObject(inputs.first() - "textInputName")))
+        }
+        for (item in corpus.getValue("cases").jsonArray.map { it.jsonObject }) {
+            val input = JsonObject(inputs.first() + ("textInputName" to item.getValue("value")))
+            if (item.getValue("valid").jsonPrimitive.boolean) JourneySchemaValidator.validate(candidate(input))
+            else assertThrows(item.getValue("name").jsonPrimitive.content, JourneyReleaseAuthenticationException::class.java) {
+                JourneySchemaValidator.validate(candidate(input))
+            }
+        }
+    }
+
+    @Test fun `version three signatures reject the retired domain`() {
+        val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val root = JsonObject(source + ("schemaVersion" to JsonPrimitive("nuxie.journey-release.v3")))
+        val bytes = root.toString().encodeToByteArray()
+        val pair = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val trusted = mapOf("TEST_ONLY_V3" to pair.public.encoded.takeLast(32).toByteArray())
+        fun signed(domain: String): ByteArray {
+            val signature = java.security.Signature.getInstance("Ed25519").run {
+                initSign(pair.private)
+                update(domain.encodeToByteArray() + bytes)
+                sign()
+            }
+            return JsonObject(envelope + mapOf(
+                "descriptorBytesBase64" to JsonPrimitive(Base64.encodeToString(bytes, Base64.NO_WRAP)),
+                "descriptorSizeBytes" to JsonPrimitive(bytes.size),
+                "descriptorSha256" to JsonPrimitive(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(bytes).joinToString("") { "%02x".format(it) }),
+                "signature" to buildJsonObject {
+                    put("version", 1); put("algorithm", "ed25519"); put("keyId", "TEST_ONLY_V3")
+                    put("signatureBase64", Base64.encodeToString(signature, Base64.NO_WRAP))
+                },
+            )).toString().encodeToByteArray()
+        }
+        // Literal domains are independent of the production constant.
+        assertArrayEquals(bytes, JourneyReleaseEnvelope.authenticate(signed("nuxie.journey-release.v3\u0000"), trusted).descriptorBytes)
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneyReleaseEnvelope.authenticate(signed("nuxie.journey-release.v2\u0000"), trusted)
+        }
+    }
+
     @Test fun `open links allow host dismissal and screenless legs while screen actions do not`() {
         for (entry in listOf("entry", "renderedEntry")) {
             val envelope = fixture.getValue(entry).jsonObject.getValue("envelope").jsonObject
@@ -107,7 +174,7 @@ class JourneyReleaseTest {
     private val keys = mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(
         fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))
 
-    @Test fun `published font fixtures authenticate with explicit CDN sources`() {
+    @Test fun `published font fixtures authenticate with explicit sources`() {
         for (name in listOf("rendered-text-input", "rendered-custom-transition", "rendered-semantic-roles")) {
             val directory = FixtureRunner.fixturesRoot().resolve("journeys/$name")
             val entry = Json.parseToJsonElement(directory.resolve("release-entry.json").readText()).jsonObject
@@ -126,7 +193,8 @@ class JourneyReleaseTest {
             val fonts = source.getValue("render").jsonObject.getValue("assets").jsonArray
                 .filter { it.jsonObject.getValue("kind").jsonPrimitive.content == "font" }
             assertEquals("$name must exercise font admission", 1, fonts.size)
-            assertEquals("cdn", fonts.single().jsonObject.getValue("location").jsonPrimitive.content)
+            assertEquals(if (name == "rendered-text-input") "system" else "cdn",
+                fonts.single().jsonObject.getValue("location").jsonPrimitive.content)
         }
     }
 
@@ -366,18 +434,18 @@ class JourneyReleaseTest {
         }
         validate(emptyMap())
         for (event in listOf("editing-ended", "return")) {
-            validate(mapOf("editableValueName" to JsonPrimitive("duration-input"),
+            validate(mapOf("textInputName" to JsonPrimitive("duration-input"),
                 "actionEvent" to JsonPrimitive(event), "declarativeActionId" to JsonPrimitive("finish-input")))
         }
-        validate(mapOf("editableValueName" to JsonPrimitive("x".repeat(256))))
-        for (key in listOf("editableValueName", "actionEvent", "declarativeActionId")) {
+        validate(mapOf("textInputName" to JsonPrimitive("x".repeat(256))))
+        for (key in listOf("textInputName", "actionEvent", "declarativeActionId")) {
             for (invalid in listOf(JsonNull, JsonPrimitive(1), JsonPrimitive(false), JsonPrimitive(""), JsonArray(emptyList()))) {
                 assertThrows("$key=$invalid", JourneyReleaseAuthenticationException::class.java) {
                     validate(mapOf(key to invalid))
                 }
             }
         }
-        for ((key, invalid) in listOf("editableValueName" to "x".repeat(257),
+        for ((key, invalid) in listOf("textInputName" to "x".repeat(257),
             "actionEvent" to "change", "unknownInputField" to "value")) {
             assertThrows(key, JourneyReleaseAuthenticationException::class.java) {
                 validate(mapOf(key to JsonPrimitive(invalid)))

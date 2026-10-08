@@ -123,7 +123,7 @@ class PublishedTextInputAlignmentDeviceTest {
                     fun string(key: String) = style.getValue(key).jsonPrimitive.content
                     val prefix = expected[index].jsonObject.getValue("path").jsonPrimitive.content
                     ExperienceTextInput(record.getValue("viewNodeId").jsonPrimitive.content,
-                        record.getValue("textRunName").jsonPrimitive.content,
+                        "synthetic-field-$index",
                         record.getValue("value").jsonPrimitive.content, null, null, null,
                         record["secureTextEntry"]?.jsonPrimitive?.booleanOrNull ?: false,
                         record.getValue("multiline").jsonPrimitive.boolean, null,
@@ -133,7 +133,7 @@ class PublishedTextInputAlignmentDeviceTest {
                             0f, style.getValue("color").jsonPrimitive.long.toInt(), string("fontAssetUniqueName"), "left"))
                 }
                 var writes = 0
-                val current = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(390f, 844f), inputs,
+                val current = nativeInputOverlayFixture(activity, ExperienceArtboardSize(390f, 844f), inputs,
                     inputs.associate { it.style.fontAssetName to fontFile }, { _, _, _, done -> writes += 1; done(Result.success(Unit)) }, { throw it })
                 overlay = current
                 activity.setContentView(current)
@@ -166,9 +166,9 @@ class PublishedTextInputAlignmentDeviceTest {
                     return native.baseline.toFloat()
                 }
                 layout()
-                current.update(snapshot, capture)
+                current.updateNativeFixture(snapshot, capture)
                 layout()
-                inputs.forEach { input ->
+                inputs.forEachIndexed { index, input ->
                     val editor = current.findViewWithTag<EditText>("nuxie-text-input-${input.id}")
                     assertEquals(View.VISIBLE, editor.visibility)
                     if (input.secure) {
@@ -182,7 +182,7 @@ class PublishedTextInputAlignmentDeviceTest {
                     val point = floatArrayOf(0f, editor.baseline.toFloat())
                     editor.matrix.mapPoints(point)
                     (editor.parent as View).matrix.mapPoints(point)
-                    val geometry = capture.fields.getValue(input.runName)
+                    val geometry = capture.fields.getValue(expected[index].jsonObject.getValue("runName").jsonPrimitive.content)
                     if (input.secure) assertNull("Secure runtime text stays blank", geometry.firstBaseline)
                     val baseline = if (input.secure) nativePasswordBaseline(editor.textSize, editor.width, editor.height) / density
                         else checkNotNull(geometry.firstBaseline)
@@ -196,7 +196,7 @@ class PublishedTextInputAlignmentDeviceTest {
                     val path = android.graphics.Path()
                     editor.layout.getCursorPath(1, path, editor.text)
                     path.computeBounds(cursorBefore, true)
-                    current.update(blankSnapshot, blankCapture)
+                    current.updateNativeFixture(blankSnapshot, blankCapture)
                     layout()
                     assertEquals("${input.id} blank runtime run retains native baseline", baselineBefore, editor.baseline)
                     assertEquals(1, editor.selectionStart)
@@ -208,14 +208,14 @@ class PublishedTextInputAlignmentDeviceTest {
                     editor.layout.getCursorPath(1, path, editor.text)
                     path.computeBounds(cursorAfter, true)
                     assertEquals("${input.id} caret geometry stays stable", cursorBefore, cursorAfter)
-                    current.update(snapshot, capture)
+                    current.updateNativeFixture(snapshot, capture)
                     layout()
                 }
                 val focused = current.findViewWithTag<EditText>("nuxie-text-input-${inputs.first().id}")
                 if (fontScalePolicy) assertTrue(focused.requestFocus())
                 val writesBeforeFrames = writes
                 for (frame in metricFrames) {
-                    current.update(frame.snapshot, frame.geometry)
+                    current.updateNativeFixture(frame.snapshot, frame.geometry)
                     layout()
                     if (fontScalePolicy) {
                         assertTrue("Font scaling retains focus", focused.hasFocus())
@@ -234,7 +234,7 @@ class PublishedTextInputAlignmentDeviceTest {
                                     effectiveHeight * density, (editor.layout.getLineBaseline(line) - editor.layout.getLineBaseline(line - 1)).toFloat(), 0.5f)
                             }
                         }
-                        val captured = frame.geometry.fields.getValue(input.runName)
+                        val captured = frame.geometry.fields.getValue(expected[index].jsonObject.getValue("runName").jsonPrimitive.content)
                         val point = floatArrayOf(0f, editor.baseline.toFloat())
                         editor.matrix.mapPoints(point)
                         (editor.parent as View).matrix.mapPoints(point)

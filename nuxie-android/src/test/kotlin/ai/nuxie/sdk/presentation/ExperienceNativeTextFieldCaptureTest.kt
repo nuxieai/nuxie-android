@@ -6,7 +6,7 @@ import org.junit.Test
 
 class ExperienceNativeTextFieldCaptureTest {
     private val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single()
-        .copy(editableValueName = "editable")
+        .copy(textInputName = "editable")
 
     @Test fun `repeated fields carry exact native owners regardless of node order`() {
         val result = ExperienceNativeTextFieldCapture.read(listOf(input), listOf(node(20), node(10)), 9,

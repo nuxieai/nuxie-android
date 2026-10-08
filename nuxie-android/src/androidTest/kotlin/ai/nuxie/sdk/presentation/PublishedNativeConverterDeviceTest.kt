@@ -61,7 +61,7 @@ class PublishedNativeConverterDeviceTest {
         val screen = render.getValue("screens").jsonArray.single().jsonObject
         val screenId = screen.getValue("id").jsonPrimitive.content
         val input = ExperienceTextInput.forScreen(descriptor, screenId).single()
-        assertNotNull("Publisher must emit the native endpoint", input.editableValueName)
+        assertNotNull("Publisher must emit the native endpoint", input.textInputName)
         assertEquals(secure, input.secure)
         assertEquals(ExperienceTextInput.ResponseCapture.BINDING, input.responseCapture)
         val directory = File(instrumentation.targetContext.cacheDir, "$prefix-${System.nanoTime()}").apply { mkdirs() }

@@ -297,15 +297,7 @@ internal class ExperienceSurfaceHost(
     private fun publishSemantics(active: NuxieRuntimePlayer, generation: Long, epoch: Long) {
         if (!semanticsEnabled || epoch != semanticEpoch.get()) return
         val next = active.captureSemantics()
-        val fields = try {
-            textInputs.values.filter { it.editableValueName == null }.mapNotNull { input ->
-                next.nodeForTextRun(active.requireHandle(), input.runName)?.let { input.id to it }
-            }.toMap().also { fields ->
-                check(fields.values.map { it.id }.distinct().size == fields.size) {
-                    "Multiple native fields name the same semantic owner"
-                }
-            }
-        } catch (error: Throwable) { next.close(); throw error }
+        val fields = emptyMap<String, NativeSemanticNode>()
         val nextCaptureId = nativeTextCaptureId + 1
         val nextOwners = mutableMapOf<Long, ai.nuxie.sdk.runtime.NuxieFieldViewModel>()
         val nativeFields = try {
@@ -462,7 +454,7 @@ internal class ExperienceSurfaceHost(
                 nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
                 val outcome = stepAndRefreshFocus {
                     checkNotNull(player).stepTyped(elapsedSeconds = 0.0, correlationId = correlationId,
-                        textRunNames = textInputs.values.map { it.runName }.distinct())
+                        textRunNames = emptyList())
                 }
                 val snapshot = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
                 snapshot?.let(::retainScreenValues)
@@ -546,7 +538,7 @@ internal class ExperienceSurfaceHost(
             val requirements = descriptor?.get("requirements") as? JsonObject
             semanticsEnabled = (requirements?.get("requiredCapabilities") as? JsonArray).orEmpty()
                 .any { (it as? JsonPrimitive)?.content == "experience-accessibility" } ||
-                textInputs.any { it.editableValueName != null }
+                textInputs.isNotEmpty()
             this.textInputs = textInputs.associateBy(ExperienceTextInput::id)
             this.retainedViewModel = retainedViewModel
             val shared = try { runValues?.prepare(sceneBytes, descriptor, artifactsByKey, runtime, systemFontCache) }
@@ -739,7 +731,7 @@ internal class ExperienceSurfaceHost(
                 val field = nativeTextFields.singleOrNull { it.target == target }
                 if (released.get() || !running || !sceneInputEnabled.get() || generation != frameGeneration.get() ||
                     epoch != semanticEpoch.get() || semanticSnapshotEpoch != epoch || write.captureId != nativeTextCaptureId ||
-                    capture == null || active == null || field == null || input?.editableValueName == null ||
+                    capture == null || active == null || field == null || input == null ||
                     capture.validate(active.requireHandle()) != 0) {
                     complete(ExperienceSemanticTextDraft.Outcome.STALE_CAPTURE)
                     return@addLast
@@ -750,16 +742,16 @@ internal class ExperienceSurfaceHost(
                 }
                 var owner: ai.nuxie.sdk.runtime.NuxieFieldViewModel? = null
                 val result = runCatching {
-                    owner = checkNotNull(active.fieldOwner(capture, target.nodeId, input.editableValueName))
+                    owner = checkNotNull(active.fieldOwner(capture, target.nodeId, input.textInputName))
                     val status = capture.writeFieldString(active.requireHandle(), target.nodeId,
-                        input.editableValueName, write.text.encodeToByteArray())
+                        input.textInputName, write.text.encodeToByteArray())
                     if (status != 0) throw ai.nuxie.sdk.runtime.NuxieRuntimeCallException("write native input", status)
                     // Settle reverse bindings on the ordinary player before reading the typed source.
                     val correlationId = nextCorrelationId
                     nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
                     val outcome = stepAndRefreshFocus {
                         active.stepAfterStateMutation(correlationId = correlationId,
-                            textRunNames = textInputs.values.filter { it.editableValueName == null }.map { it.runName }.distinct())
+                            textRunNames = emptyList())
                     }
                     val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
                     root?.let { retainScreenValues(it) }
@@ -828,53 +820,6 @@ internal class ExperienceSurfaceHost(
             }
             drainTextWrites()
         }
-    }
-
-    fun writeText(inputId: String, text: String, commit: Boolean, completion: (Result<Unit>) -> Unit) {
-        fun complete(result: Result<Unit>) { post { completion(result) } }
-        if (released.get()) {
-            complete(Result.failure(IllegalStateException("Experience surface is released")))
-            return
-        }
-        val write = {
-            val result = runCatching {
-                check(!released.get()) { "Experience surface is released" }
-                val input = checkNotNull(textInputs[inputId]) { "Text input is not declared for this screen" }
-                check(input.editableValueName == null) { "Native input requires a captured occurrence" }
-                val limited = ExperienceTextInputLimit.apply(text, input.maxLength)
-                checkNotNull(artboard) { "Experience artboard is unavailable" }
-                    .setTextRun(input.runName, if (input.secure) "" else limited)
-                if (commit) {
-                    val snapshot = if (input.responseCapture == ExperienceTextInput.ResponseCapture.BINDING) {
-                        check(!input.secure) { "Converted secure input is unsupported" }
-                        val correlationId = nextCorrelationId
-                        nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
-                        val outcome = stepAndRefreshFocus {
-                            checkNotNull(player).stepTyped(
-                                elapsedSeconds = 0.0,
-                                correlationId = correlationId,
-                                textRunNames = textInputs.values.map { it.runName }.distinct(),
-                            )
-                        }
-                        val captured = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
-                        captured?.let { retainScreenValues(it) }
-                        if (outcome.hasPublishableEffects()) {
-                            unpublishedSteps.addLast(PublishedStep(correlationId, outcome, captured))
-                        }
-                        publishSteps()
-                        captured
-                    } else null
-                    listener?.onTextCommitted(inputId, limited, snapshot)
-                }
-            }
-            complete(result)
-        }
-        val accepted = lane.enqueue {
-            // A submitted render owns its revision until completion; text edits wait on the same lane.
-            pendingTextWrites.addLast(write)
-            drainTextWrites()
-        }
-        if (!accepted) complete(Result.failure(IllegalStateException("Runtime lane is shut down")))
     }
 
     /** Suspend scene actions during navigation while allowing authored exit animation to render. */
@@ -1198,7 +1143,7 @@ internal class ExperienceSurfaceHost(
                                 pointers = pointerInput.takeBatch(),
                                 focusInputs = focusBatch,
                                 correlationId = correlationId,
-                                textRunNames = textInputs.values.map { it.runName }.distinct(),
+                                textRunNames = emptyList(),
                             )
                         }.also {
                             if (layoutStepPending) {
