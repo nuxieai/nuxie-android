@@ -99,6 +99,138 @@ import org.junit.Test
 /** Real publisher bytes, signed defaults, runtime geometry and runtime text writer. */
 class PublishedTextInputDeviceTest {
     @Test
+    fun nativeEditingSecondPublishedFieldKeepsFirstValue() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val fixture = loadPublishedFixture(instrumentation, "runtime/published-two-fields")
+        val descriptor = fixture.release.descriptor
+        val screen = descriptor.getValue("render").jsonObject.getValue("screens").jsonArray.single().jsonObject
+        val inputs = ExperienceTextInput.forScreen(descriptor, screen.getValue("id").jsonPrimitive.content)
+        assertEquals(2, inputs.size)
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val run = ExperienceRunValues()
+        val lane = run.lane
+        val captured = AtomicReference<List<ExperienceNativeTextField>>(emptyList())
+        val acceptedFocus = AtomicReference<ExperienceTextFieldTarget?>()
+        val firstFrame = CountDownLatch(1)
+        val fieldsReady = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>()
+        lateinit var overlay: ExperienceTextInputOverlay
+        lateinit var surface: ExperienceSurfaceHost
+        val size = ExperienceArtboardSize(393f, 852f)
+        try {
+            instrumentation.runOnMainSync {
+                surface = ExperienceSurfaceHost(activity, lane, artboardSize = size, runValues = run,
+                    listener = object : ExperienceSurfaceHost.Listener {
+                        override fun onFirstFrame() { firstFrame.countDown() }
+                        override fun onNativeTextFields(fields: List<ExperienceNativeTextField>): Map<Long, View> {
+                            captured.set(fields)
+                            overlay.updateNativeFields(fields)
+                            if (fields.size == 2) fieldsReady.countDown()
+                            return overlay.semanticViews()
+                        }
+                        override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
+                    })
+                overlay = ExperienceTextInputOverlay(activity, size, inputs, emptyMap(),
+                    nativeWriter = surface::writeNativeText, nativeNotification = surface::notifyNativeText,
+                    nativeEvent = surface::nativeTextEvent, nativeFocus = { target, point, completion ->
+                        surface.beginNativeEditing(target, point) { accepted ->
+                            if (accepted) acceptedFocus.set(target)
+                            completion(accepted)
+                        }
+                    })
+                activity.setContentView(android.widget.FrameLayout(activity).apply {
+                    addView(surface, android.widget.FrameLayout.LayoutParams(-1, -1))
+                    addView(overlay, android.widget.FrameLayout.LayoutParams(-1, -1))
+                })
+                surface.loadArtboard(fixture.riv.readBytes(), "input", descriptor, fixture.assets, textInputs = inputs)
+            }
+            assertTrue("First frame must be presented", firstFrame.await(30, TimeUnit.SECONDS))
+            assertTrue("Both native fields must be presented", fieldsReady.await(10, TimeUnit.SECONDS))
+            lateinit var first: EditText
+            lateinit var second: EditText
+            instrumentation.runOnMainSync {
+                val editors = overlay.semanticViews().values.map { it as EditText }
+                assertEquals(2, editors.size)
+                first = editors.single { it.text.toString() == "Ada" }
+                second = editors.single { it.text.toString() == "Hopper" }
+                assertTrue(first.requestFocus())
+            }
+            fun waitFor(message: String, predicate: () -> Boolean) {
+                val deadline = SystemClock.elapsedRealtime() + 10_000
+                while (!predicate() && failure.get() == null && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(25)
+                assertNull(failure.get())
+                assertTrue(message, predicate())
+            }
+            waitFor("First field must focus Rive") { surface.riveFocusState.expectsKeyboardInput }
+            val position = IntArray(2)
+            var x = 0f
+            var y = 0f
+            instrumentation.runOnMainSync {
+                val firstPosition = IntArray(2)
+                first.getLocationOnScreen(firstPosition)
+                second.getLocationOnScreen(position)
+                assertTrue("Field 2 must be below field 1", position[1] > firstPosition[1])
+                x = position[0] + second.width / 2f
+                y = position[1] + second.height / 2f
+            }
+            val downTime = SystemClock.uptimeMillis()
+            for (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
+                val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
+                event.source = android.view.InputDevice.SOURCE_TOUCHSCREEN
+                try { instrumentation.sendPointerSync(event) } finally { event.recycle() }
+            }
+            instrumentation.waitForIdleSync()
+            waitFor("Second field must focus Rive before typing") {
+                acceptedFocus.get() == captured.get().singleOrNull { it.text == "Hopper" }?.target &&
+                    surface.riveFocusState.hasFocus && surface.riveFocusState.expectsKeyboardInput
+            }
+            instrumentation.runOnMainSync {
+                assertTrue("The tap must focus field 2", second.hasFocus())
+                assertFalse(first.hasFocus())
+                second.selectAll()
+                checkNotNull(second.onCreateInputConnection(EditorInfo())).commitText("Grace", 1)
+            }
+            waitFor("Only field 2 and its binding must change") {
+                val fields = captured.get()
+                fields.size == 2 && fields.map { it.text }.sorted() == listOf("Ada", "Grace") && fields.all {
+                    it.snapshot.resolveString("experience/name") == "Ada" &&
+                        it.snapshot.resolveString("experience/surname") == "Grace"
+                }
+            }
+            assertTrue(surface.riveFocusState.hasFocus)
+            assertTrue(surface.riveFocusState.expectsKeyboardInput)
+            fun captureNonsecure(name: String) {
+                instrumentation.waitForIdleSync()
+                val image = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
+                try {
+                    File(instrumentation.targetContext.cacheDir, name).outputStream().use {
+                        check(image.compress(Bitmap.CompressFormat.PNG, 100, it))
+                    }
+                } finally { image.recycle() }
+            }
+            instrumentation.runOnMainSync {
+                assertEquals("Ada", first.text.toString())
+                assertEquals("Grace", second.text.toString())
+                second.setSelection(2)
+                assertEquals(2, second.selectionStart)
+                assertEquals(2, second.selectionEnd)
+            }
+            captureNonsecure("two-fields-middle-caret.png")
+            instrumentation.runOnMainSync { second.selectAll() }
+            captureNonsecure("two-fields-selection.png")
+            instrumentation.runOnMainSync {
+                checkNotNull(second.onCreateInputConnection(EditorInfo())).performEditorAction(EditorInfo.IME_ACTION_DONE)
+            }
+            waitFor("Done must clear Rive focus") { !surface.riveFocusState.hasFocus }
+        } finally {
+            instrumentation.runOnMainSync { overlay.close(); surface.release(); activity.finish() }
+            runBlocking { run.retire() }
+            assertTrue(lane.awaitQuiescence(30_000))
+        }
+    }
+
+    @Test
     fun nativeEditingUsesRiveFocusAndWholeValueReplacement() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val fixture = loadPublishedFixture(instrumentation)
