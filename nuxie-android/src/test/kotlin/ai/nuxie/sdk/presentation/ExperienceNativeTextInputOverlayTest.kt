@@ -89,10 +89,9 @@ class ExperienceNativeTextInputOverlayTest {
         val writes = mutableListOf<Pending>()
         val changes = mutableListOf<Pair<Long, String>>()
         val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single()
-            .copy(editableValueName = "answer", maxLength = null)
+            .copy(textInputName = "answer", maxLength = null)
         val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
-            listOf(input), emptyMap(), { _, _, _, _ -> error("Native inputs must not write text runs") },
-            { throw it }, nativeWriter = { target, write, done -> writes += Pending(target, write, done) },
+            listOf(input), emptyMap(), nativeWriter = { target, write, done -> writes += Pending(target, write, done) },
             nativeNotification = { target, text -> changes += target.nodeId to text })
         try {
             overlay.layout(0, 0, 400, 200)

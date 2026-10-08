@@ -48,7 +48,7 @@ class TextInputTypographyDeviceTest {
                             item.getDouble("fontSize").toFloat(), item.getDouble("lineHeight").toFloat(),
                             0f, 0xff000000.toInt(), "font", null))
                     var writes = 0
-                    val current = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(400f, 400f),
+                    val current = nativeInputOverlayFixture(activity, ExperienceArtboardSize(400f, 400f),
                         listOf(input), emptyMap(), { _, _, _, done -> writes++; done(Result.success(Unit)) },
                         { throw AssertionError(it) })
                     overlay = current
@@ -58,7 +58,7 @@ class TextInputTypographyDeviceTest {
                     current.measure(View.MeasureSpec.makeMeasureSpec(size, View.MeasureSpec.EXACTLY),
                         View.MeasureSpec.makeMeasureSpec(size, View.MeasureSpec.EXACTLY))
                     current.layout(0, 0, size, size)
-                    current.update(geometry(geometryScale), capturedGeometry(geometryScale))
+                    current.updateNativeFixture(geometry(geometryScale), capturedGeometry(geometryScale))
                     val editor = current.findViewWithTag<EditText>("nuxie-text-input-answer")
                     val oracle = EditText(activity).apply {
                         background = null
@@ -104,7 +104,7 @@ class TextInputTypographyDeviceTest {
                     assertTrue(connection.setComposingRegion(1, 4))
                     assertEquals("$name composition precondition", 1, BaseInputConnection.getComposingSpanStart(editor.text))
                     val before = writes
-                    current.update(geometry(geometryScale), capturedGeometry(geometryScale))
+                    current.updateNativeFixture(geometry(geometryScale), capturedGeometry(geometryScale))
                     layout(editor)
                     assertEquals(name, text, editor.text.toString())
                     assertEquals(name, 1, editor.selectionStart)

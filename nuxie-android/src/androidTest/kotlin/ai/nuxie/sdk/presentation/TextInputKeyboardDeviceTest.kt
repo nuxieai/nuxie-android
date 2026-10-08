@@ -105,11 +105,11 @@ class TextInputKeyboardDeviceTest {
                         0xff000000.toInt(), "font", null))
                 // Geometry is an independent fixture. The live SurfaceView still
                 // uses its real renderer and participates in the same transform.
-                overlay = ExperienceTextInputOverlay(owner, ExperienceArtboardSize(400f, 1_000f),
+                overlay = nativeInputOverlayFixture(owner, ExperienceArtboardSize(400f, 1_000f),
                     listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) },
                     { throw AssertionError(it) })
                 content.addView(overlay, FrameLayout.LayoutParams(-1, -1))
-                overlay!!.update(snapshot, capturedGeometry())
+                overlay!!.updateNativeFixture(snapshot, capturedGeometry())
                 editor = overlay!!.findViewWithTag<EditText>("nuxie-text-input-name")
             }
             awaitUi(instrumentation, "Editor did not receive its authored layout") { editor.isShown && editor.height > 1 }
@@ -156,10 +156,10 @@ class TextInputKeyboardDeviceTest {
                     "visible=${editor.rootWindowInsets?.isVisible(WindowInsets.Type.ime())}, focused=${editor.hasFocus()}", shift < 0f)
                 assertEquals(originalHostTop + shift, screenTop(host).toFloat(), 2f)
                 assertEquals(originalEditorTop + shift, screenTop(editor).toFloat(), 2f)
-                repeat(10) { overlay!!.update(snapshot, capturedGeometry()) }
+                repeat(10) { overlay!!.updateNativeFixture(snapshot, capturedGeometry()) }
                 assertEquals("Repeated geometry updates must not accumulate a keyboard shift", shift, content.translationY, 2f)
                 val rotated = geometry(rotation = (Math.PI / 2).toFloat(), y = 700f)
-                overlay!!.update(rotated, capturedGeometry(rotation = (Math.PI / 2).toFloat(), y = 700f))
+                overlay!!.updateNativeFixture(rotated, capturedGeometry(rotation = (Math.PI / 2).toFloat(), y = 700f))
                 val rotatedBounds = Rect()
                 assertTrue(editor.getGlobalVisibleRect(rotatedBounds))
                 assertEquals("Rotated field must not be clipped", editor.width.toFloat(), rotatedBounds.height().toFloat(), 2f)
@@ -167,7 +167,7 @@ class TextInputKeyboardDeviceTest {
                 val keyboardTop = screenTop(root) + root.height - root.rootWindowInsets.getInsets(WindowInsets.Type.ime()).bottom
                 assertTrue("Rotated field remained under keyboard", rotatedBounds.bottom <= keyboardTop)
                 val rotatedShift = content.translationY
-                repeat(10) { overlay!!.update(rotated, capturedGeometry(rotation = (Math.PI / 2).toFloat(), y = 700f)) }
+                repeat(10) { overlay!!.updateNativeFixture(rotated, capturedGeometry(rotation = (Math.PI / 2).toFloat(), y = 700f)) }
                 assertEquals(rotatedShift, content.translationY, 2f)
                 val ime = owner.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
                 ime.hideSoftInputFromWindow(editor.windowToken, 0)
