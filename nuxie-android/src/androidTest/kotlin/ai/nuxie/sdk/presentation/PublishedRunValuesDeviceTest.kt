@@ -41,6 +41,10 @@ class PublishedRunValuesDeviceTest {
                         assertEquals(NuxieViewModelScalarValue.NumberValue(
                             PublishedRunValuesFixture.expectations.getValue("startingValues").jsonObject
                                 .getValue("level").jsonPrimitive.double), values.snapshot().resolveScalar(listOf("level")))
+                        assertEquals(NuxieViewModelScalarValue.BooleanValue(true),
+                            values.snapshot().resolveScalar(listOf("isset:level")))
+                        assertEquals(NuxieViewModelScalarValue.BooleanValue(true),
+                            values.snapshot().resolveScalar(listOf("isset:trip_days")))
                         values.setValue("level", NuxieViewModelScalarValue.NumberValue(level))
                     }
                     instrumentation.runOnMainSync {
@@ -110,19 +114,5 @@ internal object PublishedRunValuesFixture {
         .open("runtime/run-values/$name").use { it.readBytes() }
     val bytes get() = read("screen.riv")
     val expectations get() = Json.parseToJsonElement(read("expectations.json").decodeToString()).jsonObject
-    val descriptor get() = buildJsonObject {
-        put("state", JsonObject(emptyMap())); put("responses", JsonObject(emptyMap())); put("ruleGroups", JsonArray(emptyList()))
-        putJsonObject("requirements") { put("requiredCapabilities", JsonArray(listOf("nux", "system-fonts").map(::JsonPrimitive))) }
-        putJsonObject("leg") {
-            putJsonArray("screens") { addJsonObject {
-                put("id", "level"); put("defaultViewModelName", "Runtime level scr_screens_slevel")
-                put("defaultInstanceId", "level-root")
-            } }
-        }
-        putJsonObject("render") {
-            putJsonArray("screens") { addJsonObject { put("id", "level"); put("artboardName", "level") } }
-            val fonts = Json.parseToJsonElement(read("provenance.json").decodeToString()).jsonObject.getValue("fonts").jsonArray
-            put("assets", JsonArray(fonts.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
-        }
-    }
+    val descriptor get() = Json.parseToJsonElement(read("release.json").decodeToString()).jsonObject
 }
