@@ -47,6 +47,37 @@ class JourneyResponseSaveDeliveryTest {
         JourneyResponseSaveDelivery(directory, transport, scope, now, sleep = { delay(it) }).also { workers += it }
     private fun reply(value: String, sequence: Long = 1) = JourneyResponseSaveReply.decode(value.encodeToByteArray(), sequence)
 
+    @Test fun `reservation precedes transport and observers see durable completion`() = runBlocking {
+        for (queued in listOf(false, true)) {
+            val journal = JourneyRunJournal(File(directory, "$queued"), "anon")
+            val run = responseSaveRun(journal)
+            val sent = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val observed = CompletableDeferred<JourneyResponseSaveDisplay>()
+            val delivery = worker(JourneyResponseSaveTransport { sheet ->
+                sent.complete(Unit)
+                release.await()
+                JourneyResponseSaveReply(JourneyResponseSaveReply.Code.SAVED, sheet.sequence)
+            })
+            delivery.setDisplayObserver { source, journey ->
+                val reopened = JourneyRunJournal(File(directory, "$queued"), source.distinctId)
+                assertTrue(reopened.pendingResponseSaves().isEmpty())
+                observed.complete(checkNotNull(reopened.responseSaveDisplays(journey)["feedback"]))
+            }
+            delivery.activate(JourneyStorageScope.testFixture)
+            val sheet = if (queued) delivery.enqueue(journal, run, "feedback", json("{}"))
+                else delivery.reserveWaiting(journal, run, "feedback", json("{}"))
+            assertEquals(JourneyResponseSaveDisplay.saving(1), journal.responseSaveDisplays(run.journeyId)["feedback"])
+            if (!queued) assertFalse(sent.isCompleted)
+            val waiting = if (queued) null else async { delivery.sendWaiting(sheet, journal) }
+            withTimeout(5_000) { sent.await() }
+            release.complete(Unit)
+            assertEquals(JourneyResponseSaveDisplay(1, false, true, ""), withTimeout(5_000) { observed.await() })
+            waiting?.await()?.let { assertTrue(it.confirmed) }
+            delivery.shutdown()
+        }
+    }
+
     @Test fun `whole number receipt spellings retain numeric sequences`() {
         val rows = json(FixtureRunner.fixturesRoot().resolve("responses/save-cases.json").readText()).getValue("replies").jsonArray.takeLast(4)
         val sequences = rows.map { JourneyResponseSaveReply.decode(
