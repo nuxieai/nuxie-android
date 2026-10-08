@@ -22,6 +22,7 @@ internal class NuxieRuntime(
         externalAssets: Map<Int, ByteArray> = emptyMap(),
         imageDecoder: NuxImageDecoder = AndroidImageDecoder,
         videoEnabled: Boolean = false,
+        valuePolicy: NuxieValuePolicy? = null,
     ): NuxieRuntimeFile? = native.newFile(
         renderer.requireHandle(),
         bytes,
@@ -31,7 +32,20 @@ internal class NuxieRuntime(
         videoEnabled,
     )
         .takeUnless { it == 0L }
-        ?.let { NuxieRuntimeFile(it, native) }
+        ?.let { handle ->
+            val file = NuxieRuntimeFile(handle, native)
+            try {
+                if (valuePolicy != null) {
+                    file.installValueMarkers(valuePolicy.markers(file.viewModelCatalog()))
+                    file.installValueRules(valuePolicy.rules)
+                    file.installRuleGroups(valuePolicy.groups)
+                }
+                file
+            } catch (error: Throwable) {
+                runCatching { file.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                throw error
+            }
+        }
 
     fun newAndroidVulkanRenderer(
         pixelWidth: Int,
@@ -195,6 +209,23 @@ internal class NuxieRuntimeFile(
     private val native: NuxieTypedRuntimeNative,
 ) {
     private val owned = NuxieOwnedHandle(handle, "file", native::freeFile)
+
+    fun installValueMarkers(entries: List<NuxieValueMarker>) = requireNativeSuccess(
+        native.installValueMarkers(owned.require(), entries.map { it.toNative() }.toTypedArray()),
+        "install value markers",
+    )
+
+    fun installValueRules(entries: List<NuxieValueRule>) {
+        val result = native.installValueRules(owned.require(), entries.map { it.toNative() }.toTypedArray())
+        if (result.status != NUX_STATUS_OK) {
+            throw NuxieRuntimeCallException("install value rules", result.status, result.code, result.message)
+        }
+    }
+
+    fun installRuleGroups(entries: List<NuxieRuleGroup>) = requireNativeSuccess(
+        native.installRuleGroups(owned.require(), entries.map { it.toNative() }.toTypedArray()),
+        "install rule groups",
+    )
 
     fun newArtboard(name: String? = null): NuxieRuntimeArtboard? {
         val file = owned.require()

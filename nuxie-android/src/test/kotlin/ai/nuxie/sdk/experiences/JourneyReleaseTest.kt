@@ -25,6 +25,23 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyReleaseTest {
+    @Test fun `version three requires native value policy sections`() {
+        val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val root = JsonObject(source + mapOf(
+            "state" to Json.parseToJsonElement("""{"days":{"type":"number"},"goals":{"type":"list","items":{"title":{"type":"string"}}}}"""),
+            "responses" to JsonObject(emptyMap()), "ruleGroups" to JsonArray(emptyList()),
+        ))
+        JourneySchemaValidator.validate(root)
+        for (key in listOf("state", "responses", "ruleGroups")) {
+            assertThrows(JourneyReleaseAuthenticationException::class.java) { JourneySchemaValidator.validate(JsonObject(root - key)) }
+        }
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneySchemaValidator.validate(JsonObject(root + ("state" to Json.parseToJsonElement("""{"days":{"type":"number","rules":[]}}"""))))
+        }
+    }
+
     @Test fun `version three requires native input names and rejects retired identities`() {
         val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/native-input-admission.json").readText()).jsonObject
