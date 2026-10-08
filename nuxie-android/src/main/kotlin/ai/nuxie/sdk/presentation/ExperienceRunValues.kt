@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 
 /** One run's file, renderer domain and authored values, confined to one native lane. */
 internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSnapshot? = null) {
@@ -106,6 +107,16 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
         prepared?.let { state -> state.values?.nativeSnapshot()?.let {
             ExperienceRunSnapshot.capture(it, state.origins, state.authoredIds)
         } }
+    }
+
+    suspend fun responseAnswers(form: String, descriptor: JsonObject): JsonObject = lane.call {
+        check(!retired.get()) { "The run has ended" }
+        val declaration = requireNotNull(descriptor["responses"]?.jsonObject?.get(form)?.jsonObject) {
+            "Response form is unavailable"
+        }
+        val native = checkNotNull(prepared) { "Run values are unavailable" }
+        val values = checkNotNull(native.values) { "Run values are unavailable" }
+        ExperienceResponseSheet.read(form, declaration, values.nativeSnapshot(), native.file.viewModelCatalog())
     }
 
     suspend fun journeyValues(): JsonObject = snapshot()?.journeyValues ?: JsonObject(emptyMap())
