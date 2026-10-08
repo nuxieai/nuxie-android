@@ -13,48 +13,40 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SharedValuesDeviceTest {
-    @Test fun nativePolicyInstallsBeforeFirstWriteAndRejectsBadTables() = runBlocking {
-        val runtime = ai.nuxie.sdk.runtime.NuxieRuntime.shared
-        assertTrue(runtime.isAvailable)
-        val assets = InstrumentationRegistry.getInstrumentation().context.assets
-        val bytes = assets.open("runtime/run-values/screen.riv").use { it.readBytes() }
-        val fonts = Json.parseToJsonElement(assets.open("runtime/run-values/provenance.json")
-            .use { it.readBytes() }.decodeToString()).jsonObject.getValue("fonts").jsonArray
-        val descriptor = buildJsonObject { putJsonObject("render") {
-            put("assets", JsonArray(fonts.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
-        } }
-        val lane = ai.nuxie.sdk.runtime.NuxieRuntimeLane()
-        try { lane.call {
-            val fontCache = ai.nuxie.sdk.experiences.SystemFontCache.shared
-            val leases = mutableListOf<ai.nuxie.sdk.experiences.SystemFontCache.Lease>()
-            val imports = ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder.build(descriptor, emptyMap(),
-                checkNotNull(runtime.inspectFileAssets(bytes)),
-                systemFontBytes = { fontCache.prepare(it).also(leases::add).candidate.bytes })
-            val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(1, 1))
-            val rule = ai.nuxie.sdk.runtime.NuxieValueRule("Experience", "trip_days", 2, 1, 25.0,
-                "", emptyList(), "", 0, 0, 0, "max", "At most 25")
-            try {
-                assertThrows(ai.nuxie.sdk.runtime.NuxieRuntimeCallException::class.java) {
-                    runtime.importFile(renderer, bytes, imports.expectedAssets, imports.externalAssets,
-                        valuePolicy = ai.nuxie.sdk.runtime.NuxieValuePolicy(listOf(rule.copy(model = "MissingModel")), emptyList()))
+    @Test fun publishedF5InstallsResponseRulesBeforeFirstMutation() = runBlocking {
+        assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val assets = instrumentation.context.assets
+        fun read(name: String) = assets.open("runtime/forms-saves/$name").use { it.readBytes() }
+        val descriptor = Json.parseToJsonElement(read("release.json").decodeToString()).jsonObject
+        ai.nuxie.sdk.experiences.JourneySchemaValidator.validate(descriptor)
+        assertEquals(setOf("onboarding", "feedback"), descriptor.getValue("responses").jsonObject.keys)
+        assertEquals(2, descriptor.getValue("ruleGroups").jsonArray.size)
+        val directory = java.io.File(instrumentation.targetContext.cacheDir, "f5-policy-${java.util.UUID.randomUUID()}").apply { mkdirs() }
+        try {
+            val artifacts = descriptor.getValue("render").jsonObject.getValue("assets").jsonArray
+                .map { it.jsonObject }.filter { it["key"] != null }.associate { asset ->
+                    val key = asset.getValue("key").jsonPrimitive.content
+                    key to java.io.File(directory, asset.getValue("sha256").jsonPrimitive.content).apply { writeBytes(read(key)) }
                 }
-                repeat(2) {
-                    val file = checkNotNull(runtime.importFile(renderer, bytes, imports.expectedAssets, imports.externalAssets,
-                        valuePolicy = ai.nuxie.sdk.runtime.NuxieValuePolicy(listOf(rule), emptyList())))
-                    try {
-                        val values = checkNotNull(file.newAuthoredViewModel("Experience", 0))
-                        try {
-                            values.setValue("trip_days", NuxieViewModelScalarValue.NumberValue(30.0))
-                            assertEquals(NuxieViewModelScalarValue.NumberValue(23.0), values.snapshot().resolveScalar(listOf("trip_days")))
-                            values.setValue("trip_days", NuxieViewModelScalarValue.NumberValue(24.0))
-                            assertEquals(NuxieViewModelScalarValue.NumberValue(24.0), values.snapshot().resolveScalar(listOf("trip_days")))
-                        } finally { values.close() }
-                    } finally { file.close() }
-                }
-                fontCache.didImport(leases)
-            } catch (error: Throwable) { fontCache.didFailImport(leases); throw error }
-            finally { renderer.close() }
-        } } finally { lane.shutdown() }
+            repeat(2) {
+                val run = ExperienceRunValues()
+                try { run.lane.call {
+                    val values = checkNotNull(run.prepare(read("screen.riv"), descriptor, artifacts).values)
+                    fun feedback(field: String) = values.snapshot().resolveScalar(listOf("responses:feedback", field))
+                    assertEquals(NuxieViewModelScalarValue.NumberValue(0.0), feedback("stars"))
+                    assertEquals(NuxieViewModelScalarValue.BooleanValue(false), feedback("isset:stars"))
+                    assertEquals(NuxieViewModelScalarValue.BooleanValue(false), feedback("valid"))
+                    values.setValue("responses:feedback/stars", NuxieViewModelScalarValue.NumberValue(4.0))
+                    assertEquals(NuxieViewModelScalarValue.NumberValue(4.0), feedback("stars"))
+                    assertEquals(NuxieViewModelScalarValue.BooleanValue(true), feedback("isset:stars"))
+                    assertEquals("Unanswered optional interests do not fail minItems",
+                        NuxieViewModelScalarValue.BooleanValue(true), feedback("valid"))
+                    values.setValue("responses:feedback/stars", NuxieViewModelScalarValue.NumberValue(6.0))
+                    assertEquals(NuxieViewModelScalarValue.NumberValue(4.0), feedback("stars"))
+                } } finally { run.retire() }
+            }
+        } finally { directory.deleteRecursively() }
     }
 
     @Test fun publishedListChildAcquisitionKeepsIdentityAndRejectsStaleSlot() = runBlocking {
