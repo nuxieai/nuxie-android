@@ -379,6 +379,7 @@ internal class ExperienceSurfaceHost(
     private var submittedSnapshot: SubmittedTextSnapshot? = null
     private val textPublication = AtomicLong()
     private var sharedValuesLinked = false
+    private var ownsRuntimeFile = true
     private fun retainScreenValues(snapshot: NuxieViewModelSnapshot) {
         retainedViewModel?.set(if (sharedValuesLinked) snapshot.withoutRootProperty("experience") else snapshot)
     }
@@ -549,6 +550,7 @@ internal class ExperienceSurfaceHost(
                 onLoaded?.invoke(false)
                 return@enqueue
             }
+            ownsRuntimeFile = shared?.values == null
             if (shared != null) renderer = shared.renderer
             val activeRenderer = ensureRenderer(1, 1)
             if (activeRenderer == null) {
@@ -678,7 +680,7 @@ internal class ExperienceSurfaceHost(
                 artboard = null
                 file = null
                 runCatching { loadedArtboard.close() }.exceptionOrNull()?.let(error::addSuppressed)
-                if (shared == null) runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                if (ownsRuntimeFile) runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 reportFailure(
                     ExperiencePresentationException.Reason.PREPARATION_FAILED,
                     "Experience view-model binding failed",
@@ -703,7 +705,7 @@ internal class ExperienceSurfaceHost(
                 artboard = null
                 file = null
                 runCatching { loadedArtboard.close() }.exceptionOrNull()?.let(error::addSuppressed)
-                if (shared == null) runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                if (ownsRuntimeFile) runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 reportFailure(
                     ExperiencePresentationException.Reason.HOST_FAILED,
                     "Experience player creation failed",
@@ -958,7 +960,7 @@ internal class ExperienceSurfaceHost(
                 )
                 return@enqueue
             }
-            if ((if (runValues == null) activeRenderer.resize(width.coerceAtLeast(1), height.coerceAtLeast(1)) else activeRenderer.resizeIfIdle(width.coerceAtLeast(1), height.coerceAtLeast(1))) != NUX_STATUS_OK) {
+            if ((if (ownsRuntimeFile) activeRenderer.resize(width.coerceAtLeast(1), height.coerceAtLeast(1)) else activeRenderer.resizeIfIdle(width.coerceAtLeast(1), height.coerceAtLeast(1))) != NUX_STATUS_OK) {
                 Log.w(LOG_TAG, "Android Vulkan renderer resize failed")
                 reportFailure(
                     ExperiencePresentationException.Reason.HOST_FAILED,
@@ -1399,8 +1401,8 @@ internal class ExperienceSurfaceHost(
                 player?.let { it::close },
                 viewModelState?.let { it::close },
                 artboard?.let { it::close },
-                file?.takeIf { runValues == null }?.let { it::close },
-                renderer?.takeIf { runValues == null }?.let { it::close },
+                file?.takeIf { ownsRuntimeFile }?.let { it::close },
+                renderer?.takeIf { ownsRuntimeFile }?.let { it::close },
             )
             window = null
             player = null

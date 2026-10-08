@@ -45,6 +45,27 @@ import kotlinx.serialization.json.long
 @RunWith(RobolectricTestRunner::class)
 class ExperienceSurfaceHostPointerTest {
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test fun `screen release owns file and renderer when run has no Experience model`() = kotlinx.coroutines.runBlocking {
+        val native = RecordingNative()
+        val run = ExperienceRunValues()
+        try {
+            repeat(2) { index ->
+                val host = ExperienceSurfaceHost(context = RuntimeEnvironment.getApplication(), lane = run.lane,
+                    artboardSize = ExperienceArtboardSize(400f, 200f), runtime = NuxieRuntime(native), runValues = run)
+                val loaded = CountDownLatch(1)
+                try {
+                    host.loadArtboard(byteArrayOf(1), artboardName = null) { success ->
+                        assertTrue(success); loaded.countDown()
+                    }
+                    assertTrue("runtime did not load", loaded.await(2, TimeUnit.SECONDS))
+                } finally { host.release(); drain(run.lane) }
+                assertEquals("The closed screen releases its file", index + 1, native.closedFiles)
+                assertEquals("The closed screen releases its renderer", index + 1, native.closedRenderers)
+            }
+            assertFalse(run.isPrepared())
+        } finally { run.retire() }
+    }
+
     @Test fun `custom watchdog waits for pending frame phase writes and zero delta step`() = kotlinx.coroutines.test.runTest {
         val native = RecordingNative()
         val lane = NuxieRuntimeLane()
@@ -1854,7 +1875,9 @@ class ExperienceSurfaceHostPointerTest {
             videoEnabled: Boolean,
         ): Long = 1L
 
-        override fun freeFile(handle: Long) = Unit
+        var closedFiles = 0
+        var closedRenderers = 0
+        override fun freeFile(handle: Long) { closedFiles++ }
         override fun newDefaultArtboard(fileHandle: Long): Long = 2L
         override fun freeArtboard(handle: Long) = Unit
         override fun stateMachineNames(fileHandle: Long, artboardName: String?): NativeCallResult<List<String>> = NativeCallResult(0, emptyList())
@@ -1941,6 +1964,6 @@ class ExperienceSurfaceHostPointerTest {
             layoutScaleFactor: Float,
         ): NuxieCpuFrame = error("not used")
 
-        override fun freeRenderer(handle: Long) = Unit
+        override fun freeRenderer(handle: Long) { closedRenderers++ }
     }
 }
