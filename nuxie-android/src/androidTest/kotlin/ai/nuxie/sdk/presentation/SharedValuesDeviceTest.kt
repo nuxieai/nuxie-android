@@ -1,5 +1,8 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.journey.JourneyResponseSaveDisplay
+import ai.nuxie.sdk.runtime.NuxieHostCommand
+import ai.nuxie.sdk.runtime.NuxieHostValue
 import ai.nuxie.sdk.runtime.NativeViewModelWrite
 import ai.nuxie.sdk.runtime.NuxieViewModelMutationKind
 import ai.nuxie.sdk.runtime.NuxieRuntimeCallException
@@ -135,6 +138,55 @@ class SharedValuesDeviceTest {
                 try { child.setValue("picked", NuxieViewModelScalarValue.BooleanValue(false)) } finally { child.close() }
             }
             assertEquals(oracle.getValue("cleared"), run.responseAnswers("feedback", descriptor))
+        } finally { run.retire(); directory.deleteRecursively() }
+    }
+
+    @Test fun publishedF5SaveCaptureAndDisplayAreAttemptScoped() = runBlocking {
+        assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val assets = instrumentation.context.assets
+        fun read(name: String) = assets.open("runtime/forms-saves/$name").use { it.readBytes() }
+        val descriptor = Json.parseToJsonElement(read("release.json").decodeToString()).jsonObject
+        val directory = java.io.File(instrumentation.targetContext.cacheDir, "f5-save-${java.util.UUID.randomUUID()}").apply { mkdirs() }
+        val run = ExperienceRunValues()
+        try {
+            val artifacts = descriptor.getValue("render").jsonObject.getValue("assets").jsonArray
+                .map { it.jsonObject }.filter { it["key"] != null }.associate { asset ->
+                    val key = asset.getValue("key").jsonPrimitive.content
+                    key to java.io.File(directory, asset.getValue("sha256").jsonPrimitive.content).apply { writeBytes(read(key)) }
+                }
+            run.lane.call {
+                val native = run.prepare(read("screen.riv"), descriptor, artifacts)
+                val values = checkNotNull(native.values)
+                values.setValue("responses:feedback/stars", NuxieViewModelScalarValue.NumberValue(4.0))
+                val command = NuxieHostCommand("\$nuxie.response.save", NuxieHostValue.Object(listOf(
+                    NuxieHostValue.Object.Field("form", NuxieHostValue.String("feedback")))))
+                val request = checkNotNull(ExperienceResponseSaveRequest.capture(command, values.nativeSnapshot(),
+                    native.file.viewModelCatalog(), descriptor))
+                values.setValue("responses:feedback/stars", NuxieViewModelScalarValue.NumberValue(5.0))
+                assertEquals("feedback", request.form)
+                assertNull(request.awaitTrigger)
+                assertEquals(4.0, request.answers.getValue("stars").jsonPrimitive.double, 0.0)
+                assertNull(ExperienceResponseSaveRequest.capture(command.copy(name = "ordinary"), values.nativeSnapshot(),
+                    native.file.viewModelCatalog(), descriptor))
+            }
+            suspend fun status() = run.lane.call {
+                val snapshot = checkNotNull(run.prepare(read("screen.riv"), descriptor, artifacts).values).nativeSnapshot()
+                val form = snapshot.values.single { it.ownerInstanceId == snapshot.rootInstanceId && it.name == "responses:feedback" }.referencedInstanceId
+                val fields = snapshot.values.filter { it.ownerInstanceId == form }.associateBy { it.name }
+                Triple(fields.getValue("saving").boolValue, fields.getValue("saved").boolValue,
+                    fields.getValue("saveError").bytesValue.decodeToString())
+            }
+            run.applyResponseSaveDisplays(mapOf("feedback" to JourneyResponseSaveDisplay.saving(1)), descriptor)
+            run.applyResponseSaveDisplays(mapOf("feedback" to JourneyResponseSaveDisplay.saving(2)), descriptor)
+            run.applyResponseSaveDisplays(mapOf("feedback" to JourneyResponseSaveDisplay(2, false, false, "save_unavailable")), descriptor)
+            run.applyResponseSaveDisplays(mapOf("feedback" to JourneyResponseSaveDisplay(1, false, true, "")), descriptor)
+            run.applyResponseSaveDisplays(mapOf("feedback" to JourneyResponseSaveDisplay.saving(2)), descriptor)
+            assertEquals(Triple(false, false, "save_unavailable"), status())
+            run.applyResponseSaveDisplays(mapOf("feedback" to JourneyResponseSaveDisplay.saving(3)), descriptor)
+            assertEquals(Triple(true, false, ""), status())
+            run.applyResponseSaveDisplays(mapOf("feedback" to JourneyResponseSaveDisplay(3, false, true, "")), descriptor)
+            assertEquals(Triple(false, true, ""), status())
         } finally { run.retire(); directory.deleteRecursively() }
     }
 
