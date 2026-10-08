@@ -84,6 +84,7 @@ class SharedValuesDeviceTest {
     }
 
     @Test fun publishedF5ReadsLiveAnswersWithoutFilteringMarkingFailures() = runBlocking {
+        assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val assets = instrumentation.context.assets
         fun read(name: String) = assets.open("runtime/forms-saves/$name").use { it.readBytes() }
@@ -113,7 +114,14 @@ class SharedValuesDeviceTest {
                 val child = values.acquireListItem("responses:feedback/interests", 1, ids[1])
                 try { child.setValue("picked", NuxieViewModelScalarValue.BooleanValue(true)) } finally { child.close() }
             }
-            assertEquals(oracle.getValue("feedback"), run.responseAnswers("feedback", descriptor))
+            val feedback = run.responseAnswers("feedback", descriptor)
+            val expected = oracle.getValue("feedback").jsonObject
+            // JSON 0 and 0.0 carry the same number; kotlinx compares their spelling.
+            assertEquals(expected.keys, feedback.keys)
+            assertFalse(feedback.getValue("stars").jsonPrimitive.isString)
+            assertEquals(expected.getValue("stars").jsonPrimitive.double,
+                feedback.getValue("stars").jsonPrimitive.double, 0.0)
+            assertEquals(expected - "stars", feedback - "stars")
             assertEquals(oracle.getValue("onboarding"), run.responseAnswers("onboarding", descriptor))
             run.lane.call {
                 val values = checkNotNull(run.prepare(read("screen.riv"), descriptor, artifacts).values)
