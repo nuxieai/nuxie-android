@@ -22,6 +22,7 @@
 
 #include "nux_capi.generated.h"
 #include "nuxie_logging_policy.h"
+#include "nuxie_host_installs.h"
 
 // Native diagnostics use the same Kotlin policy as every other SDK log. Never
 // redirect process-wide stderr: it belongs to the embedding application.
@@ -4005,4 +4006,65 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoCaption(
       nux_player_video_caption(from_handle(player), (size_t)component, video_caption_callback, &c);
   if (status == NUX_STATUS_OK && c.count != 2) c.failed = 1;
   return video_collector_finish(&c, status, status_out);
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileSetValueMarkers(
+    JNIEnv *env, jobject self, jlong file, jobjectArray entries) {
+  (void)self;
+  struct InstallStorage storage = {0};
+  size_t count = 0;
+  struct NuxValueMarker *values = install_ValueMarker(env, &storage, entries, &count);
+  NuxStatus status = storage.failed ? NUX_STATUS_INVALID_ARGUMENT :
+      nux_file_set_value_markers(from_handle(file), values, count);
+  install_storage_free(&storage);
+  return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileSetRuleGroups(
+    JNIEnv *env, jobject self, jlong file, jobjectArray entries) {
+  (void)self;
+  struct InstallStorage storage = {0};
+  size_t count = 0;
+  struct NuxRuleGroup *values = install_RuleGroup(env, &storage, entries, &count);
+  NuxStatus status = storage.failed ? NUX_STATUS_INVALID_ARGUMENT :
+      nux_file_set_rule_groups(from_handle(file), values, count);
+  install_storage_free(&storage);
+  return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileSetValueRules(
+    JNIEnv *env, jobject self, jlong file, jobjectArray entries, jobjectArray diagnostic) {
+  (void)self;
+  struct InstallStorage storage = {0};
+  size_t count = 0;
+  struct NuxValueRule *values = install_ValueRule(env, &storage, entries, &count);
+  struct NuxCapiResult *result = NULL;
+  NuxStatus status = storage.failed ? NUX_STATUS_INVALID_ARGUMENT :
+      nux_file_set_value_rules_with_result(from_handle(file), values, count, &result);
+  if (result != NULL) {
+    struct NuxCapiDiagnosticView view = {0};
+    view.struct_size = sizeof(view);
+    NuxStatus read_status = nux_capi_result_diagnostic(result, &view);
+    if (read_status == NUX_STATUS_OK) {
+      jstring code = new_string_view(env, view.code);
+      jstring message = code == NULL ? NULL : new_string_view(env, view.message);
+      if (code != NULL && message != NULL) {
+        (*env)->SetObjectArrayElement(env, diagnostic, 0, code);
+        if (!(*env)->ExceptionCheck(env)) (*env)->SetObjectArrayElement(env, diagnostic, 1, message);
+      } else {
+        status = NUX_STATUS_RUNTIME_ERROR;
+      }
+      if (code != NULL) (*env)->DeleteLocalRef(env, code);
+      if (message != NULL) (*env)->DeleteLocalRef(env, message);
+    } else {
+      status = read_status;
+    }
+    NuxStatus free_status = nux_capi_result_free(result);
+    if (free_status != NUX_STATUS_OK) status = free_status;
+  }
+  install_storage_free(&storage);
+  return (jint)status;
 }

@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.experiences.JourneyReleaseValuePolicy
 import ai.nuxie.sdk.experiences.ExperienceAssetImport
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
 import ai.nuxie.sdk.experiences.SystemFontCache
@@ -8,6 +9,7 @@ import ai.nuxie.sdk.runtime.NuxieRuntime
 import ai.nuxie.sdk.runtime.NuxieRuntimeFile
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import ai.nuxie.sdk.runtime.NuxieRuntimeViewModelState
+import ai.nuxie.sdk.runtime.NuxieValuePolicy
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -23,6 +25,7 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
     private var nativeRetired = false
     private val screens = AtomicInteger()
     private var bytes: ByteArray? = null
+    private var policy: NuxieValuePolicy? = null
     private var prepared: Native? = null
 
     internal class Native(
@@ -43,8 +46,9 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
         fonts: SystemFontCache = SystemFontCache.shared,
     ): Native {
         check(!retired.get()) { "The run has ended" }
+        val nextPolicy = descriptor?.let(JourneyReleaseValuePolicy::parse)
         prepared?.let {
-            check(checkNotNull(bytes).contentEquals(sceneBytes)) { "A run cannot change its native file" }
+            check(checkNotNull(bytes).contentEquals(sceneBytes) && policy == nextPolicy) { "A run cannot change its native file" }
             return it
         }
         val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(1, 1)) { "Run renderer creation failed" }
@@ -60,7 +64,8 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
             file = checkNotNull(runtime.importFile(renderer, sceneBytes,
                 expectedAssets = imports?.expectedAssets.orEmpty(),
                 externalAssets = imports?.externalAssets.orEmpty(),
-                videoEnabled = imports?.videos?.isNotEmpty() == true)) { "Run file import failed" }
+                videoEnabled = imports?.videos?.isNotEmpty() == true,
+                valuePolicy = nextPolicy)) { "Run file import failed" }
             values = file.newAuthoredViewModel("Experience", 0)
             val initial = values?.nativeSnapshot()
             val origins = initial?.let(ExperienceRunListSnapshot::authoredOrigins).orEmpty()
@@ -70,6 +75,7 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
             }
             return Native(renderer, file, imports, values, origins,
                 initial?.instances?.map { it.id }?.toSet().orEmpty()).also {
+                policy = nextPolicy
                 bytes = sceneBytes.copyOf()
                 prepared = it
                 fonts.didImport(leases)

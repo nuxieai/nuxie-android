@@ -13,12 +13,56 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SharedValuesDeviceTest {
+    @Test fun nativePolicyInstallsBeforeFirstWriteAndRejectsBadTables() = runBlocking {
+        val runtime = ai.nuxie.sdk.runtime.NuxieRuntime.shared
+        assertTrue(runtime.isAvailable)
+        val assets = InstrumentationRegistry.getInstrumentation().context.assets
+        val bytes = assets.open("runtime/run-values/screen.riv").use { it.readBytes() }
+        val fonts = Json.parseToJsonElement(assets.open("runtime/run-values/provenance.json")
+            .use { it.readBytes() }.decodeToString()).jsonObject.getValue("fonts").jsonArray
+        val descriptor = buildJsonObject { putJsonObject("render") {
+            put("assets", JsonArray(fonts.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
+        } }
+        val lane = ai.nuxie.sdk.runtime.NuxieRuntimeLane()
+        try { lane.call {
+            val fontCache = ai.nuxie.sdk.experiences.SystemFontCache.shared
+            val leases = mutableListOf<ai.nuxie.sdk.experiences.SystemFontCache.Lease>()
+            val imports = ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder.build(descriptor, emptyMap(),
+                checkNotNull(runtime.inspectFileAssets(bytes)),
+                systemFontBytes = { fontCache.prepare(it).also(leases::add).candidate.bytes })
+            val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(1, 1))
+            val rule = ai.nuxie.sdk.runtime.NuxieValueRule("Experience", "trip_days", 2, 1, 25.0,
+                "", emptyList(), "", 0, 0, 0, "max", "At most 25")
+            try {
+                assertThrows(ai.nuxie.sdk.runtime.NuxieRuntimeCallException::class.java) {
+                    runtime.importFile(renderer, bytes, imports.expectedAssets, imports.externalAssets,
+                        valuePolicy = ai.nuxie.sdk.runtime.NuxieValuePolicy(listOf(rule.copy(model = "MissingModel")), emptyList()))
+                }
+                repeat(2) {
+                    val file = checkNotNull(runtime.importFile(renderer, bytes, imports.expectedAssets, imports.externalAssets,
+                        valuePolicy = ai.nuxie.sdk.runtime.NuxieValuePolicy(listOf(rule), emptyList())))
+                    try {
+                        val values = checkNotNull(file.newAuthoredViewModel("Experience", 0))
+                        try {
+                            values.setValue("trip_days", NuxieViewModelScalarValue.NumberValue(30.0))
+                            assertEquals(NuxieViewModelScalarValue.NumberValue(23.0), values.snapshot().resolveScalar(listOf("trip_days")))
+                            values.setValue("trip_days", NuxieViewModelScalarValue.NumberValue(24.0))
+                            assertEquals(NuxieViewModelScalarValue.NumberValue(24.0), values.snapshot().resolveScalar(listOf("trip_days")))
+                        } finally { values.close() }
+                    } finally { file.close() }
+                }
+                fontCache.didImport(leases)
+            } catch (error: Throwable) { fontCache.didFailImport(leases); throw error }
+            finally { renderer.close() }
+        } } finally { lane.shutdown() }
+    }
+
     @Test fun publishedListChildAcquisitionKeepsIdentityAndRejectsStaleSlot() = runBlocking {
         assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         fun read(name: String) = assets.open("runtime/forms-saves/goals/$name").use { it.readBytes() }
         val fonts = Json.parseToJsonElement(read("provenance.json").decodeToString()).jsonObject.getValue("fonts").jsonArray
-        val descriptor = buildJsonObject { putJsonObject("render") {
+        val descriptor = buildJsonObject { put("state", JsonObject(emptyMap())); put("responses", JsonObject(emptyMap())); put("ruleGroups", JsonArray(emptyList())); putJsonObject("render") {
             put("assets", JsonArray(fonts.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
         } }
         val run = ExperienceRunValues()
@@ -67,7 +111,7 @@ class SharedValuesDeviceTest {
         fun read(name: String) = assets.open("runtime/forms-saves/goals/$name").use { it.readBytes() }
         val oracle = Json.parseToJsonElement(read("expectations.json").decodeToString()).jsonObject
         val fonts = Json.parseToJsonElement(read("provenance.json").decodeToString()).jsonObject.getValue("fonts").jsonArray
-        val descriptor = buildJsonObject { putJsonObject("render") {
+        val descriptor = buildJsonObject { put("state", JsonObject(emptyMap())); put("responses", JsonObject(emptyMap())); put("ruleGroups", JsonArray(emptyList())); putJsonObject("render") {
             put("assets", JsonArray(fonts.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
         } }
         val run = ExperienceRunValues()
@@ -95,7 +139,7 @@ class SharedValuesDeviceTest {
         val expected = Json.parseToJsonElement(read("expectations.json").decodeToString()).jsonObject
         val handlers = expected.getValue("handlers").jsonObject
         val fonts = Json.parseToJsonElement(read("provenance.json").decodeToString()).jsonObject.getValue("fonts").jsonArray
-        val descriptor = buildJsonObject { putJsonObject("render") {
+        val descriptor = buildJsonObject { put("state", JsonObject(emptyMap())); put("responses", JsonObject(emptyMap())); put("ruleGroups", JsonArray(emptyList())); putJsonObject("render") {
             put("assets", JsonArray(fonts.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
         } }
         val run = ExperienceRunValues()
@@ -153,7 +197,7 @@ class SharedValuesDeviceTest {
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         fun read(name: String) = assets.open("runtime/published-input/$name").use { it.readBytes() }
         val fonts = Json.parseToJsonElement(read("provenance.json").decodeToString()).jsonObject.getValue("fonts").jsonArray
-        val descriptor = buildJsonObject { putJsonObject("render") {
+        val descriptor = buildJsonObject { put("state", JsonObject(emptyMap())); put("responses", JsonObject(emptyMap())); put("ruleGroups", JsonArray(emptyList())); putJsonObject("render") {
             put("assets", JsonArray(fonts.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
         } }
         val run = ExperienceRunValues()
@@ -206,7 +250,7 @@ class SharedValuesDeviceTest {
             }
             fun read(name: String) = instrumentation.context.assets.open("runtime/published-input/$name").use { it.readBytes() }
             val fonts = Json.parseToJsonElement(read("provenance.json").decodeToString()).jsonObject.getValue("fonts").jsonArray
-            val descriptor = buildJsonObject { putJsonObject("render") {
+            val descriptor = buildJsonObject { put("state", JsonObject(emptyMap())); put("responses", JsonObject(emptyMap())); put("ruleGroups", JsonArray(emptyList())); putJsonObject("render") {
                 put("assets", JsonArray(fonts.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
             } }
             run.lane.call {
@@ -367,7 +411,7 @@ class SharedValuesDeviceTest {
         val bytes = read("screen.riv")
         val expected = Json.parseToJsonElement(read("expectations.json").decodeToString()).jsonObject.getValue("component").jsonObject
         val fonts = Json.parseToJsonElement(read("provenance.json").decodeToString()).jsonObject.getValue("fonts").jsonArray
-        val descriptor = buildJsonObject { putJsonObject("render") {
+        val descriptor = buildJsonObject { put("state", JsonObject(emptyMap())); put("responses", JsonObject(emptyMap())); put("ruleGroups", JsonArray(emptyList())); putJsonObject("render") {
             put("assets", JsonArray(fonts.map { JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font"))) }))
         } }
         val run = ExperienceRunValues()
