@@ -75,9 +75,12 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
             }
             return Native(renderer, file, imports, values, origins,
                 initial?.instances?.map { it.id }?.toSet().orEmpty()).also {
-                policy = nextPolicy
-                bytes = sceneBytes.copyOf()
-                prepared = it
+                // Without the shared model, the caller owns this screen's import.
+                if (values != null) {
+                    policy = nextPolicy
+                    bytes = sceneBytes.copyOf()
+                    prepared = it
+                }
                 fonts.didImport(leases)
             }
         } catch (error: Throwable) {
@@ -86,6 +89,15 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
             runCatching { file?.close() }.exceptionOrNull()?.let(error::addSuppressed)
             runCatching { renderer.close() }.exceptionOrNull()?.let(error::addSuppressed)
             throw error
+        }
+    }
+
+    /** Warm only run-owned state. A file without that state has no screen to own it here. */
+    fun prepareForRun(sceneBytes: ByteArray, descriptor: JsonObject?, artifactsByKey: Map<String, File>,
+        runtime: NuxieRuntime = NuxieRuntime.shared) {
+        val native = prepare(sceneBytes, descriptor, artifactsByKey, runtime)
+        if (native.values == null) {
+            try { native.file.close() } finally { native.renderer.close() }
         }
     }
 
