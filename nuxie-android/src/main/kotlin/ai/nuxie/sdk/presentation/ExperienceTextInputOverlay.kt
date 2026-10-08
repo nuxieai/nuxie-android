@@ -6,6 +6,9 @@ import ai.nuxie.sdk.runtime.NativeSemanticState
 import android.view.accessibility.AccessibilityNodeInfo
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Rect
 import ai.nuxie.sdk.experiences.SystemFontProvider
 import ai.nuxie.sdk.experiences.SystemFontRequirement
@@ -408,6 +411,41 @@ internal class ExperienceTextInputOverlay(
                 field = value
                 requestLayout()
             }
+
+        private val composingPaint = Paint().apply { color = input.style.color }
+        private val composingPath = Path()
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val value = text ?: return
+            val start = BaseInputConnection.getComposingSpanStart(value)
+            val end = BaseInputConnection.getComposingSpanEnd(value)
+            val textLayout = layout ?: return
+            if (start < 0 || end <= start || end > value.length) return
+            val saved = canvas.save()
+            try {
+                // Match TextView's content coordinates and viewport. Layout supplies
+                // the shaped selection path, including wrapping and bidirectional runs.
+                canvas.clipRect(compoundPaddingLeft + scrollX, extendedPaddingTop + scrollY,
+                    width - compoundPaddingRight + scrollX, height - extendedPaddingBottom + scrollY)
+                canvas.translate(compoundPaddingLeft.toFloat(), extendedPaddingTop.toFloat())
+                composingPaint.strokeWidth = resources.displayMetrics.density.coerceAtLeast(1f)
+                for (line in textLayout.getLineForOffset(start)..textLayout.getLineForOffset(end - 1)) {
+                    val lineStart = maxOf(start, textLayout.getLineStart(line))
+                    var lineEnd = minOf(end, textLayout.getLineEnd(line))
+                    if (lineEnd > lineStart && value[lineEnd - 1] == '\n') lineEnd -= 1
+                    if (lineEnd <= lineStart) continue
+                    composingPath.reset()
+                    textLayout.getSelectionPath(lineStart, lineEnd, composingPath)
+                    val lineSave = canvas.save()
+                    try {
+                        canvas.clipPath(composingPath)
+                        val y = textLayout.getLineBaseline(line) + paint.fontMetrics.descent / 2f
+                        canvas.drawLine(0f, y, textLayout.width.toFloat(), y, composingPaint)
+                    } finally { canvas.restoreToCount(lineSave) }
+                }
+            } finally { canvas.restoreToCount(saved) }
+        }
 
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
             super.onMeasure(widthMeasureSpec, heightMeasureSpec)
