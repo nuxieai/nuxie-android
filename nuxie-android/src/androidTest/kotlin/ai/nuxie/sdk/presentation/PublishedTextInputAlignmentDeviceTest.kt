@@ -49,8 +49,8 @@ class PublishedTextInputAlignmentDeviceTest {
         val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(390, 844))
         val snapshot: NuxieViewModelSnapshot
         val capture: NuxieTextGeometryCapture.Captured
-        val blankCapture: NuxieTextGeometryCapture.Captured
-        val blankSnapshot: NuxieViewModelSnapshot
+        val missingBaselineCapture: NuxieTextGeometryCapture.Captured
+        val missingBaselineSnapshot: NuxieViewModelSnapshot
         try {
             val file = checkNotNull(runtime.importFile(renderer, bytes, catalog, mapOf(font.ordinal to fontBytes)))
             try {
@@ -96,15 +96,12 @@ class PublishedTextInputAlignmentDeviceTest {
                             renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                             metricFrames += MetricsFrame(metricsSnapshot, step.textGeometry as NuxieTextGeometryCapture.Captured, size, height)
                         }
-                        expected.forEach { field ->
-                            val changed = artboard.setTextRun(field.jsonObject.getValue("runName").jsonPrimitive.content, "")
-                            assertEquals("An already-empty secure run is a successful no-op",
-                                field.jsonObject["secure"]?.jsonPrimitive?.booleanOrNull != true, changed)
-                        }
-                        blankCapture = player.stepTyped(elapsedSeconds = 0.0, textRunNames = capture.fields.keys.toList())
-                            .textGeometry as NuxieTextGeometryCapture.Captured
-                        blankSnapshot = checkNotNull(artboard.defaultViewModelSnapshot())
-                        blankCapture.fields.values.forEach { assertNull(it.firstBaseline) }
+                        // A missing baseline is a host geometry case. Supply it directly;
+                        // production no longer exposes the old rendered-run writer.
+                        missingBaselineCapture = NuxieTextGeometryCapture.Captured(capture.fields.mapValues {
+                            it.value.copy(firstBaseline = null)
+                        })
+                        missingBaselineSnapshot = checkNotNull(artboard.defaultViewModelSnapshot())
                         renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                     } finally { player.close() }
                 } finally { artboard.close() }
@@ -196,9 +193,9 @@ class PublishedTextInputAlignmentDeviceTest {
                     val path = android.graphics.Path()
                     editor.layout.getCursorPath(1, path, editor.text)
                     path.computeBounds(cursorBefore, true)
-                    current.updateNativeFixture(blankSnapshot, blankCapture)
+                    current.updateNativeFixture(missingBaselineSnapshot, missingBaselineCapture)
                     layout()
-                    assertEquals("${input.id} blank runtime run retains native baseline", baselineBefore, editor.baseline)
+                    assertEquals("${input.id} absent runtime baseline retains native baseline", baselineBefore, editor.baseline)
                     assertEquals(1, editor.selectionStart)
                     assertEquals(4, editor.selectionEnd)
                     assertEquals(1, android.view.inputmethod.BaseInputConnection.getComposingSpanStart(editor.text))

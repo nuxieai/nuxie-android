@@ -211,7 +211,7 @@ class ExperienceSurfaceHostPointerTest {
             native.presentation = 1
             host.doFrame(1_032_000_000L)
             drainNativeEditor(lane)
-            assertEquals(listOf("write:headline:50", "frame:0", "capture:50"), native.order)
+            assertEquals(listOf("frame:2", "frame:0", "text:50", "capture:50"), native.order)
             assertEquals(listOf(0.5), captured)
             assertEquals("The settling step must preserve its runtime effects", 1, effects.size)
             assertEquals(0f, native.elapsedSteps.last())
@@ -948,7 +948,7 @@ class ExperienceSurfaceHostPointerTest {
             drain(lane)
             host.onSurfaceTextureUpdated(surfaceTexture)
             drain(lane)
-            assertEquals(listOf("frame:0", "write:headline:ok", "frame:0", "frame:1"), native.order)
+            assertEquals(listOf("frame:0", "frame:2", "frame:0", "text:ok", "frame:0", "frame:1"), native.order)
         } finally {
             resume.countDown()
             closeNativeEditor()
@@ -1801,11 +1801,6 @@ class ExperienceSurfaceHostPointerTest {
             ai.nuxie.sdk.runtime.NativeSemanticNode(42L + index, -1, index, if (nativeInput) 6 else 1, 0, 0, 0, 1, 10f, 10f, 80f, 80f, if (semanticNodeCount == 1) "Continue" else "Continue ${index + 1}", "", ""))
         override fun validateSemantics(player: Long, snapshot: Long) = 0
         override fun fieldStringCopy(player: Long, snapshot: Long, nodeId: Long, name: String) = NativeCallResult(0, nativeText.encodeToByteArray())
-        override fun fieldStringSet(player: Long, snapshot: Long, nodeId: Long, name: String, value: ByteArray): Int {
-            nativeText = value.decodeToString()
-            order += "write:$name:$nativeText"
-            return 0
-        }
         override fun viewModelRootSchemaIndex(viewModelHandle: Long) = NativeCallResult(0, 0L)
         override fun fieldViewModel(player: Long, snapshot: Long, nodeId: Long, name: String) = NativeCallResult(0, 41L)
         override fun textInputGeometry(player: Long, snapshot: Long, nodeId: Long, name: String) = NativeCallResult(0,
@@ -1848,11 +1843,6 @@ class ExperienceSurfaceHostPointerTest {
             assertEquals(statePath, write.path)
             stateWrites += write.numberValue
             return 0
-        }
-
-        override fun setTextRun(handle: Long, name: String, text: String): NativeCallResult<Boolean> {
-            order += "write:$name:$text"
-            return NativeCallResult(0, true)
         }
 
         override fun newFile(
@@ -1910,6 +1900,13 @@ class ExperienceSurfaceHostPointerTest {
             focusSteps += focusInputs
             elapsedSteps += elapsedSeconds
             order += "frame:${pointers.size}"
+            if (nativeInput && pointers.any { it.kind == 0 }) focusState = NuxieFocusState(true, true)
+            for (input in focusInputs) {
+                when (input.kind) {
+                    2 -> focusState = NuxieFocusState(false, false)
+                    4 -> { nativeText = input.text.decodeToString(); order += "text:$nativeText" }
+                }
+            }
             onStep()
             stateWrites.lastOrNull()?.let(stateAtSteps::add)
             return NativeCallResult(
