@@ -25,6 +25,29 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyReleaseTest {
+    @Test fun `published F4 authenticates exact version three values`() {
+        val folder = FixtureRunner.fixturesRoot().resolve("runtime/run-values")
+        val bytes = folder.resolve("release.json").readBytes()
+        val entry = Json.parseToJsonElement(folder.resolve("profile-entry.json").readText()).jsonObject
+        val source = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
+        val locator = entry.getValue("locator").jsonObject
+        val release = JourneyReleaseVerifier.authenticate(
+            entry.getValue("envelope").toString().encodeToByteArray(), keys,
+            requireNotNull(JourneyReleaseIdentity.fromJson(JsonObject(locator - "legId"))),
+            locator.getValue("legId").jsonPrimitive.content, runtime(source), JourneyReleaseReplayPolicy.Active(0))
+        assertArrayEquals(bytes, release.descriptorBytes)
+        assertEquals(mapOf("trip_days" to "number", "level" to "number"),
+            release.descriptor.getValue("state").jsonObject.mapValues { it.value.jsonObject.getValue("type").jsonPrimitive.content })
+        assertEquals(JsonObject(emptyMap()), release.descriptor.getValue("responses"))
+        assertEquals(JsonArray(emptyList()), release.descriptor.getValue("ruleGroups"))
+        assertEquals(2, release.leg.getValue("screens").jsonArray.size)
+        val render = release.descriptor.getValue("render").jsonObject.getValue("nux").jsonObject
+        val scene = folder.resolve(render.getValue("key").jsonPrimitive.content).readBytes()
+        assertArrayEquals(folder.resolve("screen.riv").readBytes(), scene)
+        assertEquals(render.getValue("sha256").jsonPrimitive.content,
+            java.security.MessageDigest.getInstance("SHA-256").digest(scene).joinToString("") { "%02x".format(it) })
+    }
+
     @Test fun `version three requires native value policy sections`() {
         val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
         val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
