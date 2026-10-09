@@ -78,7 +78,10 @@ internal class NuxieApiPurchaseSynchronizer(
         )
     } catch (rejected: NuxieApi.PurchaseRejectedException) {
         PurchaseSyncOutcome.Rejected(rejected.permanent, rejected.invalidToken)
-    } catch (_: Exception) {
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        Log.w("NuxieBilling", "Purchase evidence sync failed", error)
         PurchaseSyncOutcome.Rejected(permanent = false)
     }
 }
