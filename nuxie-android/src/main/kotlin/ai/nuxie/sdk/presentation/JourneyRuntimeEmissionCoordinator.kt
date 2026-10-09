@@ -42,7 +42,7 @@ internal class JourneyRuntimeEmissionCoordinator(
     descriptor: JsonObject,
     nextBatchSequence: Long,
     nextEmissionSequence: Long,
-    private val onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> Boolean,
+    private val onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> JourneyEmissionBatchResult,
     private val onScreenChanged: suspend (String) -> Boolean = { true },
     private val onPresentationRevealed: suspend (String) -> Unit,
     private val onOpenLink: suspend (JourneyLinkRequest) -> Unit = {},
@@ -218,17 +218,21 @@ internal class JourneyRuntimeEmissionCoordinator(
             source = source,
             emissions = emissions,
         )
-        val accepted = runCatching {
+        val result = runCatching {
             onEmissionBatch(batch, sources?.bound(batch))
         }
             .onFailure { error ->
                 if (error is kotlinx.coroutines.CancellationException) throw error
                 Log.w(LOG_TAG, "Journey renderer emission publication failed", error)
             }
-            .getOrDefault(false)
-        if (!accepted) {
-            closed = true
-            return false
+            .getOrDefault(JourneyEmissionBatchResult.REJECTED)
+        when (result) {
+            JourneyEmissionBatchResult.DECLINED -> return true
+            JourneyEmissionBatchResult.REJECTED -> {
+                closed = true
+                return false
+            }
+            JourneyEmissionBatchResult.ACCEPTED -> Unit
         }
         nextBatch += 1
         nextEmission += emissions.size.toLong()
