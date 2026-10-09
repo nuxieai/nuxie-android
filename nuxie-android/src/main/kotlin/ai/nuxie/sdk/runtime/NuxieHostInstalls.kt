@@ -137,6 +137,16 @@ internal data class NativeRuleInstallResult(val status: Int, val code: String?, 
 
 /** Installed before creating any instance or player in the imported file. */
 internal data class NuxieValuePolicy(val rules: List<NuxieValueRule>, val groups: List<NuxieRuleGroup>) {
+    fun groupsForInstallation(markers: List<NuxieValueMarker>): List<NuxieRuleGroup> {
+        val installed = mutableMapOf<String, MutableSet<String>>()
+        for (rule in rules) installed.getOrPut(rule.model) { mutableSetOf() }.add(rule.property)
+        for (marker in markers) installed.getOrPut(marker.model) { mutableSetOf() }.add(marker.value)
+        // Native groups accept only ruled or marked members. Keep the declared table intact.
+        return groups.map { group ->
+            group.copy(members = group.members.filter { installed[group.model]?.contains(it.property) == true })
+        }
+    }
+
     fun markers(catalog: NuxieViewModelCatalog): List<NuxieValueMarker> = buildList {
         for (schema in catalog.schemas) {
             val properties = catalog.properties.filter { it.schemaIndex == schema.index }
