@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
 
 class FeatureConsumptionApiTest {
@@ -22,7 +23,7 @@ class FeatureConsumptionApiTest {
                 assertEquals(command, JsonObject(body - "apiKey"))
                 HttpTransport.Response(200, receipt.toString().encodeToByteArray())
             }
-            assertEquals(receipt, NuxieApi("test-key", NuxieEnvironment.DEVELOPMENT, transport).consumeFeature(command))
+            assertEquals(receipt, runBlocking { NuxieApi("test-key", NuxieEnvironment.DEVELOPMENT, transport).consumeFeature(command) })
         }
     }
 }
