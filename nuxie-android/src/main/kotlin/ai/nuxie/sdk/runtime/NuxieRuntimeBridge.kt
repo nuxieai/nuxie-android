@@ -253,6 +253,8 @@ internal object NuxieRuntimeBridge {
     /** Action 0 = tap, 1 = increase, 2 = decrease; accepted work requires a normal player step. */
     external fun nativePlayerQueueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int): Int
 
+    external fun nativePlayerGlobalViewModelSet(player: Long, name: ByteArray, viewModel: Long): Int
+
     external fun nativePlayerLayoutSizeSet(player: Long, width: Float, height: Float): Int
 
     external fun nativePlayerLayoutSize(player: Long, statusOut: IntArray): FloatArray?

@@ -457,6 +457,9 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
     fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int =
         error("stepPlayerFrame is not implemented")
 
+    fun setPlayerGlobalViewModel(playerHandle: Long, name: ByteArray, viewModelHandle: Long): Int =
+        error("setPlayerGlobalViewModel is not implemented")
+
     fun setPlayerLayoutSize(playerHandle: Long, width: Float, height: Float): Int =
         error("setPlayerLayoutSize is not implemented")
 
@@ -773,6 +776,9 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
 
     override fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int =
         NuxieRuntimeBridge.nativePlayerStep(playerHandle, elapsedSeconds)
+
+    override fun setPlayerGlobalViewModel(playerHandle: Long, name: ByteArray, viewModelHandle: Long): Int =
+        NuxieRuntimeBridge.nativePlayerGlobalViewModelSet(playerHandle, name, viewModelHandle)
 
     override fun setPlayerLayoutSize(playerHandle: Long, width: Float, height: Float): Int =
         NuxieRuntimeBridge.nativePlayerLayoutSizeSet(playerHandle, width, height)

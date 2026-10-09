@@ -209,6 +209,7 @@ internal class NuxieRuntimeFile(
     private val native: NuxieTypedRuntimeNative,
 ) {
     private val owned = NuxieOwnedHandle(handle, "file", native::freeFile)
+    private val globals = mutableMapOf<String, NuxieRuntimeViewModelState>()
 
     fun installValueMarkers(entries: List<NuxieValueMarker>) = requireNativeSuccess(
         native.installValueMarkers(owned.require(), entries.map { it.toNative() }.toTypedArray()),
@@ -279,7 +280,18 @@ internal class NuxieRuntimeFile(
         return NuxieRuntimeViewModelState(root, emptyList(), native, catalog, schemaIndex)
     }
 
-    fun close() = owned.close()
+    /** One file-authored global, shared by all screens using this import. */
+    fun globalViewModel(name: String): NuxieRuntimeViewModelState? {
+        owned.require()
+        globals[name]?.let { return it }
+        val schema = viewModelCatalog().schemas.singleOrNull { it.name == name && it.isGlobal } ?: return null
+        return newSchemaViewModel(schema.index).also { globals[name] = it }
+    }
+
+    fun close() {
+        try { globals.values.forEach { it.close() } }
+        finally { globals.clear(); owned.close() }
+    }
 
     internal fun requireHandle(): Long = owned.require()
 }
@@ -443,6 +455,8 @@ internal class NuxieRuntimeViewModelState(
 ) {
     private val children = children.toMutableList()
 
+    internal fun requireHandle(): Long = checkNotNull(root) { "Runtime view-model state is closed" }
+
     /** Update the same root that owns projected commerce children, on its runtime lane. */
     fun setValue(path: String, value: NuxieViewModelScalarValue) {
         val rootHandle = checkNotNull(root) { "Runtime view-model state is closed" }
@@ -605,6 +619,13 @@ internal class NuxieRuntimePlayer internal constructor(
     private var interactionStepPending = true
     private var stepFailed = false
     private val stateMachine by lazy(LazyThreadSafetyMode.NONE) { isStateMachine() }
+
+    fun bindGlobalViewModel(name: String, value: NuxieRuntimeViewModelState) {
+        if (stateMachine) requireNativeSuccess(
+            native.setPlayerGlobalViewModel(requireHandle(), name.toByteArray(Charsets.UTF_8), value.requireHandle()),
+            "bind named global")
+        interactionPlayer?.bindGlobalViewModel(name, value)
+    }
 
     fun setLayoutSize(width: Float, height: Float) {
         require(width.isFinite() && width > 0f && height.isFinite() && height > 0f)
