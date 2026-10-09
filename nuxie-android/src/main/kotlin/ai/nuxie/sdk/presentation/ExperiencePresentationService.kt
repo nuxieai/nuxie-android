@@ -1358,11 +1358,11 @@ internal class ExperiencePresentationService(
                 JourneyPermissionRequest.TRACKING,
                 null,
             )
-            JourneyActionType.DISMISS -> {
-                PresentationRegistry.dismiss(active.id, CloseReason.UserDismissed)
-                attemptOutcome(active, CloseReason.UserDismissed)
-                JourneyPresentationActionResult.Handled
-            }
+            // Persist the authored terminal outcome before presentation teardown
+            // can emit a user-close lifecycle callback.
+            JourneyActionType.DISMISS -> JourneyPresentationActionResult.Completed(
+                action.string("reason")?.takeIf(String::isNotEmpty) ?: "completed",
+            )
             else -> JourneyPresentationActionResult.Failed
         }
     }
