@@ -1522,8 +1522,11 @@ class ExperiencePresentationServiceTest {
             val host = AttachedHost()
             val id = launched.last()
             assertTrue(PresentationRegistry.attach(id, host))
-            PresentationRegistry.reportTextCommitted(id, host, "input_email", text)
+            val snapshot = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(
+                41L, arrayOf(NativeViewModelSnapshotInstance(41L, 0L)), emptyArray()))
+            PresentationRegistry.reportTextCommitted(id, host, "input_email", text, snapshot)
             runCurrent()
+            assertFalse("A valid native commit must keep the presentation open", host.finished)
             PresentationRegistry.detach(id, host)
         }
         val welcome = show("screen_welcome")
