@@ -52,7 +52,11 @@ internal data class JourneyProductCatalog(
                     if (product.platform != GOOGLE_PLAY) return@mapIndexedNotNull null
                     val play = placement["googlePlay"]
                     val offerSelection = when (play) {
-                        null, JsonNull -> OfferSelection.None
+                        null, JsonNull -> if (product.billingType == BillingClient.ProductType.SUBS) {
+                            OfferSelection.Automatic
+                        } else {
+                            OfferSelection.None
+                        }
                         is JsonObject -> OfferSelection.Exact(
                             play.requiredString("offerId", "Placement '$placementId' Google Play selection"),
                         )
