@@ -101,7 +101,7 @@ class ExperiencePresentationServiceTest {
         val presentation = async {
             service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
                 service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
-                onEmissionBatch = { it, _ -> batches += it; true }, onOutcome = { outcomes += it })
+                onEmissionBatch = { it, _ -> batches += it; JourneyEmissionBatchResult.ACCEPTED }, onOutcome = { outcomes += it })
         }
         runCurrent()
         val id = launched.single()
@@ -1506,7 +1506,7 @@ class ExperiencePresentationServiceTest {
                     ownerDistinctId = "customer-1",
                     reservation = reservation,
                     acquire = { acquired(selectedRelease.identity, Lease()) },
-                    onEmissionBatch = { it, _ -> batches += it; true },
+                    onEmissionBatch = { it, _ -> batches += it; JourneyEmissionBatchResult.ACCEPTED },
                     onOutcome = {},
                 )
             }
@@ -2054,7 +2054,7 @@ class ExperiencePresentationServiceTest {
         val presentation = async {
             service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1", service.reserveJourney("customer-1"),
                 acquire = { acquired(release.identity, Lease()) },
-                onEmissionBatch = { _, _ -> PresentationRegistry.dismiss(launched.single(), CloseReason.HostDismissed); true },
+                onEmissionBatch = { _, _ -> PresentationRegistry.dismiss(launched.single(), CloseReason.HostDismissed); JourneyEmissionBatchResult.ACCEPTED },
                 onLinkOpened = { assertEquals("external", it.destination) }, onOutcome = {})
         }
         runCurrent()

@@ -785,7 +785,7 @@ internal class ExperiencePresentationService(
             JourneyScreenDismissalResult.HANDLED
         },
         onLinkOpened: suspend (JourneyOpenedLink) -> Unit = {},
-        onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> Boolean = { _, _ -> true },
+        onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> JourneyEmissionBatchResult = { _, _ -> JourneyEmissionBatchResult.ACCEPTED },
         onPresentationRevealed: suspend (String) -> Unit = {},
         onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
         transition: JsonObject? = null,

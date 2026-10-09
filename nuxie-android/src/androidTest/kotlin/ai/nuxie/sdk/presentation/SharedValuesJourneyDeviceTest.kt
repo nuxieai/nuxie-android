@@ -373,7 +373,7 @@ class SharedValuesJourneyDeviceTest {
                     (if (reserved) listOf(JourneyScreenEmission("retired-answer", active.nextEmissionSequence,
                         System.currentTimeMillis(), "\$response_set", buildJsonObject { put("field", "trip_days"); put("value", 999) })) else emptyList()) +
                     JourneyScreenEmission("shared-continue", active.nextEmissionSequence + if (reserved) 1 else 0,
-                        System.currentTimeMillis(), "continue", JsonObject(emptyMap()))), null))
+                        System.currentTimeMillis(), "continue", JsonObject(emptyMap()))), null) == JourneyEmissionBatchResult.ACCEPTED)
             }
             withTimeout(20_000) {
                 while (request.get()?.screenId != destination) delay(20)
@@ -595,7 +595,7 @@ class SharedValuesJourneyDeviceTest {
             if (revokePark) holdSnapshot.set(true)
             assertTrue(active.onEmissionBatch(JourneyScreenEmissionBatch(active.journeyId, 0, "wait-continue",
                 JourneyScreenEmissionSource(if (goals) "goals" else "first", "scr_screens_sfirst::v3::on-click"),
-                listOf(JourneyScreenEmission("wait-event", 0, clock, "continue", JsonObject(emptyMap())))), null))
+                listOf(JourneyScreenEmission("wait-event", 0, clock, "continue", JsonObject(emptyMap())))), null) == JourneyEmissionBatchResult.ACCEPTED)
             val journal = JourneyRunJournal(directory, owner, JourneyStorageScope(fixture.authority))
             if (revokePark) {
                 withContext(Dispatchers.IO) { assertTrue(snapshotEntered.await(10, TimeUnit.SECONDS)) }
