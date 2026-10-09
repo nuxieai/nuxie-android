@@ -918,8 +918,8 @@ internal class JourneyService(
             val effectId = pending?.effectId ?: candidate.effectReceipts[stepId] ?: continue
             if (!presentationOutcomeMatches(event, effectId, candidate, action, release)) continue
             val key = CommerceExecutionKey(candidate.id, target.distinctId, executionToken.generation)
-            if (pendingAuthoredContinuations.getOrDefault(key, 0) > 0) {
-                deferredCommerceOutcomes.putIfAbsent(key, event)
+            if ((pendingAuthoredContinuations[key] ?: 0) > 0) {
+                if (key !in deferredCommerceOutcomes) deferredCommerceOutcomes[key] = event
                 // Keep EventLog's durable route pending until settlement is persisted.
                 return false
             }
@@ -1986,7 +1986,7 @@ internal class JourneyService(
             )
             val commerceKey = CommerceExecutionKey(transitioned.id, target.distinctId, executionToken.generation)
             if (transitioned.pendingCommerce != null) {
-                pendingAuthoredContinuations[commerceKey] = pendingAuthoredContinuations.getOrDefault(commerceKey, 0) + 1
+                pendingAuthoredContinuations[commerceKey] = (pendingAuthoredContinuations[commerceKey] ?: 0) + 1
             }
             val queued = commands.trySend(
                 Command.ContinueExecution(
@@ -2057,7 +2057,7 @@ internal class JourneyService(
     }
 
     private suspend fun releaseCommerceContinuation(key: CommerceExecutionKey) {
-        val count = pendingAuthoredContinuations.getOrDefault(key, 0) - 1
+        val count = (pendingAuthoredContinuations[key] ?: 0) - 1
         if (count > 0) { pendingAuthoredContinuations[key] = count; return }
         pendingAuthoredContinuations.remove(key)
         deferredCommerceOutcomes.remove(key)?.let { event ->
