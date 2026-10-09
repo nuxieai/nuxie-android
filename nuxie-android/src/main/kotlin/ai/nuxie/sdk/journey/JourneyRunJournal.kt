@@ -589,6 +589,16 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         effectId
     }
 
+    /** Settle an outcome with no authored outlet without advancing the visible run. */
+    fun settlePresentationEffect(id: String, stepId: String, effectId: String): Boolean = update { state ->
+        val run = state.runs[id] ?: return@update false
+        if (!run.startedQueued || run.completion != null || run.park != null ||
+            run.stepId != stepId || run.effectReceipts[stepId] != effectId
+        ) return@update false
+        state.runs[id] = run.copy(effectReceipts = run.effectReceipts - stepId)
+        true
+    }
+
     /** Launch recovery preserves expired parks for current-fact evaluation. */
     fun recover(
         atMillis: Long,

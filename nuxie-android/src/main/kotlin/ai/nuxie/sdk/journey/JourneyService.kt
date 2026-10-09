@@ -892,6 +892,8 @@ internal class JourneyService(
     ) {
         val route = JourneyActionType.presentationOutcomeRoute(event.name) ?: return
         val target = journal?.takeIf { it.distinctId == event.distinctId } ?: return
+        val identityScope = identity.captureScope()
+        if (identityScope.distinctId != target.distinctId) return
         val executionToken = executionFence.token()
         for (candidate in target.runs().filter {
             it.id != excludingRunId && it.completion == null && it.park == null &&
@@ -916,7 +918,14 @@ internal class JourneyService(
                 )
             ) continue
             val nextStepId = (step["outlets"] as? JsonObject)?.text(route.second)
-                ?: continue
+            if (nextStepId == null) {
+                val settled = publishJournalIfCurrent(executionToken, identityScope) {
+                    target.settlePresentationEffect(candidate.id, candidate.stepId, effectId)
+                } == true
+                if (!settled) continue
+                pendingPresentationPurchasePlacements.remove(candidate.id)
+                return
+            }
             val current = target.runs().firstOrNull {
                 it.id == candidate.id && it.completion == null && it.park == null &&
                     it.stepId == candidate.stepId &&
@@ -1775,6 +1784,12 @@ internal class JourneyService(
             batch.batchSequence < 0
         ) return false
         if (batch.batchSequence < run.nextPresentationBatchSequence) return true
+        val cursorAction = command.release.leg.getValue("steps").jsonArray
+            .map(JsonElement::jsonObject).firstOrNull { it.text("id") == run.stepId }
+            ?.get("action") as? JsonObject
+        if (run.effectReceipts[run.stepId] != null &&
+            cursorAction?.let(JourneyActionType::from)?.isCommerce == true
+        ) return false
         if (batch.batchSequence != run.nextPresentationBatchSequence ||
             batch.batchSequence == Long.MAX_VALUE
         ) return false
