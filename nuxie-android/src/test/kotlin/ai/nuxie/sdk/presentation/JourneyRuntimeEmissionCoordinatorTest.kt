@@ -35,7 +35,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             onEmissionBatch = { batch, sources ->
                 batches += batch
                 saves += checkNotNull(sources).saves
-                true
+                JourneyEmissionBatchResult.ACCEPTED
             }, onPresentationRevealed = {})
         assertTrue(coordinator.reveal())
         fun step(name: String) = NuxiePlayerStepOutcome(false, emptyList(),
@@ -62,7 +62,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
                     sequences += it.sequence
                     sourceIds += sources?.source(it.id)?.nativeId
                 }
-                true
+                JourneyEmissionBatchResult.ACCEPTED
             }, onPresentationRevealed = {})
         assertTrue(coordinator.reveal())
         val snapshot = ai.nuxie.sdk.runtime.NuxieViewModelSnapshot.fromNative(
@@ -91,7 +91,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
                     val source = requireNotNull(sources?.source(emission.id))
                     assertEquals(expectedValue, source.snapshot.resolveNativeString("placementId", null, source.nativeId))
                 }
-                true
+                JourneyEmissionBatchResult.ACCEPTED
             }, onPresentationRevealed = {})
         assertTrue(coordinator.reveal())
         for (element in vectors) {
@@ -121,7 +121,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
     @Test fun `accepted frame link cancellation escapes publication`() = runTest {
         val cancelled = kotlinx.coroutines.CancellationException("link cancelled")
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", JsonObject(emptyMap()), 0, 0,
-            onEmissionBatch = { _, sources -> sources?.frameLinks?.perform(); true }, onPresentationRevealed = {},
+            onEmissionBatch = { _, sources -> sources?.frameLinks?.perform(); JourneyEmissionBatchResult.ACCEPTED }, onPresentationRevealed = {},
             onOpenLink = { throw cancelled })
         assertTrue(coordinator.reveal())
         val events = listOf(NuxieRuntimeEvent(0, 128, "sibling", "", "", 0f, emptyList()),
@@ -136,7 +136,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
         val order = mutableListOf<String>()
         lateinit var coordinator: JourneyRuntimeEmissionCoordinator
         coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", JsonObject(emptyMap()), 0, 0,
-            onEmissionBatch = { it, _ -> order += "batch"; false }, onPresentationRevealed = {},
+            onEmissionBatch = { it, _ -> order += "batch"; JourneyEmissionBatchResult.REJECTED }, onPresentationRevealed = {},
             onOpenLink = { order += "link"; coordinator.close() })
         assertTrue(coordinator.reveal())
         val events = listOf(NuxieRuntimeEvent(0, 131, "", "https://example.test", "_self", 0f, emptyList(), 99),
@@ -150,7 +150,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
         var batches = 0
         val links = mutableListOf<JourneyLinkRequest>()
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", descriptor, 0, 0,
-            onEmissionBatch = { _, _ -> batches++; true }, onPresentationRevealed = {}, onOpenLink = { links += it })
+            onEmissionBatch = { _, _ -> batches++; JourneyEmissionBatchResult.ACCEPTED }, onPresentationRevealed = {}, onOpenLink = { links += it })
         assertTrue(coordinator.reveal())
         val control = NuxieRuntimeEvent(0, 128, "control", "", "", 0f, emptyList())
         val link = NuxieRuntimeEvent(2, 131, "", "https://example.test", "_self", 0f, emptyList())
@@ -163,7 +163,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
         val descriptor = Json.parseToJsonElement("""{"screenBehaviors":[{"screenId":"screen","controls":[{"actionId":"control","behavior":{"kind":"declarative","program":[{"type":"emit","eventName":"before_missing","payload":{}},{"type":"emit","eventName":"requires_alias","payload":{"instance":{"source":"instance_id"}}}]}}]}]}""").jsonObject
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", descriptor, 0, 0,
-            onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {})
+            onEmissionBatch = { it, _ -> batches += it; JourneyEmissionBatchResult.ACCEPTED }, onPresentationRevealed = {})
         assertTrue(coordinator.reveal())
         val frame = ai.nuxie.sdk.runtime.NuxieViewModelSnapshot.fromNative(ai.nuxie.sdk.runtime.NativeViewModelSnapshot(1,
             arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(1, 0), ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(3, 0)), emptyArray()))
@@ -185,7 +185,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             screenId = screenEmissionFixture.getValue("run").jsonObject.getValue("screen_id").jsonPrimitive.content,
             descriptor = controlDescriptor(),
             nextBatchSequence = 0, nextEmissionSequence = 0,
-            onEmissionBatch = { it, _ -> order += "batch"; true },
+            onEmissionBatch = { it, _ -> order += "batch"; JourneyEmissionBatchResult.ACCEPTED },
             onScreenChanged = { order += "screen"; true },
             onPresentationRevealed = { order += "admission"; admissionCount++ },
         )
@@ -246,7 +246,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             onEmissionBatch = { batch, frameSources ->
                 order += "batch"
                 batches += batch
-                true
+                JourneyEmissionBatchResult.ACCEPTED
             },
             onPresentationRevealed = {
                 order += "reveal:$it"
@@ -299,7 +299,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             descriptor = JsonObject(emptyMap()),
             nextBatchSequence = 0,
             nextEmissionSequence = 0,
-            onEmissionBatch = { it, _ -> batches += it; true },
+            onEmissionBatch = { it, _ -> batches += it; JourneyEmissionBatchResult.ACCEPTED },
             onPresentationRevealed = {},
             createId = incrementingIds(),
             nowMillis = { 99 },
@@ -358,7 +358,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             },
             nextBatchSequence = 0,
             nextEmissionSequence = 0,
-            onEmissionBatch = { it, _ -> batches += it; true },
+            onEmissionBatch = { it, _ -> batches += it; JourneyEmissionBatchResult.ACCEPTED },
             onPresentationRevealed = {},
         )
         coordinator.reveal()
@@ -388,7 +388,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             descriptor = controlDescriptor(),
             nextBatchSequence = 0,
             nextEmissionSequence = 0,
-            onEmissionBatch = { it, _ -> batches += it; true },
+            onEmissionBatch = { it, _ -> batches += it; JourneyEmissionBatchResult.ACCEPTED },
             onPresentationRevealed = {},
         )
         coordinator.reveal()
@@ -418,7 +418,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             descriptor = JsonObject(emptyMap()),
             nextBatchSequence = 0,
             nextEmissionSequence = 0,
-            onEmissionBatch = { it, _ -> batches += it; true },
+            onEmissionBatch = { it, _ -> batches += it; JourneyEmissionBatchResult.ACCEPTED },
             onPresentationRevealed = {},
         )
         coordinator.reveal()
@@ -453,7 +453,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             descriptor = controlDescriptor(),
             nextBatchSequence = 0,
             nextEmissionSequence = 0,
-            onEmissionBatch = { it, _ -> batches += it; true },
+            onEmissionBatch = { it, _ -> batches += it; JourneyEmissionBatchResult.ACCEPTED },
             onPresentationRevealed = {},
         )
         coordinator.reveal()
@@ -484,7 +484,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             nextEmissionSequence = 0,
             onEmissionBatch = { it, _ ->
                 attempts += 1
-                false
+                JourneyEmissionBatchResult.REJECTED
             },
             onPresentationRevealed = {},
         )
@@ -507,7 +507,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             nextEmissionSequence = 0,
             onEmissionBatch = { it, _ ->
                 attempts += 1
-                true
+                JourneyEmissionBatchResult.ACCEPTED
             },
             onPresentationRevealed = {},
         )
@@ -530,7 +530,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
         var batches = 0
         var admissions = 0
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", JsonObject(emptyMap()), 0, 0,
-            onEmissionBatch = { it, _ -> batches++; true }, onPresentationRevealed = { admissions++ })
+            onEmissionBatch = { it, _ -> batches++; JourneyEmissionBatchResult.ACCEPTED }, onPresentationRevealed = { admissions++ })
         val old = RendererEffectLifetime()
         val waiting = async { coordinator.publish(outcome(events = listOf(event("old"))), 1uL, old) }
         val text = async { coordinator.publishTextCommit("old-input", "stale", lifetime = old) }
@@ -556,7 +556,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             onEmissionBatch = { batch, frameSources ->
                 sequences += batch.batchSequence
                 if (sequences.size == 1) { entered.complete(Unit); release.await() }
-                true
+                JourneyEmissionBatchResult.ACCEPTED
             }, onPresentationRevealed = {})
         val old = RendererEffectLifetime()
         coordinator.reveal()

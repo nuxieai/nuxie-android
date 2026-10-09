@@ -35,7 +35,7 @@ class JourneyRuntimeEventScopeTest {
             var resolved: JourneyRuntimeEventSource? = null
             val coordinator = JourneyRuntimeEmissionCoordinator(journeyId = "journey", screenId = "screen",
                 descriptor = JsonObject(emptyMap()), nextBatchSequence = 0, nextEmissionSequence = 0,
-                onEmissionBatch = { it, frameSources -> batches += it; resolved = frameSources?.source(it.emissions.first().id); true },
+                onEmissionBatch = { it, frameSources -> batches += it; resolved = frameSources?.source(it.emissions.first().id); JourneyEmissionBatchResult.ACCEPTED },
                 onPresentationRevealed = {})
             assertTrue(coordinator.reveal())
             val properties = mutableListOf(NuxieRuntimeEventProperty("value",
