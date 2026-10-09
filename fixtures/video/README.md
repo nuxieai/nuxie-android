@@ -57,7 +57,7 @@ measurements, not a claim about unrestricted decoder throughput or A/V skew.
 
 `captions-anamorphic.mp4` has 64×32 coded pixels and 2:1 sample aspect ratio.
 Android's player reports 128×32 display pixels; the decoder-budget regression
-compares the decoded frame's display dimensions with the media probe's work estimate.
+compares the actual RGBA frame dimensions with the media probe's work estimate.
 Regenerate with:
 
 ```sh
