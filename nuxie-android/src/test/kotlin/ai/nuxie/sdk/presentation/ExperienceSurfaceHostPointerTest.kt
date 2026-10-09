@@ -66,6 +66,124 @@ class ExperienceSurfaceHostPointerTest {
         } finally { run.retire() }
     }
 
+    @Test fun `shared environment update waits for another screens semantic capture`() =
+        sharedEnvironmentFence(initializing = false)
+
+    @Test fun `shared environment initialization waits for another screens semantic capture`() =
+        sharedEnvironmentFence(initializing = true)
+
+    private fun sharedEnvironmentFence(initializing: Boolean) = kotlinx.coroutines.runBlocking {
+        val base = RecordingNative().apply { nativeInput = true }
+        var revision = 0
+        var reduceMotion = false
+        var imports = 0
+        var renderers = 0
+        var players = 0L
+        val submitted = mutableMapOf<Long, Pair<Int, Boolean>>()
+        val presented = mutableMapOf<Long, Pair<Int, Boolean>>()
+        val captured = mutableListOf<Boolean>()
+        val native = object : NuxieTypedRuntimeNative by base {
+            override fun newFile(rendererHandle: Long, bytes: ByteArray,
+                expectedAssets: List<ai.nuxie.sdk.runtime.ExpectedFileAsset>, externalAssets: Map<Int, ByteArray>,
+                imageDecoder: ai.nuxie.sdk.runtime.NuxImageDecoder, videoEnabled: Boolean): Long {
+                imports++
+                return 1L
+            }
+            override fun viewModelCatalog(fileHandle: Long) = NativeCallResult(0, NativeViewModelCatalog(
+                arrayOf(NativeViewModelSchema(0, "Root", 0, 0, 0, 0, -1, false),
+                    NativeViewModelSchema(1, "Experience", 0, 0, 0, 1, -1, false),
+                    NativeViewModelSchema(2, "env", 0, 1, 0, 0, -1, true)),
+                arrayOf(NativeViewModelProperty(2, 0, "reduceMotion", 3, -1, emptyArray())), emptyArray()))
+            override fun newViewModel(fileHandle: Long, schemaIndex: Int, authoredInstanceIndex: Int?) =
+                NativeCallResult(0, 50L + schemaIndex)
+            override fun snapshotViewModel(viewModelHandle: Long) = NativeCallResult(0,
+                ai.nuxie.sdk.runtime.NativeViewModelSnapshot(viewModelHandle,
+                    arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(viewModelHandle,
+                        if (viewModelHandle == 51L) 1L else 2L)), emptyArray()))
+            override fun mutateViewModel(handle: Long, write: NativeViewModelWrite): Int {
+                assertEquals(52L, handle)
+                assertEquals("reduceMotion", write.path)
+                reduceMotion = write.boolValue
+                revision++
+                return 0
+            }
+            override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long {
+                renderers++
+                return 4L
+            }
+            override fun newDefaultPlayer(artboardHandle: Long) = ++players
+            override fun setPlayerGlobalViewModel(playerHandle: Long, name: ByteArray, viewModelHandle: Long): Int {
+                assertEquals(52L, viewModelHandle)
+                return 0
+            }
+            override fun renderAndPresent(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
+                clearColor: Int, layoutScaleFactor: Float): Int {
+                val frame = submitted.getOrPut(playerHandle) { revision to reduceMotion }
+                if (base.presentation == 1) {
+                    presented[playerHandle] = frame
+                    submitted.remove(playerHandle)
+                }
+                return base.presentation
+            }
+            override fun captureSemantics(player: Long): NativeCallResult<Long> {
+                // The runtime refuses semantics from a newer global revision than the pixels.
+                val frame = checkNotNull(presented[player])
+                if (frame.first != revision) return NativeCallResult(9, null)
+                captured += frame.second
+                return base.captureSemantics(player)
+            }
+        }
+        val run = ExperienceRunValues()
+        val failures = mutableListOf<ExperiencePresentationException>()
+        fun host() = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), run.lane,
+            runtime = NuxieRuntime(native), runValues = run, usesSystemFrameCallbacks = false,
+            listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() = Unit
+                override fun onFailure(error: ExperiencePresentationException) { failures += error }
+            })
+        val first = host()
+        val second = host()
+        val texture = SurfaceTexture(0)
+        val otherTexture = SurfaceTexture(0)
+        fun load(host: ExperienceSurfaceHost) {
+            host.loadArtboard(byteArrayOf(1), null,
+                textInputs = ExperienceTextInput.forScreen(textInputDescriptor(), "survey"))
+        }
+        try {
+            load(first)
+            if (!initializing) load(second)
+            first.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(run.lane)
+            base.presentation = 4
+            first.doFrame(1_000_000_000L)
+            drain(run.lane)
+            first.onSurfaceTextureUpdated(texture)
+            second.updateRuntimeValues(mapOf("env/reduceMotion" to NuxieViewModelScalarValue.BooleanValue(true)))
+            if (initializing) {
+                load(second)
+                second.onSurfaceTextureAvailable(otherTexture, 100, 100)
+            }
+            drain(run.lane)
+            base.presentation = 1
+            first.doFrame(1_016_000_000L)
+            drain(run.lane)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertTrue("A sibling env write must not invalidate submitted text semantics: $failures", failures.isEmpty())
+            assertEquals(listOf(false), captured)
+            first.onSurfaceTextureUpdated(texture)
+            first.doFrame(1_032_000_000L)
+            drain(run.lane)
+            assertTrue("The newer env frame must capture successfully: $failures", failures.isEmpty())
+            assertEquals(listOf(false, true), captured)
+            assertEquals("Both screens use the same native file and env", 1, imports)
+            assertEquals("Deferred mounting must use the run renderer", 1, renderers)
+        } finally {
+            first.release(); second.release(); drain(run.lane)
+            run.retire()
+            texture.release(); otherTexture.release()
+        }
+    }
+
     @Test fun `custom watchdog waits for pending frame phase writes and zero delta step`() = kotlinx.coroutines.test.runTest {
         val native = RecordingNative()
         val lane = NuxieRuntimeLane()

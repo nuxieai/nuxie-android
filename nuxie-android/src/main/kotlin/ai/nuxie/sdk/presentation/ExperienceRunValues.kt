@@ -141,6 +141,9 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
     /** Called on the run lane after capture or after native submission retirement. */
     fun setPresentationPending(owner: String, pending: Boolean) = mutations.setPresentationPending(owner, pending)
 
+    /** Lane-confined writes to the shared file wait for every submitted frame's capture. */
+    fun mutateWhenPresented(apply: () -> Unit, reject: () -> Unit) = mutations.submit(apply, reject)
+
     suspend fun applyResponseSaveDisplays(displays: Map<String, JourneyResponseSaveDisplay>, descriptor: JsonObject) {
         val completion = CompletableDeferred<Unit>()
         if (!lane.enqueue {
