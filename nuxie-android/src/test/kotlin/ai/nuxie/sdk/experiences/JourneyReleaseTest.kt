@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.putJsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.int
@@ -25,6 +26,62 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyReleaseTest {
+    @Test fun signedFormQualifiedConditionAuthenticates() {
+        val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val leg = JsonObject(source.getValue("leg").jsonObject + mapOf(
+            "entryStepId" to JsonPrimitive("read-form"),
+            "routes" to JsonArray(emptyList()),
+            "steps" to Json.parseToJsonElement("""
+                [{"kind":"action","id":"read-form","action":{"type":"condition","branches":[{"id":"long","condition":{"type":"Compare","op":">","left":{"type":"Response.Field","form":"onboarding","key":"trip_days"},"right":{"type":"Number","value":14}}}]},"outlets":{"long":"done","default":"done"}},{"kind":"complete","id":"done","outcome":"continue"}]
+            """),
+        ))
+        val root = JsonObject(source + ("leg" to leg))
+        val bytes = root.toString().encodeToByteArray()
+        val pair = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val signature = java.security.Signature.getInstance("Ed25519").run {
+            initSign(pair.private)
+            update(JourneyReleaseLimits.SIGNATURE_DOMAIN.encodeToByteArray() + bytes)
+            sign()
+        }
+        val signed = JsonObject(envelope + mapOf(
+            "descriptorBytesBase64" to JsonPrimitive(Base64.encodeToString(bytes, Base64.NO_WRAP)),
+            "descriptorSizeBytes" to JsonPrimitive(bytes.size),
+            "descriptorSha256" to JsonPrimitive(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(bytes).joinToString("") { "%02x".format(it) }),
+            "signature" to buildJsonObject {
+                put("version", 1); put("algorithm", "ed25519"); put("keyId", "TEST_ONLY_C11")
+                put("signatureBase64", Base64.encodeToString(signature, Base64.NO_WRAP))
+            },
+        )).toString().encodeToByteArray()
+        val trusted = mapOf("TEST_ONLY_C11" to pair.public.encoded.takeLast(32).toByteArray())
+        val identity = requireNotNull(JourneyReleaseIdentity.fromJson(root.getValue("identity").jsonObject))
+        assertArrayEquals(bytes, JourneyReleaseVerifier.authenticate(signed, trusted, identity,
+            leg.getValue("id").jsonPrimitive.content, runtime(root), JourneyReleaseReplayPolicy.Active(0)).descriptorBytes)
+    }
+
+    @Test fun formSelectorRejectsMalformedNamesAndOtherFieldKinds() {
+        fun field(type: String = "Response.Field", form: kotlinx.serialization.json.JsonElement) = buildJsonObject {
+            put("type", type); put("key", "trip_days"); put("form", form)
+        }
+        fun validate(field: JsonObject) = JourneyGrammar.action(buildJsonObject {
+            put("type", "send_event"); put("eventName", "trip")
+            putJsonObject("payload") { put("days", field) }
+        }, emptySet(), emptySet())
+        for (form in listOf(JsonNull, JsonPrimitive(12), JsonPrimitive(""), JsonPrimitive("bad-form"), JsonPrimitive("form\n"), JsonPrimitive("é"))) {
+            assertThrows(JourneyReleaseAuthenticationException::class.java) { validate(field(form = form)) }
+            assertThrows(JourneyReleaseAuthenticationException::class.java) { DeviceEntryIrSchema.validate(field(form = form)) }
+        }
+        for (type in listOf("Event.Field", "Customer.Field")) {
+            assertThrows(JourneyReleaseAuthenticationException::class.java) { validate(field(type, JsonPrimitive("onboarding"))) }
+        }
+        for (form in listOf("onboarding", "7_form", "true", "x".repeat(257))) {
+            validate(field(form = JsonPrimitive(form)))
+            DeviceEntryIrSchema.validate(field(form = JsonPrimitive(form)))
+        }
+    }
+
     @Test fun `published F5 authenticates exact response policy`() {
         val folder = FixtureRunner.fixturesRoot().resolve("runtime/forms-saves")
         val bytes = folder.resolve("release.json").readBytes()
