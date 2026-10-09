@@ -23,6 +23,11 @@ import kotlinx.serialization.json.jsonObject
 private const val PROFILE_APP_ID_HEADER = "Nuxie-App-Id"
 private const val PROFILE_APP_ENVIRONMENT_HEADER = "Nuxie-App-Environment"
 
+internal fun isInvalidPurchaseTokenRejection(body: JsonObject): Boolean =
+    listOf("code", "reason", "error").any { key ->
+        (body[key] as? JsonPrimitive)?.takeIf { it.isString }?.content == "invalid_purchase_token"
+    }
+
 /**
  * The API client, ported from the iOS `NuxieApi`. Ordinary captured events
  * use `/batch`; Feature consumption uses `/feature/consume`.
@@ -48,6 +53,7 @@ internal class NuxieApi(
     class PurchaseRejectedException(
         val statusCode: Int,
         val permanent: Boolean,
+        val invalidToken: Boolean = false,
     ) : IOException("/purchase rejected with status $statusCode")
 
     data class PlayPurchaseReport(
@@ -475,7 +481,12 @@ internal class NuxieApi(
         )
         if (response.statusCode !in 200..299) {
             val permanent = response.statusCode in 400..499 && response.statusCode !in setOf(408, 429)
-            throw PurchaseRejectedException(response.statusCode, permanent)
+            val invalidToken = runCatching {
+                val text = response.body.decodeToString()
+                StrictJsonValidator.requireNoDuplicateKeys(text)
+                isInvalidPurchaseTokenRejection(Json.parseToJsonElement(text).jsonObject)
+            }.getOrDefault(false)
+            throw PurchaseRejectedException(response.statusCode, permanent, invalidToken)
         }
         val text = response.body.decodeToString().ifBlank { "{}" }
         StrictJsonValidator.requireNoDuplicateKeys(text)
