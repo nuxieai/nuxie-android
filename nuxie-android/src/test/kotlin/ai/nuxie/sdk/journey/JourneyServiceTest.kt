@@ -87,6 +87,7 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import org.junit.After
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -2741,7 +2742,15 @@ class JourneyServiceTest {
         assertAuthoredDismiss(null)
     }
 
-    private suspend fun assertAuthoredDismiss(commerce: String?) {
+    @Test fun `cancelled purchase without outlet permits Subscribe again`() = runBlocking {
+        assertAuthoredDismiss("purchase", SystemEventNames.PURCHASE_CANCELLED)
+    }
+
+    @Test fun `failed purchase without outlet permits Subscribe again`() = runBlocking {
+        assertAuthoredDismiss("purchase", SystemEventNames.PURCHASE_FAILED)
+    }
+
+    private suspend fun assertAuthoredDismiss(commerce: String?, retryOutcome: String? = null) {
         val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/authored-dismiss.json").readText()).jsonObject
             .getValue("cases").jsonArray.single { it.jsonObject.getValue("name").jsonPrimitive.content == (commerce ?: "user_close") }.jsonObject
@@ -2783,6 +2792,7 @@ class JourneyServiceTest {
             runtimeAvailable = { true }, currentDistinctId = identity::distinctId, launch = launched::add)
         val requestReady = CompletableDeferred<JourneyPresentationRequest>()
         val claimedEffect = CompletableDeferred<String>()
+        val claimedEffects = CopyOnWriteArrayList<String>()
         val presenter = object : JourneyPresenting {
             override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest) = presentations.openJourneyLink(owner, link)
             override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
@@ -2810,6 +2820,7 @@ class JourneyServiceTest {
             override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String): JourneyPresentationActionResult {
                 if (action["type"] == JsonPrimitive(type)) {
                     // The store boundary is controlled; authored dismissal uses the real service.
+                    claimedEffects += effectId
                     claimedEffect.complete(effectId)
                     return JourneyPresentationActionResult.AwaitingOutcome
                 }
@@ -2836,7 +2847,34 @@ class JourneyServiceTest {
                     JourneyScreenEmissionSource("screen_welcome", "buy"), listOf(JourneyScreenEmission(
                         "00000000-0000-7000-8000-000000000901", 0, 100_000L, "buy", JsonObject(emptyMap()))))
                 assertTrue(request.onEmissionBatch(batch, null))
-                val effectId = withTimeout(5_000) { claimedEffect.await() }
+                var effectId = withTimeout(5_000) { claimedEffect.await() }
+                if (retryOutcome != null) {
+                    val retry = batch.copy(batchSequence = 1, invocationId = "commerce-retry",
+                        emissions = listOf(JourneyScreenEmission("00000000-0000-7000-8000-000000000902",
+                            1, 100_001L, "buy", JsonObject(emptyMap()))))
+                    assertFalse("Pending purchase rejects a second operation", request.onEmissionBatch(retry, null))
+                    suspend fun outcome(id: String, owner: String, name: String = retryOutcome) {
+                        journeys.handleEvent(StoredEvent(id, name,
+                            buildJsonObject { put("placement_id", "golden:monthly") }, 100_002L, owner),
+                            journeys.eventAdmissionGeneration())
+                    }
+                    outcome("unrelated-effect", "customer")
+                    outcome(effectId, "other-customer")
+                    assertFalse("Only this owner's correlated outcome releases the operation", request.onEmissionBatch(retry, null))
+                    assertEquals(1, claimedEffects.size)
+                    outcome(effectId, "customer")
+                    assertTrue(presentations.ownsJourney(JourneyPresentationOwner(request.journeyId, "customer")))
+                    assertTrue(captures.none { it.first == JourneyEventNames.LEG_COMPLETED })
+                    assertTrue("Settled purchase permits Subscribe again", request.onEmissionBatch(retry, null))
+                    withTimeout(5_000) { while (claimedEffects.size < 2) kotlinx.coroutines.delay(10) }
+                    assertEquals(2, claimedEffects.size)
+                    val previous = effectId
+                    effectId = claimedEffects.last()
+                    assertNotEquals(previous, effectId)
+                    outcome(previous, "customer", SystemEventNames.PURCHASE_COMPLETED)
+                    assertTrue(presentations.ownsJourney(JourneyPresentationOwner(request.journeyId, "customer")))
+                    assertTrue(captures.none { it.first == JourneyEventNames.LEG_COMPLETED })
+                }
                 journeys.handleEvent(StoredEvent(effectId,
                     if (commerce == "purchase") SystemEventNames.PURCHASE_COMPLETED else SystemEventNames.RESTORE_COMPLETED,
                     buildJsonObject { if (commerce == "purchase") put("placement_id", "golden:monthly") },
