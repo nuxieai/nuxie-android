@@ -61,8 +61,13 @@ internal object DeviceEntryIrSchema {
             }
             "Time.Now", "Journey.Id" -> Unit
             "Response.Field" -> {
-                if (!text(node["key"]).matches(Regex("^[A-Za-z][A-Za-z0-9_]*$"))) fail("response field")
-                node["form"]?.let(JourneyReleaseJson::responseFormName)
+                val key = text(node["key"])
+                if (node.containsKey("form")) {
+                    JourneyReleaseJson.responseFormName(node["form"])
+                    if (!key.matches(Regex("^[A-Za-z_][A-Za-z0-9_]*$")) || key in setOf("true", "false", "null")) {
+                        fail("response field")
+                    }
+                } else if (!key.matches(Regex("^[A-Za-z][A-Za-z0-9_]*$"))) fail("response field")
             }
             "Time.Ago" -> child("duration")
             "Time.Window" -> { number(node["value"]); oneOf(node["interval"], "day", "week", "month", "year") }
