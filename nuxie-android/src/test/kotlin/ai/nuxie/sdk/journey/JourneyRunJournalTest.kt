@@ -65,6 +65,16 @@ class JourneyRunJournalTest {
         Unit
     }
 
+    @Test fun `derived form answers are never persisted as journey context`() {
+        val journal = JourneyRunJournal(directory, "customer")
+        val run = requireNotNull(journal.admit(arm(), JourneyFrequency.OneTime, "wait", 100))
+        val context = JsonObject(run.context + ("formAnswers" to Json.parseToJsonElement(
+            """{"onboarding":{"trip_days":21}}""")))
+        journal.markStartedQueued(run)
+        journal.transition(run.id, "wait", context, JourneyControlExecutor.Checkpoint(100, 200))
+        assertFalse(JourneyRunJournal(directory, "customer").runs().single().context.containsKey("formAnswers"))
+    }
+
     @Test fun `list graph survives journal reopen and is dropped at completion`() {
         val journal = JourneyRunJournal(directory, "customer")
         val run = requireNotNull(journal.admit(arm(), JourneyFrequency.OneTime, "wait", 100))

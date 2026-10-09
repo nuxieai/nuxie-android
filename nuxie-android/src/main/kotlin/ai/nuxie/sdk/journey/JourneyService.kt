@@ -1482,7 +1482,8 @@ internal class JourneyService(
             }
             val context = try {
                 val values = preparedNativeValues(parked, release, currentJournal)
-                JsonObject(parked.context + ("responses" to values.journeyValues())).also {
+                JsonObject(parked.context + mapOf("responses" to values.journeyValues(),
+                    "formAnswers" to values.formAnswers(release.descriptor))).also {
                     nativeRestoreRetryAt.remove(parked.id)
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
@@ -2408,8 +2409,9 @@ internal class JourneyService(
                 }
                 val values = if (readsNativeValues(step) || step.text("kind") == "complete")
                     preparedNativeValues(run, release, target) else nativeValuesByRun[run.id]?.values
-                run = run.copy(context = JsonObject(run.context + ("responses" to
-                    (values?.journeyValues() ?: JsonObject(emptyMap())))))
+                run = run.copy(context = JsonObject(run.context + mapOf(
+                    "responses" to (values?.journeyValues() ?: JsonObject(emptyMap())),
+                    "formAnswers" to (values?.formAnswers(release.descriptor) ?: JsonObject(emptyMap())))))
                 if (!isExecutionCurrent(executionToken, target) || !identity.isCurrentScope(identityScope)) return
                 when (val result = executor.evaluate(
                     step,

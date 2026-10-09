@@ -43,13 +43,19 @@ class SharedValuesJourneyDeviceTest {
     @Test fun publishedF5WaitedFailureThenRetryControlsItsJourney() = saveJourney(background = false)
     @Test fun publishedF5BackgroundSaveAllowsCompletionBeforeReply() = saveJourney(background = true)
 
-    private fun saveJourney(background: Boolean) = runBlocking {
+    @Test fun publishedF5FormAnswerRoutesBothBranchesAndBoundary() {
+        for ((days, event) in listOf(7.0 to "short_trip", 14.0 to "short_trip", 23.0 to "long_trip")) {
+            saveJourney(background = true, days = days, branchEvent = event)
+        }
+    }
+
+    private fun saveJourney(background: Boolean, days: Double = 30.0, branchEvent: String? = null) = runBlocking {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val owner = "shared-values-${UUID.randomUUID()}"
         val directory = File(context.cacheDir, owner).apply { mkdirs() }
-        val fixture = fixture(form = if (background) "departure" else "feedback")
+        val fixture = fixture(form = if (background) "departure" else "feedback", publishedFormRoutes = branchEvent != null)
         val scene = File(directory, "screen.riv").apply { writeBytes(fixture.scene) }
         val artifacts = fixture.descriptor.getValue("render").jsonObject.getValue("assets").jsonArray
             .map { it.jsonObject }.filter { it["key"] != null }.associate { asset ->
@@ -67,6 +73,7 @@ class SharedValuesJourneyDeviceTest {
         val request = AtomicReference<JourneyPresentationRequest?>()
         val revealed = LinkedBlockingQueue<String>()
         val captured = LinkedBlockingQueue<String>()
+        val capturedProperties = LinkedBlockingQueue<Pair<String, Map<String, Any?>>>()
         val catalog = JourneyProfileCatalog(fixture.keys, JourneyReleaseHighWaterStore(context)) { fixture.supported }
         val presenter = object : JourneyPresenting {
             override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
@@ -88,16 +95,14 @@ class SharedValuesJourneyDeviceTest {
                     onScreenChanged = value.onScreenChanged, onScreenDismissed = value.onScreenDismissed,
                     onLinkOpened = value.onLinkOpened, onEmissionBatch = value.onEmissionBatch,
                     onPresentationRevealed = { value.onPresentationRevealed(it); revealed.add(it) },
-                    onOutcome = value.onOutcome, runValues = value.runValues)
+                    onOutcome = value.onOutcome, runValues = value.runValues, transition = value.transition)
                 return JourneyPresentationResult.Shown
             }
         }
-        val identity = object : IdentityProvider {
-            override fun distinctId() = owner
-            override fun anonymousId() = owner
-            override fun rawDistinctId(): String? = null
-            override val isIdentified = false
-        }
+        val identity = ai.nuxie.sdk.identity.IdentityService(object : android.content.ContextWrapper(context) {
+            override fun getApplicationContext(): android.content.Context = this
+            override fun getFilesDir(): File = directory
+        }).apply { setDistinctId(owner) }
         val pending = LinkedBlockingQueue<Pair<ai.nuxie.sdk.journey.JourneyResponseSave,
             CompletableDeferred<ai.nuxie.sdk.journey.JourneyResponseSaveReply>>>()
         val delivery = ai.nuxie.sdk.journey.JourneyResponseSaveDelivery(directory,
@@ -109,9 +114,19 @@ class SharedValuesJourneyDeviceTest {
         val service = JourneyService(identity, store, catalog, directory, scope,
             capture = { name, properties, eventId, distinctId ->
                 captured.add(name)
+                capturedProperties.add(name to properties)
                 store.insertPendingIfAbsent(ai.nuxie.sdk.events.StoredEvent(eventId, name,
                     ai.nuxie.sdk.events.JsonValueConverter.fromMap(properties), System.currentTimeMillis(), distinctId))
-            }, presenter = presenter, responseSaveDelivery = delivery,
+            }, dispatcher = JourneyEffectDispatcher(identity, capture = { name, properties, eventId, distinctId, admission, _ ->
+                val committed = store.insertPendingIfAbsent(ai.nuxie.sdk.events.StoredEvent(eventId, name,
+                    ai.nuxie.sdk.events.JsonValueConverter.fromMap(properties), System.currentTimeMillis(), distinctId), admission) == true
+                if (committed) {
+                    captured.add(name)
+                    capturedProperties.add(name to properties)
+                }
+                committed
+            }, deliverAppAction = { _, _ -> error("F5 does not dispatch an app action") }),
+            presenter = presenter, responseSaveDelivery = delivery,
             prepareNativeValues = { values, release, _ -> values.lane.call {
                 values.prepare(fixture.scene, release.descriptor, artifacts); Unit
             } })
@@ -145,7 +160,7 @@ class SharedValuesJourneyDeviceTest {
                             if (pendingFrame.getBoolean(host)) return@call null
                             val artboard = ExperienceSurfaceHost::class.java.getDeclaredField("artboard").apply { isAccessible = true }.get(host) as NuxieRuntimeArtboard
                             val player = ExperienceSurfaceHost::class.java.getDeclaredField("player").apply { isAccessible = true }.get(host) as NuxieRuntimePlayer
-                            assertTrue(artboard.setDefaultViewModelValue("state/days", NuxieViewModelScalarValue.NumberValue(30.0)))
+                            assertTrue(artboard.setDefaultViewModelValue("state/days", NuxieViewModelScalarValue.NumberValue(days)))
                             val size = player.layoutSize()
                             val x = size.first / 2f
                             var found: Pair<Float, Float>? = null
@@ -189,8 +204,15 @@ class SharedValuesJourneyDeviceTest {
             assertEquals(owner, first.first.distinctId)
             if (background) {
                 assertEquals("onboarding", first.first.formName)
-                assertEquals(30.0, first.first.answers.getValue("trip_days").jsonPrimitive.double, 0.0)
-                withTimeout(20_000) { while (!captured.contains(JourneyEventNames.LEG_COMPLETED)) delay(20) }
+                assertEquals(days, first.first.answers.getValue("trip_days").jsonPrimitive.double, 0.0)
+                if (branchEvent != null) {
+                    assertEquals("scr_screens_sitalian-level", revealed.poll(20, TimeUnit.SECONDS))
+                    val routed = capturedProperties.filter { it.first in listOf("short_trip", "long_trip") }
+                    assertEquals("Published condition must select the expected branch", listOf(branchEvent), routed.map { it.first })
+                    assertEquals(days, (routed.single().second["trip_days"] as Number).toDouble(), 0.0)
+                } else {
+                    withTimeout(20_000) { while (!captured.contains(JourneyEventNames.LEG_COMPLETED)) delay(20) }
+                }
                 assertEquals(1, captured.count { it == "continue" })
                 assertFalse(first.second.isCompleted)
                 first.second.complete(ai.nuxie.sdk.journey.JourneyResponseSaveReply(
@@ -600,7 +622,7 @@ class SharedValuesJourneyDeviceTest {
     private data class Fixture(val scene: ByteArray, val profile: JsonObject, val keys: Map<String, ByteArray>,
         val supported: JourneyReleaseSupportedRuntime, val authority: ProfileDeliveryAuthority, val descriptor: JsonObject)
 
-    private fun fixture(branch: Boolean = false, wait: Boolean = false, published: Boolean = false, goals: Boolean = false, form: String? = null): Fixture {
+    private fun fixture(branch: Boolean = false, wait: Boolean = false, published: Boolean = false, goals: Boolean = false, form: String? = null, publishedFormRoutes: Boolean = false): Fixture {
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         fun read(path: String) = assets.open(path).use { it.readBytes() }
         val entry = Json.parseToJsonElement(read("journeys/rendered-text-input/release-entry.json").decodeToString()).jsonObject
@@ -690,13 +712,22 @@ class SharedValuesJourneyDeviceTest {
                         putJsonObject("host") { put("kind", "screen"); put("screenId", screen) }
                     } }
                 ))))
+            if (publishedFormRoutes) {
+                val publishedLeg = publishedForm.getValue("leg").jsonObject
+                // Keep every published route and action. Enter at its departure navigation.
+                val entryStep = publishedLeg.getValue("steps").jsonArray.first {
+                    (it.jsonObject["action"] as? JsonObject)?.get("screenId") == JsonPrimitive(screen)
+                }.jsonObject.getValue("id")
+                descriptor = JsonObject(descriptor + ("leg" to JsonObject(descriptor.getValue("leg").jsonObject + mapOf(
+                    "steps" to publishedLeg.getValue("steps"), "routes" to publishedLeg.getValue("routes"), "entryStepId" to entryStep))))
+            }
         }
         val bytes = descriptor.toString().encodeToByteArray()
         val publicKey: ByteArray
         val signature: ByteArray
         if (form != null) {
             val proof = Json.parseToJsonElement(read("f5-journey-signatures.json").decodeToString()).jsonObject
-            val signedForm = proof.getValue("signatures").jsonObject.getValue(form).jsonObject
+            val signedForm = proof.getValue("signatures").jsonObject.getValue(if (publishedFormRoutes) "departure-c11" else form).jsonObject
             assertEquals("Signed F5 test route must match its descriptor", signedForm.getValue("descriptorSha256").jsonPrimitive.content, hash(bytes))
             publicKey = Base64.decode(proof.getValue("publicKey").jsonPrimitive.content, Base64.NO_WRAP)
             signature = Base64.decode(signedForm.getValue("signature").jsonPrimitive.content, Base64.NO_WRAP)
