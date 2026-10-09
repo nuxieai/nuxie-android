@@ -186,12 +186,25 @@ internal class NuxieExperienceActivity : Activity() {
             outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
             correlationId: ULong,
             viewModelSnapshot: NuxieViewModelSnapshot?,
+            saves: List<ExperienceResponseSaveRequest>,
         ) {
+            val weakScreen = java.lang.ref.WeakReference(this)
+            val frameSaves = saves.map { request ->
+                ExperienceFrameSave(request, checkNotNull(prepared.screenId)) {
+                    withContext(Dispatchers.Main.immediate) {
+                        val screen = weakScreen.get()
+                        if (screen != null && !screen.rendererEffects.isRetired && screen.closeState.reason == null &&
+                            PresentationRegistry.currentScreen(screen.id) === screen) {
+                            request.awaitTrigger?.let { screen.mounted?.surface?.confirmResponseSave(it) }
+                        }
+                    }
+                }
+            }
             synchronized(effectsLock) {
                 if (provisional) pendingEffects += {
-                    PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot, this)
+                    PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot, this, frameSaves)
                 } else if (closeState.reason == null) {
-                    PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot, this)
+                    PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot, this, frameSaves)
                 }
             }
         }
@@ -706,7 +719,12 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private fun removeRecoveryView() {
-        recoveryView?.let { it.close(); contentRoot.removeView(it) }
+        recoveryView?.let {
+            it.close()
+            it.visibility = View.INVISIBLE
+            // First-frame reveal may still be traversing this child list.
+            contentRoot.post { contentRoot.removeView(it) }
+        }
         recoveryView = null
     }
 

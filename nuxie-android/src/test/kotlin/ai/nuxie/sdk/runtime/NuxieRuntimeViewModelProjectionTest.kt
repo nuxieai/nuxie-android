@@ -6,6 +6,20 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class NuxieRuntimeViewModelProjectionTest {
+    @Test fun `frame consumers share one native capture`() {
+        val native = SnapshotNative()
+        val state = NuxieRuntimeViewModelState(40, emptyList(), native,
+            NuxieViewModelCatalog(emptyList(), emptyList(), emptyList()), 0)
+        try {
+            val captured = state.captureSnapshot()
+            assertEquals(listOf("snapshot:40"), native.calls)
+            assertEquals(captured.native.rootInstanceId, captured.values.nativeRootInstanceId)
+            assertEquals("primary", captured.values.resolveString("paywall/selectedProduct/placementId"))
+            native.selectedProductId = 42
+            assertEquals("primary", captured.values.resolveString("paywall/selectedProduct/placementId"))
+        } finally { state.close() }
+    }
+
     @Test
     fun `projected authored identity tracks its native instance and rejects detachment`() {
         val native = ProjectionNative()

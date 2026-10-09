@@ -23,6 +23,20 @@ class ExperienceResponseSaveRequestTest {
     private fun event(fields: List<NuxieRuntimeEventProperty>) = NuxieRuntimeEvent(0, 0,
         ExperienceResponseSaveRequest.EVENT, "", "", 0f, fields)
 
+    @Test fun `one malformed save does not discard its valid frame sibling`() {
+        val valid = event(listOf(field("form", "feedback")))
+        val malformed = valid.copy(properties = emptyList())
+        val command = NuxieHostCommand(ExperienceResponseSaveRequest.EVENT,
+            NuxieHostValue.Object(listOf(NuxieHostValue.Object.Field("form", NuxieHostValue.String("feedback")))))
+        val outcome = NuxiePlayerStepOutcome(false, emptyList(), listOf(malformed, valid),
+            listOf(command.copy(value = NuxieHostValue.String("invalid")), command), emptyList())
+        var rejected = 0
+        val captured = ExperienceResponseSaveRequest.captureFrame(outcome, snapshot(), catalog, descriptor) { rejected++ }
+        assertEquals(2, rejected)
+        assertEquals(listOf("feedback", "feedback"), captured.map { it.form })
+        assertTrue(captured.all { it.answers.getValue("stars").jsonPrimitive.double == 4.0 })
+    }
+
     @Test fun `await path remains opaque and malformed saves cannot capture empty answers`() {
         val valid = event(listOf(field("form", "feedback"), field("awaitTrigger", "await/own-trigger")))
         val captured = checkNotNull(ExperienceResponseSaveRequest.capture(valid, snapshot(), catalog, descriptor))

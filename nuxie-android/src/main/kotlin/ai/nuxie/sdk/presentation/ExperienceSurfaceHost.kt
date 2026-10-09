@@ -87,6 +87,7 @@ internal class ExperienceSurfaceHost(
             outcome: NuxiePlayerStepOutcome,
             correlationId: ULong,
             viewModelSnapshot: NuxieViewModelSnapshot?,
+            saves: List<ExperienceResponseSaveRequest>,
         ) {}
         fun onFailure(error: ExperiencePresentationException)
         fun onRuntimeEvent(event: NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {}
@@ -353,12 +354,37 @@ internal class ExperienceSurfaceHost(
     @Volatile private var firstFramePresented = false
     @Volatile private var firstFrameComposed = false
     private var androidSurface: Surface? = null
+    private var saveDescriptor: JsonObject? = null
     private val unpublishedSteps = ArrayDeque<PublishedStep>()
     // SUBMITTED retains the exact frame until native completion. Polling must
     // neither step the player nor publish effects from its unfinished frame.
     private val saveFrameOwner = java.util.UUID.randomUUID().toString()
     private var pendingPresentation = false
     private val pendingTextWrites = ArrayDeque<() -> Unit>()
+
+    fun confirmResponseSave(trigger: String) {
+        val generation = frameGeneration.get()
+        lane.enqueue {
+            pendingTextWrites.addLast {
+                if (!released.get() && !failureReported.get() && generation == frameGeneration.get()) {
+                    try {
+                        viewModelState?.fireTrigger(trigger) ?: checkNotNull(artboard).fireDefaultTrigger(trigger)
+                        val correlationId = nextCorrelationId
+                        nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
+                        val outcome = stepAndRefreshFocus {
+                            checkNotNull(player).stepAfterStateMutation(correlationId = correlationId)
+                        }
+                        captureStepSnapshot(outcome, correlationId)?.let(::retainScreenValues)
+                        publishSteps()
+                    } catch (error: kotlinx.coroutines.CancellationException) { throw error }
+                    catch (error: Exception) {
+                        reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Response save continuation failed", error)
+                    }
+                }
+            }
+            drainTextWrites()
+        }
+    }
 
     private fun drainTextWrites() {
         if (pendingPresentation) return
@@ -459,9 +485,8 @@ internal class ExperienceSurfaceHost(
                     checkNotNull(player).stepTyped(elapsedSeconds = 0.0, correlationId = correlationId,
                         textRunNames = emptyList())
                 }
-                val snapshot = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
+                val snapshot = captureStepSnapshot(outcome, correlationId)
                 snapshot?.let(::retainScreenValues)
-                if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, snapshot))
                 publishSteps()
             }
             presentedTransitionWrite = null
@@ -538,6 +563,7 @@ internal class ExperienceSurfaceHost(
         discardFocusInput()
         riveFocusState = NuxieFocusState(false, false)
         lane.enqueue {
+            saveDescriptor = descriptor
             val requirements = descriptor?.get("requirements") as? JsonObject
             semanticsEnabled = (requirements?.get("requiredCapabilities") as? JsonArray).orEmpty()
                 .any { (it as? JsonPrimitive)?.content == "experience-accessibility" } ||
@@ -735,9 +761,8 @@ internal class ExperienceSurfaceHost(
         val outcome = stepAndRefreshFocus {
             checkNotNull(player).stepTyped(elapsedSeconds = 0.0, pointers = pointers, focusInputs = inputs, correlationId = correlationId)
         }
-        val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
+        val root = captureStepSnapshot(outcome, correlationId)
         root?.let { retainScreenValues(it) }
-        if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, root))
     }
 
     private fun focusNativeField(field: ExperienceNativeTextField, point: Pair<Float, Float>? = null): Boolean {
@@ -882,9 +907,8 @@ internal class ExperienceSurfaceHost(
                         val outcome = stepAndRefreshFocus {
                             checkNotNull(player).stepAfterStateMutation(correlationId = correlationId)
                         }
-                        val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
+                        val root = captureStepSnapshot(outcome, correlationId)
                         root?.let { retainScreenValues(it) }
-                        if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, root))
                         publishSteps()
                     } else listener?.onTextInputEvent(target.inputId, event)
                 } catch (error: Exception) {
@@ -1136,7 +1160,7 @@ internal class ExperienceSurfaceHost(
     private fun publishSteps() {
         while (firstFrameComposed && unpublishedSteps.isNotEmpty()) {
             val step = unpublishedSteps.removeFirst()
-            listener?.onRuntimeStep(step.outcome, step.correlationId, step.viewModelSnapshot)
+            listener?.onRuntimeStep(step.outcome, step.correlationId, step.viewModelSnapshot, step.saves)
             if (step.outcome.events.isNotEmpty()) {
                 post {
                     if (!released.get()) {
@@ -1269,7 +1293,7 @@ internal class ExperienceSurfaceHost(
                         textInputs.isNotEmpty() || outcome.events.isNotEmpty() || outcome.hasPublishableEffects()
                     ) {
                         try {
-                            viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
+                            captureStepSnapshot(outcome, correlationId)
                         } catch (error: Throwable) {
                             reportFailure(
                                 ExperiencePresentationException.Reason.HOST_FAILED,
@@ -1282,9 +1306,6 @@ internal class ExperienceSurfaceHost(
                         null
                     }
                     viewModelSnapshot?.let { retainScreenValues(it) }
-                    if (outcome.hasPublishableEffects()) {
-                        unpublishedSteps.addLast(PublishedStep(correlationId, outcome, viewModelSnapshot))
-                    }
                     submittedCaptions = SubmittedCaptions(videoPlayback?.captionSnapshot().orEmpty(), generation, epoch)
                     submittedSnapshot = viewModelSnapshot?.let { SubmittedTextSnapshot(it, outcome.textGeometry, generation, epoch) }
                     if (!firstFramePresented) firstFrameUpdateBaseline = surfaceUpdates.get()
@@ -1458,10 +1479,29 @@ internal class ExperienceSurfaceHost(
     private fun NuxiePlayerStepOutcome.hasPublishableEffects(): Boolean =
         events.isNotEmpty() || hostCommands.isNotEmpty() || viewModelChanges.isNotEmpty()
 
+    /** Called once after each player step, before any later native writes. */
+    private fun captureStepSnapshot(outcome: NuxiePlayerStepOutcome, correlationId: ULong): NuxieViewModelSnapshot? {
+        val captured = viewModelState?.captureSnapshot() ?: artboard?.captureDefaultSnapshot()
+        val saves = mutableListOf<ExperienceResponseSaveRequest>()
+        val descriptor = saveDescriptor
+        if (descriptor != null && captured != null && (outcome.events.any { it.name == ExperienceResponseSaveRequest.EVENT } ||
+            outcome.hostCommands.any { it.name == ExperienceResponseSaveRequest.EVENT })) {
+            val catalog = checkNotNull(file).viewModelCatalog()
+            saves += ExperienceResponseSaveRequest.captureFrame(outcome, captured.native, catalog, descriptor) {
+                Log.w(LOG_TAG, "Rejected native response save")
+            }
+        }
+        if (outcome.hasPublishableEffects()) {
+            unpublishedSteps.addLast(PublishedStep(correlationId, outcome, captured?.values, saves))
+        }
+        return captured?.values
+    }
+
     private data class PublishedStep(
         val correlationId: ULong,
         val outcome: NuxiePlayerStepOutcome,
         val viewModelSnapshot: NuxieViewModelSnapshot?,
+        val saves: List<ExperienceResponseSaveRequest>,
     )
 
     /**
