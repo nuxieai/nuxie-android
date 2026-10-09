@@ -2729,6 +2729,131 @@ class JourneyServiceTest {
         }
     }
 
+    @Test fun `purchase then authored dismiss completes the same Journey once`() = runBlocking {
+        assertAuthoredDismiss("purchase")
+    }
+
+    @Test fun `restore then authored dismiss completes the same Journey once`() = runBlocking {
+        assertAuthoredDismiss("restore")
+    }
+
+    @Test fun `genuine user close still reports host dismissed through the real presenter`() = runBlocking {
+        assertAuthoredDismiss(null)
+    }
+
+    private suspend fun assertAuthoredDismiss(commerce: String?) {
+        val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/authored-dismiss.json").readText()).jsonObject
+            .getValue("cases").jsonArray.single { it.jsonObject.getValue("name").jsonPrimitive.content == (commerce ?: "user_close") }.jsonObject
+        val identity = identity("customer")
+        val entry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(entry)
+        val authority = authority(entry)
+        catalog.commit("customer", catalog.prepare(profile(releaseEntry = entry), authority))
+        val baseline = requireNotNull(catalog.snapshot("customer"))
+        val original = baseline.releasesByDigest.values.single()
+        val type = commerce ?: "purchase"
+        val action = buildJsonObject {
+            put("type", type)
+            if (type == "purchase") put("placementId", "golden:monthly")
+        }
+        val leg = JsonObject(original.leg + mapOf(
+            "entryStepId" to JsonPrimitive("present"),
+            "offers" to JsonArray(emptyList()),
+            "steps" to JsonArray(listOf(
+                Json.parseToJsonElement("""{"kind":"action","id":"present","action":{"type":"navigate","screenId":"screen_welcome"},"outlets":{}}"""),
+                buildJsonObject {
+                    put("kind", "action"); put("id", "commerce"); put("action", action)
+                    putJsonObject("outlets") { put(if (type == "purchase") "completed" else "restored", "dismiss") }
+                },
+                Json.parseToJsonElement("""{"kind":"action","id":"dismiss","action":{"type":"dismiss"},"outlets":{}}"""),
+            )),
+            "routes" to Json.parseToJsonElement("""[{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"buy","entryStepId":"commerce"}]"""),
+        ))
+        val products = JsonArray(original.descriptor.getValue("products").jsonArray.map {
+            JsonObject(it.jsonObject + ("type" to JsonPrimitive("consumable")))
+        })
+        val envelope = JourneyReleaseEnvelope.authenticate(entry.getValue("envelope").toString().encodeToByteArray(),
+            mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP)))
+        val release = AuthenticatedJourneyRelease(envelope, original.identity,
+            JsonObject(original.descriptor + mapOf("leg" to leg, "products" to products)), original.publishedAtSeqToPromote)
+        val snapshot = baseline.copy(releasesByDigest = mapOf(release.descriptorSha256 to release))
+        val launched = CopyOnWriteArrayList<String>()
+        val presentations = ExperiencePresentationService(emit = { _, _, _ -> }, scope = scope,
+            runtimeAvailable = { true }, currentDistinctId = identity::distinctId, launch = launched::add)
+        val requestReady = CompletableDeferred<JourneyPresentationRequest>()
+        val claimedEffect = CompletableDeferred<String>()
+        val presenter = object : JourneyPresenting {
+            override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest) = presentations.openJourneyLink(owner, link)
+            override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
+            override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
+            override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
+            override fun resolveAction(owner: JourneyPresentationOwner, action: JsonObject, source: JourneyScreenEmissionSource?, eventSource: ai.nuxie.sdk.presentation.JourneyRuntimeEventSource?) =
+                presentations.resolveJourneyAction(owner, action, source, eventSource)
+            override suspend fun present(request: JourneyPresentationRequest): JourneyPresentationResult {
+                val file = File(directory, "dismiss-scene").apply { writeBytes(byteArrayOf(1)) }
+                val showing = scope.async {
+                    presentations.presentJourney(request.fences, request.release, request.screenId, request.journeyId,
+                        request.ownerDistinctId, request.reservation,
+                        acquire = { AcquiredJourneyRelease(identity = request.release.identity,
+                            artifactsByKey = mapOf("renders/main.riv" to file), sceneFile = file, protection = Closeable {}) },
+                        onScreenChanged = request.onScreenChanged, onScreenDismissed = request.onScreenDismissed,
+                        onPresentationRevealed = request.onPresentationRevealed, onEmissionBatch = request.onEmissionBatch,
+                        onOutcome = request.onOutcome)
+                }
+                withTimeout(5_000) { while (launched.isEmpty()) kotlinx.coroutines.delay(10) }
+                PresentationRegistry.reportFirstFrame(launched.single())
+                showing.await()
+                requestReady.complete(request)
+                return JourneyPresentationResult.Shown
+            }
+            override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String): JourneyPresentationActionResult {
+                if (action["type"] == JsonPrimitive(type)) {
+                    // The store boundary is controlled; authored dismissal uses the real service.
+                    claimedEffect.complete(effectId)
+                    return JourneyPresentationActionResult.AwaitingOutcome
+                }
+                return presentations.dispatchJourneyAction(owner, action, effectId)
+            }
+            override suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) = presentations.shutdownJourney(ownerDistinctId, journeyId)
+            override suspend fun shutdownOwnedBy(ownerDistinctId: String) = presentations.shutdownOwnedBy(ownerDistinctId)
+        }
+        val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val journeys = JourneyService(identity = identity, events = store, catalog = catalog, journalDirectory = directory,
+            scope = scope, capture = { name, properties, _, _ -> captures += name to properties; true },
+            capturePresentationEvent = { name, properties, id, distinctId, occurredAt, admission ->
+                val event = StoredEvent(id, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId)
+                val settled = admission?.commitIfCurrent { true } != null
+                StableEventCaptureResult(settled, event.takeIf { settled })
+            }, presenter = presenter, nowMillis = { 100_000L })
+        try {
+            journeys.initialize()
+            journeys.onAppWillEnterForeground()
+            journeys.profileDidCommit(snapshot, authority, "customer", 1)
+            val request = withTimeout(5_000) { requestReady.await() }
+            if (commerce != null) {
+                val batch = JourneyScreenEmissionBatch(request.journeyId, 0, "commerce-dismiss",
+                    JourneyScreenEmissionSource("screen_welcome", "buy"), listOf(JourneyScreenEmission(
+                        "00000000-0000-7000-8000-000000000901", 0, 100_000L, "buy", JsonObject(emptyMap()))))
+                assertTrue(request.onEmissionBatch(batch, null))
+                val effectId = withTimeout(5_000) { claimedEffect.await() }
+                journeys.handleEvent(StoredEvent(effectId,
+                    if (commerce == "purchase") SystemEventNames.PURCHASE_COMPLETED else SystemEventNames.RESTORE_COMPLETED,
+                    buildJsonObject { if (commerce == "purchase") put("placement_id", "golden:monthly") },
+                    100_001L, "customer"), journeys.eventAdmissionGeneration())
+            } else presentations.dismiss(CloseReason.UserDismissed)
+            withTimeout(5_000) { while (captures.none { it.first == JourneyEventNames.LEG_COMPLETED }) kotlinx.coroutines.delay(10) }
+            val completed = captures.filter { it.first == JourneyEventNames.LEG_COMPLETED }
+            assertEquals(vector.getValue("reports").jsonPrimitive.int, completed.size)
+            assertEquals(request.journeyId, completed.single().second["journey_id"])
+            assertEquals(vector.getValue("outcome").jsonPrimitive.content, completed.single().second["outcome"])
+            assertFalse(presentations.ownsJourney(JourneyPresentationOwner(request.journeyId, "customer")))
+        } finally {
+            presentations.shutdownOwnedBy("customer")
+            PresentationRegistry.clearForTesting()
+        }
+    }
+
     private suspend fun assertPurchaseOfferRoute(
         access: ai.nuxie.sdk.features.FeatureAccess?,
         dismissAlternative: JsonObject? = null,

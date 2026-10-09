@@ -2671,6 +2671,10 @@ internal class JourneyService(
                                         }
                                     }
                                 }
+                                is JourneyPresentationActionResult.Completed -> {
+                                    pendingPresentationPurchasePlacements.remove(run.id)
+                                    JourneyDispatchResult.Complete(presentationResult.outcome)
+                                }
                                 is JourneyPresentationActionResult.Advanced -> {
                                     pendingPresentationPurchasePlacements.remove(run.id)
                                     JourneyDispatchResult.Outlet(presentationResult.outlet)
