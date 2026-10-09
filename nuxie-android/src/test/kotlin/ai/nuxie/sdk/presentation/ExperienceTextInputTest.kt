@@ -36,7 +36,7 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 
 internal fun textInputDescriptor(value: String = ""): JsonObject = Json.parseToJsonElement("""
-    {"render":{"textInputs":[{
+    {"state":{},"responses":{},"ruleGroups":[],"render":{"textInputs":[{
       "id":"name","screenId":"survey","textInputName":"headline","value":${JsonPrimitive(value)},"editable":true,
       "responseFieldKey":"answer","secureTextEntry":false,"multiline":false,"maxLength":2,
       "geometry":{"xPath":"x","yPath":"y","widthPath":"width","heightPath":"height",
