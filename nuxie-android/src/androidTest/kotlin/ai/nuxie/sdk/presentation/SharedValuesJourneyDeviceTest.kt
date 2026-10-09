@@ -42,6 +42,7 @@ class SharedValuesJourneyDeviceTest {
 
     @Test fun publishedF5WaitedFailureThenRetryControlsItsJourney() = saveJourney(background = false)
     @Test fun publishedF5BackgroundSaveAllowsCompletionBeforeReply() = saveJourney(background = true)
+    @Test fun declinedCommerceFrameKeepsF5SaveAndAwaitedConfirmation() = saveJourney(background = false, pendingCommerce = true)
 
     @Test fun publishedF5FormAnswerRoutesBothBranchesAndBoundary() {
         for ((days, event) in listOf(7.0 to "short_trip", 14.0 to "short_trip", 23.0 to "long_trip")) {
@@ -49,7 +50,7 @@ class SharedValuesJourneyDeviceTest {
         }
     }
 
-    private fun saveJourney(background: Boolean, days: Double = 30.0, branchEvent: String? = null) = runBlocking {
+    private fun saveJourney(background: Boolean, days: Double = 30.0, branchEvent: String? = null, pendingCommerce: Boolean = false) = runBlocking {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
@@ -75,7 +76,13 @@ class SharedValuesJourneyDeviceTest {
         val captured = LinkedBlockingQueue<String>()
         val capturedProperties = LinkedBlockingQueue<Pair<String, Map<String, Any?>>>()
         val catalog = JourneyProfileCatalog(fixture.keys, JourneyReleaseHighWaterStore(context)) { fixture.supported }
+        val commerceOperations = java.util.concurrent.atomic.AtomicInteger()
         val presenter = object : JourneyPresenting {
+            override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String): JourneyPresentationActionResult {
+                check(action["type"] == JsonPrimitive("restore"))
+                commerceOperations.incrementAndGet()
+                return JourneyPresentationActionResult.AwaitingOutcome
+            }
             override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
             override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
             override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
@@ -135,10 +142,60 @@ class SharedValuesJourneyDeviceTest {
                 catalog.commit(owner, catalog.prepare(fixture.profile, fixture.authority))
                 service.initialize()
                 service.onAppWillEnterForeground()
-                service.profileDidCommit(checkNotNull(catalog.snapshot(owner)), fixture.authority, owner, 1)
+                val originalSnapshot = checkNotNull(catalog.snapshot(owner))
+                val snapshot = if (!pendingCommerce) originalSnapshot else {
+                    // The fixture remains signed and admitted unchanged. These hand-written
+                    // routes exercise the Journey adapter with that same native form.
+                    val originalRelease = originalSnapshot.releasesByDigest.values.single()
+                    val leg = originalRelease.leg
+                    val screen = "scr_screens_sfeedback"
+                    val commerce = Json.parseToJsonElement("""{"kind":"action","id":"restore","action":{"type":"restore"},"outlets":{}}""")
+                    val route = Json.parseToJsonElement("""{"host":{"kind":"screen","screenId":"$screen"},"eventName":"restore","entryStepId":"restore"}""")
+                    val descriptor = JsonObject(originalRelease.descriptor + ("leg" to JsonObject(leg + mapOf(
+                        "steps" to JsonArray(leg.getValue("steps").jsonArray + commerce),
+                        "routes" to JsonArray(leg.getValue("routes").jsonArray + route)))))
+                    val release = ai.nuxie.sdk.experiences.AuthenticatedJourneyRelease(JourneyReleaseEnvelope.authenticate(
+                        fixture.profile.getValue("releases").jsonArray.single().jsonObject.getValue("envelope").toString().encodeToByteArray(), fixture.keys),
+                        originalRelease.identity, descriptor, originalRelease.publishedAtSeqToPromote)
+                    originalSnapshot.copy(releasesByDigest = mapOf(release.descriptorSha256 to release))
+                }
+                service.profileDidCommit(snapshot, fixture.authority, owner, 1)
             }
             val activity = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
             assertEquals(if (background) "scr_screens_sdeparture" else "scr_screens_sfeedback", revealed.poll(20, TimeUnit.SECONDS))
+            if (pendingCommerce) {
+                val active = checkNotNull(request.get())
+                fun batch(sequence: Long) = JourneyScreenEmissionBatch(active.journeyId, sequence, "commerce-$sequence",
+                    JourneyScreenEmissionSource(active.screenId, "restore"), listOf(JourneyScreenEmission(
+                        "commerce-event-$sequence", sequence, 100_000L + sequence, "restore", JsonObject(emptyMap()))))
+                assertEquals(JourneyEmissionBatchResult.ACCEPTED, active.onEmissionBatch(batch(0), null))
+                withTimeout(5_000) { while (commerceOperations.get() == 0) delay(10) }
+                val answers = checkNotNull(active.runValues).responseAnswers("feedback", active.release.descriptor)
+                val confirmed = CompletableDeferred<Unit>()
+                val save = ExperienceFrameSave(ExperienceResponseSaveRequest("feedback", "saved", answers), active.screenId,
+                    { confirmed.complete(Unit) })
+                assertEquals(JourneyEmissionBatchResult.DECLINED, active.onEmissionBatch(batch(1),
+                    JourneyRuntimeEmissionSources(saves = listOf(save))))
+                val expectedSave = Json.parseToJsonElement(instrumentation.context.assets.open(
+                    "journeys/planes/pending-commerce.json").bufferedReader().use { it.readText() })
+                    .jsonObject.getValue("declinedFrameSave").jsonObject
+                val sent = pending.poll(5, TimeUnit.SECONDS)
+                assertEquals(expectedSave.getValue("accepted").jsonPrimitive.boolean, sent != null)
+                checkNotNull(sent)
+                assertEquals(expectedSave.getValue("form").jsonPrimitive.content, sent.first.formName)
+                assertEquals(expectedSave.getValue("answers").jsonObject.getValue("stars").jsonPrimitive.double,
+                    sent.first.answers.getValue("stars").jsonPrimitive.double, 0.0)
+                assertFalse(confirmed.isCompleted)
+                sent.second.complete(ai.nuxie.sdk.journey.JourneyResponseSaveReply(
+                    ai.nuxie.sdk.journey.JourneyResponseSaveReply.Code.SAVED, sent.first.sequence))
+                withTimeout(5_000) { confirmed.await() }
+                assertEquals(expectedSave.getValue("confirmed").jsonPrimitive.boolean, confirmed.isCompleted)
+                assertEquals(expectedSave.getValue("commerceOperations").jsonPrimitive.int, commerceOperations.get())
+                assertTrue(pending.isEmpty())
+                assertTrue(presentations.ownsJourney(JourneyPresentationOwner(active.journeyId, owner)))
+                assertFalse(captured.contains(ai.nuxie.sdk.journey.JourneyEventNames.LEG_COMPLETED))
+                return@runBlocking
+            }
             var surface: ExperienceSurfaceHost? = null
             instrumentation.runOnMainSync {
                 fun find(view: View): ExperienceSurfaceHost? = when (view) {
