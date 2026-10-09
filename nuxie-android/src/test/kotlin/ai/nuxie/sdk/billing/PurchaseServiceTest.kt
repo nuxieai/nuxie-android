@@ -2029,6 +2029,66 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun ordinaryRestoreRefreshesSyncedSubscriptionAfterBackendGrantExpires() = runTest {
+        val actions = mutableListOf<String>()
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, actions = actions, emissions = emissions)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(PurchaseEvidence(
+            purchaseToken = "retained-subscription",
+            packageName = "com.example.app",
+            storeProductIds = listOf("play-pro"),
+            nuxieProductId = "nuxie-pro",
+            productType = BillingClient.ProductType.SUBS,
+            purchaseState = StoredPurchaseState.PURCHASED,
+            obfuscatedAccountId = accountHash(owner),
+            syncAttributionDistinctId = owner,
+            ownerDistinctId = owner,
+            acknowledged = true,
+            synced = true,
+            syncedCustomerId = owner,
+            backendSyncedAtMillis = 1L,
+            firstSeenMillis = 1L,
+            catalogResolved = true,
+            completionEmitted = true,
+            syncedEventEmitted = true,
+            signatureVerified = true,
+            authorityScope = "test-fixture",
+        ))
+        // The backend's previous grant has expired while Play still reports ownership.
+        fixture.core.features.hydrateProfile(owner, Json.parseToJsonElement(
+            """{"features":[]}""",
+        ).jsonObject)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("retained-subscription", obfuscatedAccountId = accountHash(owner))
+                .copy(acknowledged = true),
+        )
+        var reconciliations = 0
+        fixture.synchronizer = {
+            reconciliations += 1
+            accepted(owner, it)
+        }
+
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+
+        assertEquals("Restore must refresh provider authority even after an earlier sync", 1, reconciliations)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        assertEquals(null, fixture.billing.launched)
+        assertEquals(0, actions.count { it == "ack" || it == "consume" })
+        assertEquals(0, emissions.count { it.first == SystemEventNames.PURCHASE_COMPLETED })
+        assertEquals(1, emissions.count { it.first == SystemEventNames.RESTORE_COMPLETED })
+        assertTrue(fixture.store.load().getValue("retained-subscription").completionEmitted)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        val failedRefresh = fixture.service.restorePurchases(expectedOwnerDistinctId = owner)
+        assertTrue("A signed Restore must not accept an old sync after refresh fails", failedRefresh is RestoreResult.Failed)
+        fixture.synchronizer = { accepted(owner, it) }
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases(expectedOwnerDistinctId = owner))
+        assertEquals(0, emissions.count { it.first == SystemEventNames.PURCHASE_COMPLETED })
+        fixture.close()
+    }
+
+    @Test
     fun recoveryDoesNotBypassAPendingManagedCompletionBackoff() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(
