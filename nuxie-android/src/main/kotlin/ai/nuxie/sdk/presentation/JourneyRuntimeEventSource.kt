@@ -10,6 +10,7 @@ internal data class JourneyRuntimeEmissionSources(
     val drafts: List<JourneyRuntimeEventSource?> = emptyList(),
     val byEmissionId: Map<String, JourneyRuntimeEventSource> = emptyMap(),
     val frameLinks: JourneyFrameLinks? = null,
+    val saves: List<ExperienceFrameSave> = emptyList(),
 ) {
     fun bound(batch: JourneyScreenEmissionBatch): JourneyRuntimeEmissionSources {
         val controlCount = batch.emissions.size - drafts.size
@@ -33,3 +34,10 @@ internal class JourneyFrameLinks(private var operation: (suspend () -> Unit)?) {
         } finally { gate.unlock() }
     }
 }
+
+/** A captured sheet and the originating screen's fenced native continuation. */
+internal data class ExperienceFrameSave(
+    val request: ExperienceResponseSaveRequest,
+    val screenID: String,
+    val onConfirmed: suspend () -> Unit,
+)

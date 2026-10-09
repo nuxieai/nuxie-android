@@ -1,0 +1,13 @@
+{
+  "publicKey": "o0fr219O1pr/CbP5hvdsaQsW1mtzoUgVocQ6eeLnvIU=",
+  "signatures": {
+    "feedback": {
+      "descriptorSha256": "05b6507a641b0f56a495a072111f9206128fabe1a8f176c81747397c8cef0be0",
+      "signature": "ZbWcy56rGPs7WLXugOFgoPxSZMoqAUQ6g2DWNPuPISG85XBZvw49FwvW+85OIdIp8mIaAWOKHK4SbAO9NNMfCg=="
+    },
+    "departure": {
+      "descriptorSha256": "a0c68e0266332b46fd983855c95d7cf256afef643a870b780e684e9e81e55d33",
+      "signature": "ZIs1D29eTTKGrcW0tYKK17CilNFC921S5B835Bhk/9WzndSuHXHdFKs6qYuYohRdFmcRuAB4EqAk4xGpcyp5DQ=="
+    }
+  }
+}

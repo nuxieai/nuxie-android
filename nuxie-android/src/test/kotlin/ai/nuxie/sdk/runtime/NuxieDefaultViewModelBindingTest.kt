@@ -6,6 +6,19 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class NuxieDefaultViewModelBindingTest {
+    @Test fun `default frame consumers share one native capture`() {
+        val native = RecordingNative()
+        val artboard = checkNotNull(NuxieRuntimeFile(10L, native).newArtboard())
+        assertNull(artboard.captureDefaultSnapshot())
+        artboard.bindDefaultViewModel("Root")
+        try {
+            val captured = checkNotNull(artboard.captureDefaultSnapshot())
+            assertEquals(1, native.calls.count { it == "snapshot" })
+            assertEquals(captured.native.rootInstanceId, captured.values.nativeRootInstanceId)
+            assertEquals(20f, captured.values.resolveGeometryNumber("width"))
+        } finally { artboard.close() }
+    }
+
     @Test
     fun `geometry snapshots require a live signed default binding`() {
         val native = RecordingNative()

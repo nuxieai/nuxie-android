@@ -3,6 +3,7 @@ package ai.nuxie.sdk.presentation
 import ai.nuxie.sdk.runtime.NativeViewModelSnapshot
 import ai.nuxie.sdk.runtime.NuxieHostCommand
 import ai.nuxie.sdk.runtime.NuxieHostValue
+import ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome
 import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
 import ai.nuxie.sdk.runtime.NuxieRuntimeEventPropertyValue
 import ai.nuxie.sdk.runtime.NuxieViewModelCatalog
@@ -14,6 +15,20 @@ import kotlinx.serialization.json.jsonObject
 internal data class ExperienceResponseSaveRequest(val form: String, val awaitTrigger: String?, val answers: JsonObject) {
     companion object {
         const val EVENT = "\$nuxie.response.save"
+
+        fun captureFrame(outcome: NuxiePlayerStepOutcome, snapshot: NativeViewModelSnapshot,
+            catalog: NuxieViewModelCatalog, descriptor: JsonObject,
+            onRejected: () -> Unit): List<ExperienceResponseSaveRequest> {
+            val requests = mutableListOf<ExperienceResponseSaveRequest>()
+            fun accept(read: () -> ExperienceResponseSaveRequest?) {
+                try { read()?.let(requests::add) }
+                catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                catch (_: Exception) { onRejected() }
+            }
+            outcome.events.forEach { event -> accept { capture(event, snapshot, catalog, descriptor) } }
+            outcome.hostCommands.forEach { command -> accept { capture(command, snapshot, catalog, descriptor) } }
+            return requests
+        }
 
         fun capture(event: NuxieRuntimeEvent, snapshot: NativeViewModelSnapshot,
             catalog: NuxieViewModelCatalog, descriptor: JsonObject): ExperienceResponseSaveRequest? {
