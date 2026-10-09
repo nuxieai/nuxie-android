@@ -33,6 +33,7 @@ class ExperienceSurfaceHostCleanupTest {
         )
         val descriptor = Json.parseToJsonElement(
             """{
+              "state":{},"responses":{},"ruleGroups":[],
               "render":{"assets":[],"screens":[{"id":"main","artboardName":"Main"}]},
               "leg":{"screens":[{"id":"main","defaultViewModelName":"Root"}]}
             }""",
@@ -75,6 +76,14 @@ class ExperienceSurfaceHostCleanupTest {
             imageDecoder: NuxImageDecoder,
             videoEnabled: Boolean,
         ): Long = 2
+        override fun installValueMarkers(file: Long, entries: Array<ai.nuxie.sdk.runtime.NativeValueMarker>): Int {
+            assertTrue(entries.isEmpty()); return 0
+        }
+        override fun installValueRules(file: Long, entries: Array<ai.nuxie.sdk.runtime.NativeValueRule>) =
+            ai.nuxie.sdk.runtime.NativeRuleInstallResult(0, null, null).also { assertTrue(entries.isEmpty()) }
+        override fun installRuleGroups(file: Long, entries: Array<ai.nuxie.sdk.runtime.NativeRuleGroup>): Int {
+            assertTrue(entries.isEmpty()); return 0
+        }
         override fun newNamedArtboard(fileHandle: Long, name: String): Long = 3
         override fun newDefaultViewModel(artboardHandle: Long): NativeCallResult<Long> = NativeCallResult(0, 4L)
         override fun viewModelRootSchemaIndex(viewModelHandle: Long): NativeCallResult<Long> = NativeCallResult(0, 0L)
