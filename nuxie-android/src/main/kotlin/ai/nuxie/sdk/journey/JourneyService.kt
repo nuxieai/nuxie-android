@@ -310,6 +310,7 @@ internal class JourneyService(
             val checkpoint: JourneyControlExecutor.Checkpoint?,
             val dismissPresentationOnCompletion: Boolean,
             val eventSource: JourneyRuntimeEventSource? = null,
+            val retainsCommerce: Boolean = false,
         ) : Command {
             override val done: CompletableDeferred<Unit>? = null
         }
@@ -406,6 +407,9 @@ internal class JourneyService(
     private val presentingRunIds = ConcurrentHashMap<String, Unit>()
     private val activePresentedRunIds = ConcurrentHashMap<String, Unit>()
     private val pendingPresentationPurchasePlacements = mutableMapOf<String, String>()
+    private data class CommerceExecutionKey(val runId: String, val owner: String, val generation: Long)
+    private val pendingAuthoredContinuations = mutableMapOf<CommerceExecutionKey, Int>()
+    private val deferredCommerceOutcomes = mutableMapOf<CommerceExecutionKey, StoredEvent>()
     private val presentationCallbackMutex = Mutex()
     private var wakeJob: Job? = null
     private var wakeGeneration = 0L
@@ -837,6 +841,7 @@ internal class JourneyService(
         directlyRoutedRunByEventId.clear()
         activePresentedRunIds.clear()
         pendingPresentationPurchasePlacements.clear()
+        deferredCommerceOutcomes.clear()
         clearRetainedReleaseCache()
         foregroundReceiptResetCustomers.clear()
         currentJournal?.takeIf { distinctId == null || it.distinctId == distinctId }
@@ -872,7 +877,7 @@ internal class JourneyService(
         if (journal?.distinctId != event.distinctId) return false
         if (!recoverConversionOccurrences(throughEventId = event.id)) return false
         val directlyRoutedRunId = directlyRoutedRunByEventId.remove(event.id)
-        resumePresentationActionOutcome(event, excludingRunId = directlyRoutedRunId)
+        if (!resumePresentationActionOutcome(event, excludingRunId = directlyRoutedRunId)) return false
         val state = currentState() ?: return currentProfilePublished
         resumeParkedRuns(state, event, excludingRunId = directlyRoutedRunId)
         if (!isCurrent(state) || admittedGeneration != eventAdmissionGeneration()) {
@@ -893,64 +898,47 @@ internal class JourneyService(
     private suspend fun resumePresentationActionOutcome(
         event: StoredEvent,
         excludingRunId: String? = null,
-    ) {
-        val route = JourneyActionType.presentationOutcomeRoute(event.name) ?: return
-        val target = journal?.takeIf { it.distinctId == event.distinctId } ?: return
+    ): Boolean {
+        val route = JourneyActionType.presentationOutcomeRoute(event.name) ?: return true
+        val target = journal?.takeIf { it.distinctId == event.distinctId } ?: return true
         val identityScope = identity.captureScope()
-        if (identityScope.distinctId != target.distinctId) return
+        if (identityScope.distinctId != target.distinctId) return true
         val executionToken = executionFence.token()
         for (candidate in target.runs().filter {
-            it.id != excludingRunId && it.completion == null && it.park == null &&
-                it.pendingPresentationPublication == null
+            it.id != excludingRunId && it.completion == null && (it.park == null || it.pendingCommerce != null)
         }) {
-            if (!isExecutionCurrent(executionToken, target)) return
-            val release = releaseFor(candidate, currentState(), executionToken, target)
-                ?: continue
-            val step = release.leg.getValue("steps").jsonArray
-                .map(JsonElement::jsonObject)
-                .firstOrNull { it.text("id") == candidate.stepId }
-                ?: continue
+            if (!isExecutionCurrent(executionToken, target)) return true
+            val release = releaseFor(candidate, currentState(), executionToken, target) ?: continue
+            val pending = candidate.pendingCommerce
+            val stepId = pending?.stepId ?: candidate.stepId
+            val step = release.leg.getValue("steps").jsonArray.map(JsonElement::jsonObject)
+                .firstOrNull { it.text("id") == stepId } ?: continue
             val action = step["action"] as? JsonObject ?: continue
             if (JourneyActionType.from(action) != route.first) continue
-            val effectId = candidate.effectReceipts[candidate.stepId] ?: continue
-            if (!presentationOutcomeMatches(
-                    event,
-                    effectId,
-                    candidate,
-                    action,
-                    release,
-                )
-            ) continue
-            val nextStepId = (step["outlets"] as? JsonObject)?.text(route.second)
-            if (nextStepId == null) {
-                val settled = publishJournalIfCurrent(executionToken, identityScope) {
-                    target.settlePresentationEffect(candidate.id, candidate.stepId, effectId)
-                } == true
-                if (!settled) continue
-                pendingPresentationPurchasePlacements.remove(candidate.id)
-                return
+            val effectId = pending?.effectId ?: candidate.effectReceipts[stepId] ?: continue
+            if (!presentationOutcomeMatches(event, effectId, candidate, action, release)) continue
+            val key = CommerceExecutionKey(candidate.id, target.distinctId, executionToken.generation)
+            if (candidate.pendingPresentationPublication != null || pendingAuthoredContinuations.getOrDefault(key, 0) > 0) {
+                deferredCommerceOutcomes.putIfAbsent(key, event)
+                // Keep EventLog's durable route pending until settlement is persisted.
+                return false
             }
-            val current = target.runs().firstOrNull {
-                it.id == candidate.id && it.completion == null && it.park == null &&
-                    it.stepId == candidate.stepId &&
-                    it.effectReceipts[candidate.stepId] == effectId
+            val nextStepId = (step["outlets"] as? JsonObject)?.text(route.second)
+            if (nextStepId == null && candidate.authoredCloseOutcome != null) {
+                // Retain correlation until completion is durable so a failed read or write can retry.
+                return finish(candidate, candidate.authoredCloseOutcome, release.leg, target, executionToken, identityScope)
+            }
+            val settled = publishJournalIfCurrent(executionToken, identityScope) {
+                target.settlePresentationCommerce(candidate.id, stepId, effectId, nextStepId)
             } ?: continue
-            target.transition(current.id, nextStepId, current.context)
-            pendingPresentationPurchasePlacements.remove(current.id)
-            execute(
-                initial = current.copy(
-                    stepId = nextStepId,
-                    park = null,
-                    effectReceipts = current.effectReceipts - current.stepId,
-                ),
-                release = release,
-                executionToken = executionToken,
-                signal = JourneyControlExecutor.Signal(),
-                initialCheckpoint = null,
-                target = target,
-            )
-            return
+            pendingPresentationPurchasePlacements.remove(candidate.id)
+            if (nextStepId != null) {
+                execute(initial = settled, release = release, executionToken = executionToken,
+                    signal = JourneyControlExecutor.Signal(), initialCheckpoint = null, target = target)
+            }
+            return true
         }
+        return true
     }
 
     private fun presentationOutcomeMatches(
@@ -968,7 +956,7 @@ internal class JourneyService(
                 if (eventExperienceId != null &&
                     eventExperienceId != release.identity.experienceId
                 ) return false
-                val expectedPlacement = pendingPresentationPurchasePlacements[run.id]
+                val expectedPlacement = run.pendingCommerce?.placementId ?: pendingPresentationPurchasePlacements[run.id]
                     ?: presentationLiteralString(action["placementId"])
                     ?: return false
                 event.properties.text("placement_id") == expectedPlacement
@@ -1033,6 +1021,7 @@ internal class JourneyService(
         directlyRoutedRunByEventId.clear()
         activePresentedRunIds.clear()
         pendingPresentationPurchasePlacements.clear()
+        deferredCommerceOutcomes.clear()
         clearRetainedReleaseCache()
         foregroundReceiptResetCustomers.clear()
         if (!departingRevoked) return
@@ -1594,6 +1583,9 @@ internal class JourneyService(
             activePresentedRunIds.remove(run.id)
         }
 
+        if (command.eventName == SystemEventNames.SCREEN_DISMISSED &&
+            run.pendingCommerce != null && run.authoredCloseOutcome != null) return PresentationLifecycleResult.ACCEPTED
+
         val routeStepId = JourneyPresentationRouteResolver.resolve(
             command.release.leg,
             event.name,
@@ -1774,7 +1766,7 @@ internal class JourneyService(
     ): JourneyEmissionBatchResult {
         val target = journal ?: return JourneyEmissionBatchResult.REJECTED
         if (!isExecutionCurrent(command.executionFenceToken, target)) return JourneyEmissionBatchResult.REJECTED
-        val run = target.runs().firstOrNull { it.id == command.runId }
+        var run = target.runs().firstOrNull { it.id == command.runId }
             ?.takeIf {
                 it.completion == null &&
                     matches(command.release, it.reference)
@@ -1791,9 +1783,6 @@ internal class JourneyService(
         val cursorAction = command.release.leg.getValue("steps").jsonArray
             .map(JsonElement::jsonObject).firstOrNull { it.text("id") == run.stepId }
             ?.get("action") as? JsonObject
-        if (run.effectReceipts[run.stepId] != null &&
-            cursorAction?.let(JourneyActionType::from)?.isCommerce == true
-        ) return JourneyEmissionBatchResult.DECLINED
         if (batch.batchSequence != run.nextPresentationBatchSequence ||
             batch.batchSequence == Long.MAX_VALUE
         ) return JourneyEmissionBatchResult.REJECTED
@@ -1838,6 +1827,21 @@ internal class JourneyService(
         for (save in command.eventSource?.saves.orEmpty()) {
             if (save.screenID != command.expectedScreenId ||
                 !acceptResponseSave(save, run, command.release, target, command.executionFenceToken, identityScope)) return JourneyEmissionBatchResult.REJECTED
+        }
+        if (run.pendingCommerce != null || (run.effectReceipts[run.stepId] != null &&
+                cursorAction?.let(JourneyActionType::from)?.isCommerce == true)) {
+            val route = batch.emissions.asSequence().filterNot { it.name.startsWith('$') }
+                .mapNotNull { JourneyPresentationRouteResolver.resolve(command.release.leg, it.name, command.expectedScreenId) }
+                .firstOrNull()
+            val action = command.release.leg.getValue("steps").jsonArray.map(JsonElement::jsonObject)
+                .firstOrNull { it.text("id") == route }?.get("action") as? JsonObject
+            if (action?.let(JourneyActionType::from)?.isCommerce == true) return JourneyEmissionBatchResult.DECLINED
+            if (run.pendingCommerce == null) {
+                val effectId = run.effectReceipts[run.stepId] ?: return JourneyEmissionBatchResult.REJECTED
+                run = publishJournalIfCurrent(command.executionFenceToken, identityScope) {
+                    target.retainPresentationCommerce(run.id, run.stepId, effectId, pendingPresentationPurchasePlacements[run.id])
+                } ?: return JourneyEmissionBatchResult.REJECTED
+            }
         }
         val staged = publishJournalIfCurrent(command.executionFenceToken, identityScope) {
             target.stagePresentationPublication(
@@ -1976,7 +1980,11 @@ internal class JourneyService(
                 executionToken,
                 identityScope,
             )
-            commands.trySend(
+            val commerceKey = CommerceExecutionKey(transitioned.id, target.distinctId, executionToken.generation)
+            if (transitioned.pendingCommerce != null) {
+                pendingAuthoredContinuations[commerceKey] = pendingAuthoredContinuations.getOrDefault(commerceKey, 0) + 1
+            }
+            val queued = commands.trySend(
                 Command.ContinueExecution(
                     transitioned.id,
                     identityScope,
@@ -1986,9 +1994,11 @@ internal class JourneyService(
                     null,
                     dismissPresentationOnCompletion = true,
                     eventSource = eventSource?.source(routedEvent?.id),
+                    retainsCommerce = transitioned.pendingCommerce != null,
                 ),
-            )
-            return true
+            ).isSuccess
+            if (!queued && transitioned.pendingCommerce != null) releaseCommerceContinuation(commerceKey)
+            return queued
         }
 
         runCatching {
@@ -2042,7 +2052,27 @@ internal class JourneyService(
         scheduleNextWake()
     }
 
+    private suspend fun releaseCommerceContinuation(key: CommerceExecutionKey) {
+        val count = pendingAuthoredContinuations.getOrDefault(key, 0) - 1
+        if (count > 0) { pendingAuthoredContinuations[key] = count; return }
+        pendingAuthoredContinuations.remove(key)
+        deferredCommerceOutcomes.remove(key)?.let { event ->
+            if (journal?.distinctId == key.owner && executionFence.token().generation == key.generation) {
+                resumePresentationActionOutcome(event)
+            }
+        }
+    }
+
     private suspend fun continueExecutionNow(command: Command.ContinueExecution) {
+        try {
+            continueExecutionReserved(command)
+        } finally {
+            if (command.retainsCommerce) releaseCommerceContinuation(
+                CommerceExecutionKey(command.runId, command.identityScope.distinctId, command.executionFenceToken.generation))
+        }
+    }
+
+    private suspend fun continueExecutionReserved(command: Command.ContinueExecution) {
         val identityScope = command.identityScope
         val target = journal ?: return
         if (!isExecutionCurrent(command.executionFenceToken, target)) return
@@ -2405,6 +2435,16 @@ internal class JourneyService(
             currentDeviceTimezoneIdentifier(),
             appDefaultTimezone,
         )
+        suspend fun closeWhileCommercePending(currentRun: JourneyRun, outcome: String) {
+            val pending = currentRun.pendingCommerce ?: return
+            val recorded = publishJournalIfCurrent(executionToken, identityScope) {
+                target.recordAuthoredCloseWhileCommercePending(currentRun.id, pending.effectId, outcome)
+            } == true
+            if (recorded) {
+                activePresentedRunIds.remove(currentRun.id)
+                presenter?.shutdownPresentation(target.distinctId, currentRun.journeyId)
+            }
+        }
         suspend fun finishExecution(currentRun: JourneyRun, outcome: String) {
             finish(currentRun, outcome, leg, target, executionToken, identityScope)
             val hadPresentation = activePresentedRunIds.remove(currentRun.id) != null
@@ -2484,10 +2524,12 @@ internal class JourneyService(
                         return
                     }
                     is JourneyControlExecutor.Result.Complete -> {
-                        finishExecution(run, result.outcome)
+                        if (run.pendingCommerce != null) closeWhileCommercePending(run, result.outcome)
+                        else finishExecution(run, result.outcome)
                         return
                     }
                     is JourneyControlExecutor.Result.Dispatch -> {
+                        if (run.pendingCommerce != null && JourneyActionType.from(result.action)?.isCommerce == true) return
                         if (identityScope.distinctId != target.distinctId) {
                             finishExecution(run, "abandoned")
                             return
@@ -2505,6 +2547,13 @@ internal class JourneyService(
                         }
                         val presentation = presenter
                         val actionType = JourneyActionType.from(result.action)
+                        if (actionType == JourneyActionType.DISMISS &&
+                            (run.pendingCommerce != null || run.authoredCloseOutcome != null)) {
+                            val outcome = result.action.text("reason")?.takeIf(String::isNotEmpty) ?: "completed"
+                            if (run.pendingCommerce != null) closeWhileCommercePending(run, outcome)
+                            else finishExecution(run, outcome)
+                            return
+                        }
                         if (presentation != null && actionType == JourneyActionType.NAVIGATE) {
                             val screenId = result.action.text("screenId") ?: run {
                                 finishExecution(run, "abandoned")
@@ -2791,7 +2840,8 @@ internal class JourneyService(
                                 checkpoint = null
                             }
                             is JourneyDispatchResult.Complete -> {
-                                finishExecution(run, dispatched.outcome)
+                                if (run.pendingCommerce != null) closeWhileCommercePending(run, dispatched.outcome)
+                                else finishExecution(run, dispatched.outcome)
                                 return
                             }
                             JourneyDispatchResult.Unsupported -> {
@@ -2831,8 +2881,8 @@ internal class JourneyService(
         target: JourneyRunJournal,
         executionToken: JourneyExecutionFenceToken,
         identityScope: IdentityScope,
-    ) {
-        if (identityScope.distinctId != target.distinctId || journal !== target) return
+    ): Boolean {
+        if (identityScope.distinctId != target.distinctId || journal !== target) return false
         pendingPresentationPurchasePlacements.remove(run.id)
         val boundary = (leg.getValue("completionOutputs") as JsonObject)[outcome]
             as? JsonObject
@@ -2857,10 +2907,11 @@ internal class JourneyService(
                 responseOutputs,
             )
             true
-        }?.takeIf { it } ?: return
+        }?.takeIf { it } ?: return false
         retireNativeValues(run.id)
         flushPendingReports(target)
         scheduleNextWake()
+        return true
     }
 
     private suspend fun abandonRun(run: JourneyRun, target: JourneyRunJournal) {

@@ -46,6 +46,8 @@ internal data class JourneyRun(
     val outputs: JsonObject = emptyOutputs(),
     val completion: Completion? = null,
     val effectReceipts: Map<String, String> = emptyMap(),
+    val pendingCommerce: PendingCommerce? = null,
+    val authoredCloseOutcome: String? = null,
     val experimentExposures: List<ExperimentExposure> = emptyList(),
     val reentry: JourneyFrequency? = null,
     val requiresReleasePin: Boolean = false,
@@ -55,6 +57,7 @@ internal data class JourneyRun(
     val pendingPresentationPublication: PendingPresentationPublication? = null,
     val presentationSource: PresentationSource? = null,
 ) {
+    data class PendingCommerce(val stepId: String, val effectId: String, val context: JsonObject, val placementId: String?)
     data class PresentationSource(val eventId: String, val source: JourneyScreenEmissionSource) {
         fun isReplacedBy(eventId: String?): Boolean = eventId == null || this.eventId != eventId
     }
@@ -589,14 +592,35 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         effectId
     }
 
-    /** Settle an outcome with no authored outlet without advancing the visible run. */
-    fun settlePresentationEffect(id: String, stepId: String, effectId: String): Boolean = update { state ->
+    fun retainPresentationCommerce(id: String, stepId: String, effectId: String, placementId: String?): JourneyRun? = update { state ->
+        val run = state.runs[id]?.takeIf { it.completion == null } ?: return@update null
+        run.pendingCommerce?.let { pending -> return@update run.takeIf { pending.effectId == effectId } }
+        if (run.stepId != stepId || run.effectReceipts[stepId] != effectId) return@update null
+        run.copy(pendingCommerce = JourneyRun.PendingCommerce(stepId, effectId, run.context, placementId))
+            .also { state.runs[id] = it }
+    }
+
+    fun recordAuthoredCloseWhileCommercePending(id: String, effectId: String, outcome: String): Boolean = update { state ->
         val run = state.runs[id] ?: return@update false
-        if (!run.startedQueued || run.completion != null || run.park != null ||
-            run.stepId != stepId || run.effectReceipts[stepId] != effectId
-        ) return@update false
-        state.runs[id] = run.copy(effectReceipts = run.effectReceipts - stepId)
+        if (run.completion != null || run.pendingCommerce?.effectId != effectId) return@update false
+        state.runs[id] = run.copy(authoredCloseOutcome = outcome)
         true
+    }
+
+    fun settlePresentationCommerce(id: String, stepId: String, effectId: String, nextStepId: String?): JourneyRun? = update { state ->
+        val run = state.runs[id]?.takeIf { it.completion == null } ?: return@update null
+        val pending = run.pendingCommerce
+        if (pending != null) {
+            if (pending.stepId != stepId || pending.effectId != effectId) return@update null
+        } else if (run.stepId != stepId || run.effectReceipts[stepId] != effectId) return@update null
+        run.copy(
+            effectReceipts = if (nextStepId == null) run.effectReceipts - stepId else run.effectReceipts - stepId - run.stepId,
+            pendingCommerce = null,
+            stepId = nextStepId ?: run.stepId,
+            context = if (nextStepId == null) run.context else pending?.context ?: run.context,
+            park = if (nextStepId == null) run.park else null,
+            nativeSnapshot = if (nextStepId == null) run.nativeSnapshot else null,
+        ).also { state.runs[id] = it }
     }
 
     /** Launch recovery preserves expired parks for current-fact evaluation. */
@@ -849,6 +873,13 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         // Form answers are derived from native values, never restored from the journal.
         put("stepId", JsonPrimitive(run.stepId)); put("context", JsonObject(run.context - "formAnswers")); put("outputs", run.outputs)
         put("effectReceipts", JsonObject(run.effectReceipts.mapValues { JsonPrimitive(it.value) }))
+        run.pendingCommerce?.let { pending -> put("pendingCommerce", buildJsonObject {
+            put("stepId", JsonPrimitive(pending.stepId))
+            put("effectId", JsonPrimitive(pending.effectId))
+            put("context", JsonObject(pending.context - "formAnswers"))
+            pending.placementId?.let { put("placementId", JsonPrimitive(it)) }
+        }) }
+        run.authoredCloseOutcome?.let { put("authoredCloseOutcome", JsonPrimitive(it)) }
         if (run.experimentExposures.isNotEmpty()) {
             put(
                 "experimentExposures",
@@ -919,6 +950,11 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         effectReceipts = (value["effectReceipts"] as? JsonObject).orEmpty().mapValues {
             it.value.jsonPrimitive.content
         },
+        pendingCommerce = (value["pendingCommerce"] as? JsonObject)?.let {
+            JourneyRun.PendingCommerce(it.text("stepId"), it.text("effectId"), it.getValue("context").jsonObject,
+                it["placementId"]?.jsonPrimitive?.content)
+        },
+        authoredCloseOutcome = value["authoredCloseOutcome"]?.jsonPrimitive?.content,
         experimentExposures = (value["experimentExposures"] as? JsonArray).orEmpty().map {
             decodeExperimentExposure(it.jsonObject)
         },
@@ -1281,6 +1317,8 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
                 "responses" to responseOutputs,
             ),
         ),
+        pendingCommerce = null,
+        authoredCloseOutcome = null,
         completion = JourneyRun.Completion(outcome, atMillis),
     )
 
