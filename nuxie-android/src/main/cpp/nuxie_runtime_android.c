@@ -2226,6 +2226,23 @@ static jfloatArray new_float_values(JNIEnv *env, const float *values, jsize coun
 }
 
 JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerGlobalViewModelSet(
+    JNIEnv *env, jobject self, jlong player, jbyteArray name, jlong view_model) {
+  (void)self;
+  if (name == NULL) return NUX_STATUS_NULL_ARGUMENT;
+  jsize length = (*env)->GetArrayLength(env, name);
+  if (length > 4096) return NUX_STATUS_LIMIT_EXCEEDED;
+  jbyte *bytes = (*env)->GetByteArrayElements(env, name, NULL);
+  if (bytes == NULL) return NUX_STATUS_RUNTIME_ERROR;
+  struct NuxStringView key = {(const char *)bytes, (size_t)length};
+  NuxStatus status = nux_player_set_global_view_model(
+      (struct NuxPlayer *)from_handle(player), key,
+      (struct NuxViewModelInstance *)from_handle(view_model));
+  (*env)->ReleaseByteArrayElements(env, name, bytes, JNI_ABORT);
+  return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerLayoutSizeSet(
     JNIEnv *env, jobject self, jlong player, jfloat width, jfloat height) {
   (void)env;

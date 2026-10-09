@@ -137,6 +137,7 @@ internal class ExperienceSurfaceHost(
     private var file: NuxieRuntimeFile? = null
     private var artboard: NuxieRuntimeArtboard? = null
     private var viewModelState: NuxieRuntimeViewModelState? = null
+    private var environment: NuxieRuntimeViewModelState? = null
     @Volatile private var semanticsEnabled = false
     private var semanticSnapshot: NuxieSemanticSnapshot? = null
     private var semanticSnapshotEpoch = -1L
@@ -504,6 +505,15 @@ internal class ExperienceSurfaceHost(
         val boundArtboard = artboard ?: return
         for ((path, value) in values) {
             try {
+                val globalPath = when (path) {
+                    "env/reduceMotion" -> "reduceMotion"
+                    "safeArea/top", "safeArea/bottom", "safeArea/left", "safeArea/right" -> path
+                    else -> null
+                }
+                if (globalPath != null) {
+                    environment?.setValue(globalPath, value)
+                    continue
+                }
                 val projected = viewModelState
                 if (projected != null) projected.setValue(path, value)
                 else boundArtboard.setDefaultViewModelValue(path, value)
@@ -677,6 +687,7 @@ internal class ExperienceSurfaceHost(
                 return@enqueue
             }
             try {
+                environment = loadedFile.globalViewModel("env")
                 val retained = retainedViewModel?.get()
                 if (retained != null) {
                     viewModelState = runtime.restoreViewModel(loadedFile, loadedArtboard, retained)
@@ -719,6 +730,7 @@ internal class ExperienceSurfaceHost(
             applyRuntimeValues(runtimeValues)
             try {
                 player = loadedFile.newExperiencePlayer(loadedArtboard, artboardName)
+                environment?.let { checkNotNull(player).bindGlobalViewModel("env", it) }
                 if (semanticsEnabled) checkNotNull(player).enableSemantics()
                 if (videoBindings.isNotEmpty()) {
                     videoPlayback = ExperienceVideoPlayback(context.applicationContext, checkNotNull(player), videoBindings, videoTargets,
@@ -1434,6 +1446,7 @@ internal class ExperienceSurfaceHost(
             player = null
             videoPlayback = null
             viewModelState = null
+            environment = null
             artboard = null
             file = null
             renderer = null
