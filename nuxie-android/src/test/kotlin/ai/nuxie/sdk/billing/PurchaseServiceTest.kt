@@ -11,6 +11,7 @@ import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.features.FeatureAllowance
+import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.testsupport.FakeTransport
 import android.app.Activity
@@ -2087,6 +2088,135 @@ class PurchaseServiceTest {
         assertEquals(0, emissions.count { it.first == SystemEventNames.PURCHASE_COMPLETED })
         fixture.close()
     }
+
+    @Test
+    fun rejectedSyncedRestoreRefreshRetainsEvidenceForLaterRestore() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(retainedRestoreEvidence(owner))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+        )
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = true) }
+
+        // Host Restore reports Play ownership even when backend refresh fails.
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+        val retained = fixture.store.load().getValue("refresh-token")
+        assertFalse("A rejected refresh must not revoke verified evidence", retained.revoked)
+        assertFalse("A rejected refresh must allow a later refresh", retained.permanentlyRejected)
+        assertTrue(retained.synced)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        assertTrue(fixture.service.restorePurchases(expectedOwnerDistinctId = owner) is RestoreResult.Failed)
+        fixture.synchronizer = { accepted(owner, it) }
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases(expectedOwnerDistinctId = owner))
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        assertEquals(null, fixture.billing.launched)
+        assertEquals(0, fixture.purchaseCompletionEventIds.size)
+        fixture.close()
+    }
+
+    @Test
+    fun failedSyncedRefreshCompletesPlayWithoutBackgroundRefreshRetries() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(retainedRestoreEvidence(owner).copy(acknowledged = false))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)),
+        )
+        var calls = 0
+        fixture.synchronizer = { calls += 1; PurchaseSyncOutcome.Rejected(permanent = false) }
+        assertTrue(fixture.service.restorePurchases(expectedOwnerDistinctId = owner) is RestoreResult.Failed)
+        assertEquals("Verified evidence still needs Play completion", 1, actions.count { it == "ack" })
+        assertTrue(fixture.store.load().getValue("refresh-token").acknowledged)
+        advanceTimeBy(600_000)
+        runCurrent()
+        assertEquals("A synced refresh waits for the next explicit Restore", 1, calls)
+        fixture.close()
+    }
+
+    @Test
+    fun syncedRefreshDoesNotScheduleBackgroundRetries() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(retainedRestoreEvidence(owner))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+        )
+        var calls = 0
+        fixture.synchronizer = { calls += 1; PurchaseSyncOutcome.Rejected(permanent = false) }
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+        advanceTimeBy(600_000)
+        runCurrent()
+        assertEquals("An explicit refresh does not create a background sync loop", 1, calls)
+        fixture.close()
+    }
+
+    @Test
+    fun restoreDoesNotRefreshAnotherCustomersSyncedToken() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        val original = retainedRestoreEvidence(owner)
+        fixture.store.upsert(original)
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+        )
+        fixture.core.identity.setDistinctId("other-customer")
+        var calls = 0
+        fixture.synchronizer = { calls += 1; PurchaseSyncOutcome.Rejected(permanent = true) }
+        assertEquals(RestoreResult.NoPurchases,
+            fixture.service.restorePurchases(expectedOwnerDistinctId = "other-customer"))
+        assertEquals("Restore must not submit another customer's token", 0, calls)
+        val retained = fixture.store.load().getValue("refresh-token")
+        assertEquals(owner, retained.ownerDistinctId)
+        assertEquals(original.syncAttempts, retained.syncAttempts)
+        assertFalse(retained.revoked)
+        assertFalse(retained.permanentlyRejected)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun syncedRefreshRevokesOnlyAnExplicitInvalidTokenResponse() = runTest {
+        val responses = listOf(
+            Triple(409, """{"code":"google_play_purchase_conflict"}""", false),
+            Triple(400, """{"code":"google_play_purchase_invalid"}""", false),
+            Triple(400, """{"code":"google_play_purchase_unsupported"}""", false),
+            Triple(401, "Invalid API key", false),
+            Triple(400, """{"code":"invalid_purchase_token"}""", true),
+            Triple(200, """{"success":false,"code":"invalid_purchase_token"}""", true),
+        )
+        for ((status, body, invalidToken) in responses) {
+            val fixture = fixture(this)
+            val owner = fixture.core.identity.distinctId()
+            fixture.store.upsert(retainedRestoreEvidence(owner))
+            fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+                playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+            )
+            val api = NuxieApi("pk_test", NuxieEnvironment.DEVELOPMENT, object : HttpTransport {
+                override fun execute(request: HttpTransport.Request) =
+                    HttpTransport.Response(status, body.encodeToByteArray())
+            })
+            val synchronizer = NuxieApiPurchaseSynchronizer(api)
+            fixture.synchronizer = { synchronizer.sync(it) }
+            assertTrue(fixture.service.restorePurchases(expectedOwnerDistinctId = owner) is RestoreResult.Failed)
+            val retained = fixture.store.load().getValue("refresh-token")
+            assertEquals("Only an explicit invalid token may revoke: $status $body", invalidToken, retained.revoked)
+            assertEquals(invalidToken, retained.permanentlyRejected)
+            fixture.close()
+        }
+    }
+
+    private fun retainedRestoreEvidence(owner: String) = PurchaseEvidence(
+        purchaseToken = "refresh-token", packageName = "com.example.app",
+        storeProductIds = listOf("play-pro"), nuxieProductId = "nuxie-pro",
+        productType = BillingClient.ProductType.SUBS, purchaseState = StoredPurchaseState.PURCHASED,
+        obfuscatedAccountId = accountHash(owner), syncAttributionDistinctId = owner,
+        ownerDistinctId = owner, nuxieManaged = true, acknowledged = true, synced = true, syncedCustomerId = owner,
+        backendSyncedAtMillis = 1L, firstSeenMillis = 1L, catalogResolved = true,
+        completionEmitted = true, syncedEventEmitted = true, signatureVerified = true,
+        authorityScope = "test-fixture",
+    )
 
     @Test
     fun recoveryDoesNotBypassAPendingManagedCompletionBackoff() = runTest {
