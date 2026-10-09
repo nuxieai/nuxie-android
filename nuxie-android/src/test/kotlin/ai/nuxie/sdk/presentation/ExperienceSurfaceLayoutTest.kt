@@ -161,6 +161,7 @@ class ExperienceSurfaceLayoutTest {
         val texture = SurfaceTexture(0)
         try {
             val descriptor = if (video) kotlinx.serialization.json.Json.parseToJsonElement("""{
+                "state":{},"responses":{},"ruleGroups":[],
                 "render":{"assets":[{"kind":"video","authoredAssetId":1,"assetUniqueName":"clip-1",
                     "key":"clip.mp4","sourceAssetKey":"asset:clip","required":false}],
                     "screens":[{"id":"main","artboardName":"Main"}]},
@@ -194,6 +195,16 @@ class ExperienceSurfaceLayoutTest {
     }
 
     private class RecordingNative(private val video: Boolean) : NuxieTypedRuntimeNative {
+        override fun installValueMarkers(file: Long, entries: Array<ai.nuxie.sdk.runtime.NativeValueMarker>): Int {
+            assertTrue(entries.isEmpty()); return 0
+        }
+        override fun installValueRules(file: Long, entries: Array<ai.nuxie.sdk.runtime.NativeValueRule>) =
+            ai.nuxie.sdk.runtime.NativeRuleInstallResult(0, null, null).also { assertTrue(entries.isEmpty()) }
+        override fun installRuleGroups(file: Long, entries: Array<ai.nuxie.sdk.runtime.NativeRuleGroup>): Int {
+            assertTrue(entries.isEmpty()); return 0
+        }
+        override fun viewModelCatalog(fileHandle: Long) = NativeCallResult(0,
+            NativeViewModelCatalog(emptyArray(), emptyArray(), emptyArray()))
         override fun inspectFileAssets(bytes: ByteArray) = if (video) listOf(
             ExpectedFileAsset(0, FileAssetKind.VIDEO, 1, "clip", "mp4", false, false, 4)) else emptyList()
         override fun videoOccurrences(player: Long) = emptyList<NuxieVideoOccurrence>()
