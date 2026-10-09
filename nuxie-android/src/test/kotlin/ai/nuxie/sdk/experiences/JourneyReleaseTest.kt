@@ -61,6 +61,40 @@ class JourneyReleaseTest {
             leg.getValue("id").jsonPrimitive.content, runtime(root), JourneyReleaseReplayPolicy.Active(0)).descriptorBytes)
     }
 
+    @Test fun qualifiedIrFieldAcceptsUnderscoreKey() {
+        val condition = Json.parseToJsonElement("""
+            {"type":"Compare","op":">","left":{"type":"Response.Field","form":"onboarding","key":"_days"},"right":{"type":"Number","value":14}}
+        """)
+        DeviceEntryIrSchema.validate(condition)
+        ExperiencePolicySchema.validate(buildJsonObject {
+            putJsonObject("entry") {
+                putJsonObject("trigger") { put("type", "api") }
+                putJsonObject("frequency") { put("type", "every_match") }
+                putJsonObject("eligibility") { put("ir_version", 1); put("expr", condition) }
+            }
+            put("exitWhenAny", JsonArray(emptyList()))
+        })
+    }
+
+    @Test fun qualifiedIrFieldKeepsCanonicalKeysAndLegacyStateRule() {
+        fun field(key: String, qualified: Boolean) = buildJsonObject {
+            put("type", "Response.Field"); put("key", key)
+            if (qualified) put("form", "onboarding")
+        }
+        for (key in listOf("_", "_days", "days_2")) DeviceEntryIrSchema.validate(field(key, true))
+        for (key in listOf("true", "false", "null", "7days", "bad-key", "days\n", "é", "")) {
+            assertThrows(JourneyReleaseAuthenticationException::class.java) {
+                DeviceEntryIrSchema.validate(field(key, true))
+            }
+        }
+        for (key in listOf("days", "days_2", "true", "false", "null")) DeviceEntryIrSchema.validate(field(key, false))
+        for (key in listOf("_days", "_", "7days")) {
+            assertThrows(JourneyReleaseAuthenticationException::class.java) {
+                DeviceEntryIrSchema.validate(field(key, false))
+            }
+        }
+    }
+
     @Test fun formSelectorRejectsMalformedNamesAndOtherFieldKinds() {
         fun field(type: String = "Response.Field", form: kotlinx.serialization.json.JsonElement) = buildJsonObject {
             put("type", type); put("key", "trip_days"); put("form", form)
