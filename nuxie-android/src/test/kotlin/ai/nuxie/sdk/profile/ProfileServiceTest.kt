@@ -466,6 +466,28 @@ class ProfileServiceTest {
         core.stop()
     }
 
+    @Test fun transportCancellationStopsTheProfileWorkerWithoutAnotherRequest() = runBlocking {
+        val calls = AtomicInteger()
+        val plane = planeProfileFixture()
+        val fixture = ProfileFixture(
+            transport = HttpTransport {
+                calls.incrementAndGet()
+                throw kotlinx.coroutines.CancellationException("controlled profile cancellation")
+            },
+            distinctId = "cancel-http", localeIdentifier = "en_US",
+            journeyProfiles = JourneyProfileCatalog(
+                trustedKeys = JourneyTrustRoots.keys(NuxieEnvironment.DEVELOPMENT),
+                highWater = JourneyReleaseHighWaterStore(RuntimeEnvironment.getApplication()),
+                supportedRuntime = { plane.second },
+            ),
+        )
+        try {
+            assertFalse(withTimeout(5_000) { fixture.service.refreshAndWait() })
+            assertFalse(withTimeout(5_000) { fixture.service.refreshAndWait() })
+            assertEquals("A cancelled profile worker must not issue another HTTP request", 1, calls.get())
+        } finally { fixture.close() }
+    }
+
     @Test fun localeChangeCancelsObsoletePreparationAndPreservesCommittedLease() = runBlocking {
         verifyPreparationCancellation("locale") { fixture -> fixture.service.setLocaleIdentifier("fr_FR") }
     }

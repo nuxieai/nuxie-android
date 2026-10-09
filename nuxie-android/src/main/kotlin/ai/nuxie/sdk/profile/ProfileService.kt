@@ -275,6 +275,7 @@ internal class ProfileService(
         val result = runCatching {
             api.fetchProfile(distinctId, locale, revalidating = validator)
         }.getOrElse {
+            if (it is CancellationException) throw it
             Log.w(LOG_TAG, "Profile fetch failed; signed authority stays as-is", it)
             return false
         }

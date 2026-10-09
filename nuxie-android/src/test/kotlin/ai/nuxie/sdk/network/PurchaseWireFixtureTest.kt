@@ -453,7 +453,7 @@ private object PurchaseWireFixtures {
         report: NuxieApi.PlayPurchaseReport,
     ): RequestFixture {
         val transport = CapturingTransport(PURCHASE_RESPONSE)
-        NuxieApi(API_KEY, NuxieEnvironment.DEVELOPMENT, transport).postPurchase(report)
+        runBlocking { NuxieApi(API_KEY, NuxieEnvironment.DEVELOPMENT, transport).postPurchase(report) }
         return transport.fixture(name, "/purchase")
     }
 
@@ -462,8 +462,8 @@ private object PurchaseWireFixtures {
         report: NuxieApi.PurchaseBackedFeatureUseReport,
     ): RequestFixture {
         val transport = CapturingTransport(ENTITLED_RESPONSE)
-        NuxieApi(API_KEY, NuxieEnvironment.DEVELOPMENT, transport)
-            .useFeatureWithPurchase(report)
+        runBlocking { NuxieApi(API_KEY, NuxieEnvironment.DEVELOPMENT, transport)
+            .useFeatureWithPurchase(report) }
         return transport.fixture(name, "/feature/consume")
     }
 
@@ -777,7 +777,7 @@ private object PurchaseWireResponses {
     }
 
     private fun assertPurchaseResponse(fixture: ResponseFixture, api: NuxieApi) {
-        val result = api.postPurchase(responsePathPurchaseReport())
+        val result = runBlocking { api.postPurchase(responsePathPurchaseReport()) }
         val body = fixture.successBody()
         assertEquals(body, result.body)
         assertEquals(body.getValue("success").jsonPrimitive.boolean, result.success)
@@ -791,11 +791,11 @@ private object PurchaseWireResponses {
     private fun assertFeatureCheckResponse(fixture: ResponseFixture, api: NuxieApi) {
         val body = fixture.successBody()
         val report = responsePathFeatureUseReport()
-        val result = api.useFeatureWithPurchase(report.copy(
+        val result = runBlocking { api.useFeatureWithPurchase(report.copy(
             customerId = body.requiredString("customerId"), featureId = body.requiredString("featureId"),
             eventData = report.eventData.copy(value = body.getValue("quantity").jsonPrimitive.double),
             purchase = report.purchase.copy(eventId = body.requiredString("operationId")),
-        ))
+        )) }
         assertEquals(body.requiredString("customerId"), result.customerId)
         assertEquals(body.requiredString("featureId"), result.featureId)
         assertEquals(body.requiredString("code"), result.code)
@@ -814,7 +814,7 @@ private object PurchaseWireResponses {
         when (fixture.endpoint) {
             "/purchase" -> {
                 val error = assertThrows(NuxieApi.PurchaseRejectedException::class.java) {
-                    api.postPurchase(responsePathPurchaseReport())
+                    runBlocking { api.postPurchase(responsePathPurchaseReport()) }
                 }
                 assertEquals(fixture.statusCode, error.statusCode)
                 assertEquals(
@@ -825,7 +825,7 @@ private object PurchaseWireResponses {
 
             "/feature/consume" -> {
                 val error = assertThrows(NuxieApi.RequestRejectedException::class.java) {
-                    api.useFeatureWithPurchase(responsePathFeatureUseReport())
+                    runBlocking { api.useFeatureWithPurchase(responsePathFeatureUseReport()) }
                 }
                 assertEquals(fixture.statusCode, error.statusCode)
             }
