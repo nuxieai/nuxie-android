@@ -192,7 +192,7 @@ class ExperienceSurfaceHostPointerTest {
                 override fun onFirstFrame() = Unit
                 override fun onFailure(error: ExperiencePresentationException) { throw error }
                 override fun onRuntimeStep(outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
-                    correlationId: ULong, viewModelSnapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?) {
+                    correlationId: ULong, viewModelSnapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?, saves: List<ExperienceResponseSaveRequest>) {
                     effects += correlationId
                 }
                 override fun onTextCommitted(inputId: String, text: String, snapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?) {
@@ -259,7 +259,7 @@ class ExperienceSurfaceHostPointerTest {
                 override fun onRuntimeStep(
                     outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
                     correlationId: ULong,
-                    viewModelSnapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?,
+                    viewModelSnapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?, saves: List<ExperienceResponseSaveRequest>,
                 ) { published += correlationId }
             })
         val texture = SurfaceTexture(0)
@@ -1707,7 +1707,7 @@ class ExperienceSurfaceHostPointerTest {
                 override fun onFirstFrame() = Unit
                 override fun onFailure(error: ExperiencePresentationException) { throw error }
                 override fun onRuntimeStep(outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
-                    correlationId: ULong, viewModelSnapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?) { onPublish(host) }
+                    correlationId: ULong, viewModelSnapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?, saves: List<ExperienceResponseSaveRequest>) { onPublish(host) }
             }))
         val texture = SurfaceTexture(0)
         try {
@@ -1743,8 +1743,8 @@ class ExperienceSurfaceHostPointerTest {
             override fun onFirstFrame() { delegate?.onFirstFrame() }
             override fun onFailure(error: ExperiencePresentationException) { delegate?.onFailure(error) ?: throw error }
             override fun onRuntimeStep(outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome, correlationId: ULong,
-                viewModelSnapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?) {
-                delegate?.onRuntimeStep(outcome, correlationId, viewModelSnapshot)
+                viewModelSnapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?, saves: List<ExperienceResponseSaveRequest>) {
+                delegate?.onRuntimeStep(outcome, correlationId, viewModelSnapshot, saves)
             }
             override fun onTextCommitted(inputId: String, text: String, snapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?) {
                 delegate?.onTextCommitted(inputId, text, snapshot)

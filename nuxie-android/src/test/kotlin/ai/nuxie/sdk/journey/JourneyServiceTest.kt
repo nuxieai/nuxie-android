@@ -597,6 +597,34 @@ class JourneyServiceTest {
         assertFalse(captures.contains(JourneyEventNames.LEG_COMPLETED))
     }
 
+    @Test fun `unaccepted frame save prevents its following emission and completion`() = runBlocking {
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val authority = authority(renderedEntry)
+        catalog.commit("customer", catalog.prepare(profile(releaseEntry = renderedEntry), authority))
+        val presenter = RecordingJourneyPresenter()
+        val captured = CopyOnWriteArrayList<String>()
+        val service = JourneyService(identity("customer"), store, catalog, directory, scope,
+            capture = { name, _, _, _ -> captured += name; true }, presenter = presenter)
+        service.initialize()
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(checkNotNull(catalog.snapshot("customer")), authority, "customer", 1)
+        val request = checkNotNull(presenter.request)
+        val batch = JourneyScreenEmissionBatch(request.journeyId, 0, "save-and-emit",
+            JourneyScreenEmissionSource("screen_welcome", "runtime:1"), listOf(
+                JourneyScreenEmission("after-save", 0, 100, "survey_submitted", JsonObject(emptyMap()))))
+        val save = ai.nuxie.sdk.presentation.ExperienceFrameSave(
+            ai.nuxie.sdk.presentation.ExperienceResponseSaveRequest("feedback", null, JsonObject(emptyMap())),
+            "screen_welcome", { error("Unaccepted save cannot confirm") })
+        assertFalse(request.onEmissionBatch(batch,
+            ai.nuxie.sdk.presentation.JourneyRuntimeEmissionSources(saves = listOf(save))))
+        assertFalse(captured.contains("survey_submitted"))
+        assertFalse(captured.contains(JourneyEventNames.LEG_COMPLETED))
+        val run = JourneyRunJournal(directory, "customer", JourneyStorageScope(authority)).runs().single()
+        assertEquals(0L, run.nextPresentationBatchSequence)
+        assertNull(run.completion)
+    }
+
     @Test fun `renderer batches durably publish once and route the owning run`() = runBlocking {
         val identity = identity("customer")
         val renderedEntry = fixture.getValue("renderedEntry").jsonObject

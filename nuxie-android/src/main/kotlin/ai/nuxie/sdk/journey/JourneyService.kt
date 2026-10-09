@@ -270,6 +270,11 @@ internal class JourneyService(
         ) : Command {
             override val done: CompletableDeferred<Unit>? = null
         }
+        data class ResponseSaveDisplayChanged(val journal: JourneyRunJournal, val journeyId: String,
+            override val done: CompletableDeferred<Unit>) : Command
+        data class ResponseSaveContinuation(val runId: String, val journal: JourneyRunJournal,
+            val fence: JourneyExecutionFenceToken, val identityScope: IdentityScope,
+            val confirmed: suspend () -> Unit, override val done: CompletableDeferred<Unit>) : Command
         data class PresentationBatch(
             val runId: String,
             val expectedScreenId: String,
@@ -357,17 +362,20 @@ internal class JourneyService(
     private var profileState: ProfileState? = null
     private var journal: JourneyRunJournal? = null
     private val nativeRestoreRetryAt = mutableMapOf<String, Long>()
-    private val nativeValuesByRun = mutableMapOf<String, Pair<String, ai.nuxie.sdk.presentation.ExperienceRunValues>>()
+    private data class NativeRunValues(val owner: String, val values: ai.nuxie.sdk.presentation.ExperienceRunValues,
+        val descriptor: JsonObject)
+    private val nativeValuesByRun = mutableMapOf<String, NativeRunValues>()
 
-    private fun nativeValues(run: JourneyRun, owner: String): ai.nuxie.sdk.presentation.ExperienceRunValues =
-        nativeValuesByRun.getOrPut(run.id) { owner to ai.nuxie.sdk.presentation.ExperienceRunValues(run.nativeSnapshot) }.also {
-            check(it.first == owner)
-        }.second
+    private fun nativeValues(run: JourneyRun, owner: String, descriptor: JsonObject): ai.nuxie.sdk.presentation.ExperienceRunValues =
+        nativeValuesByRun.getOrPut(run.id) { NativeRunValues(owner, ai.nuxie.sdk.presentation.ExperienceRunValues(run.nativeSnapshot), descriptor) }.also {
+            check(it.owner == owner)
+        }.values
 
     private suspend fun preparedNativeValues(run: JourneyRun, release: AuthenticatedJourneyRelease,
         target: JourneyRunJournal): ai.nuxie.sdk.presentation.ExperienceRunValues {
-        val values = nativeValues(run, target.distinctId)
+        val values = nativeValues(run, target.distinctId, release.descriptor)
         if (!values.isPrepared()) prepareNativeValues(values, release, checkNotNull(run.executionSnapshot).delivery)
+        applyResponseSaveDisplay(run, target, values, release.descriptor)
         return values
     }
 
@@ -379,14 +387,14 @@ internal class JourneyService(
 
     private suspend fun retireNativeValues(runId: String) {
         nativeRestoreRetryAt.remove(runId)
-        nativeValuesByRun.remove(runId)?.second?.retire()
+        nativeValuesByRun.remove(runId)?.values?.retire()
     }
 
     private suspend fun retireOwnerValues(owner: String?) {
-        val entries = nativeValuesByRun.filterValues { owner == null || it.first == owner }
+        val entries = nativeValuesByRun.filterValues { owner == null || it.owner == owner }
         entries.keys.forEach(nativeValuesByRun::remove)
         entries.keys.forEach(nativeRestoreRetryAt::remove)
-        entries.values.forEach { it.second.retire() }
+        entries.values.forEach { it.values.retire() }
     }
     private val retainedReleasesByDigest = linkedMapOf<String, AuthenticatedJourneyRelease>()
     private val retainedReleaseOrder = mutableListOf<String>()
@@ -424,6 +432,12 @@ internal class JourneyService(
                         command.event,
                         command.admittedGeneration,
                     )
+                    is Command.ResponseSaveDisplayChanged -> responseSaveDisplayChanged(command.journal, command.journeyId)
+                    is Command.ResponseSaveContinuation -> {
+                        if (isExecutionCurrent(command.fence, command.journal) &&
+                            identity.isCurrentScope(command.identityScope) &&
+                            command.journal.runs().any { it.id == command.runId && it.completion == null }) command.confirmed()
+                    }
                     is Command.PresentationBatch -> handlePresentationBatchNow(command)
                     is Command.PresentationLifecycle ->
                         handlePresentationLifecycleNow(command)
@@ -768,6 +782,9 @@ internal class JourneyService(
                     return
                 }
                 storageScope = authenticated
+            }
+            responseSaveDelivery?.setDisplayObserver { changed, journeyId ->
+                submit { Command.ResponseSaveDisplayChanged(changed, journeyId, it) }
             }
             storageScope?.let { responseSaveDelivery?.activate(it) }
             val generation = profileGeneration.incrementAndGet()
@@ -1688,6 +1705,56 @@ internal class JourneyService(
         )
     }
 
+    private suspend fun applyResponseSaveDisplay(run: JourneyRun, target: JourneyRunJournal,
+        values: ai.nuxie.sdk.presentation.ExperienceRunValues, descriptor: JsonObject) {
+        val declared = descriptor["responses"]?.jsonObject.orEmpty()
+        val displays = target.responseSaveDisplays(run.journeyId).filterKeys { it in declared }
+        if (displays.isNotEmpty()) values.applyResponseSaveDisplays(displays, descriptor)
+    }
+
+    private suspend fun responseSaveDisplayChanged(changed: JourneyRunJournal, journeyId: String) {
+        val target = journal ?: return
+        val fence = executionFence.token()
+        if (!isExecutionCurrent(fence, target) || changed.distinctId != target.distinctId ||
+            changed.responseSaveNamespace != target.responseSaveNamespace) return
+        for (run in target.runs().filter { it.journeyId == journeyId && it.completion == null }) {
+            if (!isExecutionCurrent(fence, target)) return
+            val native = nativeValuesByRun[run.id]?.takeIf { it.owner == target.distinctId } ?: continue
+            applyResponseSaveDisplay(run, target, native.values, native.descriptor)
+        }
+    }
+
+    private suspend fun acceptResponseSave(save: ai.nuxie.sdk.presentation.ExperienceFrameSave,
+        run: JourneyRun, release: AuthenticatedJourneyRelease, target: JourneyRunJournal,
+        fence: JourneyExecutionFenceToken, identityScope: IdentityScope): Boolean {
+        val delivery = responseSaveDelivery ?: return false
+        if (save.request.form !in release.descriptor["responses"]?.jsonObject.orEmpty() ||
+            !isExecutionCurrent(fence, target) || !identity.isCurrentScope(identityScope) ||
+            presenter?.owns(JourneyPresentationOwner(run.journeyId, target.distinctId)) != true) return false
+        return try {
+            val values = preparedNativeValues(run, release, target)
+            val admission = StableEventCommitAdmission { commit ->
+                executionFence.performIfCurrent(fence) { identity.withCurrentScope(identityScope, commit) }
+            }
+            val sheet = if (save.request.awaitTrigger != null) {
+                delivery.reserveWaiting(target, run, save.request.form, save.request.answers, admission)
+            } else delivery.enqueue(target, run, save.request.form, save.request.answers, admission)
+            try { applyResponseSaveDisplay(run, target, values, release.descriptor) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { Log.w(LOG_TAG, "Accepted response save display could not be refreshed") }
+            if (save.request.awaitTrigger != null) scope.launch {
+                try {
+                    if (delivery.sendWaiting(sheet, target).confirmed) {
+                        submit { Command.ResponseSaveContinuation(run.id, target, fence, identityScope, save.onConfirmed, it) }
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { Log.w(LOG_TAG, "Awaited response save could not complete") }
+            }
+            true
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { Log.w(LOG_TAG, "Native response save could not be accepted"); false }
+    }
+
     private suspend fun handlePresentationBatchNow(
         command: Command.PresentationBatch,
     ): Boolean {
@@ -1748,6 +1815,10 @@ internal class JourneyService(
         )
         val identityScope = identity.captureScope()
         if (identityScope.distinctId != target.distinctId) return false
+        for (save in command.eventSource?.saves.orEmpty()) {
+            if (save.screenID != command.expectedScreenId ||
+                !acceptResponseSave(save, run, command.release, target, command.executionFenceToken, identityScope)) return false
+        }
         val staged = publishJournalIfCurrent(command.executionFenceToken, identityScope) {
             target.stagePresentationPublication(
                 run.id,
@@ -2203,7 +2274,7 @@ internal class JourneyService(
             presentation.present(
                 JourneyPresentationRequest(
                     fences = JourneyPresentationFences(identity, identityScope, executionFence, executionToken),
-                    runValues = nativeValues(run, target.distinctId),
+                    runValues = nativeValues(run, target.distinctId, release.descriptor),
                     release = release,
                     delivery = executionSnapshot.delivery,
                     screenId = screenId,
@@ -2336,7 +2407,7 @@ internal class JourneyService(
                     return
                 }
                 val values = if (readsNativeValues(step) || step.text("kind") == "complete")
-                    preparedNativeValues(run, release, target) else nativeValuesByRun[run.id]?.second
+                    preparedNativeValues(run, release, target) else nativeValuesByRun[run.id]?.values
                 run = run.copy(context = JsonObject(run.context + ("responses" to
                     (values?.journeyValues() ?: JsonObject(emptyMap())))))
                 if (!isExecutionCurrent(executionToken, target) || !identity.isCurrentScope(identityScope)) return
@@ -2741,7 +2812,7 @@ internal class JourneyService(
         val boundary = (leg.getValue("completionOutputs") as JsonObject)[outcome]
             as? JsonObject
         val context = JsonObject(run.context + ("responses" to
-            (nativeValuesByRun[run.id]?.second?.journeyValues() ?: JsonObject(emptyMap()))))
+            (nativeValuesByRun[run.id]?.values?.journeyValues() ?: JsonObject(emptyMap()))))
         val projected = boundary?.let {
             JourneyBoundaryProjector.project(context, it)
         }

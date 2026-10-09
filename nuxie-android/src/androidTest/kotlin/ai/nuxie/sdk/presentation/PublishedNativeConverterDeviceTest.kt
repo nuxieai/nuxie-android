@@ -102,7 +102,7 @@ class PublishedNativeConverterDeviceTest {
                 mounted = ExperienceMountedScreen(activity, prepared, object : ExperienceSurfaceHost.Listener {
                     override fun onFirstFrame() { checkNotNull(mounted).activate() }
                     override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
-                    override fun onRuntimeStep(outcome: NuxiePlayerStepOutcome, correlationId: ULong, viewModelSnapshot: NuxieViewModelSnapshot?) {
+                    override fun onRuntimeStep(outcome: NuxiePlayerStepOutcome, correlationId: ULong, viewModelSnapshot: NuxieViewModelSnapshot?, saves: List<ExperienceResponseSaveRequest>) {
                         try {
                             journey?.publish(outcome, correlationId, viewModelSnapshot)
                         } catch (error: Throwable) {
