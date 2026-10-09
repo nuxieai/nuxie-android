@@ -134,6 +134,7 @@ dependencies {
   testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.robolectric)
 
+  androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
   androidTestImplementation(libs.androidx.test.runner)
   androidTestImplementation(libs.junit)
 }

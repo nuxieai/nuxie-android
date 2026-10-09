@@ -65,6 +65,9 @@ import android.view.TextureView
 import android.view.View
 import android.view.MotionEvent
 import android.view.ViewGroup
+import androidx.test.uiautomator.By
+import androidx.test.uiautomator.UiDevice
+import androidx.test.uiautomator.Until
 import androidx.test.filters.SdkSuppress
 import android.os.SystemClock
 import android.util.Base64
@@ -99,7 +102,17 @@ import org.junit.Test
 /** Real publisher bytes, signed defaults, runtime geometry and runtime text writer. */
 class PublishedTextInputDeviceTest {
     @Test
-    fun nativeEditingSecondPublishedFieldKeepsFirstValue() {
+    fun nativeEditingSecondPublishedFieldKeepsFirstValue() = withTwoPublishedFields(false)
+
+    @Test
+    fun realJapaneseKeyboardComposition() {
+        // This real IME proof requires an owned emulator configured with Japanese QWERTY Gboard.
+        org.junit.Assume.assumeTrue("Opt in with nuxieJapaneseKeyboard=true after configuring Gboard",
+            InstrumentationRegistry.getArguments().getString("nuxieJapaneseKeyboard") == "true")
+        withTwoPublishedFields(true)
+    }
+
+    private fun withTwoPublishedFields(realKeyboard: Boolean) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val fixture = loadPublishedFixture(instrumentation, "runtime/published-two-fields")
         val descriptor = fixture.release.descriptor
@@ -140,6 +153,8 @@ class PublishedTextInputDeviceTest {
                         }
                     })
                 activity.setContentView(android.widget.FrameLayout(activity).apply {
+                    // Keep the keyboard proof below this edge-to-edge test Activity's status bar.
+                    if (realKeyboard) setPadding(0, (80 * resources.displayMetrics.density).toInt(), 0, 0)
                     addView(surface, android.widget.FrameLayout.LayoutParams(-1, -1))
                     addView(overlay, android.widget.FrameLayout.LayoutParams(-1, -1))
                 })
@@ -163,6 +178,40 @@ class PublishedTextInputDeviceTest {
                 assertTrue(message, predicate())
             }
             waitFor("First field must focus Rive") { surface.riveFocusState.expectsKeyboardInput }
+            if (realKeyboard) {
+                val device = UiDevice.getInstance(instrumentation)
+                val position = IntArray(2)
+                instrumentation.runOnMainSync {
+                    second.getLocationOnScreen(position)
+                    position[0] += second.width / 2
+                    position[1] += second.height / 2
+                }
+                device.click(position[0], position[1])
+                device.takeScreenshot(File(activity.cacheDir, "m8-keyboard-before.png"))
+                device.dumpWindowHierarchy(File(activity.cacheDir, "m8-keyboard-before.xml"))
+                assertTrue("Real keyboard must be visible", device.wait(Until.hasObject(By.pkg("com.google.android.inputmethod.latin")), 10_000))
+                device.dumpWindowHierarchy(File(activity.cacheDir, "m8-keyboard-visible.xml"))
+                for (key in listOf("n", "i", "h", "o", "n")) {
+                    val button = device.wait(Until.findObject(By.desc(key)), 5_000)
+                    assertNotNull("Romaji key must be available", button)
+                    button.click()
+                }
+                waitFor("Rive must read back Japanese composition") {
+                    captured.get().map { it.text }.sorted() == listOf("Ada", "Hopperにほｎ")
+                }
+                instrumentation.runOnMainSync {
+                    assertEquals("Hopperにほｎ", second.text.toString())
+                    assertTrue("Native caret stays enabled", second.isCursorVisible)
+                    assertEquals("Selection is collapsed at the caret", second.selectionStart, second.selectionEnd)
+                    assertEquals("Native glyphs stay transparent", android.graphics.Color.TRANSPARENT, second.currentTextColor)
+                    assertTrue("Composition must remain marked", android.view.inputmethod.BaseInputConnection.getComposingSpanStart(second.text) >= 0)
+                }
+                device.waitForIdle()
+                device.dumpWindowHierarchy(File(activity.cacheDir, "m8-japanese-composing.xml"))
+                assertTrue("Composition screenshot must be retained", device.takeScreenshot(File(activity.cacheDir, "m8-japanese-composing.png")))
+                return
+            }
+
             val position = IntArray(2)
             var x = 0f
             var y = 0f
