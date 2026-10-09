@@ -3,6 +3,7 @@ package ai.nuxie.sdk.network
 import ai.nuxie.sdk.journey.JourneyResponseSave
 import ai.nuxie.sdk.journey.JourneyResponseSaveReply
 import ai.nuxie.sdk.journey.JourneyResponseSaveTransport
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import ai.nuxie.sdk.NuxieEnvironment
@@ -38,6 +39,7 @@ internal class NuxieApi(
     environment: NuxieEnvironment,
     private val transport: HttpTransport = HttpUrlConnectionTransport(),
     baseUrlOverride: URL? = null,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : JourneyResponseSaveTransport {
     private val baseUrl: String = baseUrlOverride?.let(::normalizedBaseUrl) ?: when (environment) {
         NuxieEnvironment.PRODUCTION -> "https://i.nuxie.ai"
@@ -532,7 +534,7 @@ internal class NuxieApi(
 
     /** Every API caller may arrive on Main, including explicit host Restore. */
     private suspend fun execute(request: HttpTransport.Request): HttpTransport.Response =
-        withContext(Dispatchers.IO) { transport.execute(request) }
+        withContext(ioDispatcher) { runCatching { transport.execute(request) } }.getOrThrow()
 
     private fun JsonObject.nullableString(key: String, context: String): String? =
         when (val value = this[key]) {
