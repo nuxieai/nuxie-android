@@ -1031,18 +1031,34 @@ internal class PurchaseService(
             } else {
                 RestoreDecision(
                     RestoreResult.Restored,
-                    found.mapNotNull {
+                    found.distinctBy { it.purchaseToken }.mapNotNull { purchase ->
                         commitPurchaseOutcome(
-                            classifyPurchaseObservation(it, PurchaseOutcomeSource.STARTUP_RECOVERY),
+                            classifyPurchaseObservation(purchase, PurchaseOutcomeSource.STARTUP_RECOVERY),
                             effects,
-                        )
+                        ) ?: evidenceStore.load()[purchase.purchaseToken]?.takeIf {
+                            purchase.state == StoredPurchaseState.PURCHASED &&
+                                it.purchaseState == StoredPurchaseState.PURCHASED &&
+                                it.synced && !it.revoked && !it.permanentlyRejected
+                        }
                     },
                 )
             }
         }
-        decision.followUps.forEach { finishPurchase(it) }
+        // Restore is an explicit request for current provider authority, not a replay
+        // of the earlier checkout receipt. Keep its delivery and completion claims.
+        val refreshResults = decision.followUps.associate { evidence ->
+            evidence.purchaseToken to syncEvidence(evidence, refreshProviderState = true)
+        }
         val outcome = if (expectedOwnerDistinctId != null && decision.outcome == RestoreResult.Restored) {
-            strictRestoreOutcome(found, initiatingOwner)
+            if (decision.followUps.any {
+                    it.ownerDistinctId == initiatingOwner && refreshResults[it.purchaseToken] != true
+                }) {
+                RestoreResult.Failed(RestoreReconciliationException(
+                    "Restore is waiting for purchase verification.",
+                ))
+            } else {
+                strictRestoreOutcome(found, initiatingOwner)
+            }
         } else {
             decision.outcome
         }
@@ -1719,9 +1735,12 @@ internal class PurchaseService(
         if (current.synced) completeManaged(current) else syncEvidence(current)
     }
 
-    private suspend fun syncEvidence(original: PurchaseEvidence): Boolean {
+    private suspend fun syncEvidence(
+        original: PurchaseEvidence,
+        refreshProviderState: Boolean = false,
+    ): Boolean {
         val current = evidenceStore.load()[original.purchaseToken] ?: original
-        if (current.synced) return true
+        if (current.synced && !refreshProviderState) return true
         val operation: CompletableDeferred<Boolean>
         val ownsOperation: Boolean
         synchronized(usageCoordinationLock) {
@@ -1738,7 +1757,7 @@ internal class PurchaseService(
         }
         if (!ownsOperation) return operation.await()
         val synced = try {
-            performSyncEvidence(current)
+            performSyncEvidence(current, refreshProviderState)
         } catch (_: Exception) {
             false
         }
@@ -1751,7 +1770,10 @@ internal class PurchaseService(
         return synced
     }
 
-    private suspend fun performSyncEvidence(original: PurchaseEvidence): Boolean {
+    private suspend fun performSyncEvidence(
+        original: PurchaseEvidence,
+        refreshProviderState: Boolean,
+    ): Boolean {
         val attempted = projectionRefresh.withLock {
             val current = evidenceStore.load()[original.purchaseToken] ?: original
             upsertEvidenceLocked(
@@ -1765,7 +1787,7 @@ internal class PurchaseService(
                 if (outcome.permanent) {
                     revokeEvidence(attempted.copy(permanentlyRejected = true))
                 } else {
-                    scheduleSyncRetry(attempted.purchaseToken, attempted.syncAttempts)
+                    scheduleSyncRetry(attempted.purchaseToken, attempted.syncAttempts, refreshProviderState)
                 }
                 return false
             }
@@ -2058,7 +2080,7 @@ internal class PurchaseService(
             }
         }
 
-    private fun scheduleSyncRetry(token: String, attempt: Int) {
+    private fun scheduleSyncRetry(token: String, attempt: Int, refreshProviderState: Boolean = false) {
         if (syncRetryJobs[token]?.isActive == true) return
         syncRetryJobs[token] = scope.launch {
             delay(retryDelay(attempt))
@@ -2066,9 +2088,9 @@ internal class PurchaseService(
             evidenceStore.load()[token]
                 ?.takeIf {
                     token !in locallyRevokedTokens &&
-                        !it.permanentlyRejected && !it.revoked && !it.synced
+                        !it.permanentlyRejected && !it.revoked && (!it.synced || refreshProviderState)
                 }
-                ?.let { syncEvidence(it) }
+                ?.let { syncEvidence(it, refreshProviderState) }
         }
     }
 
