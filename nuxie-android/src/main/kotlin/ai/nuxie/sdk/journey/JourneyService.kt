@@ -25,6 +25,7 @@ import ai.nuxie.sdk.presentation.JourneyPresentationResult
 import ai.nuxie.sdk.presentation.JourneyPresenting
 import ai.nuxie.sdk.presentation.JourneyRuntimeEmissionSources
 import ai.nuxie.sdk.presentation.JourneyRuntimeEventSource
+import ai.nuxie.sdk.presentation.JourneyEmissionBatchResult
 import ai.nuxie.sdk.presentation.JourneyScreenEmissionBatch
 import ai.nuxie.sdk.presentation.JourneyScreenDismissalResult
 import ai.nuxie.sdk.presentation.JourneySurfaceOutcome
@@ -282,7 +283,7 @@ internal class JourneyService(
             val executionFenceToken: JourneyExecutionFenceToken,
             val batch: JourneyScreenEmissionBatch,
             val eventSource: JourneyRuntimeEmissionSources?,
-            val accepted: CompletableDeferred<Boolean>,
+            val accepted: CompletableDeferred<JourneyEmissionBatchResult>,
         ) : Command {
             override val done: CompletableDeferred<Unit>? = null
         }
@@ -461,7 +462,10 @@ internal class JourneyService(
                 if (failure is CancellationException) {
                     command.accepted.completeExceptionally(failure)
                     kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                } else { command.accepted.complete(result.getOrNull() == true) }
+                } else {
+                    command.accepted.complete(result.getOrNull() as? JourneyEmissionBatchResult
+                        ?: JourneyEmissionBatchResult.REJECTED)
+                }
             }
             if (command is Command.PresentationLifecycle) {
                 command.result.complete(
@@ -566,8 +570,8 @@ internal class JourneyService(
         executionFenceToken: JourneyExecutionFenceToken,
         batch: JourneyScreenEmissionBatch,
         eventSource: JourneyRuntimeEmissionSources? = null,
-    ): Boolean {
-        val accepted = CompletableDeferred<Boolean>()
+    ): JourneyEmissionBatchResult {
+        val accepted = CompletableDeferred<JourneyEmissionBatchResult>()
         val command = Command.PresentationBatch(
             runId = runId,
             expectedScreenId = expectedScreenId,
@@ -580,7 +584,7 @@ internal class JourneyService(
         if (coroutineContext[WorkerContext]?.owner === this) {
             return handlePresentationBatchNow(command)
         }
-        if (commands.trySend(command).isFailure) return false
+        if (commands.trySend(command).isFailure) return JourneyEmissionBatchResult.REJECTED
         return accepted.await()
     }
 
@@ -1767,37 +1771,37 @@ internal class JourneyService(
 
     private suspend fun handlePresentationBatchNow(
         command: Command.PresentationBatch,
-    ): Boolean {
-        val target = journal ?: return false
-        if (!isExecutionCurrent(command.executionFenceToken, target)) return false
+    ): JourneyEmissionBatchResult {
+        val target = journal ?: return JourneyEmissionBatchResult.REJECTED
+        if (!isExecutionCurrent(command.executionFenceToken, target)) return JourneyEmissionBatchResult.REJECTED
         val run = target.runs().firstOrNull { it.id == command.runId }
             ?.takeIf {
                 it.completion == null &&
                     matches(command.release, it.reference)
             }
-            ?: return false
+            ?: return JourneyEmissionBatchResult.REJECTED
         val batch = command.batch
         if (batch.journeyId != run.journeyId ||
             batch.invocationId.isEmpty() ||
             batch.source.screenId != command.expectedScreenId ||
             batch.source.actionId.isEmpty() ||
             batch.batchSequence < 0
-        ) return false
-        if (batch.batchSequence < run.nextPresentationBatchSequence) return true
+        ) return JourneyEmissionBatchResult.REJECTED
+        if (batch.batchSequence < run.nextPresentationBatchSequence) return JourneyEmissionBatchResult.ACCEPTED
         val cursorAction = command.release.leg.getValue("steps").jsonArray
             .map(JsonElement::jsonObject).firstOrNull { it.text("id") == run.stepId }
             ?.get("action") as? JsonObject
         if (run.effectReceipts[run.stepId] != null &&
             cursorAction?.let(JourneyActionType::from)?.isCommerce == true
-        ) return false
+        ) return JourneyEmissionBatchResult.DECLINED
         if (batch.batchSequence != run.nextPresentationBatchSequence ||
             batch.batchSequence == Long.MAX_VALUE
-        ) return false
+        ) return JourneyEmissionBatchResult.REJECTED
 
         val screen = command.release.leg.getValue("screens").jsonArray
             .map(JsonElement::jsonObject)
             .firstOrNull { it.text("id") == command.expectedScreenId }
-            ?: return false
+            ?: return JourneyEmissionBatchResult.REJECTED
         val items = mutableListOf<JourneyRun.PendingPresentationPublication.Item>()
         val eventIds = mutableSetOf<String>()
         var nextEmissionSequence = run.nextPresentationEmissionSequence
@@ -1805,16 +1809,16 @@ internal class JourneyService(
             if (emission.id.isEmpty() || !eventIds.add(emission.id) ||
                 emission.sequence != nextEmissionSequence ||
                 emission.occurredAtMillis < 0
-            ) return false
+            ) return JourneyEmissionBatchResult.REJECTED
             nextEmissionSequence = try {
                 Math.addExact(nextEmissionSequence, 1L)
             } catch (_: ArithmeticException) {
-                return false
+                return JourneyEmissionBatchResult.REJECTED
             }
             if (emission.name.startsWith('$')) continue
-            if (emission.name.isEmpty()) return false
+            if (emission.name.isEmpty()) return JourneyEmissionBatchResult.REJECTED
             val properties = attributedPresentationProperties(emission.payload, command.expectedScreenId, run)
-                ?: return false
+                ?: return JourneyEmissionBatchResult.REJECTED
             items += JourneyRun.PendingPresentationPublication.Item(emission.name, properties,
                 emission.id, emission.occurredAtMillis)
         }
@@ -1830,10 +1834,10 @@ internal class JourneyService(
             items = items,
         )
         val identityScope = identity.captureScope()
-        if (identityScope.distinctId != target.distinctId) return false
+        if (identityScope.distinctId != target.distinctId) return JourneyEmissionBatchResult.REJECTED
         for (save in command.eventSource?.saves.orEmpty()) {
             if (save.screenID != command.expectedScreenId ||
-                !acceptResponseSave(save, run, command.release, target, command.executionFenceToken, identityScope)) return false
+                !acceptResponseSave(save, run, command.release, target, command.executionFenceToken, identityScope)) return JourneyEmissionBatchResult.REJECTED
         }
         val staged = publishJournalIfCurrent(command.executionFenceToken, identityScope) {
             target.stagePresentationPublication(
@@ -1842,7 +1846,7 @@ internal class JourneyService(
                 context = context,
                 publication = publication,
             )
-        } ?: return false
+        } ?: return JourneyEmissionBatchResult.REJECTED
         val accepted = settlePresentationPublication(
             staged,
             command.release,
@@ -1853,7 +1857,7 @@ internal class JourneyService(
         )
         // The worker cannot consume queued continuations until these links settle.
         command.eventSource?.frameLinks?.perform()
-        return accepted
+        return if (accepted) JourneyEmissionBatchResult.ACCEPTED else JourneyEmissionBatchResult.REJECTED
     }
 
     private suspend fun settlePresentationPublication(

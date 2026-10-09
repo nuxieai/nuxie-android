@@ -57,7 +57,7 @@ class ExperienceTextInputTest {
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey",
             JsonObject(descriptor + ("screenBehaviors" to behaviors)), 0, 0,
-            onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {})
+            onEmissionBatch = { it, _ -> batches += it; JourneyEmissionBatchResult.ACCEPTED }, onPresentationRevealed = {})
         coordinator.reveal()
         assertTrue(coordinator.publishTextInputEvent("name", ExperienceSemanticTextDraft.Event(
             ExperienceSemanticTextDraft.EventKind.EDITING_ENDED, "same")))
@@ -78,7 +78,7 @@ class ExperienceTextInputTest {
             .replace("\"headline\"", "\"editable\"")) as JsonObject
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", descriptor, 0, 0,
-            onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {})
+            onEmissionBatch = { it, _ -> batches += it; JourneyEmissionBatchResult.ACCEPTED }, onPresentationRevealed = {})
         fun owner(id: Long) = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(id,
             arrayOf(NativeViewModelSnapshotInstance(id, 0)), emptyArray()))
         coordinator.reveal()
@@ -114,7 +114,7 @@ class ExperienceTextInputTest {
     @Test fun `text commits do not publish answer events`() = runTest {
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", textInputDescriptor(), 0, 0,
-            onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {})
+            onEmissionBatch = { it, _ -> batches += it; JourneyEmissionBatchResult.ACCEPTED }, onPresentationRevealed = {})
         assertTrue(coordinator.reveal())
         assertTrue(coordinator.publishTextCommit("name", "50", snapshot = snapshot()))
         assertTrue(batches.isEmpty())
@@ -671,7 +671,7 @@ class ExperienceTextInputTest {
         var publications = 0
         val coordinator = JourneyRuntimeEmissionCoordinator(
             "journey", "survey", textInputDescriptor("abcd"), 0, 0,
-            onEmissionBatch = { it, _ -> publications++; true }, onPresentationRevealed = {},
+            onEmissionBatch = { it, _ -> publications++; JourneyEmissionBatchResult.ACCEPTED }, onPresentationRevealed = {},
         )
         assertTrue(coordinator.reveal())
         assertTrue(coordinator.publishTextCommit("name", "ab", snapshot = snapshot()))
