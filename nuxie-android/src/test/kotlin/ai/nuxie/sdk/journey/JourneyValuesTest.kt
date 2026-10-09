@@ -12,6 +12,18 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class JourneyValuesTest {
+    @Test fun slashLeafKeysRemainExactAndSeparateFromFormFields() {
+        fun obj(text: String) = Json.parseToJsonElement(text).jsonObject
+        val context = obj("""{"event":{},"responses":{"profile/minutes":20,"profile/settings/day":"2026-10-10","top":7},"formAnswers":{"onboarding":{"minutes":9}}}""")
+        val field = obj("""{"type":"Response.Field","key":"profile/minutes"}""")
+        assertEquals(kotlinx.serialization.json.JsonPrimitive(20), JourneyValues.resolve(field, context))
+        assertEquals(true, JourneyValues.evaluate(obj("""{"type":"Compare","op":">","left":$field,"right":{"type":"Number","value":15}}"""), context))
+        assertEquals(kotlinx.serialization.json.JsonPrimitive("2026-10-10"), JourneyValues.resolve(obj("""{"type":"Response.Field","key":"profile/settings/day"}"""), context))
+        assertEquals(kotlinx.serialization.json.JsonPrimitive(7), JourneyValues.resolve(obj("""{"type":"Response.Field","key":"top"}"""), context))
+        assertEquals(kotlinx.serialization.json.JsonPrimitive(9), JourneyValues.resolve(obj("""{"type":"Response.Field","form":"onboarding","key":"minutes"}"""), context))
+        assertEquals(null, JourneyValues.resolve(obj("""{"type":"Response.Field","key":"profile"}"""), context))
+    }
+
     @Test fun formFieldWithoutAnswersDoesNotReadSameNamedState() {
         val field = Json.parseToJsonElement("""{"type":"Response.Field","form":"onboarding","key":"trip_days"}""").jsonObject
         val context = Json.parseToJsonElement("""{"event":{},"responses":{"trip_days":99}}""").jsonObject
