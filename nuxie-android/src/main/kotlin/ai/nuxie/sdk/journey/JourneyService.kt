@@ -918,10 +918,14 @@ internal class JourneyService(
             val effectId = pending?.effectId ?: candidate.effectReceipts[stepId] ?: continue
             if (!presentationOutcomeMatches(event, effectId, candidate, action, release)) continue
             val key = CommerceExecutionKey(candidate.id, target.distinctId, executionToken.generation)
-            if (candidate.pendingPresentationPublication != null || pendingAuthoredContinuations.getOrDefault(key, 0) > 0) {
+            if (pendingAuthoredContinuations.getOrDefault(key, 0) > 0) {
                 deferredCommerceOutcomes.putIfAbsent(key, event)
                 // Keep EventLog's durable route pending until settlement is persisted.
                 return false
+            }
+            if (candidate.pendingPresentationPublication != null) {
+                if (!settlePresentationPublication(candidate, release, target, executionToken, identityScope)) return false
+                return resumePresentationActionOutcome(event, excludingRunId)
             }
             val nextStepId = (step["outlets"] as? JsonObject)?.text(route.second)
             if (nextStepId == null && candidate.authoredCloseOutcome != null) {
