@@ -26,6 +26,39 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyReleaseTest {
+    @Test fun signedV3NestedObjectPolicyAuthenticatesExactMetadata() {
+        val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val leg = source.getValue("leg").jsonObject
+        val state = Json.parseToJsonElement(java.io.File("../fixtures/runtime/nested-values/state.json").readText()).jsonObject
+        val root = JsonObject(source + ("state" to state))
+        assertEquals("nuxie.journey-release.v3", root.getValue("schemaVersion").jsonPrimitive.content)
+        val bytes = root.toString().encodeToByteArray()
+        val pair = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val signature = java.security.Signature.getInstance("Ed25519").run {
+            initSign(pair.private)
+            update(JourneyReleaseLimits.SIGNATURE_DOMAIN.encodeToByteArray() + bytes)
+            sign()
+        }
+        val signed = JsonObject(envelope + mapOf(
+            "descriptorBytesBase64" to JsonPrimitive(Base64.encodeToString(bytes, Base64.NO_WRAP)),
+            "descriptorSizeBytes" to JsonPrimitive(bytes.size),
+            "descriptorSha256" to JsonPrimitive(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(bytes).joinToString("") { "%02x".format(it) }),
+            "signature" to buildJsonObject {
+                put("version", 1); put("algorithm", "ed25519"); put("keyId", "TEST_ONLY_C11")
+                put("signatureBase64", Base64.encodeToString(signature, Base64.NO_WRAP))
+            },
+        )).toString().encodeToByteArray()
+        val trusted = mapOf("TEST_ONLY_C11" to pair.public.encoded.takeLast(32).toByteArray())
+        val identity = requireNotNull(JourneyReleaseIdentity.fromJson(root.getValue("identity").jsonObject))
+        val release = JourneyReleaseVerifier.authenticate(signed, trusted, identity,
+            leg.getValue("id").jsonPrimitive.content, runtime(root), JourneyReleaseReplayPolicy.Active(0))
+        assertArrayEquals(bytes, release.descriptorBytes)
+        assertEquals(state, release.descriptor.getValue("state"))
+    }
+
     @Test fun signedFormQualifiedConditionAuthenticates() {
         val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
         val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")

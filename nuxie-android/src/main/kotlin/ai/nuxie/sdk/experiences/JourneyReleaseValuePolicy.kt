@@ -103,13 +103,19 @@ internal object JourneyReleaseValuePolicy {
     }
 
     private fun state(value: JsonElement) {
-        val state = exact(value, setOf("type"), setOf("values", "multiple", "items"))
+        val state = exact(value, setOf("type"), setOf("values", "multiple", "items", "fields"))
         val type = text(state["type"])
-        if (type !in listOf("string", "number", "boolean", "color", "enum", "date", "list", "trigger", "image") ||
-            (type == "enum") != state.containsKey("values") || (type == "list") != state.containsKey("items")) fail("state kind")
+        if (type !in listOf("string", "number", "boolean", "color", "enum", "date", "list", "trigger", "image", "object") ||
+            (type == "enum") != state.containsKey("values") || (type == "list") != state.containsKey("items") ||
+            (type == "object") != state.containsKey("fields")) fail("state kind")
         state["values"]?.let(::choices)
         state["multiple"]?.let { if (!boolean(it) || type != "enum") fail("multiple") }
         state["items"]?.let { for ((key, item) in record(it)) { name(key); state(item) } }
+        state["fields"]?.let {
+            val fields = record(it)
+            if (fields.isEmpty()) fail("empty object fields")
+            for ((key, field) in fields) { name(key); state(field) }
+        }
     }
     private fun name(value: String): String = value.also {
         if (!it.matches(Regex("[A-Za-z_][A-Za-z0-9_]*")) || it in listOf("true", "false", "null")) fail("value name")
