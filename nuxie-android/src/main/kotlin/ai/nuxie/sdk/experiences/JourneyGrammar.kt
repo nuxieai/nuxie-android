@@ -145,7 +145,11 @@ internal object JourneyGrammar {
             "String" -> { exact(value, setOf("type", "value")); text(value["value"]) }
             "Array" -> { exact(value, setOf("type", "items")); array(value["items"], 256).forEach(::value) }
             "Object" -> { exact(value, setOf("type", "fields")); values(value["fields"]) }
-            "Event.Field", "Response.Field", "Customer.Field" -> { exact(value, setOf("type", "key")); journeyId(value["key"]) }
+            "Response.Field" -> {
+                exact(value, setOf("type", "key"), setOf("form")); journeyId(value["key"])
+                value["form"]?.let(JourneyReleaseJson::responseFormName)
+            }
+            "Event.Field", "Customer.Field" -> { exact(value, setOf("type", "key")); journeyId(value["key"]) }
             else -> fail("value expression")
         }
     }

@@ -27,6 +27,9 @@ internal object JourneyReleaseJson {
             } else if (char.isLowSurrogate()) fail("identifier Unicode")
         }
     }
+    fun responseFormName(value: JsonElement?): String = text(value).also {
+        if (!it.matches(Regex("[A-Za-z0-9_]+"))) fail("response form")
+    }
     fun timestamp(value: JsonElement?): String = text(value).also { timestamp ->
         // Identity timestamps are opaque signed strings, not millisecond values.
         // Validate the Gregorian date without rounding its fractional precision.

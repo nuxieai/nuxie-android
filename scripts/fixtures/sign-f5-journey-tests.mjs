@@ -10,7 +10,8 @@ const compatibility = readFileSync("nuxie-android/src/main/kotlin/ai/nuxie/sdk/r
 const revision = compatibility.match(/SOURCE_REVISION = "([^"]+)"/)[1];
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 const signatures = {};
-for (const form of ["feedback", "departure"]) {
+for (const name of ["feedback", "departure", "departure-c11"]) {
+  const form = name === "departure-c11" ? "departure" : name;
   const screen = `scr_screens_s${form}`;
   const descriptor = { ...published, identity: original.identity,
     requirements: { ...original.requirements, runtimeRevision: revision, requiredCapabilities: ["nux", "system-fonts"] },
@@ -19,8 +20,13 @@ for (const form of ["feedback", "departure"]) {
         { kind: "complete", id: "done", outcome: "done" }],
       routes: [{ entryStepId: "done", eventName: form === "feedback" ? "sent" : "continue",
         host: { kind: "screen", screenId: screen } }] } };
+  if (name === "departure-c11") {
+    descriptor.leg.steps = published.leg.steps;
+    descriptor.leg.routes = published.leg.routes;
+    descriptor.leg.entryStepId = published.leg.steps.find(step => step.action?.screenId === screen).id;
+  }
   const bytes = Buffer.from(JSON.stringify(descriptor));
-  signatures[form] = { descriptorSha256: createHash("sha256").update(bytes).digest("hex"),
+  signatures[name] = { descriptorSha256: createHash("sha256").update(bytes).digest("hex"),
     signature: sign(null, Buffer.concat([Buffer.from("nuxie.journey-release.v3\0"), bytes]), privateKey).toString("base64") };
 }
 const target = "nuxie-android/src/androidTest/assets/f5-journey-signatures.json";

@@ -836,7 +836,8 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         }
         put("isEnrollment", JsonPrimitive(run.isEnrollment)); put("startedEventId", JsonPrimitive(run.startedEventId))
         put("completedEventId", JsonPrimitive(run.completedEventId)); put("startedQueued", JsonPrimitive(run.startedQueued))
-        put("stepId", JsonPrimitive(run.stepId)); put("context", run.context); put("outputs", run.outputs)
+        // Form answers are derived from native values, never restored from the journal.
+        put("stepId", JsonPrimitive(run.stepId)); put("context", JsonObject(run.context - "formAnswers")); put("outputs", run.outputs)
         put("effectReceipts", JsonObject(run.effectReceipts.mapValues { JsonPrimitive(it.value) }))
         if (run.experimentExposures.isNotEmpty()) {
             put(
@@ -893,7 +894,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         executionSnapshot = value["executionSnapshot"]?.jsonObject
             ?.let(::decodeExecutionSnapshot),
         startedQueued = value.getValue("startedQueued").jsonPrimitive.boolean, stepId = value.text("stepId"),
-        context = value.getValue("context").jsonObject, outputs = value.getValue("outputs").jsonObject,
+        context = JsonObject(value.getValue("context").jsonObject - "formAnswers"), outputs = value.getValue("outputs").jsonObject,
         nativeSnapshot = (value["nativeSnapshot"] as? JsonArray)?.let { ai.nuxie.sdk.presentation.ExperienceRunSnapshot(it,
             value["nativeLists"]?.let(ai.nuxie.sdk.presentation.ExperienceRunListSnapshot::decode)) },
         park = value["park"]?.jsonObject?.let {
