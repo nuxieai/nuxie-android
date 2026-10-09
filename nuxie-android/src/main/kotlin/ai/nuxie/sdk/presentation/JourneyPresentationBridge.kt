@@ -109,6 +109,7 @@ internal data class JourneyPresentationPermissionEvent(
 internal sealed interface JourneyPresentationActionResult {
     data class Navigate(val screenId: String) : JourneyPresentationActionResult
     data class Advanced(val outlet: String) : JourneyPresentationActionResult
+    data class Completed(val outcome: String) : JourneyPresentationActionResult
     data class PermissionResolved(
         val outlet: String,
         val event: JourneyPresentationPermissionEvent,
