@@ -4,7 +4,7 @@ import ai.nuxie.sdk.NuxieEnvironment
 import java.io.IOException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertThrows
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.URL
@@ -28,7 +28,7 @@ class NuxieApiTest {
     }
 
     @Test
-    fun canonicalProfileCarriesTransportAuthenticatedAuthorityInItsValidator() {
+    fun canonicalProfileCarriesTransportAuthenticatedAuthorityInItsValidator() = runBlocking<Unit> {
         val transport = object : HttpTransport {
             override fun execute(request: HttpTransport.Request) = HttpTransport.Response(
                 statusCode = 200,
@@ -51,8 +51,8 @@ class NuxieApiTest {
     }
 
     @Test
-    fun canonicalProfileRejectsMissingOrPartialTransportAuthority() {
-        fun fetch(headers: Map<String, String>) {
+    fun canonicalProfileRejectsMissingOrPartialTransportAuthority() = runBlocking<Unit> {
+        suspend fun fetch(headers: Map<String, String>) {
             val transport = HttpTransport {
                 HttpTransport.Response(
                     statusCode = 200,
@@ -87,7 +87,7 @@ class NuxieApiTest {
     }
 
     @Test
-    fun canonical304RequiresTheExactAuthorityAndValidator() {
+    fun canonical304RequiresTheExactAuthorityAndValidator() = runBlocking<Unit> {
         val responses = ArrayDeque(
             listOf(
                 HttpTransport.Response(
@@ -121,7 +121,7 @@ class NuxieApiTest {
     }
 
     @Test
-    fun batchBodyIsGzipCompressedWithoutChangingItsCanonicalJson() {
+    fun batchBodyIsGzipCompressedWithoutChangingItsCanonicalJson() = runBlocking<Unit> {
         val transport = RecordingTransport()
         val api = NuxieApi("pk_test_key", NuxieEnvironment.DEVELOPMENT, transport)
 
@@ -149,14 +149,14 @@ class NuxieApiTest {
     }
 
     @Test
-    fun productionEnvironmentTargetsTheProductionHost() {
+    fun productionEnvironmentTargetsTheProductionHost() = runBlocking<Unit> {
         val transport = RecordingTransport()
         NuxieApi("pk_live", NuxieEnvironment.PRODUCTION, transport).postBatch(listOf("{}"))
         assertEquals("https://i.nuxie.ai/batch", transport.requests.single().url.toString())
     }
 
     @Test
-    fun explicitTestEndpointOverridesTheEnvironmentHost() {
+    fun explicitTestEndpointOverridesTheEnvironmentHost() = runBlocking<Unit> {
         val transport = RecordingTransport()
         NuxieApi(
             "pk_test",
@@ -172,7 +172,7 @@ class NuxieApiTest {
     }
 
     @Test
-    fun explicitTestEndpointRejectsNonHttpSchemes() {
+    fun explicitTestEndpointRejectsNonHttpSchemes() = runBlocking<Unit> {
         assertThrows(IllegalArgumentException::class.java) {
             NuxieApi(
                 "pk_test",
@@ -184,7 +184,7 @@ class NuxieApiTest {
     }
 
     @Test
-    fun nonSuccessResponsesThrowTyped() {
+    fun nonSuccessResponsesThrowTyped() = runBlocking<Unit> {
         val api = NuxieApi("pk", NuxieEnvironment.DEVELOPMENT, RecordingTransport(statusCode = 500))
         val failure = assertThrows(NuxieApi.BatchRejectedException::class.java) {
             api.postBatch(listOf("{}"))
@@ -193,7 +193,7 @@ class NuxieApiTest {
     }
 
     @Test
-    fun apiKeysWithSpecialCharactersAreEscaped() {
+    fun apiKeysWithSpecialCharactersAreEscaped() = runBlocking<Unit> {
         val transport = RecordingTransport()
         NuxieApi("pk\"quote\\slash", NuxieEnvironment.DEVELOPMENT, transport)
             .postBatch(listOf("{}"))
@@ -207,7 +207,7 @@ class NuxieApiTest {
     }
 
     @Test
-    fun featureCheckUsesTheIosEntitledWireShape() {
+    fun featureCheckUsesTheIosEntitledWireShape() = runBlocking<Unit> {
         val transport = RecordingTransport()
         val api = NuxieApi("pk_test_key", NuxieEnvironment.DEVELOPMENT, transport)
         transport.apply {
@@ -242,7 +242,7 @@ class NuxieApiTest {
     }
 
     @Test
-    fun playPurchaseUsesExactCanonicalSnakeCaseWireBody() {
+    fun playPurchaseUsesExactCanonicalSnakeCaseWireBody() = runBlocking<Unit> {
         val transport = object : HttpTransport {
             lateinit var request: HttpTransport.Request
             override fun execute(request: HttpTransport.Request): HttpTransport.Response {
@@ -278,7 +278,7 @@ class NuxieApiTest {
     }
 
     @Test
-    fun playPurchaseOmitsNullOptionalsAndPreservesARejectedSuccessFlag() {
+    fun playPurchaseOmitsNullOptionalsAndPreservesARejectedSuccessFlag() = runBlocking<Unit> {
         val transport = object : HttpTransport {
             lateinit var request: HttpTransport.Request
             override fun execute(request: HttpTransport.Request): HttpTransport.Response {
@@ -309,7 +309,7 @@ class NuxieApiTest {
     }
 
     @Test
-    fun playPurchaseOmitsBlankProductIdentifierTokenFirst() {
+    fun playPurchaseOmitsBlankProductIdentifierTokenFirst() = runBlocking<Unit> {
         val transport = object : HttpTransport {
             lateinit var request: HttpTransport.Request
             override fun execute(request: HttpTransport.Request): HttpTransport.Response {
@@ -340,7 +340,7 @@ class NuxieApiTest {
     }
 
     @Test
-    fun purchaseBackedFeatureUseUsesTheStrictCanonicalPlayWire() {
+    fun purchaseBackedFeatureUseUsesTheStrictCanonicalPlayWire() = runBlocking<Unit> {
         val transport = object : HttpTransport {
             lateinit var request: HttpTransport.Request
             override fun execute(request: HttpTransport.Request): HttpTransport.Response {
@@ -385,3 +385,6 @@ class NuxieApiTest {
         )
     }
 }
+
+private fun <T : Throwable> assertThrows(type: Class<T>, action: suspend () -> Unit): T =
+    org.junit.Assert.assertThrows(type) { runBlocking { action() } }

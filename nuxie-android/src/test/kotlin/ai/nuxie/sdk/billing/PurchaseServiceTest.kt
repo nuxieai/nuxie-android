@@ -2524,6 +2524,7 @@ class PurchaseServiceTest {
         assertFalse("sync" in actions)
         assertTrue(fixture.store.load().isEmpty())
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.core.eventLog.awaitBarrier()
         assertEquals(
             listOf(SystemEventNames.PURCHASE_COMPLETED),
             journeyEvents.map(StoredEvent::name),
