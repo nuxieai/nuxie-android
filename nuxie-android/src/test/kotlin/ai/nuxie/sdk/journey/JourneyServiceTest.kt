@@ -2862,9 +2862,13 @@ class JourneyServiceTest {
             terminalOutcome = SystemEventNames.PURCHASE_FAILED, failCompletionOnce = true)
     }
 
+    @Test fun `terminal purchase recovers a previously failed authored publication`() = runBlocking {
+        assertAuthoredDismiss("purchase", failPublicationOnce = true)
+    }
+
     private suspend fun assertAuthoredDismiss(commerce: String?, retryOutcome: String? = null, runtimeFrames: Boolean = false,
         pendingClose: Boolean = false, terminalOutcome: String? = null, holdClosePublication: Boolean = false,
-        failCompletionOnce: Boolean = false) {
+        failCompletionOnce: Boolean = false, failPublicationOnce: Boolean = false) {
         val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/authored-dismiss.json").readText()).jsonObject
             .getValue("cases").jsonArray.single { it.jsonObject.getValue("name").jsonPrimitive.content == (commerce ?: "user_close") }.jsonObject
@@ -2959,6 +2963,7 @@ class JourneyServiceTest {
         val closeCaptureEntered = CompletableDeferred<Unit>()
         val releaseCloseCapture = CompletableDeferred<Unit>()
         val failCompletionClock = java.util.concurrent.atomic.AtomicBoolean()
+        val failPublication = java.util.concurrent.atomic.AtomicBoolean(failPublicationOnce)
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val journeys = JourneyService(identity = identity, events = store, catalog = catalog, journalDirectory = directory,
             scope = scope, capture = { name, properties, _, _ -> captures += name to properties; true },
@@ -2966,6 +2971,9 @@ class JourneyServiceTest {
                 admission.commitIfCurrent { captures += name to properties; true } == true
             }, deliverAppAction = { _, _ -> error("No app action authored") }),
             captureScreenEvent = { name, properties, id, distinctId, occurredAt, admission, origin ->
+                if (name == "checkout_publication" && failPublication.compareAndSet(true, false)) {
+                    throw java.io.IOException("Renderer event capture unavailable")
+                }
                 if (holdClosePublication && name == "close") {
                     closeCaptureEntered.complete(Unit)
                     releaseCloseCapture.await()
@@ -3078,6 +3086,14 @@ class JourneyServiceTest {
                         }
                         assertTrue(captures.none { it.first == JourneyEventNames.LEG_COMPLETED })
                     }
+                }
+                if (failPublicationOnce) {
+                    val failed = batch.copy(batchSequence = 1, invocationId = "failed-checkout-publication",
+                        emissions = listOf(JourneyScreenEmission(effectId, 1, 100_001L,
+                            "checkout_publication", JsonObject(emptyMap()))))
+                    assertEquals(JourneyEmissionBatchResult.REJECTED, request.onEmissionBatch(failed, null))
+                    assertFalse(failPublication.get())
+                    assertEquals(1, claimedEffects.size)
                 }
                 if (failCompletionOnce) {
                     failCompletionClock.set(true)
