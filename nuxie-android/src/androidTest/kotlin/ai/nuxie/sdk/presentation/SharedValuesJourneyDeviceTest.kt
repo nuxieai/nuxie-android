@@ -40,6 +40,191 @@ class SharedValuesJourneyDeviceTest {
     @Test fun publishedContinueTapRoutesWithItsNewRunValue() = navigateWithValue(PublishedRunValuesFixture.expectations.getValue("tap").jsonObject
         .getValue("after").jsonPrimitive.double, "level", true, published = true)
 
+    @Test fun publishedF5WaitedFailureThenRetryControlsItsJourney() = saveJourney(background = false)
+    @Test fun publishedF5BackgroundSaveAllowsCompletionBeforeReply() = saveJourney(background = true)
+
+    private fun saveJourney(background: Boolean) = runBlocking {
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val owner = "shared-values-${UUID.randomUUID()}"
+        val directory = File(context.cacheDir, owner).apply { mkdirs() }
+        val fixture = fixture(form = if (background) "departure" else "feedback")
+        val scene = File(directory, "screen.riv").apply { writeBytes(fixture.scene) }
+        val artifacts = fixture.descriptor.getValue("render").jsonObject.getValue("assets").jsonArray
+            .map { it.jsonObject }.filter { it["key"] != null }.associate { asset ->
+                val key = asset.getValue("key").jsonPrimitive.content
+                key to File(directory, asset.getValue("sha256").jsonPrimitive.content).apply {
+                    writeBytes(instrumentation.context.assets.open("runtime/forms-saves/$key").use { it.readBytes() })
+                }
+            }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val store = SQLiteEventStore(context, databaseFile = File(directory, "events.db"))
+        val presentations = ExperiencePresentationService(context, { _, _, _ -> }, scope,
+            { NuxieRuntime.shared.isAvailable }, currentDistinctId = { owner })
+        val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+        instrumentation.addMonitor(monitor)
+        val request = AtomicReference<JourneyPresentationRequest?>()
+        val revealed = LinkedBlockingQueue<String>()
+        val captured = LinkedBlockingQueue<String>()
+        val catalog = JourneyProfileCatalog(fixture.keys, JourneyReleaseHighWaterStore(context)) { fixture.supported }
+        val presenter = object : JourneyPresenting {
+            override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
+            override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
+            override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
+            override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest) = presentations.openJourneyLink(owner, link)
+            override suspend fun shutdownOwnedBy(ownerDistinctId: String) = presentations.shutdownOwnedBy(ownerDistinctId)
+            override suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) = presentations.shutdownJourney(ownerDistinctId, journeyId)
+            override suspend fun present(value: JourneyPresentationRequest): JourneyPresentationResult {
+                request.set(value)
+                checkNotNull(value.runValues).lane.call {
+                    val native = checkNotNull(value.runValues).prepare(fixture.scene, value.release.descriptor, artifacts)
+                    if (!background) checkNotNull(native.values).setValue("responses:feedback/stars", NuxieViewModelScalarValue.NumberValue(4.0))
+                }
+                presentations.presentJourney(value.fences, value.release, value.screenId, value.journeyId,
+                    value.ownerDistinctId, value.reservation, value.canPresent,
+                    acquire = { AcquiredJourneyRelease(value.release.identity, artifacts, scene, protection = Closeable {}) },
+                    nextBatchSequence = value.nextBatchSequence, nextEmissionSequence = value.nextEmissionSequence,
+                    onScreenChanged = value.onScreenChanged, onScreenDismissed = value.onScreenDismissed,
+                    onLinkOpened = value.onLinkOpened, onEmissionBatch = value.onEmissionBatch,
+                    onPresentationRevealed = { value.onPresentationRevealed(it); revealed.add(it) },
+                    onOutcome = value.onOutcome, runValues = value.runValues)
+                return JourneyPresentationResult.Shown
+            }
+        }
+        val identity = object : IdentityProvider {
+            override fun distinctId() = owner
+            override fun anonymousId() = owner
+            override fun rawDistinctId(): String? = null
+            override val isIdentified = false
+        }
+        val pending = LinkedBlockingQueue<Pair<ai.nuxie.sdk.journey.JourneyResponseSave,
+            CompletableDeferred<ai.nuxie.sdk.journey.JourneyResponseSaveReply>>>()
+        val delivery = ai.nuxie.sdk.journey.JourneyResponseSaveDelivery(directory,
+            ai.nuxie.sdk.journey.JourneyResponseSaveTransport { sheet ->
+                val reply = CompletableDeferred<ai.nuxie.sdk.journey.JourneyResponseSaveReply>()
+                pending.add(sheet to reply)
+                reply.await()
+            }, scope)
+        val service = JourneyService(identity, store, catalog, directory, scope,
+            capture = { name, properties, eventId, distinctId ->
+                captured.add(name)
+                store.insertPendingIfAbsent(ai.nuxie.sdk.events.StoredEvent(eventId, name,
+                    ai.nuxie.sdk.events.JsonValueConverter.fromMap(properties), System.currentTimeMillis(), distinctId))
+            }, presenter = presenter, responseSaveDelivery = delivery,
+            prepareNativeValues = { values, release, _ -> values.lane.call {
+                values.prepare(fixture.scene, release.descriptor, artifacts); Unit
+            } })
+        try {
+            withTimeout(30_000) {
+                catalog.commit(owner, catalog.prepare(fixture.profile, fixture.authority))
+                service.initialize()
+                service.onAppWillEnterForeground()
+                service.profileDidCommit(checkNotNull(catalog.snapshot(owner)), fixture.authority, owner, 1)
+            }
+            val activity = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
+            assertEquals(if (background) "scr_screens_sdeparture" else "scr_screens_sfeedback", revealed.poll(20, TimeUnit.SECONDS))
+            var surface: ExperienceSurfaceHost? = null
+            instrumentation.runOnMainSync {
+                fun find(view: View): ExperienceSurfaceHost? = when (view) {
+                    is ExperienceSurfaceHost -> view.takeIf { it.isShown }
+                    is ViewGroup -> (0 until view.childCount).firstNotNullOfOrNull { find(view.getChildAt(it)) }
+                    else -> null
+                }
+                surface = find(activity.window.decorView)
+            }
+            val host = checkNotNull(surface)
+            var point = 121f to 1f
+            if (background) {
+                val lane = ExperienceSurfaceHost::class.java.getDeclaredField("lane").apply { isAccessible = true }.get(host) as NuxieRuntimeLane
+                val pendingFrame = ExperienceSurfaceHost::class.java.getDeclaredField("pendingPresentation").apply { isAccessible = true }
+                point = withTimeout(20_000) {
+                    var hit: Pair<Float, Float>? = null
+                    while (hit == null) {
+                        hit = lane.call {
+                            if (pendingFrame.getBoolean(host)) return@call null
+                            val artboard = ExperienceSurfaceHost::class.java.getDeclaredField("artboard").apply { isAccessible = true }.get(host) as NuxieRuntimeArtboard
+                            val player = ExperienceSurfaceHost::class.java.getDeclaredField("player").apply { isAccessible = true }.get(host) as NuxieRuntimePlayer
+                            assertTrue(artboard.setDefaultViewModelValue("state/days", NuxieViewModelScalarValue.NumberValue(30.0)))
+                            val size = player.layoutSize()
+                            val x = size.first / 2f
+                            var found: Pair<Float, Float>? = null
+                            var y = size.second - 1f
+                            while (y >= 1f && found == null) {
+                                fun probe(kind: NuxiePlayerPointerKind) = player.stepTyped(elapsedSeconds = 0.0,
+                                    pointers = listOf(NuxiePlayerPointerEvent(kind, x, y, 0, 0f)))
+                                val down = probe(NuxiePlayerPointerKind.DOWN)
+                                val exit = probe(NuxiePlayerPointerKind.EXIT)
+                                assertTrue("Hit probes must not consume a save", down.events.isEmpty() && exit.events.isEmpty() &&
+                                    down.hostCommands.isEmpty() && exit.hostCommands.isEmpty())
+                                if (down.pointerHits.any { it != NuxiePlayerPointerHit.NONE }) found = x to y - 4f
+                                y -= 4f
+                            }
+                            checkNotNull(found) { "Published Continue must have a native hit" }
+                        }
+                        if (hit == null) delay(20)
+                    }
+                    checkNotNull(hit)
+                }
+            }
+            fun tap() = instrumentation.runOnMainSync {
+                val density = host.resources.displayMetrics.density
+                val now = SystemClock.uptimeMillis()
+                for (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
+                    val event = MotionEvent.obtain(now, now, action, point.first * density, point.second * density, 0)
+                    try { assertTrue(host.dispatchTouchEvent(event)) } finally { event.recycle() }
+                }
+            }
+            val values = checkNotNull(checkNotNull(request.get()).runValues)
+            suspend fun display(): Triple<Boolean, Boolean, String> = values.lane.call {
+                val snapshot = checkNotNull(values.prepare(fixture.scene, fixture.descriptor, artifacts).values).nativeSnapshot()
+                val form = snapshot.values.single { it.ownerInstanceId == snapshot.rootInstanceId && it.name == "responses:feedback" }.referencedInstanceId
+                val fields = snapshot.values.filter { it.ownerInstanceId == form }.associateBy { it.name }
+                Triple(fields.getValue("saving").boolValue, fields.getValue("saved").boolValue,
+                    fields.getValue("saveError").bytesValue.decodeToString())
+            }
+            tap()
+            val first = checkNotNull(pending.poll(20, TimeUnit.SECONDS)) { "The published Send must request a save" }
+            assertEquals(1L, first.first.sequence)
+            assertEquals(owner, first.first.distinctId)
+            if (background) {
+                assertEquals("onboarding", first.first.formName)
+                assertEquals(30.0, first.first.answers.getValue("trip_days").jsonPrimitive.double, 0.0)
+                withTimeout(20_000) { while (!captured.contains(JourneyEventNames.LEG_COMPLETED)) delay(20) }
+                assertEquals(1, captured.count { it == "continue" })
+                assertFalse(first.second.isCompleted)
+                first.second.complete(ai.nuxie.sdk.journey.JourneyResponseSaveReply(
+                    ai.nuxie.sdk.journey.JourneyResponseSaveReply.Code.SAVED, first.first.sequence))
+                return@runBlocking
+            }
+            assertEquals("feedback", first.first.formName)
+            assertEquals(4.0, first.first.answers.getValue("stars").jsonPrimitive.double, 0.0)
+            assertFalse(captured.contains("sent"))
+            first.second.complete(ai.nuxie.sdk.journey.JourneyResponseSaveReply.noAnswer)
+            withTimeout(20_000) { while (display() != Triple(false, false, "no_answer")) delay(20) }
+            assertFalse(captured.contains("sent"))
+            assertFalse(captured.contains(JourneyEventNames.LEG_COMPLETED))
+            tap()
+            val second = checkNotNull(pending.poll(20, TimeUnit.SECONDS)) { "Retry must request a new save" }
+            assertEquals(2L, second.first.sequence)
+            assertFalse(captured.contains("sent"))
+            second.second.complete(ai.nuxie.sdk.journey.JourneyResponseSaveReply(
+                ai.nuxie.sdk.journey.JourneyResponseSaveReply.Code.SAVED, second.first.sequence))
+            withTimeout(20_000) { while (!captured.contains(JourneyEventNames.LEG_COMPLETED)) delay(20) }
+            assertEquals(1, captured.count { it == "sent" })
+            assertTrue(captured.toList().indexOf("sent") < captured.toList().indexOf(JourneyEventNames.LEG_COMPLETED))
+            assertTrue(pending.isEmpty())
+        } finally {
+            service.profileDidClearAll()
+            presentations.shutdownOwnedBy(owner)
+            delivery.shutdown()
+            scope.cancel()
+            store.close()
+            instrumentation.removeMonitor(monitor)
+            directory.deleteRecursively()
+        }
+    }
+
     private fun navigateWithValue(days: Double, destination: String, branch: Boolean, reserved: Boolean = false, published: Boolean = false) = runBlocking {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -413,15 +598,15 @@ class SharedValuesJourneyDeviceTest {
     }
 
     private data class Fixture(val scene: ByteArray, val profile: JsonObject, val keys: Map<String, ByteArray>,
-        val supported: JourneyReleaseSupportedRuntime, val authority: ProfileDeliveryAuthority)
+        val supported: JourneyReleaseSupportedRuntime, val authority: ProfileDeliveryAuthority, val descriptor: JsonObject)
 
-    private fun fixture(branch: Boolean = false, wait: Boolean = false, published: Boolean = false, goals: Boolean = false): Fixture {
+    private fun fixture(branch: Boolean = false, wait: Boolean = false, published: Boolean = false, goals: Boolean = false, form: String? = null): Fixture {
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         fun read(path: String) = assets.open(path).use { it.readBytes() }
         val entry = Json.parseToJsonElement(read("journeys/rendered-text-input/release-entry.json").decodeToString()).jsonObject
         val envelope = entry.getValue("envelope").jsonObject
         val original = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
-        val folder = if (goals) "forms-saves/goals" else if (published) "run-values" else "shared-values"
+        val folder = if (form != null) "forms-saves" else if (goals) "forms-saves/goals" else if (published) "run-values" else "shared-values"
         val scene = read("runtime/$folder/screen.riv")
         val provenance = Json.parseToJsonElement(read("runtime/$folder/provenance.json").decodeToString()).jsonObject
         fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
@@ -469,7 +654,7 @@ class SharedValuesJourneyDeviceTest {
                 put("id", it); put("defaultViewModelName", "Runtime $it scr_screens_s$it"); put("defaultInstanceId", "$it-root"); putJsonArray("responseCaptures") {}
             } }),
             "routes" to buildJsonArray { addJsonObject { put("entryStepId", "next"); put("eventName", "continue"); putJsonObject("host") { put("kind", "screen"); put("screenId", names.first()) } } }))
-        val descriptor = JsonObject(original + mapOf("leg" to leg, "requirements" to requirements,
+        var descriptor = JsonObject(original + mapOf("leg" to leg, "requirements" to requirements,
             "viewModelValues" to JsonArray(emptyList()),
             "screenBehaviors" to JsonArray(names.sorted().map { buildJsonObject {
                 put("screenId", it); putJsonArray("controls") {
@@ -488,19 +673,48 @@ class SharedValuesJourneyDeviceTest {
                 put("screens", JsonArray(names.map { buildJsonObject { put("id", it); put("artboardId", it); put("artboardName", it); put("width", 393); put("height", 852) } }))
                 putJsonArray("transitions") {}; putJsonArray("textInputs") {}
             }))
-        val bytes = descriptor.toString().encodeToByteArray()
-        val alias = "shared-values-test-${UUID.randomUUID()}"
-        val pair = KeyPairGenerator.getInstance("Ed25519", "AndroidKeyStore").run {
-            initialize(android.security.keystore.KeyGenParameterSpec.Builder(alias,
-                android.security.keystore.KeyProperties.PURPOSE_SIGN or android.security.keystore.KeyProperties.PURPOSE_VERIFY)
-                .setAlgorithmParameterSpec(java.security.spec.ECGenParameterSpec("ed25519"))
-                .setDigests(android.security.keystore.KeyProperties.DIGEST_NONE).build())
-            generateKeyPair()
+        if (form != null) {
+            val publishedForm = Json.parseToJsonElement(read("runtime/forms-saves/release.json").decodeToString()).jsonObject
+            val screen = "scr_screens_s$form"
+            descriptor = JsonObject(publishedForm + mapOf("identity" to original.getValue("identity"),
+                "requirements" to requirements,
+                "leg" to JsonObject(publishedForm.getValue("leg").jsonObject + mapOf(
+                    "id" to original.getValue("leg").jsonObject.getValue("id"),
+                    "policy" to original.getValue("leg").jsonObject.getValue("policy"),
+                    "entryCondition" to original.getValue("leg").jsonObject.getValue("entryCondition"),
+                    "entryStepId" to JsonPrimitive("show"),
+                    "steps" to JsonArray(listOf(navigate("show", screen),
+                        buildJsonObject { put("kind", "complete"); put("id", "done"); put("outcome", "done") })),
+                    "routes" to buildJsonArray { addJsonObject {
+                        put("entryStepId", "done"); put("eventName", if (form == "feedback") "sent" else "continue")
+                        putJsonObject("host") { put("kind", "screen"); put("screenId", screen) }
+                    } }
+                ))))
         }
-        val signature = try {
-            Signature.getInstance("Ed25519").run { initSign(pair.private); update(JourneyReleaseLimits.SIGNATURE_DOMAIN.encodeToByteArray() + bytes); sign() }
-        } finally {
-            java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.deleteEntry(alias)
+        val bytes = descriptor.toString().encodeToByteArray()
+        val publicKey: ByteArray
+        val signature: ByteArray
+        if (form != null) {
+            val proof = Json.parseToJsonElement(read("f5-journey-signatures.json").decodeToString()).jsonObject
+            val signedForm = proof.getValue("signatures").jsonObject.getValue(form).jsonObject
+            assertEquals("Signed F5 test route must match its descriptor", signedForm.getValue("descriptorSha256").jsonPrimitive.content, hash(bytes))
+            publicKey = Base64.decode(proof.getValue("publicKey").jsonPrimitive.content, Base64.NO_WRAP)
+            signature = Base64.decode(signedForm.getValue("signature").jsonPrimitive.content, Base64.NO_WRAP)
+        } else {
+            val alias = "shared-values-test-${UUID.randomUUID()}"
+            val pair = KeyPairGenerator.getInstance("Ed25519", "AndroidKeyStore").run {
+                initialize(android.security.keystore.KeyGenParameterSpec.Builder(alias,
+                    android.security.keystore.KeyProperties.PURPOSE_SIGN or android.security.keystore.KeyProperties.PURPOSE_VERIFY)
+                    .setAlgorithmParameterSpec(java.security.spec.ECGenParameterSpec("ed25519"))
+                    .setDigests(android.security.keystore.KeyProperties.DIGEST_NONE).build())
+                generateKeyPair()
+            }
+            signature = try {
+                Signature.getInstance("Ed25519").run { initSign(pair.private); update(JourneyReleaseLimits.SIGNATURE_DOMAIN.encodeToByteArray() + bytes); sign() }
+            } finally {
+                java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.deleteEntry(alias)
+            }
+            publicKey = pair.public.encoded.takeLast(32).toByteArray()
         }
         val signed = JsonObject(envelope + mapOf("descriptorSha256" to JsonPrimitive(hash(bytes)),
             "descriptorSizeBytes" to JsonPrimitive(bytes.size), "descriptorBytesBase64" to JsonPrimitive(Base64.encodeToString(bytes, Base64.NO_WRAP)),
@@ -517,7 +731,7 @@ class SharedValuesJourneyDeviceTest {
                 putJsonObject("context") { putJsonObject("event") {}; putJsonObject("responses") {} }
             } }
         }
-        return Fixture(scene, profile, mapOf("TEST_ONLY_SHARED" to pair.public.encoded.takeLast(32).toByteArray()), supported,
-            ProfileDeliveryAuthority(locator.getValue("appId").jsonPrimitive.content, locator.getValue("environment").jsonPrimitive.content))
+        return Fixture(scene, profile, mapOf("TEST_ONLY_SHARED" to publicKey), supported,
+            ProfileDeliveryAuthority(locator.getValue("appId").jsonPrimitive.content, locator.getValue("environment").jsonPrimitive.content), descriptor)
     }
 }

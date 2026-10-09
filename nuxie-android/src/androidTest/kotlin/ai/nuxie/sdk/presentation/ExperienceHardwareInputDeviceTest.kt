@@ -322,7 +322,7 @@ class ExperienceHardwareInputDeviceTest {
                     listener = object : ExperienceSurfaceHost.Listener {
                         override fun onFirstFrame() { firstFrame.countDown() }
                         override fun onRuntimeStep(outcome: NuxiePlayerStepOutcome, correlationId: ULong,
-                            viewModelSnapshot: NuxieViewModelSnapshot?) { changes.addAll(outcome.viewModelChanges) }
+                            viewModelSnapshot: NuxieViewModelSnapshot?, saves: List<ExperienceResponseSaveRequest>) { changes.addAll(outcome.viewModelChanges) }
                         override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
                     })
                 checkNotNull(host).loadArtboard(bytes, artboard)

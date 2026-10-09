@@ -310,23 +310,29 @@ internal class NuxieRuntimeArtboard internal constructor(
         return true
     }
 
+    fun fireDefaultTrigger(path: String) {
+        owned.require()
+        requireNativeSuccess(native.mutateViewModel(checkNotNull(defaultViewModel).require(),
+            NativeViewModelWrite(NuxieViewModelMutationKind.FIRE_TRIGGER, path)), "confirm response save")
+    }
+
     fun linkDefaultViewModel(property: String, value: NuxieRuntimeViewModelState): Boolean {
         val root = defaultViewModel ?: return false
         return value.linkInto(root.require(), property, checkNotNull(boundCatalog), checkNotNull(boundRootSchemaIndex))
     }
 
-    /** Write one exact authored TextValueRun on the owning runtime lane. */
-
     /** Snapshot only the signed default bound to this artboard, on its owning lane. */
-    fun defaultViewModelSnapshot(): NuxieViewModelSnapshot? {
+    fun defaultViewModelSnapshot(): NuxieViewModelSnapshot? = captureDefaultSnapshot()?.values
+
+    fun captureDefaultSnapshot(): NuxieCapturedViewModelSnapshot? {
         owned.require()
         val model = defaultViewModel ?: return null
-        return NuxieViewModelSnapshot.fromNative(
-            requireNativeValue(native.snapshotViewModel(model.require()), "snapshot default view model"),
+        val snapshot = requireNativeValue(native.snapshotViewModel(model.require()), "snapshot default view model")
+        return NuxieCapturedViewModelSnapshot(snapshot, NuxieViewModelSnapshot.fromNative(snapshot,
             schemaNames = checkNotNull(boundCatalog).schemas.associate { it.index.toLong() to it.name },
             defaultInstanceId = boundDefaultInstanceId,
             instanceIds = boundInstanceIds,
-        )
+        ))
     }
 
     /**
@@ -443,6 +449,9 @@ internal class NuxieRuntimeViewModelState(
         writeBoundScalar(native, rootHandle, catalog, rootSchemaIndex, path, value)
     }
 
+    fun fireTrigger(path: String) = restoreWrites(listOf(
+        NativeViewModelWrite(NuxieViewModelMutationKind.FIRE_TRIGGER, path)))
+
     fun linkViewModel(property: String, value: NuxieRuntimeViewModelState): Boolean =
         value.linkInto(checkNotNull(root), property, catalog, rootSchemaIndex)
 
@@ -459,17 +468,15 @@ internal class NuxieRuntimeViewModelState(
     }
 
     /** Must be called on the owning runtime lane before the next player step. */
-    fun snapshot(): NuxieViewModelSnapshot {
-        val rootHandle = checkNotNull(root) { "Runtime view-model state is closed" }
-        return NuxieViewModelSnapshot.fromNative(
-            requireNativeValue(
-                native.snapshotViewModel(rootHandle),
-                "snapshot view model",
-            ),
+    fun snapshot(): NuxieViewModelSnapshot = captureSnapshot().values
+
+    fun captureSnapshot(): NuxieCapturedViewModelSnapshot {
+        val snapshot = nativeSnapshot()
+        return NuxieCapturedViewModelSnapshot(snapshot, NuxieViewModelSnapshot.fromNative(snapshot,
             schemaNames = catalog.schemas.associate { it.index.toLong() to it.name },
             instanceIds = instanceIds,
             defaultInstanceId = defaultInstanceId,
-        )
+        ))
     }
 
     /** Retains the actual child on the owning lane; the caller closes the returned state. */
@@ -1039,3 +1046,9 @@ private class NuxieOwnedHandle(
 private const val NUX_STATUS_OK = 0
 private const val NUX_STATUS_RUNTIME_ERROR = 4
 private const val NUX_SURFACE_ATTACHMENT_UNSUPPORTED = -1
+
+/** One native read shared by all consumers of an evaluated frame. */
+internal data class NuxieCapturedViewModelSnapshot(
+    val native: NativeViewModelSnapshot,
+    val values: NuxieViewModelSnapshot,
+)

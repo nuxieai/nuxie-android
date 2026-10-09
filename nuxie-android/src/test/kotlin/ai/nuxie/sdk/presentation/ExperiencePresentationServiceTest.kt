@@ -696,7 +696,7 @@ class ExperiencePresentationServiceTest {
         val lifetimes = mutableListOf<RendererEffectLifetime?>()
         PresentationRegistry.register("effect-owner",
             PreparedPresentation(File("unused.riv"), null, 0, PresentationShell.FullScreen),
-            {}, {}, {}, {}, onRuntimeStep = { _, correlation, _, lifetime ->
+            {}, {}, {}, {}, onRuntimeStep = { _, correlation, _, lifetime, _ ->
                 received += correlation; lifetimes += lifetime
             })
         val old = AttachedHost()
