@@ -36,9 +36,10 @@ internal class NuxieRuntime(
             val file = NuxieRuntimeFile(handle, native)
             try {
                 if (valuePolicy != null) {
-                    file.installValueMarkers(valuePolicy.markers(file.viewModelCatalog()))
+                    val markers = valuePolicy.markers(file.viewModelCatalog())
+                    file.installValueMarkers(markers)
                     file.installValueRules(valuePolicy.rules)
-                    file.installRuleGroups(valuePolicy.groups)
+                    file.installRuleGroups(valuePolicy.groupsForInstallation(markers))
                 }
                 file
             } catch (error: Throwable) {
