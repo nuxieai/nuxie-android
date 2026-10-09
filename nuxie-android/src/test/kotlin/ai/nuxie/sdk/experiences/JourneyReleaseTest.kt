@@ -154,7 +154,8 @@ class JourneyReleaseTest {
             release.descriptor.getValue("state").jsonObject.mapValues { it.value.jsonObject.getValue("type").jsonPrimitive.content })
         assertEquals(JsonObject(emptyMap()), release.descriptor.getValue("responses"))
         assertEquals(JsonArray(emptyList()), release.descriptor.getValue("ruleGroups"))
-        assertEquals(2, release.leg.getValue("screens").jsonArray.size)
+        assertEquals(listOf("scr_screens_sdevice", "scr_screens_slevel", "scr_screens_stap"),
+            release.leg.getValue("screens").jsonArray.map { it.jsonObject.getValue("id").jsonPrimitive.content })
         val render = release.descriptor.getValue("render").jsonObject.getValue("nux").jsonObject
         val scene = folder.resolve(render.getValue("key").jsonPrimitive.content).readBytes()
         assertArrayEquals(folder.resolve("screen.riv").readBytes(), scene)
