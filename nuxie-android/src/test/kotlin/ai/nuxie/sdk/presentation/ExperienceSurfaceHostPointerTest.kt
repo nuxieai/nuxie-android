@@ -185,7 +185,7 @@ class ExperienceSurfaceHostPointerTest {
     }
 
     @Test fun `custom watchdog waits for pending frame phase writes and zero delta step`() = kotlinx.coroutines.test.runTest {
-        val native = RecordingNative()
+        val native = RecordingNative("screen/phase")
         val lane = NuxieRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
         val texture = SurfaceTexture(0)
@@ -205,7 +205,7 @@ class ExperienceSurfaceHostPointerTest {
             drain(lane)
             val transition = async {
                 outgoing.performWith(incoming, plan) {
-                    host.applyTransitionValues(mapOf("safeArea/top" to NuxieViewModelScalarValue.NumberValue(2.0)))
+                    host.applyTransitionValues(mapOf("screen/phase" to NuxieViewModelScalarValue.NumberValue(2.0)))
                 }
             }
             testScheduler.runCurrent()
@@ -248,7 +248,7 @@ class ExperienceSurfaceHostPointerTest {
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test fun `hidden transition settles without rendering and closed transition cancels`() = kotlinx.coroutines.test.runTest {
         for (mode in listOf("queued-hidden", "preceding-frame", "phase-frame", "closed")) {
-            val native = RecordingNative()
+            val native = RecordingNative("screen/phase")
             var renders = 0
             native.onRender = { renders++ }
             val lane = NuxieRuntimeLane()
@@ -268,7 +268,7 @@ class ExperienceSurfaceHostPointerTest {
                     host.doFrame(1_016_000_000L)
                 }
                 drain(lane)
-                val phase = async { host.applyTransitionValues(mapOf("safeArea/top" to NuxieViewModelScalarValue.NumberValue(2.0))) }
+                val phase = async { host.applyTransitionValues(mapOf("screen/phase" to NuxieViewModelScalarValue.NumberValue(2.0))) }
                 testScheduler.runCurrent()
                 drain(lane)
                 if (mode == "phase-frame") {
@@ -797,8 +797,8 @@ class ExperienceSurfaceHostPointerTest {
     }
 
     @Test
-    fun `environment state queues before loading and updates the retained commerce root`() {
-        val native = RecordingNative()
+    fun `environment state queues before loading and updates the file global`() {
+        val native = RecordingNative(globalEnvironment = true)
         val lane = NuxieRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
         try {
@@ -817,7 +817,7 @@ class ExperienceSurfaceHostPointerTest {
             host.release(ExperienceSafeAreaInsets.ZERO.stateValues())
             host.updateRuntimeValues(ExperienceSafeAreaInsets.ZERO.stateValues())
             drain(lane)
-            assertEquals(listOf(24f, 12f, 0f), native.stateWrites)
+            assertEquals("A retired screen cannot overwrite the shared environment", listOf(24f, 12f), native.stateWrites)
             assertTrue(native.boundStateFreed)
         } finally {
             host.release()
@@ -828,7 +828,7 @@ class ExperienceSurfaceHostPointerTest {
 
     @Test
     fun `environment updates wait for pending presentation and apply before the next step`() {
-        val native = RecordingNative()
+        val native = RecordingNative(globalEnvironment = true)
         val lane = NuxieRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
         val texture = SurfaceTexture(0)
@@ -1181,6 +1181,7 @@ class ExperienceSurfaceHostPointerTest {
         host.layout(0, 0, 100, 100)
         val texture = SurfaceTexture(0)
         val descriptor = Json.parseToJsonElement("""{
+            "state":{},"responses":{},"ruleGroups":[],
             "requirements":{"requiredCapabilities":["experience-accessibility"]},
             "render":{"assets":[],"screens":[{"id":"screen","artboardName":"Main"}]},
             "leg":{"screens":[{"id":"screen"}]}
@@ -1218,6 +1219,7 @@ class ExperienceSurfaceHostPointerTest {
         host.layout(0, 0, 100, 100)
         val texture = SurfaceTexture(0)
         val descriptor = Json.parseToJsonElement("""{
+            "state":{},"responses":{},"ruleGroups":[],
             "requirements":{"requiredCapabilities":["experience-accessibility"]},
             "render":{"assets":[],"screens":[{"id":"screen","artboardName":"Main"}]},
             "leg":{"screens":[{"id":"screen"}]}
@@ -1554,7 +1556,8 @@ class ExperienceSurfaceHostPointerTest {
             host.layout(0, 0, 100, 100)
             host.isFocusableInTouchMode = true
             val descriptor = Json.parseToJsonElement("""{
-                "requirements":{"requiredCapabilities":["experience-accessibility"]},
+                "state":{},"responses":{},"ruleGroups":[],
+            "requirements":{"requiredCapabilities":["experience-accessibility"]},
                 "render":{"assets":[],"screens":[{"id":"screen","artboardName":"Main"}]},
                 "leg":{"screens":[{"id":"screen"}]}
             }""").jsonObject
@@ -1749,7 +1752,8 @@ class ExperienceSurfaceHostPointerTest {
             host.isFocusableInTouchMode = true
             assertTrue(host.requestFocus())
             val descriptor = Json.parseToJsonElement("""{
-                "requirements":{"requiredCapabilities":["experience-accessibility"]},
+                "state":{},"responses":{},"ruleGroups":[],
+            "requirements":{"requiredCapabilities":["experience-accessibility"]},
                 "render":{"assets":[],"screens":[{"id":"screen","artboardName":"Main"}]},
                 "leg":{"screens":[{"id":"screen"}]}
             }""").jsonObject
@@ -1831,7 +1835,8 @@ class ExperienceSurfaceHostPointerTest {
         try {
             host.layout(0, 0, 100, 100)
             val descriptor = if (semantics) Json.parseToJsonElement("""{
-                "requirements":{"requiredCapabilities":["experience-accessibility"]},
+                "state":{},"responses":{},"ruleGroups":[],
+            "requirements":{"requiredCapabilities":["experience-accessibility"]},
                 "render":{"assets":[],"screens":[{"id":"screen","artboardName":"Main"}]},
                 "leg":{"screens":[{"id":"screen"}]}
             }""").jsonObject else null
@@ -1919,7 +1924,7 @@ class ExperienceSurfaceHostPointerTest {
     private fun motion(action: Int, eventTime: Long, x: Float, y: Float): MotionEvent =
         MotionEvent.obtain(0, eventTime, action, x, y, 0)
 
-    private class RecordingNative(private val statePath: String = "safeArea/top") : NuxieTypedRuntimeNative {
+    private class RecordingNative(private val statePath: String = "safeArea/top", private val globalEnvironment: Boolean = false) : NuxieTypedRuntimeNative {
         var nativeInput = false
         var nativeText = ""
         var geometryStatus: Int? = null
@@ -1965,10 +1970,26 @@ class ExperienceSurfaceHostPointerTest {
         val stateAtSteps = mutableListOf<Float>()
         override fun viewModelCatalog(fileHandle: Long) = NativeCallResult(0, NativeViewModelCatalog(
             arrayOf(NativeViewModelSchema(0, "Root", 0, 2, 0, 0, -1, false),
-                NativeViewModelSchema(1, "Product", 2, 0, 0, 0, -1, false)),
+                NativeViewModelSchema(1, "Product", 2, 0, 0, 0, -1, false)) +
+                if (globalEnvironment) arrayOf(NativeViewModelSchema(2, "env", 2, 1, 0, 0, -1, true)) else emptyArray(),
             arrayOf(NativeViewModelProperty(0, 0, statePath, 2, -1, emptyArray()),
-                NativeViewModelProperty(0, 1, "products", 8, 1, emptyArray())), emptyArray(),
+                NativeViewModelProperty(0, 1, "products", 8, 1, emptyArray())) +
+                if (globalEnvironment) arrayOf(NativeViewModelProperty(2, 0, statePath, 2, -1, emptyArray())) else emptyArray(), emptyArray(),
         ))
+        override fun installValueMarkers(file: Long, entries: Array<ai.nuxie.sdk.runtime.NativeValueMarker>): Int {
+            assertTrue(entries.isEmpty()); return 0
+        }
+        override fun installValueRules(file: Long, entries: Array<ai.nuxie.sdk.runtime.NativeValueRule>) =
+            ai.nuxie.sdk.runtime.NativeRuleInstallResult(0, null, null).also { assertTrue(entries.isEmpty()) }
+        override fun installRuleGroups(file: Long, entries: Array<ai.nuxie.sdk.runtime.NativeRuleGroup>): Int {
+            assertTrue(entries.isEmpty()); return 0
+        }
+        override fun newViewModel(fileHandle: Long, schemaIndex: Int, authoredInstanceIndex: Int?): NativeCallResult<Long> {
+            assertTrue(globalEnvironment); assertEquals(2, schemaIndex); return NativeCallResult(0, 52L)
+        }
+        override fun setPlayerGlobalViewModel(playerHandle: Long, name: ByteArray, viewModelHandle: Long): Int {
+            assertEquals("env", name.decodeToString()); assertEquals(52L, viewModelHandle); return 0
+        }
         override fun newDefaultViewModel(artboardHandle: Long) = NativeCallResult(0, 40L)
         var snapshot =
             ai.nuxie.sdk.runtime.NativeViewModelSnapshot(40L,
@@ -1978,7 +1999,7 @@ class ExperienceSurfaceHostPointerTest {
         override fun freeViewModel(handle: Long): Int { if (handle == 40L) boundStateFreed = true; return 0 }
         override fun mutateViewModel(handle: Long, write: NativeViewModelWrite): Int {
             assertFalse(boundStateFreed)
-            assertEquals(40L, handle)
+            assertEquals(if (globalEnvironment) 52L else 40L, handle)
             assertEquals(statePath, write.path)
             stateWrites += write.numberValue
             return 0
