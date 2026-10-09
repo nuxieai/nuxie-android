@@ -8,6 +8,7 @@ import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureService
 import ai.nuxie.sdk.features.FeatureUsageResult
 import ai.nuxie.sdk.network.NuxieApi
+import ai.nuxie.sdk.network.isInvalidPurchaseTokenRejection
 import android.app.Activity
 import ai.nuxie.sdk.logging.NuxieLog as Log
 import com.android.billingclient.api.BillingClient
@@ -41,7 +42,7 @@ internal class PurchaseSettings(
 
 internal sealed interface PurchaseSyncOutcome {
     data class Accepted(val response: NuxieApi.PurchaseResponse) : PurchaseSyncOutcome
-    data class Rejected(val permanent: Boolean) : PurchaseSyncOutcome
+    data class Rejected(val permanent: Boolean, val invalidToken: Boolean = false) : PurchaseSyncOutcome
 }
 
 internal fun interface PurchaseSynchronizer {
@@ -71,9 +72,12 @@ internal class NuxieApiPurchaseSynchronizer(
             ),
         )
         if (response.success) PurchaseSyncOutcome.Accepted(response)
-        else PurchaseSyncOutcome.Rejected(isPermanentPurchaseRejection(response.body))
+        else PurchaseSyncOutcome.Rejected(
+            permanent = isPermanentPurchaseRejection(response.body),
+            invalidToken = isInvalidPurchaseTokenRejection(response.body),
+        )
     } catch (rejected: NuxieApi.PurchaseRejectedException) {
-        PurchaseSyncOutcome.Rejected(rejected.permanent)
+        PurchaseSyncOutcome.Rejected(rejected.permanent, rejected.invalidToken)
     } catch (_: Exception) {
         PurchaseSyncOutcome.Rejected(permanent = false)
     }
@@ -1047,7 +1051,12 @@ internal class PurchaseService(
         // Restore is an explicit request for current provider authority, not a replay
         // of the earlier checkout receipt. Keep its delivery and completion claims.
         val refreshResults = decision.followUps.associate { evidence ->
-            evidence.purchaseToken to syncEvidence(evidence, refreshProviderState = true)
+            evidence.purchaseToken to if (evidence.ownerDistinctId == initiatingOwner) {
+                syncEvidence(evidence, refreshProviderState = true)
+            } else {
+                finishPurchase(evidence)
+                false
+            }
         }
         val outcome = if (expectedOwnerDistinctId != null && decision.outcome == RestoreResult.Restored) {
             if (decision.followUps.any {
@@ -1757,7 +1766,9 @@ internal class PurchaseService(
         }
         if (!ownsOperation) return operation.await()
         val synced = try {
-            performSyncEvidence(current, refreshProviderState)
+            val refreshed = performSyncEvidence(current, refreshProviderState)
+            if (!refreshed && current.synced) completeManaged(current)
+            refreshed
         } catch (_: Exception) {
             false
         }
@@ -1784,10 +1795,11 @@ internal class PurchaseService(
         when (val outcome = runCatching { synchronizer.sync(attempted) }
             .getOrElse { PurchaseSyncOutcome.Rejected(permanent = false) }) {
             is PurchaseSyncOutcome.Rejected -> {
-                if (outcome.permanent) {
+                val refreshingSynced = refreshProviderState && attempted.synced
+                if (outcome.invalidToken || (!refreshingSynced && outcome.permanent)) {
                     revokeEvidence(attempted.copy(permanentlyRejected = true))
-                } else {
-                    scheduleSyncRetry(attempted.purchaseToken, attempted.syncAttempts, refreshProviderState)
+                } else if (!refreshingSynced) {
+                    scheduleSyncRetry(attempted.purchaseToken, attempted.syncAttempts)
                 }
                 return false
             }
@@ -2080,7 +2092,7 @@ internal class PurchaseService(
             }
         }
 
-    private fun scheduleSyncRetry(token: String, attempt: Int, refreshProviderState: Boolean = false) {
+    private fun scheduleSyncRetry(token: String, attempt: Int) {
         if (syncRetryJobs[token]?.isActive == true) return
         syncRetryJobs[token] = scope.launch {
             delay(retryDelay(attempt))
@@ -2088,9 +2100,9 @@ internal class PurchaseService(
             evidenceStore.load()[token]
                 ?.takeIf {
                     token !in locallyRevokedTokens &&
-                        !it.permanentlyRejected && !it.revoked && (!it.synced || refreshProviderState)
+                        !it.permanentlyRejected && !it.revoked && !it.synced
                 }
-                ?.let { syncEvidence(it, refreshProviderState) }
+                ?.let { syncEvidence(it) }
         }
     }
 
