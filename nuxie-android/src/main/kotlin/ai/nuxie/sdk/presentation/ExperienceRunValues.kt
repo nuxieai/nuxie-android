@@ -124,6 +124,20 @@ internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSn
         ExperienceResponseSheet.read(form, declaration, values.nativeSnapshot(), native.file.viewModelCatalog())
     }
 
+    suspend fun formAnswers(descriptor: JsonObject): JsonObject {
+        val declarations = descriptor["responses"]?.jsonObject.orEmpty()
+        if (declarations.isEmpty()) return JsonObject(emptyMap())
+        return lane.call {
+            check(!retired.get()) { "The run has ended" }
+            val native = checkNotNull(prepared) { "Run values are unavailable" }
+            val snapshot = checkNotNull(native.values) { "Run values are unavailable" }.nativeSnapshot()
+            val catalog = native.file.viewModelCatalog()
+            JsonObject(declarations.mapValues { (form, declaration) ->
+                ExperienceResponseSheet.read(form, declaration.jsonObject, snapshot, catalog)
+            })
+        }
+    }
+
     /** Called on the run lane after capture or after native submission retirement. */
     fun setPresentationPending(owner: String, pending: Boolean) = mutations.setPresentationPending(owner, pending)
 
