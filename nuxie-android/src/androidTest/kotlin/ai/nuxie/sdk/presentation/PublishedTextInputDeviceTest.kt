@@ -392,7 +392,11 @@ class PublishedTextInputDeviceTest {
                             artboard.bindDefaultViewModel(schema)
                             val player = checkNotNull(artboard.newPlayer())
                             try {
-                                fun verify(values: Map<String, NuxieViewModelScalarValue>) {
+                                fun verify(state: Map<String, NuxieViewModelScalarValue>) {
+                                    // Production tolerates this absent field in ExperienceSurfaceHost.applyRuntimeValues.
+                                    // This signed fixture predates fontScale. Its absence is pinned below;
+                                    // TextMetricsBindingDeviceTest covers the published font-scale contract.
+                                    val values = state - "fontScale"
                                     values.forEach { (path, value) -> assertTrue(artboard.setDefaultViewModelValue(path, value)) }
                                     val result = native.snapshotViewModel(root)
                                     assertEquals(0, result.status)
@@ -426,6 +430,13 @@ class PublishedTextInputDeviceTest {
                                         }
                                     }
                                 }
+                                val schemaSnapshot = checkNotNull(native.snapshotViewModel(root).value)
+                                assertEquals(setOf("screen", "env", "safeArea", "response", "nuxieTextInputs"),
+                                    schemaSnapshot.values.filter { it.ownerInstanceId == schemaSnapshot.rootInstanceId }
+                                        .map { it.name }.toSet())
+                                assertTrue(runCatching {
+                                    artboard.setDefaultViewModelValue("fontScale", NuxieViewModelScalarValue.NumberValue(1.0))
+                                }.exceptionOrNull() is IllegalArgumentException)
                                 val lifecycle = ExperienceScreenLifecycle()
                                 verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING))
                                 verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ACTIVE))
@@ -579,6 +590,7 @@ class PublishedTextInputDeviceTest {
             })
             val original = checkNotNull(monitor.waitForActivityWithTimeout(15_000))
             activity = original
+            val portraitRequestedAt = SystemClock.elapsedRealtime()
             instrumentation.runOnMainSync {
                 // This corpus compares identical portrait extents before/after Home.
                 // Do not inherit another app's transient display orientation.
@@ -593,16 +605,15 @@ class PublishedTextInputDeviceTest {
                     PresentationRegistry.currentScreen(id)?.purchaseActivity())
             }
             instrumentation.waitForIdleSync()
-            SystemClock.sleep(150)
-            val portraitDeadline = SystemClock.elapsedRealtime() + 10_000
-            var initial = copySurface(checkNotNull(findSurface(original.window.decorView)))
-            while (initial.width >= initial.height && SystemClock.elapsedRealtime() < portraitDeadline) {
-                initial.recycle()
-                SystemClock.sleep(50)
-                initial = copySurface(checkNotNull(findSurface(original.window.decorView)))
+            // The first-frame latch can precede the requested portrait resize.
+            // Capture a composed published frame, not the new texture's empty buffer.
+            // Bound the empty resized surface by the existing ten-second composition budget.
+            // Timing from the orientation request includes any surface replacement delay.
+            before = awaitPublishedSurface(checkNotNull(findSurface(original.window.decorView)),
+                timeoutMillis = (portraitRequestedAt + 10_000 - SystemClock.elapsedRealtime()).coerceAtLeast(0)) {
+                it.height > it.width
             }
-            assertTrue("Initial portrait frame must be established", initial.height > initial.width)
-            before = initial
+            android.util.Log.i("NuxieDeviceQualification", "portrait_request_to_pixels_ms=${SystemClock.elapsedRealtime() - portraitRequestedAt}")
             val stopped = CountDownLatch(1)
             val resumed = CountDownLatch(1)
             val application = original.application
@@ -634,7 +645,12 @@ class PublishedTextInputDeviceTest {
                 SystemClock.sleep(150)
                 val returned = copySurfaceAtSize(checkNotNull(findSurface(original.window.decorView)), before.width, before.height)
                 try {
-                    assertEquals(0, changedPixels(before, returned, Rect(0, 0, before.width, before.height)))
+                    val changed = changedPixels(before, returned, Rect(0, 0, before.width, before.height))
+                    if (changed != 0) {
+                        File(context.filesDir, "recreation-home-before.png").outputStream().use { before.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                        File(context.filesDir, "recreation-home-returned.png").outputStream().use { returned.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    }
+                    assertEquals(0, changed)
                 } finally { returned.recycle() }
             } finally { application.unregisterActivityLifecycleCallbacks(callbacks) }
             instrumentation.removeMonitor(monitor)
@@ -693,9 +709,9 @@ class PublishedTextInputDeviceTest {
                 }
                 assertTrue("Portrait surface extent must be restored", portraitSized)
             }
-            val replacementSurface = checkNotNull(findSurface(replacement.window.decorView))
-            // Activity creation does not mean its asynchronous native frame is ready.
+            // Recreation drains the prior renderer before mounting its replacement.
             val renderDeadline = SystemClock.uptimeMillis() + 10_000
+            val replacementSurface = awaitSurfaceAttachment(replacement.window.decorView, renderDeadline)
             var rendered = copySurfaceAtSize(replacementSurface, before.width, before.height)
             after = rendered
             while (changedPixels(before, rendered, Rect(0, 0, before.width, before.height)) != 0 &&
@@ -942,9 +958,19 @@ class PublishedTextInputDeviceTest {
             assertTrue("Destination must finish native preparation", pending != null)
             val during = composedSurface(instrumentation, surface, captureBounds)
             try {
+                val provisionalChangedPixels = changedPixels(before, during, Rect(0, 0, before.width, before.height))
+                if (provisionalChangedPixels != 0) {
+                    File(instrumentation.targetContext.cacheDir, "provisional-before.png").outputStream().use {
+                        before.compress(Bitmap.CompressFormat.PNG, 100, it)
+                    }
+                    File(instrumentation.targetContext.cacheDir, "provisional-during.png").outputStream().use {
+                        during.compress(Bitmap.CompressFormat.PNG, 100, it)
+                    }
+                    File(instrumentation.targetContext.cacheDir, "provisional-context.txt").writeText(
+                        "transition=$transitionKind signed=$signedCustom reverse=$reverse changedPixels=$provisionalChangedPixels bounds=$captureBounds")
+                }
                 assertEquals("Transparent source must not expose a provisional destination",
-                    contract.getValue("composedPixelsChanged").jsonPrimitive.long.toInt(),
-                    changedPixels(before, during, Rect(0, 0, before.width, before.height)))
+                    contract.getValue("composedPixelsChanged").jsonPrimitive.long.toInt(), provisionalChangedPixels)
                 if (transitionKind != null) {
                     val started = SystemClock.uptimeMillis()
                     runBlocking { kotlinx.coroutines.withTimeout(10_000) { checkNotNull(pending).awaitExit() } }
@@ -1385,8 +1411,10 @@ class PublishedTextInputDeviceTest {
             val field = checkNotNull(editor) { "Signed default model must expose live field geometry: ${failure.get()}" }
             val surface = checkNotNull(findSurface(activity!!.window.decorView))
             instrumentation.runOnMainSync { field.clearFocus() }
-            SystemClock.sleep(100)
-            val original = copySurface(surface)
+            // Composition shares the field geometry readiness deadline, including time spent empty.
+            val original = awaitPublishedSurface(surface,
+                timeoutMillis = (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0),
+            ) { true }
             val region = Rect()
             instrumentation.runOnMainSync {
                 val fieldOrigin = IntArray(2)
@@ -1450,7 +1478,13 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun authenticatedShellPrecedesAcquisitionAndReusesActivityForNativeReveal() {
+    fun authenticatedShellPrecedesAcquisitionAndReusesActivityForNativeReveal() = verifyAuthenticatedShell(false)
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun authenticatedShellKeepsNativeContentHiddenDuringRecovery() = verifyAuthenticatedShell(true)
+
+    private fun verifyAuthenticatedShell(waitForRecovery: Boolean) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         assertTrue(NuxieRuntime.shared.isAvailable)
         val fixture = loadPublishedFixture(instrumentation)
@@ -1465,7 +1499,30 @@ class PublishedTextInputDeviceTest {
         }, scope, { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "early-owner" })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
-        val before = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
+        val host = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val ground = android.graphics.Color.rgb(24, 48, 72)
+        instrumentation.runOnMainSync { host.setContentView(View(host).apply { setBackgroundColor(ground) }) }
+        instrumentation.waitForIdleSync()
+        fun assertLoadingShell(container: ViewGroup, nativeContent: Boolean) {
+            val children = (0 until container.childCount).map { container.getChildAt(it) }
+            val loading = children.filterIsInstance<ExperienceLoadingView>().single()
+            val recovery = children.filterIsInstance<ExperienceRecoveryView>().singleOrNull()
+            val content = children.filter { it !is ExperienceLoadingView && it !is ExperienceRecoveryView }
+            assertEquals(if (nativeContent) 1 else 0, content.size)
+            assertEquals(if (nativeContent) 2 else 1, children.size - if (recovery == null) 0 else 1)
+            assertEquals("Experience loading", loading.contentDescription)
+            if (nativeContent) {
+                assertTrue(content.single() is ExperienceInputContainer)
+                assertSame(content.single(), children.first())
+                assertEquals(0f, content.single().alpha)
+            }
+            assertEquals(if (recovery == null) View.VISIBLE else View.INVISIBLE, loading.visibility)
+            recovery?.let {
+                assertEquals(View.VISIBLE, it.visibility)
+                assertSame(it, children.last())
+            }
+        }
         val pending = scope.async {
             service.presentJourney(testPresentationFences(), fixture.release, "screen_1", "early-shell", "early-owner",
                 service.reserveJourney("early-owner"), acquire = {
@@ -1490,16 +1547,22 @@ class PublishedTextInputDeviceTest {
             instrumentation.runOnMainSync {
                 assertEquals(0, (checkNotNull(root).background as android.graphics.drawable.ColorDrawable).color)
                 val container = checkNotNull(root) as ViewGroup
-                assertEquals(1, container.childCount)
-                assertTrue(container.getChildAt(0) is ExperienceLoadingView)
-                assertEquals("Experience loading", container.getChildAt(0).contentDescription)
+                assertLoadingShell(container, nativeContent = false)
             }
-            val expected = before.getPixel(bounds.centerX(), bounds.centerY())
+            val expected = ground
             var observed = 0
             val deadline = SystemClock.elapsedRealtime() + 5_000
             do {
                 val screenshot = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
-                observed = screenshot.getPixel(bounds.centerX(), bounds.centerY())
+                observed = screenshot.getPixel(bounds.left + 2, bounds.top + 2)
+                var recoveryPresent = false
+                instrumentation.runOnMainSync {
+                    val container = checkNotNull(root) as ViewGroup
+                    recoveryPresent = (0 until container.childCount).any { container.getChildAt(it) is ExperienceRecoveryView }
+                }
+                if (!recoveryPresent && observed == expected) {
+                    observed = screenshot.getPixel(bounds.centerX(), bounds.centerY())
+                }
                 screenshot.recycle()
                 if (observed != expected) SystemClock.sleep(30)
             } while (observed != expected && SystemClock.elapsedRealtime() < deadline)
@@ -1507,14 +1570,26 @@ class PublishedTextInputDeviceTest {
             assertEquals(0, shown.get())
             assertFalse(pending.isCompleted)
             releaseAcquisition.complete(Unit)
+            val revealDeadline = SystemClock.elapsedRealtime() + 15_000
             assertTrue(revealStarted.await(15, TimeUnit.SECONDS))
+            if (waitForRecovery) {
+                var recoveryShown = false
+                while (!recoveryShown && SystemClock.elapsedRealtime() < revealDeadline) {
+                    instrumentation.runOnMainSync {
+                        val container = checkNotNull(root) as ViewGroup
+                        recoveryShown = (0 until container.childCount).any {
+                            container.getChildAt(it) is ExperienceRecoveryView
+                        }
+                    }
+                    if (!recoveryShown) SystemClock.sleep(20)
+                }
+                assertTrue("Withheld reveal must expose recovery within the existing readiness budget", recoveryShown)
+            }
             assertFalse(pending.isCompleted)
             assertEquals(0, shown.get())
             instrumentation.runOnMainSync {
                 val container = checkNotNull(root) as ViewGroup
-                assertEquals(2, container.childCount)
-                assertEquals(0f, container.getChildAt(0).alpha)
-                assertTrue(container.getChildAt(1) is ExperienceLoadingView)
+                assertLoadingShell(container, nativeContent = true)
                 assertEquals(0, (container.background as android.graphics.drawable.ColorDrawable).color)
             }
             releaseReveal.complete(Unit)
@@ -1531,12 +1606,12 @@ class PublishedTextInputDeviceTest {
                 assertNull(container.background)
             }
         } finally {
-            before.recycle()
             releaseReveal.complete(Unit)
             releaseAcquisition.complete(Unit)
             runBlocking { service.shutdownOwnedBy("early-owner"); scope.coroutineContext[Job]?.cancelAndJoin() }
             instrumentation.removeMonitor(monitor)
             PresentationRegistry.clearForTesting()
+            instrumentation.runOnMainSync { host.finish() }
         }
     }
 
@@ -3197,6 +3272,89 @@ class PublishedTextInputDeviceTest {
         error("Surface bounds did not stabilize inside the composed display")
     }
 
+    private fun awaitSurfaceAttachment(root: View, deadline: Long): TextureView {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val attached = CountDownLatch(1)
+        val surface = AtomicReference<TextureView?>()
+        val listener = android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            findSurface(root)?.takeIf { it.isAttachedToWindow }?.let {
+                surface.set(it)
+                attached.countDown()
+            }
+        }
+        instrumentation.runOnMainSync {
+            root.viewTreeObserver.addOnGlobalLayoutListener(listener)
+            listener.onGlobalLayout()
+        }
+        try {
+            assertTrue("Replacement surface must attach before the render deadline",
+                attached.await((deadline - SystemClock.uptimeMillis()).coerceAtLeast(0), TimeUnit.MILLISECONDS))
+            return checkNotNull(surface.get())
+        } finally {
+            instrumentation.runOnMainSync { root.viewTreeObserver.removeOnGlobalLayoutListener(listener) }
+        }
+    }
+
+    private fun awaitPublishedSurface(
+        surface: TextureView,
+        timeoutMillis: Long = 10_000,
+        matchesSize: (Bitmap) -> Boolean,
+    ): Bitmap {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val startedAt = SystemClock.elapsedRealtime()
+        val deadline = startedAt + timeoutMillis
+        val frames = LinkedBlockingQueue<Bitmap>(1)
+        val captured = java.util.concurrent.atomic.AtomicBoolean(false)
+        var previous: TextureView.SurfaceTextureListener? = null
+        fun captureComposedFrame() {
+            if (captured.get()) return
+            val frame = surface.bitmap ?: return
+            val pixels = IntArray(frame.width * frame.height)
+            frame.getPixels(pixels, 0, frame.width, 0, 0, frame.width, frame.height)
+            // This oracle is specific to the signed fixture's text and colored controls.
+            // A correctly sized but empty texture is not its initial frame.
+            val colors = HashSet<Int>()
+            for (pixel in pixels) {
+                colors.add(pixel)
+                if (colors.size > 8) break
+            }
+            if (SystemClock.elapsedRealtime() <= deadline && matchesSize(frame) && colors.size > 8) {
+                captured.set(true)
+                frames.add(frame)
+            } else frame.recycle()
+        }
+        check(timeoutMillis > 0) { "Composition readiness budget is exhausted" }
+        instrumentation.runOnMainSync {
+            previous = surface.surfaceTextureListener
+            surface.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                override fun onSurfaceTextureAvailable(texture: android.graphics.SurfaceTexture, width: Int, height: Int) {
+                    previous?.onSurfaceTextureAvailable(texture, width, height)
+                }
+                override fun onSurfaceTextureSizeChanged(texture: android.graphics.SurfaceTexture, width: Int, height: Int) {
+                    previous?.onSurfaceTextureSizeChanged(texture, width, height)
+                }
+                override fun onSurfaceTextureDestroyed(texture: android.graphics.SurfaceTexture): Boolean =
+                    previous?.onSurfaceTextureDestroyed(texture) ?: true
+                override fun onSurfaceTextureUpdated(texture: android.graphics.SurfaceTexture) {
+                    previous?.onSurfaceTextureUpdated(texture)
+                    captureComposedFrame()
+                }
+            }
+            // An idle renderer may already have composed its last frame.
+            captureComposedFrame()
+        }
+        try {
+            return checkNotNull(frames.poll((deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0), TimeUnit.MILLISECONDS)) {
+                "A composed published frame must arrive within ${timeoutMillis}ms of readiness observation"
+            }.also {
+                android.util.Log.i("NuxieDeviceQualification", "published_frame_wait_ms=${SystemClock.elapsedRealtime() - startedAt}")
+            }
+        } finally {
+            instrumentation.runOnMainSync { surface.surfaceTextureListener = previous }
+            frames.poll()?.recycle()
+        }
+    }
+
     private fun copySurfaceAtSize(surface: TextureView, width: Int, height: Int): Bitmap {
         val deadline = SystemClock.elapsedRealtime() + 10_000
         do {
@@ -3439,10 +3597,31 @@ class PublishedTextInputDeviceTest {
         return checkNotNull(bitmap) { "Runtime texture must contain a composed frame" }
     }
 
+    @Test
+    fun pixelDifferenceCountsOnlyTheRequestedRegion() {
+        val before = Bitmap.createBitmap(3, 2, Bitmap.Config.ARGB_8888).apply { eraseColor(0xff123456.toInt()) }
+        val after = before.copy(Bitmap.Config.ARGB_8888, true)
+        try {
+            after.setPixel(0, 0, 0xffabcdef.toInt())
+            after.setPixel(2, 1, 0)
+            assertEquals(2, changedPixels(before, after, Rect(0, 0, 3, 2)))
+            assertEquals(1, changedPixels(before, after, Rect(0, 0, 3, 1)))
+            assertEquals(0, changedPixels(before, after, Rect(0, 1, 2, 2)))
+            assertEquals(0, changedPixels(before, after, Rect()))
+        } finally { before.recycle(); after.recycle() }
+    }
+
     private fun changedPixels(before: Bitmap, after: Bitmap, region: Rect): Int {
+        if (region.isEmpty) return 0
+        val width = region.width()
+        val height = region.height()
+        val beforePixels = IntArray(width * height)
+        val afterPixels = IntArray(width * height)
+        before.getPixels(beforePixels, 0, width, region.left, region.top, width, height)
+        after.getPixels(afterPixels, 0, width, region.left, region.top, width, height)
         var changed = 0
-        for (y in region.top until region.bottom) for (x in region.left until region.right) {
-            if (before.getPixel(x, y) != after.getPixel(x, y)) changed++
+        for (index in beforePixels.indices) {
+            if (beforePixels[index] != afterPixels[index]) changed++
         }
         return changed
     }

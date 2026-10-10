@@ -32,6 +32,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import kotlinx.coroutines.async
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.boolean
@@ -43,6 +44,123 @@ import kotlinx.serialization.json.long
 
 @RunWith(RobolectricTestRunner::class)
 class ExperienceSurfaceHostPointerTest {
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test fun `custom watchdog waits for pending frame phase writes and zero delta step`() = kotlinx.coroutines.test.runTest {
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
+        val texture = SurfaceTexture(0)
+        val outgoing = ExperienceScreenExitHandshake()
+        val incoming = ExperienceScreenExitHandshake()
+        val plan = ExperienceScreenTransitionPlan.Custom("test", 450, true, "out", "in")
+        try {
+            host.loadArtboard(byteArrayOf(1), null,
+                viewModelProjection = NuxieViewModelListProjection("Root", "products", null, "Product", emptyList()))
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            native.presentation = 4
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            val transition = async {
+                outgoing.performWith(incoming, plan) {
+                    host.applyTransitionValues(mapOf("safeArea/top" to NuxieViewModelScalarValue.NumberValue(2.0)))
+                }
+            }
+            testScheduler.runCurrent()
+            drain(lane)
+            testScheduler.advanceTimeBy(plan.watchdogMs + 1)
+            testScheduler.runCurrent()
+            assertTrue("A pending frame cannot consume the transition watchdog", transition.isActive)
+            assertTrue(native.stateWrites.isEmpty())
+            native.presentation = 1
+            host.doFrame(1_032_000_000L)
+            drain(lane)
+            testScheduler.runCurrent()
+            native.presentation = 4
+            host.doFrame(1_048_000_000L)
+            drain(lane)
+            testScheduler.runCurrent()
+            assertEquals(listOf(2f), native.stateWrites)
+            assertEquals("Phase application includes a zero-delta step", 0f, native.elapsedSteps.last())
+            testScheduler.advanceTimeBy(plan.watchdogMs + 1)
+            testScheduler.runCurrent()
+            assertTrue("The phase frame must complete before the watchdog starts", transition.isActive)
+            native.presentation = 1
+            host.doFrame(1_064_000_000L)
+            drain(lane)
+            testScheduler.runCurrent()
+            testScheduler.advanceTimeBy(plan.watchdogMs - 1)
+            testScheduler.runCurrent()
+            assertTrue(transition.isActive)
+            testScheduler.advanceTimeBy(1)
+            testScheduler.runCurrent()
+            transition.await()
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test fun `hidden transition settles without rendering and closed transition cancels`() = kotlinx.coroutines.test.runTest {
+        for (mode in listOf("queued-hidden", "preceding-frame", "phase-frame", "closed")) {
+            val native = RecordingNative()
+            var renders = 0
+            native.onRender = { renders++ }
+            val lane = NuxieRuntimeLane()
+            val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
+            val texture = SurfaceTexture(0)
+            try {
+                host.loadArtboard(byteArrayOf(1), null,
+                    viewModelProjection = NuxieViewModelListProjection("Root", "products", null, "Product", emptyList()))
+                host.onSurfaceTextureAvailable(texture, 100, 100)
+                drain(lane)
+                host.doFrame(1_000_000_000L)
+                drain(lane)
+                host.onSurfaceTextureUpdated(texture)
+                if (mode == "queued-hidden") host.setPresentationVisible(false)
+                if (mode == "preceding-frame" || mode == "closed") {
+                    native.presentation = 4
+                    host.doFrame(1_016_000_000L)
+                }
+                drain(lane)
+                val phase = async { host.applyTransitionValues(mapOf("safeArea/top" to NuxieViewModelScalarValue.NumberValue(2.0))) }
+                testScheduler.runCurrent()
+                drain(lane)
+                if (mode == "phase-frame") {
+                    native.presentation = 4
+                    host.doFrame(1_032_000_000L)
+                    drain(lane)
+                }
+                val rendersBeforeHide = renders
+                if (mode == "closed") host.release() else host.setPresentationVisible(false)
+                drain(lane)
+                testScheduler.runCurrent()
+                assertTrue("An invisible host cannot leave the phase waiting for a frame tick", phase.isCompleted)
+                assertEquals("Hidden settlement must not submit a render", rendersBeforeHide, renders)
+                if (mode == "closed") {
+                    assertTrue(phase.isCancelled)
+                    assertTrue(native.stateWrites.isEmpty())
+                } else {
+                    phase.await()
+                    assertEquals(listOf(2f), native.stateWrites)
+                    assertEquals(0f, native.elapsedSteps.last())
+                    assertEquals(if (mode == "preceding-frame") 3 else 2, native.elapsedSteps.size)
+                }
+            } finally {
+                host.release()
+                lane.shutdown()
+                assertTrue(lane.awaitQuiescence(2_000))
+                texture.release()
+            }
+        }
+    }
+
     @Test fun `converted text settles on the native lane after pending render and before capture`() {
         val native = RecordingNative()
         val lane = NuxieRuntimeLane()
@@ -181,6 +299,67 @@ class ExperienceSurfaceHostPointerTest {
             kotlinx.coroutines.runBlocking { values.retire() }
             assertTrue(lane.awaitQuiescence(2_000))
             texture.release()
+        }
+    }
+
+    @Test fun `CPU surface stays connected across host resize`() {
+        val native = RecordingNative().apply { attachStatus = -1 }
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
+        val texture = SurfaceTexture(0)
+        try {
+            host.loadArtboard(byteArrayOf(1), null)
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            host.onSurfaceTextureSizeChanged(texture, 200, 100)
+            drain(lane)
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            assertEquals(2, native.copyCalls)
+            assertEquals("The CPU producer must not be replaced by another Vulkan attach", 1, native.attachCount)
+            assertEquals(0, native.detachCount)
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
+    @Test
+    fun `resizing another shared host preserves the pending window`() {
+        val native = RecordingNative()
+        val values = ExperienceRunValues()
+        val lane = values.lane
+        val hosts = List(2) { ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
+            runtime = NuxieRuntime(native), runValues = values) }
+        val textures = List(2) { SurfaceTexture(0) }
+        try {
+            hosts.forEachIndexed { index, host ->
+                host.loadArtboard(byteArrayOf(1), null)
+                host.onSurfaceTextureAvailable(textures[index], 100, 100)
+                drain(lane)
+            }
+            native.presentation = 4
+            hosts[0].doFrame(1_000_000_000L)
+            drain(lane)
+            val detached = native.detachCount
+            val steps = native.elapsedSteps.size
+            hosts[1].onSurfaceTextureSizeChanged(textures[1], 200, 100)
+            drain(lane)
+            assertEquals("Another host cannot retire this window's submission", detached, native.detachCount)
+            native.presentation = 1
+            hosts[0].doFrame(1_016_000_000L)
+            drain(lane)
+            assertEquals("The original frame must complete without stepping again", steps, native.elapsedSteps.size)
+        } finally {
+            hosts.forEach { it.release() }
+            kotlinx.coroutines.runBlocking { values.retire() }
+            assertTrue(lane.awaitQuiescence(2_000))
+            textures.forEach { it.release() }
         }
     }
 
@@ -382,13 +561,19 @@ class ExperienceSurfaceHostPointerTest {
         )
         val texture = SurfaceTexture(0)
         try {
-            host.loadArtboard(byteArrayOf(1), null)
+            host.loadArtboard(byteArrayOf(1), null,
+                viewModelProjection = NuxieViewModelListProjection("Root", "products", null, "Product", emptyList()))
+            native.events = arrayOf(ai.nuxie.sdk.runtime.NativeRuntimeEvent(0, 0, "test", "", "", 0f, emptyArray()))
+            native.presentation = 4
             host.onSurfaceTextureAvailable(texture, 100, 100)
             drain(lane)
             host.doFrame(1_000_000_000L)
             drain(lane)
             val submitted = native.elapsedSteps.size
             assertTrue(submitted > 0)
+            assertTrue(org.robolectric.util.ReflectionHelpers.getField<Boolean>(host, "pendingPresentation"))
+            assertNotNull(org.robolectric.util.ReflectionHelpers.getField<Any?>(host, "submittedSnapshot"))
+            assertNotNull(org.robolectric.util.ReflectionHelpers.getField<Any?>(host, "submittedCaptions"))
             native.resizeStatus = 5
             host.onSurfaceTextureSizeChanged(texture, 200, 100)
             drain(lane)
@@ -398,6 +583,9 @@ class ExperienceSurfaceHostPointerTest {
             assertEquals(1, failures.size)
             assertTrue(failures.single().message.orEmpty().contains("resize failed"))
             assertEquals(submitted, native.elapsedSteps.size)
+            assertFalse(org.robolectric.util.ReflectionHelpers.getField<Boolean>(host, "pendingPresentation"))
+            assertNull(org.robolectric.util.ReflectionHelpers.getField<Any?>(host, "submittedSnapshot"))
+            assertNull(org.robolectric.util.ReflectionHelpers.getField<Any?>(host, "submittedCaptions"))
         } finally {
             host.release()
             lane.shutdown()
@@ -1591,14 +1779,19 @@ class ExperienceSurfaceHostPointerTest {
         override fun playerLayoutSize(playerHandle: Long) = NativeCallResult(0, layoutSize)
         override fun freePlayer(handle: Long) = Unit
         override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long = 4L
-        override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int = 0
+        var attachStatus = 0
+        var attachCount = 0
+        var copyCalls = 0
+        override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int { attachCount++; return attachStatus }
+        override fun copyPlayerToWindow(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
+            clearColor: Int, layoutScaleFactor: Float): Int { copyCalls++; return presentation }
 
         var detachCount = 0
         override fun detachRendererSurface(rendererHandle: Long): Int { detachCount++; return 0 }
 
         var resizeStatus = 0
         override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int = resizeStatus
-        override fun acquireWindow(surface: android.view.Surface): Long = 5L.also { windowsAcquired += 1 }
+        override fun acquireWindow(surface: android.view.Surface): Long = (5L + windowsAcquired).also { windowsAcquired += 1 }
         override fun releaseWindow(handle: Long) = Unit
 
         var playerKind = 1
