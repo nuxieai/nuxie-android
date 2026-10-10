@@ -51,6 +51,31 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
+    fun invalidRowsInReadableEvidenceFilesAreLogged(): Unit = kotlinx.coroutines.runBlocking {
+        val directory = Files.createTempDirectory("nuxie-invalid-evidence").toFile()
+        ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.WARN)
+        org.robolectric.shadows.ShadowLog.clear()
+        try {
+            File(directory, "purchase-evidence.json").writeText("""{"private-token":{}}""")
+            File(directory, "purchase-bindings.json").writeText("[{}]")
+            File(directory, "purchase-catalog.json").writeText("[{}]")
+            val store = FilePurchaseEvidenceStore(directory)
+            assertTrue(store.load().isEmpty())
+            assertTrue(store.loadBindings().isEmpty())
+            assertTrue(store.loadProductMappings().isEmpty())
+            val warnings = org.robolectric.shadows.ShadowLog.getLogsForTag("NuxieBilling").map { it.msg }
+            for (description in listOf("evidence", "bindings", "catalog")) {
+                assertTrue("Invalid $description rows must not disappear silently", warnings.any {
+                    it.contains("Invalid purchase $description row")
+                })
+            }
+            assertFalse(warnings.any { it.contains("private-token") })
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun cancelledInstallerStillPinsFirstArrivalBeforeTheNextMapping() = kotlinx.coroutines.test.runTest {
         val store = InMemoryPurchaseEvidenceStore()
         val first = StoredProductMapping(
