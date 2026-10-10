@@ -244,8 +244,9 @@ class FeatureInfo {
 
     /**
      * Invalidate every older customer publication and stage the complete new
-     * customer view. Staging emits nothing; callers publish only after all
-     * identity-decision locks have been released.
+     * customer view. Staging emits nothing; callers publish after their own
+     * identity-decision scope returns. An enclosing App Action callback may
+     * still hold the reentrant identity fence.
      */
     internal fun stageIdentityChange(
         features: Map<String, FeatureAccess>,
