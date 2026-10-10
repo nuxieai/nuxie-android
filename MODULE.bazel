@@ -8,6 +8,12 @@ bazel_dep(name = "apple_support", version = "2.8.0")
 bazel_dep(name = "rules_cc", version = "0.2.20")
 bazel_dep(name = "rules_java", version = "9.3.0")
 bazel_dep(name = "rules_kotlin", version = "2.1.9")
+single_version_override(
+    module_name = "rules_kotlin",
+    version = "2.1.9",
+    patches = ["//scripts/bazel:rules-kotlin-2.0-adapter.patch"],
+    patch_strip = 1,
+)
 bazel_dep(name = "rules_jvm_external", version = "6.9")
 bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "rules_robolectric", version = "4.16.1", repo_name = "robolectric")
@@ -34,6 +40,15 @@ runtime = use_extension("//scripts/bazel:repositories.bzl", "runtime_artifacts")
 use_repo(runtime, "nuxie_runtime_android")
 
 maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
+# rules_android's legacy IDE hub otherwise puts Guava 30.1 first on its
+# resource-tool classpath, hiding the buildOrThrow API required by 0.8.0.
+# Reuse the rule's own pinned modern Guava without widening SDK dependencies.
+use_repo(maven, "rules_android_maven")
+maven.override(
+    name = "android_ide_common_30_1_3",
+    coordinates = "com.google.guava:guava",
+    target = "@rules_android_maven//:com_google_guava_guava",
+)
 maven.install(
     name = "sdk_maven",
     lock_file = "//scripts/bazel/locks:sdk_maven_install.json",

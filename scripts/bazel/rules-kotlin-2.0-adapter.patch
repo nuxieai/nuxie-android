@@ -1,0 +1,22 @@
+diff --git a/MODULE.bazel b/MODULE.bazel
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -36,1 +36,12 @@
+ register_toolchains("//kotlin/internal:default_toolchain")
++
++# The SDK retains Kotlin 2.0.21. The 2.1 adapter calls a newer CLI ABI;
++# select the official 2.0 release adapter, keeping the modern Bazel rules.
++http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
++http_archive(
++    name = "nuxie_kotlin_2_0_adapter",
++    urls = ["https://github.com/bazelbuild/rules_kotlin/releases/download/v2.0.0/rules_kotlin-v2.0.0.tar.gz"],
++    sha256 = "d89723cc9ebbb7bdb2ebaca1af7d2383e074615643cf97a366b758a76b7dc443",
++    strip_prefix = "src/main/kotlin/io/bazel/kotlin/compiler",
++    build_file_content = 'exports_files(["compiler.jar"])',
++)
+diff --git a/src/main/kotlin/io/bazel/kotlin/compiler/BUILD.bazel b/src/main/kotlin/io/bazel/kotlin/compiler/BUILD.bazel
+--- a/src/main/kotlin/io/bazel/kotlin/compiler/BUILD.bazel
++++ b/src/main/kotlin/io/bazel/kotlin/compiler/BUILD.bazel
+@@ -18,1 +18,1 @@
+-    jars = ["compiler.jar"],
++    jars = ["@nuxie_kotlin_2_0_adapter//:compiler.jar"],
