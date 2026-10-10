@@ -301,6 +301,7 @@ def prepare(args):
         raise ValueError("Signed or source-addressed Maven preparation requires the published pinned runtime")
     verify_api(inputs[".aar"])
     verify_native(inputs[".aar"], ndk)
+    license_data = (ROOT / "LICENSE").read_bytes()
     if source_identity(args.maven_version, args.sign) != (revision, dirty):
         raise ValueError("SDK source identity changed during preparation")
     output = args.output.resolve()
@@ -326,6 +327,14 @@ def prepare(args):
             publish_directory(staging, destination)
             records = [{"kind": "maven", "path": path.relative_to(output).as_posix(), "sha256": sha256(path), "size": path.stat().st_size}
                        for path in sorted(destination.iterdir()) if path.is_file()]
+            license_path = output / "licenses/LICENSE"
+            license_path.parent.mkdir(exist_ok=True)
+            if not license_path.is_file() or license_path.read_bytes() != license_data:
+                temporary_license = license_path.with_name(".LICENSE.tmp")
+                temporary_license.write_bytes(license_data)
+                temporary_license.replace(license_path)
+            records.append({"kind": "license", "path": "licenses/LICENSE", "sha256": sha256(license_path),
+                            "size": license_path.stat().st_size})
             manifest = {"schemaVersion": 1, "sdk": "android", "sourceRevision": revision,
                         "sourceDirty": dirty, "runtime": provenance,
                         "maven": {"groupId": GROUP, "artifactId": ARTIFACT, "version": args.maven_version, "repository": "."}, "artifacts": records}

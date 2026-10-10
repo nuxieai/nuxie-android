@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -199,6 +200,35 @@ class BazelSdkPackagingTests(unittest.TestCase):
         self.assertEqual((destination / "sdk.aar").read_bytes(), b"new")
         self.assertFalse((destination / "sdk.aar.asc").exists())
         self.assertEqual((other / "sdk.aar").read_bytes(), b"other")
+
+    def test_prepared_receipt_inventories_the_source_license_outside_maven_products(self):
+        inputs = {}
+        for suffix, label in sdk.TARGETS.items():
+            path = self.directory / ("input" + suffix)
+            path.write_bytes(suffix.encode())
+            inputs[label] = path
+        provenance = self.directory / "provenance.json"
+        provenance.write_text(json.dumps({"mode": "published", "sourceRevision": "b" * 40}))
+        inputs["@nuxie_runtime_android//:provenance.json"] = provenance
+        output = self.directory / "prepared"
+        args = SimpleNamespace(output=output, maven_version="0.2.0-" + "a" * 40, sign=False)
+        with patch.object(sdk, "source_identity", return_value=("a" * 40, False)), \
+                patch.object(sdk, "toolchain", return_value=(self.directory, self.directory)), \
+                patch.object(sdk, "bazel"), patch.object(sdk, "artifact", side_effect=inputs.__getitem__), \
+                patch.object(sdk, "verify_api"), patch.object(sdk, "verify_native"):
+            sdk.prepare(args)
+            license_path = output / "licenses/LICENSE"
+            previous = license_path.stat().st_mtime_ns
+            sdk.prepare(args)
+        self.assertEqual(license_path.read_bytes(), (ROOT / "LICENSE").read_bytes())
+        self.assertEqual(license_path.stat().st_mtime_ns, previous)
+        receipt = json.loads((output / "sdk-artifacts.json").read_text())
+        licenses = [item for item in receipt["artifacts"] if item["kind"] == "license"]
+        self.assertEqual(licenses, [{"kind": "license", "path": "licenses/LICENSE",
+                                    "sha256": hashlib.sha256((ROOT / "LICENSE").read_bytes()).hexdigest(),
+                                    "size": (ROOT / "LICENSE").stat().st_size}])
+        self.assertTrue(all(item["path"].startswith("ai/nuxie/nuxie-android/")
+                            for item in receipt["artifacts"] if item["kind"] == "maven"))
 
     def test_ordinary_suite_excludes_live_native_smoke_and_preserves_host_option_tests(self):
         paths = list((ROOT / "nuxie-android/src/test").rglob("*.kt")) + list((ROOT / "nuxie-android/src/test").rglob("*.java"))
