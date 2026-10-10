@@ -90,7 +90,7 @@ android_library(name = "sdk_test_resources", custom_package = "ai.nuxie.sdk", ex
 
 TEST_SRCS = glob([
     "nuxie-android/src/test/**/*.kt", "nuxie-android/src/test/**/*.java",
-    "nuxie-android/src/sharedTest/**/*.kt", "nuxie-android/src/hostRenderHarness/**/*.kt",
+    "nuxie-android/src/hostRenderHarness/**/*.kt",
 ])
 
 genrule(
@@ -178,7 +178,7 @@ android_binary(
 
 kt_android_library(
     name = "instrumentation",
-    srcs = glob(["nuxie-android/src/androidTest/**/*.kt", "nuxie-android/src/sharedTest/**/*.kt"]),
+    srcs = glob(["nuxie-android/src/androidTest/**/*.kt"]),
     associates = [":sdk"],
     manifest = "nuxie-android/src/androidTest/AndroidManifest.xml",
     custom_package = "ai.nuxie.sdk",
