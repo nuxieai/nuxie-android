@@ -143,13 +143,16 @@ diff --git a/src/main/kotlin/BUILD.bazel b/src/main/kotlin/BUILD.bazel
 diff --git a/kotlin/internal/jvm/compile.bzl b/kotlin/internal/jvm/compile.bzl
 --- a/kotlin/internal/jvm/compile.bzl
 +++ b/kotlin/internal/jvm/compile.bzl
-@@ -466,1 +466,4 @@
+@@ -466,1 +466,7 @@
 -    args = _utils.init_args(ctx, rule_kind, compile_deps.module_name, kotlinc_options)
 +    # The 2.0 builder describes Android bytecode compilation as JVM.
++    # Its local-test compilation kind is the ordinary JVM test kind.
 +    # Android packaging and providers retain the original rule kind.
 +    builder_kind = rule_kind.replace("kt_android_", "kt_jvm_")
++    if builder_kind == "kt_jvm_local_test":
++        builder_kind = "kt_jvm_test"
 +    args = _utils.init_args(ctx, builder_kind, compile_deps.module_name, kotlinc_options)
-@@ -477,3 +480,4 @@
+@@ -477,3 +483,4 @@
      args.add("--reduced_classpath_mode", toolchains.kt.experimental_reduce_classpath_mode)
 -    args.add("--build_tools_api", toolchains.kt.experimental_build_tools_api)
 +    if toolchains.kt.experimental_build_tools_api:

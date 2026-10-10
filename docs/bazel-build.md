@@ -31,6 +31,8 @@ scripts/bazel/sdk.sh prepare --output build/maven-repository
 `test` runs the ordinary SDK JVM tests and both lint rule suites. The live host
 render smoke suite remains separate. Test-only harnesses and fixture inputs are
 declared runfiles and are absent from the AAR and sources JAR.
+Lint tests receive the pinned Android API jar as declared runfiles and discover
+it through a minimal SDK inside their private test scratch directory.
 The debug example retains its original debug Activity, localhost cleartext
 setting and asset-smoke fixtures. Its main and debug manifests are combined by
 the Android rule's manifest merger, which also retains dependency permissions.

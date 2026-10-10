@@ -117,38 +117,25 @@ sdk_docs = rule(
 def _jvm_test_impl(ctx):
     launcher = ctx.actions.declare_file(ctx.label.name + ".sh")
     binary = ctx.executable.binary
-    ctx.actions.write(launcher, """#!/usr/bin/env bash
-set -euo pipefail
-root="$TEST_SRCDIR/$TEST_WORKSPACE"
-# Gradle's fixture tests run from the SDK module. Robolectric's generated
-# manifest/resource paths run from the Bazel package. Give both their existing
-# relative paths using links to declared runfiles in an isolated test directory.
-work="$TEST_TMPDIR/sdk-cwd"
-cwd="$work/nuxie-android"
-mkdir -p "$cwd"
-for entry in "$TEST_SRCDIR"/*; do
-  ln -s "$entry" "$work/$(basename "$entry")"
-done
-for entry in "$root"/*; do
-  name="$(basename "$entry")"
-  if [[ "$name" != nuxie-android ]]; then
-    ln -s "$entry" "$cwd/$name"
-    [[ -e "$work/$name" ]] || ln -s "$entry" "$work/$name"
-  fi
-done
-for entry in "$root/nuxie-android"/*; do
-  name="$(basename "$entry")"
-  [[ -e "$cwd/$name" ]] || ln -s "$entry" "$cwd/$name"
-done
-cd "$cwd"
-exec "$root/%s" "$@"
-""" % binary.short_path, is_executable = True)
-    runfiles = ctx.runfiles(files = [binary]).merge(ctx.attr.binary[DefaultInfo].default_runfiles)
+    ctx.actions.expand_template(
+        template = ctx.file._launcher,
+        output = launcher,
+        substitutions = {
+            "@binary@": _runfile(ctx, binary),
+            "@android_jar@": _runfile(ctx, ctx.file.android_jar) if ctx.file.android_jar else "",
+        },
+        is_executable = True,
+    )
+    runfiles = ctx.runfiles(files = [binary] + ctx.files.android_jar).merge(ctx.attr.binary[DefaultInfo].default_runfiles)
     return [DefaultInfo(executable = launcher, runfiles = runfiles)]
 
 sdk_jvm_test = rule(
     implementation = _jvm_test_impl,
-    attrs = {"binary": attr.label(executable = True, cfg = "target", mandatory = True)},
+    attrs = {
+        "binary": attr.label(executable = True, cfg = "target", mandatory = True),
+        "android_jar": attr.label(allow_single_file = [".jar"]),
+        "_launcher": attr.label(default = Label("//scripts/bazel:jvm_test_launcher.sh"), allow_single_file = True),
+    },
     test = True,
 )
 

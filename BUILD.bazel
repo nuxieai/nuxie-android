@@ -203,17 +203,31 @@ kt_android_local_test(
 sdk_jvm_test(name = "sdk_test", binary = ":sdk_test_java", size = "large", timeout = "long")
 
 java_test(
-    name = "lint_test",
+    name = "lint_test_java",
     srcs = glob(["nuxie-lint/src/test/java/**/*.java"]),
     test_class = "ai.nuxie.lint.LoggingPolicyDetectorTest",
     deps = [":lint", "@lint_maven//:com_android_tools_lint_lint_tests", "@lint_maven//:com_android_tools_lint_lint_checks", "@lint_maven//:junit_junit"],
+    tags = ["manual"],
 )
 
 java_test(
-    name = "lint_store_test",
+    name = "lint_store_test_java",
     srcs = glob(["nuxie-lint/src/test/java/**/*.java"]),
     test_class = "ai.nuxie.lint.TestStoreDetectorTest",
     deps = [":lint", "@lint_maven//:com_android_tools_lint_lint_tests", "@lint_maven//:com_android_tools_lint_lint_checks", "@lint_maven//:junit_junit"],
+    tags = ["manual"],
+)
+
+sdk_jvm_test(
+    name = "lint_test",
+    binary = ":lint_test_java",
+    android_jar = "@androidsdk//:platforms/android-36/android.jar",
+)
+
+sdk_jvm_test(
+    name = "lint_store_test",
+    binary = ":lint_store_test_java",
+    android_jar = "@androidsdk//:platforms/android-36/android.jar",
 )
 
 test_suite(name = "tests", tests = [":sdk_test", ":lint_test", ":lint_store_test"])
