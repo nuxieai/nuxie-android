@@ -378,6 +378,7 @@ class NuxieTest {
     }
 
     @Test
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     fun shutdownCancelsPendingPlayCheckoutAndRetainsItsRecoveryBinding() = runBlocking {
         val launched = CompletableDeferred<Unit>()
         val endCount = java.util.concurrent.atomic.AtomicInteger()
@@ -414,6 +415,7 @@ class NuxieTest {
         }
         Nuxie.setup(RuntimeEnvironment.getApplication(), configuration)
         val activity = org.robolectric.Robolectric.buildActivity(Activity::class.java).setup()
+        Dispatchers.setMain(UnconfinedTestDispatcher())
         try {
             withTimeout(5_000) {
                 val purchase = async { runCatching { Nuxie.purchase(activity.get(), product) } }
@@ -429,7 +431,10 @@ class NuxieTest {
                 assertFalse(events.contains(SystemEventNames.PURCHASE_CANCELLED))
                 assertFalse(events.contains(SystemEventNames.PURCHASE_FAILED))
             }
-        } finally { activity.pause().stop().destroy() }
+        } finally {
+            Dispatchers.resetMain()
+            activity.pause().stop().destroy()
+        }
     }
 
     @Test
