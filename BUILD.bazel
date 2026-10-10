@@ -86,7 +86,7 @@ sdk_docs(
     ],
 )
 
-filegroup(name = "fixtures", srcs = glob(["fixtures/**", "nuxie-android/src/test/resources/**"]))
+filegroup(name = "fixtures", srcs = glob(["fixtures/**", "nuxie-android/src/test/resources/**", "nuxie-android/src/androidTest/assets/**"]))
 
 # The friend edge supplies internal Kotlin access; this ordinary Android edge
 # also carries the production manifest/resources into Robolectric and APKs.
