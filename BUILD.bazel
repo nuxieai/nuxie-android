@@ -257,7 +257,7 @@ kt_android_library(
     manifest = ":example_debug_manifest",
     custom_package = "ai.nuxie.example",
     exports_manifest = 1,
-    resource_files = glob(["example-app/src/main/res/**", "example-app/src/debug/res/**"]),
+    resource_files = glob(["example-app/src/main/res/**"]),
     assets = glob(["example-app/src/debug/assets/**"]),
     assets_dir = "example-app/src/debug/assets",
     deps = [":sdk_release"],
