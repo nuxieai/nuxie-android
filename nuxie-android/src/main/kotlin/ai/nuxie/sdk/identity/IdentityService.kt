@@ -125,7 +125,10 @@ internal class IdentityService(
     // callback runs inside withCurrentScope and may call identify or reset.
     // The suspending admission runs no host code under the fence, so it takes
     // the Mutex without the thread flag and never re-enters.
-    private fun <T> withDecision(block: () -> T): T {
+    // The facade also uses this one fence for the entire identity transition,
+    // including session rotation, event capture and Feature staging. A separate
+    // facade lock would invert the order when an admitted App Action re-enters.
+    fun <T> withDecision(block: () -> T): T {
         if (decisionHeldByThisThread.get() == true) return block()
         return runBlocking {
             decisionLock.withLock {

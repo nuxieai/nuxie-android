@@ -297,8 +297,8 @@ internal class NuxieCore(
 
     /**
      * Decide the complete destination Feature projection synchronously. The
-     * facade publishes the returned mutation only after releasing its identity
-     * monitor, so inline collectors cannot observe a half-switched customer.
+     * facade publishes the returned mutation after finishing its identity
+     * decision, so inline collectors cannot observe a half-switched customer.
      */
     fun stageFeatureUserChange(from: String, to: String): FeatureInfo.Mutation =
         kotlinx.coroutines.runBlocking {
