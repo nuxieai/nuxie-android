@@ -2926,10 +2926,11 @@ internal class JourneyService(
             true
         }?.takeIf { it } ?: return false
         activePresentedRunIds.remove(run.id)
-        if (dismissPresentation) presenter?.shutdownPresentation(target.distinctId, run.journeyId)
         retireNativeValues(run.id)
         flushPendingReports(target)
         scheduleNextWake()
+        // Activity teardown may wait for the host; publish durable completion first.
+        if (dismissPresentation) presenter?.shutdownPresentation(target.distinctId, run.journeyId)
         return true
     }
 
