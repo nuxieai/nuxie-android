@@ -311,6 +311,13 @@ class BazelSdkPackagingTests(unittest.TestCase):
                 self.assertEqual(run.call_args.args[0], ["adb", "-s", "emulator-5554", "shell", "am", "instrument", "-w", "-r",
                     "-e", "class", "ai.nuxie.sdk.NativeTest", "ai.nuxie.sdk.test/androidx.test.runner.AndroidJUnitRunner"])
 
+    def test_instrumentation_transport_failure_keeps_adb_diagnostics(self):
+        result = subprocess.CompletedProcess(["adb"], 1, stdout="error: device offline\n")
+        with patch.object(sdk.subprocess, "run", return_value=result), patch("builtins.print") as output:
+            with self.assertRaises(subprocess.CalledProcessError):
+                sdk.run_instrumentation(["adb"])
+            output.assert_called_once_with(result.stdout, end="", flush=True)
+
 
 if __name__ == "__main__":
     unittest.main()

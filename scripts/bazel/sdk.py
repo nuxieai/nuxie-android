@@ -245,8 +245,9 @@ def run_instrumentation(adb, test_class=None):
     if test_class:
         command += ["-e", "class", test_class]
     command += ["ai.nuxie.sdk.test/androidx.test.runner.AndroidJUnitRunner"]
-    result = subprocess.run(command, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    result = subprocess.run(command, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     print(result.stdout, end="", flush=True)
+    result.check_returncode()
     verify_instrumentation_result(result.stdout)
 
 
