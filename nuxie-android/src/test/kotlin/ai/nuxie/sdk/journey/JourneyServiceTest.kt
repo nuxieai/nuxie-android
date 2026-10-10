@@ -2984,9 +2984,17 @@ class JourneyServiceTest {
         assertAuthoredDismiss("purchase", failReportOnce = true)
     }
 
+    @Test fun `dismissed lifecycle route retains pending purchase`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true, lifecycleRoute = SystemEventNames.SCREEN_DISMISSED)
+    }
+
+    @Test fun `shown lifecycle route retains pending purchase`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true, lifecycleRoute = SystemEventNames.SCREEN_SHOWN)
+    }
+
     private suspend fun assertAuthoredDismiss(commerce: String?, retryOutcome: String? = null, runtimeFrames: Boolean = false,
         pendingClose: Boolean = false, terminalOutcome: String? = null, holdClosePublication: Boolean = false,
-        failCompletionOnce: Boolean = false, failPublicationOnce: Boolean = false, secondPurchase: Boolean = false, terminalStartsEntry: Boolean = false, failReportOnce: Boolean = false, deferredFailureRetry: Boolean = false) {
+        failCompletionOnce: Boolean = false, failPublicationOnce: Boolean = false, secondPurchase: Boolean = false, terminalStartsEntry: Boolean = false, failReportOnce: Boolean = false, deferredFailureRetry: Boolean = false, lifecycleRoute: String? = null) {
         val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/authored-dismiss.json").readText()).jsonObject
             .getValue("cases").jsonArray.single { it.jsonObject.getValue("name").jsonPrimitive.content == (commerce ?: "user_close") }.jsonObject
@@ -3028,8 +3036,12 @@ class JourneyServiceTest {
                 Json.parseToJsonElement("""{"kind":"action","id":"close","action":{"type":"dismiss","reason":"author_closed"},"outlets":{}}"""),
                 Json.parseToJsonElement("""{"kind":"action","id":"close_marker","action":{"type":"send_event","eventName":"authored_close_requested","payload":{}},"outlets":{"next":"close"}}"""),
             )),
-            "routes" to Json.parseToJsonElement("""[{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"buy","entryStepId":"commerce"},{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"close","entryStepId":"close_marker"}]"""),
+            "routes" to Json.parseToJsonElement("""[{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"buy","entryStepId":"commerce"},{"host":{"kind":"screen","screenId":"${if (lifecycleRoute == SystemEventNames.SCREEN_SHOWN) "screen_thanks" else "screen_welcome"}"},"eventName":"${lifecycleRoute ?: "close"}","entryStepId":"close_marker"}]"""),
         ))
+        if (lifecycleRoute == SystemEventNames.SCREEN_SHOWN) {
+            leg = JsonObject(leg + ("screens" to JsonArray(leg.getValue("screens").jsonArray +
+                buildJsonObject { put("id", "screen_thanks") })))
+        }
         if (failReportOnce) {
             leg = JsonObject(leg + ("steps" to JsonArray(leg.getValue("steps").jsonArray.map {
                 if (it.jsonObject["id"] == JsonPrimitive("dismiss")) Json.parseToJsonElement(
@@ -3056,7 +3068,7 @@ class JourneyServiceTest {
         val envelope = JourneyReleaseEnvelope.authenticate(entry.getValue("envelope").toString().encodeToByteArray(),
             mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP)))
         val render = original.descriptor.getValue("render").jsonObject
-        val fixtureRender = if (secondPurchase) JsonObject(render + ("screens" to JsonArray(
+        val fixtureRender = if (secondPurchase || lifecycleRoute == SystemEventNames.SCREEN_SHOWN) JsonObject(render + ("screens" to JsonArray(
             render.getValue("screens").jsonArray + JsonObject(render.getValue("screens").jsonArray.first().jsonObject +
                 ("id" to JsonPrimitive("screen_thanks")))))) else render
         val release = AuthenticatedJourneyRelease(envelope, original.identity,
@@ -3250,6 +3262,10 @@ class JourneyServiceTest {
                         releaseCloseCapture.complete(Unit)
                         val terminalAccepted = withTimeout(5_000) { close.await(); terminal.await() }
                         assertTrue("Deferral must acknowledge durable handling", terminalAccepted)
+                    } else if (lifecycleRoute == SystemEventNames.SCREEN_SHOWN) {
+                        assertTrue(request.onScreenChanged("screen_thanks"))
+                    } else if (lifecycleRoute == SystemEventNames.SCREEN_DISMISSED) {
+                        request.onScreenDismissed("screen_welcome", null, "user")
                     } else runtimeTap("close")
                     withTimeout(5_000) {
                         while (presentations.ownsJourney(JourneyPresentationOwner(request.journeyId, "customer"))) kotlinx.coroutines.delay(10)
