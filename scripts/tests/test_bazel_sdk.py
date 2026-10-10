@@ -43,17 +43,51 @@ class BazelSdkPackagingTests(unittest.TestCase):
         </manifest>''')
         output = self.directory / "packaged.xml"
         with patch("sys.argv", ["package_aar.py", "manifest", "--input", str(source),
-                                "--output", str(output), "--package", "ai.nuxie.example"]):
+                                "--output", str(output), "--package", "ai.nuxie.example", "--debuggable"]):
             packager.main()
         root = ET.parse(output).getroot()
         android = "{http://schemas.android.com/apk/res/android}"
         self.assertEqual(root.attrib, {"package": "ai.nuxie.example"})
         application = root.find("application")
-        self.assertEqual(application.attrib, {android + "usesCleartextTraffic": "true"})
+        self.assertEqual(application.attrib, {android + "usesCleartextTraffic": "true",
+                                             android + "debuggable": "true"})
         self.assertEqual(application.find("activity").attrib,
                          {android + "name": ".AssetSmokeActivity", android + "exported": "true"})
         self.assertEqual(root.find("uses-sdk").attrib,
                          {android + "minSdkVersion": "23", android + "targetSdkVersion": "36"})
+
+    def test_sdk_manifest_keeps_release_application_without_debug_override(self):
+        source = self.directory / "sdk.xml"
+        source.write_text('<manifest><application /></manifest>')
+        output = self.directory / "packaged.xml"
+        with patch("sys.argv", ["package_aar.py", "manifest", "--input", str(source),
+                                "--output", str(output)]):
+            packager.main()
+        root = ET.parse(output).getroot()
+        self.assertEqual(root.attrib, {"package": "ai.nuxie.sdk"})
+        self.assertEqual(root.find("application").attrib, {})
+
+    def test_instrumentation_manifest_keeps_authored_hosts_and_debug_runner(self):
+        source = self.directory / "test.xml"
+        source.write_text('''<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          <application android:usesCleartextTraffic="true">
+            <activity android:name="ai.nuxie.sdk.presentation.SurfaceCompatibilityHostActivity" />
+          </application>
+        </manifest>''')
+        output = self.directory / "packaged.xml"
+        with patch("sys.argv", ["package_aar.py", "instrumentation-manifest", "--input", str(source),
+                                "--output", str(output)]):
+            packager.main()
+        root = ET.parse(output).getroot()
+        android = "{http://schemas.android.com/apk/res/android}"
+        self.assertEqual(root.attrib, {"package": "ai.nuxie.sdk.test"})
+        self.assertEqual(root.find("application").attrib,
+                         {android + "usesCleartextTraffic": "true", android + "debuggable": "true"})
+        self.assertEqual(root.find("application/activity").get(android + "name"),
+                         "ai.nuxie.sdk.presentation.SurfaceCompatibilityHostActivity")
+        self.assertEqual(root.find("instrumentation").attrib,
+                         {android + "name": "androidx.test.runner.AndroidJUnitRunner",
+                          android + "targetPackage": "ai.nuxie.sdk.test"})
 
     def test_cache_override_reaches_bazel_without_overriding_worktree_output_base(self):
         root = self.directory
