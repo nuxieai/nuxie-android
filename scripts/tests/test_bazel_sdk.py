@@ -282,6 +282,36 @@ class BazelSdkPackagingTests(unittest.TestCase):
             sdk.verify_api(publication)
             self.assertEqual(jar.stat().st_mtime_ns, previous)
 
+    def test_instrumentation_accepts_completed_tests_and_runner_skips(self):
+        output = (
+            "INSTRUMENTATION_STATUS_CODE: 1\n"
+            "INSTRUMENTATION_STATUS_CODE: 0\n"
+            "INSTRUMENTATION_STATUS_CODE: -3\n"
+            "INSTRUMENTATION_STATUS_CODE: -4\n"
+            "INSTRUMENTATION_RESULT: stream=\n\nOK (1 test)\n"
+            "INSTRUMENTATION_CODE: -1\n"
+        )
+        sdk.verify_instrumentation_result(output)
+
+    def test_successful_adb_exit_does_not_hide_junit_failure_or_crashed_runner(self):
+        outputs = (
+            "INSTRUMENTATION_STATUS_CODE: 1\nINSTRUMENTATION_STATUS_CODE: -2\n"
+            "INSTRUMENTATION_RESULT: stream=\nFAILURES!!!\nTests run: 1, Failures: 1\nINSTRUMENTATION_CODE: -1\n",
+            "INSTRUMENTATION_STATUS_CODE: -1\nINSTRUMENTATION_CODE: -1\n",
+            "INSTRUMENTATION_RESULT: shortMsg=Process crashed.\nINSTRUMENTATION_CODE: 0\n",
+            "INSTRUMENTATION_FAILED: Unable to find instrumentation info\n",
+            "INSTRUMENTATION_RESULT: stream=\nOK (0 tests)\nINSTRUMENTATION_CODE: -1\n",
+            "INSTRUMENTATION_STATUS_CODE: 1\nOK (1 test)\n",
+        )
+        for output in outputs:
+            with self.subTest(output=output), \
+                    patch.object(sdk.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout=output)) as run, \
+                    patch("builtins.print"):
+                with self.assertRaisesRegex(ValueError, "Android instrumentation"):
+                    sdk.run_instrumentation(["adb", "-s", "emulator-5554"], "ai.nuxie.sdk.NativeTest")
+                self.assertEqual(run.call_args.args[0], ["adb", "-s", "emulator-5554", "shell", "am", "instrument", "-w", "-r",
+                    "-e", "class", "ai.nuxie.sdk.NativeTest", "ai.nuxie.sdk.test/androidx.test.runner.AndroidJUnitRunner"])
+
 
 if __name__ == "__main__":
     unittest.main()
