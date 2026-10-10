@@ -267,7 +267,7 @@ internal class FilePurchaseEvidenceStore(
     private fun loadBindingsUnlocked(): List<StoredPurchaseBinding> = runCatching {
         if (!bindingsFile.exists()) emptyList() else {
             json.parseToJsonElement(bindingsFile.readText()).jsonArray.mapNotNull {
-                decodeBinding(it as? JsonObject ?: return@mapNotNull null)
+                warnIfInvalidRow((it as? JsonObject)?.let(::decodeBinding), "bindings")
             }
         }
     }.onFailure { Log.w("NuxieBilling", "Could not read purchase bindings.", it) }.getOrDefault(emptyList())
@@ -275,7 +275,7 @@ internal class FilePurchaseEvidenceStore(
     private fun loadMappingsUnlocked(): List<StoredProductMapping> = runCatching {
         if (!catalogFile.exists()) emptyList() else {
             json.parseToJsonElement(catalogFile.readText()).jsonArray.mapNotNull {
-                decodeMapping(it as? JsonObject ?: return@mapNotNull null)
+                warnIfInvalidRow((it as? JsonObject)?.let(::decodeMapping), "catalog")
             }
         }
     }.onFailure { Log.w("NuxieBilling", "Could not read purchase catalog.", it) }.getOrDefault(emptyList())
@@ -291,9 +291,16 @@ internal class FilePurchaseEvidenceStore(
 
     private fun loadUnlocked(): Map<String, PurchaseEvidence> = runCatching {
         if (!file.exists()) emptyMap() else json.parseToJsonElement(file.readText()).jsonObject
-            .mapNotNull { (token, raw) -> decodeEvidence(raw.jsonObject)?.let { token to it } }
+            .mapNotNull { (token, raw) ->
+                warnIfInvalidRow(decodeEvidence(raw.jsonObject), "evidence")?.let { token to it }
+            }
             .toMap()
     }.onFailure { Log.w("NuxieBilling", "Could not read purchase evidence.", it) }.getOrDefault(emptyMap())
+
+    private fun <T> warnIfInvalidRow(value: T?, description: String): T? {
+        if (value == null) Log.w("NuxieBilling", "Invalid purchase $description row was ignored.")
+        return value
+    }
 
     private fun saveUnlocked(entries: Map<String, PurchaseEvidence>): Boolean = runCatching {
         directory.mkdirs()
