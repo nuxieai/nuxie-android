@@ -37,7 +37,7 @@ use_repo(ndk, "androidndk")
 register_toolchains("@androidndk//:all")
 
 runtime = use_extension("//scripts/bazel:repositories.bzl", "runtime_artifacts")
-use_repo(runtime, "nuxie_runtime_android")
+use_repo(runtime, "nuxie_runtime_android", "nuxie_runtime_host")
 
 maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
 # rules_android's legacy IDE hub otherwise puts Guava 30.1 first on its

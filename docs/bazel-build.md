@@ -61,10 +61,23 @@ oracle. `scripts/bazel/sdk.sh check` runs Bazel tests/builds followed by the
 repository's Gradle checks and 16 KiB release verification. `api-check` and `lint`
 run those individual checks. `providers` retains the RevenueCat/Superwall example
 build/test and provider-selection drivers; their dependencies stay outside the
-SDK artifact. `host-render` runs the explicit live native smoke driver.
-The specialist host-render driver still uses Gradle to compile its SDK/test
-classpath and host JNI adapter. Its separate Bazel migration is tracked in
-[UNIV-4194](https://universe.basis.dev/issue/UNIV-4194).
+SDK artifact.
+
+`host-render --input /absolute/release --output /absolute/frames --frames 3
+--step-ms 16` runs `//:host_render_harness`. Bazel compiles the existing host
+Kotlin harness and JNI C adapter, preserving their internal SDK access, release
+descriptor import, rendering and output manifest. The host JNI link imports the
+explicit `NUXIE_HOST_CAPI_LIB` as a watched source input and verifies the same
+five required scripting exports. It uses the verified SDK runtime header and
+the declared JDK JNI headers, and loads the selected library from runfiles.
+Absolute checkout paths are absent from native compile/link arguments.
+
+`host-render-smoke` runs the four existing live tests through
+`//:host_render_smoke` in a separate JVM. Both frontends require a macOS or Linux
+scripting-enabled host runtime. Vulkan/loader environment variables are retained.
+Host harness sources and libraries remain outside the published Android AAR.
+See [UNIV-4194](https://universe.basis.dev/issue/UNIV-4194) for the parent headless
+driver's qualification and adoption.
 
 ```sh
 scripts/bazel/sdk.sh instrumentation-run --serial "$ANDROID_SERIAL" \

@@ -1,9 +1,10 @@
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_java//java:java_library.bzl", "java_library")
 load("@rules_java//java:java_test.bzl", "java_test")
+load("@rules_java//java:java_binary.bzl", "java_binary")
 load("@rules_kotlin//kotlin:android.bzl", "kt_android_library", "kt_android_local_test")
 load("@rules_android//android:rules.bzl", "aar_import", "android_binary", "android_library")
-load("//scripts/bazel:sdk_rules.bzl", "sdk_aar", "sdk_docs", "sdk_jvm_test", "sdk_assets")
+load("//scripts/bazel:sdk_rules.bzl", "sdk_aar", "sdk_docs", "sdk_jvm_test", "sdk_assets", "sdk_host_harness", "sdk_host_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -87,6 +88,81 @@ filegroup(name = "fixtures", srcs = glob(["fixtures/**", "nuxie-android/src/test
 # The friend edge supplies internal Kotlin access; this ordinary Android edge
 # also carries the production manifest/resources into Robolectric and APKs.
 android_library(name = "sdk_test_resources", custom_package = "ai.nuxie.sdk", exports = [":sdk"])
+
+HOST_COMPATIBILITY = select({
+    "@platforms//os:macos": [],
+    "@platforms//os:linux": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+cc_binary(
+    name = "libnuxie_runtime_android_host.so",
+    srcs = ["nuxie-android/src/main/cpp/nuxie_runtime_android.c"] + glob(["nuxie-android/src/main/cpp/*.h"]),
+    defines = ["NUX_CAPI_ANDROID_VULKAN", "NUX_CAPI_ANDROID_AUTHORED_WGSL"],
+    copts = ["-O2"],
+    linkopts = select({"@platforms//os:linux": ["-Wl,-z,defs"], "//conditions:default": []}),
+    linkshared = True,
+    deps = ["@rules_java//toolchains:jni", "@nuxie_runtime_android//:capi_headers", "@nuxie_runtime_host//:capi"],
+    target_compatible_with = HOST_COMPATIBILITY,
+)
+
+HOST_SRCS = glob(["nuxie-android/src/hostRenderHarness/**/*.kt"])
+HOST_DEPS = SDK_DEPS + [":sdk_test_resources", "@test_maven//:org_robolectric_robolectric", "@robolectric//bazel:android-all"]
+
+kt_android_library(
+    name = "host_render_kotlin",
+    srcs = HOST_SRCS,
+    associates = [":sdk"],
+    manifest = "nuxie-android/src/main/AndroidManifest.xml",
+    custom_package = "ai.nuxie.sdk",
+    deps = HOST_DEPS,
+    target_compatible_with = HOST_COMPATIBILITY,
+)
+
+java_binary(
+    name = "host_render_java",
+    main_class = "ai.nuxie.sdk.hostrender.HostRenderHarnessKt",
+    runtime_deps = [":host_render_kotlin"],
+    target_compatible_with = HOST_COMPATIBILITY,
+)
+
+sdk_host_harness(
+    name = "host_render_harness",
+    binary = ":host_render_java",
+    jni = ":libnuxie_runtime_android_host.so",
+    target_compatible_with = HOST_COMPATIBILITY,
+)
+
+kt_android_library(
+    name = "host_render_smoke_kotlin",
+    srcs = HOST_SRCS + ["nuxie-android/src/test/kotlin/ai/nuxie/sdk/hostrender/HostRenderSmokeTest.kt"],
+    associates = [":sdk"],
+    manifest = "nuxie-android/src/main/AndroidManifest.xml",
+    custom_package = "ai.nuxie.sdk",
+    deps = HOST_DEPS + ["@test_maven//:junit_junit"],
+    target_compatible_with = HOST_COMPATIBILITY,
+)
+
+java_binary(
+    name = "host_render_smoke_java",
+    main_class = "org.junit.runner.JUnitCore",
+    args = ["ai.nuxie.sdk.hostrender.HostRenderSmokeTest"],
+    runtime_deps = [":host_render_smoke_kotlin", "@test_maven//:junit_junit"],
+    resources = glob(["nuxie-android/src/test/resources/hostrender/**"]),
+    resource_strip_prefix = "nuxie-android/src/test/resources",
+    data = glob(["nuxie-android/src/androidTest/assets/**", "example-app/src/debug/assets/asset-smoke/**"]),
+    target_compatible_with = HOST_COMPATIBILITY,
+)
+
+sdk_host_test(
+    name = "host_render_smoke",
+    binary = ":host_render_smoke_java",
+    jni = ":libnuxie_runtime_android_host.so",
+    target_compatible_with = HOST_COMPATIBILITY,
+    size = "large",
+    timeout = "long",
+    tags = ["manual"],
+)
 
 TEST_SRCS = glob([
     "nuxie-android/src/test/**/*.kt", "nuxie-android/src/test/**/*.java",
