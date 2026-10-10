@@ -2438,7 +2438,10 @@ class JourneyServiceTest {
                         if (!reset) {
                             core.eventLog.awaitBarrier()
                             core.userTransitions.drain()
-                            val identify = core.store.pendingBatch(limit = 50).single {
+                            // Upload completion must not erase the durable-event oracle.
+                            core.delivery.flushAll()
+                            val session = requireNotNull(core.sessions.getSessionId(readOnly = true))
+                            val identify = core.store.querySessionEvents(session).single {
                                 it.name == "\$identify" && it.properties["distinct_id"] == JsonPrimitive("replacement")
                             }
                             assertEquals("replacement", identify.distinctId)
