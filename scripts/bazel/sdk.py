@@ -228,6 +228,29 @@ def verify_api(aar_path):
     gradle(":nuxie-android:bazelApiCheck", properties=("-PnuxieBazelApiJar=" + str(jar),))
 
 
+def verify_instrumentation_result(output):
+    # adb shell can exit successfully even when AndroidJUnitRunner reports a
+    # failing test or crashes. Use the runner's raw result protocol as the oracle.
+    status = [int(value) for value in re.findall(r"^INSTRUMENTATION_STATUS_CODE: (-?\d+)\s*$", output, re.MULTILINE)]
+    terminal = re.findall(r"^INSTRUMENTATION_CODE: (-?\d+)\s*$", output, re.MULTILINE)
+    summary = re.search(r"^OK \(([1-9]\d*) tests?\)\s*$", output, re.MULTILINE)
+    failed = re.search(r"^INSTRUMENTATION_(?:FAILED|ABORTED):|^INSTRUMENTATION_RESULT: shortMsg=", output, re.MULTILINE)
+    if terminal != ["-1"] or summary is None or failed or any(value not in (1, 0, -3, -4) for value in status):
+        raise ValueError("Android instrumentation failed or did not report a completed test run")
+    if not any(value in (0, -3, -4) for value in status):
+        raise ValueError("Android instrumentation reported no completed tests")
+
+
+def run_instrumentation(adb, test_class=None):
+    command = adb + ["shell", "am", "instrument", "-w", "-r"]
+    if test_class:
+        command += ["-e", "class", test_class]
+    command += ["ai.nuxie.sdk.test/androidx.test.runner.AndroidJUnitRunner"]
+    result = subprocess.run(command, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    print(result.stdout, end="", flush=True)
+    verify_instrumentation_result(result.stdout)
+
+
 def sign(directory, files):
     key = os.environ.get("NUXIE_SIGNING_KEY")
     if not key:
@@ -355,10 +378,7 @@ def main():
             apk = artifact("//:sdk_instrumentation_apk")
             adb = [str(Path(os.environ["ANDROID_HOME"]) / "platform-tools/adb"), "-s", args.serial]
             subprocess.run(adb + ["install", "-r", str(apk)], check=True)
-            command = adb + ["shell", "am", "instrument", "-w", "-r"]
-            if args.test_class:
-                command += ["-e", "class", args.test_class]
-            subprocess.run(command + ["ai.nuxie.sdk.test/androidx.test.runner.AndroidJUnitRunner"], check=True)
+            run_instrumentation(adb, args.test_class)
         else:
             label = {"build": "//:sdk_aar", "example": "//:example_app_debug", "instrumentation": "//:sdk_instrumentation_apk"}[args.command]
             bazel("build", label)
