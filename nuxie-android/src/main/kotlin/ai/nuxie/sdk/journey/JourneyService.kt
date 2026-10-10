@@ -2926,12 +2926,15 @@ internal class JourneyService(
             true
         }?.takeIf { it } ?: return false
         activePresentedRunIds.remove(run.id)
-        retireNativeValues(run.id)
-        flushPendingReports(target)
-        scheduleNextWake()
-        // Activity teardown may wait for the host; publish durable completion first.
-        if (dismissPresentation) presenter?.shutdownPresentation(target.distinctId, run.journeyId)
-        return true
+        try {
+            retireNativeValues(run.id)
+            flushPendingReports(target)
+            scheduleNextWake()
+            return true
+        } finally {
+            // Attempt publication first; a durable terminal run always releases its screen.
+            if (dismissPresentation) presenter?.shutdownPresentation(target.distinctId, run.journeyId)
+        }
     }
 
     private suspend fun abandonRun(run: JourneyRun, target: JourneyRunJournal) {
