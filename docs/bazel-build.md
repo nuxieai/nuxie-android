@@ -85,7 +85,18 @@ checkout. Run `python3 -B -m unittest discover -s scripts/bazel -p 'test_cache.p
 for the cache override checks.
 
 `NUXIE_BAZEL_JOBS` defaults to 2. `NUXIE_BAZEL_BIN` selects an existing launcher.
-Commands require at least 5 GiB of free disk before starting.
+`NUXIE_BAZEL_BATCH=1` (or `CI=1`) avoids a persistent Bazel server; set it to `0`
+to keep a local server. System and home bazelrc files are excluded so declared
+workspace toolchains and cache configuration apply consistently. The nested
+semantic-fixture workspace uses the same caches and derives its own output base;
+its optional output override is `NUXIE_ANDROID_FIXTURE_BAZEL_OUTPUT_BASE`.
+Commands require at least 5 GiB of free disk before starting. Standalone CI
+installs the checksummed launcher explicitly and preserves reusable caches.
+Standalone Buildkite lanes source `scripts/bazel/ci-cache.sh`, matching the
+installed root/runtime hook's sanitized agent directory under
+`~/.nuxie-ci/editor-cargo-target/`. Existing cache, output-user-root and batch
+overrides are preserved. The shared output-user-root contains a separate Bazel
+output base for each repository checkout.
 
 After intentionally changing Maven inputs, repin the owning hub:
 

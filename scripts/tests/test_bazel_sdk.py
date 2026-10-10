@@ -1,7 +1,9 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -38,12 +40,64 @@ class BazelSdkPackagingTests(unittest.TestCase):
                                           "NUXIE_BAZEL_CACHE_DIR": str(root / "shared cache")}, clear=True), \
                 patch.object(sdk.subprocess, "run") as run:
             sdk.bazel("build", "//:nuxie_android_aar")
-        self.assertEqual(run.call_args.args[0], ["selected-bazel",
+        self.assertEqual(run.call_args.args[0], ["selected-bazel", "--nosystem_rc", "--nohome_rc",
                          "--bazelrc=" + str(root / ".bazel-cache.local.bazelrc"),
                          "build", "--jobs=2", "//:nuxie_android_aar"])
         self.assertEqual(run.call_args.kwargs["cwd"], root)
         self.assertIn(str(root / "shared cache/actions"),
                       (root / ".bazel-cache.local.bazelrc").read_text())
+
+    def test_ci_batch_and_user_root_preserve_distinct_workspace_outputs(self):
+        sdk_root = self.directory / "sdk"
+        fixture_root = sdk_root / "build/semantic-fixture"
+        fixture_root.mkdir(parents=True)
+        variables = {"NUXIE_BAZEL_BIN": "selected-bazel", "CI": "1",
+                     "NUXIE_BAZEL_OUTPUT_USER_ROOT": str(self.directory / "outputs"),
+                     "NUXIE_ANDROID_BAZEL_OUTPUT_BASE": str(self.directory / "sdk output"),
+                     "NUXIE_BAZEL_CACHE_DIR": str(self.directory / "shared cache")}
+        with patch.object(sdk, "ROOT", sdk_root), patch.dict("os.environ", variables, clear=True):
+            ordinary = sdk.bazel_command()
+            fixture = sdk.bazel_command(fixture_root, "NUXIE_ANDROID_FIXTURE_BAZEL_OUTPUT_BASE")
+            self.assertIn("--batch", ordinary)
+            self.assertIn("--batch", fixture)
+            self.assertIn("--output_base=" + variables["NUXIE_ANDROID_BAZEL_OUTPUT_BASE"], ordinary)
+            self.assertFalse(any(value.startswith("--output_base=") for value in fixture))
+            for command in (ordinary, fixture):
+                self.assertIn("--output_user_root=" + variables["NUXIE_BAZEL_OUTPUT_USER_ROOT"], command)
+            with patch.dict("os.environ", {"NUXIE_BAZEL_BATCH": "0"}):
+                self.assertNotIn("--batch", sdk.bazel_command())
+        self.assertEqual((sdk_root / ".bazel-cache.local.bazelrc").read_bytes(),
+                         (fixture_root / ".bazel-cache.local.bazelrc").read_bytes())
+
+    def test_standalone_build_uses_the_checksummed_launcher_without_parent_dependencies(self):
+        with patch.object(sdk, "ROOT", self.directory), patch.dict("os.environ", {}, clear=True), \
+                patch.object(sdk.shutil, "which", return_value=None):
+            self.assertEqual(sdk.bazel_command()[:2], [sdk.sys.executable,
+                             str(self.directory / "scripts/bazel/launcher.py")])
+
+    def ci_caches(self, variables):
+        environment = {"PATH": os.environ["PATH"], "HOME": str(Path.home()), **variables}
+        result = subprocess.run(["bash", "--noprofile", "--norc", "-c",
+                                'set -euo pipefail; source "$1"; printf "%s\\n" "$BAZELISK_HOME" '
+                                '"$NUXIE_BAZEL_OUTPUT_USER_ROOT" "$NUXIE_BAZEL_CACHE_DIR" "$NUXIE_BAZEL_BATCH"',
+                                "ci-cache-test", str(ROOT / "scripts/bazel/ci-cache.sh")],
+                               env=environment, check=True, text=True, capture_output=True)
+        return result.stdout.splitlines()
+
+    def test_standalone_buildkite_reuses_guarded_agent_caches(self):
+        expected_root = Path.home() / ".nuxie-ci/editor-cargo-target/runner-mac-one"
+        self.assertEqual(self.ci_caches({"BUILDKITE_AGENT_NAME": "runner mac/one", "RUNNER_NAME": "unused"}),
+                         [str(expected_root / "bazelisk"), str(expected_root / "bazel"),
+                          str(expected_root / "bazel-shared-cache"), "1"])
+        for name in ("", ".", ".."):
+            self.assertIn("/editor-cargo-target/default/bazel", self.ci_caches({"RUNNER_NAME": name})[1])
+
+    def test_standalone_buildkite_preserves_explicit_cache_and_output_overrides(self):
+        expected = [str(self.directory / name) for name in ("launcher cache", "output state", "shared cache")]
+        variables = dict(zip(("BAZELISK_HOME", "NUXIE_BAZEL_OUTPUT_USER_ROOT", "NUXIE_BAZEL_CACHE_DIR"), expected))
+        variables["NUXIE_BAZEL_BATCH"] = "0"
+        self.assertEqual(self.ci_caches(variables), expected + ["0"])
+        self.assertEqual(self.ci_caches({"NUXIE_BAZEL_CACHE_DIR": ""})[2], "")
 
     def fixture(self):
         base = self.directory / "base.aar"
@@ -185,12 +239,15 @@ class BazelSdkPackagingTests(unittest.TestCase):
         sdk_root = self.directory / "sdk"
         sdk_root.mkdir()
         (sdk_root / ".bazelversion").write_text("9.3.0\n")
+        (sdk_root / ".bazel-cache.bazelrc").write_bytes((ROOT / ".bazel-cache.bazelrc").read_bytes())
         with patch.object(semantic, "ROOT", sdk_root):
             generated = semantic.workspace(runtime_path)
         module_text = (generated / "MODULE.bazel").read_text()
         self.assertIn(json.dumps(str(runtime_path)), module_text)
         self.assertIn('@nuxie_runtime//crates/nuxie-schema:nuxie-schema__host', (generated / "BUILD.bazel").read_text())
         self.assertEqual((generated / "semantic-text.rs").readlink(), sdk_root / "scripts/fixtures/semantic-text.rs")
+        self.assertEqual((generated / ".bazel-cache.bazelrc").read_bytes(), (ROOT / ".bazel-cache.bazelrc").read_bytes())
+        self.assertEqual((generated / ".bazelrc").read_text(), "import %workspace%/.bazel-cache.bazelrc\n")
         self.assertEqual(hashlib.sha256(semantic.ASSET.read_bytes()).hexdigest(), semantic.EXPECTED_SHA256)
         with self.assertRaisesRegex(ValueError, "no Bazel schema interface"):
             semantic.workspace(self.directory / "no runtime metadata")
