@@ -429,8 +429,9 @@ class PurchaseFeatureUseTest {
         },
         billing: PlayBillingGateway = NoopBilling,
     ): PurchaseService {
-        store.upsertProductMapping(featureDescriptor())
+        kotlinx.coroutines.runBlocking { store.upsertProductMapping(featureDescriptor()) }
         return PurchaseService(
+            ioDispatcher = kotlinx.coroutines.Dispatchers.Unconfined,
             billing = billing,
             evidenceStore = store,
             synchronizer = synchronizer,
@@ -511,7 +512,7 @@ class PurchaseFeatureUseTest {
         return FallbackFixture(core, transport, store, service(core, store))
     }
 
-    private fun syncFixture(outcome: PurchaseSyncOutcome): SyncFixture {
+    private suspend fun syncFixture(outcome: PurchaseSyncOutcome): SyncFixture {
         val transport = FakeTransport().apply {
             respond = { request ->
                 if (request.url.path == "/feature/consume") {
@@ -598,7 +599,7 @@ class PurchaseFeatureUseTest {
             nextLoadSnapshot = entries.toMap()
         }
 
-        override fun load(): Map<String, PurchaseEvidence> = synchronized(entries) {
+        override suspend fun load(): Map<String, PurchaseEvidence> = synchronized(entries) {
             if (observe) {
                 observe = false
                 nextLoadObserved.countDown()
@@ -608,16 +609,16 @@ class PurchaseFeatureUseTest {
             snapshot ?: entries.toMap()
         }
 
-        override fun upsert(evidence: PurchaseEvidence): Boolean = synchronized(entries) {
+        override suspend fun upsert(evidence: PurchaseEvidence): Boolean = synchronized(entries) {
             entries[evidence.purchaseToken] = evidence
             true
         }
 
         private var mapping: StoredProductMapping? = null
 
-        override fun loadProductMappings(): List<StoredProductMapping> = listOfNotNull(mapping)
+        override suspend fun loadProductMappings(): List<StoredProductMapping> = listOfNotNull(mapping)
 
-        override fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
+        override suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
             this.mapping = mapping
             return true
         }
