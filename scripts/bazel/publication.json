@@ -1,0 +1,15 @@
+{
+  "name": "Nuxie Android SDK",
+  "description": "Native Android Experiences, Journeys, and Features for Nuxie.",
+  "url": "https://nuxie.ai",
+  "license": {
+    "name": "MIT License",
+    "url": "https://opensource.org/licenses/MIT"
+  },
+  "developer": {"id": "nuxie", "name": "Nuxie", "url": "https://nuxie.ai"},
+  "scm": {
+    "connection": "scm:git:https://github.com/nuxieai/nuxie-android.git",
+    "developerConnection": "scm:git:ssh://git@github.com/nuxieai/nuxie-android.git",
+    "url": "https://github.com/nuxieai/nuxie-android"
+  }
+}

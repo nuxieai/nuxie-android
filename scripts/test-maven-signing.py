@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise Gradle signing and bundle admission with an isolated temporary key."""
+"""Exercise Bazel publication signing and bundle admission with an isolated temporary key."""
 import importlib.util
 import os
 from pathlib import Path
@@ -30,8 +30,8 @@ with tempfile.TemporaryDirectory(prefix='nxpgp-', dir='/tmp') as temporary:
     environment['NUXIE_SIGNING_PASSWORD'] = ''
     logs = root / 'build/maven-signing-test'
     logs.mkdir(parents=True, exist_ok=True)
-    with (logs / 'gradle.log').open('w') as output:
-        subprocess.run([str(root / 'gradlew'), '--no-daemon', ':nuxie-android:publishReleasePublicationToStagingRepository'],
+    with (logs / 'bazel.log').open('w') as output:
+        subprocess.run([str(root / 'scripts/bazel/sdk.sh'), 'prepare', '--output', str(root / 'build/maven-repository'), '--sign'],
                        cwd=root, env=environment, check=True, stdout=output, stderr=subprocess.STDOUT)
     repository = work / 'repository'
     shutil.copytree(root / 'build/maven-repository', repository)
@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix='nxpgp-', dir='/tmp') as temporary:
     version = versions[0].parent.name
     bundle = work / 'central.zip'
     module.bundle(repository, version, public_key, fingerprint, bundle)
-    print('Gradle-generated signatures and complete bundle passed', flush=True)
+    print('Bazel publication signatures and complete bundle passed', flush=True)
     def rejected(label, key_fingerprint=fingerprint):
         try:
             module.bundle(repository, version, public_key, key_fingerprint, work / 'rejected.zip')

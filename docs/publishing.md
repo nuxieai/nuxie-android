@@ -10,7 +10,7 @@ Test Store lint rule. Purchase-provider adapters remain example code.
 From this repository, stage the publication and build an independent consumer:
 
 ```sh
-./gradlew :nuxie-android:publishReleasePublicationToStagingRepository
+scripts/bazel/sdk.sh prepare --output build/maven-repository
 python3 scripts/test-maven-consumer.py --version 0.1.0
 ```
 
@@ -34,10 +34,11 @@ run remain required before announcing availability.
 Provide the armored release private key through `NUXIE_SIGNING_KEY` and its
 password through `NUXIE_SIGNING_PASSWORD` using the release secret environment.
 These are signing credentials, separate from the Central user token. With that
-environment present, Gradle signs the publication in memory:
+environment present, Bazel preparation signs the publication with an isolated
+temporary GnuPG home:
 
 ```sh
-./gradlew --no-daemon :nuxie-android:publishReleasePublicationToStagingRepository
+scripts/bazel/sdk.sh prepare --output build/maven-repository --sign
 python3 scripts/bundle-maven-release.py --version 0.1.0 \
   --public-key /absolute/path/to/release-public-key.asc \
   --fingerprint FULL_RELEASE_KEY_FINGERPRINT \
@@ -50,7 +51,7 @@ checks publication identity and required metadata/content, and creates the Maven
 repository layout with signatures and MD5, SHA-1, SHA-256 and SHA-512 checksums.
 It does not upload or publish anything.
 
-`python3 scripts/test-maven-signing.py` qualifies Gradle signing with a temporary
+`python3 scripts/test-maven-signing.py` qualifies publication signing with a temporary
 test key and rejects a wrong fingerprint, altered bytes and missing signatures.
 It replaces staging signatures with test signatures; regenerate the publication
 with the release key before preparing a real release bundle. The temporary
@@ -71,7 +72,7 @@ python3 scripts/publish-maven-release.py prepare --version 0.1.0 \
 ```
 
 Preparation checks the remote tag and main ancestry, rejects a dirty checkout or
-local runtime override, runs native tests/API/lint/example/release assembly,
+local runtime override, runs Bazel tests and the independent Gradle native/API/lint/example checks,
 stages the signed publication, runs the independent consumer and verifies the
 bundle. It records the source commit and bundle digest in `release.json`. Use a
 new output directory for a new preparation attempt; retain failed logs.
@@ -112,8 +113,9 @@ credentials through redirects.
 API contract and failure handling with simulated responses. It does not prove
 namespace ownership, live Central validation or public release availability.
 
-Publication uses the Android release software component so dependency scopes
-are preserved. Billing and coroutines are compile dependencies because public
+Publication preserves the Android release software component's dependency scopes
+and uses shared canonical metadata for Bazel and the Gradle compatibility oracle.
+Billing and coroutines are compile dependencies because public
 APIs expose their types; SQLite and serialization remain runtime dependencies.
 See [Android library publication](https://developer.android.com/build/publish-library/upload-library)
 and [Maven Central requirements](https://central.sonatype.org/publish/requirements/).

@@ -1,0 +1,106 @@
+module(name = "nuxie_android", version = "0.1.0")
+
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "rules_android", version = "0.8.0")
+bazel_dep(name = "rules_android_ndk", version = "0.1.5")
+bazel_dep(name = "rules_cc", version = "0.2.17")
+bazel_dep(name = "rules_java", version = "9.3.0")
+bazel_dep(name = "rules_kotlin", version = "2.1.9")
+bazel_dep(name = "rules_jvm_external", version = "6.9")
+bazel_dep(name = "rules_python", version = "1.7.0")
+bazel_dep(name = "rules_robolectric", version = "4.16.1", repo_name = "robolectric")
+
+kotlin = use_extension("@rules_kotlin//src/main/starlark/core/repositories:bzlmod_setup.bzl", "rules_kotlin_extensions")
+kotlin.kotlinc_version(
+    version = "2.0.21",
+    sha256 = "0352c0a45bd22f80f6b26e485cd04da8047baa5de54865281fb9f89a4a7bcf2a",
+)
+use_repo(kotlin, "com_github_jetbrains_kotlin")
+register_toolchains("//scripts/bazel:kotlin_toolchain")
+
+sdk = use_extension("@rules_android//rules/android_sdk_repository:rule.bzl", "android_sdk_repository_extension")
+sdk.configure(api_level = 36, build_tools_version = "36.0.0")
+use_repo(sdk, "androidsdk")
+register_toolchains("@androidsdk//:sdk-toolchain", "@androidsdk//:all")
+
+ndk = use_extension("@rules_android_ndk//:extension.bzl", "android_ndk_repository_extension")
+ndk.configure(api_level = 23)
+use_repo(ndk, "androidndk")
+register_toolchains("@androidndk//:all")
+
+runtime = use_extension("//scripts/bazel:repositories.bzl", "runtime_artifacts")
+use_repo(runtime, "nuxie_runtime_android")
+
+maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
+maven.install(
+    name = "sdk_maven",
+    lock_file = "//scripts/bazel/locks:sdk_maven_install.json",
+    fail_if_repin_required = True,
+    artifacts = [
+        "androidx.browser:browser:1.8.0",
+        "androidx.sqlite:sqlite-framework:2.6.2",
+        "com.android.billingclient:billing:9.1.0",
+        # The independent owning Gradle releaseRuntimeClasspath resolves 2.1.20
+        # through sqlite2.6.2 while compiling with Kotlin2.0.21.
+        "org.jetbrains.kotlin:kotlin-stdlib:2.1.20",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.9.0",
+        "org.jetbrains.kotlinx:kotlinx-serialization-json-jvm:1.7.2",
+    ],
+    repositories = ["https://dl.google.com/dl/android/maven2", "https://repo.maven.apache.org/maven2"],
+    aar_import_bzl_label = "@rules_android//android:rules.bzl",
+    use_starlark_android_rules = True,
+    version_conflict_policy = "pinned",
+)
+use_repo(maven, "sdk_maven")
+
+# Tooling dependencies have separate classpaths and never widen the published SDK.
+maven.install(
+    name = "test_maven",
+    lock_file = "//scripts/bazel/locks:test_maven_install.json",
+    fail_if_repin_required = True,
+    artifacts = [
+        "junit:junit:4.13.2",
+        "org.jetbrains.kotlin:kotlin-stdlib:2.1.20",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-test-jvm:1.9.0",
+        "org.mockito:mockito-core:5.18.0",
+        "org.robolectric:robolectric:4.16.1",
+        "androidx.test:runner:1.6.2",
+        "androidx.test.uiautomator:uiautomator:2.3.0",
+    ],
+    repositories = ["https://dl.google.com/dl/android/maven2", "https://repo.maven.apache.org/maven2"],
+    aar_import_bzl_label = "@rules_android//android:rules.bzl",
+    use_starlark_android_rules = True,
+    version_conflict_policy = "pinned",
+)
+use_repo(maven, "test_maven")
+
+maven.install(
+    name = "lint_maven",
+    lock_file = "//scripts/bazel/locks:lint_maven_install.json",
+    fail_if_repin_required = True,
+    artifacts = [
+        "com.android.tools.lint:lint-api:31.10.1",
+        "com.android.tools.lint:lint-tests:31.10.1",
+        "com.android.tools.lint:lint-checks:31.10.1",
+        "junit:junit:4.13.2",
+    ],
+    repositories = ["https://dl.google.com/dl/android/maven2", "https://repo.maven.apache.org/maven2"],
+    version_conflict_policy = "pinned",
+)
+use_repo(maven, "lint_maven")
+
+maven.install(
+    name = "docs_maven",
+    lock_file = "//scripts/bazel/locks:docs_maven_install.json",
+    fail_if_repin_required = True,
+    artifacts = [
+        "org.jetbrains.dokka:dokka-cli:2.0.0",
+        "org.jetbrains.dokka:dokka-base:2.0.0",
+        "org.jetbrains.dokka:analysis-kotlin-descriptors:2.0.0",
+        "org.jetbrains.dokka:javadoc-plugin:2.0.0",
+        "org.jetbrains.dokka:kotlin-as-java-plugin:2.0.0",
+    ],
+    repositories = ["https://repo.maven.apache.org/maven2"],
+)
+use_repo(maven, "docs_maven")

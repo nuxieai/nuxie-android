@@ -42,11 +42,14 @@ adb -s "$ANDROID_SERIAL" shell am instrument -w -r \
 
 ## Runtime artifact
 
-Gradle fetches and SHA-256 verifies the published Android runtime pinned
+Bazel imports and SHA-256 verifies the published Android runtime pinned
 in `runtime/artifact.json`. It contains the native surface-presentation APIs used
 by this SDK. Ordinary builds and tests use that artifact automatically:
 
 ```bash
+scripts/bazel/sdk.sh build
+scripts/bazel/sdk.sh test
+scripts/bazel/sdk.sh example
 ./gradlew :nuxie-android:test :nuxie-android:apiCheck :nuxie-android:lint :example-app:assembleDebug
 ```
 
@@ -55,12 +58,15 @@ For development of runtime changes, build the Android distribution in a
 
 ```bash
 scripts/stage-runtime.sh /absolute/path/to/nuxie-runtime
-NUXIE_RUNTIME_USE_LOCAL=1 ./gradlew :nuxie-android:test :nuxie-android:apiCheck :nuxie-android:lint :example-app:assembleDebug
+NUXIE_RUNTIME_USE_LOCAL=1 scripts/bazel/sdk.sh build
 ```
 
 The staging script verifies the build's source revision and pinned NDK.
-Without `NUXIE_RUNTIME_USE_LOCAL=1`, Gradle restores the public pinned artifact;
+Without `NUXIE_RUNTIME_USE_LOCAL=1`, builds restore the public pinned artifact;
 restage your runtime build before resuming local runtime development if needed.
+
+See the [Bazel build guide](docs/bazel-build.md) for Maven preparation, direct JVM
+tests, instrumentation, and the retained API/lint/release qualification drivers.
 
 ## Integration example
 
@@ -97,7 +103,7 @@ release/
 Build the host runtime from a `nuxie-runtime` checkout:
 
 ```bash
-cargo build -p nux-capi --features android-authored-wgsl,android-vulkan,scripting
+python3 tools/bazel/runtime.py build -p nux-capi --features android-authored-wgsl,android-vulkan,scripting
 export NUXIE_HOST_CAPI_LIB=/absolute/path/to/nuxie-runtime/target/debug/libnux_capi.dylib
 ```
 

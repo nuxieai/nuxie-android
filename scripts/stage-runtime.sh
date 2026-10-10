@@ -85,11 +85,13 @@ done
 TOKEN="$(date +%s)-$$-${RANDOM}"
 STAGED="${RUNTIME_DIR}/.prebuilt-${TOKEN}.tmp"
 BACKUP="${RUNTIME_DIR}/.prebuilt-${TOKEN}.backup"
+LOCAL_PROVENANCE="${RUNTIME_DIR}/.local-artifact-${TOKEN}.tmp"
 mkdir -p "${STAGED}/jniLibs/arm64-v8a" "${STAGED}/jniLibs/x86_64" "${STAGED}/include"
 
 recover_on_exit() {
   status=$?
   rm -rf -- "${STAGED}"
+  rm -f -- "${LOCAL_PROVENANCE}"
   if [[ -d "${BACKUP}" && ! -e "${DEST}" ]]; then
     mv -- "${BACKUP}" "${DEST}" || true
   fi
@@ -122,10 +124,18 @@ if [[ "${ACTUAL_FILE_COUNT}" != "${#REQUIRED_ARTIFACTS[@]}" ]]; then
   exit 67
 fi
 
+# Keep the local source identity outside the five-file prebuilt tree, so the
+# existing Gradle integrity boundary and Bazel import consume the same files.
+python3 "${SCRIPT_DIR}/bazel/runtime_artifacts.py" stamp \
+  --tree "${STAGED}" --build-inputs "${RUNTIME_BUILD_INPUTS}" \
+  --source-revision "${SOURCE_REVISION}" --ndk "${PINNED_NDK_VERSION}" \
+  --budget "${RUNTIME_DIR}/size-budget.json" --output "${LOCAL_PROVENANCE}"
+
 # Publication is a pair of same-filesystem atomic renames: preserve the old
 # complete tree until the new complete tree is live, then discard the backup.
 if [[ -e "${DEST}" ]]; then mv -- "${DEST}" "${BACKUP}"; fi
 mv -- "${STAGED}" "${DEST}"
+mv -- "${LOCAL_PROVENANCE}" "${RUNTIME_DIR}/local-artifact.json"
 rm -rf -- "${BACKUP}"
 trap - EXIT
 

@@ -18,7 +18,7 @@ concurrency:
 jobs:
   local-gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository
@@ -51,6 +51,21 @@ jobs:
 
       - name: Verify cross-SDK fixtures
         run: scripts/verify-fixtures.sh
+
+      - name: Compile and test the SDK with Bazel
+        env:
+          NUXIE_BAZEL_JOBS: "2"
+        run: |
+          scripts/bazel/sdk.sh test
+          scripts/bazel/sdk.sh build
+          scripts/bazel/sdk.sh example
+          scripts/bazel/sdk.sh instrumentation
+          scripts/bazel/sdk.sh prepare --output build/maven-repository
+
+      - name: Qualify the prepared Maven SDK
+        run: >-
+          python3 scripts/test-maven-consumer.py
+          --version "$(python3 -c 'import sys; sys.path.insert(0, "scripts/bazel"); import sdk; print(sdk.declared_version())')"
 
       - name: Run local gate
         run: >-

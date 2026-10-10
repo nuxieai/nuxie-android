@@ -1,8 +1,33 @@
+import groovy.json.JsonSlurper
+import kotlinx.validation.KotlinApiBuildTask
+import kotlinx.validation.KotlinApiCompareTask
+
 plugins {
   alias(libs.plugins.android.library)
   alias(libs.plugins.kotlin.android)
   `maven-publish`
   signing
+}
+
+@Suppress("UNCHECKED_CAST")
+val nuxiePublication = JsonSlurper().parse(rootProject.file("scripts/bazel/publication.json")) as Map<String, Any>
+fun publicationFields(name: String): Map<String, String> {
+  @Suppress("UNCHECKED_CAST")
+  return nuxiePublication[name] as Map<String, String>
+}
+
+// Reuse the independently maintained API validator against the actual Bazel
+// publication. These tasks inspect a supplied JAR and do not compile SDK sources.
+val bazelApiBuild = tasks.register<KotlinApiBuildTask>("bazelApiBuild") {
+  inputJar.fileProvider(providers.gradleProperty("nuxieBazelApiJar").map { rootProject.file(it) })
+  outputApiFile.set(layout.buildDirectory.file("bazel-api/nuxie-android.api"))
+  runtimeClasspath.from(configurations.named("bcv-rt-jvm-cp-resolver"))
+}
+tasks.register<KotlinApiCompareTask>("bazelApiCheck") {
+  group = "verification"
+  description = "Checks the Bazel publication against the reviewed public API dump."
+  projectApiFile.set(layout.projectDirectory.file("api/nuxie-android.api"))
+  generatedApiFile.set(bazelApiBuild.flatMap { it.outputApiFile })
 }
 
 android {
@@ -74,26 +99,26 @@ publishing {
       artifactId = "nuxie-android"
       afterEvaluate { from(components["release"]) }
       pom {
-        name.set("Nuxie Android SDK")
-        description.set("Native Android Experiences, Journeys, and Features for Nuxie.")
-        url.set("https://nuxie.ai")
+        name.set(nuxiePublication["name"] as String)
+        description.set(nuxiePublication["description"] as String)
+        url.set(nuxiePublication["url"] as String)
         licenses {
           license {
-            name.set("MIT License")
-            url.set("https://opensource.org/licenses/MIT")
+            name.set(publicationFields("license")["name"])
+            url.set(publicationFields("license")["url"])
           }
         }
         developers {
           developer {
-            id.set("nuxie")
-            name.set("Nuxie")
-            url.set("https://nuxie.ai")
+            id.set(publicationFields("developer")["id"])
+            name.set(publicationFields("developer")["name"])
+            url.set(publicationFields("developer")["url"])
           }
         }
         scm {
-          connection.set("scm:git:https://github.com/nuxieai/nuxie-android.git")
-          developerConnection.set("scm:git:ssh://git@github.com/nuxieai/nuxie-android.git")
-          url.set("https://github.com/nuxieai/nuxie-android")
+          connection.set(publicationFields("scm")["connection"])
+          developerConnection.set(publicationFields("scm")["developerConnection"])
+          url.set(publicationFields("scm")["url"])
         }
       }
     }
@@ -162,7 +187,7 @@ val compileHostRenderBridge by tasks.registering(Exec::class) {
     val capi = hostCapiLibrary.orNull?.let(::file)?.canonicalFile
       ?: throw GradleException(
         "Set NUXIE_HOST_CAPI_LIB to nux_capi built with " +
-          "`cargo build -p nux-capi --features android-authored-wgsl,android-vulkan,scripting`."
+          "`python3 tools/bazel/runtime.py build -p nux-capi --features android-authored-wgsl,android-vulkan,scripting`."
       )
     if (!capi.isFile) {
       throw GradleException("NUXIE_HOST_CAPI_LIB is not a file: $capi")
@@ -186,7 +211,7 @@ val compileHostRenderBridge by tasks.registering(Exec::class) {
       throw GradleException(
         "NUXIE_HOST_CAPI_LIB lacks required scripting symbols " +
           "${missingSymbols.joinToString()}. Build it with " +
-          "`cargo build -p nux-capi --features android-authored-wgsl,android-vulkan,scripting`."
+          "`python3 tools/bazel/runtime.py build -p nux-capi --features android-authored-wgsl,android-vulkan,scripting`."
       )
     }
     val output = hostBridgeLibrary.get().asFile
