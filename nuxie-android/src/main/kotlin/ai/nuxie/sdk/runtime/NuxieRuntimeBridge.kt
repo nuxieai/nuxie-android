@@ -350,6 +350,6 @@ internal object NuxieRuntimeBridge {
     external fun nativeRuntimeInfo(): String
 
     private const val HOST_BUILD_COMMAND =
-        "cargo build -p nux-capi --features android-authored-wgsl,android-vulkan,scripting"
+        "python3 tools/bazel/runtime.py build -p nux-capi --features android-authored-wgsl,android-vulkan,scripting"
     private const val NUX_STATUS_OK = 0
 }

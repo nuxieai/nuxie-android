@@ -18,6 +18,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cache import startup_options
+from host_runtime import validate as validate_host_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
 GROUP = "ai.nuxie"
@@ -251,6 +252,17 @@ def run_instrumentation(adb, test_class=None):
     verify_instrumentation_result(result.stdout)
 
 
+def run_host_renderer(arguments, smoke=False):
+    validate_host_runtime(os.environ.get("NUXIE_HOST_CAPI_LIB", ""))
+    if smoke:
+        environment = ["--test_env=" + name for name in
+                       ("NUXIE_MOLTENVK_LIBRARY", "VK_ICD_FILENAMES", "DYLD_LIBRARY_PATH", "LD_LIBRARY_PATH")
+                       if name in os.environ]
+        bazel("test", "//:host_render_smoke", *environment)
+    else:
+        bazel("run", "//:host_render_harness", "--", *arguments)
+
+
 def sign(directory, files):
     key = os.environ.get("NUXIE_SIGNING_KEY")
     if not key:
@@ -351,8 +363,13 @@ def main():
     prepared.add_argument("--output", type=Path, default=ROOT / "build/bazel-sdk/maven")
     prepared.add_argument("--maven-version", default=declared_version())
     prepared.add_argument("--sign", action="store_true")
-    for name in ("build", "test", "example", "instrumentation", "doctor", "check", "api-check", "lint", "providers", "host-render"):
+    for name in ("build", "test", "example", "instrumentation", "doctor", "check", "api-check", "lint", "providers", "host-render-smoke"):
         commands.add_parser(name)
+    host = commands.add_parser("host-render")
+    host.add_argument("--input", required=True)
+    host.add_argument("--output", required=True)
+    for option in ("frames", "step-ms", "size"):
+        host.add_argument("--" + option)
     device = commands.add_parser("instrumentation-run")
     device.add_argument("--serial", required=True)
     device.add_argument("--class", dest="test_class")
@@ -376,8 +393,16 @@ def main():
             bazel("build", "//:sdk_aar")
             verify_api(artifact("//:sdk_aar"))
             gradle(":nuxie-android:apiCheck")
-        elif args.command in ("lint", "host-render"):
-            gradle({"lint": ":nuxie-android:lint", "host-render": ":nuxie-android:hostRenderSmoke"}[args.command])
+        elif args.command == "lint":
+            gradle(":nuxie-android:lint")
+        elif args.command in ("host-render", "host-render-smoke"):
+            arguments = []
+            if args.command == "host-render":
+                for option in ("input", "output", "frames", "step-ms", "size"):
+                    value = getattr(args, option.replace("-", "_"))
+                    if value is not None:
+                        arguments += ["--" + option, value]
+            run_host_renderer(arguments, smoke=args.command == "host-render-smoke")
         elif args.command == "providers":
             for provider in ("revenuecat", "superwall"):
                 gradle(":example-" + provider + ":test", ":example-app:test", ":example-app:verifyPurchaseProviderSelection", ":example-app:assembleDebug",

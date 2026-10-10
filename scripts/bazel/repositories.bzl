@@ -51,7 +51,8 @@ cc_import(name = "capi_shared", shared_library = select({
     ":arm64": "jniLibs/arm64-v8a/libnux_capi.so",
     "//conditions:default": "jniLibs/x86_64/libnux_capi.so",
 }))
-cc_library(name = "capi", hdrs = ["include/nux_capi.generated.h"], includes = ["include"], deps = [":capi_shared"])
+cc_library(name = "capi_headers", hdrs = ["include/nux_capi.generated.h"], includes = ["include"])
+cc_library(name = "capi", deps = [":capi_headers", ":capi_shared"])
 filegroup(name = "jni_libraries", srcs = glob(["jniLibs/**/*.so"]))
 exports_files(["provenance.json"])
 """)
@@ -66,7 +67,35 @@ _runtime = repository_rule(
     environ = ["NUXIE_RUNTIME_USE_LOCAL"],
 )
 
+def _host_runtime_impl(ctx):
+    selected = ctx.getenv("NUXIE_HOST_CAPI_LIB", "")
+    if not selected or not selected.startswith("/"):
+        fail("Set NUXIE_HOST_CAPI_LIB to an absolute scripting-enabled host runtime library")
+    source = ctx.path(selected)
+    ctx.watch(source)
+    python = ctx.which("python3")
+    if python == None:
+        fail("python3 is required to verify the host runtime input")
+    result = ctx.execute([python, ctx.path(ctx.attr.verifier), source])
+    if result.return_code:
+        fail("Host runtime verification failed:\n" + result.stderr)
+    suffix = ".dylib" if selected.endswith(".dylib") else ".so"
+    name = "libnux_capi" + suffix
+    ctx.symlink(source, name)
+    ctx.file("BUILD.bazel", """load("@rules_cc//cc:cc_import.bzl", "cc_import")
+package(default_visibility = ["//visibility:public"])
+cc_import(name = "capi", shared_library = "%s")
+filegroup(name = "library", srcs = ["%s"])
+""" % (name, name))
+
+_host_runtime = repository_rule(
+    implementation = _host_runtime_impl,
+    attrs = {"verifier": attr.label(default = Label("//scripts/bazel:host_runtime.py"))},
+    environ = ["NUXIE_HOST_CAPI_LIB"],
+)
+
 def _extension_impl(ctx):
     _runtime(name = "nuxie_runtime_android")
+    _host_runtime(name = "nuxie_runtime_host")
 
 runtime_artifacts = module_extension(implementation = _extension_impl)

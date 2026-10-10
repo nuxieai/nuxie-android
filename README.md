@@ -87,8 +87,8 @@ personalized-price limitation.
 The host-only harness drives a release descriptor through the SDK's configured
 Experience asset import, artboard/player ownership, fixed-timestep stepping,
 and headless Android Vulkan renderer. It writes tightly packed, top-row-first
-RGBA8 premultiplied-sRGB files plus `manifest.json`. Harness sources compile
-only into the JVM test artifact and are not shipped in the AAR.
+RGBA8 premultiplied-sRGB files plus `manifest.json`. Bazel compiles its Kotlin
+and host JNI adapter directly; harness sources are not shipped in the AAR.
 
 The input directory must contain:
 
@@ -115,7 +115,7 @@ On Linux, use `libnux_capi.so`; a conformant Vulkan ICD such as lavapipe may
 be selected with `VK_ICD_FILENAMES` when the machine has more than one ICD.
 
 On Apple Silicon macOS with Homebrew MoltenVK, use the runtime's explicit
-loader path. This is reliable through Gradle worker processes; setting only
+loader path. This is reliable through JVM processes; setting only
 `DYLD_LIBRARY_PATH` is not.
 
 ```bash
@@ -126,8 +126,8 @@ export VK_ICD_FILENAMES=/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json
 Run the harness:
 
 ```bash
-./gradlew :nuxie-android:hostRenderHarness \
-  --args='--input /absolute/path/to/release --output /absolute/path/to/frames --frames 2 --size 390x844 --step-ms 16'
+scripts/bazel/sdk.sh host-render --input /absolute/path/to/release \
+  --output /absolute/path/to/frames --frames 2 --size 390x844 --step-ms 16
 ```
 
 `--frames` defaults to `1`, `--step-ms` to `16`, and `--size` to the first
@@ -139,14 +139,13 @@ the string returned by `NuxieRuntime.info()`.
 Verify the live harness separately from the default unit test suite:
 
 ```bash
-./gradlew :nuxie-android:hostRenderSmoke
+scripts/bazel/sdk.sh host-render-smoke
 ```
 
-This dedicated task runs only the four host render smoke tests in a fresh
-worker JVM. The default `:nuxie-android:test` task excludes them and is
-insensitive to host harness environment variables. When `NUXIE_HOST_CAPI_LIB`
-is unset, the dedicated task skips them with the named assumption
-`NUXIE_HOST_CAPI_LIB must name a host-built nux_capi library`.
+This dedicated target runs only the four host render smoke tests in a fresh
+JVM against the selected scripting-enabled runtime. The frontend requires
+`NUXIE_HOST_CAPI_LIB` and checks its scripting exports before building. Ordinary
+SDK tests exclude these live tests and clear host runtime selection.
 
 ## Wrapper contract
 

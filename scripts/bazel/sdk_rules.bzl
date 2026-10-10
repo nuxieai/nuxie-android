@@ -152,6 +152,40 @@ sdk_jvm_test = rule(
     test = True,
 )
 
+def _runfile(ctx, file):
+    if file.short_path.startswith("../"):
+        return file.short_path[3:]
+    return ctx.workspace_name + "/" + file.short_path
+
+def _host_harness_impl(ctx):
+    launcher = ctx.actions.declare_file(ctx.label.name + ".sh")
+    binary = ctx.executable.binary
+    ctx.actions.expand_template(
+        template = ctx.file._launcher,
+        output = launcher,
+        substitutions = {
+            "@binary@": _runfile(ctx, binary),
+            "@jni@": _runfile(ctx, ctx.file.jni),
+            "@capi@": _runfile(ctx, ctx.file.capi),
+            "@workspace@": ctx.workspace_name,
+        },
+        is_executable = True,
+    )
+    runfiles = ctx.runfiles(files = [binary, ctx.file.jni, ctx.file.capi])
+    for dep in [ctx.attr.binary, ctx.attr.jni, ctx.attr.capi]:
+        runfiles = runfiles.merge(dep[DefaultInfo].default_runfiles)
+    return [DefaultInfo(executable = launcher, runfiles = runfiles)]
+
+_host_attrs = {
+    "binary": attr.label(executable = True, cfg = "target", mandatory = True),
+    "jni": attr.label(allow_single_file = True, mandatory = True),
+    "capi": attr.label(default = Label("@nuxie_runtime_host//:library"), allow_single_file = True),
+    "_launcher": attr.label(default = Label("//scripts/bazel:host_render_launcher.sh"), allow_single_file = True),
+}
+
+sdk_host_harness = rule(implementation = _host_harness_impl, attrs = _host_attrs, executable = True)
+sdk_host_test = rule(implementation = _host_harness_impl, attrs = _host_attrs, test = True)
+
 def _assets_impl(ctx):
     files = {}
     for source in ctx.files.srcs:
