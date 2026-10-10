@@ -87,6 +87,8 @@ class NuxieIdentityFacadeTest {
                 val identifying = requireNotNull(contender)
                 // Establish the inversion, not merely simultaneous starts: the
                 // other public identify has reached the occupied identity fence.
+                // Renaming withDecision must update this probe; otherwise the
+                // precondition below fails instead of silently missing the race.
                 val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
                 while (identifying.stackTrace.none {
                     it.className == IdentityService::class.java.name && it.methodName == "withDecision"
