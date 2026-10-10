@@ -267,7 +267,9 @@ internal class FilePurchaseEvidenceStore(
     private fun loadBindingsUnlocked(): List<StoredPurchaseBinding> = runCatching {
         if (!bindingsFile.exists()) emptyList() else {
             json.parseToJsonElement(bindingsFile.readText()).jsonArray.mapNotNull {
-                warnIfInvalidRow((it as? JsonObject)?.let(::decodeBinding), "bindings")
+                val decoded = (it as? JsonObject)?.let(::decodeBinding)
+                if (decoded == null) Log.w("NuxieBilling", "Invalid purchase bindings row was ignored.")
+                decoded
             }
         }
     }.onFailure { Log.w("NuxieBilling", "Could not read purchase bindings.", it) }.getOrDefault(emptyList())
@@ -275,7 +277,9 @@ internal class FilePurchaseEvidenceStore(
     private fun loadMappingsUnlocked(): List<StoredProductMapping> = runCatching {
         if (!catalogFile.exists()) emptyList() else {
             json.parseToJsonElement(catalogFile.readText()).jsonArray.mapNotNull {
-                warnIfInvalidRow((it as? JsonObject)?.let(::decodeMapping), "catalog")
+                val decoded = (it as? JsonObject)?.let(::decodeMapping)
+                if (decoded == null) Log.w("NuxieBilling", "Invalid purchase catalog row was ignored.")
+                decoded
             }
         }
     }.onFailure { Log.w("NuxieBilling", "Could not read purchase catalog.", it) }.getOrDefault(emptyList())
@@ -292,15 +296,12 @@ internal class FilePurchaseEvidenceStore(
     private fun loadUnlocked(): Map<String, PurchaseEvidence> = runCatching {
         if (!file.exists()) emptyMap() else json.parseToJsonElement(file.readText()).jsonObject
             .mapNotNull { (token, raw) ->
-                warnIfInvalidRow(decodeEvidence(raw.jsonObject), "evidence")?.let { token to it }
+                val decoded = decodeEvidence(raw.jsonObject)
+                if (decoded == null) Log.w("NuxieBilling", "Invalid purchase evidence row was ignored.")
+                decoded?.let { token to it }
             }
             .toMap()
     }.onFailure { Log.w("NuxieBilling", "Could not read purchase evidence.", it) }.getOrDefault(emptyMap())
-
-    private fun <T> warnIfInvalidRow(value: T?, description: String): T? {
-        if (value == null) Log.w("NuxieBilling", "Invalid purchase $description row was ignored.")
-        return value
-    }
 
     private fun saveUnlocked(entries: Map<String, PurchaseEvidence>): Boolean = runCatching {
         directory.mkdirs()
