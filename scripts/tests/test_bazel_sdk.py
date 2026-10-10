@@ -156,14 +156,13 @@ class BazelSdkPackagingTests(unittest.TestCase):
             self.assertFalse(any("hostrender" in name for name in archive.namelist()))
 
     def test_maven_compile_and_runtime_scopes_match_the_owning_gradle_pom(self):
-        # Captured by owning Gradle generatePomFileForReleasePublication at
-        # recorded8c7de363 before migration; this is an independent oracle.
+        # API/runtime scopes were captured by owning Gradle at8c7de363.
+        # Main's canonical Gradle declarations omit V3's AndroidX Browser.
         expected = {
             ("com.android.billingclient", "billing", "9.1.0", "compile"),
             ("org.jetbrains.kotlinx", "kotlinx-coroutines-android", "1.9.0", "compile"),
             ("org.jetbrains.kotlin", "kotlin-stdlib", "2.0.21", "compile"),
             ("androidx.sqlite", "sqlite-framework", "2.6.2", "runtime"),
-            ("androidx.browser", "browser", "1.8.0", "runtime"),
             ("org.jetbrains.kotlinx", "kotlinx-serialization-json", "1.7.2", "runtime"),
         }
         ns = {"m": "http://maven.apache.org/POM/4.0.0"}
@@ -181,7 +180,7 @@ class BazelSdkPackagingTests(unittest.TestCase):
         api = {dep["module"] for dep in variants["java-api:library"]["dependencies"]}
         runtime_modules = {dep["module"] for dep in variants["java-runtime:library"]["dependencies"]}
         self.assertEqual(api, {"billing", "kotlinx-coroutines-android", "kotlin-stdlib"})
-        self.assertEqual(runtime_modules - api, {"sqlite-framework", "browser", "kotlinx-serialization-json"})
+        self.assertEqual(runtime_modules - api, {"sqlite-framework", "kotlinx-serialization-json"})
         self.assertIn("java-runtime:sources", variants)
         self.assertIn("java-runtime:javadoc", variants)
 

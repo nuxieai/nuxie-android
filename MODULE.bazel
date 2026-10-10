@@ -39,7 +39,6 @@ maven.install(
     lock_file = "//scripts/bazel/locks:sdk_maven_install.json",
     fail_if_repin_required = True,
     artifacts = [
-        "androidx.browser:browser:1.8.0",
         "androidx.sqlite:sqlite-framework:2.6.2",
         "com.android.billingclient:billing:9.1.0",
         # The independent owning Gradle releaseRuntimeClasspath resolves 2.1.20
