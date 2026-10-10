@@ -31,6 +31,11 @@ scripts/bazel/sdk.sh prepare --output build/maven-repository
 `test` runs the ordinary SDK JVM tests and both lint rule suites. The live host
 render smoke suite remains separate. Test-only harnesses and fixture inputs are
 declared runfiles and are absent from the AAR and sources JAR.
+Production Java resources retain their original classpath paths, including the
+pinned timezone bundle and Unicode license. Preparation compares their compiled
+bytes to the source files and verifies the AAR still supports Android API 23.
+The pinned Android rules have a one-line minimum-SDK floor patch to retain that
+existing support level; their desugaring floor remains unchanged.
 Lint tests receive the pinned Android API jar as declared runfiles and discover
 it through a minimal SDK inside their private test scratch directory.
 The debug example retains its original debug Activity, localhost cleartext

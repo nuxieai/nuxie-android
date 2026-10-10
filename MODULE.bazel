@@ -2,6 +2,12 @@ module(name = "nuxie_android", version = "0.1.0")
 
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_android", version = "0.8.0")
+single_version_override(
+    module_name = "rules_android",
+    version = "0.8.0",
+    patches = ["//scripts/bazel:rules-android-min-sdk-23.patch"],
+    patch_strip = 1,
+)
 bazel_dep(name = "rules_android_ndk", version = "0.1.5")
 # macOS host tools use Xcode's declared SDK; register before rules_cc.
 bazel_dep(name = "apple_support", version = "2.8.0")

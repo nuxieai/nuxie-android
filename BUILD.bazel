@@ -37,6 +37,8 @@ kt_android_library(
     custom_package = "ai.nuxie.sdk",
     exports_manifest = 1,
     resource_files = glob(["nuxie-android/src/main/res/**"]),
+    resources = glob(["nuxie-android/src/main/resources/**"]),
+    resource_strip_prefix = "nuxie-android/src/main/resources",
     deps = SDK_DEPS,
 )
 
@@ -194,7 +196,8 @@ kt_android_local_test(
         "@test_maven//:org_robolectric_robolectric",
         "@robolectric//bazel:android-all",
     ],
-    jvm_flags = ["-Xmx1g", "-Djava.security.manager=allow"],
+    # The complete suite needs more than the local-test rule's 48 MiB code cache.
+    jvm_flags = ["-Xmx1g", "-XX:ReservedCodeCacheSize=256m", "-Djava.security.manager=allow"],
     size = "large",
     timeout = "long",
     tags = ["manual"],
