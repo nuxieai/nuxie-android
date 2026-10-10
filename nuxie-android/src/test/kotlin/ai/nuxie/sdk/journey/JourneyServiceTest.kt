@@ -2875,13 +2875,19 @@ class JourneyServiceTest {
             holdClosePublication = true, terminalStartsEntry = true)
     }
 
+    @Test fun `durably deferred failure retries completion without event replay`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true,
+            terminalOutcome = SystemEventNames.PURCHASE_FAILED, holdClosePublication = true,
+            deferredFailureRetry = true)
+    }
+
     @Test fun `durably completed Journey closes its screen when report publication throws`() = runBlocking {
         assertAuthoredDismiss("purchase", failReportOnce = true)
     }
 
     private suspend fun assertAuthoredDismiss(commerce: String?, retryOutcome: String? = null, runtimeFrames: Boolean = false,
         pendingClose: Boolean = false, terminalOutcome: String? = null, holdClosePublication: Boolean = false,
-        failCompletionOnce: Boolean = false, failPublicationOnce: Boolean = false, secondPurchase: Boolean = false, terminalStartsEntry: Boolean = false, failReportOnce: Boolean = false) {
+        failCompletionOnce: Boolean = false, failPublicationOnce: Boolean = false, secondPurchase: Boolean = false, terminalStartsEntry: Boolean = false, failReportOnce: Boolean = false, deferredFailureRetry: Boolean = false) {
         val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/authored-dismiss.json").readText()).jsonObject
             .getValue("cases").jsonArray.single { it.jsonObject.getValue("name").jsonPrimitive.content == (commerce ?: "user_close") }.jsonObject
@@ -2903,6 +2909,7 @@ class JourneyServiceTest {
         } else firstProfile
         catalog.commit("customer", catalog.prepare(profileDocument, authority))
         val baseline = requireNotNull(catalog.snapshot("customer"))
+        if (!terminalStartsEntry) assertEquals(1, baseline.releasesByDigest.size)
         val original = baseline.releasesByDigest.getValue(entry.getValue("envelope").jsonObject.getValue("descriptorSha256").jsonPrimitive.content)
         val type = commerce ?: "purchase"
         val action = buildJsonObject {
@@ -2980,6 +2987,8 @@ class JourneyServiceTest {
         val publications = CopyOnWriteArrayList<JourneyScreenEmissionBatch>()
         val claimedEffect = CompletableDeferred<String>()
         val claimedEffects = CopyOnWriteArrayList<String>()
+        val failCompletionClock = java.util.concurrent.atomic.AtomicBoolean()
+        val completionFailureCount = java.util.concurrent.atomic.AtomicInteger()
         val presenter = object : JourneyPresenting {
             override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest) = presentations.openJourneyLink(owner, link)
             override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
@@ -3019,12 +3028,14 @@ class JourneyServiceTest {
                 }
                 return presentations.dispatchJourneyAction(owner, action, effectId)
             }
-            override suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) = presentations.shutdownJourney(ownerDistinctId, journeyId)
+            override suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) {
+                presentations.shutdownJourney(ownerDistinctId, journeyId)
+                if (deferredFailureRetry && completionFailureCount.get() == 0) failCompletionClock.set(true)
+            }
             override suspend fun shutdownOwnedBy(ownerDistinctId: String) = presentations.shutdownOwnedBy(ownerDistinctId)
         }
         val closeCaptureEntered = CompletableDeferred<Unit>()
         val releaseCloseCapture = CompletableDeferred<Unit>()
-        val failCompletionClock = java.util.concurrent.atomic.AtomicBoolean()
         val failPublication = java.util.concurrent.atomic.AtomicBoolean(failPublicationOnce)
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val failReport = java.util.concurrent.atomic.AtomicBoolean(failReportOnce)
@@ -3056,7 +3067,10 @@ class JourneyServiceTest {
                 val settled = admission?.commitIfCurrent { true } != null
                 StableEventCaptureResult(settled, event.takeIf { settled })
             }, presenter = presenter, nowMillis = {
-                if (failCompletionClock.compareAndSet(true, false)) throw java.io.IOException("Completion clock unavailable")
+                if (failCompletionClock.compareAndSet(true, false)) {
+                    completionFailureCount.incrementAndGet()
+                    throw java.io.IOException("Completion clock unavailable")
+                }
                 100_000L
             })
         try {
@@ -3130,13 +3144,13 @@ class JourneyServiceTest {
                         val close = scope.async { runtimeTap("close") }
                         withTimeout(5_000) { closeCaptureEntered.await() }
                         val terminal = scope.async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
-                            journeys.handleEvent(StoredEvent(effectId, SystemEventNames.PURCHASE_COMPLETED,
+                            journeys.handleEvent(StoredEvent(effectId, terminalOutcome ?: SystemEventNames.PURCHASE_COMPLETED,
                                 buildJsonObject { put("placement_id", "golden:monthly") }, 100_001L, "customer"),
                                 journeys.eventAdmissionGeneration())
                         }
                         releaseCloseCapture.complete(Unit)
                         val terminalAccepted = withTimeout(5_000) { close.await(); terminal.await() }
-                        if (terminalStartsEntry) assertTrue("Deferral must acknowledge durable handling", terminalAccepted)
+                        assertTrue("Deferral must acknowledge durable handling", terminalAccepted)
                     } else runtimeTap("close")
                     withTimeout(5_000) {
                         while (presentations.ownsJourney(JourneyPresentationOwner(request.journeyId, "customer"))) kotlinx.coroutines.delay(10)
@@ -3199,7 +3213,13 @@ class JourneyServiceTest {
                     return
                 }
             } else presentations.dismiss(CloseReason.UserDismissed)
-            withTimeout(5_000) { while (captures.none { it.first == JourneyEventNames.LEG_COMPLETED && it.second["journey_id"] == request.journeyId }) kotlinx.coroutines.delay(10) }
+            // This new retry case must span the production five-second retry interval.
+            withTimeout(if (deferredFailureRetry) 10_000 else 5_000) {
+                while (captures.none { it.first == JourneyEventNames.LEG_COMPLETED && it.second["journey_id"] == request.journeyId }) kotlinx.coroutines.delay(10)
+            }
+            if (deferredFailureRetry) assertEquals("One failed settlement is retried without another event", 1, completionFailureCount.get())
+            if (!secondPurchase) assertEquals("A single-screen case launches exactly once", 1, launched.size)
+            if (!terminalStartsEntry) assertEquals("No extra Journey completion", 1, captures.count { it.first == JourneyEventNames.LEG_COMPLETED })
             val completed = captures.filter { it.first == JourneyEventNames.LEG_COMPLETED && it.second["journey_id"] == request.journeyId }
             assertEquals((if (pendingClose) pendingExpected else vector).getValue("reports").jsonPrimitive.int, completed.size)
             assertEquals(request.journeyId, completed.single().second["journey_id"])
@@ -3209,7 +3229,7 @@ class JourneyServiceTest {
                 assertFalse(failReport.get())
                 assertEquals("completed", JourneyRunJournal(directory, "customer", JourneyStorageScope(authority)).runs().single().completion?.outcome)
             }
-            if (pendingClose && !terminalStartsEntry) {
+            if (pendingClose && !terminalStartsEntry && !deferredFailureRetry) {
                 journeys.handleEvent(StoredEvent(claimedEffects.single(), SystemEventNames.PURCHASE_COMPLETED,
                     buildJsonObject { put("placement_id", "golden:monthly") }, 100_002L, "customer"),
                     journeys.eventAdmissionGeneration())
