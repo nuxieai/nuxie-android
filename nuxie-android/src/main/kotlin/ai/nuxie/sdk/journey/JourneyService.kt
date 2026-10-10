@@ -1621,6 +1621,14 @@ internal class JourneyService(
             return PresentationLifecycleResult.ACCEPTED
         }
 
+        val steps = command.release.leg.getValue("steps").jsonArray.map(JsonElement::jsonObject)
+        val cursorAction = steps.firstOrNull { it.text("id") == run.stepId }?.get("action") as? JsonObject
+        val awaitingCommerce = run.pendingCommerce != null ||
+            (run.effectReceipts[run.stepId] != null && cursorAction?.let(JourneyActionType::from)?.isCommerce == true)
+        val routeAction = steps.firstOrNull { it.text("id") == routeStepId }?.get("action") as? JsonObject
+        if (awaitingCommerce && routeAction?.let(JourneyActionType::from)?.isCommerce == true) {
+            return PresentationLifecycleResult.ACCEPTED
+        }
         val context = JsonObject(
             mapOf(
                 "event" to event.properties,
@@ -1635,10 +1643,19 @@ internal class JourneyService(
                         it.stepId == run.stepId &&
                         it.pendingPresentationPublication == null
                 } ?: return@publishJournalIfCurrent null
+                if (awaitingCommerce && current.pendingCommerce == null) {
+                    val effectId = current.effectReceipts[current.stepId] ?: return@publishJournalIfCurrent null
+                    target.retainPresentationCommerce(current.id, current.stepId, effectId,
+                        pendingPresentationPurchasePlacements[current.id]) ?: return@publishJournalIfCurrent null
+                }
                 target.transition(current.id, routeStepId, context, clearPresentationSource = true)
                 target.runs().firstOrNull { it.id == current.id }
             }
         }.getOrNull() ?: return PresentationLifecycleResult.REJECTED
+        val commerceKey = CommerceExecutionKey(transitioned.id, target.distinctId, command.executionFenceToken.generation)
+        if (transitioned.pendingCommerce != null) {
+            pendingAuthoredContinuations[commerceKey] = (pendingAuthoredContinuations[commerceKey] ?: 0) + 1
+        }
         val continuation = Command.ContinueExecution(
             transitioned.id,
             identityScope,
@@ -1646,6 +1663,7 @@ internal class JourneyService(
             command.executionFenceToken,
             executorSignal(event),
             null,
+            retainsCommerce = transitioned.pendingCommerce != null,
             dismissPresentationOnCompletion = !(
                 command.eventName == SystemEventNames.SCREEN_DISMISSED &&
                     command.revealingScreenId == null
@@ -1655,6 +1673,7 @@ internal class JourneyService(
             return if (commands.trySend(continuation).isSuccess) {
                 PresentationLifecycleResult.ACCEPTED
             } else {
+                if (transitioned.pendingCommerce != null) releaseCommerceContinuation(commerceKey)
                 PresentationLifecycleResult.REJECTED
             }
         }
