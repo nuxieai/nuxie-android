@@ -2992,16 +2992,29 @@ class JourneyServiceTest {
         assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true, lifecycleRoute = SystemEventNames.SCREEN_SHOWN)
     }
 
+    @Test fun `deferred restore allows authored close then follows restored outlet once`() = runBlocking {
+        assertAuthoredDismiss("restore", runtimeFrames = true, pendingClose = true)
+    }
+
+    @Test fun `deferred purchase allows exit then follows completed outlet once`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true, exitClose = true)
+    }
+
+    @Test fun `exit then cancelled purchase keeps authored close outcome`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true,
+            terminalOutcome = SystemEventNames.PURCHASE_CANCELLED, exitClose = true)
+    }
+
     private suspend fun assertAuthoredDismiss(commerce: String?, retryOutcome: String? = null, runtimeFrames: Boolean = false,
         pendingClose: Boolean = false, terminalOutcome: String? = null, holdClosePublication: Boolean = false,
-        failCompletionOnce: Boolean = false, failPublicationOnce: Boolean = false, secondPurchase: Boolean = false, terminalStartsEntry: Boolean = false, failReportOnce: Boolean = false, deferredFailureRetry: Boolean = false, lifecycleRoute: String? = null) {
+        failCompletionOnce: Boolean = false, failPublicationOnce: Boolean = false, secondPurchase: Boolean = false, terminalStartsEntry: Boolean = false, failReportOnce: Boolean = false, deferredFailureRetry: Boolean = false, lifecycleRoute: String? = null, exitClose: Boolean = false) {
         val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/authored-dismiss.json").readText()).jsonObject
             .getValue("cases").jsonArray.single { it.jsonObject.getValue("name").jsonPrimitive.content == (commerce ?: "user_close") }.jsonObject
         val pendingCorpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/pending-commerce.json").readText()).jsonObject
         val pendingExpected = pendingCorpus.getValue("cases").jsonArray.map(JsonElement::jsonObject).single {
-            it.getValue("terminalEvent").jsonPrimitive.content == (terminalOutcome ?: SystemEventNames.PURCHASE_COMPLETED)
+            it.getValue("terminalEvent").jsonPrimitive.content == (terminalOutcome ?: if (commerce == "restore") SystemEventNames.RESTORE_COMPLETED else SystemEventNames.PURCHASE_COMPLETED)
         }
         val identity = IdentityService(context).also { it.setDistinctId("customer") }
         val entry = fixture.getValue("renderedEntry").jsonObject
@@ -3032,8 +3045,15 @@ class JourneyServiceTest {
                     put("kind", "action"); put("id", "commerce"); put("action", action)
                     putJsonObject("outlets") { put(if (type == "purchase") "completed" else "restored", "dismiss") }
                 },
-                Json.parseToJsonElement("""{"kind":"action","id":"dismiss","action":{"type":"dismiss"},"outlets":{}}"""),
-                Json.parseToJsonElement("""{"kind":"action","id":"close","action":{"type":"dismiss","reason":"author_closed"},"outlets":{}}"""),
+                buildJsonObject {
+                    put("kind", "action"); put("id", "dismiss")
+                    putJsonObject("action") {
+                        put("type", "dismiss")
+                        if (pendingClose) put("reason", if (type == "restore") "restore_finished" else "purchase_finished")
+                    }
+                    putJsonObject("outlets") {}
+                },
+                Json.parseToJsonElement("""{"kind":"action","id":"close","action":{"type":"${if (exitClose) "exit" else "dismiss"}","reason":"author_closed"},"outlets":{}}"""),
                 Json.parseToJsonElement("""{"kind":"action","id":"close_marker","action":{"type":"send_event","eventName":"authored_close_requested","payload":{}},"outlets":{"next":"close"}}"""),
             )),
             "routes" to Json.parseToJsonElement("""[{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"buy","entryStepId":"commerce"},{"host":{"kind":"screen","screenId":"${if (lifecycleRoute == SystemEventNames.SCREEN_SHOWN) "screen_thanks" else "screen_welcome"}"},"eventName":"${lifecycleRoute ?: "close"}","entryStepId":"close_marker"}]"""),
@@ -3279,8 +3299,9 @@ class JourneyServiceTest {
                         assertEquals("commerce", waiting.pendingCommerce?.stepId)
                         assertEquals("author_closed", waiting.authoredCloseOutcome)
                         for ((id, owner) in listOf("unrelated" to "customer", effectId to "another-customer")) {
-                            journeys.handleEvent(StoredEvent(id, SystemEventNames.PURCHASE_COMPLETED,
-                                buildJsonObject { put("placement_id", "golden:monthly") }, 100_002L, owner),
+                            journeys.handleEvent(StoredEvent(id,
+                                if (commerce == "restore") SystemEventNames.RESTORE_COMPLETED else SystemEventNames.PURCHASE_COMPLETED,
+                                if (commerce == "restore") JsonObject(emptyMap()) else buildJsonObject { put("placement_id", "golden:monthly") }, 100_002L, owner),
                                 journeys.eventAdmissionGeneration())
                         }
                         assertTrue(captures.none { it.first == JourneyEventNames.LEG_COMPLETED })
@@ -3345,8 +3366,9 @@ class JourneyServiceTest {
                 assertEquals("completed", JourneyRunJournal(directory, "customer", JourneyStorageScope(authority)).runs().single().completion?.outcome)
             }
             if (pendingClose && !terminalStartsEntry && !deferredFailureRetry) {
-                journeys.handleEvent(StoredEvent(claimedEffects.single(), SystemEventNames.PURCHASE_COMPLETED,
-                    buildJsonObject { put("placement_id", "golden:monthly") }, 100_002L, "customer"),
+                journeys.handleEvent(StoredEvent(claimedEffects.single(),
+                    if (commerce == "restore") SystemEventNames.RESTORE_COMPLETED else SystemEventNames.PURCHASE_COMPLETED,
+                    if (commerce == "restore") JsonObject(emptyMap()) else buildJsonObject { put("placement_id", "golden:monthly") }, 100_002L, "customer"),
                     journeys.eventAdmissionGeneration())
                 assertEquals(1, captures.count { it.first == JourneyEventNames.LEG_COMPLETED && it.second["journey_id"] == request.journeyId })
             }
