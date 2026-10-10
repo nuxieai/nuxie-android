@@ -2469,10 +2469,11 @@ class JourneyServiceTest {
             if (reset) {
                 assertFalse(Nuxie.isIdentified)
                 assertNotEquals("customer", Nuxie.distinctId)
+                assertNotEquals(originalSession, requireNotNull(core.sessions.getSessionId(readOnly = true)))
             } else {
                 assertTrue(Nuxie.isIdentified)
                 assertEquals("replacement", Nuxie.distinctId)
-                assertNotEquals(originalSession, core.sessions.getSessionId(readOnly = true))
+                assertNotEquals(originalSession, requireNotNull(core.sessions.getSessionId(readOnly = true)))
             }
         } finally {
             finished.countDown()
