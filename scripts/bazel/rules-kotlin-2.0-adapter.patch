@@ -1,11 +1,11 @@
 diff --git a/MODULE.bazel b/MODULE.bazel
 --- a/MODULE.bazel
 +++ b/MODULE.bazel
-@@ -36,1 +36,12 @@
+@@ -36,1 +36,36 @@
  register_toolchains("//kotlin/internal:default_toolchain")
 +
-+# The SDK retains Kotlin 2.0.21. The 2.1 adapter calls a newer CLI ABI;
-+# select the official 2.0 release adapter, keeping the modern Bazel rules.
++# The SDK retains Kotlin 2.0.21. Keep its builder, adapter and compiler
++# plugins on the same internal compiler ABI behind the modern Bazel rules.
 +http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 +http_archive(
 +    name = "nuxie_kotlin_2_0_adapter",
@@ -14,9 +14,144 @@ diff --git a/MODULE.bazel b/MODULE.bazel
 +    strip_prefix = "src/main/kotlin/io/bazel/kotlin/compiler",
 +    build_file_content = 'exports_files(["compiler.jar"])',
 +)
++http_archive(
++    name = "nuxie_kotlin_2_0_tools",
++    urls = ["https://github.com/bazelbuild/rules_kotlin/releases/download/v2.0.0/rules_kotlin-v2.0.0.tar.gz"],
++    sha256 = "d89723cc9ebbb7bdb2ebaca1af7d2383e074615643cf97a366b758a76b7dc443",
++    strip_prefix = "src/main/kotlin",
++    build_file_content = 'exports_files(["kotlin_worker.jar", "jdeps_merger_worker.jar", "jdeps-gen.jar", "skip-code-gen.jar"])',
++)
++
++# Compiler plugins use unstable FIR APIs. Rebuild their complete upstream
++# sources with the exact SDK compiler instead of importing a different ABI.
++http_archive(
++    name = "nuxie_kotlin_2_0_jdeps_sources",
++    urls = ["https://github.com/bazelbuild/rules_kotlin/archive/40fecf58b5e6b6002c137fca7ea91c7cb4b5889b.tar.gz"],
++    sha256 = "4247ae7d40a383da6a52ddcbfdbdd931d1f4123a207ba26dc1c3e32ae7bd76a4",
++    strip_prefix = "rules_kotlin-40fecf58b5e6b6002c137fca7ea91c7cb4b5889b/src/main/kotlin/io/bazel/kotlin/plugin/jdeps",
++    build_file_content = 'filegroup(name="sources", srcs=glob(["**/*.kt"]), visibility=["//visibility:public"])',
++)
++http_archive(
++    name = "nuxie_kotlin_2_0_skip_sources",
++    urls = ["https://github.com/bazelbuild/rules_kotlin/archive/40fecf58b5e6b6002c137fca7ea91c7cb4b5889b.tar.gz"],
++    sha256 = "4247ae7d40a383da6a52ddcbfdbdd931d1f4123a207ba26dc1c3e32ae7bd76a4",
++    strip_prefix = "rules_kotlin-40fecf58b5e6b6002c137fca7ea91c7cb4b5889b/src/main/kotlin/io/bazel/kotlin/plugin",
++    build_file_content = 'filegroup(name="sources", srcs=["SkipCodeGen.kt"], visibility=["//visibility:public"])',
++)
 diff --git a/src/main/kotlin/io/bazel/kotlin/compiler/BUILD.bazel b/src/main/kotlin/io/bazel/kotlin/compiler/BUILD.bazel
 --- a/src/main/kotlin/io/bazel/kotlin/compiler/BUILD.bazel
 +++ b/src/main/kotlin/io/bazel/kotlin/compiler/BUILD.bazel
-@@ -18,1 +18,1 @@
+@@ -14,1 +14,14 @@
+ load("@rules_java//java:defs.bzl", "java_import")
++# Preload the compiler's own coroutines with its adapter. Falling back to
++# the worker's loader duplicates Kotlin function interfaces in Kotlin 2.0.
++genrule(
++    name = "compiler_runtime",
++    srcs = [
++        "@nuxie_kotlin_2_0_adapter//:compiler.jar",
++        "@com_github_jetbrains_kotlin//:kotlinx-coroutines-core-jvm",
++    ],
++    outs = ["compiler-runtime.jar"],
++    tools = ["@bazel_tools//tools/jdk:singlejar"],
++    cmd = "$(location @bazel_tools//tools/jdk:singlejar) --output $@ --normalize --sources $(SRCS)",
++)
++
+@@ -17,3 +30,3 @@
+     name = "compiler",
 -    jars = ["compiler.jar"],
-+    jars = ["@nuxie_kotlin_2_0_adapter//:compiler.jar"],
++    jars = [":compiler_runtime"],
+     visibility = ["//src:__subpackages__"],
+diff --git a/src/main/kotlin/BUILD.bazel b/src/main/kotlin/BUILD.bazel
+--- a/src/main/kotlin/BUILD.bazel
++++ b/src/main/kotlin/BUILD.bazel
+@@ -18,3 +18,3 @@
+     name = "worker",
+-    jars = ["kotlin_worker.jar"],
++    jars = ["@nuxie_kotlin_2_0_tools//:kotlin_worker.jar"],
+ )
+@@ -23,3 +23,3 @@
+     name = "jdeps_merger_worker",
+-    jars = ["jdeps_merger_worker.jar"],
++    jars = ["@nuxie_kotlin_2_0_tools//:jdeps_merger_worker.jar"],
+ )
+@@ -28,3 +28,3 @@
+     name = "skip-code-gen",
+-    jars = ["skip-code-gen.jar"],
++    jars = [":skip_codegen_compatible"],
+ )
+@@ -33,3 +33,3 @@
+     name = "jdeps-gen",
+-    jars = ["jdeps-gen.jar"],
++    jars = [":jdeps_gen_compatible"],
+ )
+@@ -95,1 +95,55 @@
+ )
++
++# Bootstrap without the Kotlin worker or plugins: both plugins are compiled
++# directly by the exact pinned compiler, then retain their existing services,
++# protobuf and utility dependencies from the checksummed upstream release.
++java_import(
++    name = "plugin_compiler_runtime",
++    jars = [
++        "@com_github_jetbrains_kotlin//:kotlin-compiler",
++        "@com_github_jetbrains_kotlin//:kotlin-stdlib",
++        "@com_github_jetbrains_kotlin//:kotlin-reflect",
++        "@com_github_jetbrains_kotlin//:kotlin-script-runtime",
++        "@com_github_jetbrains_kotlin//:kotlinx-coroutines-core-jvm",
++        "@com_github_jetbrains_kotlin//:trove4j",
++        "@com_github_jetbrains_kotlin//:annotations",
++    ],
++)
++java_binary(
++    name = "plugin_compiler",
++    main_class = "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler",
++    runtime_deps = [":plugin_compiler_runtime"],
++)
++[
++    genrule(
++        name = name + "_classes",
++        srcs = [
++            sources,
++            release,
++            "@com_github_jetbrains_kotlin//:kotlin-compiler",
++            "@com_github_jetbrains_kotlin//:kotlin-stdlib",
++        ],
++        outs = [name + "-classes.jar"],
++        tools = [":plugin_compiler"],
++        cmd = "$(location :plugin_compiler) -no-stdlib -no-reflect -jvm-target 1.8 -module-name " + module_name +
++              " -classpath $(location @com_github_jetbrains_kotlin//:kotlin-compiler):$(location @com_github_jetbrains_kotlin//:kotlin-stdlib):$(location " + release + ")" +
++              " -d $@ $(locations " + sources + ")",
++    )
++    for name, sources, release, module_name in [
++        ("jdeps_gen", "@nuxie_kotlin_2_0_jdeps_sources//:sources", "@nuxie_kotlin_2_0_tools//:jdeps-gen.jar", "src_main_kotlin_io_bazel_kotlin_plugin_jdeps_jdeps_gen_lib"),
++        ("skip_codegen", "@nuxie_kotlin_2_0_skip_sources//:sources", "@nuxie_kotlin_2_0_tools//:skip-code-gen.jar", "src_main_kotlin_io_bazel_kotlin_plugin_skip_code_gen_lib"),
++    ]
++]
++[
++    genrule(
++        name = name + "_compatible",
++        srcs = [":" + name + "_classes", release],
++        outs = [name + "-compatible.jar"],
++        tools = ["@bazel_tools//tools/jdk:singlejar"],
++        cmd = "$(location @bazel_tools//tools/jdk:singlejar) --output $@ --normalize --sources $(location :" + name + "_classes) $(location " + release + ")",
++    )
++    for name, release in [
++        ("jdeps_gen", "@nuxie_kotlin_2_0_tools//:jdeps-gen.jar"),
++        ("skip_codegen", "@nuxie_kotlin_2_0_tools//:skip-code-gen.jar"),
++    ]
++]
+diff --git a/kotlin/internal/jvm/compile.bzl b/kotlin/internal/jvm/compile.bzl
+--- a/kotlin/internal/jvm/compile.bzl
++++ b/kotlin/internal/jvm/compile.bzl
+@@ -466,1 +466,4 @@
+-    args = _utils.init_args(ctx, rule_kind, compile_deps.module_name, kotlinc_options)
++    # The 2.0 builder describes Android bytecode compilation as JVM.
++    # Android packaging and providers retain the original rule kind.
++    builder_kind = rule_kind.replace("kt_android_", "kt_jvm_")
++    args = _utils.init_args(ctx, builder_kind, compile_deps.module_name, kotlinc_options)
+@@ -477,3 +480,4 @@
+     args.add("--reduced_classpath_mode", toolchains.kt.experimental_reduce_classpath_mode)
+-    args.add("--build_tools_api", toolchains.kt.experimental_build_tools_api)
++    if toolchains.kt.experimental_build_tools_api:
++        fail("The pinned Kotlin 2.0 builder uses its CLI adapter; build-tools API mode is unavailable")
+     args.add_all("--sources", srcs.all_srcs, omit_if_empty = True)
