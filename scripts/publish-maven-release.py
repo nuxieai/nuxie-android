@@ -58,9 +58,11 @@ def prepare(version, public_key, fingerprint, directory):
         raise ValueError('NUXIE_SIGNING_KEY is required for release preparation')
     directory.mkdir(parents=True, exist_ok=False)
     commands = [
-        [str(ROOT / 'gradlew'), '--no-daemon', ':nuxie-android:test', ':nuxie-android:apiCheck',
-         ':nuxie-android:lint', ':example-app:assembleDebug', ':nuxie-android:assembleRelease',
-         ':nuxie-android:publishReleasePublicationToStagingRepository'],
+        [str(ROOT / 'scripts/bazel/sdk.sh'), 'test'],
+        [str(ROOT / 'gradlew'), '--no-daemon', '--max-workers=2', ':nuxie-android:test', ':nuxie-android:apiCheck',
+         ':nuxie-android:lint', ':example-app:assembleDebug'],
+        [str(ROOT / 'scripts/bazel/sdk.sh'), 'prepare', '--output', str(ROOT / 'build/maven-repository'),
+         '--maven-version', version, '--sign'],
         [sys.executable, str(ROOT / 'scripts/test-maven-consumer.py'), '--version', version],
         [sys.executable, str(ROOT / 'scripts/bundle-maven-release.py'), '--version', version,
          '--public-key', str(public_key.resolve()), '--fingerprint', fingerprint,

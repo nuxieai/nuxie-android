@@ -38,6 +38,28 @@ class CentralDeploymentTests(unittest.TestCase):
             publisher.upload(self.manifest)
         return json.loads(self.receipt.read_text())
 
+    def test_prepare_qualifies_bazel_artifacts_before_independent_consumer_and_bundle(self):
+        directory = self.directory / 'prepared'
+        commands = []
+        def run(command, **kwargs):
+            commands.append(command)
+            if 'bundle-maven-release.py' in command[1]:
+                (directory / 'bundle.zip').write_bytes(b'qualified Bazel bundle')
+        with patch.dict(os.environ, {'NUXIE_SIGNING_KEY': 'test key', 'NUXIE_RUNTIME_USE_LOCAL': ''}), \
+             patch.object(publisher.subprocess, 'run', side_effect=run):
+            publisher.prepare('0.1.0', self.directory / 'public.asc', 'A' * 40, directory)
+        self.assertEqual(commands[0][1:], ['test'])
+        artifact_prepare = commands[2]
+        self.assertTrue(artifact_prepare[0].endswith('/scripts/bazel/sdk.sh'))
+        self.assertEqual(artifact_prepare[1], 'prepare')
+        self.assertIn('--sign', artifact_prepare)
+        self.assertEqual(artifact_prepare[artifact_prepare.index('--maven-version') + 1], '0.1.0')
+        self.assertIn(':nuxie-android:apiCheck', commands[1])
+        self.assertIn(':nuxie-android:lint', commands[1])
+        self.assertFalse(any('publishReleasePublication' in arg for command in commands for arg in command))
+        self.assertTrue(commands[3][1].endswith('/scripts/test-maven-consumer.py'))
+        self.assertEqual(json.loads((directory / 'release.json').read_text())['checks'], commands)
+
     def response(self, state):
         receipt = json.loads(self.receipt.read_text())
         return json.dumps({'deploymentId': DEPLOYMENT, 'deploymentName': receipt['deploymentName'], 'deploymentState': state}).encode()

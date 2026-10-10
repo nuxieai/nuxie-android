@@ -22,3 +22,10 @@ runtime/prebuilt/
 */.cxx/
 .kotlin/
 *.hprof
+
+# Bazel outputs are separate from the stable prepared Maven repository in build/.
+/bazel-*
+/runtime/local-artifact.json
+/runtime/.local-artifact-*.tmp
+/.bazel-cache.local.bazelrc
+/.bazel-cache.*.tmp

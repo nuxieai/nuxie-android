@@ -1,0 +1,29 @@
+load("@rules_kotlin//kotlin:core.bzl", "define_kt_toolchain", "kt_javac_options", "kt_kotlinc_options")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_java//java:java_binary.bzl", "java_binary")
+
+package(default_visibility = ["//visibility:public"])
+exports_files(["runtime_artifacts.py"])
+
+kt_kotlinc_options(name = "kotlinc_options", jvm_target = "17", x_jvm_default = "all")
+kt_javac_options(name = "javac_options", release = "17")
+define_kt_toolchain(
+    name = "kotlin_toolchain",
+    language_version = "2.0",
+    api_version = "2.0",
+    jvm_target = "17",
+    kotlinc_options = ":kotlinc_options",
+    javac_options = ":javac_options",
+    experimental_build_tools_api = False,
+    jvm_stdlibs = ["@sdk_maven//:org_jetbrains_kotlin_kotlin_stdlib", "@rules_kotlin//kotlin/compiler:annotations"],
+    jvm_runtime = ["@sdk_maven//:org_jetbrains_kotlin_kotlin_stdlib"],
+)
+
+py_binary(name = "package_aar", srcs = ["package_aar.py"])
+py_binary(name = "test_suite", srcs = ["test_suite.py"])
+
+java_binary(
+    name = "dokka_cli",
+    main_class = "org.jetbrains.dokka.MainKt",
+    runtime_deps = ["@docs_maven//:org_jetbrains_dokka_dokka_cli"],
+)

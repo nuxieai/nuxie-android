@@ -1,0 +1,208 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_java//java:java_library.bzl", "java_library")
+load("@rules_java//java:java_test.bzl", "java_test")
+load("@rules_kotlin//kotlin:android.bzl", "kt_android_library", "kt_android_local_test")
+load("@rules_android//android:rules.bzl", "aar_import", "android_binary", "android_library")
+load("//scripts/bazel:sdk_rules.bzl", "sdk_aar", "sdk_docs", "sdk_jvm_test", "sdk_assets")
+
+package(default_visibility = ["//visibility:public"])
+
+platform(name = "android_arm64", constraint_values = ["@platforms//cpu:arm64", "@platforms//os:android"])
+platform(name = "android_x86_64", constraint_values = ["@platforms//cpu:x86_64", "@platforms//os:android"])
+
+cc_binary(
+    name = "libnuxie_runtime_android.so",
+    srcs = ["nuxie-android/src/main/cpp/nuxie_runtime_android.c", "nuxie-android/src/main/cpp/nuxie_host_installs.h"],
+    defines = ["NUX_CAPI_ANDROID_VULKAN", "NUX_CAPI_ANDROID_AUTHORED_WGSL"],
+    copts = ["-O2"],
+    linkopts = ["-landroid", "-llog", "-Wl,-z,max-page-size=16384", "-Wl,-soname,libnuxie_runtime_android.so"],
+    linkshared = True,
+    deps = ["@nuxie_runtime_android//:capi"],
+    target_compatible_with = ["@platforms//os:android"],
+)
+
+SDK_DEPS = [
+    "@sdk_maven//:androidx_browser_browser",
+    "@sdk_maven//:androidx_sqlite_sqlite_framework",
+    "@sdk_maven//:com_android_billingclient_billing",
+    "@sdk_maven//:org_jetbrains_kotlinx_kotlinx_coroutines_android",
+    "@sdk_maven//:org_jetbrains_kotlinx_kotlinx_coroutines_core_jvm",
+    "@sdk_maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+]
+
+kt_android_library(
+    name = "sdk",
+    srcs = glob(["nuxie-android/src/main/**/*.kt", "nuxie-android/src/main/**/*.java"]),
+    manifest = ":sdk_manifest",
+    custom_package = "ai.nuxie.sdk",
+    resource_files = glob(["nuxie-android/src/main/res/**"]),
+    deps = SDK_DEPS,
+)
+
+genrule(
+    name = "sdk_manifest",
+    srcs = ["nuxie-android/src/main/AndroidManifest.xml"],
+    outs = ["SdkAndroidManifest.xml"],
+    tools = ["//scripts/bazel:package_aar"],
+    cmd = "$(location //scripts/bazel:package_aar) manifest --input $(SRCS) --output $@",
+)
+
+java_library(
+    name = "lint",
+    srcs = glob(["nuxie-lint/src/main/java/**/*.java"]),
+    resources = glob(["nuxie-lint/src/main/resources/**"]),
+    deps = ["@lint_maven//:com_android_tools_lint_lint_api"],
+)
+
+sdk_aar(
+    name = "sdk_aar",
+    sdk = ":sdk",
+    lint = ":lint",
+    shim = ":libnuxie_runtime_android.so",
+    runtime = "@nuxie_runtime_android//:jni_libraries",
+    consumer_rules = "nuxie-android/consumer-rules.pro",
+)
+
+genrule(
+    name = "sdk_sources",
+    srcs = glob(["nuxie-android/src/main/**/*.kt", "nuxie-android/src/main/**/*.java"]),
+    outs = ["nuxie-android-sources.jar"],
+    tools = ["//scripts/bazel:package_aar"],
+    cmd = "$(location //scripts/bazel:package_aar) sources --output $@ $(SRCS)",
+)
+
+sdk_docs(
+    name = "sdk_javadoc",
+    sdk = ":sdk",
+    srcs = glob(["nuxie-android/src/main/**/*.kt", "nuxie-android/src/main/**/*.java"]),
+    plugins = [
+        "@docs_maven//:org_jetbrains_dokka_dokka_base",
+        "@docs_maven//:org_jetbrains_dokka_analysis_kotlin_descriptors",
+        "@docs_maven//:org_jetbrains_dokka_javadoc_plugin",
+        "@docs_maven//:org_jetbrains_dokka_kotlin_as_java_plugin",
+    ],
+)
+
+filegroup(name = "fixtures", srcs = glob(["fixtures/**", "nuxie-android/src/test/resources/**"]))
+
+# The friend edge supplies internal Kotlin access; this ordinary Android edge
+# also carries the production manifest/resources into Robolectric and APKs.
+android_library(name = "sdk_test_resources", custom_package = "ai.nuxie.sdk", exports = [":sdk"])
+
+TEST_SRCS = glob([
+    "nuxie-android/src/test/**/*.kt", "nuxie-android/src/test/**/*.java",
+    "nuxie-android/src/sharedTest/**/*.kt", "nuxie-android/src/hostRenderHarness/**/*.kt",
+])
+
+genrule(
+    name = "sdk_test_suite",
+    srcs = TEST_SRCS,
+    outs = ["SdkTestSuite.java"],
+    tools = ["//scripts/bazel:test_suite"],
+    cmd = "$(location //scripts/bazel:test_suite) --output $@ $(SRCS)",
+)
+
+kt_android_local_test(
+    name = "sdk_test_java",
+    srcs = TEST_SRCS + [":sdk_test_suite"],
+    associates = [":sdk"],
+    custom_package = "ai.nuxie.sdk",
+    manifest = "nuxie-android/src/main/AndroidManifest.xml",
+    manifest_values = {"minSdkVersion": "23", "targetSdkVersion": "36"},
+    test_class = "ai.nuxie.bazel.SdkTestSuite",
+    resources = glob(["nuxie-android/src/test/resources/**"]),
+    data = [":fixtures"],
+    deps = SDK_DEPS + [":sdk_test_resources",
+        "@test_maven//:junit_junit",
+        "@test_maven//:org_jetbrains_kotlinx_kotlinx_coroutines_test_jvm",
+        "@test_maven//:org_robolectric_robolectric",
+        "@robolectric//bazel:android-all",
+    ],
+    jvm_flags = ["-Xmx1g", "-Djava.security.manager=allow"],
+    size = "large",
+    timeout = "long",
+    tags = ["manual"],
+)
+
+sdk_jvm_test(name = "sdk_test", binary = ":sdk_test_java", size = "large", timeout = "long")
+
+java_test(
+    name = "lint_test",
+    srcs = glob(["nuxie-lint/src/test/java/**/*.java"]),
+    test_class = "ai.nuxie.lint.LoggingPolicyDetectorTest",
+    deps = [":lint", "@lint_maven//:com_android_tools_lint_lint_tests", "@lint_maven//:com_android_tools_lint_lint_checks", "@lint_maven//:junit_junit"],
+)
+
+java_test(
+    name = "lint_store_test",
+    srcs = glob(["nuxie-lint/src/test/java/**/*.java"]),
+    test_class = "ai.nuxie.lint.TestStoreDetectorTest",
+    deps = [":lint", "@lint_maven//:com_android_tools_lint_lint_tests", "@lint_maven//:com_android_tools_lint_lint_checks", "@lint_maven//:junit_junit"],
+)
+
+test_suite(name = "tests", tests = [":sdk_test", ":lint_test", ":lint_store_test"])
+
+aar_import(name = "sdk_release", aar = ":sdk_aar", deps = SDK_DEPS)
+
+genrule(
+    name = "sdk_native_aar",
+    srcs = [":sdk_aar"],
+    outs = ["nuxie-native-only.aar"],
+    tools = ["//scripts/bazel:package_aar"],
+    cmd = "$(location //scripts/bazel:package_aar) native-aar --input $(SRCS) --output $@",
+)
+aar_import(name = "sdk_native", aar = ":sdk_native_aar")
+
+genrule(
+    name = "example_build_config",
+    outs = ["BuildConfig.java"],
+    cmd = "echo 'package ai.nuxie.example; public final class BuildConfig { public static final boolean DEBUG = true; }' > $@",
+)
+
+kt_android_library(
+    name = "example_app",
+    srcs = glob(["example-app/src/main/**/*.kt", "example-app/src/nuxie/**/*.kt"]) + [":example_build_config"],
+    manifest = "example-app/src/main/AndroidManifest.xml",
+    custom_package = "ai.nuxie.example",
+    resource_files = glob(["example-app/src/main/res/**"]),
+    deps = [":sdk_release"],
+)
+
+android_binary(
+    name = "example_app_debug",
+    incremental_dexing = 0,
+    manifest = "example-app/src/main/AndroidManifest.xml",
+    custom_package = "ai.nuxie.example",
+    manifest_values = {"applicationId": "ai.nuxie.example", "minSdkVersion": "23", "targetSdkVersion": "36", "versionCode": "11", "versionName": "0.1.10"},
+    deps = [":example_app"],
+)
+
+kt_android_library(
+    name = "instrumentation",
+    srcs = glob(["nuxie-android/src/androidTest/**/*.kt", "nuxie-android/src/sharedTest/**/*.kt"]),
+    associates = [":sdk"],
+    manifest = "nuxie-android/src/androidTest/AndroidManifest.xml",
+    custom_package = "ai.nuxie.sdk",
+    assets = [":instrumentation_assets"],
+    assets_dir = "instrumentation_assets",
+    deps = SDK_DEPS + [":sdk_test_resources", "@test_maven//:androidx_test_runner", "@test_maven//:androidx_test_uiautomator_uiautomator", "@test_maven//:junit_junit"],
+)
+
+sdk_assets(name = "instrumentation_assets", srcs = glob(["nuxie-android/src/androidTest/assets/**", "fixtures/**"]))
+
+genrule(
+    name = "instrumentation_manifest",
+    srcs = ["nuxie-android/src/androidTest/AndroidManifest.xml"],
+    outs = ["InstrumentationAndroidManifest.xml"],
+    tools = ["//scripts/bazel:package_aar"],
+    cmd = "$(location //scripts/bazel:package_aar) instrumentation-manifest --input $(SRCS) --output $@",
+)
+
+android_binary(
+    name = "sdk_instrumentation_apk",
+    incremental_dexing = 0,
+    manifest = ":instrumentation_manifest",
+    custom_package = "ai.nuxie.sdk.test",
+    manifest_values = {"applicationId": "ai.nuxie.sdk.test", "minSdkVersion": "23", "targetSdkVersion": "36"},
+    deps = [":instrumentation", ":sdk_native"],
+)
