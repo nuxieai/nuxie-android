@@ -1,0 +1,17 @@
+{
+  "publicKey": "oyyefdfEk3was36hkN+a08V7I0qqmk0Psygjt5cTAxc=",
+  "signatures": {
+    "feedback": {
+      "descriptorSha256": "b45acead8f29942fbf96727e9410ecf526cdbcbb167bed29b13b372eb25e463b",
+      "signature": "wwxsbJak2AfTMSBlTLJFsHXn5m36kRzbu1iki8aI7GgLr6028ZtB8qWZ4lEfi/hSTan0IWyou8lIdLqiI+JhBA=="
+    },
+    "departure": {
+      "descriptorSha256": "baa5927978de3dbab747ea67881ef6b7b7c8c9a328523fbc490272f85f90aa3c",
+      "signature": "KRHAsww2zyGdyUv0kybK5CnW0h5RFlvzJupe9OOLvxcC4FaHbwXVS3SjwZHHb4N5rvMlen8GvzXnsW8qZn2yDw=="
+    },
+    "departure-c11": {
+      "descriptorSha256": "54b65cbdc5fef836bf4428f50351a119515940cae6bc5e7f067e898fbac26138",
+      "signature": "3uhR+0pxo779oCuiy9xjujFBueOIoULqGSdg256And5gwPJfeLVTW4wfgR4QGAEEPl8p8V7CJdi7yf9X5/XsCA=="
+    }
+  }
+}

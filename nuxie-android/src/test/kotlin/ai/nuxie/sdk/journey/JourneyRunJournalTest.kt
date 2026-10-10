@@ -23,6 +23,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -62,6 +63,34 @@ class JourneyRunJournalTest {
         scope.coroutineContext[Job]?.cancelAndJoin()
         directory.deleteRecursively()
         Unit
+    }
+
+    @Test fun `derived form answers are never persisted as journey context`() {
+        val journal = JourneyRunJournal(directory, "customer")
+        val run = requireNotNull(journal.admit(arm(), JourneyFrequency.OneTime, "wait", 100))
+        val context = JsonObject(run.context + ("formAnswers" to Json.parseToJsonElement(
+            """{"onboarding":{"trip_days":21}}""")))
+        journal.markStartedQueued(run)
+        journal.transition(run.id, "wait", context, JourneyControlExecutor.Checkpoint(100, 200))
+        assertFalse(JourneyRunJournal(directory, "customer").runs().single().context.containsKey("formAnswers"))
+    }
+
+    @Test fun `list graph survives journal reopen and is dropped at completion`() {
+        val journal = JourneyRunJournal(directory, "customer")
+        val run = requireNotNull(journal.admit(arm(), JourneyFrequency.OneTime, "wait", 100))
+        val graph = ai.nuxie.sdk.presentation.ExperienceRunListSnapshot(listOf(
+            ai.nuxie.sdk.presentation.ExperienceRunListSnapshot.Node(0, emptyList(), JsonArray(emptyList()),
+                listOf(ai.nuxie.sdk.presentation.ExperienceRunListSnapshot.Items("goals", listOf(1, 1))), emptyList()),
+            ai.nuxie.sdk.presentation.ExperienceRunListSnapshot.Node(1, null,
+                Json.parseToJsonElement("""[{"path":"title","kind":1,"value":"Walk"}]""").jsonArray,
+                emptyList(), emptyList()),
+        ))
+        val snapshot = ai.nuxie.sdk.presentation.ExperienceRunSnapshot(JsonArray(emptyList()), graph)
+        journal.markStartedQueued(run)
+        journal.transition(run.id, "wait", run.context, JourneyControlExecutor.Checkpoint(100, 200), nativeSnapshot = snapshot)
+        assertEquals(snapshot, JourneyRunJournal(directory, "customer").runs().single().nativeSnapshot)
+        journal.complete(run.id, "closed", 150)
+        assertNull(JourneyRunJournal(directory, "customer").runs().single().nativeSnapshot)
     }
 
     @Test fun `completion discards timed wait values and checkpoint`() {

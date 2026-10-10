@@ -92,7 +92,7 @@ internal class JourneyRuntimeEmissionCoordinator(
         }
     }
 
-    suspend fun publish(outcome: NuxiePlayerStepOutcome, correlationId: ULong, lifetime: RendererEffectLifetime? = null, snapshot: NuxieViewModelSnapshot? = null): Boolean {
+    suspend fun publish(outcome: NuxiePlayerStepOutcome, correlationId: ULong, lifetime: RendererEffectLifetime? = null, snapshot: NuxieViewModelSnapshot? = null, saves: List<ExperienceFrameSave> = emptyList()): Boolean {
         if (!awaitReveal(lifetime)) return true
         var frameLinks: JourneyFrameLinks? = null
         val accepted = gate.withLock {
@@ -109,7 +109,7 @@ internal class JourneyRuntimeEmissionCoordinator(
             val drafts = when (val control = projected.control) {
                 null -> projected.drafts
                 else -> {
-                    val authored = materializeControl(control) ?: return@withLock true
+                    val authored = materializeControl(control) ?: if (saves.isEmpty()) return@withLock true else emptyList()
                     authored + projected.drafts
                 }
             }
@@ -124,7 +124,7 @@ internal class JourneyRuntimeEmissionCoordinator(
                 screenId = screenId,
                 actionId = "runtime:$correlationId",
             )
-            publishDrafts(drafts, source, (projected.eventSource ?: JourneyRuntimeEmissionSources()).copy(frameLinks = frameLinks))
+            publishDrafts(drafts, source, (projected.eventSource ?: JourneyRuntimeEmissionSources()).copy(frameLinks = frameLinks, saves = saves))
         }
         frameLinks?.perform()
         return accepted
@@ -143,8 +143,7 @@ internal class JourneyRuntimeEmissionCoordinator(
             if (closed) return@withLock false
             if (lifetime?.isRetired == true) return@withLock true
             val input = textInputs[inputId] ?: return@withLock false
-            val commitKey = if (input.editableValueName == null) inputId else
-                "$inputId:${checkNotNull(snapshot) { "Native input requires its evaluated owner" }.nativeRootInstanceId}"
+            val commitKey = "$inputId:${checkNotNull(snapshot) { "Native input requires its evaluated owner" }.nativeRootInstanceId}"
             val previous = state.committedValue(commitKey)
                 ?: ExperienceTextInputLimit.apply(input.value, input.maxLength)
             if (previous == text) return@withLock true
@@ -184,7 +183,7 @@ internal class JourneyRuntimeEmissionCoordinator(
         eventSource: JourneyRuntimeEmissionSources? = null,
     ): Boolean {
         val drafts = inputDrafts.filterNot(Draft::isReservedEvent)
-        if (drafts.isEmpty()) return true
+        if (drafts.isEmpty() && eventSource?.saves.isNullOrEmpty()) return true
         val sources = eventSource?.let { sources ->
             val controlCount = inputDrafts.size - sources.drafts.size
             sources.copy(drafts = sources.drafts.filterIndexed { index, _ ->

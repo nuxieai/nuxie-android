@@ -61,7 +61,7 @@ class PublishedNativeConverterDeviceTest {
         val screen = render.getValue("screens").jsonArray.single().jsonObject
         val screenId = screen.getValue("id").jsonPrimitive.content
         val input = ExperienceTextInput.forScreen(descriptor, screenId).single()
-        assertNotNull("Publisher must emit the native endpoint", input.editableValueName)
+        assertNotNull("Publisher must emit the native endpoint", input.textInputName)
         assertEquals(secure, input.secure)
         assertEquals(ExperienceTextInput.ResponseCapture.BINDING, input.responseCapture)
         val directory = File(instrumentation.targetContext.cacheDir, "$prefix-${System.nanoTime()}").apply { mkdirs() }
@@ -102,7 +102,7 @@ class PublishedNativeConverterDeviceTest {
                 mounted = ExperienceMountedScreen(activity, prepared, object : ExperienceSurfaceHost.Listener {
                     override fun onFirstFrame() { checkNotNull(mounted).activate() }
                     override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
-                    override fun onRuntimeStep(outcome: NuxiePlayerStepOutcome, correlationId: ULong, viewModelSnapshot: NuxieViewModelSnapshot?) {
+                    override fun onRuntimeStep(outcome: NuxiePlayerStepOutcome, correlationId: ULong, viewModelSnapshot: NuxieViewModelSnapshot?, saves: List<ExperienceResponseSaveRequest>) {
                         try {
                             journey?.publish(outcome, correlationId, viewModelSnapshot)
                         } catch (error: Throwable) {

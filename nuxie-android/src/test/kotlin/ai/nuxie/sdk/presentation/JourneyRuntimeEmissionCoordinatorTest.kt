@@ -26,6 +26,29 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class JourneyRuntimeEmissionCoordinatorTest {
+    @Test fun `save only frames and ordinary siblings reach the publication gate once`() = runTest {
+        val saves = mutableListOf<ExperienceFrameSave>()
+        val batches = mutableListOf<JourneyScreenEmissionBatch>()
+        val request = ExperienceFrameSave(ExperienceResponseSaveRequest("feedback", "resume", JsonObject(emptyMap())),
+            "screen", {})
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", JsonObject(emptyMap()), 0, 0,
+            onEmissionBatch = { batch, sources ->
+                batches += batch
+                saves += checkNotNull(sources).saves
+                true
+            }, onPresentationRevealed = {})
+        assertTrue(coordinator.reveal())
+        fun step(name: String) = NuxiePlayerStepOutcome(false, emptyList(),
+            listOf(NuxieRuntimeEvent(0, 128, name, "", "", 0f, emptyList())), emptyList(), emptyList())
+        assertTrue(coordinator.publish(step("\$nuxie.response.save"), 1uL, saves = listOf(request)))
+        assertTrue(coordinator.publish(step("continue"), 2uL, saves = listOf(request)))
+        assertEquals(listOf(0L, 1L), batches.map { it.batchSequence })
+        assertTrue(batches.first().emissions.isEmpty())
+        assertEquals(listOf("continue"), batches.last().emissions.map { it.name })
+        assertEquals(listOf(0L), batches.last().emissions.map { it.sequence })
+        assertEquals(listOf(request, request), saves)
+    }
+
     @Test fun `reserved event drops only itself and preserves the sibling source`() = runTest {
         val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("events/reserved-event-filtering.json").readText()).jsonObject

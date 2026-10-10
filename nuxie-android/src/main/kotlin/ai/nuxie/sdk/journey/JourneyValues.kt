@@ -12,7 +12,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /** Null is the unknown sentinel; JsonNull is an explicitly known value. These
- * operations see only the current event and locally buffered response context. */
+ * operations see the current event and freshly read native state and form answers. */
 internal object JourneyValues {
     fun resolve(value: JsonObject, context: JsonObject, customer: JsonObject = JsonObject(emptyMap())): JsonElement? {
         return when (value.text("type")) {
@@ -20,7 +20,12 @@ internal object JourneyValues {
             "Boolean", "Number", "String" -> value["value"]
             "Event.Field" -> (context["event"] as? JsonObject)?.get(value.text("key"))
             "Customer.Field" -> customer[value.text("key")]
-            "Response.Field" -> (context["responses"] as? JsonObject)?.get(value.text("key"))
+            "Response.Field" -> {
+                val fields = if (value.containsKey("form"))
+                    (context["formAnswers"] as? JsonObject)?.get(value.text("form")) as? JsonObject
+                else context["responses"] as? JsonObject
+                fields?.get(value.text("key"))
+            }
             "Array" -> {
                 val items = mutableListOf<JsonElement>()
                 for (item in value.getValue("items").jsonArray) items += resolve(item.jsonObject, context, customer) ?: return null

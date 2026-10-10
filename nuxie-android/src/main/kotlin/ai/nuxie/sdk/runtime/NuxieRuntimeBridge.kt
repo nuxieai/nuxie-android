@@ -186,6 +186,10 @@ internal object NuxieRuntimeBridge {
 
     external fun nativeViewModelInstanceNewDefault(artboard: Long, statusOut: IntArray): Long
 
+    external fun nativeViewModelListItemAcquire(
+        owner: Long, path: ByteArray, index: Int, expectedIdentity: Long, statusOut: IntArray,
+    ): Long
+
     external fun nativeViewModelRootSchemaIndex(viewModel: Long, statusOut: IntArray): Long
 
     /** Copies one retained instance's complete graph into JVM-owned values. */
@@ -195,8 +199,6 @@ internal object NuxieRuntimeBridge {
     ): NativeViewModelSnapshot?
 
     external fun nativeArtboardInstanceBindViewModel(artboard: Long, viewModel: Long): Int
-
-    external fun nativeArtboardSetTextRun(artboard: Long, name: ByteArray, text: ByteArray, statusOut: IntArray): Int
 
     external fun nativeViewModelMutate(
         viewModel: Long,
@@ -208,6 +210,7 @@ internal object NuxieRuntimeBridge {
         boolValue: Boolean,
         relatedViewModel: Long,
         index: Long,
+        secondIndex: Long,
     ): Int
 
     external fun nativeViewModelInstanceFree(viewModel: Long): Int
@@ -239,8 +242,6 @@ internal object NuxieRuntimeBridge {
 
     external fun nativePlayerFieldStringCopy(player: Long, snapshot: Long, nodeId: Long, name: ByteArray, statusOut: IntArray): ByteArray?
 
-    external fun nativePlayerFieldStringSet(player: Long, snapshot: Long, nodeId: Long, name: ByteArray, value: ByteArray): Int
-
     external fun nativePlayerTextInputGeometry(player: Long, snapshot: Long, nodeId: Long, name: ByteArray, statusOut: IntArray): NativeTextInputGeometry?
 
     external fun nativePlayerFieldViewModel(player: Long, snapshot: Long, nodeId: Long, name: ByteArray, statusOut: IntArray): Long
@@ -251,6 +252,8 @@ internal object NuxieRuntimeBridge {
 
     /** Action 0 = tap, 1 = increase, 2 = decrease; accepted work requires a normal player step. */
     external fun nativePlayerQueueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int): Int
+
+    external fun nativePlayerGlobalViewModelSet(player: Long, name: ByteArray, viewModel: Long): Int
 
     external fun nativePlayerLayoutSizeSet(player: Long, width: Float, height: Float): Int
 
@@ -361,4 +364,8 @@ internal object NuxieRuntimeBridge {
     private const val HOST_BUILD_COMMAND =
         "cargo build -p nux-capi --features android-authored-wgsl,android-vulkan,scripting"
     private const val NUX_STATUS_OK = 0
+
+    external fun nativeFileSetValueMarkers(file: Long, entries: Array<NativeValueMarker>): Int
+    external fun nativeFileSetValueRules(file: Long, entries: Array<NativeValueRule>, diagnostic: Array<String?>): Int
+    external fun nativeFileSetRuleGroups(file: Long, entries: Array<NativeRuleGroup>): Int
 }

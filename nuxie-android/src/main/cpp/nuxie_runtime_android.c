@@ -22,6 +22,7 @@
 
 #include "nux_capi.generated.h"
 #include "nuxie_logging_policy.h"
+#include "nuxie_host_installs.h"
 
 // Native diagnostics use the same Kotlin policy as every other SDK log. Never
 // redirect process-wide stderr: it belongs to the embedding application.
@@ -1420,6 +1421,51 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelInstanceNew(
 }
 
 JNIEXPORT jlong JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelListItemAcquire(
+    JNIEnv *env, jobject self, jlong owner, jbyteArray path, jint index,
+    jlong expected_identity, jintArray status_out) {
+  (void)self;
+  if (status_out == NULL) return 0;
+  NuxStatus status = NUX_STATUS_NULL_ARGUMENT;
+  struct NuxViewModelInstance *child = NULL;
+  if (index < 0) {
+    status = NUX_STATUS_INVALID_ARGUMENT;
+  } else if (owner != 0 && path != NULL) {
+    jsize length = (*env)->GetArrayLength(env, path);
+    if (clear_jni_exception(env)) {
+      status = NUX_STATUS_RUNTIME_ERROR;
+    } else if (length > 4096) {
+      status = NUX_STATUS_LIMIT_EXCEEDED;
+    } else {
+      jbyte *bytes = (*env)->GetByteArrayElements(env, path, NULL);
+      if (clear_jni_exception(env) || bytes == NULL) {
+        if (bytes != NULL) (*env)->ReleaseByteArrayElements(env, path, bytes, JNI_ABORT);
+        status = NUX_STATUS_RUNTIME_ERROR;
+      } else {
+        struct NuxStringView key = {(const char *)bytes, (size_t)length};
+        status = nux_view_model_instance_list_item_acquire(
+            (const struct NuxViewModelInstance *)from_handle(owner), key, (size_t)index, &child);
+        (*env)->ReleaseByteArrayElements(env, path, bytes, JNI_ABORT);
+        if (status == NUX_STATUS_OK && child == NULL) status = NUX_STATUS_RUNTIME_ERROR;
+        if (status == NUX_STATUS_OK) {
+          uint64_t identity = 0;
+          status = nux_view_model_instance_identity(child, &identity);
+          if (status == NUX_STATUS_OK && identity != (uint64_t)expected_identity) {
+            status = NUX_STATUS_INVALID_ARGUMENT;
+          }
+        }
+      }
+    }
+  }
+  int returned_status = set_status_out(env, status_out, status);
+  if (status != NUX_STATUS_OK || !returned_status) {
+    if (child != NULL) nux_view_model_instance_free(child);
+    return 0;
+  }
+  return as_handle(child);
+}
+
+JNIEXPORT jlong JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelInstanceNewDefault(
     JNIEnv *env, jobject self, jlong artboard, jintArray status_out) {
   (void)self;
@@ -1708,47 +1754,10 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeArtboardInstanceBindViewModel
 }
 
 JNIEXPORT jint JNICALL
-Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeArtboardSetTextRun(
-    JNIEnv *env, jobject self, jlong artboard, jbyteArray name,
-    jbyteArray text, jintArray status_out) {
-  (void)self;
-  NuxStatus status = NUX_STATUS_NULL_ARGUMENT;
-  uint32_t changed = 0;
-  jbyte *name_data = NULL;
-  jbyte *text_data = NULL;
-  if (artboard == 0 || name == NULL || text == NULL) goto text_run_done;
-  status = NUX_STATUS_RUNTIME_ERROR;
-  jsize name_len = (*env)->GetArrayLength(env, name);
-  if (clear_jni_exception(env)) goto text_run_done;
-  jsize text_len = (*env)->GetArrayLength(env, text);
-  if (clear_jni_exception(env)) goto text_run_done;
-  name_data = (*env)->GetByteArrayElements(env, name, NULL);
-  if (clear_jni_exception(env) || name_data == NULL) goto text_run_done;
-  text_data = (*env)->GetByteArrayElements(env, text, NULL);
-  if (clear_jni_exception(env) || text_data == NULL) goto text_run_done;
-  struct NuxTextRunMutation mutation = {
-      .name = {.data = (const char *)name_data, .len = (size_t)name_len},
-      .text = {.data = (const uint8_t *)text_data, .len = (size_t)text_len},
-  };
-  struct NuxTextRunMutationBatch batch = {
-      .struct_size = sizeof(struct NuxTextRunMutationBatch),
-      .mutations = &mutation,
-      .mutation_count = 1,
-  };
-  status = nux_artboard_instance_set_text_runs(
-      (struct NuxArtboardInstance *)from_handle(artboard), &batch, &changed);
-text_run_done:
-  if (text_data != NULL) (*env)->ReleaseByteArrayElements(env, text, text_data, JNI_ABORT);
-  if (name_data != NULL) (*env)->ReleaseByteArrayElements(env, name, name_data, JNI_ABORT);
-  if (!set_status_out(env, status_out, status)) return 0;
-  return status == NUX_STATUS_OK ? (jint)changed : 0;
-}
-
-JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
     JNIEnv *env, jobject self, jlong view_model, jint kind, jbyteArray path,
     jbyteArray bytes_value, jfloat number_value, jlong integer_value,
-    jboolean bool_value, jlong related_view_model, jlong index) {
+    jboolean bool_value, jlong related_view_model, jlong index, jlong second_index) {
   (void)self;
   if (view_model == 0 || path == NULL || bytes_value == NULL) {
     return (jint)NUX_STATUS_NULL_ARGUMENT;
@@ -1757,6 +1766,8 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
          kind <= NUX_VIEW_MODEL_MUTATION_KIND_SET_IMAGE) ||
         kind == NUX_VIEW_MODEL_MUTATION_KIND_SET_VIEW_MODEL ||
         kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_INSERT ||
+        kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_REMOVE ||
+        kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_MOVE ||
         kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_CLEAR ||
         kind == NUX_VIEW_MODEL_MUTATION_KIND_LIST_SET)) {
     return (jint)NUX_STATUS_INVALID_ARGUMENT;
@@ -1767,7 +1778,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
       related_view_model == 0) {
     return (jint)NUX_STATUS_NULL_ARGUMENT;
   }
-  if (index < 0) return (jint)NUX_STATUS_INVALID_ARGUMENT;
+  if (index < 0 || second_index < 0) return (jint)NUX_STATUS_INVALID_ARGUMENT;
   jsize path_len = (*env)->GetArrayLength(env, path);
   if (clear_jni_exception(env)) return (jint)NUX_STATUS_RUNTIME_ERROR;
   jsize bytes_len = (*env)->GetArrayLength(env, bytes_value);
@@ -1802,6 +1813,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeViewModelMutate(
   mutation.related_instance =
       (struct NuxViewModelInstance *)from_handle(related_view_model);
   mutation.index = (size_t)index;
+  mutation.second_index = (size_t)second_index;
   struct NuxViewModelMutationBatch batch;
   memset(&batch, 0, sizeof(batch));
   batch.struct_size = (uint32_t)sizeof(batch);
@@ -2065,33 +2077,6 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerFieldStringCopy(
   return result;
 }
 
-JNIEXPORT jint JNICALL
-Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerFieldStringSet(
-    JNIEnv *env, jobject self, jlong player, jlong snapshot, jlong node_id,
-    jbyteArray name, jbyteArray value) {
-  (void)self;
-  if (node_id < 0 || node_id > UINT32_MAX) return NUX_STATUS_INVALID_ARGUMENT;
-  if (name == NULL || value == NULL) return NUX_STATUS_NULL_ARGUMENT;
-  jsize name_length = (*env)->GetArrayLength(env, name);
-  jsize value_length = (*env)->GetArrayLength(env, value);
-  if (name_length > 4096 || value_length > 1048576) return NUX_STATUS_LIMIT_EXCEEDED;
-  jbyte *name_bytes = (*env)->GetByteArrayElements(env, name, NULL);
-  if (name_bytes == NULL) return NUX_STATUS_RUNTIME_ERROR;
-  jbyte *value_bytes = (*env)->GetByteArrayElements(env, value, NULL);
-  if (value_bytes == NULL) {
-    (*env)->ReleaseByteArrayElements(env, name, name_bytes, JNI_ABORT);
-    return NUX_STATUS_RUNTIME_ERROR;
-  }
-  struct NuxStringView key = {(const char *)name_bytes, (size_t)name_length};
-  struct NuxStringView input = {(const char *)value_bytes, (size_t)value_length};
-  NuxStatus status = nux_player_field_string_set(
-      (struct NuxPlayer *)from_handle(player),
-      (const struct NuxSemanticSnapshot *)from_handle(snapshot), (uint32_t)node_id, key, input);
-  (*env)->ReleaseByteArrayElements(env, value, value_bytes, JNI_ABORT);
-  (*env)->ReleaseByteArrayElements(env, name, name_bytes, JNI_ABORT);
-  return status;
-}
-
 JNIEXPORT jlong JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerFieldViewModel(
     JNIEnv *env, jobject self, jlong player, jlong snapshot, jlong node_id,
@@ -2238,6 +2223,23 @@ static jfloatArray new_float_values(JNIEnv *env, const float *values, jsize coun
     return NULL;
   }
   return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerGlobalViewModelSet(
+    JNIEnv *env, jobject self, jlong player, jbyteArray name, jlong view_model) {
+  (void)self;
+  if (name == NULL) return NUX_STATUS_NULL_ARGUMENT;
+  jsize length = (*env)->GetArrayLength(env, name);
+  if (length > 4096) return NUX_STATUS_LIMIT_EXCEEDED;
+  jbyte *bytes = (*env)->GetByteArrayElements(env, name, NULL);
+  if (bytes == NULL) return NUX_STATUS_RUNTIME_ERROR;
+  struct NuxStringView key = {(const char *)bytes, (size_t)length};
+  NuxStatus status = nux_player_set_global_view_model(
+      (struct NuxPlayer *)from_handle(player), key,
+      (struct NuxViewModelInstance *)from_handle(view_model));
+  (*env)->ReleaseByteArrayElements(env, name, bytes, JNI_ABORT);
+  return (jint)status;
 }
 
 JNIEXPORT jint JNICALL
@@ -4021,4 +4023,65 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeVideoCaption(
       nux_player_video_caption(from_handle(player), (size_t)component, video_caption_callback, &c);
   if (status == NUX_STATUS_OK && c.count != 2) c.failed = 1;
   return video_collector_finish(&c, status, status_out);
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileSetValueMarkers(
+    JNIEnv *env, jobject self, jlong file, jobjectArray entries) {
+  (void)self;
+  struct InstallStorage storage = {0};
+  size_t count = 0;
+  struct NuxValueMarker *values = install_ValueMarker(env, &storage, entries, &count);
+  NuxStatus status = storage.failed ? NUX_STATUS_INVALID_ARGUMENT :
+      nux_file_set_value_markers(from_handle(file), values, count);
+  install_storage_free(&storage);
+  return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileSetRuleGroups(
+    JNIEnv *env, jobject self, jlong file, jobjectArray entries) {
+  (void)self;
+  struct InstallStorage storage = {0};
+  size_t count = 0;
+  struct NuxRuleGroup *values = install_RuleGroup(env, &storage, entries, &count);
+  NuxStatus status = storage.failed ? NUX_STATUS_INVALID_ARGUMENT :
+      nux_file_set_rule_groups(from_handle(file), values, count);
+  install_storage_free(&storage);
+  return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeFileSetValueRules(
+    JNIEnv *env, jobject self, jlong file, jobjectArray entries, jobjectArray diagnostic) {
+  (void)self;
+  struct InstallStorage storage = {0};
+  size_t count = 0;
+  struct NuxValueRule *values = install_ValueRule(env, &storage, entries, &count);
+  struct NuxCapiResult *result = NULL;
+  NuxStatus status = storage.failed ? NUX_STATUS_INVALID_ARGUMENT :
+      nux_file_set_value_rules_with_result(from_handle(file), values, count, &result);
+  if (result != NULL) {
+    struct NuxCapiDiagnosticView view = {0};
+    view.struct_size = sizeof(view);
+    NuxStatus read_status = nux_capi_result_diagnostic(result, &view);
+    if (read_status == NUX_STATUS_OK) {
+      jstring code = new_string_view(env, view.code);
+      jstring message = code == NULL ? NULL : new_string_view(env, view.message);
+      if (code != NULL && message != NULL) {
+        (*env)->SetObjectArrayElement(env, diagnostic, 0, code);
+        if (!(*env)->ExceptionCheck(env)) (*env)->SetObjectArrayElement(env, diagnostic, 1, message);
+      } else {
+        status = NUX_STATUS_RUNTIME_ERROR;
+      }
+      if (code != NULL) (*env)->DeleteLocalRef(env, code);
+      if (message != NULL) (*env)->DeleteLocalRef(env, message);
+    } else {
+      status = read_status;
+    }
+    NuxStatus free_status = nux_capi_result_free(result);
+    if (free_status != NUX_STATUS_OK) status = free_status;
+  }
+  install_storage_free(&storage);
+  return (jint)status;
 }

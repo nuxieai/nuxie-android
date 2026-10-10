@@ -174,7 +174,7 @@ internal object PresentationRegistry {
         val onFailure: (Throwable) -> Unit,
         val onDismissed: (CloseReason) -> Unit,
         val onOutcome: (CloseReason) -> Unit,
-        val onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit,
+        val onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?, RendererEffectLifetime?, List<ExperienceFrameSave>) -> Unit,
         val onTextCommitted: (String, String, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit,
         val onRecovery: (Throwable) -> Unit = {},
         val onTextInputEvent: (String, ExperienceSemanticTextDraft.Event, RendererEffectLifetime?) -> Unit = { _, _, _ -> },
@@ -206,8 +206,8 @@ internal object PresentationRegistry {
         onFailure: (Throwable) -> Unit,
         onDismissed: (CloseReason) -> Unit,
         onOutcome: (CloseReason) -> Unit,
-        onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit =
-            { _, _, _, _ -> },
+        onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?, RendererEffectLifetime?, List<ExperienceFrameSave>) -> Unit =
+            { _, _, _, _, _ -> },
         onTextCommitted: (String, String, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit = { _, _, _, _ -> },
         requiresAcquiring: Boolean = false,
         onRecovery: (Throwable) -> Unit = {},
@@ -239,7 +239,7 @@ internal object PresentationRegistry {
         synchronized(lock) {
             check(id !in entries) { "duplicate presentation id" }
             Entry(PresentationContentState.Acquiring(screen), Callbacks({}, { onClosed(CloseReason.Error(it)) }, onClosed,
-                onClosed, { _, _, _, _ -> }, { _, _, _, _ -> })).also { it.retry = onRetry; entries[id] = it }.detached
+                onClosed, { _, _, _, _, _ -> }, { _, _, _, _ -> })).also { it.retry = onRetry; entries[id] = it }.detached
         }
 
     fun updateAcquisition(id: String, progress: AcquisitionProgress) = synchronized(lock) {
@@ -466,6 +466,7 @@ internal object PresentationRegistry {
         correlationId: ULong,
         viewModelSnapshot: NuxieViewModelSnapshot?,
         source: PresentationScreenHandle? = null,
+        saves: List<ExperienceFrameSave> = emptyList(),
     ) {
         val callback = synchronized(lock) {
             entries[id]?.takeUnless {
@@ -473,7 +474,7 @@ internal object PresentationRegistry {
                     (source != null && (it.latestScreen.get() !== source || source.rendererEffects?.isRetired == true))
             }?.callbacks?.onRuntimeStep
         } ?: return
-        callback(outcome, correlationId, viewModelSnapshot, source?.rendererEffects)
+        callback(outcome, correlationId, viewModelSnapshot, source?.rendererEffects, saves)
     }
 
     fun currentScreen(id: String): PresentationScreenHandle? = synchronized(lock) {
@@ -1143,9 +1144,9 @@ internal class ExperiencePresentationService(
                             onRecovery = { error -> recordFontLoadFailure(pending, preparedContent.descriptor, error) },
                             onDismissed = { reason -> ended(pending, reason) },
                             onOutcome = { reason -> attemptOutcome(pending, reason) },
-                            onRuntimeStep = { outcome, correlationId, snapshot, lifetime ->
+                            onRuntimeStep = { outcome, correlationId, snapshot, lifetime, saves ->
                                 pending.latestViewModelSnapshot.set(snapshot)
-                                runtimeStep(pending, outcome, correlationId, lifetime, snapshot)
+                                runtimeStep(pending, outcome, correlationId, lifetime, snapshot, saves)
                             },
                             onTextCommitted = { inputId, text, snapshot, lifetime ->
                                 publishScreenEffects(pending) {
@@ -1599,8 +1600,9 @@ internal class ExperiencePresentationService(
         correlationId: ULong,
         lifetime: RendererEffectLifetime?,
         snapshot: NuxieViewModelSnapshot?,
+        saves: List<ExperienceFrameSave>,
     ) {
-        publishScreenEffects(active) { active.journey.emissions.publish(outcome, correlationId, lifetime, snapshot) }
+        publishScreenEffects(active) { active.journey.emissions.publish(outcome, correlationId, lifetime, snapshot, saves) }
     }
 
     private fun publishScreenEffects(active: ActivePresentation, publish: suspend () -> Boolean) {

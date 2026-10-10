@@ -13,7 +13,7 @@ import kotlinx.serialization.json.long
 /** An editable control selected from the authenticated render descriptor. */
 internal data class ExperienceTextInput(
     val id: String,
-    val runName: String,
+    val textInputName: String,
     val value: String,
     val responseField: String?,
     val placeholder: String?,
@@ -24,7 +24,6 @@ internal data class ExperienceTextInput(
     val geometryPaths: Map<String, String>,
     val style: Style,
     val responseCapture: ResponseCapture = ResponseCapture.TEXT,
-    val editableValueName: String? = null,
     val viewNodeId: String = id,
     val actionEvent: ExperienceSemanticTextDraft.EventKind = ExperienceSemanticTextDraft.EventKind.EDITING_ENDED,
     val declarativeActionId: String? = null,
@@ -75,8 +74,7 @@ internal data class ExperienceTextInput(
                 val style = input.getValue("style") as JsonObject
                 ExperienceTextInput(
                     id = input.text("id"),
-                    runName = input.text("textRunName"),
-                    editableValueName = input.optionalText("editableValueName"),
+                    textInputName = input.text("textInputName"),
                     viewNodeId = input.optionalText("viewNodeId") ?: input.text("id"),
                     actionEvent = when (input.optionalText("actionEvent")) {
                         null, "editing-ended" -> ExperienceSemanticTextDraft.EventKind.EDITING_ENDED
