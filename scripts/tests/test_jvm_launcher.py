@@ -26,6 +26,8 @@ from pathlib import Path
 def read(path):
     return Path(path).read_text() if Path(path).is_file() else None
 sdk = Path(os.environ["ANDROID_SDK_ROOT"])
+fixture_root = next((directory / "fixtures" for directory in (Path.cwd(), *Path.cwd().parents)
+                     if (directory / "fixtures").is_dir()), None)
 print(json.dumps({
     "cwd": os.getcwd(), "arguments": sys.argv[1:],
     "sdk": str(sdk), "home": os.environ["ANDROID_HOME"],
@@ -35,6 +37,7 @@ print(json.dumps({
     "local_fixture": read("src/test/case.txt"),
     "shared_fixture": read("../fixtures/case.txt"),
     "package_fixture": read("../_main/nuxie-android/src/test/case.txt"),
+    "repository_asset": read(fixture_root.parent / "nuxie-android/src/androidTest/assets/case.txt") if fixture_root else None,
     "cwd_entries": sorted(path.name for path in Path.cwd().iterdir()),
 }))
 ''')
@@ -78,10 +81,15 @@ print(json.dumps({
         shared_fixture = self.workspace / "fixtures/case.txt"
         shared_fixture.parent.mkdir()
         shared_fixture.write_text("shared fixture")
+        repository_asset = self.workspace / "nuxie-android/src/androidTest/assets/case.txt"
+        repository_asset.parent.mkdir(parents=True)
+        repository_asset.write_text("original converter asset")
         value = self.launch()
         self.assertEqual(value["local_fixture"], "module fixture")
         self.assertEqual(value["package_fixture"], "module fixture")
         self.assertEqual(value["shared_fixture"], "shared fixture")
+        self.assertEqual(value["repository_asset"], "original converter asset")
+        self.assertNotIn("fixtures", value["cwd_entries"])
         self.assertEqual(value["sdk"], str(self.directory / "caller sdk"))
         self.assertEqual(value["home"], "caller home")
         self.assertEqual(value["cache"], "caller cache")
