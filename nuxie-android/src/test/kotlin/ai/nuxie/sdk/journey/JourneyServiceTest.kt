@@ -2430,7 +2430,21 @@ class JourneyServiceTest {
             dispatchThread = thread(isDaemon = true, name = "posted-app-action") {
                 try {
                     assertNotEquals(android.os.Looper.getMainLooper(), android.os.Looper.myLooper())
-                    result.set(runBlocking { dispatcher.dispatch(request) })
+                    result.set(runBlocking {
+                        val dispatched = dispatcher.dispatch(request)
+                        // Draining capture can deliver activity to Main too.
+                        // Keep the test thread pumping its looper until this
+                        // worker has checked the durable identify consequence.
+                        if (!reset) {
+                            core.eventLog.awaitBarrier()
+                            core.userTransitions.drain()
+                            val identify = core.store.pendingBatch(limit = 50).single {
+                                it.name == "\$identify" && it.properties["distinct_id"] == JsonPrimitive("replacement")
+                            }
+                            assertEquals("replacement", identify.distinctId)
+                        }
+                        dispatched
+                    })
                 } catch (error: Throwable) {
                     failure.set(error)
                 } finally {
@@ -2456,14 +2470,6 @@ class JourneyServiceTest {
                 assertTrue(Nuxie.isIdentified)
                 assertEquals("replacement", Nuxie.distinctId)
                 assertNotEquals(originalSession, core.sessions.getSessionId(readOnly = true))
-                runBlocking {
-                    core.eventLog.awaitBarrier()
-                    core.userTransitions.drain()
-                    val identify = core.store.pendingBatch(limit = 50).single {
-                        it.name == "\$identify" && it.properties["distinct_id"] == JsonPrimitive("replacement")
-                    }
-                    assertEquals("replacement", identify.distinctId)
-                }
             }
         } finally {
             finished.countDown()
