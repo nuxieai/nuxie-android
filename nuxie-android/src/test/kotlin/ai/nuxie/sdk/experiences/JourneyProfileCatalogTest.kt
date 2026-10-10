@@ -85,7 +85,7 @@ class JourneyProfileCatalogTest {
         val catalog = JourneyProfileCatalog(keys, highWater) { runtime() }
         val prepared = catalog.prepare(profile(), authority)
         val identity = prepared.snapshot.releasesByDigest.values.single().identity
-        highWater.admitBatch(mapOf(identity.streamKey to identity.copy(buildId = "another-build")))
+        highWater.admitBatch(mapOf(identity.streamKey to identity.copy(buildId = "another-build"))) {}
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
             kotlinx.coroutines.runBlocking { catalog.commit("customer", prepared) }
         }
@@ -130,7 +130,7 @@ class JourneyProfileCatalogTest {
             entry.getValue("locator").jsonObject,
             setOf("legId"),
         )!!
-        highWater.admitBatch(mapOf(identity.streamKey to identity.copy(publishedAtSeq = identity.publishedAtSeq + 1)))
+        highWater.admitBatch(mapOf(identity.streamKey to identity.copy(publishedAtSeq = identity.publishedAtSeq + 1))) {}
 
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
             kotlinx.coroutines.runBlocking { catalog.commit("customer", prepared) }
@@ -159,7 +159,7 @@ class JourneyProfileCatalogTest {
             entry.getValue("locator").jsonObject,
             setOf("legId"),
         )!!
-        highWater.admitBatch(mapOf(identity.streamKey to identity.copy(publishedAtSeq = identity.publishedAtSeq + 1)))
+        highWater.admitBatch(mapOf(identity.streamKey to identity.copy(publishedAtSeq = identity.publishedAtSeq + 1))) {}
         val continuation = buildJsonObject {
             put("type", "continue")
             put("journeyId", "00000000-0000-7000-8000-000000000001")
@@ -203,7 +203,7 @@ class JourneyProfileCatalogTest {
         val reference = snapshot.profile.armedLegs.single().reference
         val identity = snapshot.releasesByDigest.values.single().identity
         catalog.clear("customer")
-        highWater.admitBatch(mapOf(identity.streamKey to identity.copy(publishedAtSeq = identity.publishedAtSeq + 10)))
+        highWater.admitBatch(mapOf(identity.streamKey to identity.copy(publishedAtSeq = identity.publishedAtSeq + 10))) {}
 
         val pinned = catalog.authenticatePinnedRelease(entry, reference)
 
