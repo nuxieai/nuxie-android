@@ -60,6 +60,9 @@ repository's Gradle checks and 16 KiB release verification. `api-check` and `lin
 run those individual checks. `providers` retains the RevenueCat/Superwall example
 build/test and provider-selection drivers; their dependencies stay outside the
 SDK artifact. `host-render` runs the explicit live native smoke driver.
+The specialist host-render driver still uses Gradle to compile its SDK/test
+classpath and host JNI adapter. Its separate Bazel migration is tracked in
+[UNIV-4194](https://universe.basis.dev/issue/UNIV-4194).
 
 ```sh
 scripts/bazel/sdk.sh instrumentation-run --serial "$ANDROID_SERIAL" \
@@ -69,6 +72,8 @@ scripts/bazel/sdk.sh instrumentation-run --serial "$ANDROID_SERIAL" \
 The instrumentation APK includes the original fixture assets, test Activities,
 runner, SDK and both native ABIs. It uses the existing standalone
 `ai.nuxie.sdk.test` application and can be installed/run on the device matrix.
+The frontend verifies the runner's completion and test results in addition to
+the `adb` exit code, including failures, crashes, and runs that execute no tests.
 
 ## Worktree caches
 
