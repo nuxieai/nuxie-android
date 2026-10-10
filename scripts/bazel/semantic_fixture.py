@@ -4,12 +4,13 @@
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sdk import bazel
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_SHA256 = "fe28bef78da518159aaed81de8007feff6d56a783024d87b1c1dc6c8c6d3f7e1"
@@ -30,6 +31,8 @@ def workspace(runtime):
                        'rust_binary(name = "generate", srcs = ["semantic-text.rs"], crate_root = "semantic-text.rs", '
                        'edition = "2021", deps = ["@nuxie_runtime//crates/nuxie-schema:nuxie-schema__host"])\n',
         ".bazelversion": (ROOT / ".bazelversion").read_text(),
+        ".bazelrc": "import %workspace%/.bazel-cache.bazelrc\n",
+        ".bazel-cache.bazelrc": (ROOT / ".bazel-cache.bazelrc").read_text(),
     }
     for name, content in contents.items():
         path = directory / name
@@ -48,25 +51,10 @@ def main():
     args = parser.parse_args()
     runtime = args.runtime.resolve(strict=True)
     directory = workspace(runtime)
-    candidate = os.environ.get("NUXIE_BAZEL_BIN") or shutil.which("bazelisk") or shutil.which("bazel")
-    if not candidate:
-        parent = ROOT.parent.parent / "node_modules/.bin/bazelisk"
-        if parent.is_file():
-            candidate = str(parent)
-    if shutil.disk_usage(directory).free < 5 * 1024**3:
-        raise ValueError("Fixture compilation needs at least 5 GiB of free disk")
-    command = [candidate] if candidate else [sys.executable, str(ROOT / "scripts/bazel/launcher.py")]
-    user_root = os.environ.get("NUXIE_BAZEL_OUTPUT_USER_ROOT")
-    if user_root:
-        if not Path(user_root).is_absolute():
-            raise ValueError("NUXIE_BAZEL_OUTPUT_USER_ROOT must be absolute")
-        command.append("--output_user_root=" + user_root)
-    jobs = os.environ.get("NUXIE_BAZEL_JOBS", "2")
-    if not jobs.isdecimal() or int(jobs) < 1:
-        raise ValueError("NUXIE_BAZEL_JOBS must be a positive integer")
     with tempfile.TemporaryDirectory(prefix="nuxie-semantic-fixture-") as temporary:
         generated = Path(temporary) / "semantic_text.riv"
-        subprocess.run(command + ["run", "--jobs=" + jobs, "//:generate", "--", str(generated)], cwd=directory, check=True)
+        bazel("run", "//:generate", "--", str(generated), workspace=directory,
+              output_base_variable="NUXIE_ANDROID_FIXTURE_BAZEL_OUTPUT_BASE")
         data = generated.read_bytes()
         if hashlib.sha256(data).hexdigest() != EXPECTED_SHA256:
             raise ValueError("Selected runtime changed the recorded semantic fixture bytes; the build migration does not update fixtures")

@@ -78,28 +78,37 @@ def toolchain():
     return sdk, ndk
 
 
-def bazel(command, *args, capture=False):
-    require_space()
+def bazel_command(workspace=None, output_base_variable="NUXIE_ANDROID_BAZEL_OUTPUT_BASE"):
+    workspace = ROOT if workspace is None else workspace
     candidate = os.environ.get("NUXIE_BAZEL_BIN") or shutil.which("bazelisk") or shutil.which("bazel")
     if not candidate:
         parent = ROOT.parent.parent / "node_modules/.bin/bazelisk"
         if parent.is_file():
             candidate = str(parent)
     executable = [candidate] if candidate else [sys.executable, str(ROOT / "scripts/bazel/launcher.py")]
-    startup = startup_options(ROOT)
-    for variable, option in (("NUXIE_BAZEL_OUTPUT_USER_ROOT", "--output_user_root"), ("NUXIE_ANDROID_BAZEL_OUTPUT_BASE", "--output_base")):
+    startup = ["--nosystem_rc", "--nohome_rc", *startup_options(workspace)]
+    for variable, option in (("NUXIE_BAZEL_OUTPUT_USER_ROOT", "--output_user_root"), (output_base_variable, "--output_base")):
         value = os.environ.get(variable)
         if value:
             if not Path(value).is_absolute():
                 raise ValueError(variable + " must be absolute")
             startup.append(option + "=" + value)
+    if os.environ.get("NUXIE_BAZEL_BATCH", os.environ.get("CI", "0")) == "1":
+        startup.append("--batch")
+    return [*executable, *startup]
+
+
+def bazel(command, *args, capture=False, workspace=None, output_base_variable="NUXIE_ANDROID_BAZEL_OUTPUT_BASE"):
+    require_space()
+    workspace = ROOT if workspace is None else workspace
+    executable = bazel_command(workspace, output_base_variable)
     flags = []
     if command in ("build", "test", "run", "cquery", "aquery"):
         jobs = os.environ.get("NUXIE_BAZEL_JOBS", "2")
         if not re.fullmatch(r"[1-9][0-9]*", jobs):
             raise ValueError("NUXIE_BAZEL_JOBS must be a positive integer")
         flags.append("--jobs=" + jobs)
-    result = subprocess.run([*executable, *startup, command, *flags, *args], cwd=ROOT,
+    result = subprocess.run([*executable, command, *flags, *args], cwd=workspace,
                             check=True, text=True, stdout=subprocess.PIPE if capture else None)
     return result.stdout.strip() if capture else None
 

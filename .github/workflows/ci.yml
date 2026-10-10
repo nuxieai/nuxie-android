@@ -19,6 +19,9 @@ jobs:
   local-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      NUXIE_BAZEL_BATCH: "1"
+      NUXIE_BAZEL_JOBS: "2"
 
     steps:
       - name: Check out repository
@@ -43,6 +46,23 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      - name: Restore shared Bazel caches
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/nuxie/bazel
+            ~/.cache/nuxie-tools/bazelisk
+            ~/.cache/bazelisk
+          key: ${{ runner.os }}-bazel-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'scripts/bazel/locks/*.json') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-bazel-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'scripts/bazel/locks/*.json') }}-
+            ${{ runner.os }}-bazel-
+
+      - name: Install checksummed Bazelisk
+        run: >-
+          python3 -c 'import sys; sys.path.insert(0, "scripts/bazel"); import launcher; print("NUXIE_BAZEL_BIN=" + launcher.executable())'
+          >> "$GITHUB_ENV"
+
       - name: Restore pinned runtime
         uses: actions/cache@v6
         with:
@@ -53,8 +73,6 @@ jobs:
         run: scripts/verify-fixtures.sh
 
       - name: Compile and test the SDK with Bazel
-        env:
-          NUXIE_BAZEL_JOBS: "2"
         run: |
           scripts/bazel/sdk.sh test
           scripts/bazel/sdk.sh build
