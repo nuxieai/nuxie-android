@@ -34,6 +34,27 @@ class BazelSdkPackagingTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
 
+    def test_manifest_adapter_preserves_authored_example_overlay_in_its_namespace(self):
+        source = self.directory / "debug.xml"
+        source.write_text('''<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          <application android:usesCleartextTraffic="true">
+            <activity android:name=".AssetSmokeActivity" android:exported="true" />
+          </application>
+        </manifest>''')
+        output = self.directory / "packaged.xml"
+        with patch("sys.argv", ["package_aar.py", "manifest", "--input", str(source),
+                                "--output", str(output), "--package", "ai.nuxie.example"]):
+            packager.main()
+        root = ET.parse(output).getroot()
+        android = "{http://schemas.android.com/apk/res/android}"
+        self.assertEqual(root.attrib, {"package": "ai.nuxie.example"})
+        application = root.find("application")
+        self.assertEqual(application.attrib, {android + "usesCleartextTraffic": "true"})
+        self.assertEqual(application.find("activity").attrib,
+                         {android + "name": ".AssetSmokeActivity", android + "exported": "true"})
+        self.assertEqual(root.find("uses-sdk").attrib,
+                         {android + "minSdkVersion": "23", android + "targetSdkVersion": "36"})
+
     def test_cache_override_reaches_bazel_without_overriding_worktree_output_base(self):
         root = self.directory
         with patch.object(sdk, "ROOT", root), patch.object(sdk, "require_space"), \

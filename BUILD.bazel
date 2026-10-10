@@ -35,6 +35,7 @@ kt_android_library(
     srcs = glob(["nuxie-android/src/main/**/*.kt", "nuxie-android/src/main/**/*.java"]),
     manifest = ":sdk_manifest",
     custom_package = "ai.nuxie.sdk",
+    exports_manifest = 1,
     resource_files = glob(["nuxie-android/src/main/res/**"]),
     deps = SDK_DEPS,
 )
@@ -234,19 +235,38 @@ genrule(
     cmd = "echo 'package ai.nuxie.example; public final class BuildConfig { public static final boolean DEBUG = true; }' > $@",
 )
 
+genrule(
+    name = "example_manifest",
+    srcs = ["example-app/src/main/AndroidManifest.xml"],
+    outs = ["ExampleAndroidManifest.xml"],
+    tools = ["//scripts/bazel:package_aar"],
+    cmd = "$(location //scripts/bazel:package_aar) manifest --package ai.nuxie.example --input $(SRCS) --output $@",
+)
+
+genrule(
+    name = "example_debug_manifest",
+    srcs = ["example-app/src/debug/AndroidManifest.xml"],
+    outs = ["ExampleDebugAndroidManifest.xml"],
+    tools = ["//scripts/bazel:package_aar"],
+    cmd = "$(location //scripts/bazel:package_aar) manifest --package ai.nuxie.example --input $(SRCS) --output $@",
+)
+
 kt_android_library(
     name = "example_app",
-    srcs = glob(["example-app/src/main/**/*.kt", "example-app/src/nuxie/**/*.kt"]) + [":example_build_config"],
-    manifest = "example-app/src/main/AndroidManifest.xml",
+    srcs = glob(["example-app/src/main/**/*.kt", "example-app/src/nuxie/**/*.kt", "example-app/src/debug/**/*.kt"]) + [":example_build_config"],
+    manifest = ":example_debug_manifest",
     custom_package = "ai.nuxie.example",
-    resource_files = glob(["example-app/src/main/res/**"]),
+    exports_manifest = 1,
+    resource_files = glob(["example-app/src/main/res/**", "example-app/src/debug/res/**"]),
+    assets = glob(["example-app/src/debug/assets/**"]),
+    assets_dir = "example-app/src/debug/assets",
     deps = [":sdk_release"],
 )
 
 android_binary(
     name = "example_app_debug",
     incremental_dexing = 0,
-    manifest = "example-app/src/main/AndroidManifest.xml",
+    manifest = ":example_manifest",
     custom_package = "ai.nuxie.example",
     manifest_values = {"applicationId": "ai.nuxie.example", "minSdkVersion": "23", "targetSdkVersion": "36", "versionCode": "11", "versionName": "0.1.10"},
     deps = [":example_app"],

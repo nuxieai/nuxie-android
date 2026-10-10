@@ -85,6 +85,7 @@ def main():
     manifest = commands.add_parser("manifest")
     manifest.add_argument("--input", type=Path, required=True)
     manifest.add_argument("--output", type=Path, required=True)
+    manifest.add_argument("--package", default="ai.nuxie.sdk")
     instrumentation = commands.add_parser("instrumentation-manifest")
     instrumentation.add_argument("--input", type=Path, required=True)
     instrumentation.add_argument("--output", type=Path, required=True)
@@ -117,7 +118,7 @@ def main():
     else:
         ET.register_namespace("android", "http://schemas.android.com/apk/res/android")
         root = ET.fromstring(args.input.read_bytes())
-        root.set("package", "ai.nuxie.sdk.test" if args.command == "instrumentation-manifest" else "ai.nuxie.sdk")
+        root.set("package", "ai.nuxie.sdk.test" if args.command == "instrumentation-manifest" else args.package)
         sdk = ET.SubElement(root, "uses-sdk")
         sdk.set("{http://schemas.android.com/apk/res/android}minSdkVersion", "23")
         sdk.set("{http://schemas.android.com/apk/res/android}targetSdkVersion", "36")

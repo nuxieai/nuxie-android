@@ -6,5 +6,7 @@ build --java_runtime_version=local_jdk
 build --tool_java_runtime_version=local_jdk
 build --compilation_mode=opt
 build --experimental_strict_java_deps=off
+# Preserve Gradle's permission inheritance from SDK and dependency manifests.
+build --merge_android_manifest_permissions
 test --test_output=errors
 test --test_env=NUXIE_HOST_CAPI_LIB=
