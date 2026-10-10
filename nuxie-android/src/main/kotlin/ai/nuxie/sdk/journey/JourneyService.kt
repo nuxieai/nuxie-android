@@ -242,6 +242,7 @@ internal class JourneyService(
     )
 
     private sealed interface Command {
+        data class SettleCommerce(val key: CommerceExecutionKey, override val done: CompletableDeferred<Unit>? = null) : Command
         val done: CompletableDeferred<Unit>?
 
         data class Initialize(
@@ -437,6 +438,7 @@ internal class JourneyService(
                         command.event,
                         command.admittedGeneration,
                     )
+                    is Command.SettleCommerce -> drainDeferredCommerce(command.key)
                     is Command.ResponseSaveDisplayChanged -> responseSaveDisplayChanged(command.journal, command.journeyId)
                     is Command.ResponseSaveContinuation -> {
                         if (isExecutionCurrent(command.fence, command.journal) &&
@@ -919,9 +921,12 @@ internal class JourneyService(
             if (!presentationOutcomeMatches(event, effectId, candidate, action, release)) continue
             val key = CommerceExecutionKey(candidate.id, target.distinctId, executionToken.generation)
             if ((pendingAuthoredContinuations[key] ?: 0) > 0) {
+                if (publishJournalIfCurrent(executionToken, identityScope) {
+                    target.deferPresentationCommerceOutcome(candidate.id, stepId, effectId, event)
+                } != true) return false
                 if (key !in deferredCommerceOutcomes) deferredCommerceOutcomes[key] = event
-                // Keep EventLog's durable route pending until settlement is persisted.
-                return false
+                // The journal owns settlement; parked runs and event entries still see this event.
+                return true
             }
             if (candidate.pendingPresentationPublication != null) {
                 if (!settlePresentationPublication(candidate, release, target, executionToken, identityScope)) return false
@@ -1598,10 +1603,6 @@ internal class JourneyService(
         if (routeStepId == null) {
             if (command.unhandledOutcome != null) {
                 finish(run, command.unhandledOutcome, command.release.leg, target, command.executionFenceToken, identityScope)
-                val hadPresentation = activePresentedRunIds.remove(run.id) != null
-                if (hadPresentation) {
-                    presenter?.shutdownPresentation(target.distinctId, run.journeyId)
-                }
                 return PresentationLifecycleResult.COMPLETED
             }
             if (command.eventName == SystemEventNames.SCREEN_DISMISSED &&
@@ -2060,10 +2061,24 @@ internal class JourneyService(
         val count = (pendingAuthoredContinuations[key] ?: 0) - 1
         if (count > 0) { pendingAuthoredContinuations[key] = count; return }
         pendingAuthoredContinuations.remove(key)
-        deferredCommerceOutcomes.remove(key)?.let { event ->
-            if (journal?.distinctId == key.owner && executionFence.token().generation == key.generation) {
-                resumePresentationActionOutcome(event)
-            }
+        if (deferredCommerceOutcomes.remove(key) != null) drainDeferredCommerce(key)
+    }
+
+    private suspend fun drainDeferredCommerce(key: CommerceExecutionKey) {
+        val target = journal ?: return
+        if (target.distinctId != key.owner || executionFence.token().generation != key.generation) return
+        val accepted = try {
+            val pending = target.runs().firstOrNull { it.id == key.runId && it.completion == null }?.pendingCommerceOutcome ?: return
+            resumePresentationActionOutcome(StoredEvent(checkNotNull(pending.id), pending.name,
+                pending.properties, pending.occurredAtMillis, target.distinctId))
+        } catch (error: CancellationException) { throw error
+        } catch (error: Exception) {
+            Log.w(LOG_TAG, "Deferred commerce settlement remains pending", error)
+            false
+        }
+        if (!accepted) scope.launch {
+            delay(5_000)
+            commands.trySend(Command.SettleCommerce(key))
         }
     }
 
@@ -2450,11 +2465,8 @@ internal class JourneyService(
             }
         }
         suspend fun finishExecution(currentRun: JourneyRun, outcome: String) {
-            finish(currentRun, outcome, leg, target, executionToken, identityScope)
-            val hadPresentation = activePresentedRunIds.remove(currentRun.id) != null
-            if (dismissPresentationOnCompletion && hadPresentation) {
-                presenter?.shutdownPresentation(target.distinctId, currentRun.journeyId)
-            }
+            finish(currentRun, outcome, leg, target, executionToken, identityScope,
+                dismissPresentation = dismissPresentationOnCompletion)
         }
         var run = initial
         var checkpoint = initialCheckpoint
@@ -2552,7 +2564,7 @@ internal class JourneyService(
                         val presentation = presenter
                         val actionType = JourneyActionType.from(result.action)
                         if (actionType == JourneyActionType.DISMISS &&
-                            (run.pendingCommerce != null || run.authoredCloseOutcome != null)) {
+                            (run.pendingCommerce != null || presentation?.owns(JourneyPresentationOwner(run.journeyId, target.distinctId)) != true)) {
                             val outcome = result.action.text("reason")?.takeIf(String::isNotEmpty) ?: "completed"
                             if (run.pendingCommerce != null) closeWhileCommercePending(run, outcome)
                             else finishExecution(run, outcome)
@@ -2885,6 +2897,7 @@ internal class JourneyService(
         target: JourneyRunJournal,
         executionToken: JourneyExecutionFenceToken,
         identityScope: IdentityScope,
+        dismissPresentation: Boolean = true,
     ): Boolean {
         if (identityScope.distinctId != target.distinctId || journal !== target) return false
         pendingPresentationPurchasePlacements.remove(run.id)
@@ -2912,6 +2925,8 @@ internal class JourneyService(
             )
             true
         }?.takeIf { it } ?: return false
+        activePresentedRunIds.remove(run.id)
+        if (dismissPresentation) presenter?.shutdownPresentation(target.distinctId, run.journeyId)
         retireNativeValues(run.id)
         flushPendingReports(target)
         scheduleNextWake()
