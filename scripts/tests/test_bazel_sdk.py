@@ -89,6 +89,19 @@ class BazelSdkPackagingTests(unittest.TestCase):
                          {android + "name": "androidx.test.runner.AndroidJUnitRunner",
                           android + "targetPackage": "ai.nuxie.sdk.test"})
 
+    def test_instrumentation_library_keeps_authored_hosts_without_apk_runner_metadata(self):
+        source = ROOT / "nuxie-android/src/androidTest/AndroidManifest.xml"
+        authored = ET.parse(source).getroot()
+        output = self.directory / "library.xml"
+        with patch("sys.argv", ["package_aar.py", "manifest", "--input", str(source),
+                                "--output", str(output), "--package", "ai.nuxie.sdk"]):
+            packager.main()
+        root = ET.parse(output).getroot()
+        self.assertEqual(root.get("package"), "ai.nuxie.sdk")
+        self.assertIsNone(root.find("instrumentation"))
+        self.assertEqual(ET.tostring(root.find("application")), ET.tostring(authored.find("application")))
+        self.assertEqual(ET.tostring(root.find("uses-permission")), ET.tostring(authored.find("uses-permission")))
+
     def test_cache_override_reaches_bazel_without_overriding_worktree_output_base(self):
         root = self.directory
         with patch.object(sdk, "ROOT", root), patch.object(sdk, "require_space"), \

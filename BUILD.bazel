@@ -286,11 +286,19 @@ android_binary(
     deps = [":example_app"],
 )
 
+genrule(
+    name = "instrumentation_library_manifest",
+    srcs = ["nuxie-android/src/androidTest/AndroidManifest.xml"],
+    outs = ["InstrumentationLibraryAndroidManifest.xml"],
+    tools = ["//scripts/bazel:package_aar"],
+    cmd = "$(location //scripts/bazel:package_aar) manifest --package ai.nuxie.sdk --input $(SRCS) --output $@",
+)
+
 kt_android_library(
     name = "instrumentation",
     srcs = glob(["nuxie-android/src/androidTest/**/*.kt"]),
     associates = [":sdk"],
-    manifest = "nuxie-android/src/androidTest/AndroidManifest.xml",
+    manifest = ":instrumentation_library_manifest",
     custom_package = "ai.nuxie.sdk",
     assets = [":instrumentation_assets"],
     assets_dir = "instrumentation_assets",
