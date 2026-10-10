@@ -10,7 +10,7 @@ steps:
       export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
       export ANDROID_SDK_ROOT="$ANDROID_HOME"
       export PATH="$JAVA_HOME/bin:$PATH"
-      "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865"
+      "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865" "cmake;3.22.1"
       source scripts/bazel/ci-cache.sh
       export NUXIE_BAZEL_JOBS=2
       export NUXIE_BAZEL_BIN="$(python3 -c 'import sys; sys.path.insert(0, "scripts/bazel"); import launcher; print(launcher.executable())')"
@@ -19,8 +19,8 @@ steps:
       scripts/bazel/sdk.sh example
       scripts/bazel/sdk.sh instrumentation
       scripts/bazel/sdk.sh prepare --output build/maven-repository
-      ./gradlew :nuxie-android:test :nuxie-android:apiCheck :nuxie-android:lint
-      ./gradlew verifyAndroidReleaseArtifacts
+      ./gradlew --no-daemon --max-workers=2 :nuxie-android:test :nuxie-android:apiCheck :nuxie-android:lint
+      ./gradlew --no-daemon --max-workers=2 verifyAndroidReleaseArtifacts
       python3 scripts/test-maven-consumer.py --version "$(python3 -c 'import sys; sys.path.insert(0, "scripts/bazel"); import sdk; print(sdk.declared_version())')"
       scripts/verify-fixtures.sh
     agents:
