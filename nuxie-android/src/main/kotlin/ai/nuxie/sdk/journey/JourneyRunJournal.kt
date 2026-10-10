@@ -48,6 +48,7 @@ internal data class JourneyRun(
     val effectReceipts: Map<String, String> = emptyMap(),
     val pendingCommerce: PendingCommerce? = null,
     val authoredCloseOutcome: String? = null,
+    val pendingCommerceOutcome: JourneyControlExecutor.Event? = null,
     val experimentExposures: List<ExperimentExposure> = emptyList(),
     val reentry: JourneyFrequency? = null,
     val requiresReleasePin: Boolean = false,
@@ -607,6 +608,18 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         true
     }
 
+    fun deferPresentationCommerceOutcome(id: String, stepId: String, effectId: String, event: StoredEvent): Boolean = update { state ->
+        val run = state.runs[id]?.takeIf { it.completion == null } ?: return@update false
+        val pending = run.pendingCommerce
+        if (pending != null) {
+            if (pending.stepId != stepId || pending.effectId != effectId) return@update false
+        } else if (run.stepId != stepId || run.effectReceipts[stepId] != effectId) return@update false
+        run.pendingCommerceOutcome?.let { return@update it.id == effectId }
+        state.runs[id] = run.copy(pendingCommerceOutcome = JourneyControlExecutor.Event(
+            event.name, event.timestampMillis, event.properties, effectId))
+        true
+    }
+
     fun settlePresentationCommerce(id: String, stepId: String, effectId: String, nextStepId: String?): JourneyRun? = update { state ->
         val run = state.runs[id]?.takeIf { it.completion == null } ?: return@update null
         val pending = run.pendingCommerce
@@ -616,6 +629,8 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         run.copy(
             effectReceipts = if (nextStepId == null) run.effectReceipts - stepId else run.effectReceipts - stepId - run.stepId,
             pendingCommerce = null,
+            authoredCloseOutcome = null,
+            pendingCommerceOutcome = null,
             stepId = nextStepId ?: run.stepId,
             context = if (nextStepId == null) run.context else pending?.context ?: run.context,
             park = if (nextStepId == null) run.park else null,
@@ -879,6 +894,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             put("context", JsonObject(pending.context - "formAnswers"))
             pending.placementId?.let { put("placementId", JsonPrimitive(it)) }
         }) }
+        run.pendingCommerceOutcome?.let { put("pendingCommerceOutcome", encodeControlEvent(it)) }
         run.authoredCloseOutcome?.let { put("authoredCloseOutcome", JsonPrimitive(it)) }
         if (run.experimentExposures.isNotEmpty()) {
             put(
@@ -955,6 +971,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
                 it["placementId"]?.jsonPrimitive?.content)
         },
         authoredCloseOutcome = value["authoredCloseOutcome"]?.jsonPrimitive?.content,
+        pendingCommerceOutcome = (value["pendingCommerceOutcome"] as? JsonObject)?.let(::decodeControlEvent),
         experimentExposures = (value["experimentExposures"] as? JsonArray).orEmpty().map {
             decodeExperimentExposure(it.jsonObject)
         },
@@ -1319,6 +1336,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         ),
         pendingCommerce = null,
         authoredCloseOutcome = null,
+        pendingCommerceOutcome = null,
         completion = JourneyRun.Completion(outcome, atMillis),
     )
 
