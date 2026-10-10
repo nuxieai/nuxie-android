@@ -2384,6 +2384,99 @@ class JourneyServiceTest {
         }
     }
 
+    @Test fun `posted app action handler can reset the SDK`() = postedIdentityAction(reset = true)
+
+    @Test fun `posted app action handler can identify the SDK`() = postedIdentityAction(reset = false)
+
+    private fun postedIdentityAction(reset: Boolean) {
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = FakeTransport(),
+            registerLifecycle = false,
+            requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
+            eventDatabaseFile = File(directory, "posted-identity-events.db"),
+        )
+        Nuxie.setup(context, NuxieConfiguration("pk_test_posted_identity"))
+        val calls = AtomicInteger()
+        val result = java.util.concurrent.atomic.AtomicReference<JourneyDispatchResult?>()
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        val finished = CountDownLatch(1)
+        val main = Thread.currentThread()
+        var dispatchThread: Thread? = null
+        var watchdog: Thread? = null
+        try {
+            val core = requireNotNull(Nuxie.core)
+            Nuxie.identify("customer")
+            val originalSession = core.sessions.getSessionId(readOnly = true)
+            Nuxie.listener = NuxieListener { sdk, action ->
+                assertEquals("switch_customer", action.name)
+                assertEquals(main, Thread.currentThread())
+                calls.incrementAndGet()
+                if (reset) sdk.reset() else sdk.identify("replacement")
+            }
+            val request = dispatchRequest(core.identity, buildJsonObject {
+                put("type", "app_action")
+                put("name", "switch_customer")
+            })
+            val dispatcher = JourneyEffectDispatcher(
+                identity = core.identity,
+                capture = core.eventLog::captureIdempotentlyIfCurrent,
+                deliverAppAction = Nuxie::deliverAppAction,
+            )
+            // Starting off Main forces deliverAppAction through its posted
+            // Runnable, rather than the inline path covered above.
+            val looper = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            looper.idle()
+            dispatchThread = thread(isDaemon = true, name = "posted-app-action") {
+                try {
+                    assertNotEquals(android.os.Looper.getMainLooper(), android.os.Looper.myLooper())
+                    result.set(runBlocking { dispatcher.dispatch(request) })
+                } catch (error: Throwable) {
+                    failure.set(error)
+                } finally {
+                    finished.countDown()
+                }
+            }
+            assertEquals("handler cannot run before Main consumes the Runnable", 0, calls.get())
+            watchdog = thread(isDaemon = true, name = "posted-identity-watchdog") {
+                if (!finished.await(5, TimeUnit.SECONDS)) main.interrupt()
+            }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            do {
+                looper.idle()
+            } while (!finished.await(10, TimeUnit.MILLISECONDS) && System.nanoTime() < deadline)
+            assertEquals("posted App Action must settle", 0L, finished.count)
+            assertNull(failure.get())
+            assertEquals(1, calls.get())
+            assertEquals(JourneyDispatchResult.Failed, result.get())
+            if (reset) {
+                assertFalse(Nuxie.isIdentified)
+                assertNotEquals("customer", Nuxie.distinctId)
+            } else {
+                assertTrue(Nuxie.isIdentified)
+                assertEquals("replacement", Nuxie.distinctId)
+                assertNotEquals(originalSession, core.sessions.getSessionId(readOnly = true))
+                runBlocking {
+                    core.eventLog.awaitBarrier()
+                    core.userTransitions.drain()
+                    val identify = core.store.pendingBatch(limit = 50).single {
+                        it.name == "\$identify" && it.properties["distinct_id"] == JsonPrimitive("replacement")
+                    }
+                    assertEquals("replacement", identify.distinctId)
+                }
+            }
+        } finally {
+            finished.countDown()
+            dispatchThread?.interrupt()
+            dispatchThread?.join(5_000)
+            watchdog?.join(5_000)
+            Thread.interrupted()
+            Nuxie.listener = null
+            Nuxie.resetForTesting()
+            Nuxie.overridesForTesting = null
+        }
+    }
+
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Config(shadows = [LinkStateRenderCapabilityShadow::class, LinkStateNativeMountShadow::class],
         instrumentedPackages = ["ai.nuxie.sdk.presentation.NuxieExperienceActivity", "ai.nuxie.sdk.presentation.AndroidRenderCapability"])
