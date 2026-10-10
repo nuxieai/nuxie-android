@@ -47,13 +47,13 @@ class JourneyProfileCatalogTest {
         context.getSharedPreferences("nuxie_journey_release_high_water", 0).edit().clear().commit()
     }
 
-    @Test fun `publishes a complete authenticated plane profile only at commit`() {
+    @Test fun `publishes a complete authenticated plane profile only at commit`(): Unit = kotlinx.coroutines.runBlocking {
         val highWater = JourneyReleaseHighWaterStore(context)
         val catalog = JourneyProfileCatalog(keys, highWater) { runtime() }
         val prepared = catalog.prepare(profile(), authority)
         assertNull(catalog.snapshot("customer"))
 
-        catalog.commit("customer", prepared)
+        kotlinx.coroutines.runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val release = snapshot.releasesByDigest.values.single()
         assertEquals(entry.getValue("locator").jsonObject.getValue("legId").jsonPrimitive.content, release.leg.getValue("id").jsonPrimitive.content)
@@ -62,15 +62,15 @@ class JourneyProfileCatalogTest {
         assertEquals(release.identity.publishedAtSeq, highWater.floor(release.identity.streamKey))
     }
 
-    @Test fun `shared profiles enforce the signed fact union across multiple legs`() {
+    @Test fun `shared profiles enforce the signed fact union across multiple legs`(): Unit = kotlinx.coroutines.runBlocking {
         FixtureRunner.run("journeys/planes/profile-fact-admission.json", "journeys/planes/profile-fact-admission") { vector ->
             val catalog = JourneyProfileCatalog(keys, JourneyReleaseHighWaterStore(context)) { runtime() }
             val body = vector.body.getValue("profile").jsonObject
             if (vector.body.getValue("valid").jsonPrimitive.content == "true") {
-                catalog.commit("customer", catalog.prepare(body, authority))
+                kotlinx.coroutines.runBlocking { catalog.commit("customer", catalog.prepare(body, authority)) }
                 assertEquals(2, catalog.snapshot("customer")?.releasesByDigest?.size)
             } else {
-                catalog.commit("customer", catalog.prepare(profile(), authority))
+                kotlinx.coroutines.runBlocking { catalog.commit("customer", catalog.prepare(profile(), authority)) }
                 val previous = catalog.snapshot("customer")
                 assertThrows(JourneyReleaseAuthenticationException::class.java) {
                     catalog.prepare(body, authority)
@@ -80,26 +80,26 @@ class JourneyProfileCatalogTest {
         }
     }
 
-    @Test fun `equal sequence conflicting publication cannot replace admitted profile`() {
+    @Test fun `equal sequence conflicting publication cannot replace admitted profile`(): Unit = kotlinx.coroutines.runBlocking {
         val highWater = JourneyReleaseHighWaterStore(context)
         val catalog = JourneyProfileCatalog(keys, highWater) { runtime() }
         val prepared = catalog.prepare(profile(), authority)
         val identity = prepared.snapshot.releasesByDigest.values.single().identity
         highWater.admitBatch(mapOf(identity.streamKey to identity.copy(buildId = "another-build")))
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
-            catalog.commit("customer", prepared)
+            kotlinx.coroutines.runBlocking { catalog.commit("customer", prepared) }
         }
         assertNull(catalog.snapshot("customer"))
         val empty = JsonObject(profile() + mapOf(
             "releases" to JsonArray(emptyList()), "armedLegs" to JsonArray(emptyList()),
         ))
-        catalog.commit("customer", catalog.prepare(empty, authority.copy(appId = "different-app")))
+        kotlinx.coroutines.runBlocking { catalog.commit("customer", catalog.prepare(empty, authority.copy(appId = "different-app"))) }
     }
 
-    @Test fun `a rejected replacement cannot mutate current authority or replay floors`() {
+    @Test fun `a rejected replacement cannot mutate current authority or replay floors`(): Unit = kotlinx.coroutines.runBlocking {
         val highWater = JourneyReleaseHighWaterStore(context)
         val catalog = JourneyProfileCatalog(keys, highWater) { runtime() }
-        catalog.commit("customer", catalog.prepare(profile(), authority))
+        kotlinx.coroutines.runBlocking { catalog.commit("customer", catalog.prepare(profile(), authority)) }
         val current = requireNotNull(catalog.snapshot("customer"))
         val release = current.releasesByDigest.values.single()
         val floor = highWater.floor(release.identity.streamKey)
@@ -118,9 +118,13 @@ class JourneyProfileCatalogTest {
         assertEquals(floor, highWater.floor(release.identity.streamKey))
     }
 
-    @Test fun `a prepared profile cannot replace a newer replay floor`() {
+    @Test fun `a prepared profile cannot replace a newer replay floor`(): Unit = kotlinx.coroutines.runBlocking {
         val highWater = JourneyReleaseHighWaterStore(context)
-        val catalog = JourneyProfileCatalog(keys, highWater) { runtime() }
+        var retainedMapping = "newer-mapping"
+        val catalog = JourneyProfileCatalog(keys, highWater, onReleaseAdmitted = {
+            retainedMapping = "older-mapping"
+            true
+        }) { runtime() }
         val prepared = catalog.prepare(profile(), authority)
         val identity = JourneyReleaseIdentity.fromJson(
             entry.getValue("locator").jsonObject,
@@ -129,13 +133,26 @@ class JourneyProfileCatalogTest {
         highWater.admitBatch(mapOf(identity.streamKey to identity.copy(publishedAtSeq = identity.publishedAtSeq + 1)))
 
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
-            catalog.commit("customer", prepared)
+            kotlinx.coroutines.runBlocking { catalog.commit("customer", prepared) }
         }
+        assertEquals("newer-mapping", retainedMapping)
         assertNull(catalog.snapshot("customer"))
         assertEquals(identity.publishedAtSeq + 1, highWater.floor(identity.streamKey))
     }
 
-    @Test fun `a continuation-only release remains pinned behind a newer active floor`() {
+    @Test fun `failed mapping retention does not advance replay authority`(): Unit = kotlinx.coroutines.runBlocking {
+        val highWater = JourneyReleaseHighWaterStore(context)
+        val catalog = JourneyProfileCatalog(keys, highWater, onReleaseAdmitted = { false }) { runtime() }
+        val prepared = catalog.prepare(profile(), authority)
+        val stream = prepared.snapshot.releasesByDigest.values.single().identity.streamKey
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            kotlinx.coroutines.runBlocking { catalog.commit("customer", prepared) }
+        }
+        assertEquals(0L, highWater.floor(stream))
+        assertNull(catalog.snapshot("customer"))
+    }
+
+    @Test fun `a continuation-only release remains pinned behind a newer active floor`(): Unit = kotlinx.coroutines.runBlocking {
         val highWater = JourneyReleaseHighWaterStore(context)
         val catalog = JourneyProfileCatalog(keys, highWater) { runtime() }
         val identity = JourneyReleaseIdentity.fromJson(
@@ -149,14 +166,14 @@ class JourneyProfileCatalogTest {
             put("generation", 4)
         }
 
-        catalog.commit("customer", catalog.prepare(profile(binding = continuation), authority))
+        kotlinx.coroutines.runBlocking { catalog.commit("customer", catalog.prepare(profile(binding = continuation), authority)) }
 
         assertEquals("continue", requireNotNull(catalog.snapshot("customer"))
             .profile.armedLegs.single().binding.getValue("type").jsonPrimitive.content)
         assertEquals(identity.publishedAtSeq + 1, highWater.floor(identity.streamKey))
     }
 
-    @Test fun `transport authority must match every signed release locator`() {
+    @Test fun `transport authority must match every signed release locator`(): Unit = kotlinx.coroutines.runBlocking {
         val catalog = JourneyProfileCatalog(keys, JourneyReleaseHighWaterStore(context)) { runtime() }
 
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
@@ -165,7 +182,7 @@ class JourneyProfileCatalogTest {
         assertNull(catalog.snapshot("customer"))
     }
 
-    @Test fun `delivery cannot rewrite the trigger authenticated inside a leg`() {
+    @Test fun `delivery cannot rewrite the trigger authenticated inside a leg`(): Unit = kotlinx.coroutines.runBlocking {
         val catalog = JourneyProfileCatalog(keys, JourneyReleaseHighWaterStore(context)) { runtime() }
         val changedEntry = buildJsonObject {
             put("type", "event")
@@ -178,10 +195,10 @@ class JourneyProfileCatalogTest {
         assertNull(catalog.snapshot("customer"))
     }
 
-    @Test fun `a retained release reauthenticates by exact pinned identity after delivery clears`() {
+    @Test fun `a retained release reauthenticates by exact pinned identity after delivery clears`(): Unit = kotlinx.coroutines.runBlocking {
         val highWater = JourneyReleaseHighWaterStore(context)
         val catalog = JourneyProfileCatalog(keys, highWater) { runtime() }
-        catalog.commit("customer", catalog.prepare(profile(), authority))
+        kotlinx.coroutines.runBlocking { catalog.commit("customer", catalog.prepare(profile(), authority)) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val reference = snapshot.profile.armedLegs.single().reference
         val identity = snapshot.releasesByDigest.values.single().identity
@@ -195,9 +212,9 @@ class JourneyProfileCatalogTest {
         assertNull(pinned.publishedAtSeqToPromote)
     }
 
-    @Test fun `a retained release cannot change shape or bound authority`() {
+    @Test fun `a retained release cannot change shape or bound authority`(): Unit = kotlinx.coroutines.runBlocking {
         val catalog = JourneyProfileCatalog(keys, JourneyReleaseHighWaterStore(context)) { runtime() }
-        catalog.commit("customer", catalog.prepare(profile(), authority))
+        kotlinx.coroutines.runBlocking { catalog.commit("customer", catalog.prepare(profile(), authority)) }
         val reference = requireNotNull(catalog.snapshot("customer")).profile.armedLegs.single().reference
         val malformed = JsonObject(entry + ("unexpected" to JsonPrimitive(true)))
         val otherAuthorityLocator = JsonObject(
@@ -213,7 +230,7 @@ class JourneyProfileCatalogTest {
         }
     }
 
-    @Test fun `an empty canonical delivery still binds configured app authority`() {
+    @Test fun `an empty canonical delivery still binds configured app authority`(): Unit = kotlinx.coroutines.runBlocking {
         val catalog = JourneyProfileCatalog(keys, JourneyReleaseHighWaterStore(context)) { runtime() }
         val empty = JsonObject(
             profile() + mapOf(
@@ -222,7 +239,7 @@ class JourneyProfileCatalogTest {
             ),
         )
 
-        catalog.commit("customer", catalog.prepare(empty, authority))
+        kotlinx.coroutines.runBlocking { catalog.commit("customer", catalog.prepare(empty, authority)) }
 
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
             catalog.prepare(empty, authority.copy(appId = "another-app"))

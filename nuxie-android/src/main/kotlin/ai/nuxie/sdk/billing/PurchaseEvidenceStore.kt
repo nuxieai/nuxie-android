@@ -2,6 +2,12 @@ package ai.nuxie.sdk.billing
 
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.logging.NuxieLog as Log
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.math.BigDecimal
 import java.security.MessageDigest
@@ -181,83 +187,82 @@ internal data class PurchaseEvidence(
 )
 
 internal interface PurchaseEvidenceStore {
-    fun load(): Map<String, PurchaseEvidence>
-    fun upsert(evidence: PurchaseEvidence): Boolean
-    fun loadBindings(): List<StoredPurchaseBinding> = emptyList()
-    fun upsertBinding(binding: StoredPurchaseBinding): Boolean = true
-    fun loadProductMappings(): List<StoredProductMapping> = emptyList()
+    suspend fun load(): Map<String, PurchaseEvidence>
+    suspend fun upsert(evidence: PurchaseEvidence): Boolean
+    suspend fun loadBindings(): List<StoredPurchaseBinding> = emptyList()
+    suspend fun upsertBinding(binding: StoredPurchaseBinding): Boolean = true
+    suspend fun loadProductMappings(): List<StoredProductMapping> = emptyList()
     /** Successful installation invokes the listener before a later mapping installation may begin. */
-    fun upsertProductMapping(mapping: StoredProductMapping): Boolean = true
-    fun setProductMappingsChangedListener(listener: (() -> Unit)?) = Unit
+    suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean = true
+    fun setProductMappingsChangedListener(listener: (suspend () -> Unit)?) = Unit
 }
 
 /** Scope-private atomic JSON store. Purchase tokens are keys, never logs or preferences. */
 internal class FilePurchaseEvidenceStore(
-    directory: File,
+    private val directory: File,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : PurchaseEvidenceStore {
     private val file = File(directory, "purchase-evidence.json")
     private val bindingsFile = File(directory, "purchase-bindings.json")
     private val catalogFile = File(directory, "purchase-catalog.json")
     private val lock = Any()
-    private val productMappingInstallationLock = Any()
+    private val productMappingInstallationLock = Mutex()
     private val json = Json { ignoreUnknownKeys = true }
-    @Volatile private var productMappingsChangedListener: (() -> Unit)? = null
+    @Volatile private var productMappingsChangedListener: (suspend () -> Unit)? = null
 
-    init {
-        directory.mkdirs()
-    }
+    override suspend fun load(): Map<String, PurchaseEvidence> = onIo { synchronized(lock) { loadUnlocked() } }
 
-    override fun load(): Map<String, PurchaseEvidence> = synchronized(lock) { loadUnlocked() }
-
-    override fun upsert(evidence: PurchaseEvidence): Boolean = synchronized(lock) {
-        val entries = loadUnlocked().toMutableMap()
-        entries[evidence.purchaseToken] = evidence
-        saveUnlocked(entries)
-    }
-
-    override fun loadBindings(): List<StoredPurchaseBinding> = synchronized(lock) {
-        runCatching {
-            if (!bindingsFile.exists()) emptyList() else {
-                json.parseToJsonElement(bindingsFile.readText()).jsonArray.mapNotNull {
-                    decodeBinding(it as? JsonObject ?: return@mapNotNull null)
-                }
-            }
-        }.getOrDefault(emptyList())
-    }
-
-    override fun upsertBinding(binding: StoredPurchaseBinding): Boolean = synchronized(lock) {
-        val entries = loadBindingsUnlocked().associateByTo(linkedMapOf()) {
-            StoredPurchaseBindingKey(it.obfuscatedAccountId, it.productIdentity)
+    override suspend fun upsert(evidence: PurchaseEvidence): Boolean = onIo {
+        synchronized(lock) {
+            val entries = loadUnlocked().toMutableMap()
+            entries[evidence.purchaseToken] = evidence
+            saveUnlocked(entries)
         }
-        entries[StoredPurchaseBindingKey(binding.obfuscatedAccountId, binding.productIdentity)] = binding
-        runCatching {
-            val temporary = File(bindingsFile.parentFile, "${bindingsFile.name}.tmp")
-            val encoded = JsonArray(entries.values.map(::encodeBinding))
-            temporary.writeText(json.encodeToString(JsonArray.serializer(), encoded))
-            if (!temporary.renameTo(bindingsFile)) error("Could not publish purchase bindings")
-            true
-        }.onFailure { Log.w("NuxieBilling", "Could not persist purchase binding.", it) }
-            .getOrDefault(false)
     }
 
-    override fun loadProductMappings(): List<StoredProductMapping> = synchronized(lock) {
-        loadMappingsUnlocked()
+    override suspend fun loadBindings(): List<StoredPurchaseBinding> = onIo {
+        synchronized(lock) { loadBindingsUnlocked() }
     }
 
-    override fun upsertProductMapping(mapping: StoredProductMapping): Boolean =
-        synchronized(productMappingInstallationLock) {
+    override suspend fun upsertBinding(binding: StoredPurchaseBinding): Boolean = onIo {
+        synchronized(lock) {
+            val entries = loadBindingsUnlocked().associateByTo(linkedMapOf()) {
+                StoredPurchaseBindingKey(it.obfuscatedAccountId, it.productIdentity)
+            }
+            entries[StoredPurchaseBindingKey(binding.obfuscatedAccountId, binding.productIdentity)] = binding
+            runCatching {
+                directory.mkdirs()
+                val temporary = File(bindingsFile.parentFile, "${bindingsFile.name}.tmp")
+                val encoded = JsonArray(entries.values.map(::encodeBinding))
+                temporary.writeText(json.encodeToString(JsonArray.serializer(), encoded))
+                if (!temporary.renameTo(bindingsFile)) error("Could not publish purchase bindings")
+                true
+            }.onFailure { Log.w("NuxieBilling", "Could not persist purchase binding.", it) }
+                .getOrDefault(false)
+        }
+    }
+
+    override suspend fun loadProductMappings(): List<StoredProductMapping> = onIo {
+        synchronized(lock) { loadMappingsUnlocked() }
+    }
+
+    override suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean = onIo {
+        productMappingInstallationLock.withLock {
             val persisted = synchronized(lock) {
                 val entries = loadMappingsUnlocked().associateByTo(linkedMapOf()) { it.productIdentity }
                 entries[mapping.productIdentity] = mapping
                 saveArray(catalogFile, entries.values.map(::encodeMapping), "catalog mapping")
             }
-            if (persisted) productMappingsChangedListener?.invoke()
+            if (persisted) withContext(NonCancellable) { productMappingsChangedListener?.invoke() }
             persisted
         }
+    }
 
-    override fun setProductMappingsChangedListener(listener: (() -> Unit)?) {
+    override fun setProductMappingsChangedListener(listener: (suspend () -> Unit)?) {
         productMappingsChangedListener = listener
     }
+
+    private suspend fun <T> onIo(block: suspend () -> T): T = withContext(ioDispatcher) { block() }
 
     private fun loadBindingsUnlocked(): List<StoredPurchaseBinding> = runCatching {
         if (!bindingsFile.exists()) emptyList() else {
@@ -265,7 +270,7 @@ internal class FilePurchaseEvidenceStore(
                 decodeBinding(it as? JsonObject ?: return@mapNotNull null)
             }
         }
-    }.getOrDefault(emptyList())
+    }.onFailure { Log.w("NuxieBilling", "Could not read purchase bindings.", it) }.getOrDefault(emptyList())
 
     private fun loadMappingsUnlocked(): List<StoredProductMapping> = runCatching {
         if (!catalogFile.exists()) emptyList() else {
@@ -273,9 +278,10 @@ internal class FilePurchaseEvidenceStore(
                 decodeMapping(it as? JsonObject ?: return@mapNotNull null)
             }
         }
-    }.getOrDefault(emptyList())
+    }.onFailure { Log.w("NuxieBilling", "Could not read purchase catalog.", it) }.getOrDefault(emptyList())
 
     private fun saveArray(target: File, values: List<JsonObject>, description: String): Boolean = runCatching {
+        directory.mkdirs()
         val temporary = File(target.parentFile, "${target.name}.tmp")
         temporary.writeText(json.encodeToString(JsonArray.serializer(), JsonArray(values)))
         if (!temporary.renameTo(target)) error("Could not publish purchase $description")
@@ -287,9 +293,10 @@ internal class FilePurchaseEvidenceStore(
         if (!file.exists()) emptyMap() else json.parseToJsonElement(file.readText()).jsonObject
             .mapNotNull { (token, raw) -> decodeEvidence(raw.jsonObject)?.let { token to it } }
             .toMap()
-    }.getOrDefault(emptyMap())
+    }.onFailure { Log.w("NuxieBilling", "Could not read purchase evidence.", it) }.getOrDefault(emptyMap())
 
     private fun saveUnlocked(entries: Map<String, PurchaseEvidence>): Boolean = runCatching {
+        directory.mkdirs()
         val temporary = File(file.parentFile, "${file.name}.tmp")
         val encoded = JsonObject(entries.mapValues { encodeEvidence(it.value) })
         temporary.writeText(json.encodeToString(JsonObject.serializer(), encoded))
@@ -501,30 +508,30 @@ internal class InMemoryPurchaseEvidenceStore : PurchaseEvidenceStore {
     private val entries = linkedMapOf<String, PurchaseEvidence>()
     private val bindings = linkedMapOf<StoredPurchaseBindingKey, StoredPurchaseBinding>()
     private val mappings = linkedMapOf<StoredProductIdentity, StoredProductMapping>()
-    private val productMappingInstallationLock = Any()
-    @Volatile private var productMappingsChangedListener: (() -> Unit)? = null
-    override fun load(): Map<String, PurchaseEvidence> = synchronized(entries) { entries.toMap() }
-    override fun upsert(evidence: PurchaseEvidence): Boolean = synchronized(entries) {
+    private val productMappingInstallationLock = Mutex()
+    @Volatile private var productMappingsChangedListener: (suspend () -> Unit)? = null
+    override suspend fun load(): Map<String, PurchaseEvidence> = synchronized(entries) { entries.toMap() }
+    override suspend fun upsert(evidence: PurchaseEvidence): Boolean = synchronized(entries) {
         entries[evidence.purchaseToken] = evidence
         true
     }
-    override fun loadBindings(): List<StoredPurchaseBinding> = synchronized(bindings) {
+    override suspend fun loadBindings(): List<StoredPurchaseBinding> = synchronized(bindings) {
         bindings.values.toList()
     }
-    override fun upsertBinding(binding: StoredPurchaseBinding): Boolean = synchronized(bindings) {
+    override suspend fun upsertBinding(binding: StoredPurchaseBinding): Boolean = synchronized(bindings) {
         bindings[StoredPurchaseBindingKey(binding.obfuscatedAccountId, binding.productIdentity)] = binding
         true
     }
-    override fun loadProductMappings(): List<StoredProductMapping> = synchronized(mappings) {
+    override suspend fun loadProductMappings(): List<StoredProductMapping> = synchronized(mappings) {
         mappings.values.toList()
     }
-    override fun upsertProductMapping(mapping: StoredProductMapping): Boolean =
-        synchronized(productMappingInstallationLock) {
+    override suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean =
+        productMappingInstallationLock.withLock {
             synchronized(mappings) { mappings[mapping.productIdentity] = mapping }
-            productMappingsChangedListener?.invoke()
+            withContext(NonCancellable) { productMappingsChangedListener?.invoke() }
             true
         }
-    override fun setProductMappingsChangedListener(listener: (() -> Unit)?) {
+    override fun setProductMappingsChangedListener(listener: (suspend () -> Unit)?) {
         productMappingsChangedListener = listener
     }
 }

@@ -45,7 +45,7 @@ class JourneyBestOfferTest {
         assertChoice("pinned", listOf(offer("long", 0, "P1M"), offer("pinned", 5_000_000)), "pinned")
     }
 
-    @Test fun oneTimePurchaseKeepsItsPurchaseOption() {
+    @Test fun oneTimePurchaseKeepsItsPurchaseOption(): Unit = kotlinx.coroutines.runBlocking {
         val request = JourneyProductCatalog.parse(release(null, "nonConsumable")).requests.single()
         assertEquals(OfferSelection.None, request.offerSelection)
         assertEquals("standard", request.purchaseOptionId)

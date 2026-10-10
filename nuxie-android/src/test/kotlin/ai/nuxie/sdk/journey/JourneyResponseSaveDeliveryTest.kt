@@ -78,7 +78,7 @@ class JourneyResponseSaveDeliveryTest {
         }
     }
 
-    @Test fun `whole number receipt spellings retain numeric sequences`() {
+    @Test fun `whole number receipt spellings retain numeric sequences`(): Unit = kotlinx.coroutines.runBlocking {
         val rows = json(FixtureRunner.fixturesRoot().resolve("responses/save-cases.json").readText()).getValue("replies").jsonArray.takeLast(4)
         val sequences = rows.map { JourneyResponseSaveReply.decode(
             it.jsonObject.getValue("bodyText").jsonPrimitive.content.encodeToByteArray(), 1).sequence }
@@ -207,7 +207,7 @@ class JourneyResponseSaveDeliveryTest {
         } finally { callerScope.cancel() }
     }
 
-    @Test fun `unknown form deadline and backoff survive restart and backward clock`() {
+    @Test fun `unknown form deadline and backoff survive restart and backward clock`(): Unit = kotlinx.coroutines.runBlocking {
         val journal = JourneyRunJournal(directory, "anon")
         val run = responseSaveRun(journal)
         val sheet = journal.reserveResponseSave(run, "feedback", json("{}"), true)
