@@ -31,7 +31,8 @@ internal class ExperienceMountedScreen(
             val key = (asset["key"] as? JsonPrimitive)?.content ?: return@mapNotNull null
             prepared.artifactsByKey[key]?.let { name to it }
         }.toMap()
-    private val lane = NuxieRuntimeLane()
+    private val runValues = prepared.runValues?.also { it.retainScreen() }
+    private val lane = runValues?.lane ?: NuxieRuntimeLane()
     private var captionOverlay: ExperienceVideoCaptionOverlay? = null
     private var textOverlay: ExperienceTextInputOverlay? = null
     private var captionInsets: ExperienceWindowInsets? = null
@@ -47,6 +48,7 @@ internal class ExperienceMountedScreen(
     val surface = ExperienceSurfaceHost(
         context = activity,
         lane = lane,
+        runValues = runValues,
         videoDecoderPool = videoDecoderPool,
         clearColor = prepared.clearColor,
         artboardSize = prepared.artboardSize,
@@ -104,7 +106,7 @@ internal class ExperienceMountedScreen(
             textInputs = inputs,
             retainedViewModel = prepared.retainedViewModel,
         )
-        return ExperienceInputContainer(activity, surface::dispatchSemanticKeyEvent, surface::semanticKeyboardEntry).apply {
+        return ExperienceInputContainer(activity, surface::dispatchExperienceKeyEvent, surface::semanticKeyboardEntry).apply {
             if (awaitingSemanticPublication) {
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
             }
@@ -135,12 +137,12 @@ internal class ExperienceMountedScreen(
         }
     }
 
-    fun setVisible(visible: Boolean) {
+    fun setVisible(visible: Boolean, preservePendingInput: Boolean = false) {
         if (visible) {
             refreshFontScale(activity.resources.configuration.fontScale)
             reducedMotion?.refresh()
         }
-        surface.setPresentationVisible(visible)
+        surface.setPresentationVisible(visible, preservePendingInput)
     }
 
     /** Queued on the same lane as safe-area updates and frame-qualified native input capture. */
@@ -198,6 +200,7 @@ internal class ExperienceMountedScreen(
             else lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN)
         val retirement = ExperienceScreenRetirement(completion)
         surface.release(finalState, retirement::mediaReleased)
-        lane.shutdown(retirement::nativeReleased)
+        if (runValues != null) runValues.releaseScreen(retirement::nativeReleased)
+        else lane.shutdown(retirement::nativeReleased)
     }
 }

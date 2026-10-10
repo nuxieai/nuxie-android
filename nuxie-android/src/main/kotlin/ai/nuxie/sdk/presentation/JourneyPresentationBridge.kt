@@ -84,6 +84,7 @@ internal data class JourneyPresentationRequest(
     val onPresentationRevealed: suspend (String) -> Unit = {},
     val onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
     val transition: JsonObject? = null,
+    val runValues: ExperienceRunValues? = null,
 )
 
 internal sealed interface JourneyPresentationResult {

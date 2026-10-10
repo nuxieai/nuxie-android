@@ -8,6 +8,9 @@ import ai.nuxie.sdk.runtime.NativeViewModelWrite
 import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
 import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import ai.nuxie.sdk.runtime.NativeCallResult
+import ai.nuxie.sdk.runtime.NativeFocusInput
+import ai.nuxie.sdk.runtime.NuxieFocusInput
+import ai.nuxie.sdk.runtime.NuxieFocusState
 import ai.nuxie.sdk.runtime.NativePlayerInput
 import ai.nuxie.sdk.runtime.NativePlayerPointer
 import ai.nuxie.sdk.runtime.NativePlayerStepOutcome
@@ -23,6 +26,7 @@ import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -103,11 +107,12 @@ class ExperienceSurfaceHostPointerTest {
     @Test
     fun `pending surface submission polls without stepping or publishing effects`() {
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val values = ExperienceRunValues()
+        val lane = values.lane
         val published = mutableListOf<ULong>()
         var composed = 0
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
-            runtime = NuxieRuntime(native), listener = object : ExperienceSurfaceHost.Listener {
+            runtime = NuxieRuntime(native), runValues = values, listener = object : ExperienceSurfaceHost.Listener {
                 override fun onFirstFrame() { composed++ }
                 override fun onFailure(error: ExperiencePresentationException) { throw error }
                 override fun onRuntimeStep(
@@ -151,6 +156,7 @@ class ExperienceSurfaceHostPointerTest {
                 0, 0, "nx_exit_done:resized", "", "", 0f, emptyArray()))
             host.doFrame(1_080_000_000L)
             drain(lane)
+            val detachBeforeResize = native.detachCount
             val resizeQueued = CountDownLatch(1)
             val allowResize = CountDownLatch(1)
             lane.enqueue { resizeQueued.countDown(); allowResize.await(2, TimeUnit.SECONDS) }
@@ -164,10 +170,43 @@ class ExperienceSurfaceHostPointerTest {
             }
             drain(lane)
             assertEquals("Resize settles with a zero step", listOf(0f, 0.064f, 0.016f, 0f), native.elapsedSteps)
+            assertEquals("Resize cancels the native submission before replacing its capture", detachBeforeResize + 1, native.detachCount)
+            assertEquals("Resize retires the pending frame and requires a fresh step", 4, native.elapsedSteps.size)
             assertEquals("Retired frame effects await the replacement delivery", listOf(1uL, 3uL), published)
             host.doFrame(1_112_000_000L)
             drain(lane)
             assertEquals("The next animation step includes time spent settling layout", 0.032f, native.elapsedSteps.last(), 0.000001f)
+        } finally {
+            host.release()
+            kotlinx.coroutines.runBlocking { values.retire() }
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
+    @Test
+    fun `hiding a pending surface releases its native submission without destroying the texture`() {
+        val native = RecordingNative()
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
+            runtime = NuxieRuntime(native))
+        val texture = SurfaceTexture(0)
+        try {
+            host.loadArtboard(byteArrayOf(1), null)
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            native.presentation = 4
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            val before = native.detachCount
+            host.setPresentationVisible(false)
+            drain(lane)
+            assertEquals("A hidden screen cannot leave another screen waiting on its renderer", before + 1, native.detachCount)
+            native.presentation = 1
+            host.setPresentationVisible(true)
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            assertEquals("Resuming steps a replacement frame", 2, native.elapsedSteps.size)
         } finally {
             host.release()
             lane.shutdown()
@@ -934,7 +973,7 @@ class ExperienceSurfaceHostPointerTest {
                     override fun onFailure(error: ExperiencePresentationException) { throw error }
                     override fun onTextInputSnapshot(snapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot, geometry: ai.nuxie.sdk.runtime.NuxieTextGeometryCapture) {
                         delivered++
-                        assertEquals(ai.nuxie.sdk.runtime.NuxieTextGeometryCapture.Failed(3), geometry)
+                        assertEquals(ai.nuxie.sdk.runtime.NuxieTextGeometryCapture.Failed(if (boundary == "pending-hide") 4 else 3), geometry)
                     }
                 })
             controller.get().setContentView(host)
@@ -963,6 +1002,7 @@ class ExperienceSurfaceHostPointerTest {
                         host.doFrame(1_016_000_000L)
                     }
                     "pending-hide" -> {
+                        native.geometryStatus = 4
                         host.setPresentationVisible(false)
                         host.setPresentationVisible(true)
                         native.presentation = 1
@@ -977,7 +1017,8 @@ class ExperienceSurfaceHostPointerTest {
                 drain(lane)
                 android.view.Choreographer.getInstance().removeFrameCallback(host)
                 org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-                assertEquals("Queued snapshot at $boundary", if (boundary == "current" || boundary == "pending-current" || boundary == "newer") 1 else 0, delivered)
+                assertEquals("Queued snapshot at $boundary", if (boundary == "current" || boundary == "pending-current" || boundary == "pending-hide" || boundary == "newer") 1 else 0, delivered)
+                if (boundary == "pending-hide") assertEquals("Only the replacement frame delivers", 2, native.elapsedSteps.size)
             } finally {
                 host.release()
                 lane.shutdown()
@@ -985,6 +1026,477 @@ class ExperienceSurfaceHostPointerTest {
                 texture.release()
                 controller.pause().stop().destroy()
             }
+        }
+    }
+
+    @Test fun `keyboard configuration changes keep the Activity occurrence`() {
+        val context = RuntimeEnvironment.getApplication()
+        val info = context.packageManager.getActivityInfo(android.content.ComponentName(context, NuxieExperienceActivity::class.java), 0)
+        for (bit in listOf(android.content.pm.ActivityInfo.CONFIG_KEYBOARD,
+            android.content.pm.ActivityInfo.CONFIG_KEYBOARD_HIDDEN, android.content.pm.ActivityInfo.CONFIG_NAVIGATION)) {
+            assertEquals(bit, info.configChanges and bit)
+        }
+    }
+
+    @Test fun `Escape stays with the platform without Rive focus and reaches Rive with focus`() {
+        val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+        try {
+            withFocusHost(context = activity.get()) { host, native, lane, texture ->
+                val container = ExperienceInputContainer(activity.get(), host::dispatchExperienceKeyEvent) { null }
+                val overlay = android.widget.FrameLayout(activity.get()).apply { isFocusableInTouchMode = true }
+                container.addView(host)
+                container.addView(overlay)
+                activity.get().setContentView(container)
+                assertTrue(overlay.requestFocus())
+                fun key(action: Int) = container.dispatchKeyEvent(android.view.KeyEvent(action, android.view.KeyEvent.KEYCODE_ESCAPE))
+                assertFalse(key(android.view.KeyEvent.ACTION_DOWN))
+                assertFalse(key(android.view.KeyEvent.ACTION_UP))
+                host.doFrame(1_000_000_000L)
+                drain(lane)
+                assertTrue(native.focusSteps.flatten().isEmpty())
+                host.onSurfaceTextureUpdated(texture)
+                drain(lane)
+                native.onStep = { native.focusState = NuxieFocusState(true, false) }
+                host.doFrame(1_016_000_000L)
+                drain(lane)
+                assertTrue(key(android.view.KeyEvent.ACTION_DOWN))
+                assertTrue(key(android.view.KeyEvent.ACTION_UP))
+                host.doFrame(1_032_000_000L)
+                drain(lane)
+                assertEquals(listOf(256, 256), native.focusSteps.flatten().map { it.code })
+            }
+        } finally { activity.pause().stop().destroy() }
+    }
+
+    @Test fun `binding commit retires Rive focus without another frame`() {
+        val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+        try {
+            val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single()
+                .copy(responseCapture = ExperienceTextInput.ResponseCapture.BINDING)
+            withFocusHost(context = activity.get(), native = RecordingNative().apply {
+                focusState = NuxieFocusState(true, false)
+            }, textInputs = listOf(input)) { host, native, lane, _ ->
+                val container = ExperienceInputContainer(activity.get(), host::dispatchExperienceKeyEvent) { null }
+                container.addView(host)
+                activity.get().setContentView(container)
+                assertTrue(host.riveFocusState.hasFocus)
+                native.onStep = { native.focusState = NuxieFocusState(false, false) }
+                host.writeText("name", "changed", true) { assertTrue(it.isSuccess) }
+                drain(lane)
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                assertFalse(host.riveFocusState.hasFocus)
+                assertFalse(container.dispatchKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN,
+                    android.view.KeyEvent.KEYCODE_ESCAPE)))
+            }
+        } finally { activity.pause().stop().destroy() }
+    }
+
+    @Test fun `unmoved Rive Tab gives focus to the next native view`() {
+        val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+        try {
+            withFocusHost(context = activity.get()) { host, native, lane, _ ->
+                val container = ExperienceInputContainer(activity.get(), host::dispatchExperienceKeyEvent) { null }
+                val next = android.widget.FrameLayout(activity.get()).apply { isFocusableInTouchMode = true; id = 912 }
+                host.isFocusableInTouchMode = true
+                host.nextFocusForwardId = next.id
+                container.addView(host)
+                container.addView(next)
+                activity.get().setContentView(container)
+                assertTrue(host.requestFocus())
+                assertTrue(container.dispatchKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_TAB)))
+                host.doFrame(1_000_000_000L)
+                drain(lane)
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                assertEquals(listOf(0), native.focusSteps.flatten().map { it.kind })
+                assertTrue("A failed focus-next must leave the Rive group", next.hasFocus())
+            }
+        } finally { activity.pause().stop().destroy() }
+    }
+
+    @Test fun `Tab without a state machine gives focus to the next native view`() {
+        val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+        try {
+            withFocusHost(context = activity.get(), native = RecordingNative().apply { playerKind = 0 }) { host, native, lane, _ ->
+                val container = ExperienceInputContainer(activity.get(), host::dispatchExperienceKeyEvent) { null }
+                val next = android.widget.FrameLayout(activity.get()).apply { isFocusableInTouchMode = true; id = 912 }
+                host.isFocusableInTouchMode = true
+                host.nextFocusForwardId = next.id
+                container.addView(host)
+                container.addView(next)
+                activity.get().setContentView(container)
+                assertTrue(host.requestFocus())
+                assertTrue(container.dispatchKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_TAB)))
+                host.doFrame(1_000_000_000L)
+                drain(lane)
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                assertTrue(native.focusSteps.flatten().isEmpty())
+                assertTrue("A failed focus-next must leave the Rive group", next.hasFocus())
+            }
+        } finally { activity.pause().stop().destroy() }
+    }
+
+    @Test fun `last Rive stop hands Tab to the app`() = assertRiveEdgeHandsOn(backwards = false, stopScope = false)
+
+    @Test fun `first Rive stop hands Shift Tab to the app`() = assertRiveEdgeHandsOn(backwards = true, stopScope = false)
+
+    @Test fun `Stop scope keeps focus at its edge`() = assertRiveEdgeHandsOn(backwards = false, stopScope = true)
+
+    @Test fun `Rive edge enters first semantic keyboard target`() = assertRiveEdgeHandsOn(false, false, true)
+
+    @Test fun `reverse Rive edge enters last semantic keyboard target`() = assertRiveEdgeHandsOn(true, false, true)
+
+    private fun assertRiveEdgeHandsOn(backwards: Boolean, stopScope: Boolean, semantics: Boolean = false) {
+        val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+        try {
+            withFocusHost(context = activity.get(), native = RecordingNative().apply {
+                focusState = NuxieFocusState(true, false)
+                semanticNodeCount = 2
+            }, semantics = semantics) { host, native, lane, _ ->
+                val container = ExperienceInputContainer(activity.get(), host::dispatchExperienceKeyEvent) { null }
+                val sibling = android.widget.FrameLayout(activity.get()).apply { isFocusableInTouchMode = true; id = 912 }
+                host.isFocusableInTouchMode = true
+                host.id = 913
+                host.nextFocusForwardId = sibling.id
+                sibling.nextFocusForwardId = host.id
+                if (backwards) container.addView(sibling)
+                container.addView(host)
+                if (!backwards) container.addView(sibling)
+                activity.get().setContentView(container)
+                assertTrue(host.requestFocus())
+                native.onStep = { native.focusState = NuxieFocusState(stopScope, false) }
+                val modifiers = if (backwards) android.view.KeyEvent.META_SHIFT_ON else 0
+                assertTrue(container.dispatchKeyEvent(android.view.KeyEvent(0, 1, android.view.KeyEvent.ACTION_DOWN,
+                    android.view.KeyEvent.KEYCODE_TAB, 0, modifiers)))
+                host.doFrame(1_000_000_000L)
+                drain(lane)
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                assertEquals(listOf(if (backwards) 1 else 0), native.focusSteps.flatten().map { it.kind })
+                if (semantics) {
+                    assertFalse(sibling.hasFocus())
+                    assertEquals(if (backwards) "Continue 2" else "Continue 1", host.accessibilityNodeProvider
+                        .findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+                } else {
+                    assertEquals("Only a Stop scope retains Rive focus", stopScope, host.hasFocus())
+                    assertEquals(!stopScope, sibling.hasFocus())
+                }
+            }
+        } finally { activity.pause().stop().destroy() }
+    }
+
+    @Test fun `native editor Tab follows authored neighbors without reaching Rive`() {
+        val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+        val editor = android.widget.EditText(activity.get())
+        val native = RecordingNative().apply { semanticNodeCount = 3 }
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(activity.get(), lane, runtime = NuxieRuntime(native),
+            artboardSize = ExperienceArtboardSize(100f, 100f), usesSystemFrameCallbacks = false,
+            listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() = Unit
+                override fun onFailure(error: ExperiencePresentationException) { throw error }
+                override fun onSemanticFields(fields: Map<String, ai.nuxie.sdk.runtime.NativeSemanticNode>) = mapOf(43L to editor)
+            })
+        val container = ExperienceInputContainer(activity.get(), host::dispatchExperienceKeyEvent, host::semanticKeyboardEntry)
+        val texture = SurfaceTexture(0)
+        try {
+            container.addView(host)
+            container.addView(editor)
+            activity.get().setContentView(container)
+            host.layout(0, 0, 100, 100)
+            host.isFocusableInTouchMode = true
+            val descriptor = Json.parseToJsonElement("""{
+                "requirements":{"requiredCapabilities":["experience-accessibility"]},
+                "render":{"assets":[],"screens":[{"id":"screen","artboardName":"Main"}]},
+                "leg":{"screens":[{"id":"screen"}]}
+            }""").jsonObject
+            host.loadArtboard(byteArrayOf(1), null, descriptor)
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            for ((modifiers, expected) in listOf(0 to "Continue 3", android.view.KeyEvent.META_SHIFT_ON to "Continue 1")) {
+                assertTrue(editor.requestFocus())
+                assertTrue(container.dispatchKeyEvent(android.view.KeyEvent(0, 1, android.view.KeyEvent.ACTION_DOWN,
+                    android.view.KeyEvent.KEYCODE_TAB, 0, modifiers)))
+                assertTrue(container.dispatchKeyEvent(android.view.KeyEvent(0, 2, android.view.KeyEvent.ACTION_UP,
+                    android.view.KeyEvent.KEYCODE_TAB, 0, modifiers)))
+                assertEquals(expected, host.accessibilityNodeProvider.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+            }
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            assertTrue(native.focusSteps.flatten().isEmpty())
+        } finally {
+            host.release(); lane.shutdown(); assertTrue(lane.awaitQuiescence(2_000)); texture.release()
+            activity.pause().stop().destroy()
+        }
+    }
+
+    @Test fun `focus inputs keep order through frame limits and state precedes publication`() {
+        val observed = mutableListOf<NuxieFocusState>()
+        withFocusHost(onPublish = { observed.add(it.riveFocusState) }) { host, native, lane, texture ->
+            native.focusState = NuxieFocusState(true, true)
+            val keys = (0 until 5_000).map { NuxieFocusInput.Key(it, 0, true, false) }
+            keys.forEach { assertTrue(host.receiveFocusInput(it)) }
+            native.events = arrayOf(ai.nuxie.sdk.runtime.NativeRuntimeEvent(0, 0, "checkpoint", "", "", 0f, emptyArray()))
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+            native.events = emptyArray()
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            val batches = native.focusSteps.filter { it.isNotEmpty() }
+            assertEquals(listOf((0 until 4_096).toList(), (4_096 until 5_000).toList()), batches.map { batch -> batch.map { it.code } })
+            assertEquals(listOf(NuxieFocusState(true, true)), observed)
+        }
+    }
+
+    @Test fun `large paste reaches the player as bounded ordered items`() {
+        withFocusHost { host, native, lane, _ ->
+            assertTrue(host.receiveFocusInput(NuxieFocusInput.Text("🙂".repeat(786_432))))
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            val chunk = "🙂".repeat(262_144)
+            val inputs = native.focusSteps.flatten()
+            assertEquals(listOf(4, 4, 4), inputs.map { it.kind })
+            assertEquals(listOf(chunk, chunk, chunk), inputs.map { it.text.decodeToString() })
+        }
+    }
+
+    @Test fun `temporary deactivation keeps accepted focus input but hiding discards it`() {
+        withFocusHost { host, native, lane, _ ->
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            assertTrue(lane.enqueue { entered.countDown(); check(release.await(2, TimeUnit.SECONDS)) })
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            try {
+                assertTrue(host.receiveFocusInput(NuxieFocusInput.Text("kept")))
+                host.setPresentationVisible(false, preservePendingInput = true)
+                assertFalse(host.receiveFocusInput(NuxieFocusInput.Text("not accepted")))
+            } finally { release.countDown() }
+            drain(lane)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            assertTrue(native.focusSteps.flatten().isEmpty())
+            host.setPresentationVisible(true)
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            assertEquals(listOf("kept"), native.focusSteps.flatten().map { it.text.decodeToString() })
+            assertTrue(host.receiveFocusInput(NuxieFocusInput.Text("discarded")))
+            host.setPresentationVisible(false)
+            drain(lane)
+            host.setPresentationVisible(true)
+            val stepsBeforeDiscardCheck = native.focusSteps.size
+            host.doFrame(1_032_000_000L)
+            drain(lane)
+            assertEquals(stepsBeforeDiscardCheck + 1, native.focusSteps.size)
+            assertEquals(listOf("kept"), native.focusSteps.flatten().map { it.text.decodeToString() })
+        }
+    }
+
+    @Test fun `resize keeps queued typing for the following step`() {
+        withFocusHost { host, native, lane, texture ->
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            assertTrue(lane.enqueue { entered.countDown(); check(release.await(2, TimeUnit.SECONDS)) })
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            try {
+                assertTrue(host.receiveFocusInput(NuxieFocusInput.Text("日本🙂")))
+                host.onSurfaceTextureSizeChanged(texture, 200, 100)
+            } finally { release.countDown() }
+            drain(lane)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            assertEquals(listOf("日本🙂"), native.focusSteps.flatten().map { it.text.decodeToString() })
+        }
+    }
+
+    @Test fun `a queued frame cannot consume focus input after navigation disables it`() {
+        withFocusHost { host, native, lane, _ ->
+            assertTrue(host.receiveFocusInput(NuxieFocusInput.Text("retired")))
+            drain(lane)
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            assertTrue(lane.enqueue { entered.countDown(); check(release.await(2, TimeUnit.SECONDS)) })
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            try {
+                host.doFrame(1_000_000_000L)
+                host.setInputEnabled(false)
+            } finally { release.countDown() }
+            drain(lane)
+            assertTrue("An exit frame must not take retired typing", native.focusSteps.flatten().isEmpty())
+        }
+    }
+
+    @Test fun `hidden or discarded presses cannot authorize a later release`() {
+        withFocusHost { host, native, lane, _ ->
+            fun key(action: Int) = host.dispatchKeyEvent(android.view.KeyEvent(action, android.view.KeyEvent.KEYCODE_B))
+            host.setPresentationVisible(false)
+            key(android.view.KeyEvent.ACTION_DOWN)
+            host.setPresentationVisible(true)
+            key(android.view.KeyEvent.ACTION_UP)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            assertTrue("A refused press cannot authorize release", native.focusSteps.flatten().isEmpty())
+            key(android.view.KeyEvent.ACTION_DOWN)
+            host.setPresentationVisible(false)
+            host.setPresentationVisible(true)
+            key(android.view.KeyEvent.ACTION_UP)
+            val priorSteps = native.focusSteps.size
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            assertEquals(priorSteps + 1, native.focusSteps.size)
+            assertTrue("A discarded press cannot authorize release", native.focusSteps.flatten().isEmpty())
+        }
+    }
+
+    @Test fun `native editor keeps a key through repeat and release after losing focus`() {
+        val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
+        try {
+            withFocusHost(context = activity.get()) { host, native, lane, _ ->
+                val container = ExperienceInputContainer(activity.get(), host::dispatchExperienceKeyEvent) { null }
+                val editor = android.widget.EditText(activity.get())
+                container.addView(host)
+                container.addView(editor)
+                activity.get().setContentView(container)
+                native.focusState = NuxieFocusState(true, true)
+                assertTrue(host.receiveFocusInput(NuxieFocusInput.Next))
+                host.doFrame(1_000_000_000L)
+                drain(lane)
+                native.focusSteps.clear()
+                assertTrue(editor.requestFocus())
+                container.dispatchKeyEvent(android.view.KeyEvent(1, 2, android.view.KeyEvent.ACTION_DOWN,
+                    android.view.KeyEvent.KEYCODE_A, 0))
+                editor.clearFocus()
+                host.isFocusableInTouchMode = true
+                assertTrue(host.requestFocus())
+                container.dispatchKeyEvent(android.view.KeyEvent(1, 3, android.view.KeyEvent.ACTION_DOWN,
+                    android.view.KeyEvent.KEYCODE_A, 1))
+                container.dispatchKeyEvent(android.view.KeyEvent(1, 4, android.view.KeyEvent.ACTION_UP,
+                    android.view.KeyEvent.KEYCODE_A, 0))
+                host.doFrame(1_016_000_000L)
+                drain(lane)
+                assertEquals("The ownership check must actually step", 1, native.focusSteps.size)
+                assertTrue("Native-owned repeat/up cannot reach Rive", native.focusSteps.flatten().isEmpty())
+            }
+        } finally { activity.pause().stop().destroy() }
+    }
+
+    @Test fun `Rive focus selects one owner for keys shared with accessibility`() {
+        val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+        val native = RecordingNative().apply { semanticNodeCount = 2 }
+        val lane = NuxieRuntimeLane()
+        val host = ExperienceSurfaceHost(activity.get(), lane, runtime = NuxieRuntime(native),
+            artboardSize = ExperienceArtboardSize(100f, 100f), usesSystemFrameCallbacks = false)
+        val container = ExperienceInputContainer(activity.get(), host::dispatchExperienceKeyEvent, host::semanticKeyboardEntry)
+        val texture = SurfaceTexture(0)
+        try {
+            container.addView(host)
+            activity.get().setContentView(container)
+            host.layout(0, 0, 100, 100)
+            host.isFocusableInTouchMode = true
+            assertTrue(host.requestFocus())
+            val descriptor = Json.parseToJsonElement("""{
+                "requirements":{"requiredCapabilities":["experience-accessibility"]},
+                "render":{"assets":[],"screens":[{"id":"screen","artboardName":"Main"}]},
+                "leg":{"screens":[{"id":"screen"}]}
+            }""").jsonObject
+            host.loadArtboard(byteArrayOf(1), null, descriptor)
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            fun key(code: Int, action: Int = android.view.KeyEvent.ACTION_DOWN) =
+                container.dispatchKeyEvent(android.view.KeyEvent(action, code))
+            assertNotNull(host.accessibilityNodeProvider.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT))
+            assertTrue(key(android.view.KeyEvent.KEYCODE_TAB))
+            assertEquals("Continue 2", host.accessibilityNodeProvider
+                .findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)?.text)
+            assertFalse("A held semantic Tab at the edge must allow Android focus fallback",
+                host.dispatchExperienceKeyEvent(android.view.KeyEvent(0, 0,
+                    android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_TAB, 1)))
+            assertTrue(key(android.view.KeyEvent.KEYCODE_TAB, android.view.KeyEvent.ACTION_UP))
+            // An unowned Tab at the same edge must also stay out of Rive.
+            key(android.view.KeyEvent.KEYCODE_TAB)
+            key(android.view.KeyEvent.KEYCODE_TAB, android.view.KeyEvent.ACTION_UP)
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            assertTrue("Accessibility Tab at the edge must not also move Rive", native.focusSteps.flatten().isEmpty())
+            native.onStep = { native.focusState = NuxieFocusState(true, true) }
+            host.doFrame(1_032_000_000L)
+            drain(lane)
+            native.focusSteps.clear()
+            assertTrue(key(android.view.KeyEvent.KEYCODE_ENTER))
+            assertTrue(key(android.view.KeyEvent.KEYCODE_ENTER, android.view.KeyEvent.ACTION_UP))
+            host.doFrame(1_048_000_000L)
+            drain(lane)
+            assertEquals(listOf(257, 257), native.focusSteps.flatten().map { it.code })
+            assertTrue("Rive Enter must not also activate accessibility", native.semanticActions.isEmpty())
+            native.onStep = { native.focusState = NuxieFocusState(false, false) }
+            host.doFrame(1_064_000_000L)
+            drain(lane)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            native.focusSteps.clear()
+            assertTrue(key(android.view.KeyEvent.KEYCODE_ENTER))
+            assertTrue(key(android.view.KeyEvent.KEYCODE_ENTER, android.view.KeyEvent.ACTION_UP))
+            drain(lane)
+            assertEquals(listOf(43L to 0), native.semanticActions)
+            host.doFrame(1_080_000_000L)
+            drain(lane)
+            assertTrue(native.focusSteps.flatten().isEmpty())
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+            activity.pause().stop().destroy()
+        }
+    }
+
+    private fun withFocusHost(
+        context: android.content.Context = RuntimeEnvironment.getApplication(),
+        native: RecordingNative = RecordingNative(),
+        semantics: Boolean = false,
+        textInputs: List<ExperienceTextInput> = emptyList(),
+        onPublish: (ExperienceSurfaceHost) -> Unit = {},
+        block: (ExperienceSurfaceHost, RecordingNative, NuxieRuntimeLane, SurfaceTexture) -> Unit,
+    ) {
+        val lane = NuxieRuntimeLane()
+        lateinit var host: ExperienceSurfaceHost
+        host = ExperienceSurfaceHost(context, lane, runtime = NuxieRuntime(native),
+            artboardSize = ExperienceArtboardSize(100f, 100f), usesSystemFrameCallbacks = false,
+            listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() = Unit
+                override fun onFailure(error: ExperiencePresentationException) { throw error }
+                override fun onRuntimeStep(outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
+                    correlationId: ULong, viewModelSnapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?) { onPublish(host) }
+            })
+        val texture = SurfaceTexture(0)
+        try {
+            host.layout(0, 0, 100, 100)
+            val descriptor = if (semantics) Json.parseToJsonElement("""{
+                "requirements":{"requiredCapabilities":["experience-accessibility"]},
+                "render":{"assets":[],"screens":[{"id":"screen","artboardName":"Main"}]},
+                "leg":{"screens":[{"id":"screen"}]}
+            }""").jsonObject else null
+            host.loadArtboard(byteArrayOf(1), null, descriptor, textInputs = textInputs)
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            host.doFrame(0L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+            block(host, native, lane, texture)
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
         }
     }
 
@@ -1005,14 +1517,15 @@ class ExperienceSurfaceHostPointerTest {
         var semanticCaptureStatus = 0
         var semanticRevision = 1L
         var semanticTreeVersion = 1L
+        var semanticNodeCount = 1
         val semanticFreed = mutableListOf<Long>()
         val semanticActions = mutableListOf<Pair<Long, Int>>()
         override fun inspectFileAssets(bytes: ByteArray) = emptyList<ai.nuxie.sdk.runtime.ExpectedFileAsset>()
         override fun enableSemantics(player: Long): Int { semanticsEnabled++; return 0 }
         override fun captureSemantics(player: Long): NativeCallResult<Long> { semanticCaptures++; return NativeCallResult(semanticCaptureStatus, if (semanticCaptureStatus == 0) 99L else null) }
-        override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(semanticRevision, semanticTreeVersion, 1))
+        override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(semanticRevision, semanticTreeVersion, semanticNodeCount.toLong()))
         override fun semanticNode(snapshot: Long, index: Int) = NativeCallResult(0,
-            ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 1, 0, 0, 0, 1, 10f, 10f, 80f, 80f, "Continue", "", ""))
+            ai.nuxie.sdk.runtime.NativeSemanticNode(42L + index, -1, index, 1, 0, 0, 0, 1, 10f, 10f, 80f, 80f, if (semanticNodeCount == 1) "Continue" else "Continue ${index + 1}", "", ""))
         override fun freeSemantics(snapshot: Long): Int { semanticFreed += snapshot; return 0 }
         override fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int): Int {
             semanticActions += nodeId to action; return 0
@@ -1020,6 +1533,8 @@ class ExperienceSurfaceHostPointerTest {
         var onRender: () -> Unit = {}
         var events = emptyArray<ai.nuxie.sdk.runtime.NativeRuntimeEvent>()
         val pointerSteps = mutableListOf<List<NativePlayerPointer>>()
+        val focusSteps = mutableListOf<List<NativeFocusInput>>()
+        var focusState = NuxieFocusState(false, false)
         val order = mutableListOf<String>()
         val elapsedSteps = mutableListOf<Float>()
         var playersCreated = 0
@@ -1078,12 +1593,17 @@ class ExperienceSurfaceHostPointerTest {
         override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long = 4L
         override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int = 0
 
-        override fun detachRendererSurface(rendererHandle: Long): Int = 0
+        var detachCount = 0
+        override fun detachRendererSurface(rendererHandle: Long): Int { detachCount++; return 0 }
 
         var resizeStatus = 0
         override fun resizeRenderer(handle: Long, pixelWidth: Int, pixelHeight: Int): Int = resizeStatus
         override fun acquireWindow(surface: android.view.Surface): Long = 5L.also { windowsAcquired += 1 }
         override fun releaseWindow(handle: Long) = Unit
+
+        var playerKind = 1
+        override fun playerKind(playerHandle: Long) = NativeCallResult(0, playerKind)
+        override fun playerFocusState(playerHandle: Long) = NativeCallResult(0, focusState)
 
         override fun stepPlayer(
             playerHandle: Long,
@@ -1092,9 +1612,11 @@ class ExperienceSurfaceHostPointerTest {
             elapsedSeconds: Float,
             correlationId: Long,
             textRunNames: List<String>,
+            focusInputs: List<NativeFocusInput>,
         ): NativeCallResult<NativePlayerStepOutcome> {
             requestedTextRuns += textRunNames
             pointerSteps += pointers
+            focusSteps += focusInputs
             elapsedSteps += elapsedSeconds
             order += "frame:${pointers.size}"
             onStep()
@@ -1103,6 +1625,7 @@ class ExperienceSurfaceHostPointerTest {
                 0,
                 NativePlayerStepOutcome(
                     keepGoing = true,
+                    focusResults = BooleanArray(focusInputs.size),
                     pointerHits = intArrayOf(),
                     events = events.also { events = emptyArray() },
                     hostCommands = emptyArray(),

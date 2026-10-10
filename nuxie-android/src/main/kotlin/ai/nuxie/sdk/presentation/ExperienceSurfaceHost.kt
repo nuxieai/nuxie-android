@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NuxieFocusInput
+import ai.nuxie.sdk.runtime.NuxieFocusState
 import ai.nuxie.sdk.runtime.ExperienceVideoPlayback
 import ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding
 import ai.nuxie.sdk.experiences.ExperienceVideoElement
@@ -65,6 +67,8 @@ internal class ExperienceSurfaceHost(
     private val runtime: NuxieRuntime = NuxieRuntime.shared,
     private val systemFontCache: SystemFontCache = SystemFontCache.shared,
     private val videoDecoderPool: ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool? = null,
+    private val usesSystemFrameCallbacks: Boolean = true,
+    private val runValues: ExperienceRunValues? = null,
 ) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
     @Volatile private var layoutBounds = artboardSize
     private var surfaceWidth = 0
@@ -149,10 +153,77 @@ internal class ExperienceSurfaceHost(
 
     fun semanticKeyboardEntry(direction: Int): android.view.View? = accessibility.keyboardEntry(direction)
 
-    fun dispatchSemanticKeyEvent(event: KeyEvent): Boolean = accessibility.key(event)
+    private val semanticKeys = mutableSetOf<Int>()
+    private val riveKeys = mutableSetOf<Int>()
+    @Volatile var riveFocusState = NuxieFocusState(false, false)
+        private set
+
+    fun dispatchExperienceKeyEvent(event: KeyEvent): Boolean {
+        if (!running || !sceneInputEnabled.get() || released.get()) {
+            semanticKeys.clear()
+            riveKeys.clear()
+            return false
+        }
+        val code = event.keyCode
+        if (rootView.findFocus()?.onCheckIsTextEditor() == true) {
+            riveKeys.clear()
+            val authoredTab = code == KeyEvent.KEYCODE_TAB &&
+                (event.hasNoModifiers() || event.hasModifiers(KeyEvent.META_SHIFT_ON))
+            if (!authoredTab) { semanticKeys.clear(); return false }
+            if (code in semanticKeys) {
+                if (event.action == KeyEvent.ACTION_UP) { semanticKeys.remove(code); return true }
+                return accessibility.key(event)
+            }
+            if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return false
+            return accessibility.key(event).also { if (it) semanticKeys.add(code) }
+        }
+        if (code in semanticKeys) {
+            if (event.action == KeyEvent.ACTION_UP) {
+                semanticKeys.remove(code)
+                return true
+            }
+            return accessibility.key(event)
+        }
+        if (code in riveKeys) {
+            if (event.action == KeyEvent.ACTION_UP) riveKeys.remove(code)
+            ExperienceHardwareKey.input(event)?.let(::receiveFocusInput)
+            return true
+        }
+        // A repeat or release belongs to the owner that accepted its initial press.
+        if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return false
+        if (!riveFocusState.hasFocus && accessibility.hasKeyboardTargets) {
+            val accepted = accessibility.key(event)
+            if (accepted) semanticKeys.add(code)
+            return accepted
+        }
+        if (code != KeyEvent.KEYCODE_TAB && !riveFocusState.hasFocus) return false
+        val input = ExperienceHardwareKey.input(event) ?: return false
+        val accepted = receiveFocusInput(input)
+        if (accepted && event.action == KeyEvent.ACTION_DOWN) riveKeys.add(code)
+        return accepted
+    }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean =
-        accessibility.key(event) || super.dispatchKeyEvent(event)
+        dispatchExperienceKeyEvent(event) || super.dispatchKeyEvent(event)
+
+    fun receiveFocusInput(input: NuxieFocusInput): Boolean {
+        if (!running || !sceneInputEnabled.get() || released.get() || failureReported.get()) return false
+        val generation = focusGeneration.get()
+        return lane.enqueue {
+            if (!released.get() && !failureReported.get() && generation == focusGeneration.get()) {
+                if (queuedFocusGeneration != generation) {
+                    focusInput.clear()
+                    queuedFocusGeneration = generation
+                }
+                focusInput.add(input)
+            }
+        }
+    }
+
+    private fun discardFocusInput() {
+        focusGeneration.incrementAndGet()
+        lane.enqueue { focusInput.clear() }
+    }
 
     override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: Rect?) {
         super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
@@ -314,6 +385,11 @@ internal class ExperienceSurfaceHost(
     private val captionPublication = AtomicLong()
     private var submittedSnapshot: SubmittedTextSnapshot? = null
     private val textPublication = AtomicLong()
+    private var sharedValuesLinked = false
+    private fun retainScreenValues(snapshot: NuxieViewModelSnapshot) {
+        retainedViewModel?.set(if (sharedValuesLinked) snapshot.withoutRootProperty("experience") else snapshot)
+    }
+
     private var retainedViewModel: java.util.concurrent.atomic.AtomicReference<NuxieViewModelSnapshot?>? = null
     private var textInputs: Map<String, ExperienceTextInput> = emptyMap()
     private val runtimeValues = linkedMapOf<String, NuxieViewModelScalarValue>()
@@ -367,6 +443,9 @@ internal class ExperienceSurfaceHost(
     private var lastFrameNanos = 0L
     private var lastSteppedGeneration = -1L
     private val pointerInput = ExperienceRuntimePointerInput(artboardSize)
+    private val focusInput = ExperienceFocusInputQueue()
+    private val focusGeneration = AtomicLong()
+    private var queuedFocusGeneration = 0L
 
     init {
         isOpaque = false
@@ -389,6 +468,8 @@ internal class ExperienceSurfaceHost(
         onLoaded: ((Boolean) -> Unit)? = null,
     ) {
         retireSemantics()
+        discardFocusInput()
+        riveFocusState = NuxieFocusState(false, false)
         lane.enqueue {
             val requirements = descriptor?.get("requirements") as? JsonObject
             semanticsEnabled = (requirements?.get("requiredCapabilities") as? JsonArray).orEmpty()
@@ -396,6 +477,14 @@ internal class ExperienceSurfaceHost(
                 textInputs.any { it.editableValueName != null }
             this.textInputs = textInputs.associateBy(ExperienceTextInput::id)
             this.retainedViewModel = retainedViewModel
+            val shared = try { runValues?.prepare(sceneBytes, descriptor, artifactsByKey, runtime, systemFontCache) }
+            catch (error: Exception) {
+                reportFailure(ExperiencePresentationException.Reason.PREPARATION_FAILED,
+                    "Experience run values could not be prepared", error)
+                onLoaded?.invoke(false)
+                return@enqueue
+            }
+            if (shared != null) renderer = shared.renderer
             val activeRenderer = ensureRenderer(1, 1)
             if (activeRenderer == null) {
                 reportFailure(
@@ -407,7 +496,11 @@ internal class ExperienceSurfaceHost(
             }
             var videoBindings: List<ExperienceVideoAssetBinding> = emptyList()
             var videoTargets: List<ExperienceVideoElement> = emptyList()
-            file = if (descriptor == null) {
+            file = if (shared != null) {
+                videoBindings = shared.imports?.videos.orEmpty()
+                videoTargets = shared.imports?.videoElements.orEmpty()
+                shared.file
+            } else if (descriptor == null) {
                 runtime.importFile(activeRenderer, sceneBytes)
             } else {
                 val inspectedCatalog = runtime.inspectFileAssets(sceneBytes)
@@ -508,13 +601,18 @@ internal class ExperienceSurfaceHost(
                         }
                     }
                 }
+                val values = shared?.values
+                if (values != null) {
+                    sharedValuesLinked = viewModelState?.linkViewModel("experience", values)
+                        ?: loadedArtboard.linkDefaultViewModel("experience", values)
+                }
             } catch (error: Exception) {
                 // Do not retain a partially bound graph after a signed state
                 // contract failure. The renderer remains available for retry.
                 artboard = null
                 file = null
                 runCatching { loadedArtboard.close() }.exceptionOrNull()?.let(error::addSuppressed)
-                runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                if (shared == null) runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 reportFailure(
                     ExperiencePresentationException.Reason.PREPARATION_FAILED,
                     "Experience view-model binding failed",
@@ -539,7 +637,7 @@ internal class ExperienceSurfaceHost(
                 artboard = null
                 file = null
                 runCatching { loadedArtboard.close() }.exceptionOrNull()?.let(error::addSuppressed)
-                runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                if (shared == null) runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 reportFailure(
                     ExperiencePresentationException.Reason.HOST_FAILED,
                     "Experience player creation failed",
@@ -551,6 +649,9 @@ internal class ExperienceSurfaceHost(
             onLoaded?.invoke(true)
         }
     }
+
+    private fun stepAndRefreshFocus(step: () -> NuxiePlayerStepOutcome): NuxiePlayerStepOutcome =
+        step().also { riveFocusState = it.focusState ?: NuxieFocusState(false, false) }
 
     /** UI entry point. Native edits and optional response commits share the frame lane. */
     fun writeNativeText(target: ExperienceTextFieldTarget, write: ExperienceSemanticTextDraft.Write,
@@ -584,10 +685,12 @@ internal class ExperienceSurfaceHost(
                     // Settle reverse bindings on the ordinary player before reading the typed source.
                     val correlationId = nextCorrelationId
                     nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
-                    val outcome = active.stepAfterStateMutation(correlationId = correlationId,
-                        textRunNames = textInputs.values.filter { it.editableValueName == null }.map { it.runName }.distinct())
+                    val outcome = stepAndRefreshFocus {
+                        active.stepAfterStateMutation(correlationId = correlationId,
+                            textRunNames = textInputs.values.filter { it.editableValueName == null }.map { it.runName }.distinct())
+                    }
                     val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
-                    root?.let { retainedViewModel?.set(it) }
+                    root?.let { retainScreenValues(it) }
                     if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, root))
                     val evaluated = checkNotNull(owner).snapshot()
                     check(evaluated.nativeRootInstanceId == field.ownerId) { "Native field owner changed during write" }
@@ -639,9 +742,11 @@ internal class ExperienceSurfaceHost(
                     if (scripted) {
                         val correlationId = nextCorrelationId
                         nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
-                        val outcome = checkNotNull(player).stepAfterStateMutation(correlationId = correlationId)
+                        val outcome = stepAndRefreshFocus {
+                            checkNotNull(player).stepAfterStateMutation(correlationId = correlationId)
+                        }
                         val root = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
-                        root?.let { retainedViewModel?.set(it) }
+                        root?.let { retainScreenValues(it) }
                         if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlationId, outcome, root))
                         publishSteps()
                     } else listener?.onTextInputEvent(target.inputId, event)
@@ -672,13 +777,15 @@ internal class ExperienceSurfaceHost(
                         check(!input.secure) { "Converted secure input is unsupported" }
                         val correlationId = nextCorrelationId
                         nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
-                        val outcome = checkNotNull(player).stepTyped(
-                            elapsedSeconds = 0.0,
-                            correlationId = correlationId,
-                            textRunNames = textInputs.values.map { it.runName }.distinct(),
-                        )
+                        val outcome = stepAndRefreshFocus {
+                            checkNotNull(player).stepTyped(
+                                elapsedSeconds = 0.0,
+                                correlationId = correlationId,
+                                textRunNames = textInputs.values.map { it.runName }.distinct(),
+                            )
+                        }
                         val captured = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
-                        captured?.let { retainedViewModel?.set(it) }
+                        captured?.let { retainScreenValues(it) }
                         if (outcome.hasPublishableEffects()) {
                             unpublishedSteps.addLast(PublishedStep(correlationId, outcome, captured))
                         }
@@ -703,13 +810,21 @@ internal class ExperienceSurfaceHost(
         if (sceneInputEnabled.getAndSet(enabled) == enabled) return
         isEnabled = enabled
         semanticEpoch.incrementAndGet()
-        if (!enabled) lane.enqueue { pointerInput.reset() }
+        if (!enabled) {
+            semanticKeys.clear()
+            riveKeys.clear()
+            discardFocusInput()
+            lane.enqueue { pointerInput.reset() }
+        }
         if (!enabled) accessibility.withdraw() else accessibility.invalidateState()
     }
 
     /** UI-thread visibility input; a paused but visible Activity remains active. */
-    fun setPresentationVisible(visible: Boolean) {
+    fun setPresentationVisible(visible: Boolean, preservePendingInput: Boolean = false) {
         if (!visible) {
+            semanticKeys.clear()
+            riveKeys.clear()
+            if (!preservePendingInput) discardFocusInput()
             captionPublication.incrementAndGet()
             listener?.onVideoCaptions(emptyMap())
             retireSemantics(preserveFocus = true)
@@ -725,11 +840,14 @@ internal class ExperienceSurfaceHost(
         lane.enqueue { videoPlayback?.setVisible(shouldRun) }
         frameGeneration.incrementAndGet()
         if (shouldRun) {
-            Choreographer.getInstance().postFrameCallback(this)
+            if (usesSystemFrameCallbacks) Choreographer.getInstance().postFrameCallback(this)
         } else {
             // Reset after any staging operation that already started on this
             // lane; clearing on the UI thread could race its final enqueue.
-            lane.enqueue { pointerInput.reset() }
+            lane.enqueue {
+                pointerInput.reset()
+                retireSubmission()
+            }
             Choreographer.getInstance().removeFrameCallback(this)
         }
     }
@@ -753,7 +871,7 @@ internal class ExperienceSurfaceHost(
                 )
                 return@enqueue
             }
-            if (activeRenderer.resize(width.coerceAtLeast(1), height.coerceAtLeast(1)) != NUX_STATUS_OK) {
+            if ((if (runValues == null) activeRenderer.resize(width.coerceAtLeast(1), height.coerceAtLeast(1)) else activeRenderer.resizeIfIdle(width.coerceAtLeast(1), height.coerceAtLeast(1))) != NUX_STATUS_OK) {
                 Log.w(LOG_TAG, "Android Vulkan renderer resize failed")
                 reportFailure(
                     ExperiencePresentationException.Reason.HOST_FAILED,
@@ -811,6 +929,23 @@ internal class ExperienceSurfaceHost(
         }
     }
 
+    /** Cancels only this window's native work before discarding its captured frame. */
+    private fun retireSubmission(): Boolean {
+        val status = window?.let { renderer?.detachSurface(it) } ?: NUX_STATUS_OK
+        if (status != NUX_STATUS_OK) {
+            attached = false
+            reportFailure(
+                ExperiencePresentationException.Reason.HOST_FAILED,
+                "Experience renderer detach failed with status $status",
+            )
+            return false
+        }
+        pendingPresentation = false
+        submittedSnapshot = null
+        submittedCaptions = null
+        return true
+    }
+
     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
         resizeSurface(width, height)
     }
@@ -827,10 +962,11 @@ internal class ExperienceSurfaceHost(
             appliedLayout = null
             pointerInput.reset()
             if (attached) {
-                pendingPresentation = false
-                submittedSnapshot = null
-                submittedCaptions = null
-                val status = renderer?.resize(width.coerceAtLeast(1), height.coerceAtLeast(1))
+                if (!retireSubmission()) return@enqueue
+                val status = if (runValues != null) renderer?.resizeIfIdle(width.coerceAtLeast(1), height.coerceAtLeast(1)) else renderer?.resize(
+                    width.coerceAtLeast(1),
+                    height.coerceAtLeast(1),
+                )
                 if (status != NUX_STATUS_OK) {
                     attached = false
                     reportFailure(
@@ -863,7 +999,7 @@ internal class ExperienceSurfaceHost(
                 submittedSnapshot = null
                 submittedCaptions = null
                 try {
-                    renderer?.detachSurface()
+                    window?.let { renderer?.detachSurface(it) }
                 } finally {
                     window?.close()
                     window = null
@@ -917,7 +1053,7 @@ internal class ExperienceSurfaceHost(
     override fun doFrame(frameTimeNanos: Long) {
         if (!running || failureReported.get()) return
         refreshLayoutDensity()
-        Choreographer.getInstance().postFrameCallback(this)
+        if (usesSystemFrameCallbacks) Choreographer.getInstance().postFrameCallback(this)
         if (!framePending.compareAndSet(false, true)) return
         // The preceding native frame can finish while this tick acquires the
         // slot. Wait for composition and the owner's preparation handoff before
@@ -971,12 +1107,21 @@ internal class ExperienceSurfaceHost(
                     }
                     val outcome = try {
                         if (!sceneInputEnabled.get()) pointerInput.reset()
-                        player.stepTyped(
-                            elapsedSeconds = elapsedSeconds,
-                            pointers = pointerInput.takeBatch(),
-                            correlationId = correlationId,
-                            textRunNames = textInputs.values.map { it.runName }.distinct(),
-                        ).also {
+                        val currentFocusGeneration = focusGeneration.get()
+                        if (!sceneInputEnabled.get() || queuedFocusGeneration != currentFocusGeneration) {
+                            focusInput.clear()
+                            queuedFocusGeneration = currentFocusGeneration
+                        }
+                        val focusBatch = focusInput.takeBatch()
+                        stepAndRefreshFocus {
+                            player.stepTyped(
+                                elapsedSeconds = elapsedSeconds,
+                                pointers = pointerInput.takeBatch(),
+                                focusInputs = focusBatch,
+                                correlationId = correlationId,
+                                textRunNames = textInputs.values.map { it.runName }.distinct(),
+                            )
+                        }.also {
                             if (layoutStepPending) {
                                 val size = player.layoutSize()
                                 val bounds = ExperienceArtboardSize(size.first, size.second)
@@ -987,6 +1132,26 @@ internal class ExperienceSurfaceHost(
                                 mainHandler.post {
                                     if (!released.get() && generation == frameGeneration.get() && epoch == semanticEpoch.get()) {
                                         listener?.onLayoutBounds(bounds)
+                                    }
+                                }
+                            }
+                            if (it.focusState?.hasFocus != true) {
+                                val direction = focusBatch.withIndex().firstNotNullOfOrNull { (index, input) ->
+                                    val moved = it.focusResults.getOrNull(index) == true
+                                    if (moved) null else when (input) {
+                                        NuxieFocusInput.Next -> android.view.View.FOCUS_FORWARD
+                                        NuxieFocusInput.Previous -> android.view.View.FOCUS_BACKWARD
+                                        else -> null
+                                    }
+                                }
+                                if (direction != null) post {
+                                    if (!released.get() && running && sceneInputEnabled.get() &&
+                                        generation == frameGeneration.get() && currentFocusGeneration == focusGeneration.get() &&
+                                        !riveFocusState.hasFocus) {
+                                        if (!accessibility.enterKeyboardOrder(direction)) {
+                                            val current = rootView.findFocus() ?: this
+                                            current.focusSearch(direction)?.takeIf { target -> target !== current }?.requestFocus(direction)
+                                        }
                                     }
                                 }
                             }
@@ -1016,7 +1181,7 @@ internal class ExperienceSurfaceHost(
                     } else {
                         null
                     }
-                    viewModelSnapshot?.let { retainedViewModel?.set(it) }
+                    viewModelSnapshot?.let { retainScreenValues(it) }
                     if (outcome.hasPublishableEffects()) {
                         unpublishedSteps.addLast(PublishedStep(correlationId, outcome, viewModelSnapshot))
                     }
@@ -1033,7 +1198,7 @@ internal class ExperienceSurfaceHost(
                         return@enqueue
                     }
                 }
-                val disposition = renderer.renderAndPresent(player, window, clearColor, layout.density)
+                val disposition = renderer.renderAndPresent(player, window, clearColor, layout.density, layout.pixelWidth, layout.pixelHeight)
                 pendingPresentation = disposition == 4
                 if (disposition < 0) {
                     Log.w(LOG_TAG, "render_player failed", null, Log.status("status", -disposition))
@@ -1114,6 +1279,7 @@ internal class ExperienceSurfaceHost(
     /** Release every native handle. The host is not reusable afterwards. */
     fun release(finalState: Map<String, NuxieViewModelScalarValue> = emptyMap(), onMediaReleased: () -> Unit = {}) {
         if (!released.compareAndSet(false, true)) return
+        discardFocusInput()
         captionPublication.incrementAndGet()
         listener?.onVideoCaptions(emptyMap())
         retireSemantics()
@@ -1126,18 +1292,18 @@ internal class ExperienceSurfaceHost(
             applyRuntimeValues(finalValues)
             // Capture on the original lane after input/exit writes and before releasing handles.
             var firstFailure = retainedViewModel?.let { retained -> runCatching {
-                (viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot())?.let(retained::set)
+                (viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot())?.let(::retainScreenValues)
             }.exceptionOrNull() }
             attached = false
             val closeHandles = listOfNotNull(
-                renderer?.let { active -> { active.detachSurface(); Unit } },
+                window?.let { ownedWindow -> renderer?.let { active -> { active.detachSurface(ownedWindow); Unit } } },
                 window?.let { it::close },
                 videoPlayback?.let { owner -> { owner.closeAfterRetirement(onMediaReleased) } } ?: onMediaReleased,
                 player?.let { it::close },
                 viewModelState?.let { it::close },
                 artboard?.let { it::close },
-                file?.let { it::close },
-                renderer?.let { it::close },
+                file?.takeIf { runValues == null }?.let { it::close },
+                renderer?.takeIf { runValues == null }?.let { it::close },
             )
             window = null
             player = null
@@ -1168,6 +1334,7 @@ internal class ExperienceSurfaceHost(
         cause: Throwable? = null,
     ) {
         if (!failureReported.compareAndSet(false, true)) return
+        discardFocusInput()
         captionPublication.incrementAndGet()
         lane.enqueue {
             while (videoCommands.isNotEmpty()) videoCommands.removeFirst().result.complete(false)

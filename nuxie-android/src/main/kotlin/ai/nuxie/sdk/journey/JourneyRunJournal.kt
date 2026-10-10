@@ -38,6 +38,7 @@ internal data class JourneyRun(
     val startedQueued: Boolean = false,
     val stepId: String,
     val park: Park? = null,
+    val nativeSnapshot: ai.nuxie.sdk.presentation.ExperienceRunSnapshot? = null,
     val context: JsonObject,
     val outputs: JsonObject = emptyOutputs(),
     val completion: Completion? = null,
@@ -62,7 +63,8 @@ internal data class JourneyRun(
     data class Park(
         val wakeAtMillis: Long?,
         val anchorAtMillis: Long? = null,
-        val pendingResponsesChanged: Boolean = false,
+        val pendingEvent: JourneyControlExecutor.Event? = null,
+        val candidateEvents: List<JourneyControlExecutor.Event> = emptyList(),
     )
     data class Completion(val outcome: String, val atMillis: Long)
     data class ExperimentExposure(
@@ -89,7 +91,6 @@ internal data class JourneyRun(
         val sourceActionId: String,
         val sourceComponentId: String? = null,
         val sourceInstanceId: String? = null,
-        val responsesChanged: Boolean,
         val items: List<Item>,
     ) {
         data class Item(
@@ -120,6 +121,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     private val ids: TimeBasedEpochGenerator = TimeBasedEpochGenerator.shared,
     private val maximumRunCount: Int = MAX_RUN_COUNT,
 ) {
+    internal val responseSaveNamespace = storageScope.conversionNamespace
     private val root = File(directory, "journey-state-v2")
     private val journals = File(root, "journals")
     private val customerDigest = storageScope.customerDigest(distinctId)
@@ -135,6 +137,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         val stateArmReceipts: MutableSet<String> = linkedSetOf(),
         val conversionWatches: MutableMap<String, JourneyConversionWatch> = linkedMapOf(),
         val conversionReceipts: MutableMap<String, Long> = linkedMapOf(),
+        var responseSaves: JourneyResponseSaveState? = null,
     )
 
     /** The caller authenticates the arm's release before admitting it here. */
@@ -246,6 +249,76 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         }
     }
 
+    fun reserveResponseSave(run: JourneyRun, formName: String, answers: JsonObject, queued: Boolean): JourneyResponseSave = update { state ->
+        val saves = state.responseSaves ?: JourneyResponseSaveState(responseSaveNamespace, distinctId)
+        check(saves.namespace == responseSaveNamespace && saves.distinctId == distinctId) { "Wrong response save owner" }
+        check(state.runs[run.id]?.startedEventId == run.startedEventId || saves.journeys[run.journeyId]?.containsKey(formName) == true) {
+            "Wrong response save owner"
+        }
+        val forms = saves.journeys.getOrPut(run.journeyId) { linkedMapOf() }
+        val lane = forms.getOrPut(formName) { JourneyResponseSaveLane() }
+        check(lane.sequence < JourneyResponseSave.MAXIMUM_SEQUENCE) { "Response save sequence exhausted" }
+        lane.sequence += 1
+        val sheet = JourneyResponseSave(distinctId, run.journeyId, run.experienceId,
+            run.reference.text("versionId"), formName, lane.sequence, answers)
+        if (queued) { lane.pending = sheet; lane.retry = null }
+        state.responseSaves = saves
+        sheet
+    }
+
+    fun pendingResponseSaves(): List<JourneyResponseSave> = read { state ->
+        state.responseSaves?.journeys?.values?.flatMap { forms -> forms.values.mapNotNull { it.pending } }.orEmpty()
+    }
+
+    fun confirmResponseSave(sheet: JourneyResponseSave, storedSequence: Long) = update { state ->
+        check(sheet.distinctId == distinctId) { "Wrong response save owner" }
+        check(sheet.sequence > 0 && storedSequence >= sheet.sequence && storedSequence <= JourneyResponseSave.MAXIMUM_SEQUENCE) {
+            "Invalid response save receipt"
+        }
+        val lane = checkNotNull(state.responseSaves?.journeys?.get(sheet.journeyId)?.get(sheet.formName))
+        lane.sequence = maxOf(lane.sequence, storedSequence)
+        if (lane.pending?.let { it.sequence <= sheet.sequence } == true) { lane.pending = null; lane.retry = null }
+    }
+
+    fun responseSaveAttempts(now: Long): List<JourneyResponseSaveAttempt> {
+        val attempts = read { state -> state.responseSaves?.journeys?.values?.flatMap { forms ->
+            forms.values.mapNotNull { lane -> lane.pending?.let { JourneyResponseSaveAttempt(it, lane.retry) } }
+        }.orEmpty() }
+        if (attempts.none { it.retry?.let { retry -> now < retry.observedAt } == true }) return attempts
+        update { state -> state.responseSaves?.journeys?.values?.forEach { forms ->
+            forms.values.forEach { it.retry?.normalizeClock(now) }
+        } }
+        return responseSaveAttempts(now)
+    }
+
+    fun recordResponseSaveReply(sheet: JourneyResponseSave, reply: JourneyResponseSaveReply, now: Long): Boolean {
+        if (reply.confirmed) {
+            confirmResponseSave(sheet, checkNotNull(reply.sequence))
+            return false
+        }
+        check(sheet.distinctId == distinctId) { "Wrong response save owner" }
+        return update { state ->
+            val lane = state.responseSaves?.journeys?.get(sheet.journeyId)?.get(sheet.formName) ?: return@update false
+            if (lane.pending?.sequence != sheet.sequence) return@update false
+            val retry = lane.retry ?: JourneyResponseSaveRetry(0, now, now, null, reply.code)
+            retry.normalizeClock(now)
+            retry.attempts = minOf(64, retry.attempts + 1)
+            retry.observedAt = now
+            retry.lastCode = reply.code
+            if (reply.code == JourneyResponseSaveReply.Code.UNKNOWN_FORM && retry.unknownFormSince == null) retry.unknownFormSince = now
+            val expired = reply.code == JourneyResponseSaveReply.Code.UNKNOWN_FORM && retry.unknownFormSince?.let { now - it >= 600_000 } == true
+            val stopped = reply.terminal || expired
+            if (stopped) {
+                lane.pending = null
+                lane.retry = null
+            } else {
+                retry.nextAttemptAt = now + minOf(300_000L, 5_000L * (1L shl minOf(6, retry.attempts - 1)))
+                lane.retry = retry
+            }
+            stopped
+        }
+    }
+
     fun runs(): List<JourneyRun> = read { it.runs.values.sortedBy(JourneyRun::startedEventId) }
     fun checkmark(experienceId: String): JourneyCheckmark? = read { it.checklist[experienceId] }
 
@@ -296,15 +369,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         }
     }
 
-    fun recordResponses(id: String, values: JsonObject) = update { state ->
-        val run = checkNotNull(state.runs[id])
-        check(run.completion == null)
-        state.runs[id] = run.copy(
-            context = JsonObject(run.context + ("responses" to JsonObject(run.context.getValue("responses").jsonObject + values))),
-        )
-    }
-
-    /** Stages response mutations and ordinary renderer events in one durable run update. */
+    /** Stages ordinary renderer events in one durable run update. */
     fun stagePresentationPublication(
         id: String,
         expectedStepId: String,
@@ -336,21 +401,12 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     fun clearPresentationPublication(
         id: String,
         invocationId: String,
-        retainResponsesChanged: Boolean = false,
     ): JourneyRun? = update { state ->
         val run = state.runs[id] ?: return@update null
         val pending = run.pendingPresentationPublication
             ?.takeIf { it.invocationId == invocationId }
             ?: return@update null
-        settlePresentationPublication(run, pending).copy(
-            park = run.park?.let { park ->
-                if (retainResponsesChanged) {
-                    park.copy(pendingResponsesChanged = true)
-                } else {
-                    park
-                }
-            },
-        ).also { state.runs[id] = it }
+        settlePresentationPublication(run, pending).also { state.runs[id] = it }
     }
 
     /**
@@ -386,6 +442,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         clearingPresentationPublication: String? = null,
         presentationEventId: String? = null,
         clearPresentationSource: Boolean = false,
+        nativeSnapshot: ai.nuxie.sdk.presentation.ExperienceRunSnapshot? = null,
     ) = update { state ->
         val run = checkNotNull(state.runs[id])
         check(run.startedQueued && run.completion == null)
@@ -414,7 +471,8 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         } else {
             settled.experimentExposures
         }
-        state.runs[id] = settled.copy(stepId = stepId, context = context,
+        state.runs[id] = settled.copy(stepId = stepId, context = JsonObject(context + ("responses" to JsonObject(emptyMap()))),
+            nativeSnapshot = nativeSnapshot.takeIf { checkpoint != null },
             park = checkpoint?.let { JourneyRun.Park(it.wakeAtMillis, it.anchorAtMillis) },
             effectReceipts = settled.effectReceipts - settled.stepId,
             experimentExposures = exposures,
@@ -522,11 +580,36 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         state.runs.values.filter { it.park != null && it.completion == null }.sortedBy(JourneyRun::startedEventId)
     }
 
-    /** Consume durably before executing a continuation; only parks resume. */
-    fun resumeParked(id: String): JourneyRun = update { state ->
-        val run = checkNotNull(state.runs[id])
-        check(run.startedQueued && run.park != null && run.completion == null)
-        run.copy(park = null).also { state.runs[id] = it }
+    fun appendParkedCandidate(id: String, expectedStepId: String, expectedPark: JourneyRun.Park,
+        event: JourneyControlExecutor.Event): JourneyRun.Park? = update { state ->
+        val run = state.runs[id] ?: return@update null
+        val park = run.park ?: return@update null
+        if (run.completion != null || run.stepId != expectedStepId || park.wakeAtMillis != expectedPark.wakeAtMillis ||
+            park.anchorAtMillis != expectedPark.anchorAtMillis) return@update null
+        val updated = park.copy(candidateEvents = (park.candidateEvents + event).distinct())
+        state.runs[id] = run.copy(park = updated)
+        updated
+    }
+
+    fun selectParkedEvent(id: String, expectedStepId: String, expectedPark: JourneyRun.Park,
+        selected: JourneyControlExecutor.Event?): JourneyRun.Park? = update { state ->
+        val run = state.runs[id] ?: return@update null
+        val park = run.park ?: return@update null
+        if (run.completion != null || run.stepId != expectedStepId || park.wakeAtMillis != expectedPark.wakeAtMillis ||
+            park.anchorAtMillis != expectedPark.anchorAtMillis ||
+            (park.pendingEvent != null && park.pendingEvent != selected)) return@update null
+        val updated = park.copy(pendingEvent = selected,
+            candidateEvents = park.candidateEvents - expectedPark.candidateEvents.toSet())
+        state.runs[id] = run.copy(park = updated)
+        updated
+    }
+
+    /** Consume only the checkpoint observed before asynchronous preparation. */
+    fun resumeParked(id: String, expectedStepId: String, expectedPark: JourneyRun.Park): JourneyRun? = update { state ->
+        val run = state.runs[id] ?: return@update null
+        if (!run.startedQueued || run.completion != null || run.stepId != expectedStepId ||
+            run.park != expectedPark) return@update null
+        run.copy(park = null, nativeSnapshot = null).also { state.runs[id] = it }
     }
 
     /** Identity teardown blocks admission and retires parked work too. */
@@ -628,6 +711,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     private fun persist(state: Snapshot) {
         val bytes = buildJsonObject {
             put("schemaVersion", JsonPrimitive(VERSION))
+            state.responseSaves?.let { put("responseSaves", it.toJson()) }
             put("conversionWatches", JsonObject(state.conversionWatches.mapValues { it.value.toJson() }))
             put("conversionReceipts", JsonObject(state.conversionReceipts.mapValues { JsonPrimitive(it.value) }))
             put("runs", JsonObject(state.runs.mapValues { encodeRun(it.value) }))
@@ -704,7 +788,8 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         val conversionReceipts = value.getValue("conversionReceipts").jsonObject.mapValues {
             it.value.jsonPrimitive.long
         }.toMutableMap()
-        return Snapshot(runs, checklist, receipts, watches, conversionReceipts)
+        return Snapshot(runs, checklist, receipts, watches, conversionReceipts,
+            value["responseSaves"]?.jsonObject?.let(JourneyResponseSaveState::fromJson))
     }
 
     private fun encodeRun(run: JourneyRun) = buildJsonObject {
@@ -741,17 +826,26 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         run.pendingPresentationPublication?.let {
             put("pendingPresentationPublication", encodePresentationPublication(it))
         }
+        run.nativeSnapshot?.let { put("nativeSnapshot", it.fields) }
         run.park?.let { park -> put("park", buildJsonObject {
             park.wakeAtMillis?.let { put("wakeAtMillis", JsonPrimitive(it)) }
             park.anchorAtMillis?.let { put("anchorAtMillis", JsonPrimitive(it)) }
-            if (park.pendingResponsesChanged) {
-                put("pendingResponsesChanged", JsonPrimitive(true))
-            }
+            park.pendingEvent?.let { put("pendingEvent", encodeControlEvent(it)) }
+            put("candidateEvents", JsonArray(park.candidateEvents.map(::encodeControlEvent)))
         }) }
         run.completion?.let { completion -> put("completion", buildJsonObject {
             put("outcome", JsonPrimitive(completion.outcome)); put("atMillis", JsonPrimitive(completion.atMillis))
         }) }
     }
+
+    private fun encodeControlEvent(event: JourneyControlExecutor.Event) = buildJsonObject {
+        put("name", JsonPrimitive(event.name)); put("occurredAtMillis", JsonPrimitive(event.occurredAtMillis))
+        put("properties", event.properties); event.id?.let { put("id", JsonPrimitive(it)) }
+    }
+
+    private fun decodeControlEvent(value: JsonObject) = JourneyControlExecutor.Event(
+        value.text("name"), value.number("occurredAtMillis"), value.getValue("properties").jsonObject,
+        value["id"]?.jsonPrimitive?.content)
 
     private fun decodeRun(value: JsonObject) = JourneyRun(
         journeyId = value.text("journeyId"), generation = value.number("generation"), reference = value.getValue("reference").jsonObject,
@@ -761,11 +855,13 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             ?.let(::decodeExecutionSnapshot),
         startedQueued = value.getValue("startedQueued").jsonPrimitive.boolean, stepId = value.text("stepId"),
         context = value.getValue("context").jsonObject, outputs = value.getValue("outputs").jsonObject,
+        nativeSnapshot = (value["nativeSnapshot"] as? JsonArray)?.let { ai.nuxie.sdk.presentation.ExperienceRunSnapshot(it) },
         park = value["park"]?.jsonObject?.let {
             JourneyRun.Park(
                 it["wakeAtMillis"]?.jsonPrimitive?.long,
                 it["anchorAtMillis"]?.jsonPrimitive?.long,
-                it["pendingResponsesChanged"]?.jsonPrimitive?.boolean ?: false,
+                (it["pendingEvent"] as? JsonObject)?.let(::decodeControlEvent),
+                (it["candidateEvents"] as? JsonArray).orEmpty().map { event -> decodeControlEvent(event.jsonObject) },
             )
         },
         completion = value["completion"]?.jsonObject?.let { JourneyRun.Completion(it.text("outcome"), it.number("atMillis")) },
@@ -924,7 +1020,6 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         put("sourceActionId", JsonPrimitive(publication.sourceActionId))
         publication.sourceComponentId?.let { put("sourceComponentId", JsonPrimitive(it)) }
         publication.sourceInstanceId?.let { put("sourceInstanceId", JsonPrimitive(it)) }
-        put("responsesChanged", JsonPrimitive(publication.responsesChanged))
         put("items", JsonArray(publication.items.map { item ->
             buildJsonObject {
                 put("name", JsonPrimitive(item.name))
@@ -946,7 +1041,6 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             sourceActionId = value.text("sourceActionId"),
             sourceComponentId = value["sourceComponentId"]?.jsonPrimitive?.content,
             sourceInstanceId = value["sourceInstanceId"]?.jsonPrimitive?.content,
-            responsesChanged = value.getValue("responsesChanged").jsonPrimitive.boolean,
             items = value.getValue("items").jsonArray.map { element ->
                 val item = element.jsonObject
                 JourneyRun.PendingPresentationPublication.Item(
@@ -1127,6 +1221,8 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         eventOutputs: JsonObject,
         responseOutputs: JsonObject,
     ) = run.copy(
+        park = null,
+        nativeSnapshot = null,
         context = emptyOutputs(),
         outputs = JsonObject(
             mapOf(
@@ -1137,16 +1233,36 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         completion = JourneyRun.Completion(outcome, atMillis),
     )
 
-    private companion object {
-        const val VERSION = "nuxie.journey-journal.v2"
+    companion object {
+        fun recoverResponseSaveOwners(directory: File, scope: JourneyStorageScope): JourneyResponseSaveRecovery {
+            val root = File(directory, "journey-state-v2")
+            val journals = File(root, "journals")
+            if (!journals.exists()) return JourneyResponseSaveRecovery(emptyList(), false)
+            return CacheFilesystemLock(root).withLock {
+                val owners = mutableListOf<String>()
+                var needsRetry = false
+                val reader = JourneyRunJournal(directory, "", scope)
+                val files = journals.listFiles() ?: throw IOException("Could not list response save journals")
+                for (file in files.filter { it.extension == "json" }) {
+                    val state = try { reader.load(file) } catch (error: kotlinx.coroutines.CancellationException) { throw error }
+                    catch (_: Exception) { needsRetry = true; continue }
+                    val saves = state.responseSaves ?: continue
+                    if (saves.namespace != scope.conversionNamespace || file.name != scope.customerDigest(saves.distinctId) + ".json") continue
+                    if (saves.journeys.values.any { forms -> forms.values.any { it.pending != null } }) owners += saves.distinctId
+                }
+                JourneyResponseSaveRecovery(owners, needsRetry)
+            }
+        }
+
+        private const val VERSION = "nuxie.journey-journal.v2"
         // A canonical profile may contribute up to 24 MiB of admitted context.
         // Preserve headroom for cursors, responses, receipts, and checkmarks.
-        const val MAX_BYTES = 40 * 1024 * 1024
-        const val MAX_RELEASE_PIN_BYTES = 6L * 1024L * 1024L
-        const val MAX_RELEASE_PIN_TOTAL_BYTES = 256L * 1024L * 1024L
-        const val MAX_RELEASE_PIN_COUNT = 1_024
-        const val MAX_RUN_COUNT = 1_024
-        val DIGEST = Regex("^[a-f0-9]{64}$")
+        private const val MAX_BYTES = 40 * 1024 * 1024
+        private const val MAX_RELEASE_PIN_BYTES = 6L * 1024L * 1024L
+        private const val MAX_RELEASE_PIN_TOTAL_BYTES = 256L * 1024L * 1024L
+        private const val MAX_RELEASE_PIN_COUNT = 1_024
+        private const val MAX_RUN_COUNT = 1_024
+        private val DIGEST = Regex("^[a-f0-9]{64}$")
     }
 }
 

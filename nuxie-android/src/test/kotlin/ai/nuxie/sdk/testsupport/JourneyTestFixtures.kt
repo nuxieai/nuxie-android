@@ -27,11 +27,6 @@ internal object JourneyTestFixtures {
               },
               "effects": [
                 {
-                  "kind": "response_set",
-                  "field": "answer",
-                  "value": "premium"
-                },
-                {
                   "kind": "event",
                   "name": "survey_submitted",
                   "payload": { "answer": "premium" }
@@ -39,10 +34,10 @@ internal object JourneyTestFixtures {
               ],
               "expected": {
                 "batch_sequence": 0,
-                "emission_sequences": [0, 1],
-                "emission_ids": ["emission-1", "emission-2"],
+                "emission_sequences": [0],
+                "emission_ids": ["emission-2"],
                 "customer_event_ids": ["emission-2"],
-                "response_values": { "answer": "premium" },
+                "response_values": {},
                 "pending_batch_count_after_drain": 0,
                 "replay_customer_event_count": 1,
                 "replay_response_version_increment": 0

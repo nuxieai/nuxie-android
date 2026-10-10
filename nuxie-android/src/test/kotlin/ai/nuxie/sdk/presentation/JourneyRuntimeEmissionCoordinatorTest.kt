@@ -26,6 +26,75 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class JourneyRuntimeEmissionCoordinatorTest {
+    @Test fun `reserved event drops only itself and preserves the sibling source`() = runTest {
+        val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("events/reserved-event-filtering.json").readText()).jsonObject
+        val published = mutableListOf<String>()
+        val sequences = mutableListOf<Long>()
+        val sourceIds = mutableListOf<Long?>()
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", JsonObject(emptyMap()), 0, 0,
+            onEmissionBatch = { batch, sources ->
+                batch.emissions.forEach {
+                    published += it.name
+                    sequences += it.sequence
+                    sourceIds += sources?.source(it.id)?.nativeId
+                }
+                true
+            }, onPresentationRevealed = {})
+        assertTrue(coordinator.reveal())
+        val snapshot = ai.nuxie.sdk.runtime.NuxieViewModelSnapshot.fromNative(
+            ai.nuxie.sdk.runtime.NativeViewModelSnapshot(71,
+                arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(71, 0),
+                    ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(72, 1)), emptyArray()))
+        val events = vector.getValue("events").jsonArray.mapIndexed { index, name ->
+            NuxieRuntimeEvent(index, 128, name.jsonPrimitive.content, "", "", 0f, emptyList(), 71L + index)
+        }
+        assertTrue(coordinator.publish(NuxiePlayerStepOutcome(false, emptyList(), events, emptyList(), emptyList()),
+            1uL, snapshot = snapshot))
+        assertEquals(vector.getValue("expectedEvents").jsonArray.map { it.jsonPrimitive.content }, published)
+        assertEquals(vector.getValue("expectedSequences").jsonArray.map { it.jsonPrimitive.long }, sequences)
+        assertEquals(listOf(71L), sourceIds)
+    }
+
+    @Test fun `shared frame changes produce no events and emissions retain their settled snapshot`() = runTest {
+        val vectors = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("events/runtime-frame-writes.json").readText()).jsonObject.getValue("cases").jsonArray
+        var expectedValue = ""
+        val published = mutableListOf<String>()
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", JsonObject(emptyMap()), 0, 0,
+            onEmissionBatch = { batch, sources ->
+                batch.emissions.forEach { emission ->
+                    published += emission.name
+                    val source = requireNotNull(sources?.source(emission.id))
+                    assertEquals(expectedValue, source.snapshot.resolveNativeString("placementId", null, source.nativeId))
+                }
+                true
+            }, onPresentationRevealed = {})
+        assertTrue(coordinator.reveal())
+        for (element in vectors) {
+            val vector = element.jsonObject
+            val value = vector.getValue("value").jsonPrimitive.content
+            expectedValue = value
+            published.clear()
+            val snapshot = ai.nuxie.sdk.runtime.NuxieViewModelSnapshot.fromNative(
+                ai.nuxie.sdk.runtime.NativeViewModelSnapshot(71,
+                    arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(71, 0)),
+                    arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue(71, 0, "placementId",
+                        ai.nuxie.sdk.runtime.NuxieViewModelPropertyKind.STRING.nativeValue,
+                        value.encodeToByteArray(), 0))))
+            val events = vector.getValue("events").jsonArray.mapIndexed { index, name ->
+                NuxieRuntimeEvent(index, 128, name.jsonPrimitive.content, "", "", 0f, emptyList())
+            }
+            val change = ai.nuxie.sdk.runtime.NuxieViewModelChange(
+                ai.nuxie.sdk.runtime.NuxieViewModelChangeOrigin.RUNTIME, 77uL, 71uL, 0,
+                ai.nuxie.sdk.runtime.NuxieViewModelValue.Bytes(value.encodeToByteArray()))
+            assertTrue(coordinator.publish(NuxiePlayerStepOutcome(false, emptyList(), events,
+                emptyList(), listOf(change)), 42uL, snapshot = snapshot))
+            assertEquals(vector.getValue("name").jsonPrimitive.content,
+                vector.getValue("expectedEvents").jsonArray.map { it.jsonPrimitive.content }, published)
+        }
+    }
+
     @Test fun `accepted frame link cancellation escapes publication`() = runTest {
         val cancelled = kotlinx.coroutines.CancellationException("link cancelled")
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", JsonObject(emptyMap()), 0, 0,
@@ -138,7 +207,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
         val run = fixture.getValue("run").jsonObject
         val input = fixture.getValue("input").jsonObject
         val expected = fixture.getValue("expected").jsonObject
-        val expectedIds = expected.getValue("emission_ids").jsonArray.map {
+        val expectedIds = expected.getValue("customer_event_ids").jsonArray.map {
             it.jsonPrimitive.content
         }
         val order = mutableListOf<String>()
@@ -180,23 +249,17 @@ class JourneyRuntimeEmissionCoordinatorTest {
         assertEquals(input.getValue("component_id").jsonPrimitive.content, batch.source.componentId)
         assertEquals(input.getValue("instance_id").jsonPrimitive.content, batch.source.instanceId)
         assertEquals(
-            expected.getValue("emission_sequences").jsonArray.map { it.jsonPrimitive.long },
+            listOf(0L),
             batch.emissions.map { it.sequence },
         )
         assertEquals(expectedIds, batch.emissions.map { it.id })
         assertEquals(
-            fixture.getValue("effects").jsonArray.map { effect ->
-                when (effect.jsonObject.getValue("kind").jsonPrimitive.content) {
-                    "response_set" -> "\$response_set"
-                    "event" -> effect.jsonObject.getValue("name").jsonPrimitive.content
-                    else -> error("unsupported fixture effect")
-                }
-            },
+            listOf("survey_submitted"),
             batch.emissions.map { it.name },
         )
         assertEquals(
-            expected.getValue("response_values").jsonObject.getValue("answer"),
-            batch.emissions[0].payload.getValue("value"),
+            input.getValue("value"),
+            batch.emissions[0].payload.getValue("answer"),
         )
         assertEquals(
             expected.getValue("customer_event_ids").jsonArray.map { it.jsonPrimitive.content },
@@ -205,7 +268,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
     }
 
     @Test
-    fun `runtime event and host response preserve native transaction order`() = runTest {
+    fun `reserved host answer is dropped while ordinary runtime event publishes`() = runTest {
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val coordinator = JourneyRuntimeEmissionCoordinator(
             journeyId = "journey-1",
@@ -242,7 +305,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
         )
 
         val batch = batches.single()
-        assertEquals(listOf("survey_viewed", "\$response_unset"), batch.emissions.map { it.name })
+        assertEquals(listOf("survey_viewed"), batch.emissions.map { it.name })
         assertEquals("runtime:23", batch.source.actionId)
         assertEquals("survey", batch.source.screenId)
     }
@@ -491,16 +554,11 @@ class JourneyRuntimeEmissionCoordinatorTest {
     private fun controlDescriptor(): JsonObject {
         val run = screenEmissionFixture.getValue("run").jsonObject
         val input = screenEmissionFixture.getValue("input").jsonObject
-        val program = screenEmissionFixture.getValue("effects").jsonArray.map { element ->
+        val program = screenEmissionFixture.getValue("effects").jsonArray.filter {
+            it.jsonObject.getValue("kind").jsonPrimitive.content == "event"
+        }.map { element ->
             val effect = element.jsonObject
             when (effect.getValue("kind").jsonPrimitive.content) {
-                "response_set" -> buildJsonObject {
-                    put("type", JsonPrimitive("response_set"))
-                    put("field", effect.getValue("field"))
-                    put("value", buildJsonObject {
-                        put("source", JsonPrimitive("invocation_value"))
-                    })
-                }
                 "event" -> buildJsonObject {
                     put("type", JsonPrimitive("emit"))
                     put("eventName", effect.getValue("name"))

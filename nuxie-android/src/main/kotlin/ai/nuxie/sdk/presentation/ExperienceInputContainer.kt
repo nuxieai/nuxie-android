@@ -5,10 +5,10 @@ import android.view.KeyEvent
 import android.view.View
 import android.widget.FrameLayout
 
-/** Route authored traversal before a focused native editor consumes Tab. */
+/** Give each key to the screen owner before ordinary view dispatch. */
 internal class ExperienceInputContainer(
     context: Context,
-    private val semanticKey: (KeyEvent) -> Boolean,
+    private val screenKey: (KeyEvent) -> Boolean,
     private val semanticEntry: (Int) -> View?,
 ) : FrameLayout(context) {
     override fun addFocusables(views: ArrayList<View>, direction: Int, focusableMode: Int) {
@@ -19,7 +19,7 @@ internal class ExperienceInputContainer(
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.keyCode == KeyEvent.KEYCODE_TAB && semanticKey(event)) return true
+        if (screenKey(event)) return true
         return super.dispatchKeyEvent(event)
     }
 }

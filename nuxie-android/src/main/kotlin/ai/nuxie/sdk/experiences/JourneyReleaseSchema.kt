@@ -234,10 +234,6 @@ internal object JourneyReleaseSchema {
                                     for ((key, source) in record(payload)) { utf8(JsonPrimitive(key), 256); source(source) }
                                 }
                             }
-                            "response_set" -> {
-                                exact(action, setOf("type", "field", "value")); utf8(action["field"], 256); source(action["value"])
-                            }
-                            "response_unset" -> { exact(action, setOf("type", "field")); utf8(action["field"], 256) }
                             else -> fail("screen action")
                         }
                     }

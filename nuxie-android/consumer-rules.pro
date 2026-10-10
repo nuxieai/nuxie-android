@@ -19,3 +19,6 @@
 -keep,allowobfuscation class ai.nuxie.sdk.core.NuxieResumedActivityProbe {
     public <init>();
 }
+
+# Focus inputs are read by field name for the synchronous JNI step.
+-keep class ai.nuxie.sdk.runtime.NativeFocusInput { *; }

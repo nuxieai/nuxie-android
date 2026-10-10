@@ -344,6 +344,7 @@ internal class NuxieCore(
         ): JourneyPresentationResult = try {
             presentations.presentJourney(
                 fences = request.fences,
+                runValues = request.runValues,
                 release = request.release,
                 screenId = request.screenId,
                 transition = request.transition,
@@ -423,11 +424,16 @@ internal class NuxieCore(
         deliverAppAction = Nuxie::deliverAppAction,
     )
 
+    private val responseSaveDelivery = ai.nuxie.sdk.journey.JourneyResponseSaveDelivery(
+        directory = File(appContext.filesDir, "nuxie"), transport = api, coroutineScope = scope,
+    )
+
     val journeys = JourneyService(
         identity = identity,
         events = store,
         catalog = journeyProfiles,
         journalDirectory = File(appContext.filesDir, "nuxie"),
+        responseSaveDelivery = responseSaveDelivery,
         scope = scope,
         capture = eventLog::captureIdempotently,
         captureScreenEvent = eventLog::captureScreenEvent,
@@ -442,6 +448,12 @@ internal class NuxieCore(
         nowMillis = nowMillis,
         replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
         artifactManager = releaseArtifactAcquirer,
+        prepareNativeValues = { values, release, delivery ->
+            if (release.descriptor["render"] is kotlinx.serialization.json.JsonObject) releaseArtifactAcquirer.acquire(release, delivery).use { acquired ->
+                val bytes = acquired.sceneFile.readBytes()
+                values.lane.call { values.prepare(bytes, release.descriptor, acquired.artifactsByKey) }
+            }
+        },
     )
 
     val profile = ProfileService(
@@ -604,6 +616,7 @@ internal class NuxieCore(
         { profile.close() },
         { featureUsage.close() },
         { journeys.profileDidClearAll() },
+        { responseSaveDelivery.shutdown() },
         { delivery.close() },
         { eventLog.closeWorkers() },
         {
