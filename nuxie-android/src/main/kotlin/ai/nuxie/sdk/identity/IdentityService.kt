@@ -28,6 +28,8 @@ internal class IdentityService(
     context: Context,
 ) : IdentityProvider {
     private val decisionLock = Mutex()
+    // True on the thread whose synchronous bridge currently holds decisionLock.
+    private val decisionHeldByThisThread = ThreadLocal<Boolean>()
     private val lock = Any()
     private val file: File
 
@@ -116,10 +118,25 @@ internal class IdentityService(
             if (isCurrentScope(scope)) block() else null
         }
 
-    // The public identity API remains synchronous. Its existing exclusion now
-    // shares the coroutine fence used by suspendable profile admission.
-    private fun <T> withDecision(block: () -> T): T = runBlocking {
-        decisionLock.withLock { block() }
+    // The public identity API remains synchronous and shares the coroutine
+    // fence used by suspendable profile admission. A synchronous decision
+    // re-enters on the thread that already holds the fence, as the JVM monitor
+    // it replaced did and as iOS's NSRecursiveLock does: a host App Action
+    // callback runs inside withCurrentScope and may call identify or reset.
+    // The suspending admission runs no host code under the fence, so it takes
+    // the Mutex without the thread flag and never re-enters.
+    private fun <T> withDecision(block: () -> T): T {
+        if (decisionHeldByThisThread.get() == true) return block()
+        return runBlocking {
+            decisionLock.withLock {
+                decisionHeldByThisThread.set(true)
+                try {
+                    block()
+                } finally {
+                    decisionHeldByThisThread.remove()
+                }
+            }
+        }
     }
 
     fun setUserProperties(properties: Map<String, Any?>) {
