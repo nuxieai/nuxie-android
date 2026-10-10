@@ -12,6 +12,13 @@ uses an installed Bazelisk or downloads Bazelisk 1.27.0 with its release SHA-256
 bytecode and `-Xjvm-default=all`. Maven resolver lockfiles retain the owning
 Gradle dependency versions, including its resolved Kotlin stdlib 2.1.20.
 
+The `rules_kotlin` override retains its Kotlin 2.0 CLI builder and adapter.
+Bazel rebuilds the complete upstream dependency-tracking and skip-code-generation
+plugin sources with the exact pinned compiler, since compiler plugins depend
+on internal Kotlin APIs. Both the upstream source archive and builder release
+are checksummed in the override. The compiler's coroutine runtime is preloaded
+with its adapter so the compiler and worker do not load separate Kotlin types.
+
 ```sh
 scripts/bazel/sdk.sh doctor
 scripts/bazel/sdk.sh build
