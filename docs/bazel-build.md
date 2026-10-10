@@ -28,6 +28,8 @@ declared runfiles and are absent from the AAR and sources JAR.
 `prepare` creates the AAR, sources, Javadoc, POM, Gradle module metadata and
 checksum sidecars in a conventional Maven repository. `sdk-artifacts.json`
 records their paths, sizes, hashes, source revision and selected runtime identity.
+It also inventories `licenses/LICENSE` for downstream packages that consume
+prepared artifacts without a source checkout.
 It replaces only the requested Maven version and preserves unchanged artifacts'
 modification times. Downstream SDKs use this stable interface:
 
