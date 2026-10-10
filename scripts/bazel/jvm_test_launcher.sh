@@ -13,7 +13,9 @@ done
 for entry in "$root"/*; do
   name="$(basename "$entry")"
   if [[ "$name" != nuxie-android ]]; then
-    ln -s "$entry" "$cwd/$name"
+    # FixtureRunner walks to repository fixtures and derives its source root
+    # from their parent; retain Gradle's parent-level fixture location.
+    [[ "$name" == fixtures ]] || ln -s "$entry" "$cwd/$name"
     [[ -e "$work/$name" ]] || ln -s "$entry" "$work/$name"
   fi
 done
