@@ -15,6 +15,13 @@ import ai.nuxie.sdk.presentation.LinkStateRenderCapabilityShadow
 import ai.nuxie.sdk.presentation.LinkStateNativeMountShadow
 import ai.nuxie.sdk.presentation.openActivityLink
 import ai.nuxie.sdk.LogLevel
+import ai.nuxie.sdk.Nuxie
+import ai.nuxie.sdk.NuxieConfiguration
+import ai.nuxie.sdk.NuxieListener
+import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.testsupport.FakeTransport
+import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
+import kotlin.concurrent.thread
 import ai.nuxie.sdk.core.supportedRuntimeForEmbeddedRuntime
 import ai.nuxie.sdk.presentation.JourneyRuntimeEmissionCoordinator
 import ai.nuxie.sdk.runtime.NuxieHostCommand
@@ -2300,6 +2307,81 @@ class JourneyServiceTest {
         assertEquals(listOf("\$app_action_requested"), captures.map { it.first })
         assertEquals(request.run.journeyId, captures.single().second["journey_id"])
         assertEquals(request.run.generation, captures.single().second["leg_generation"])
+    }
+
+    @Test fun `app action handler that resets the SDK returns and fails the step`() {
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = FakeTransport(),
+            registerLifecycle = false,
+            requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
+            eventDatabaseFile = File(directory, "app-action-reset-events.db"),
+        )
+        Nuxie.setup(context, NuxieConfiguration("pk_test_app_action_reset"))
+        val callbackReturned = CountDownLatch(1)
+        val listener = NuxieListener { sdk, action ->
+            assertEquals("sign_out", action.name)
+            sdk.reset()
+            callbackReturned.countDown()
+        }
+        try {
+            val core = requireNotNull(Nuxie.core)
+            Nuxie.identify("customer")
+            Nuxie.listener = listener
+            val request = dispatchRequest(
+                core.identity,
+                buildJsonObject {
+                    put("type", "app_action")
+                    put("name", "sign_out")
+                },
+            )
+            // Production wiring: the SDK identity, fenced capture, and the
+            // facade's delivery, which calls the listener on Main under the fences.
+            val dispatcher = JourneyEffectDispatcher(
+                identity = core.identity,
+                capture = core.eventLog::captureIdempotentlyIfCurrent,
+                deliverAppAction = Nuxie::deliverAppAction,
+            )
+            // Robolectric's Main is this test thread. Interrupt a parked handler
+            // so the case fails instead of hanging the suite.
+            val main = Thread.currentThread()
+            val settled = CountDownLatch(1)
+            val watchdog = thread(isDaemon = true, name = "app-action-watchdog") {
+                if (!settled.await(5, TimeUnit.SECONDS)) main.interrupt()
+            }
+            val result = try {
+                runBlocking { dispatcher.dispatch(request) }
+            } catch (parked: InterruptedException) {
+                throw AssertionError("An App Action handler that calls sdk.reset() must return within 5 s", parked)
+            } finally {
+                settled.countDown()
+                watchdog.join()
+                Thread.interrupted()
+            }
+
+            assertEquals("the handler returned", 0L, callbackReturned.count)
+            assertNotEquals("customer", Nuxie.distinctId)
+            assertFalse(Nuxie.isIdentified)
+            // The reset moved the identity the step was admitted under, so the
+            // step fails instead of advancing, as at base and on iOS.
+            assertEquals(JourneyDispatchResult.Failed, result)
+
+            Nuxie.listener = null
+            val identified = CountDownLatch(1)
+            thread(isDaemon = true, name = "later-identify") {
+                Nuxie.identify("customer-2")
+                identified.countDown()
+            }
+            assertTrue(
+                "A later identify from another thread must finish within 5 s",
+                identified.await(5, TimeUnit.SECONDS),
+            )
+            assertEquals("customer-2", Nuxie.distinctId)
+        } finally {
+            Nuxie.listener = null
+            Nuxie.resetForTesting()
+            Nuxie.overridesForTesting = null
+        }
     }
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
