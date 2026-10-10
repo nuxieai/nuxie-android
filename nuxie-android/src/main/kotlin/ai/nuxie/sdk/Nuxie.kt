@@ -36,7 +36,6 @@ object Nuxie {
             try { state.stopAndAwait() } finally { featureInfoInstance.reset() }
         },
     )
-    private val identityDecisionLock = Any()
 
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     private val callbackLock = Any()
@@ -236,7 +235,7 @@ object Nuxie {
 
             val copiedUserProperties = userProperties?.toMap()
             val copiedUserPropertiesSetOnce = userPropertiesSetOnce?.toMap()
-            val publication = synchronized(identityDecisionLock) {
+            val publication = core.identity.withDecision {
                 val identity = core.identity
                 val oldDistinctId = identity.distinctId()
                 val wasIdentified = identity.isIdentified
@@ -287,9 +286,9 @@ object Nuxie {
                 }
             }
 
-            // Observable publication is the only reentrant step and remains
-            // outside the facade and FeatureService monitors. A nested transition
-            // can supersede this view, but cannot erase the durable work above.
+            // Publish after this decision has staged every durable consequence.
+            // An outer App Action may still hold the reentrant identity fence;
+            // nested transitions cannot erase the durable work above.
             publication?.let {
                 kotlinx.coroutines.runBlocking { core.featureInfo.publish(it) }
             }
@@ -301,7 +300,7 @@ object Nuxie {
         val operation = lifecycle.admit() ?: return
         val core = operation.graph
         try {
-            val publication = synchronized(identityDecisionLock) {
+            val publication = core.identity.withDecision {
                 val identity = core.identity
                 val previousDistinctId = identity.distinctId()
                 identity.reset(keepAnonymousId)

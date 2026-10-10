@@ -30,10 +30,12 @@ internal object ExperienceAccessibilityStateDescription {
         val mixed = node.stateFlags and NativeSemanticState.MIXED != 0
         val parts = mutableListOf<String>()
         if (value.isNotEmpty()) parts += value
-        // A supplied description replaces the reader's default checked speech.
-        // Preserve the independent checked state whenever we supply other words.
-        if (isCheckable(node) && node.stateFlags and NativeSemanticState.OBSCURED == 0
-            && (value.isNotEmpty() || states.isNotEmpty() || (mixed && Build.VERSION.SDK_INT < 36))) {
+        // Authored values already describe binary state, as on iOS. When other
+        // state words replace default checked speech, supply the missing state.
+        val needsCheckedWords = if (mixed) {
+            value.isNotEmpty() || states.isNotEmpty() || Build.VERSION.SDK_INT < 36
+        } else value.isEmpty() && states.isNotEmpty()
+        if (isCheckable(node) && node.stateFlags and NativeSemanticState.OBSCURED == 0 && needsCheckedWords) {
             val on = node.stateFlags and (NativeSemanticState.CHECKED or NativeSemanticState.TOGGLED) != 0
             val toggle = node.role == NativeSemanticRole.SWITCH_CONTROL || node.traitFlags and NativeSemanticTrait.TOGGLEABLE != 0
             parts += resources.getString(when {

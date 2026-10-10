@@ -297,8 +297,8 @@ internal class NuxieCore(
 
     /**
      * Decide the complete destination Feature projection synchronously. The
-     * facade publishes the returned mutation only after releasing its identity
-     * monitor, so inline collectors cannot observe a half-switched customer.
+     * facade publishes the returned mutation after finishing its identity
+     * decision, so inline collectors cannot observe a half-switched customer.
      */
     fun stageFeatureUserChange(from: String, to: String): FeatureInfo.Mutation =
         kotlinx.coroutines.runBlocking {
@@ -326,10 +326,16 @@ internal class NuxieCore(
             emit = eventLog::capture,
             scope = scope,
             runtimeAvailable = AndroidRenderCapability::isAvailable,
+            currentDistinctId = identity::distinctId,
             commerce = journeyCommerce,
+            foregroundActivity = { lifecycleCoordinator.resumedActivity() },
+            isAppForeground = { lifecycleCoordinator.isAppForeground() },
         )).also { presentations -> construction?.onFailure { presentations.close() } }
 
     private val journeyPresenter = object : JourneyPresenting {
+        override suspend fun openLink(owner: JourneyPresentationOwner, link: ai.nuxie.sdk.presentation.JourneyLinkRequest) =
+            presentations.openJourneyLink(owner, link)
+
         override fun reserve(ownerDistinctId: String) =
             presentations.reserveJourney(ownerDistinctId)
 
@@ -337,6 +343,8 @@ internal class NuxieCore(
             request: JourneyPresentationRequest,
         ): JourneyPresentationResult = try {
             presentations.presentJourney(
+                fences = request.fences,
+                runValues = request.runValues,
                 release = request.release,
                 screenId = request.screenId,
                 transition = request.transition,
@@ -351,6 +359,7 @@ internal class NuxieCore(
                 nextEmissionSequence = request.nextEmissionSequence,
                 onScreenChanged = request.onScreenChanged,
                 onScreenDismissed = request.onScreenDismissed,
+                onLinkOpened = request.onLinkOpened,
                 onEmissionBatch = request.onEmissionBatch,
                 onPresentationRevealed = request.onPresentationRevealed,
                 onOutcome = request.onOutcome,
@@ -382,8 +391,9 @@ internal class NuxieCore(
             owner: JourneyPresentationOwner,
             action: kotlinx.serialization.json.JsonObject,
             source: ai.nuxie.sdk.presentation.JourneyScreenEmissionSource?,
+            eventSource: ai.nuxie.sdk.presentation.JourneyRuntimeEventSource?,
         ): kotlinx.serialization.json.JsonObject? =
-            presentations.resolveJourneyAction(owner, action, source)
+            presentations.resolveJourneyAction(owner, action, source, eventSource)
 
         override suspend fun dispatchAction(
             owner: JourneyPresentationOwner,
@@ -414,11 +424,16 @@ internal class NuxieCore(
         deliverAppAction = Nuxie::deliverAppAction,
     )
 
+    private val responseSaveDelivery = ai.nuxie.sdk.journey.JourneyResponseSaveDelivery(
+        directory = File(appContext.filesDir, "nuxie"), transport = api, coroutineScope = scope,
+    )
+
     val journeys = JourneyService(
         identity = identity,
         events = store,
         catalog = journeyProfiles,
         journalDirectory = File(appContext.filesDir, "nuxie"),
+        responseSaveDelivery = responseSaveDelivery,
         scope = scope,
         capture = eventLog::captureIdempotently,
         captureScreenEvent = eventLog::captureScreenEvent,
@@ -428,10 +443,17 @@ internal class NuxieCore(
         },
         offerFeatureAccess = { featureId -> features.getForJourney(featureId, resolveUnknown = true) },
         dispatcher = journeyDispatcher,
+        linkRecorder = journeyDispatcher,
         presenter = journeyPresenter,
         nowMillis = nowMillis,
         replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
         artifactManager = releaseArtifactAcquirer,
+        prepareNativeValues = { values, release, delivery ->
+            if (release.descriptor["render"] is kotlinx.serialization.json.JsonObject) releaseArtifactAcquirer.acquire(release, delivery).use { acquired ->
+                val bytes = acquired.sceneFile.readBytes()
+                values.lane.call { values.prepareForRun(bytes, release.descriptor, acquired.artifactsByKey) }
+            }
+        },
     )
 
     val profile = ProfileService(
@@ -467,7 +489,7 @@ internal class NuxieCore(
         emit = { name, properties -> eventLog.capture(name, properties) },
     )
 
-    private val lifecycleCoordinator = NuxieLifecycleCoordinator(
+    private val lifecycleCoordinator: NuxieLifecycleCoordinator = NuxieLifecycleCoordinator(
         lifecycleTracker,
         sessions,
         scope,
@@ -594,6 +616,7 @@ internal class NuxieCore(
         { profile.close() },
         { featureUsage.close() },
         { journeys.profileDidClearAll() },
+        { responseSaveDelivery.shutdown() },
         { delivery.close() },
         { eventLog.closeWorkers() },
         {

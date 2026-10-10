@@ -1,5 +1,9 @@
 package ai.nuxie.sdk.identity
 
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -118,5 +122,63 @@ class IdentityServiceTest {
         assertFalse(identity.isIdentified)
         assertEquals(anonymousId, identity.distinctId())
         assertFalse(identity.isCurrentScope(identifiedScope))
+    }
+
+    // A host App Action callback runs inside withCurrentScope and may call
+    // reset or identify on the same thread, as the base monitor and iOS's
+    // NSRecursiveLock allow.
+    @Test
+    fun resetInsideAnAdmittedPublicationFinishesOnTheSameThread() {
+        val identity = service()
+        identity.setDistinctId("user-1")
+        val scope = identity.captureScope()
+
+        val published = onDaemonThread("reset inside an admitted publication must finish") {
+            identity.withCurrentScope(scope) {
+                identity.reset(keepAnonymousId = false)
+                true
+            }
+        }
+
+        assertEquals(true, published)
+        assertFalse(identity.isIdentified)
+        assertFalse(identity.isCurrentScope(scope))
+        onDaemonThread("a later identify from another thread must finish") {
+            identity.setDistinctId("user-2")
+        }
+        assertEquals("user-2", identity.distinctId())
+    }
+
+    @Test
+    fun identifyInsideAnAdmittedPublicationFinishesOnTheSameThread() {
+        val identity = service()
+        val scope = identity.captureScope()
+
+        val published = onDaemonThread("identify inside an admitted publication must finish") {
+            identity.withCurrentScope(scope) {
+                identity.setDistinctId("user-1")
+                true
+            }
+        }
+
+        assertEquals(true, published)
+        assertEquals("user-1", identity.distinctId())
+        assertFalse(identity.isCurrentScope(scope))
+        onDaemonThread("a later reset from another thread must finish") {
+            identity.reset(keepAnonymousId = true)
+        }
+        assertFalse(identity.isIdentified)
+    }
+
+    // A parked daemon worker fails the case instead of keeping the test JVM alive.
+    private fun <T> onDaemonThread(expectation: String, block: () -> T): T {
+        val result = AtomicReference<Result<T>>()
+        val finished = CountDownLatch(1)
+        thread(isDaemon = true, name = "identity-decision-worker") {
+            result.set(runCatching(block))
+            finished.countDown()
+        }
+        assertTrue("$expectation within 5 s", finished.await(5, TimeUnit.SECONDS))
+        return result.get().getOrThrow()
     }
 }

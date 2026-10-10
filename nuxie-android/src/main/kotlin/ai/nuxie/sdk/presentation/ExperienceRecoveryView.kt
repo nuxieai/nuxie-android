@@ -65,8 +65,9 @@ internal class ExperienceRecoveryView(
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         insets = ExperienceWindowInsets(activity, this) {
-            setPadding(dp(16) + it.left.roundToInt(), dp(16) + it.top.roundToInt(),
-                dp(16) + it.right.roundToInt(), dp(16) + it.bottom.roundToInt())
+            val density = resources.displayMetrics.density
+            setPadding(dp(16) + (it.left * density).roundToInt(), dp(16) + (it.top * density).roundToInt(),
+                dp(16) + (it.right * density).roundToInt(), dp(16) + (it.bottom * density).roundToInt())
         }
     }
 

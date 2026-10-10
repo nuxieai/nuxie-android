@@ -31,7 +31,8 @@ internal class ExperienceMountedScreen(
             val key = (asset["key"] as? JsonPrimitive)?.content ?: return@mapNotNull null
             prepared.artifactsByKey[key]?.let { name to it }
         }.toMap()
-    private val lane = NuxieRuntimeLane()
+    private val runValues = prepared.runValues?.also { it.retainScreen() }
+    private val lane = runValues?.lane ?: NuxieRuntimeLane()
     private var captionOverlay: ExperienceVideoCaptionOverlay? = null
     private var textOverlay: ExperienceTextInputOverlay? = null
     private var captionInsets: ExperienceWindowInsets? = null
@@ -43,14 +44,19 @@ internal class ExperienceMountedScreen(
     private var awaitingSemanticPublication =
         ((prepared.descriptor?.get("requirements") as? JsonObject)?.get("requiredCapabilities") as? JsonArray)
             .orEmpty().any { (it as? JsonPrimitive)?.content == "experience-accessibility" } ||
-            inputs.any { it.editableValueName != null }
+            inputs.isNotEmpty()
     val surface = ExperienceSurfaceHost(
         context = activity,
         lane = lane,
+        runValues = runValues,
         videoDecoderPool = videoDecoderPool,
         clearColor = prepared.clearColor,
         artboardSize = prepared.artboardSize,
         listener = object : ExperienceSurfaceHost.Listener by listener {
+            override fun onLayoutBounds(bounds: ExperienceArtboardSize) {
+                textOverlay?.updateLayoutBounds(bounds)
+                listener.onLayoutBounds(bounds)
+            }
             override fun onVideoCaptions(captions: Map<Long, ai.nuxie.sdk.runtime.NuxieVideoCaption>) {
                 captionOverlay?.update(captions)
                 listener.onVideoCaptions(captions)
@@ -58,11 +64,6 @@ internal class ExperienceMountedScreen(
             override fun onRuntimeEvent(event: ai.nuxie.sdk.runtime.NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {
                 transitionEvents.receive(event.name)
                 listener.onRuntimeEvent(event, viewModelSnapshot)
-            }
-            override fun onSemanticFields(fields: Map<String, ai.nuxie.sdk.runtime.NativeSemanticNode>): Map<Long, View> {
-                textOverlay?.updateSemantics(fields)
-                val ids = fields.values.map { it.id }.toSet()
-                return textOverlay?.semanticViews().orEmpty().filterKeys { it in ids }
             }
             override fun onNativeTextFields(fields: List<ExperienceNativeTextField>): Map<Long, View> {
                 textOverlay?.updateNativeFields(fields)
@@ -76,9 +77,7 @@ internal class ExperienceMountedScreen(
                     awaitingSemanticPublication = false
                 }
             }
-            override fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot, geometry: ai.nuxie.sdk.runtime.NuxieTextGeometryCapture) {
-                textOverlay?.update(snapshot, geometry)
-            }
+
         },
     )
     private var reducedMotion: ExperienceReducedMotion? = null
@@ -100,7 +99,7 @@ internal class ExperienceMountedScreen(
             textInputs = inputs,
             retainedViewModel = prepared.retainedViewModel,
         )
-        return ExperienceInputContainer(activity, surface::dispatchSemanticKeyEvent, surface::semanticKeyboardEntry).apply {
+        return ExperienceInputContainer(activity, surface::dispatchExperienceKeyEvent, surface::semanticKeyboardEntry).apply {
             if (awaitingSemanticPublication) {
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
             }
@@ -111,8 +110,8 @@ internal class ExperienceMountedScreen(
             }
             inputSize?.let { size ->
                 val overlay = ExperienceTextInputOverlay(activity, size, inputs, fonts,
-                    surface::writeText, onFailure, prepared.textInputState,
-                    surface::writeNativeText, surface::notifyNativeText, surface::nativeTextEvent)
+                    prepared.textInputState,
+                    surface::writeNativeText, surface::notifyNativeText, surface::nativeTextEvent, surface::beginNativeEditing)
                 textOverlay = overlay
                 addView(overlay, FrameLayout.LayoutParams(-1, -1))
             }
@@ -126,19 +125,17 @@ internal class ExperienceMountedScreen(
             ExperienceWindowInsets(activity, overlay, overlay::updateInsets)
         }
         windowInsets?.close()
-        windowInsets = prepared.artboardSize?.let { size ->
-            ExperienceWindowInsets(activity, surface, size) { insets ->
-                surface.updateRuntimeValues(insets.stateValues())
-            }
+        windowInsets = ExperienceWindowInsets(activity, surface) { insets ->
+            surface.updateRuntimeValues(insets.stateValues())
         }
     }
 
-    fun setVisible(visible: Boolean) {
+    fun setVisible(visible: Boolean, preservePendingInput: Boolean = false) {
         if (visible) {
             refreshFontScale(activity.resources.configuration.fontScale)
             reducedMotion?.refresh()
         }
-        surface.setPresentationVisible(visible)
+        surface.setPresentationVisible(visible, preservePendingInput)
     }
 
     /** Queued on the same lane as safe-area updates and frame-qualified native input capture. */
@@ -169,8 +166,8 @@ internal class ExperienceMountedScreen(
         transitionEvents.perform(screen?.get("exit") as? JsonObject, reduceMotionEnabled, ::exit)
     }
 
-    fun beginCustomTransition(id: String, outgoing: Boolean) {
-        surface.updateRuntimeValues(if (outgoing)
+    suspend fun beginCustomTransition(id: String, outgoing: Boolean) {
+        surface.applyTransitionValues(if (outgoing)
             lifecycle.move(ExperienceScreenLifecycle.Phase.EXITING, id)
         else lifecycle.beginPreparedTransition(id))
     }
@@ -196,6 +193,7 @@ internal class ExperienceMountedScreen(
             else lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN)
         val retirement = ExperienceScreenRetirement(completion)
         surface.release(finalState, retirement::mediaReleased)
-        lane.shutdown(retirement::nativeReleased)
+        if (runValues != null) runValues.releaseScreen(retirement::nativeReleased)
+        else lane.shutdown(retirement::nativeReleased)
     }
 }

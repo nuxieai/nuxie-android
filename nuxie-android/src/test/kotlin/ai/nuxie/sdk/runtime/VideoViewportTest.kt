@@ -4,17 +4,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VideoViewportTest {
-    @Test fun mapsLetterboxingAndPreservesDensityIndependence() {
-        assertEquals(VideoViewport(-50f, 0f, 150f, 200f), VideoViewport.contain(100f, 200f, 200, 200))
-        assertEquals(VideoViewport(0f, -50f, 200f, 150f), VideoViewport.contain(200f, 100f, 200, 200))
-        assertEquals(VideoViewport(0f, 0f, 100f, 200f), VideoViewport.contain(100f, 200f, 300, 600))
-        assertEquals(VideoViewport.contain(100f, 200f, 200, 200), VideoViewport.contain(100f, 200f, 600, 600))
+    @Test fun viewPixelsBecomeLayoutPoints() {
+        assertEquals(VideoViewport(0f, 0f, 393f, 852f), VideoViewport.layout(1179, 2556, 3f))
+        assertEquals(VideoViewport(10f, 20f, 410f, 820f), VideoViewport.layout(1050, 2100, 2.625f, 10f, 20f))
+        assertEquals(VideoViewport(0f, 0f, 852f, 393f), VideoViewport.layout(2556, 1179, 3f))
     }
 
-    @Test fun emptySurfaceHasNoDemandAndInvalidArtboardIsRejected() {
-        assertEquals(VideoViewport(0f, 0f, 0f, 0f), VideoViewport.contain(100f, 200f, 0, 200))
-        for (width in listOf(0f, -1f, Float.NaN, Float.POSITIVE_INFINITY)) {
-            assertThrows(IllegalArgumentException::class.java) { VideoViewport.contain(width, 200f, 100, 200) }
+    @Test fun emptySurfaceHasNoDemandAndInvalidDensityIsRejected() {
+        assertEquals(VideoViewport(0f, 0f, 0f, 0f), VideoViewport.layout(0, 200, 3f))
+        for (density in listOf(0f, -1f, Float.NaN, Float.POSITIVE_INFINITY)) {
+            assertThrows(IllegalArgumentException::class.java) { VideoViewport.layout(100, 200, density) }
         }
     }
 }

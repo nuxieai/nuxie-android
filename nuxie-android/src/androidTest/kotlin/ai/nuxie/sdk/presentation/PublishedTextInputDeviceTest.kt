@@ -65,6 +65,9 @@ import android.view.TextureView
 import android.view.View
 import android.view.MotionEvent
 import android.view.ViewGroup
+import androidx.test.uiautomator.By
+import androidx.test.uiautomator.UiDevice
+import androidx.test.uiautomator.Until
 import androidx.test.filters.SdkSuppress
 import android.os.SystemClock
 import android.util.Base64
@@ -98,6 +101,307 @@ import org.junit.Test
 
 /** Real publisher bytes, signed defaults, runtime geometry and runtime text writer. */
 class PublishedTextInputDeviceTest {
+    @Test
+    fun nativeEditingSecondPublishedFieldKeepsFirstValue() = withTwoPublishedFields(false)
+
+    @Test
+    fun realJapaneseKeyboardComposition() {
+        // This real IME proof requires an owned emulator configured with Japanese QWERTY Gboard.
+        org.junit.Assume.assumeTrue("Opt in with nuxieJapaneseKeyboard=true after configuring Gboard",
+            InstrumentationRegistry.getArguments().getString("nuxieJapaneseKeyboard") == "true")
+        withTwoPublishedFields(true)
+    }
+
+    private fun withTwoPublishedFields(realKeyboard: Boolean) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val fixture = loadPublishedFixture(instrumentation, "runtime/published-two-fields")
+        val descriptor = fixture.release.descriptor
+        val screen = descriptor.getValue("render").jsonObject.getValue("screens").jsonArray.single().jsonObject
+        val inputs = ExperienceTextInput.forScreen(descriptor, screen.getValue("id").jsonPrimitive.content)
+        assertEquals(2, inputs.size)
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val run = ExperienceRunValues()
+        val lane = run.lane
+        val captured = AtomicReference<List<ExperienceNativeTextField>>(emptyList())
+        val acceptedFocus = AtomicReference<ExperienceTextFieldTarget?>()
+        val firstFrame = CountDownLatch(1)
+        val fieldsReady = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>()
+        lateinit var overlay: ExperienceTextInputOverlay
+        lateinit var surface: ExperienceSurfaceHost
+        val size = ExperienceArtboardSize(393f, 852f)
+        try {
+            instrumentation.runOnMainSync {
+                surface = ExperienceSurfaceHost(activity, lane, artboardSize = size, runValues = run,
+                    listener = object : ExperienceSurfaceHost.Listener {
+                        override fun onFirstFrame() { firstFrame.countDown() }
+                        override fun onNativeTextFields(fields: List<ExperienceNativeTextField>): Map<Long, View> {
+                            captured.set(fields)
+                            overlay.updateNativeFields(fields)
+                            if (fields.size == 2) fieldsReady.countDown()
+                            return overlay.semanticViews()
+                        }
+                        override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
+                    })
+                overlay = ExperienceTextInputOverlay(activity, size, inputs, emptyMap(),
+                    nativeWriter = surface::writeNativeText, nativeNotification = surface::notifyNativeText,
+                    nativeEvent = surface::nativeTextEvent, nativeFocus = { target, point, completion ->
+                        surface.beginNativeEditing(target, point) { accepted ->
+                            if (accepted) acceptedFocus.set(target)
+                            completion(accepted)
+                        }
+                    })
+                activity.setContentView(android.widget.FrameLayout(activity).apply {
+                    // Keep the keyboard proof below this edge-to-edge test Activity's status bar.
+                    if (realKeyboard) setPadding(0, (80 * resources.displayMetrics.density).toInt(), 0, 0)
+                    addView(surface, android.widget.FrameLayout.LayoutParams(-1, -1))
+                    addView(overlay, android.widget.FrameLayout.LayoutParams(-1, -1))
+                })
+                surface.loadArtboard(fixture.riv.readBytes(), "input", descriptor, fixture.assets, textInputs = inputs)
+            }
+            assertTrue("First frame must be presented", firstFrame.await(30, TimeUnit.SECONDS))
+            assertTrue("Both native fields must be presented", fieldsReady.await(10, TimeUnit.SECONDS))
+            lateinit var first: EditText
+            lateinit var second: EditText
+            instrumentation.runOnMainSync {
+                val editors = overlay.semanticViews().values.map { it as EditText }
+                assertEquals(2, editors.size)
+                first = editors.single { it.text.toString() == "Ada" }
+                second = editors.single { it.text.toString() == "Hopper" }
+                assertTrue(first.requestFocus())
+            }
+            fun waitFor(message: String, predicate: () -> Boolean) {
+                val deadline = SystemClock.elapsedRealtime() + 10_000
+                while (!predicate() && failure.get() == null && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(25)
+                assertNull(failure.get())
+                assertTrue(message, predicate())
+            }
+            waitFor("First field must focus Rive") { surface.riveFocusState.expectsKeyboardInput }
+            if (realKeyboard) {
+                val device = UiDevice.getInstance(instrumentation)
+                val position = IntArray(2)
+                instrumentation.runOnMainSync {
+                    second.getLocationOnScreen(position)
+                    position[0] += second.width / 2
+                    position[1] += second.height / 2
+                }
+                device.click(position[0], position[1])
+                device.takeScreenshot(File(activity.cacheDir, "m8-keyboard-before.png"))
+                device.dumpWindowHierarchy(File(activity.cacheDir, "m8-keyboard-before.xml"))
+                assertTrue("Real keyboard must be visible", device.wait(Until.hasObject(By.pkg("com.google.android.inputmethod.latin")), 10_000))
+                device.dumpWindowHierarchy(File(activity.cacheDir, "m8-keyboard-visible.xml"))
+                for (key in listOf("n", "i", "h", "o", "n")) {
+                    val button = device.wait(Until.findObject(By.desc(key)), 5_000)
+                    assertNotNull("Romaji key must be available", button)
+                    button.click()
+                }
+                waitFor("Rive must read back Japanese composition") {
+                    captured.get().map { it.text }.sorted() == listOf("Ada", "Hopperにほｎ")
+                }
+                instrumentation.runOnMainSync {
+                    assertEquals("Hopperにほｎ", second.text.toString())
+                    assertTrue("Native caret stays enabled", second.isCursorVisible)
+                    assertEquals("Selection is collapsed at the caret", second.selectionStart, second.selectionEnd)
+                    assertEquals("Native glyphs stay transparent", android.graphics.Color.TRANSPARENT, second.currentTextColor)
+                    assertTrue("Composition must remain marked", android.view.inputmethod.BaseInputConnection.getComposingSpanStart(second.text) >= 0)
+                }
+                device.waitForIdle()
+                device.dumpWindowHierarchy(File(activity.cacheDir, "m8-japanese-composing.xml"))
+                assertTrue("Composition screenshot must be retained", device.takeScreenshot(File(activity.cacheDir, "m8-japanese-composing.png")))
+                return
+            }
+
+            val position = IntArray(2)
+            var x = 0f
+            var y = 0f
+            instrumentation.runOnMainSync {
+                val firstPosition = IntArray(2)
+                first.getLocationOnScreen(firstPosition)
+                second.getLocationOnScreen(position)
+                assertTrue("Field 2 must be below field 1", position[1] > firstPosition[1])
+                x = position[0] + second.width / 2f
+                y = position[1] + second.height / 2f
+            }
+            val downTime = SystemClock.uptimeMillis()
+            for (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
+                val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
+                event.source = android.view.InputDevice.SOURCE_TOUCHSCREEN
+                try { instrumentation.sendPointerSync(event) } finally { event.recycle() }
+            }
+            instrumentation.waitForIdleSync()
+            waitFor("Second field must focus Rive before typing") {
+                acceptedFocus.get() == captured.get().singleOrNull { it.text == "Hopper" }?.target &&
+                    surface.riveFocusState.hasFocus && surface.riveFocusState.expectsKeyboardInput
+            }
+            instrumentation.runOnMainSync {
+                assertTrue("The tap must focus field 2", second.hasFocus())
+                assertFalse(first.hasFocus())
+                second.selectAll()
+                checkNotNull(second.onCreateInputConnection(EditorInfo())).commitText("Grace", 1)
+            }
+            waitFor("Only field 2 and its binding must change") {
+                val fields = captured.get()
+                fields.size == 2 && fields.map { it.text }.sorted() == listOf("Ada", "Grace") && fields.all {
+                    it.snapshot.resolveString("experience/name") == "Ada" &&
+                        it.snapshot.resolveString("experience/surname") == "Grace"
+                }
+            }
+            assertTrue(surface.riveFocusState.hasFocus)
+            assertTrue(surface.riveFocusState.expectsKeyboardInput)
+            fun captureNonsecure(name: String) {
+                instrumentation.waitForIdleSync()
+                val image = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
+                try {
+                    File(instrumentation.targetContext.cacheDir, name).outputStream().use {
+                        check(image.compress(Bitmap.CompressFormat.PNG, 100, it))
+                    }
+                } finally { image.recycle() }
+            }
+            instrumentation.runOnMainSync {
+                assertEquals("Ada", first.text.toString())
+                assertEquals("Grace", second.text.toString())
+                second.setSelection(2)
+                assertEquals(2, second.selectionStart)
+                assertEquals(2, second.selectionEnd)
+            }
+            captureNonsecure("two-fields-middle-caret.png")
+            instrumentation.runOnMainSync { second.selectAll() }
+            captureNonsecure("two-fields-selection.png")
+            instrumentation.runOnMainSync {
+                checkNotNull(second.onCreateInputConnection(EditorInfo())).performEditorAction(EditorInfo.IME_ACTION_DONE)
+            }
+            waitFor("Done must clear Rive focus") { !surface.riveFocusState.hasFocus }
+        } finally {
+            instrumentation.runOnMainSync { overlay.close(); surface.release(); activity.finish() }
+            runBlocking { run.retire() }
+            assertTrue(lane.awaitQuiescence(30_000))
+        }
+    }
+
+    @Test
+    fun nativeEditingUsesRiveFocusAndWholeValueReplacement() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val fixture = loadPublishedFixture(instrumentation)
+        val descriptor = fixture.release.descriptor
+        val screen = descriptor.getValue("render").jsonObject.getValue("screens").jsonArray.first().jsonObject
+        val inputs = ExperienceTextInput.forScreen(descriptor, screen.getValue("id").jsonPrimitive.content)
+        // This is explicitly a test control, not a replacement signed release.
+        val bytes = instrumentation.context.assets.open("runtime/typing-probes/f3-field-in-flow.riv").use { it.readBytes() }
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val run = ExperienceRunValues()
+        val lane = run.lane
+        val nativeField = AtomicReference<ExperienceNativeTextField>()
+        val firstFrame = CountDownLatch(1)
+        val fieldReady = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>()
+        val commits = LinkedBlockingQueue<String>()
+        val callbacks = mutableListOf<String>()
+        lateinit var overlay: ExperienceTextInputOverlay
+        lateinit var surface: ExperienceSurfaceHost
+        val size = ExperienceArtboardSize(393f, 852f)
+        try {
+            instrumentation.runOnMainSync {
+                surface = ExperienceSurfaceHost(activity, lane, artboardSize = size, runValues = run,
+                    listener = object : ExperienceSurfaceHost.Listener {
+                        override fun onFirstFrame() { firstFrame.countDown() }
+                        override fun onNativeTextFields(fields: List<ExperienceNativeTextField>): Map<Long, View> {
+                            fields.singleOrNull()?.let { nativeField.set(it); fieldReady.countDown() }
+                            overlay.updateNativeFields(fields)
+                            return overlay.semanticViews()
+                        }
+                        override fun onTextCommitted(inputId: String, text: String, snapshot: NuxieViewModelSnapshot?) {
+                            commits.add(text)
+                        }
+                        override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
+                    })
+                overlay = ExperienceTextInputOverlay(activity, size, inputs, emptyMap(),
+                    nativeWriter = surface::writeNativeText, nativeNotification = surface::notifyNativeText,
+                    nativeEvent = surface::nativeTextEvent, nativeFocus = surface::beginNativeEditing)
+                activity.setContentView(android.widget.FrameLayout(activity).apply {
+                    addView(surface, android.widget.FrameLayout.LayoutParams(-1, -1))
+                    addView(overlay, android.widget.FrameLayout.LayoutParams(-1, -1))
+                })
+                surface.loadArtboard(bytes, "input", descriptor, fixture.assets, textInputs = inputs)
+            }
+            assertTrue("First frame must be presented", firstFrame.await(30, TimeUnit.SECONDS))
+            assertTrue("Native field must be presented", fieldReady.await(10, TimeUnit.SECONDS))
+            lateinit var editor: EditText
+            instrumentation.runOnMainSync {
+                editor = overlay.semanticViews().values.single() as EditText
+                assertEquals("Ada", editor.text.toString())
+                editor.addTextChangedListener(object : android.text.TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                    override fun afterTextChanged(value: android.text.Editable?) {
+                        callbacks.add("text=$value, composing=${value?.let { android.view.inputmethod.BaseInputConnection.getComposingSpanStart(it) >= 0 } == true}")
+                    }
+                })
+                assertTrue(editor.requestFocus())
+            }
+            fun waitFor(message: String, predicate: () -> Boolean) {
+                val deadline = SystemClock.elapsedRealtime() + 10_000
+                while (!predicate() && failure.get() == null && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(25)
+                assertNull(failure.get())
+                assertTrue(message, predicate())
+            }
+            waitFor("Begin editing must focus Rive") { surface.riveFocusState.hasFocus && surface.riveFocusState.expectsKeyboardInput }
+            fun verify(expected: String) {
+                waitFor("Rive field and its binding must contain the replacement") {
+                    nativeField.get()?.let { it.text == expected && it.snapshot.resolveString("experience/name") == expected } == true
+                }
+                instrumentation.runOnMainSync { assertEquals(expected, editor.text.toString()) }
+            }
+            fun replace(value: String) {
+                instrumentation.runOnMainSync {
+                    editor.selectAll()
+                    checkNotNull(editor.onCreateInputConnection(EditorInfo())).commitText(value, 1)
+                }
+                verify(value)
+            }
+            replace("Grace")
+            replace("")
+            replace("👍🏽")
+            instrumentation.runOnMainSync {
+                editor.selectAll()
+                checkNotNull(editor.onCreateInputConnection(EditorInfo())).setComposingText("ぐれ", 1)
+            }
+            verify("ぐれ")
+            instrumentation.runOnMainSync {
+                val image = Bitmap.createBitmap(editor.width, editor.height, Bitmap.Config.ARGB_8888)
+                try {
+                    editor.draw(android.graphics.Canvas(image))
+                    File(instrumentation.targetContext.cacheDir, "a0-native-composition.png").outputStream().use {
+                        check(image.compress(Bitmap.CompressFormat.PNG, 100, it))
+                    }
+                } finally { image.recycle() }
+            }
+            instrumentation.runOnMainSync {
+                checkNotNull(editor.onCreateInputConnection(EditorInfo())).commitText("グレース", 1)
+            }
+            verify("グレース")
+            instrumentation.runOnMainSync {
+                checkNotNull(editor.onCreateInputConnection(EditorInfo())).performEditorAction(EditorInfo.IME_ACTION_DONE)
+            }
+            waitFor("Done must clear Rive focus") { !surface.riveFocusState.hasFocus }
+            instrumentation.runOnMainSync {
+                assertFalse(editor.hasFocus())
+                val arguments = android.os.Bundle().apply {
+                    putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Grace")
+                }
+                assertTrue(editor.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, arguments))
+            }
+            verify("Grace")
+            assertTrue(surface.riveFocusState.expectsKeyboardInput)
+            instrumentation.runOnMainSync { android.util.Log.i("F3-A0", callbacks.joinToString("; ")) }
+        } finally {
+            instrumentation.runOnMainSync { overlay.close(); surface.release(); activity.finish() }
+            runBlocking { run.retire() }
+            assertTrue(lane.awaitQuiescence(30_000))
+        }
+    }
+
     /** API 23 supports the SDK through the documented non-rendering degradation contract. */
     @Test
     @SdkSuppress(maxSdkVersion = 23)
@@ -155,7 +459,7 @@ class PublishedTextInputDeviceTest {
             repeat(2) {
                 val reservation = checkNotNull(core.presentations.reserveJourney(owner))
                 try {
-                    core.presentations.presentJourney(fixture.release, "screen_1", "degraded-journey", owner,
+                    core.presentations.presentJourney(testPresentationFences(), fixture.release, "screen_1", "degraded-journey", owner,
                         reservation, acquire = { error("Unsupported rendering must fail before acquiring artifacts") },
                         onOutcome = { error("A rejected presentation has no screen outcome") })
                     fail("A device without a renderer must reject presentation")
@@ -307,7 +611,7 @@ class PublishedTextInputDeviceTest {
                 cleanup += player::close
                 if (startSmall) assertEquals(0, renderer.resize(1080, 2400))
                 player.stepWithEvents(0.0)
-                val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                 assertEquals(1080 * 2400 * 4, frame.rgba.size)
                 assertTrue("Published content must produce non-background pixels", frame.rgba.indices.any {
                     it % 4 != 3 && frame.rgba[it] != 0.toByte()
@@ -315,7 +619,7 @@ class PublishedTextInputDeviceTest {
                 return RenderedResources(
                     render = {
                         player.stepWithEvents(1.0 / 60.0)
-                        val next = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        val next = renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                         assertEquals(1080 * 2400 * 4, next.rgba.size)
                     },
                     cleanup = { cleanup.asReversed().forEach { it() } },
@@ -392,7 +696,11 @@ class PublishedTextInputDeviceTest {
                             artboard.bindDefaultViewModel(schema)
                             val player = checkNotNull(artboard.newPlayer())
                             try {
-                                fun verify(values: Map<String, NuxieViewModelScalarValue>) {
+                                fun verify(state: Map<String, NuxieViewModelScalarValue>) {
+                                    // Production tolerates this absent field in ExperienceSurfaceHost.applyRuntimeValues.
+                                    // This signed fixture predates fontScale. Its absence is pinned below;
+                                    // TextMetricsBindingDeviceTest covers the published font-scale contract.
+                                    val values = state - "fontScale"
                                     values.forEach { (path, value) -> assertTrue(artboard.setDefaultViewModelValue(path, value)) }
                                     val result = native.snapshotViewModel(root)
                                     assertEquals(0, result.status)
@@ -426,6 +734,13 @@ class PublishedTextInputDeviceTest {
                                         }
                                     }
                                 }
+                                val schemaSnapshot = checkNotNull(native.snapshotViewModel(root).value)
+                                assertEquals(setOf("experience", "state", "screen", "env", "safeArea", "nuxieTextInputs"),
+                                    schemaSnapshot.values.filter { it.ownerInstanceId == schemaSnapshot.rootInstanceId }
+                                        .map { it.name }.toSet())
+                                assertTrue(runCatching {
+                                    artboard.setDefaultViewModelValue("fontScale", NuxieViewModelScalarValue.NumberValue(1.0))
+                                }.exceptionOrNull() is IllegalArgumentException)
                                 val lifecycle = ExperienceScreenLifecycle()
                                 verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING))
                                 verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ACTIVE))
@@ -579,6 +894,7 @@ class PublishedTextInputDeviceTest {
             })
             val original = checkNotNull(monitor.waitForActivityWithTimeout(15_000))
             activity = original
+            val portraitRequestedAt = SystemClock.elapsedRealtime()
             instrumentation.runOnMainSync {
                 // This corpus compares identical portrait extents before/after Home.
                 // Do not inherit another app's transient display orientation.
@@ -593,16 +909,15 @@ class PublishedTextInputDeviceTest {
                     PresentationRegistry.currentScreen(id)?.purchaseActivity())
             }
             instrumentation.waitForIdleSync()
-            SystemClock.sleep(150)
-            val portraitDeadline = SystemClock.elapsedRealtime() + 10_000
-            var initial = copySurface(checkNotNull(findSurface(original.window.decorView)))
-            while (initial.width >= initial.height && SystemClock.elapsedRealtime() < portraitDeadline) {
-                initial.recycle()
-                SystemClock.sleep(50)
-                initial = copySurface(checkNotNull(findSurface(original.window.decorView)))
+            // The first-frame latch can precede the requested portrait resize.
+            // Capture a composed published frame, not the new texture's empty buffer.
+            // Bound the empty resized surface by the existing ten-second composition budget.
+            // Timing from the orientation request includes any surface replacement delay.
+            before = awaitPublishedSurface(checkNotNull(findSurface(original.window.decorView)),
+                timeoutMillis = (portraitRequestedAt + 10_000 - SystemClock.elapsedRealtime()).coerceAtLeast(0)) {
+                it.height > it.width
             }
-            assertTrue("Initial portrait frame must be established", initial.height > initial.width)
-            before = initial
+            android.util.Log.i("NuxieDeviceQualification", "portrait_request_to_pixels_ms=${SystemClock.elapsedRealtime() - portraitRequestedAt}")
             val stopped = CountDownLatch(1)
             val resumed = CountDownLatch(1)
             val application = original.application
@@ -634,7 +949,12 @@ class PublishedTextInputDeviceTest {
                 SystemClock.sleep(150)
                 val returned = copySurfaceAtSize(checkNotNull(findSurface(original.window.decorView)), before.width, before.height)
                 try {
-                    assertEquals(0, changedPixels(before, returned, Rect(0, 0, before.width, before.height)))
+                    val changed = changedPixels(before, returned, Rect(0, 0, before.width, before.height))
+                    if (changed != 0) {
+                        File(context.filesDir, "recreation-home-before.png").outputStream().use { before.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                        File(context.filesDir, "recreation-home-returned.png").outputStream().use { returned.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    }
+                    assertEquals(0, changed)
                 } finally { returned.recycle() }
             } finally { application.unregisterActivityLifecycleCallbacks(callbacks) }
             instrumentation.removeMonitor(monitor)
@@ -693,9 +1013,9 @@ class PublishedTextInputDeviceTest {
                 }
                 assertTrue("Portrait surface extent must be restored", portraitSized)
             }
-            val replacementSurface = checkNotNull(findSurface(replacement.window.decorView))
-            // Activity creation does not mean its asynchronous native frame is ready.
+            // Recreation drains the prior renderer before mounting its replacement.
             val renderDeadline = SystemClock.uptimeMillis() + 10_000
+            val replacementSurface = awaitSurfaceAttachment(replacement.window.decorView, renderDeadline)
             var rendered = copySurfaceAtSize(replacementSurface, before.width, before.height)
             after = rendered
             while (changedPixels(before, rendered, Rect(0, 0, before.width, before.height)) != 0 &&
@@ -771,7 +1091,7 @@ class PublishedTextInputDeviceTest {
             val cancelWaiter = item.getValue("cancelWaiter").jsonPrimitive.content.toBooleanStrict()
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             val service = ExperiencePresentationService(instrumentation.targetContext, { _, _, _ -> }, scope,
-                { NuxieRuntime.shared.isAvailable })
+                { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "terminal-owner" })
             val checkpointEntered = CountDownLatch(1)
             val checkpoint = CompletableDeferred<JourneyScreenDismissalResult>()
             val sourceReleased = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -785,7 +1105,7 @@ class PublishedTextInputDeviceTest {
             try {
                 runBlocking {
                     kotlinx.coroutines.withTimeout(30_000) {
-                        service.presentJourney(fixture.release, "screen_1", "terminal-device", "terminal-owner",
+                        service.presentJourney(testPresentationFences(), fixture.release, "screen_1", "terminal-device", "terminal-owner",
                             service.reserveJourney("terminal-owner"),
                             acquire = { AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv,
                                 protection = Closeable { sourceReleased.set(true) }) },
@@ -799,7 +1119,7 @@ class PublishedTextInputDeviceTest {
                 activity = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
                 navigation = scope.async {
                     runCatching {
-                        service.presentJourney(fixture.release, "screen_2", "terminal-device", "terminal-owner", null,
+                        service.presentJourney(testPresentationFences(), fixture.release, "screen_2", "terminal-device", "terminal-owner", null,
                             acquire = { AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv,
                                 protection = Closeable { destinationReleased.set(true) }) }, onOutcome = {})
                     }
@@ -942,9 +1262,19 @@ class PublishedTextInputDeviceTest {
             assertTrue("Destination must finish native preparation", pending != null)
             val during = composedSurface(instrumentation, surface, captureBounds)
             try {
+                val provisionalChangedPixels = changedPixels(before, during, Rect(0, 0, before.width, before.height))
+                if (provisionalChangedPixels != 0) {
+                    File(instrumentation.targetContext.cacheDir, "provisional-before.png").outputStream().use {
+                        before.compress(Bitmap.CompressFormat.PNG, 100, it)
+                    }
+                    File(instrumentation.targetContext.cacheDir, "provisional-during.png").outputStream().use {
+                        during.compress(Bitmap.CompressFormat.PNG, 100, it)
+                    }
+                    File(instrumentation.targetContext.cacheDir, "provisional-context.txt").writeText(
+                        "transition=$transitionKind signed=$signedCustom reverse=$reverse changedPixels=$provisionalChangedPixels bounds=$captureBounds")
+                }
                 assertEquals("Transparent source must not expose a provisional destination",
-                    contract.getValue("composedPixelsChanged").jsonPrimitive.long.toInt(),
-                    changedPixels(before, during, Rect(0, 0, before.width, before.height)))
+                    contract.getValue("composedPixelsChanged").jsonPrimitive.long.toInt(), provisionalChangedPixels)
                 if (transitionKind != null) {
                     val started = SystemClock.uptimeMillis()
                     runBlocking { kotlinx.coroutines.withTimeout(10_000) { checkNotNull(pending).awaitExit() } }
@@ -1227,6 +1557,9 @@ class PublishedTextInputDeviceTest {
         val freed = java.util.concurrent.atomic.AtomicInteger()
         val firstFrame = CountDownLatch(1)
         val commits = LinkedBlockingQueue<Pair<String, String>>()
+        val nativeField = AtomicReference<ExperienceNativeTextField>()
+        val fieldReady = CountDownLatch(1)
+        lateinit var textOverlay: ExperienceTextInputOverlay
         val failure = AtomicReference<Throwable?>()
         val releaseNative = CountDownLatch(1)
         val native = object : ai.nuxie.sdk.runtime.NuxieTypedRuntimeNative by ai.nuxie.sdk.runtime.JniNuxieTypedRuntimeNative {
@@ -1235,12 +1568,12 @@ class PublishedTextInputDeviceTest {
                 return -1
             }
             override fun renderAndPresent(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
-                clearColor: Int, fitContainCenter: Boolean): Int = error("Unsupported attachment must never use GPU surface presentation")
+                clearColor: Int, layoutScaleFactor: Float): Int = error("Unsupported attachment must never use GPU surface presentation")
             override fun copyPlayerToWindow(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
-                clearColor: Int, fitContainCenter: Boolean): Int {
+                clearColor: Int, layoutScaleFactor: Float): Int {
                 copied.incrementAndGet()
                 return ai.nuxie.sdk.runtime.JniNuxieTypedRuntimeNative.copyPlayerToWindow(
-                    rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter)
+                    rendererHandle, playerHandle, windowHandle, clearColor, layoutScaleFactor)
             }
             override fun freeRenderer(handle: Long) {
                 freed.incrementAndGet()
@@ -1255,25 +1588,42 @@ class PublishedTextInputDeviceTest {
                         screen.getValue("height").jsonPrimitive.float), runtime = NuxieRuntime(native),
                     listener = object : ExperienceSurfaceHost.Listener {
                         override fun onFirstFrame() { firstFrame.countDown() }
+                        override fun onNativeTextFields(fields: List<ExperienceNativeTextField>): Map<Long, View> {
+                            val field = fields.singleOrNull() ?: return emptyMap()
+                            nativeField.set(field)
+                            textOverlay.updateNativeFields(fields)
+                            fieldReady.countDown()
+                            return textOverlay.semanticViews()
+                        }
                         override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
                         override fun onTextCommitted(inputId: String, text: String, snapshot: NuxieViewModelSnapshot?) { commits.add(inputId to text) }
                     })
+                // Keep the real draft admission loop, but leave its view unmounted so these
+                // pixel assertions can only observe text rendered by the native runtime.
+                textOverlay = ExperienceTextInputOverlay(activity,
+                    ExperienceArtboardSize(screen.getValue("width").jsonPrimitive.float,
+                        screen.getValue("height").jsonPrimitive.float), inputs, emptyMap(),
+                    nativeWriter = checkNotNull(surface)::writeNativeText,
+                    nativeNotification = checkNotNull(surface)::notifyNativeText,
+                    nativeEvent = checkNotNull(surface)::nativeTextEvent).apply { layout(0, 0, 393, 852) }
                 checkNotNull(surface).loadArtboard(fixture.riv.readBytes(), screen.getValue("artboardName").jsonPrimitive.content,
                     fixture.release.descriptor, fixture.assets, textInputs = inputs)
                 activity.setContentView(checkNotNull(surface))
             }
             assertTrue("Window-copy first frame must compose: ${failure.get()}", firstFrame.await(30, TimeUnit.SECONDS))
+            assertTrue("Native occurrence must be presented", fieldReady.await(10, TimeUnit.SECONDS))
+            val originalText = checkNotNull(nativeField.get()).text
+            assertEquals("Ada", originalText)
             val original = copySurface(checkNotNull(surface))
             val region = Rect(0, 0, original.width, original.height)
             fun write(text: String) {
-                val finished = CountDownLatch(1)
-                val result = AtomicReference<Result<Unit>>()
                 instrumentation.runOnMainSync {
-                    checkNotNull(surface).writeText(inputs.single().id, text, true) { result.set(it); finished.countDown() }
+                    val editor = textOverlay.semanticViews().values.single() as EditText
+                    assertTrue("Presented native editor must admit input", editor.isEnabled)
+                    editor.setText(text)
                 }
-                assertTrue(finished.await(10, TimeUnit.SECONDS))
-                checkNotNull(result.get()).getOrThrow()
                 assertEquals(inputs.single().id to text, commits.poll(10, TimeUnit.SECONDS))
+                assertTrue("One accepted edit must notify once", commits.isEmpty())
             }
             write("")
             var cleared = copySurface(checkNotNull(surface))
@@ -1285,7 +1635,7 @@ class PublishedTextInputDeviceTest {
             }
             assertTrue("Native window copy must expose actual rendered glyph changes", changedPixels(original, cleared, region) >= 20)
             cleared.recycle()
-            write(inputs.single().value)
+            write(originalText)
             var restored = copySurface(checkNotNull(surface))
             val restoreDeadline = SystemClock.elapsedRealtime() + 10_000
             while (changedPixels(original, restored, region) != 0 && SystemClock.elapsedRealtime() < restoreDeadline) {
@@ -1332,7 +1682,8 @@ class PublishedTextInputDeviceTest {
             assertEquals(1, freed.get())
         } finally {
             releaseNative.countDown()
-            instrumentation.runOnMainSync { surface?.release(); activity.finish() }
+            instrumentation.runOnMainSync { textOverlay.close()
+                surface?.release(); activity.finish() }
             lane.shutdown()
             assertTrue(lane.awaitQuiescence(30_000))
         }
@@ -1377,7 +1728,7 @@ class PublishedTextInputDeviceTest {
             val deadline = SystemClock.elapsedRealtime() + 10_000
             while (editor == null && SystemClock.elapsedRealtime() < deadline) {
                 instrumentation.runOnMainSync {
-                    editor = activity!!.window.decorView.findViewWithTag<EditText>("nuxie-text-input-$inputId")
+                    editor = findNativeEditor(activity!!.window.decorView, inputId)
                         ?.takeIf { it.isShown && it.width > 1 && it.height > 1 }
                 }
                 if (editor == null) SystemClock.sleep(50)
@@ -1385,8 +1736,10 @@ class PublishedTextInputDeviceTest {
             val field = checkNotNull(editor) { "Signed default model must expose live field geometry: ${failure.get()}" }
             val surface = checkNotNull(findSurface(activity!!.window.decorView))
             instrumentation.runOnMainSync { field.clearFocus() }
-            SystemClock.sleep(100)
-            val original = copySurface(surface)
+            // Composition shares the field geometry readiness deadline, including time spent empty.
+            val original = awaitPublishedSurface(surface,
+                timeoutMillis = (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0),
+            ) { true }
             val region = Rect()
             instrumentation.runOnMainSync {
                 val fieldOrigin = IntArray(2)
@@ -1413,8 +1766,8 @@ class PublishedTextInputDeviceTest {
             assertTrue("Clearing must remove Rive glyphs: region=$region changed=${changedPixels(original, cleared, region)}, full=${changedPixels(original, cleared, Rect(0, 0, original.width, original.height))}",
                 changedPixels(original, cleared, region) >= 20)
             commits.clear()
-            edit(instrumentation, field, input.getValue("value").jsonPrimitive.content)
-            assertEquals(inputId to input.getValue("value").jsonPrimitive.content, commits.poll(10, TimeUnit.SECONDS))
+            edit(instrumentation, field, "Ada")
+            assertEquals(inputId to "Ada", commits.poll(10, TimeUnit.SECONDS))
             var restored = copySurface(surface)
             val restoreDeadline = SystemClock.elapsedRealtime() + 5_000
             while (changedPixels(original, restored, region) > 0 && SystemClock.elapsedRealtime() < restoreDeadline) {
@@ -1432,7 +1785,7 @@ class PublishedTextInputDeviceTest {
             commits.clear()
             val replacement = "native@example.com"
             instrumentation.runOnMainSync {
-                assertEquals(input.getValue("value").jsonPrimitive.content, field.text.toString())
+                assertEquals("Ada", field.text.toString())
                 assertTrue(field.requestFocus())
                 field.selectAll()
                 val connection = checkNotNull(field.onCreateInputConnection(EditorInfo()))
@@ -1450,7 +1803,13 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun authenticatedShellPrecedesAcquisitionAndReusesActivityForNativeReveal() {
+    fun authenticatedShellPrecedesAcquisitionAndReusesActivityForNativeReveal() = verifyAuthenticatedShell(false)
+
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
+    fun authenticatedShellKeepsNativeContentHiddenDuringRecovery() = verifyAuthenticatedShell(true)
+
+    private fun verifyAuthenticatedShell(waitForRecovery: Boolean) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         assertTrue(NuxieRuntime.shared.isAvailable)
         val fixture = loadPublishedFixture(instrumentation)
@@ -1462,12 +1821,35 @@ class PublishedTextInputDeviceTest {
         val shown = java.util.concurrent.atomic.AtomicInteger()
         val service = ExperiencePresentationService(instrumentation.targetContext, { name, _, _ ->
             if (name == ai.nuxie.sdk.events.SystemEventNames.EXPERIENCE_SHOWN) shown.incrementAndGet()
-        }, scope, { NuxieRuntime.shared.isAvailable })
+        }, scope, { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "early-owner" })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
-        val before = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
+        val host = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val ground = android.graphics.Color.rgb(24, 48, 72)
+        instrumentation.runOnMainSync { host.setContentView(View(host).apply { setBackgroundColor(ground) }) }
+        instrumentation.waitForIdleSync()
+        fun assertLoadingShell(container: ViewGroup, nativeContent: Boolean) {
+            val children = (0 until container.childCount).map { container.getChildAt(it) }
+            val loading = children.filterIsInstance<ExperienceLoadingView>().single()
+            val recovery = children.filterIsInstance<ExperienceRecoveryView>().singleOrNull()
+            val content = children.filter { it !is ExperienceLoadingView && it !is ExperienceRecoveryView }
+            assertEquals(if (nativeContent) 1 else 0, content.size)
+            assertEquals(if (nativeContent) 2 else 1, children.size - if (recovery == null) 0 else 1)
+            assertEquals("Experience loading", loading.contentDescription)
+            if (nativeContent) {
+                assertTrue(content.single() is ExperienceInputContainer)
+                assertSame(content.single(), children.first())
+                assertEquals(0f, content.single().alpha)
+            }
+            assertEquals(if (recovery == null) View.VISIBLE else View.INVISIBLE, loading.visibility)
+            recovery?.let {
+                assertEquals(View.VISIBLE, it.visibility)
+                assertSame(it, children.last())
+            }
+        }
         val pending = scope.async {
-            service.presentJourney(fixture.release, "screen_1", "early-shell", "early-owner",
+            service.presentJourney(testPresentationFences(), fixture.release, "screen_1", "early-shell", "early-owner",
                 service.reserveJourney("early-owner"), acquire = {
                     started.countDown()
                     releaseAcquisition.await()
@@ -1490,16 +1872,22 @@ class PublishedTextInputDeviceTest {
             instrumentation.runOnMainSync {
                 assertEquals(0, (checkNotNull(root).background as android.graphics.drawable.ColorDrawable).color)
                 val container = checkNotNull(root) as ViewGroup
-                assertEquals(1, container.childCount)
-                assertTrue(container.getChildAt(0) is ExperienceLoadingView)
-                assertEquals("Experience loading", container.getChildAt(0).contentDescription)
+                assertLoadingShell(container, nativeContent = false)
             }
-            val expected = before.getPixel(bounds.centerX(), bounds.centerY())
+            val expected = ground
             var observed = 0
             val deadline = SystemClock.elapsedRealtime() + 5_000
             do {
                 val screenshot = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
-                observed = screenshot.getPixel(bounds.centerX(), bounds.centerY())
+                observed = screenshot.getPixel(bounds.left + 2, bounds.top + 2)
+                var recoveryPresent = false
+                instrumentation.runOnMainSync {
+                    val container = checkNotNull(root) as ViewGroup
+                    recoveryPresent = (0 until container.childCount).any { container.getChildAt(it) is ExperienceRecoveryView }
+                }
+                if (!recoveryPresent && observed == expected) {
+                    observed = screenshot.getPixel(bounds.centerX(), bounds.centerY())
+                }
                 screenshot.recycle()
                 if (observed != expected) SystemClock.sleep(30)
             } while (observed != expected && SystemClock.elapsedRealtime() < deadline)
@@ -1507,14 +1895,26 @@ class PublishedTextInputDeviceTest {
             assertEquals(0, shown.get())
             assertFalse(pending.isCompleted)
             releaseAcquisition.complete(Unit)
+            val revealDeadline = SystemClock.elapsedRealtime() + 15_000
             assertTrue(revealStarted.await(15, TimeUnit.SECONDS))
+            if (waitForRecovery) {
+                var recoveryShown = false
+                while (!recoveryShown && SystemClock.elapsedRealtime() < revealDeadline) {
+                    instrumentation.runOnMainSync {
+                        val container = checkNotNull(root) as ViewGroup
+                        recoveryShown = (0 until container.childCount).any {
+                            container.getChildAt(it) is ExperienceRecoveryView
+                        }
+                    }
+                    if (!recoveryShown) SystemClock.sleep(20)
+                }
+                assertTrue("Withheld reveal must expose recovery within the existing readiness budget", recoveryShown)
+            }
             assertFalse(pending.isCompleted)
             assertEquals(0, shown.get())
             instrumentation.runOnMainSync {
                 val container = checkNotNull(root) as ViewGroup
-                assertEquals(2, container.childCount)
-                assertEquals(0f, container.getChildAt(0).alpha)
-                assertTrue(container.getChildAt(1) is ExperienceLoadingView)
+                assertLoadingShell(container, nativeContent = true)
                 assertEquals(0, (container.background as android.graphics.drawable.ColorDrawable).color)
             }
             releaseReveal.complete(Unit)
@@ -1531,12 +1931,12 @@ class PublishedTextInputDeviceTest {
                 assertNull(container.background)
             }
         } finally {
-            before.recycle()
             releaseReveal.complete(Unit)
             releaseAcquisition.complete(Unit)
             runBlocking { service.shutdownOwnedBy("early-owner"); scope.coroutineContext[Job]?.cancelAndJoin() }
             instrumentation.removeMonitor(monitor)
             PresentationRegistry.clearForTesting()
+            instrumentation.runOnMainSync { host.finish() }
         }
     }
 
@@ -1614,12 +2014,12 @@ class PublishedTextInputDeviceTest {
         val shown = java.util.concurrent.atomic.AtomicInteger()
         val service = ExperiencePresentationService(instrumentation.targetContext, { name, _, _ ->
             if (name == ai.nuxie.sdk.events.SystemEventNames.EXPERIENCE_SHOWN) shown.incrementAndGet()
-        }, scope, { NuxieRuntime.shared.isAvailable })
+        }, scope, { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "recovery-owner" })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val pending = scope.async {
             runCatching {
-                service.presentJourney(fixture.release, "screen_1", "recovery-device", "recovery-owner",
+                service.presentJourney(testPresentationFences(), fixture.release, "screen_1", "recovery-device", "recovery-owner",
                     service.reserveJourney("recovery-owner"), acquire = {
                         if (attempts.incrementAndGet() == 1 && !closeWhileSlow) throw java.io.IOException("Fixture transport failure")
                         kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { release.await() }
@@ -1747,11 +2147,11 @@ class PublishedTextInputDeviceTest {
         val checkpoints = java.util.concurrent.atomic.AtomicInteger()
         val service = ExperiencePresentationService(instrumentation.targetContext, { name, _, _ ->
             if (name == ai.nuxie.sdk.events.SystemEventNames.EXPERIENCE_SHOWN) shown.incrementAndGet()
-        }, scope, { NuxieRuntime.shared.isAvailable })
+        }, scope, { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "native-recovery-owner" })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val pending = scope.async {
-            service.presentJourney(fixture.release, "screen_1", "native-recovery-device", "native-recovery-owner",
+            service.presentJourney(testPresentationFences(), fixture.release, "screen_1", "native-recovery-device", "native-recovery-owner",
                 service.reserveJourney("native-recovery-owner"), acquire = {
                     AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv,
                         protection = Closeable { closed.incrementAndGet() })
@@ -1922,7 +2322,7 @@ class PublishedTextInputDeviceTest {
         val batches = LinkedBlockingQueue<JourneyScreenEmissionBatch>()
         val screens = LinkedBlockingQueue<String>()
         val service = ExperiencePresentationService(instrumentation.targetContext, { _, _, _ -> }, scope,
-            { NuxieRuntime.shared.isAvailable })
+            { NuxieRuntime.shared.isAvailable }, currentDistinctId = { owner })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val navigationContract = instrumentation.context.assets.open("journeys/planes/persistent-navigation-android.json")
@@ -1934,18 +2334,15 @@ class PublishedTextInputDeviceTest {
         val releaseCheckpoint = CompletableDeferred<Unit>()
         var holdCheckpoint = false
         var pendingNavigation: Deferred<Activity>? = null
-        var nextBatch = 0L
-        var nextEmission = 0L
         fun present(screenId: String): Activity {
             runBlocking {
-                service.presentJourney(fixture.release, screenId, journey, owner, service.reserveJourney(owner),
+                service.presentJourney(testPresentationFences(), fixture.release, screenId, journey, owner, service.reserveJourney(owner),
                     acquire = { AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv,
                         protection = Closeable {}) },
-                    nextBatchSequence = nextBatch, nextEmissionSequence = nextEmission,
                     onScreenChanged = { screens.add(it); true },
-                    onEmissionBatch = { batch ->
+                    onEmissionBatch = { batch, _ ->
                         batches.add(batch)
-                        true
+                        JourneyEmissionBatchResult.ACCEPTED
                     }, onScreenDismissed = { _, _, _ ->
                         dismissalCheckpoints++
                         if (holdCheckpoint) {
@@ -1960,22 +2357,24 @@ class PublishedTextInputDeviceTest {
             assertHostedScreen(instrumentation, host, screenId)
             return host
         }
-        fun response(value: String) {
-            val batch = checkNotNull(batches.poll(10, TimeUnit.SECONDS)) { "Native commit must reach the response coordinator" }
-            assertEquals(journey, batch.journeyId)
-            assertEquals(nextBatch++, batch.batchSequence)
-            assertEquals(JourneyScreenEmissionSource("screen_1", "text_input:$inputId", inputId, null), batch.source)
-            val emission = batch.emissions.single()
-            assertEquals(nextEmission++, emission.sequence)
-            assertEquals("\$response_set", emission.name)
-            assertEquals("email", emission.payload.getValue("field").jsonPrimitive.content)
-            assertEquals(value, emission.payload.getValue("value").jsonPrimitive.content)
+        fun committedValue(value: String) {
+            val host = checkNotNull(hostActivity)
+            val id = checkNotNull(host.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
+            val state = checkNotNull(PresentationRegistry.resolve(id)).textInputState
+            val key = nativeCommitKey(host, inputId)
+            val deadline = SystemClock.elapsedRealtime() + 10_000
+            while (state.committedValue(key) != value && SystemClock.elapsedRealtime() < deadline) {
+                SystemClock.sleep(20)
+            }
+            assertEquals("Accepted native text must reach the retained screen state", value, state.committedValue(key))
+            assertNull("Native edits must not synthesize answer events", batches.poll(300, TimeUnit.MILLISECONDS))
         }
+
         try {
             val first = present(navigationScreens[0])
             val field = awaitEditor(instrumentation, first, inputId)
             edit(instrumentation, field, "saved@example.com")
-            response("saved@example.com")
+            committedValue("saved@example.com")
             instrumentation.runOnMainSync { field.setSelection(2, 7) }
             val outgoingSurface = checkNotNull(findSurface(first.window.decorView))
             val beforeFailure = stableSurface(outgoingSurface)
@@ -1984,7 +2383,7 @@ class PublishedTextInputDeviceTest {
             val unusedLeaseClosed = java.util.concurrent.atomic.AtomicBoolean(false)
             val failedPreparation = scope.async {
                 runCatching {
-                    service.presentJourney(fixture.release, navigationScreens[1], journey, owner, null,
+                    service.presentJourney(testPresentationFences(), fixture.release, navigationScreens[1], journey, owner, null,
                         acquire = { AcquiredJourneyRelease(fixture.release.identity, fixture.assets, invalidRiv,
                             protection = Closeable { unusedLeaseClosed.set(true) }) }, onOutcome = {})
                 }
@@ -2039,9 +2438,9 @@ class PublishedTextInputDeviceTest {
                 assertTrue(retained.requestFocus())
                 retained.clearFocus()
             }
-            assertEquals("Unchanged retained text must not emit a second response", null, batches.poll(300, TimeUnit.MILLISECONDS))
+            assertEquals("Unchanged retained text must not synthesize an answer event", null, batches.poll(300, TimeUnit.MILLISECONDS))
             edit(instrumentation, retained, "next@example.com")
-            response("next@example.com")
+            committedValue("next@example.com")
             runBlocking { service.shutdownOwnedBy(owner) }
             assertEquals(null, service.journeyScreenId(JourneyPresentationOwner(journey, owner)))
         } finally {
@@ -2095,20 +2494,20 @@ class PublishedTextInputDeviceTest {
         val destinationCloses = java.util.concurrent.atomic.AtomicInteger()
         val checkpoints = java.util.concurrent.atomic.AtomicInteger()
         val service = ExperiencePresentationService(instrumentation.targetContext, { _, _, _ -> }, scope,
-            { NuxieRuntime.shared.isAvailable })
+            { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "recover-owner" })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val invalid = File.createTempFile("navigation-recovery", ".riv", instrumentation.targetContext.cacheDir).apply { writeText("invalid native fixture") }
         var next: Deferred<ai.nuxie.sdk.ExperienceRef>? = null
         try {
-            val initial = scope.async { service.presentJourney(fixture.release, screenIds[0], "recover-navigation", "recover-owner",
+            val initial = scope.async { service.presentJourney(testPresentationFences(), fixture.release, screenIds[0], "recover-navigation", "recover-owner",
                 service.reserveJourney("recover-owner"), acquire = { AcquiredJourneyRelease(fixture.release.identity,
                     fixture.assets, fixture.riv, protection = Closeable {}) },
                 onScreenDismissed = { _, _, _ -> checkpoints.incrementAndGet(); JourneyScreenDismissalResult.HANDLED }, onOutcome = {}) }
             val activity = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
             runBlocking { kotlinx.coroutines.withTimeout(30_000) { initial.await() } }
             val sourceId = checkNotNull(activity.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
-            next = scope.async { service.presentJourney(fixture.release, screenIds[1], "recover-navigation", "recover-owner", null,
+            next = scope.async { service.presentJourney(testPresentationFences(), fixture.release, screenIds[1], "recover-navigation", "recover-owner", null,
                 acquire = {
                     val attempt = attempts.incrementAndGet()
                     if (attempt == 1) throw java.io.IOException("Fixture acquisition failure")
@@ -2170,11 +2569,11 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun nativeResponseIsDurableBeforeItsAuthoredJourneyNavigation() = exerciseDurableNativeEmission(PublishedBehavior.TEXT_INPUT)
+    fun nativeTextIsRetainedBeforeItsAuthoredJourneyNavigation() = exerciseDurableNativeEmission(PublishedBehavior.TEXT_INPUT)
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun compiledScriptResponseIsDurableBeforeItsAuthoredJourneyNavigation() = exerciseDurableNativeEmission(PublishedBehavior.SCRIPT)
+    fun compiledScriptActionIsDurableWithoutLegacyResponseBeforeNavigation() = exerciseDurableNativeEmission(PublishedBehavior.SCRIPT)
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
@@ -2192,7 +2591,7 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun accessibilityTextEditIsDurableBeforeAuthoredJourneyNavigation() =
+    fun accessibilityTextEditIsRetainedBeforeAuthoredJourneyNavigation() =
         exerciseDurableNativeEmission(PublishedBehavior.TEXT_INPUT, accessibilityEdit = true)
 
     @Test
@@ -2218,7 +2617,7 @@ class PublishedTextInputDeviceTest {
         val automation = instrumentation.uiAutomation
         val originalFlags = automation.serviceInfo.flags
         val fixture = loadPublishedFixture(instrumentation,
-            if (candidateSemantics) "journeys/rendered-semantic-roles" else "journeys/rendered-text-input", candidateSemantics)
+            if (candidateSemantics) "journeys/rendered-semantic-roles" else "journeys/rendered-custom-transition", candidateSemantics)
         val descriptor = fixture.release.descriptor
         val authored = descriptor.getValue("render").jsonObject.getValue("screens").jsonArray.first().jsonObject
         val prepared = PreparedPresentation(fixture.riv, authored.getValue("artboardName").jsonPrimitive.content,
@@ -2264,13 +2663,13 @@ class PublishedTextInputDeviceTest {
             val deadline = SystemClock.uptimeMillis() + 10_000
             var published = nodes()
             while (SystemClock.uptimeMillis() < deadline &&
-                !(published.any { it.text?.toString() == "Choose your plan" } && published.any { it.isEditable })) {
+                !(published.any { it.text?.toString() == "Choose your plan" } && published.any { it.text?.toString() == "Seats" })) {
                 failure.get()?.let { throw AssertionError("Semantic publication failed", it) }
                 SystemClock.sleep(20)
                 published = nodes()
             }
             assertTrue("The heading must become accessible after publication", published.any { it.text?.toString() == "Choose your plan" })
-            assertEquals("The same publication exposes exactly one native editor", 1, published.count { it.isEditable })
+            assertEquals("The retained roles scene has no native input declaration", 0, published.count { it.isEditable })
         } finally {
             try {
                 mounted?.let { owner ->
@@ -2290,7 +2689,7 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun signedAuthoredRolesExposeSecureEditorAndDurableNativeActions() =
+    fun signedAuthoredRolesExposeDurableNativeActions() =
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES)
 
     @Test
@@ -2306,7 +2705,8 @@ class PublishedTextInputDeviceTest {
         org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
         repeat(2) { iteration ->
             try {
-                exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.EDITOR_ENTRY)
+                exerciseDurableNativeEmission(PublishedBehavior.TEXT_INPUT, roleProbe = AuthoredRoleProbe.EDITOR_ENTRY)
+                exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.HEADING_ENTRY)
             } catch (failure: AssertionError) {
                 throw AssertionError("Entry presentation ${iteration + 1}: ${failure.message}", failure)
             }
@@ -2317,7 +2717,7 @@ class PublishedTextInputDeviceTest {
     @SdkSuppress(minSdkVersion = 34)
     fun signedAuthoredRolesRestoreTalkBackEditorAfterHome() {
         org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
-        exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.EDITOR_HOME_RETURN)
+        exerciseDurableNativeEmission(PublishedBehavior.TEXT_INPUT, roleProbe = AuthoredRoleProbe.EDITOR_HOME_RETURN)
     }
 
     @Test
@@ -2379,7 +2779,7 @@ class PublishedTextInputDeviceTest {
     }
 
     @Test
-    fun signedConditionReadsResponseAndEventFromTheSameNativeEmission() {
+    fun signedConditionIgnoresReservedResponseCommandInNativeEmission() {
         exerciseDurableNativeEmission(PublishedBehavior.SCRIPT, conditionGate = true)
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_SCRIPT, conditionGate = true)
     }
@@ -2403,7 +2803,7 @@ class PublishedTextInputDeviceTest {
         val directory = File(context.cacheDir, owner).apply { mkdirs() }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val store = SQLiteEventStore(context, databaseFile = File(directory, "events.db"))
-        val presentations = ExperiencePresentationService(context, { _, _, _ -> }, scope, { NuxieRuntime.shared.isAvailable })
+        val presentations = ExperiencePresentationService(context, { _, _, _ -> }, scope, { NuxieRuntime.shared.isAvailable }, currentDistinctId = { owner })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val accepted = LinkedBlockingQueue<JourneyScreenEmissionBatch>()
@@ -2436,8 +2836,10 @@ class PublishedTextInputDeviceTest {
             override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
             override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
             override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
-            override fun resolveAction(owner: JourneyPresentationOwner, action: JsonObject, source: JourneyScreenEmissionSource?) =
-                presentations.resolveJourneyAction(owner, action, source)
+            override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest) =
+                presentations.openJourneyLink(owner, link)
+            override fun resolveAction(owner: JourneyPresentationOwner, action: JsonObject, source: JourneyScreenEmissionSource?, eventSource: JourneyRuntimeEventSource?) =
+                presentations.resolveJourneyAction(owner, action, source, eventSource)
             override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String): JourneyPresentationActionResult {
                 if (purchasing && action["type"]?.jsonPrimitive?.content == "purchase") {
                     purchases.add(action.getValue("placementId").jsonPrimitive.content)
@@ -2455,7 +2857,7 @@ class PublishedTextInputDeviceTest {
                     responsesBeforeNavigation.set(JourneyRunJournal(directory, owner, JourneyStorageScope(authority))
                         .runs().single().context.getValue("responses").jsonObject)
                 }
-                presentations.presentJourney(request.release, request.screenId, request.journeyId,
+                presentations.presentJourney(request.fences, request.release, request.screenId, request.journeyId,
                     request.ownerDistinctId, request.reservation, request.canPresent,
                     acquire = {
                         if (purchasing || scripted || candidateSemantics) artifactAcquirer.acquire(request.release, checkNotNull(catalog.snapshot(owner)).profile.delivery)
@@ -2470,9 +2872,10 @@ class PublishedTextInputDeviceTest {
                             if (method == "error") errorDismissals.add(it)
                         }
                     },
-                    onEmissionBatch = { batch ->
-                        val committed = request.onEmissionBatch(batch)
-                        if (committed) accepted.add(batch)
+                    onLinkOpened = request.onLinkOpened,
+                    onEmissionBatch = { batch, frameSources ->
+                        val committed = request.onEmissionBatch(batch, frameSources)
+                        if (committed == JourneyEmissionBatchResult.ACCEPTED) accepted.add(batch)
                         committed
                     }, onPresentationRevealed = { id ->
                         request.onPresentationRevealed(id)
@@ -2532,10 +2935,9 @@ class PublishedTextInputDeviceTest {
                 var downTime = SystemClock.uptimeMillis()
                 fun dispatch(action: Int, authoredY: Float = 30f) = instrumentation.runOnMainSync {
                     if (action == MotionEvent.ACTION_DOWN) downTime = SystemClock.uptimeMillis()
-                    val authoredHeight = if (purchaseNavigationFixture) 150f else 100f
-                    val scale = minOf(target.width / 320f, target.height / authoredHeight)
-                    val x = (target.width - 320f * scale) / 2f + purchaseX * scale
-                    val y = (target.height - authoredHeight * scale) / 2f + authoredY * scale
+                    val density = target.resources.displayMetrics.density
+                    val x = purchaseX * density
+                    val y = authoredY * density
                     val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
                     try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }
                 }
@@ -2634,9 +3036,9 @@ class PublishedTextInputDeviceTest {
                 var downTime = SystemClock.uptimeMillis()
                 fun dispatch(action: Int) = instrumentation.runOnMainSync {
                     if (action == MotionEvent.ACTION_DOWN) downTime = SystemClock.uptimeMillis()
-                    val scale = minOf(target.width / 390f, target.height / 844f)
-                    val x = (target.width - 390f * scale) / 2f + 100f * scale
-                    val y = (target.height - 844f * scale) / 2f + 728f * scale
+                    val density = target.resources.displayMetrics.density
+                    val x = 100f * density
+                    val y = 728f * density
                     val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
                     try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }
                 }
@@ -2721,6 +3123,12 @@ class PublishedTextInputDeviceTest {
                     dispatch(MotionEvent.ACTION_UP)
                 }
             } else {
+                if (roleProbe == AuthoredRoleProbe.EDITOR_ENTRY || roleProbe == AuthoredRoleProbe.EDITOR_HOME_RETURN) {
+                    assertF3EditorTalkBack(instrumentation, first, roleProbe == AuthoredRoleProbe.EDITOR_HOME_RETURN)
+                    assertTrue(journalRun().context.getValue("responses").jsonObject.isEmpty())
+                    assertTrue(accepted.isEmpty())
+                    return
+                }
                 val field = awaitEditor(instrumentation, first, "text-input/screen_1/email_input")
                 if (accessibilityEdit) editUsingAccessibility(instrumentation, "durable@example.com")
                 else edit(instrumentation, field, "durable@example.com")
@@ -2744,9 +3152,15 @@ class PublishedTextInputDeviceTest {
                 assertTrue("Failed script must drain and destroy its Activity", destroyed)
                 return
             }
-            val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS)) { "Journey service must durably accept native input" }
+            val retainedText = if (!scripted) awaitCommittedText(first, "text-input/screen_1/email_input", "durable@example.com") else null
+            val batch = if (scripted) checkNotNull(accepted.poll(10, TimeUnit.SECONDS)) {
+                "Journey service must durably accept the authored action"
+            } else {
+                assertNull("Native text must not synthesize an answer event", accepted.poll(300, TimeUnit.MILLISECONDS))
+                null
+            }
             if (shutdownAfterAdmission) {
-                assertEquals(listOf("\$response_set", "script_control_activated"), batch.emissions.map { it.name })
+                assertEquals(listOf("script_control_activated"), checkNotNull(batch).emissions.map { it.name })
                 runBlocking { kotlinx.coroutines.withTimeout(10_000) { presentations.shutdownOwnedBy(owner) } }
                 val completed = JourneyRunJournal(directory, owner, JourneyStorageScope(authority))
                 assertTrue(completed.runs().isEmpty())
@@ -2760,21 +3174,33 @@ class PublishedTextInputDeviceTest {
                 assertTrue("Terminal action shutdown must destroy its Activity", destroyed)
                 return
             }
+            if (conditionGate) {
+                val completed = JourneyRunJournal(directory, owner, JourneyStorageScope(authority))
+                val deadline = SystemClock.elapsedRealtime() + 10_000
+                while (completed.checkmark(fixture.release.identity.experienceId) == null &&
+                    SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(20)
+                assertEquals("A reserved response command cannot satisfy a Journey value condition",
+                    "selection_missing", checkNotNull(completed.checkmark(fixture.release.identity.experienceId)).outcome)
+                assertTrue(completed.runs().isEmpty())
+                assertEquals(listOf("script_control_activated"), checkNotNull(batch).emissions.map { it.name })
+                assertEquals(1, presentationCount.get())
+                assertNull(accepted.poll(300, TimeUnit.MILLISECONDS))
+                return
+            }
             val reopened = journalRun()
-            val responseKey = if (scripted) "selection" else "email"
-            val expectedValue = if (scripted) "pro" else "durable@example.com"
-            assertEquals(expectedValue, reopened.context.getValue("responses").jsonObject.getValue(responseKey).jsonPrimitive.content)
-            assertEquals(batch.batchSequence + 1, reopened.nextPresentationBatchSequence)
-            assertEquals(batch.emissions.last().sequence + 1, reopened.nextPresentationEmissionSequence)
+            assertTrue("Native edits and reserved commands must not populate the removed response store",
+                reopened.context.getValue("responses").jsonObject.isEmpty())
             if (scripted) {
+                val committed = checkNotNull(batch)
+                assertEquals(committed.batchSequence + 1, reopened.nextPresentationBatchSequence)
+                assertEquals(committed.emissions.last().sequence + 1, reopened.nextPresentationEmissionSequence)
+                assertEquals(listOf("script_control_activated"), committed.emissions.map { it.name })
+                assertEquals("compiled", committed.emissions.single().payload.getValue("source").jsonPrimitive.content)
                 runBlocking { kotlinx.coroutines.withTimeout(10_000) {
                     while (responsesBeforeNavigation.get() == null) kotlinx.coroutines.delay(20)
                 } }
-                assertEquals("pro", checkNotNull(responsesBeforeNavigation.get()).getValue("selection").jsonPrimitive.content)
-                assertEquals(listOf("\$response_set", "script_control_activated"), batch.emissions.map { it.name })
-                assertEquals("compiled", batch.emissions.last().payload.getValue("source").jsonPrimitive.content)
-                assertEquals(batch.emissions.first().sequence + 1, batch.emissions.last().sequence)
-                val captured = runBlocking { checkNotNull(store.stableEvent(batch.emissions.last().id)) }
+                assertTrue(checkNotNull(responsesBeforeNavigation.get()).isEmpty())
+                val captured = runBlocking { checkNotNull(store.stableEvent(committed.emissions.single().id)) }
                 assertEquals("script_control_activated", captured.name)
                 assertEquals(owner, captured.distinctId)
                 assertTrue("Authored navigation must finish presenting", navigationPresented.await(10, TimeUnit.SECONDS))
@@ -2794,12 +3220,14 @@ class PublishedTextInputDeviceTest {
                     UUID.randomUUID().toString(), JourneyScreenEmissionSource("screen_1", "corpus-continue"),
                     listOf(JourneyScreenEmission(UUID.randomUUID().toString(), reopened.nextPresentationEmissionSequence,
                         System.currentTimeMillis(), "corpus_next_0", JsonObject(emptyMap()))),
-                )))
+                ), null) == JourneyEmissionBatchResult.ACCEPTED)
             }
+            assertTrue("Accepted navigation must finish presenting", navigationPresented.await(10, TimeUnit.SECONDS))
             assertHostedScreen(instrumentation, first, "screen_2")
             assertEquals(1, monitor.hits)
             assertEquals("screen_2", presentations.journeyScreenId(JourneyPresentationOwner(reopened.journeyId, owner)))
-            assertEquals("durable@example.com", journalRun().context.getValue("responses").jsonObject.getValue("email").jsonPrimitive.content)
+            assertEquals("durable@example.com", checkNotNull(retainedText).let { (state, key) -> state.committedValue(key) })
+            assertTrue(journalRun().context.getValue("responses").jsonObject.isEmpty())
         } finally {
             releaseOldLane.countDown()
             runBlocking {
@@ -2818,7 +3246,7 @@ class PublishedTextInputDeviceTest {
         input: TalkBackEmulatorInput,
         targetBeforeHome: android.view.accessibility.AccessibilityNodeInfo,
         restoredTarget: () -> android.view.accessibility.AccessibilityNodeInfo?,
-        nextAfterTarget: () -> android.view.accessibility.AccessibilityNodeInfo,
+        nextAfterTarget: (() -> android.view.accessibility.AccessibilityNodeInfo)? = null,
     ) {
         val automation = instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
         val stopped = CountDownLatch(1)
@@ -2860,7 +3288,8 @@ class PublishedTextInputDeviceTest {
             assertEquals("Restored focus must preserve secure-entry semantics", targetBeforeHome.isPassword, checkNotNull(restored).isPassword)
             // Backgrounding withdraws virtual targets. Compare traversal with the
             // newly presented target, not a retired pre-background platform ID.
-            val expectedNext = nextAfterTarget()
+            // F3 has a single input; roles retain the resumed traversal oracle.
+            val expectedNext = nextAfterTarget?.invoke() ?: return
             input.swipeForward()
             val nextDeadline = SystemClock.uptimeMillis() + 2_000
             var next = focused()
@@ -2883,6 +3312,27 @@ class PublishedTextInputDeviceTest {
         }
     }
 
+    private fun assertF3EditorTalkBack(instrumentation: Instrumentation, activity: Activity, homeReturn: Boolean) {
+        val automation = instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+        val input = TalkBackEmulatorInput(automation,
+            checkNotNull(InstrumentationRegistry.getArguments().getString("nuxieTalkBackInputDevice")))
+        fun editable(): android.view.accessibility.AccessibilityNodeInfo? {
+            fun collect(node: android.view.accessibility.AccessibilityNodeInfo): List<android.view.accessibility.AccessibilityNodeInfo> =
+                listOf(node) + (0 until node.childCount).mapNotNull(node::getChild).flatMap(::collect)
+            return automation.rootInActiveWindow?.let(::collect)?.singleOrNull { it.isEditable }
+        }
+        awaitEditor(instrumentation, activity, "text-input/screen_1/email_input")
+        val deadline = SystemClock.uptimeMillis() + 5_000
+        while (editable()?.isAccessibilityFocused != true && SystemClock.uptimeMillis() < deadline) {
+            input.swipeForward()
+            SystemClock.sleep(20)
+        }
+        val field = checkNotNull(editable())
+        assertTrue("TalkBack must reach F3's native editor", field.isAccessibilityFocused)
+        assertEquals("android.widget.EditText", field.className.toString())
+        if (homeReturn) assertTalkBackHomeReturn(instrumentation, activity, input, field, { editable() })
+    }
+
     private fun assertAuthoredRoles(
         instrumentation: Instrumentation,
         activity: Activity,
@@ -2893,7 +3343,7 @@ class PublishedTextInputDeviceTest {
         val useTalkBack = InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true"
         val automation = if (useTalkBack) instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
             else instrumentation.uiAutomation
-        val expectedLabels = listOf("Choose your plan", "Continue", "Annual plan", "Seats", "Password", "Unavailable", "Plan option", "Plan option", "Optional extras", "Choose the options that suit you.")
+        val expectedLabels = listOf("Choose your plan", "Continue", "Annual plan", "Seats", "Unavailable", "Plan option", "Plan option", "Optional extras", "Choose the options that suit you.")
         fun nodes(): List<android.view.accessibility.AccessibilityNodeInfo> {
             fun collect(node: android.view.accessibility.AccessibilityNodeInfo): List<android.view.accessibility.AccessibilityNodeInfo> =
                 listOf(node) + (0 until node.childCount).mapNotNull { node.getChild(it) }.flatMap { collect(it) }
@@ -2955,7 +3405,7 @@ class PublishedTextInputDeviceTest {
                         try {
                             assertTalkBackHomeReturn(instrumentation, activity, input, next,
                                 { nodes().singleOrNull { label(it) == "Seats" } },
-                                { nodes().single { label(it) == "Password" } })
+                                { nodes().single { label(it) == "Unavailable" } })
                         } catch (failure: AssertionError) {
                             throw AssertionError("Virtual Home/return cycle ${cycle + 1}: ${failure.message}", failure)
                         }
@@ -2964,16 +3414,7 @@ class PublishedTextInputDeviceTest {
                     assertTrue("Home/return must not commit a response", responses().isEmpty())
                     return
                 }
-                if (expected == "Password" && roleProbe in setOf(AuthoredRoleProbe.EDITOR_ENTRY, AuthoredRoleProbe.EDITOR_HOME_RETURN)) {
-                    assertTrue("The prior presentation must finish on the native editor", next.isEditable)
-                    assertEquals("android.widget.EditText", next.className.toString())
-                    if (roleProbe == AuthoredRoleProbe.EDITOR_HOME_RETURN) {
-                        assertTalkBackHomeReturn(instrumentation, activity, input, next, { next }) { nodes().single { label(it) == "Unavailable" } }
-                        assertTrue("Home/return must not produce authored effects", accepted.isEmpty())
-                        assertTrue("Home/return must not commit an untouched editor", responses().isEmpty())
-                    }
-                    return
-                }
+
             }
             assertEquals("Repeated labels must retain distinct TalkBack identities", expectedLabels.size, visited.distinct().size)
             assertEquals(expectedLabels, visited.mapNotNull { label(it) })
@@ -3008,14 +3449,7 @@ class PublishedTextInputDeviceTest {
         assertFalse(disabled.isEnabled)
         assertFalse(disabled.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK))
         assertEquals(2, published.filter { label(it) == "Plan option" }.distinct().size)
-        val field = named("Password")
-        assertTrue(field.isEditable)
-        assertTrue(field.isPassword)
-        assertEquals(1, nodes().count { it.isEditable })
-        val editor = awaitEditor(instrumentation, activity, "text-input/screen_1/password")
-        instrumentation.runOnMainSync { assertEquals("", editor.text.toString()) }
-        assertTrue("An empty Android editor may expose its placeholder", field.text.isNullOrEmpty() || field.isShowingHintText)
-        assertEquals("Password", field.hintText?.toString())
+        assertEquals("Retired text-run declarations do not create native fields", 0, nodes().count { it.isEditable })
         fun awaitEmission(name: String) {
             val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS)) { "Authored native action must reach durable Journey admission: $name" }
             assertEquals(listOf(name), batch.emissions.map { it.name })
@@ -3041,16 +3475,7 @@ class PublishedTextInputDeviceTest {
         if (hardwareInput != null) hardwareInput.swipeDown()
         else assertTrue(named("Seats").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD))
         awaitEmission("seat_decreased")
-        val arguments = Bundle().apply {
-            putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "typed-password")
-        }
-        assertTrue(named("Password").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_FOCUS))
-        assertTrue(named("Password").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, arguments))
-        instrumentation.runOnMainSync { editor.onEditorAction(android.view.inputmethod.EditorInfo.IME_ACTION_DONE) }
-        awaitEmission("\$response_set")
-        assertEquals("typed-password", responses().getValue("password").jsonPrimitive.content)
-        assertFalse(nodes().any { it.text?.toString() == "typed-password" || it.contentDescription?.toString() == "typed-password" })
-        assertEquals(1, nodes().count { it.isEditable })
+        assertTrue(responses().isEmpty())
         assertEquals(null, accepted.poll(300, TimeUnit.MILLISECONDS))
     }
 
@@ -3137,13 +3562,7 @@ class PublishedTextInputDeviceTest {
             assertEquals("One key must produce one ordered authored action", null, accepted.poll(300, TimeUnit.MILLISECONDS))
         }
         instrumentation.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_TAB)
-        awaitFocus("Password")
-        val editor = awaitEditor(instrumentation, activity, "text-input/screen_1/password")
-        instrumentation.runOnMainSync {
-            assertTrue(editor.hasFocus())
-            assertEquals(direction, editor.layoutDirection)
-            assertEquals("", editor.text.toString())
-        }
+        awaitFocus("Plan option")
         val now = SystemClock.uptimeMillis()
         for (action in listOf(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.ACTION_UP)) {
             instrumentation.sendKeySync(android.view.KeyEvent(now, now, action, android.view.KeyEvent.KEYCODE_TAB,
@@ -3174,6 +3593,89 @@ class PublishedTextInputDeviceTest {
             SystemClock.sleep(50)
         } while (SystemClock.elapsedRealtime() < deadline)
         error("Surface bounds did not stabilize inside the composed display")
+    }
+
+    private fun awaitSurfaceAttachment(root: View, deadline: Long): TextureView {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val attached = CountDownLatch(1)
+        val surface = AtomicReference<TextureView?>()
+        val listener = android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            findSurface(root)?.takeIf { it.isAttachedToWindow }?.let {
+                surface.set(it)
+                attached.countDown()
+            }
+        }
+        instrumentation.runOnMainSync {
+            root.viewTreeObserver.addOnGlobalLayoutListener(listener)
+            listener.onGlobalLayout()
+        }
+        try {
+            assertTrue("Replacement surface must attach before the render deadline",
+                attached.await((deadline - SystemClock.uptimeMillis()).coerceAtLeast(0), TimeUnit.MILLISECONDS))
+            return checkNotNull(surface.get())
+        } finally {
+            instrumentation.runOnMainSync { root.viewTreeObserver.removeOnGlobalLayoutListener(listener) }
+        }
+    }
+
+    private fun awaitPublishedSurface(
+        surface: TextureView,
+        timeoutMillis: Long = 10_000,
+        matchesSize: (Bitmap) -> Boolean,
+    ): Bitmap {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val startedAt = SystemClock.elapsedRealtime()
+        val deadline = startedAt + timeoutMillis
+        val frames = LinkedBlockingQueue<Bitmap>(1)
+        val captured = java.util.concurrent.atomic.AtomicBoolean(false)
+        var previous: TextureView.SurfaceTextureListener? = null
+        fun captureComposedFrame() {
+            if (captured.get()) return
+            val frame = surface.bitmap ?: return
+            val pixels = IntArray(frame.width * frame.height)
+            frame.getPixels(pixels, 0, frame.width, 0, 0, frame.width, frame.height)
+            // This oracle is specific to the signed fixture's text and colored controls.
+            // A correctly sized but empty texture is not its initial frame.
+            val colors = HashSet<Int>()
+            for (pixel in pixels) {
+                colors.add(pixel)
+                if (colors.size > 8) break
+            }
+            if (SystemClock.elapsedRealtime() <= deadline && matchesSize(frame) && colors.size > 8) {
+                captured.set(true)
+                frames.add(frame)
+            } else frame.recycle()
+        }
+        check(timeoutMillis > 0) { "Composition readiness budget is exhausted" }
+        instrumentation.runOnMainSync {
+            previous = surface.surfaceTextureListener
+            surface.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                override fun onSurfaceTextureAvailable(texture: android.graphics.SurfaceTexture, width: Int, height: Int) {
+                    previous?.onSurfaceTextureAvailable(texture, width, height)
+                }
+                override fun onSurfaceTextureSizeChanged(texture: android.graphics.SurfaceTexture, width: Int, height: Int) {
+                    previous?.onSurfaceTextureSizeChanged(texture, width, height)
+                }
+                override fun onSurfaceTextureDestroyed(texture: android.graphics.SurfaceTexture): Boolean =
+                    previous?.onSurfaceTextureDestroyed(texture) ?: true
+                override fun onSurfaceTextureUpdated(texture: android.graphics.SurfaceTexture) {
+                    previous?.onSurfaceTextureUpdated(texture)
+                    captureComposedFrame()
+                }
+            }
+            // An idle renderer may already have composed its last frame.
+            captureComposedFrame()
+        }
+        try {
+            return checkNotNull(frames.poll((deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0), TimeUnit.MILLISECONDS)) {
+                "A composed published frame must arrive within ${timeoutMillis}ms of readiness observation"
+            }.also {
+                android.util.Log.i("NuxieDeviceQualification", "published_frame_wait_ms=${SystemClock.elapsedRealtime() - startedAt}")
+            }
+        } finally {
+            instrumentation.runOnMainSync { surface.surfaceTextureListener = previous }
+            frames.poll()?.recycle()
+        }
     }
 
     private fun copySurfaceAtSize(surface: TextureView, width: Int, height: Int): Bitmap {
@@ -3248,17 +3750,57 @@ class PublishedTextInputDeviceTest {
         )
     }
 
+    private fun nativeCommitKey(activity: Activity, inputId: String): String {
+        lateinit var surface: ExperienceSurfaceHost
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            surface = checkNotNull(findSurface(activity.window.decorView) as? ExperienceSurfaceHost)
+        }
+        val lane = ExperienceSurfaceHost::class.java.getDeclaredField("lane")
+            .apply { isAccessible = true }.get(surface) as NuxieRuntimeLane
+        val key = AtomicReference<String>()
+        val captured = CountDownLatch(1)
+        assertTrue(lane.enqueue {
+            try {
+                @Suppress("UNCHECKED_CAST")
+                val fields = ExperienceSurfaceHost::class.java.getDeclaredField("nativeTextFields")
+                    .apply { isAccessible = true }.get(surface) as List<ExperienceNativeTextField>
+                fields.singleOrNull { it.target.inputId == inputId }?.let { key.set("$inputId:${it.ownerId}") }
+            } finally { captured.countDown() }
+        })
+        assertTrue("Native occurrence owner must be captured", captured.await(10, TimeUnit.SECONDS))
+        return checkNotNull(key.get()) { "Expected one presented native input owner" }
+    }
+
+    private fun awaitCommittedText(activity: Activity, inputId: String, expected: String): Pair<ExperienceTextInputState, String> {
+        val id = checkNotNull(activity.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
+        val state = checkNotNull(PresentationRegistry.resolve(id)).textInputState
+        val key = nativeCommitKey(activity, inputId)
+        val deadline = SystemClock.elapsedRealtime() + 10_000
+        while (state.committedValue(key) != expected && SystemClock.elapsedRealtime() < deadline) {
+            SystemClock.sleep(20)
+        }
+        assertEquals("Accepted native text must reach the retained screen state", expected, state.committedValue(key))
+        return state to key
+    }
+
     private fun awaitEditor(instrumentation: Instrumentation, activity: Activity, inputId: String): EditText {
         var editor: EditText? = null
         val deadline = SystemClock.elapsedRealtime() + 10_000
         while (editor == null && SystemClock.elapsedRealtime() < deadline) {
             instrumentation.runOnMainSync {
-                editor = activity.window.decorView.findViewWithTag<EditText>("nuxie-text-input-$inputId")
+                editor = findNativeEditor(activity.window.decorView, inputId)
                     ?.takeIf { it.isShown && it.width > 1 && it.height > 1 }
             }
             if (editor == null) SystemClock.sleep(50)
         }
         return checkNotNull(editor) { "Published input must obtain visible live geometry" }
+    }
+
+    private fun findNativeEditor(root: View, inputId: String): EditText? {
+        if (root is EditText && root.tag?.toString()?.startsWith("nuxie-text-input-$inputId-") == true) return root
+        if (root is android.view.ViewGroup) return (0 until root.childCount)
+            .firstNotNullOfOrNull { findNativeEditor(root.getChildAt(it), inputId) }
+        return null
     }
 
     private data class PublishedFixture(
@@ -3318,8 +3860,8 @@ class PublishedTextInputDeviceTest {
         val scripts = (release.descriptor["screenBehaviors"] as? JsonArray).orEmpty().mapNotNull {
             (it.jsonObject["script"] as? JsonObject)?.get("artifact")?.jsonObject
         }
-        val assets = (render.getValue("assets").jsonArray.map { it.jsonObject } + scripts).associate { stage(it) }
-        val references = render.getValue("assets").jsonArray.map { it.jsonObject } + scripts + render.getValue("nux").jsonObject
+        val assets = (render.getValue("assets").jsonArray.map { it.jsonObject }.filter { it["location"]?.jsonPrimitive?.content != "system" } + scripts).associate { stage(it) }
+        val references = render.getValue("assets").jsonArray.map { it.jsonObject }.filter { it["location"]?.jsonPrimitive?.content != "system" } + scripts + render.getValue("nux").jsonObject
         val contentTypes = references.associate { it.getValue("key").jsonPrimitive.content to it.getValue("contentType").jsonPrimitive.content }
         return PublishedFixture(release, riv, assets, entry, trustedKeys, contentTypes)
     }
@@ -3361,7 +3903,7 @@ class PublishedTextInputDeviceTest {
             val root = instrumentation.uiAutomation.rootInActiveWindow
             if (root != null) {
                 try {
-                    val matches = root.findAccessibilityNodeInfosByText("levi@nuxie.dev")
+                    val matches = root.findAccessibilityNodeInfosByText("Ada")
                     editor = matches.firstOrNull { it.isEditable && it.isVisibleToUser }
                     matches.filter { it !== editor }.forEach { it.recycle() }
                 } finally { root.recycle() }
@@ -3407,12 +3949,44 @@ class PublishedTextInputDeviceTest {
         return checkNotNull(bitmap) { "Runtime texture must contain a composed frame" }
     }
 
+    @Test
+    fun pixelDifferenceCountsOnlyTheRequestedRegion() {
+        val before = Bitmap.createBitmap(3, 2, Bitmap.Config.ARGB_8888).apply { eraseColor(0xff123456.toInt()) }
+        val after = before.copy(Bitmap.Config.ARGB_8888, true)
+        try {
+            after.setPixel(0, 0, 0xffabcdef.toInt())
+            after.setPixel(2, 1, 0)
+            assertEquals(2, changedPixels(before, after, Rect(0, 0, 3, 2)))
+            assertEquals(1, changedPixels(before, after, Rect(0, 0, 3, 1)))
+            assertEquals(0, changedPixels(before, after, Rect(0, 1, 2, 2)))
+            assertEquals(0, changedPixels(before, after, Rect()))
+        } finally { before.recycle(); after.recycle() }
+    }
+
     private fun changedPixels(before: Bitmap, after: Bitmap, region: Rect): Int {
+        if (region.isEmpty) return 0
+        val width = region.width()
+        val height = region.height()
+        val beforePixels = IntArray(width * height)
+        val afterPixels = IntArray(width * height)
+        before.getPixels(beforePixels, 0, width, region.left, region.top, width, height)
+        after.getPixels(afterPixels, 0, width, region.left, region.top, width, height)
         var changed = 0
-        for (y in region.top until region.bottom) for (x in region.left until region.right) {
-            if (before.getPixel(x, y) != after.getPixel(x, y)) changed++
+        for (index in beforePixels.indices) {
+            if (beforePixels[index] != afterPixels[index]) changed++
         }
         return changed
+    }
+
+    private fun testPresentationFences(): JourneyPresentationFences {
+        val identity = object : ai.nuxie.sdk.identity.IdentityProvider {
+            override fun distinctId() = "device-owner"
+            override fun anonymousId() = "anonymous"
+            override fun rawDistinctId() = "device-owner"
+            override val isIdentified = true
+        }
+        val execution = ai.nuxie.sdk.journey.JourneyExecutionFence()
+        return JourneyPresentationFences(identity, identity.captureScope(), execution, execution.token())
     }
 
 }

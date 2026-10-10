@@ -13,6 +13,11 @@ import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.identity.IdentityService
 import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponse
 import ai.nuxie.sdk.testsupport.FakeTransport
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancelAndJoin
@@ -59,6 +64,60 @@ class NuxieIdentityFacadeTest {
         core.eventLog.awaitBarrier()
         core.userTransitions.drain()
         core.store.pendingBatch(limit = 50).map { it.name }
+    }
+
+    @Test
+    fun admittedCallbackCanResetWhileAnotherThreadIdentifies() {
+        Nuxie.identify("customer")
+        val identity = requireNotNull(Nuxie.core).identity
+        val callbackReturned = CountDownLatch(1)
+        val interruptedDeadlock = AtomicBoolean(false)
+        val identifyFailure = AtomicReference<Throwable?>()
+        var contender: Thread? = null
+        var watchdog: Thread? = null
+        try {
+            identity.withCurrentScope(identity.captureScope()) {
+                contender = thread(isDaemon = true, name = "concurrent-identify") {
+                    try {
+                        Nuxie.identify("next-customer")
+                    } catch (failure: Throwable) {
+                        identifyFailure.set(failure)
+                    }
+                }
+                val identifying = requireNotNull(contender)
+                // Establish the inversion, not merely simultaneous starts: the
+                // other public identify has reached the occupied identity fence.
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                while (identifying.stackTrace.none {
+                    it.className == IdentityService::class.java.name && it.methodName == "withDecision"
+                } && System.nanoTime() < deadline) Thread.yield()
+                assertTrue("identify must reach the occupied identity fence", identifying.stackTrace.any {
+                    it.className == IdentityService::class.java.name && it.methodName == "withDecision"
+                })
+                watchdog = thread(isDaemon = true, name = "identity-order-watchdog") {
+                    if (!callbackReturned.await(5, TimeUnit.SECONDS)) {
+                        interruptedDeadlock.set(true)
+                        // Interrupt the coroutine fence waiter, releasing the old
+                        // facade monitor so the red can unwind without leaking it.
+                        identifying.interrupt()
+                    }
+                }
+                Nuxie.reset()
+                assertFalse(Nuxie.isIdentified)
+                callbackReturned.countDown()
+            }
+            requireNotNull(contender).join(5_000)
+            assertFalse("reset inside an admitted callback must not deadlock with concurrent identify",
+                interruptedDeadlock.get())
+            assertFalse("the concurrent identify must finish", requireNotNull(contender).isAlive)
+            assertNull(identifyFailure.get())
+            assertEquals("next-customer", Nuxie.distinctId)
+        } finally {
+            callbackReturned.countDown()
+            contender?.interrupt()
+            contender?.join(5_000)
+            watchdog?.join(5_000)
+        }
     }
 
     @Test

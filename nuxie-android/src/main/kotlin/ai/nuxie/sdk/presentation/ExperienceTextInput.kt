@@ -13,7 +13,7 @@ import kotlinx.serialization.json.long
 /** An editable control selected from the authenticated render descriptor. */
 internal data class ExperienceTextInput(
     val id: String,
-    val runName: String,
+    val textInputName: String,
     val value: String,
     val responseField: String?,
     val placeholder: String?,
@@ -24,24 +24,11 @@ internal data class ExperienceTextInput(
     val geometryPaths: Map<String, String>,
     val style: Style,
     val responseCapture: ResponseCapture = ResponseCapture.TEXT,
-    val editableValueName: String? = null,
     val viewNodeId: String = id,
     val actionEvent: ExperienceSemanticTextDraft.EventKind = ExperienceSemanticTextDraft.EventKind.EDITING_ENDED,
     val declarativeActionId: String? = null,
 ) {
     enum class ResponseCapture { TEXT, BINDING }
-
-    /** Native bindings own conversion; a missing source is not a raw-text fallback. */
-    fun captureResponse(text: String, snapshot: NuxieViewModelSnapshot?): JsonPrimitive {
-        if (responseCapture == ResponseCapture.TEXT) return JsonPrimitive(text)
-        val field = checkNotNull(responseField) { "Converted input $id has no response field" }
-        return when (val value = snapshot?.resolveScalar(listOf("response", "values", field))) {
-            is NuxieViewModelScalarValue.StringValue -> JsonPrimitive(value.value)
-            is NuxieViewModelScalarValue.NumberValue -> JsonPrimitive(value.value)
-            is NuxieViewModelScalarValue.BooleanValue -> JsonPrimitive(value.value)
-            else -> error("Converted input $id has no valid evaluated response source")
-        }
-    }
 
     data class Style(
         val fontFamily: String,
@@ -87,8 +74,7 @@ internal data class ExperienceTextInput(
                 val style = input.getValue("style") as JsonObject
                 ExperienceTextInput(
                     id = input.text("id"),
-                    runName = input.text("textRunName"),
-                    editableValueName = input.optionalText("editableValueName"),
+                    textInputName = input.text("textInputName"),
                     viewNodeId = input.optionalText("viewNodeId") ?: input.text("id"),
                     actionEvent = when (input.optionalText("actionEvent")) {
                         null, "editing-ended" -> ExperienceSemanticTextDraft.EventKind.EDITING_ENDED

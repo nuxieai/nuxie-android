@@ -18,6 +18,29 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 class ExperienceWindowInsetsTest {
     @Test
+    @Config(sdk = [30])
+    fun `attached view publishes window pixels as dp at fractional density`() {
+        val controller = org.robolectric.Robolectric.buildActivity(LayoutInsetsActivity::class.java).setup().visible()
+        val activity = controller.get()
+        val density = activity.resources.displayMetrics.density
+        activity.resources.displayMetrics.density = 2.625f
+        val view = android.view.View(activity)
+        activity.setContentView(view)
+        val values = mutableListOf<ExperienceSafeAreaInsets>()
+        val observer = ExperienceWindowInsets(activity, view, values::add)
+        try {
+            applyLayoutTestInsets(activity, view)
+            val published = values.last().stateValues()
+            assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.NumberValue(56.0), published["safeArea/top"])
+            assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.NumberValue(24.0), published["safeArea/bottom"])
+        } finally {
+            observer.close()
+            activity.resources.displayMetrics.density = density
+            controller.pause().stop().destroy()
+        }
+    }
+
+    @Test
     @Config(sdk = [23, 30])
     fun `window fixtures remove space already excluded by rendering layout`() {
         val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
@@ -66,4 +89,29 @@ class ExperienceWindowInsetsTest {
     fun `API 23 accepts an empty platform inset without newer API calls`() {
         assertEquals(ExperienceSafeAreaInsets.ZERO, ExperienceWindowInsets.systemInsets(WindowInsets::class.java.getDeclaredConstructor(Rect::class.java).newInstance(Rect())))
     }
+}
+
+class LayoutInsetsActivity : android.app.Activity() {
+    var testMetrics: android.view.WindowMetrics? = null
+    override fun getWindowManager(): android.view.WindowManager {
+        val actual = super.getWindowManager()
+        return object : android.view.WindowManager by actual {
+            override fun getCurrentWindowMetrics() = testMetrics ?: actual.currentWindowMetrics
+        }
+    }
+}
+
+@Suppress("DEPRECATION")
+internal fun applyLayoutTestInsets(activity: LayoutInsetsActivity, view: android.view.View) {
+    view.layoutParams = view.layoutParams.apply { width = 1050; height = 2100 }
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    view.measure(android.view.View.MeasureSpec.makeMeasureSpec(1050, android.view.View.MeasureSpec.EXACTLY),
+        android.view.View.MeasureSpec.makeMeasureSpec(2100, android.view.View.MeasureSpec.EXACTLY))
+    view.layout(0, 0, 1050, 2100)
+    val location = IntArray(2)
+    view.getLocationOnScreen(location)
+    val insets = WindowInsets.Builder().setInsets(WindowInsets.Type.systemBars(), Insets.of(21, 147, 42, 63)).build()
+    activity.testMetrics = android.view.WindowMetrics(Rect(location[0], location[1], location[0] + 1050, location[1] + 2100), insets)
+    view.dispatchApplyWindowInsets(insets)
+    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
 }

@@ -89,13 +89,15 @@ internal class HostRenderHarness(
             require(output.mkdirs() || output.isDirectory) {
                 "Could not create --output directory: $output"
             }
+            player.setLayoutSize(size.width.toFloat(), size.height.toFloat())
+            check(player.step(0.0) == NUX_STATUS_OK) { "Experience layout step failed" }
             val frames = buildList(options.frameCount) {
                 repeat(options.frameCount) { index ->
                     val stepStatus = player.step(options.stepMillis / 1_000.0)
                     check(stepStatus == NUX_STATUS_OK) {
                         "Experience player step failed with status $stepStatus"
                     }
-                    val frame = renderer.renderToCpuFrame(player, clearColor, true)
+                    val frame = renderer.renderToCpuFrame(player, clearColor, 1f)
                     check(frame.width == size.width && frame.height == size.height) {
                         "Runtime returned ${frame.width}x${frame.height}; expected ${size.width}x${size.height}"
                     }

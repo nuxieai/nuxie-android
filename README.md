@@ -155,7 +155,8 @@ the flat activity view. Host `beforeSend` privacy policy applies to both reports
 The [`nuxie-android/api/nuxie-android.api`](nuxie-android/api/nuxie-android.api)
 `apiCheck` dump is the Android binding wrapper contract, sibling to the
 `nuxie-ios` `api/public-api.txt`. Wrappers may bind only symbols listed in that
-allowlist.
+allowlist. `NuxieActivity.LinkOpened` is part of this wrapper contract and forwards
+`$link_opened` with the URL, actual `destination` (`in_app` or `external`), authored target, screen/source attribution and Journey leg.
 
 ## Setup
 
@@ -391,3 +392,14 @@ read. Switching A → B → A does not reactivate activity from the first A sess
 and shutting down the SDK invalidates activities from that SDK session. Stale
 activities are still delivered for analytics, with their original customer ID.
 Activity identity metadata does not change the flat activity name or properties.
+
+Links use the shared `events/link-open-states.json` state table. A settled, owned
+Experience opens web links in-app for an omitted target, `_self`, `_parent`, `_top`,
+or `in_app`; `_blank` and `external` use the browser. Closing, closed, and screenless
+Experiences fall back to the browser or system. A started app with no resumed Activity
+opens externally from the application context; only a resumed Activity can host an in-app link. With no started Activity nothing
+opens or records. Non-web schemes use an available system handler. Broken Journey
+link steps advance without opening, recording, or dismissing. `$link_opened` and
+public `LinkOpened` include the actual `destination` (`in_app` or `external`) and the
+original optional `target`. Step records use the step identity before completion.
+A link already in flight still opens externally after identity change or current-customer profile clear, but its revoked run records no event.

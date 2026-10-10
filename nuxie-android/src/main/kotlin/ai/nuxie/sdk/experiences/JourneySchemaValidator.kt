@@ -20,8 +20,9 @@ import kotlinx.serialization.json.JsonObject
 internal object JourneySchemaValidator {
     fun validate(value: JsonObject) {
         val root = exact(value, setOf("schemaVersion", "identity", "metadata", "presentation", "leg", "products",
-            "placements", "viewModelValues", "screenBehaviors", "render", "requirements", "provenance"))
-        if (text(root["schemaVersion"]) != "nuxie.journey-release.v2") fail("descriptor version")
+            "placements", "viewModelValues", "screenBehaviors", "render", "requirements", "provenance", "state", "responses", "ruleGroups"))
+        if (text(root["schemaVersion"]) != "nuxie.journey-release.v3") fail("descriptor version")
+        JourneyReleaseValuePolicy.parse(root)
         JourneyReleaseSchema.validate(root)
         val leg = exact(root["leg"], setOf("schemaVersion", "id", "entryCondition", "entryStepId", "steps", "routes",
             "screens", "policy", "offers", "facts", "inputs", "outputs", "completionOutputs"))
@@ -55,6 +56,8 @@ internal object JourneySchemaValidator {
             "action" -> {
                 exact(step, setOf("kind", "id", "action", "outlets"))
                 for (target in record(step["outlets"]).values) if (id(target) !in ids) fail("local outlet")
+                if (screens.isEmpty() && text(record(step["action"])["type"]) in JourneyGrammar.presenting)
+                    fail("screenless presentation action")
                 JourneyGrammar.action(step["action"], screens.toSet(), placements)
             }
             else -> fail("step kind")

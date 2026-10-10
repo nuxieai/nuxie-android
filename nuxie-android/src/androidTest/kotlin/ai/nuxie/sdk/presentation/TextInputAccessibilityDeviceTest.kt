@@ -27,7 +27,7 @@ class TextInputAccessibilityDeviceTest {
                 val input = ExperienceTextInput("name", "headline", "Native editor", "answer", null, null,
                     false, false, null, emptyMap(), ExperienceTextInput.Style(
                         "sans-serif", "400", false, 16f, 20f, 0f, 0xff000000.toInt(), "font", null))
-                overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(400f, 400f),
+                overlay = nativeInputOverlayFixture(activity, ExperienceArtboardSize(400f, 400f),
                     listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) },
                     { throw AssertionError(it) })
                 activity.setContentView(overlay)

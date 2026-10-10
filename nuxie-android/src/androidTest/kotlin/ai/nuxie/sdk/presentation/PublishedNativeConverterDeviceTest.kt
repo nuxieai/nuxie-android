@@ -61,7 +61,7 @@ class PublishedNativeConverterDeviceTest {
         val screen = render.getValue("screens").jsonArray.single().jsonObject
         val screenId = screen.getValue("id").jsonPrimitive.content
         val input = ExperienceTextInput.forScreen(descriptor, screenId).single()
-        assertNotNull("Publisher must emit the native endpoint", input.editableValueName)
+        assertNotNull("Publisher must emit the native endpoint", input.textInputName)
         assertEquals(secure, input.secure)
         assertEquals(ExperienceTextInput.ResponseCapture.BINDING, input.responseCapture)
         val directory = File(instrumentation.targetContext.cacheDir, "$prefix-${System.nanoTime()}").apply { mkdirs() }
@@ -102,7 +102,7 @@ class PublishedNativeConverterDeviceTest {
                 mounted = ExperienceMountedScreen(activity, prepared, object : ExperienceSurfaceHost.Listener {
                     override fun onFirstFrame() { checkNotNull(mounted).activate() }
                     override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
-                    override fun onRuntimeStep(outcome: NuxiePlayerStepOutcome, correlationId: ULong, viewModelSnapshot: NuxieViewModelSnapshot?) {
+                    override fun onRuntimeStep(outcome: NuxiePlayerStepOutcome, correlationId: ULong, viewModelSnapshot: NuxieViewModelSnapshot?, saves: List<ExperienceResponseSaveRequest>) {
                         try {
                             journey?.publish(outcome, correlationId, viewModelSnapshot)
                         } catch (error: Throwable) {
@@ -135,7 +135,6 @@ class PublishedNativeConverterDeviceTest {
                 assertTrue("Mount cannot submit", commands.isEmpty())
                 val persisted = checkNotNull(journey)
                 assertTrue("Mount cannot persist an answer", persisted.responses().isEmpty())
-                var lastValid: Double? = null
                 var submissions = 0
                 fun complete(draft: String, expected: Double?) {
                     instrumentation.runOnMainSync { field.requestFocus(); field.setText(draft); field.clearFocus() }
@@ -149,12 +148,10 @@ class PublishedNativeConverterDeviceTest {
                         assertEquals(NuxieHostValue.String("durationSeconds"), fields["field"])
                         assertEquals(NuxieHostValue.Number(expected), fields["value"])
                         assertEquals("duration_ready", checkNotNull(commands.poll(10, TimeUnit.SECONDS)).name)
-                        lastValid = expected
                         submissions += 1
                     }
                     failure.get()?.let { throw AssertionError("Published validation failed", it) }
-                    assertEquals("Journal reload must preserve the converted numeric answer",
-                        lastValid?.let(::JsonPrimitive), persisted.responses()["durationSeconds"])
+                    assertTrue("Retired answer commands must not populate the journal", persisted.responses().isEmpty())
                     assertEquals("Only valid drafts submit", submissions, persisted.submissions())
                 }
                 complete("2:00", 120.0)
@@ -171,7 +168,8 @@ class PublishedNativeConverterDeviceTest {
                 val event = checkNotNull(commits.poll(10, TimeUnit.SECONDS)) { "Expected native edit notification" }
                 failure.get()?.let { throw AssertionError("Published native edit failed", it) }
                 assertEquals(text, event.first)
-                assertEquals(seconds, input.captureResponse(event.first, event.second).double, 0.0)
+                assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.NumberValue(seconds),
+                    event.second?.resolveScalar(listOf("response", "values", "durationSeconds")))
             }
             edited("2:00", 120.0)
             // A property write accepts the draft, not its validity. Failed reverse
@@ -197,7 +195,8 @@ class PublishedNativeConverterDeviceTest {
                 assertEquals(draft, event.text)
                 val committed = checkNotNull(precedingCommit)
                 assertEquals("Completion must follow the latest value notification", draft, committed.first)
-                assertEquals(seconds, input.captureResponse(committed.first, committed.second).double, 0.0)
+                assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.NumberValue(seconds),
+                    committed.second?.resolveScalar(listOf("response", "values", "durationSeconds")))
             }
             blurAfterEdit("3:00", 180.0)
             // Authored validation must receive the invalid draft, not a reformatted

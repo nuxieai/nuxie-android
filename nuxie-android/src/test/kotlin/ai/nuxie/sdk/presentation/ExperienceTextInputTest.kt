@@ -1,5 +1,8 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NativeSemanticNode
+import ai.nuxie.sdk.runtime.NativeSemanticState
+import ai.nuxie.sdk.runtime.NuxieTextInputGeometry
 import ai.nuxie.sdk.runtime.NuxieTextGeometryCapture
 import ai.nuxie.sdk.runtime.NuxieTextRunGeometry
 import ai.nuxie.sdk.fixtures.FixtureRunner
@@ -33,8 +36,8 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 
 internal fun textInputDescriptor(value: String = ""): JsonObject = Json.parseToJsonElement("""
-    {"render":{"textInputs":[{
-      "id":"name","screenId":"survey","textRunName":"headline","value":${JsonPrimitive(value)},"editable":true,
+    {"state":{},"responses":{},"ruleGroups":[],"render":{"textInputs":[{
+      "id":"name","screenId":"survey","textInputName":"headline","value":${JsonPrimitive(value)},"editable":true,
       "responseFieldKey":"answer","secureTextEntry":false,"multiline":false,"maxLength":2,
       "geometry":{"xPath":"x","yPath":"y","widthPath":"width","heightPath":"height",
         "rotationPath":"rotation","scaleXPath":"scaleX","scaleYPath":"scaleY"},
@@ -47,14 +50,14 @@ internal fun textInputDescriptor(value: String = ""): JsonObject = Json.parseToJ
 class ExperienceTextInputTest {
     @Test fun `unchanged Return executes the declared action each time but blur does not`() = runTest {
         val descriptor = Json.parseToJsonElement(textInputDescriptor().toString()
-            .replace("\"textRunName\":", "\"actionEvent\":\"return\",\"declarativeActionId\":\"submit\",\"textRunName\":")) as JsonObject
+            .replace("\"textInputName\":", "\"actionEvent\":\"return\",\"declarativeActionId\":\"submit\",\"textInputName\":")) as JsonObject
         val behaviors = Json.parseToJsonElement("""[{"screenId":"survey","controls":[{
           "actionId":"submit","behavior":{"kind":"declarative","program":[{"type":"emit","eventName":"submitted"}]}
         }]}]""")
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey",
             JsonObject(descriptor + ("screenBehaviors" to behaviors)), 0, 0,
-            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
+            onEmissionBatch = { it, _ -> batches += it; JourneyEmissionBatchResult.ACCEPTED }, onPresentationRevealed = {})
         coordinator.reveal()
         assertTrue(coordinator.publishTextInputEvent("name", ExperienceSemanticTextDraft.Event(
             ExperienceSemanticTextDraft.EventKind.EDITING_ENDED, "same")))
@@ -70,12 +73,12 @@ class ExperienceTextInputTest {
         coordinator.close()
     }
 
-    @Test fun `native response deduplication belongs to each occurrence owner`() = runTest {
+    @Test fun `native text commits from separate owners publish no answer events`() = runTest {
         val descriptor = Json.parseToJsonElement(textInputDescriptor().toString()
-            .replace("\"textRunName\":", "\"editableValueName\":\"editable\",\"textRunName\":")) as JsonObject
+            .replace("\"headline\"", "\"editable\"")) as JsonObject
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", descriptor, 0, 0,
-            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
+            onEmissionBatch = { it, _ -> batches += it; JourneyEmissionBatchResult.ACCEPTED }, onPresentationRevealed = {})
         fun owner(id: Long) = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(id,
             arrayOf(NativeViewModelSnapshotInstance(id, 0)), emptyArray()))
         coordinator.reveal()
@@ -84,7 +87,7 @@ class ExperienceTextInputTest {
         assertTrue(coordinator.publishTextCommit("name", "Al", snapshot = owner(10)))
         assertTrue(coordinator.publishTextCommit("name", "Al", snapshot = owner(10)))
         assertTrue(coordinator.publishTextCommit("name", "Al", snapshot = owner(20)))
-        assertEquals(2, batches.size)
+        assertTrue(batches.isEmpty())
         coordinator.close()
     }
 
@@ -97,9 +100,9 @@ class ExperienceTextInputTest {
             val original = ExperienceTextInput.forScreen(textInputDescriptor("ok"), "survey").single()
             for (weight in 100..900 step 100) {
                 val input = original.copy(style = original.style.copy(fontFamily = "System", fontWeight = "$weight"))
-                val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
+                val overlay = nativeOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
                     listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
-                val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+                var editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name-42")
                 assertEquals(weight, editor.typeface.weight)
                 assertFalse(editor.typeface.isItalic)
             }
@@ -108,78 +111,13 @@ class ExperienceTextInputTest {
         }
     }
 
-    @Test fun `shared response capture cases preserve scalar type and reject unavailable binding state`() {
-        val cases = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
-            .resolve("journeys/planes/text-input-response-capture.json").readText()).jsonObject.getValue("cases").jsonArray
-        for (item in cases) {
-            val case = item.jsonObject
-            val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(
-                secure = case.getValue("secure").jsonPrimitive.boolean,
-                responseCapture = if (case["mode"]?.jsonPrimitive?.content == "binding")
-                    ExperienceTextInput.ResponseCapture.BINDING else ExperienceTextInput.ResponseCapture.TEXT,
-            )
-            val snapshot = (case["source"] as? JsonPrimitive)?.let(::responseSnapshot)
-            val capture = runCatching { input.captureResponse(case.getValue("text").jsonPrimitive.content, snapshot) }
-            if (case["rejected"]?.jsonPrimitive?.booleanOrNull == true) {
-                assertTrue(case.getValue("name").toString(), capture.isFailure)
-            } else {
-                assertEquals(case.getValue("name").toString(), case["expected"], capture.getOrThrow())
-            }
-        }
-    }
-
-    @Test fun `invalid binding source fails without accepting or deduplicating the edit`() = runTest {
-        val descriptor = Json.parseToJsonElement(textInputDescriptor().toString()
-            .replace("\"responseFieldKey\":", "\"responseCapture\":\"binding\",\"responseFieldKey\":")) as JsonObject
-        val state = ExperienceTextInputState()
+    @Test fun `text commits do not publish answer events`() = runTest {
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
-        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", descriptor, 0, 0,
-            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
-        coordinator.reveal()
-        for (snapshot in listOf(null, responseSnapshot(JsonPrimitive(Float.NaN)))) {
-            assertTrue(runCatching { coordinator.publishTextCommit("name", "50", state, snapshot = snapshot) }.isFailure)
-            assertNull(state.committedValue("name"))
-            assertTrue(batches.isEmpty())
-        }
-        assertTrue(coordinator.publishTextCommit("name", "50", state, snapshot = responseSnapshot(JsonPrimitive(0.5))))
-        assertEquals(JsonPrimitive(0.5), batches.single().emissions.single().payload["value"])
-        coordinator.close()
-    }
-
-    private fun responseSnapshot(value: JsonPrimitive): NuxieViewModelSnapshot {
-        val kind = when {
-            value.isString -> NuxieViewModelPropertyKind.STRING
-            value.booleanOrNull != null -> NuxieViewModelPropertyKind.BOOLEAN
-            else -> NuxieViewModelPropertyKind.NUMBER
-        }
-        return NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(1,
-            arrayOf(NativeViewModelSnapshotInstance(1, 0), NativeViewModelSnapshotInstance(2, 1), NativeViewModelSnapshotInstance(3, 2)),
-            arrayOf(
-                NativeViewModelSnapshotValue(1, 0, "response", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 2),
-                NativeViewModelSnapshotValue(2, 0, "values", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 3),
-                NativeViewModelSnapshotValue(3, 0, "answer", kind.nativeValue, value.content.encodeToByteArray(), 0,
-                    numberValue = if (kind == NuxieViewModelPropertyKind.NUMBER) value.float else 0f,
-                    boolValue = value.booleanOrNull ?: false),
-            )))
-    }
-
-    @Test fun `converted response commits capture evaluated source instead of displayed text`() = runTest {
-        val descriptor = Json.parseToJsonElement(textInputDescriptor().toString()
-            .replace("\"responseFieldKey\":", "\"responseCapture\":\"binding\",\"responseFieldKey\":")) as JsonObject
-        val batches = mutableListOf<JourneyScreenEmissionBatch>()
-        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", descriptor, 0, 0,
-            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", textInputDescriptor(), 0, 0,
+            onEmissionBatch = { it, _ -> batches += it; JourneyEmissionBatchResult.ACCEPTED }, onPresentationRevealed = {})
         assertTrue(coordinator.reveal())
-        val snapshot = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(1,
-            arrayOf(NativeViewModelSnapshotInstance(1, 0), NativeViewModelSnapshotInstance(2, 1),
-                NativeViewModelSnapshotInstance(3, 2)),
-            arrayOf(
-                NativeViewModelSnapshotValue(1, 0, "response", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 2),
-                NativeViewModelSnapshotValue(2, 0, "values", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 3),
-                NativeViewModelSnapshotValue(3, 0, "answer", NuxieViewModelPropertyKind.NUMBER.nativeValue, byteArrayOf(), 0, numberValue = 0.5f),
-            )))
-        assertTrue(coordinator.publishTextCommit("name", "50", snapshot = snapshot))
-        assertEquals(JsonPrimitive(0.5), batches.single().emissions.single().payload["value"])
+        assertTrue(coordinator.publishTextCommit("name", "50", snapshot = snapshot()))
+        assertTrue(batches.isEmpty())
         coordinator.close()
     }
 
@@ -187,7 +125,7 @@ class ExperienceTextInputTest {
         val controller = Robolectric.buildActivity(Activity::class.java).setup().visible()
         val activity = controller.get()
         val input = ExperienceTextInput.forScreen(textInputDescriptor("ok"), "survey").single()
-        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+        val overlay = nativeOverlay(activity, ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
         val host = View(activity)
         val provider = ExperienceAccessibilityProvider(host, { null }, { _, _, _ -> true })
@@ -201,25 +139,28 @@ class ExperienceTextInputTest {
             })
             host.layout(0, 0, 400, 400)
             overlay.layout(0, 0, 400, 400)
-            overlay.update(snapshot(), capturedGeometry())
-            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+            overlay.presentGeometry(snapshot(), capturedGeometry())
+            var editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name-42")
             fun present() {
-                overlay.updateSemantics(mapOf("name" to node))
+                overlay.presentNodes(mapOf("name" to node))
                 provider.publish(tree, overlay.semanticViews())
             }
             present()
             assertTrue(editor.requestFocus())
             provider.withdraw()
-            overlay.updateSemantics(emptyMap())
+            overlay.presentNodes(emptyMap())
             assertFalse(editor.hasFocus())
             present()
-            assertTrue("A new semantic frame restores the real editor", editor.hasFocus())
+            val retired = editor
+            editor = overlay.findViewWithTag("nuxie-text-input-name-42")
+            assertNotSame(retired, editor)
+            assertTrue("Publication restores the occurrence focus", editor.hasFocus())
             provider.withdraw()
             overlay.setInputEnabled(false)
             assertFalse(editor.hasFocus())
             overlay.setInputEnabled(true)
             present()
-            assertTrue("Navigation rollback restores the real editor", editor.hasFocus())
+            assertTrue("Publication restores the occurrence focus", editor.hasFocus())
             assertEquals("ok", editor.text.toString())
         } finally {
             provider.retire()
@@ -232,16 +173,16 @@ class ExperienceTextInputTest {
     fun `semantic field label preserves real editing and absent capture retires traversal`() {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
         val input = ExperienceTextInput.forScreen(textInputDescriptor("ok"), "survey").single()
-        val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
+        val overlay = nativeOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
         try {
-            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+            var editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name-42")
             val node = ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 6, 0, 0, 0, 0,
                 0f, 0f, 100f, 30f, "Your name", "", "Use your full name")
             controller.get().setContentView(overlay)
             overlay.layout(0, 0, 400, 400)
-            overlay.update(snapshot(), capturedGeometry())
-            overlay.updateSemantics(mapOf("name" to node))
+            overlay.presentGeometry(snapshot(), capturedGeometry())
+            overlay.presentNodes(mapOf("name" to node))
             assertTrue(editor.requestFocus())
             val info = editor.createAccessibilityNodeInfo()
             assertEquals("ok", info.text.toString())
@@ -261,14 +202,15 @@ class ExperienceTextInputTest {
             replacement.putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Ada")
             assertFalse(editor.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, replacement))
             assertEquals("Ad", editor.text.toString()) // Rejected whole-value edits preserve the valid draft.
-            overlay.updateSemantics(emptyMap())
+            overlay.presentNodes(emptyMap())
             assertFalse(editor.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, replacement))
             assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_NO, editor.importantForAccessibility)
             assertFalse(editor.isEnabled)
             overlay.setInputEnabled(false)
             overlay.setInputEnabled(true)
             assertFalse(editor.isEnabled)
-            overlay.updateSemantics(mapOf("name" to node))
+            overlay.presentNodes(mapOf("name" to node))
+            editor = overlay.findViewWithTag("nuxie-text-input-name-42")
             assertTrue(editor.isEnabled)
         } finally { overlay.close(); controller.pause().stop().destroy() }
     }
@@ -279,25 +221,26 @@ class ExperienceTextInputTest {
         val input = ExperienceTextInput.forScreen(textInputDescriptor("ok"), "survey").single().copy(secure = true)
         val writes = mutableListOf<String>()
         val state = ExperienceTextInputState()
-        val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
+        val overlay = nativeOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, text, _, done -> writes += text; done(Result.success(Unit)) }, { throw it }, state)
         try {
-            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+            var editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name-42")
             val node = ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 6, 4096, 0, 0, 0,
                 0f, 0f, 100f, 30f, "Password", "", "")
-            overlay.updateSemantics(mapOf("name" to node))
+            overlay.presentNodes(mapOf("name" to node))
             val info = editor.createAccessibilityNodeInfo()
             assertTrue(info.isPassword)
             assertTrue(info.isEditable)
             assertNull(info.contentDescription)
-            overlay.updateSemantics(emptyMap())
+            overlay.presentNodes(emptyMap())
             val count = writes.size
             editor.setText("zz")
             assertEquals(count, writes.size)
-            overlay.updateSemantics(mapOf("name" to node))
+            overlay.presentNodes(mapOf("name" to node))
+            editor = overlay.findViewWithTag("nuxie-text-input-name-42")
             // Retirement must restore the last admitted draft, not an IME mutation
             // that arrived while the authored field was absent.
-            assertEquals("ok", editor.text.toString())
+            assertTrue("Retirement restores the admitted secure draft", editor.text.toString() == "ok")
         } finally { overlay.close(); controller.pause().stop().destroy() }
     }
 
@@ -306,20 +249,20 @@ class ExperienceTextInputTest {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
         val input = ExperienceTextInput.forScreen(textInputDescriptor("ok"), "survey").single()
         val writes = mutableListOf<String>()
-        val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
+        val overlay = nativeOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, text, _, done -> writes += text; done(Result.success(Unit)) }, { throw it })
         try {
             controller.get().setContentView(overlay)
             overlay.layout(0, 0, 400, 400)
-            overlay.update(snapshot(), capturedGeometry())
-            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+            overlay.presentGeometry(snapshot(), capturedGeometry())
+            var editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name-42")
             val group = ai.nuxie.sdk.runtime.NativeSemanticNode(10, -1, 0, 9, 0, 0, 0, 0,
                 0f, 0f, 200f, 100f, "Group", "", "")
             val field = group.copy(id = 42, parentId = 10, role = 6, label = "Name")
             fun publish(disabled: Boolean) {
                 val tree = ai.nuxie.sdk.runtime.NuxieSemanticTree(1, 1,
                     listOf(field, group.copy(stateFlags = if (disabled) 64 else 0)))
-                overlay.updateSemantics(mapOf("name" to tree.nodes.single { it.id == 42L }))
+                overlay.presentNodes(mapOf("name" to tree.nodes.single { it.id == 42L }))
             }
             publish(false)
             assertTrue(editor.requestFocus())
@@ -346,7 +289,7 @@ class ExperienceTextInputTest {
     }
 
     @Test
-    fun `native preparation takes the latest draft and fences stale IME callbacks until abort`() {
+    fun `native preparation fences stale IME callbacks and resumes the accepted occurrence`() {
         val contract = Json.parseToJsonElement(ai.nuxie.sdk.fixtures.FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/navigation-input-handoff-android.json").readText()) as JsonObject
         fun value(key: String) = (contract.getValue(key) as JsonPrimitive).content
@@ -354,10 +297,10 @@ class ExperienceTextInputTest {
         val state = ExperienceTextInputState()
         val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(maxLength = null)
         val writes = mutableListOf<String>()
-        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+        val overlay = nativeOverlay(activity, ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, text, _, done -> writes += text; done(Result.success(Unit)) },
             { throw it }, state)
-        val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+        var editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name-42")
         editor.setText(value("initialDraft"))
         val target = state.copyForPreparation()
         editor.setText(value("latestDraft"))
@@ -365,14 +308,15 @@ class ExperienceTextInputTest {
         overlay.setInputEnabled(false)
         target.refreshBeforeMount()
         val targetSession = target.bind()
-        assertEquals(ExperienceTextInputState.Value(value("latestDraft"), 1, 3), targetSession.read("name"))
+        assertEquals(value("latestDraft"), checkNotNull(nativeFixtures[overlay]).text)
+        assertNull(targetSession.read("name"))
         val count = writes.size
         editor.setText(value("staleImeDraft"))
         assertEquals(count, writes.size)
         targetSession.write("name", ExperienceTextInputState.Value("provisional", 0, 0))
         // A response accepted while native preparation runs must not be emitted again on arrival.
-        state.recordCommit("name", value("acceptedResponse"))
-        assertEquals(value("acceptedResponse"), target.committedValue("name"))
+        state.recordCommit("name:1", value("acceptedResponse"))
+        assertEquals(value("acceptedResponse"), target.committedValue("name:1"))
         overlay.setInputEnabled(true)
         assertEquals(value("latestDraft"), editor.text.toString())
         assertEquals(1, editor.selectionStart)
@@ -383,38 +327,30 @@ class ExperienceTextInputTest {
     }
 
     @Test
-    fun `recreated editors restore draft and selection without accepting stale owners`() {
+    fun `recreated editors seed captured source and reject callbacks from stale owners`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val state = ExperienceTextInputState()
-        val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(maxLength = null)
+        val input = ExperienceTextInput.forScreen(textInputDescriptor("ok"), "survey").single().copy(maxLength = null)
         val writes = mutableListOf<String>()
         val callbacks = mutableListOf<(Result<Unit>) -> Unit>()
-        val failures = mutableListOf<Throwable>()
-        fun overlay() = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+        fun overlay() = nativeOverlay(activity, ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, value, _, done -> writes += value; callbacks += done },
-            failures::add, state)
+            { throw it }, state)
         val first = overlay()
-        val oldEditor = first.findViewWithTag<EditText>("nuxie-text-input-name")
-        oldEditor.setText("Iris")
-        oldEditor.setSelection(1, 3)
-        val staleCompletion = callbacks.last()
-        // Activity attachment may overlap its predecessor's asynchronous teardown.
+        val oldEditor = first.findViewWithTag<EditText>("nuxie-text-input-name-42")
+        oldEditor.setText("pending")
+        val staleCompletion = callbacks.single()
         val second = overlay()
-        val editor = second.findViewWithTag<EditText>("nuxie-text-input-name")
-        assertEquals("Iris", editor.text.toString())
-        assertEquals(1, editor.selectionStart)
-        assertEquals(3, editor.selectionEnd)
+        val editor = second.findViewWithTag<EditText>("nuxie-text-input-name-42")
+        assertEquals("ok", editor.text.toString())
         assertFalse(editor.isSaveEnabled)
         val count = writes.size
         oldEditor.setText("stale")
         staleCompletion(Result.failure(IllegalStateException("old runtime closed")))
         assertEquals(count, writes.size)
-        assertTrue(failures.isEmpty())
+        assertEquals("ok", editor.text.toString())
         first.close()
         second.close()
-        val third = overlay()
-        assertEquals("Iris", (third.findViewWithTag<EditText>("nuxie-text-input-name")).text.toString())
-        third.close()
     }
 
     @Test @org.robolectric.annotation.Config(sdk = [23, 30])
@@ -422,31 +358,33 @@ class ExperienceTextInputTest {
         val controller = Robolectric.buildActivity(Activity::class.java).setup().visible()
         val input = ExperienceTextInput.forScreen(textInputDescriptor("ok"), "survey").single()
         val writes = mutableListOf<String>()
-        val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
+        val overlay = nativeOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, text, _, done -> writes += text; done(Result.success(Unit)) }, { throw it })
         try {
             controller.get().setContentView(overlay)
             overlay.layout(0, 0, 400, 400)
-            overlay.update(snapshot(), capturedGeometry())
-            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+            overlay.presentGeometry(snapshot(), capturedGeometry())
+            var editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name-42")
             val node = ai.nuxie.sdk.runtime.NativeSemanticNode(42, -1, 0, 6, 0, 0, 0, 0,
                 10f, 20f, 90f, 40f, "Your name", "", "")
-            overlay.updateSemantics(mapOf("name" to node))
+            overlay.presentNodes(mapOf("name" to node))
+            editor = overlay.findViewWithTag("nuxie-text-input-name-42")
             assertEquals(View.VISIBLE, editor.visibility)
             assertTrue(editor.requestFocus())
-            overlay.updateSemantics(emptyMap())
+            overlay.presentNodes(emptyMap())
             val count = writes.size
             assertEquals(View.INVISIBLE, editor.visibility)
             assertFalse(editor.hasFocus())
-            overlay.update(snapshot(), capturedGeometry())
+            overlay.presentGeometry(snapshot(), capturedGeometry())
             assertEquals(View.INVISIBLE, editor.visibility)
             editor.setText("zz")
             assertEquals(count, writes.size)
-            overlay.updateSemantics(mapOf("name" to node))
+            overlay.presentNodes(mapOf("name" to node))
+            editor = overlay.findViewWithTag("nuxie-text-input-name-42")
             assertEquals(View.VISIBLE, editor.visibility)
             assertEquals("ok", editor.text.toString())
             assertFalse(editor.hasFocus())
-            overlay.updateSemantics(mapOf("name" to node.copy(stateFlags = 64)))
+            overlay.presentNodes(mapOf("name" to node.copy(stateFlags = 64)))
             assertEquals(View.VISIBLE, editor.visibility)
             assertFalse(editor.isEnabled)
         } finally { overlay.close(); controller.pause().stop().destroy() }
@@ -459,14 +397,14 @@ class ExperienceTextInputTest {
         val controller = Robolectric.buildActivity(Activity::class.java).setup().visible()
         val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(maxLength = null)
         var writes = 0
-        val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
+        val overlay = nativeOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, _, _, done -> writes++; done(Result.success(Unit)) }, { throw it })
         try {
             controller.get().setContentView(overlay)
             val spec = View.MeasureSpec.makeMeasureSpec(400, View.MeasureSpec.EXACTLY)
             overlay.measure(spec, spec)
             overlay.layout(0, 0, 400, 400)
-            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+            var editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name-42")
             var composing = false
             for (entry in contract.getValue("cases").jsonArray) {
                 val item = entry.jsonObject
@@ -476,7 +414,7 @@ class ExperienceTextInputTest {
                 val field = NuxieTextRunGeometry(1uL, transform, transform,
                     NuxieTextRunGeometry.Bounds(0f, 0f, 10f, 20f),
                     NuxieTextRunGeometry.Layout(transform, NuxieTextRunGeometry.Bounds(0f, 0f, 10f, 20f)), 12f)
-                overlay.update(snapshot(width = Float.NaN), NuxieTextGeometryCapture.Captured(mapOf(input.runName to field)))
+                overlay.presentGeometry(snapshot(width = Float.NaN), NuxieTextGeometryCapture.Captured(mapOf(input.textInputName to field)))
                 overlay.measure(spec, spec)
                 overlay.layout(0, 0, 400, 400)
                 if (item.getValue("corners") == JsonNull) {
@@ -490,7 +428,7 @@ class ExperienceTextInputTest {
                 (editor.parent as View).matrix.mapPoints(corners)
                 item.getValue("corners").jsonArray.forEachIndexed { index, value ->
                     assertEquals(item.getValue("name").jsonPrimitive.content,
-                        value.jsonPrimitive.float * 2f + if (index % 2 == 1) 100f else 0f, corners[index], 0.002f)
+                        value.jsonPrimitive.float, corners[index], 0.002f)
                 }
                 if (!composing) {
                     assertTrue(editor.requestFocus())
@@ -499,19 +437,19 @@ class ExperienceTextInputTest {
                 }
                 val before = writes
                 val selection = editor.selectionStart
-                overlay.update(snapshot(), NuxieTextGeometryCapture.Captured(mapOf(input.runName to field)))
+                overlay.presentGeometry(snapshot(), NuxieTextGeometryCapture.Captured(mapOf(input.textInputName to field)))
                 assertEquals("draft", editor.text.toString())
                 assertEquals(selection, editor.selectionStart)
                 assertTrue(android.view.inputmethod.BaseInputConnection.getComposingSpanStart(editor.text) >= 0)
                 assertEquals("Placement cannot emit text transactions", before, writes)
             }
-            overlay.update(snapshot(), NuxieTextGeometryCapture.Failed(3))
+            overlay.presentGeometry(snapshot(), NuxieTextGeometryCapture.Failed(3))
             assertEquals("Failure cannot restore local-channel placement", View.INVISIBLE, editor.visibility)
             assertFalse(editor.isEnabled)
             val beforeLateIme = writes
             editor.setText("late IME write")
             assertEquals("Missing geometry must fence writes", beforeLateIme, writes)
-            overlay.update(snapshot(), capturedGeometry())
+            overlay.presentGeometry(snapshot(), capturedGeometry())
             assertEquals(View.VISIBLE, editor.visibility)
             assertTrue(editor.isEnabled)
             assertEquals("draft", editor.text.toString())
@@ -520,25 +458,25 @@ class ExperienceTextInputTest {
     }
 
     @Test
-    fun `geometry uses renderer contain fit and invalid geometry hides editor`() {
+    fun `geometry uses view density and invalid geometry hides editor`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(value = "abcd")
-        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+        val overlay = nativeOverlay(activity, ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
         activity.setContentView(overlay)
         overlay.layout(0, 0, 400, 400)
-        overlay.update(snapshot(), capturedGeometry())
-        val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+        overlay.presentGeometry(snapshot(), capturedGeometry())
+        var editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name-42")
         assertEquals("ab", editor.text.toString())
         assertEquals(View.VISIBLE, editor.visibility)
         val origin = floatArrayOf(0f, 0f)
         editor.matrix.mapPoints(origin)
         (editor.parent as View).matrix.mapPoints(origin)
-        assertArrayEquals(floatArrayOf(20f, 140f), origin, 0.002f)
-        assertEquals(160, editor.layoutParams.width)
-        assertEquals(40, editor.layoutParams.height)
+        assertArrayEquals(floatArrayOf(10f, 20f), origin, 0.002f)
+        assertEquals(80, editor.layoutParams.width)
+        assertEquals(20, editor.layoutParams.height)
         assertEquals(Color.TRANSPARENT, editor.currentTextColor)
-        overlay.update(snapshot(), capturedGeometry(width = Float.NaN))
+        overlay.presentGeometry(snapshot(), capturedGeometry(width = Float.NaN))
         assertEquals(View.INVISIBLE, editor.visibility)
         overlay.close()
         assertEquals(0, overlay.childCount)
@@ -549,14 +487,14 @@ class ExperienceTextInputTest {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val writes = mutableListOf<Pair<String, Boolean>>()
         val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single()
-        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+        val overlay = nativeOverlay(activity, ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, text, commit, done ->
                 writes += text to commit; done(Result.success(Unit))
             }, { throw it })
         activity.setContentView(overlay)
         overlay.layout(0, 0, 400, 400)
-        overlay.update(snapshot(), capturedGeometry())
-        val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+        overlay.presentGeometry(snapshot(), capturedGeometry())
+        var editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name-42")
         editor.requestFocus()
         val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
         connection.setComposingText("abc", 1)
@@ -576,15 +514,15 @@ class ExperienceTextInputTest {
         val controller = Robolectric.buildActivity(Activity::class.java).setup().visible()
         val writes = mutableListOf<Pair<String, Boolean>>()
         val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single()
-        val overlay = ExperienceTextInputOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
+        val overlay = nativeOverlay(controller.get(), ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, text, commit, done ->
                 writes += text to commit; done(Result.success(Unit))
             }, { throw it })
         try {
             controller.get().setContentView(overlay)
             overlay.layout(0, 0, 400, 400)
-            overlay.update(snapshot(), capturedGeometry())
-            val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+            overlay.presentGeometry(snapshot(), capturedGeometry())
+            var editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name-42")
             assertTrue(editor.requestFocus())
             val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
             assertTrue(connection.setComposingText("abc", 1))
@@ -610,34 +548,34 @@ class ExperienceTextInputTest {
     }
 
     @Test
-    fun `focused editor owns complete pre-edit text and restores Rive on blur`() {
+    fun `native editor preserves complete pre-edit text without blanking the runtime`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val writes = mutableListOf<Pair<String, Boolean>>()
         val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(value = "abc", maxLength = 3)
-        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+        val overlay = nativeOverlay(activity, ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, text, commit, done ->
                 writes += text to commit; done(Result.success(Unit))
             }, { throw it })
         activity.setContentView(overlay)
         overlay.layout(0, 0, 400, 400)
-        overlay.update(snapshot(), capturedGeometry())
-        val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
-        assertEquals("abc" to false, writes.last())
+        overlay.presentGeometry(snapshot(), capturedGeometry())
+        var editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name-42")
+        assertTrue(writes.isEmpty())
         assertEquals(Color.TRANSPARENT, editor.currentTextColor)
         editor.requestFocus()
-        assertEquals("" to false, writes.last())
-        assertEquals(input.style.color, editor.currentTextColor)
+        assertTrue(writes.none { it.first.isEmpty() })
+        assertEquals(Color.TRANSPARENT, editor.currentTextColor)
         val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
         editor.setSelection(1, 2)
         connection.setComposingText("XYZ", 1)
         assertEquals("aXYZc", editor.text.toString())
-        assertEquals(input.style.color, editor.currentTextColor)
-        assertEquals("" to false, writes.last())
+        assertEquals(Color.TRANSPARENT, editor.currentTextColor)
+        assertTrue(writes.none { it.first.isEmpty() })
         editor.clearFocus()
         assertEquals("aXc" to true, writes.last())
         assertEquals(Color.TRANSPARENT, editor.currentTextColor)
         connection.finishComposingText()
-        assertEquals("aXc" to false, writes.last())
+        assertEquals("aXc", editor.text.toString())
         assertEquals(Color.TRANSPARENT, editor.currentTextColor)
         overlay.close()
     }
@@ -646,10 +584,10 @@ class ExperienceTextInputTest {
     fun `ordinary over-limit insertion cannot discard unselected text`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(value = "ab")
-        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+        val overlay = nativeOverlay(activity, ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
         activity.setContentView(overlay)
-        val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+        var editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name-42")
         val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
         editor.setSelection(1)
         connection.commitText("X", 1)
@@ -667,10 +605,10 @@ class ExperienceTextInputTest {
     fun `composition commit and finish preserve text outside the composing range`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(value = "abc", maxLength = 3)
-        val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
+        val overlay = nativeOverlay(activity, ExperienceArtboardSize(200f, 100f),
             listOf(input), emptyMap(), { _, _, _, done -> done(Result.success(Unit)) }, { throw it })
         activity.setContentView(overlay)
-        val editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name")
+        var editor = overlay.findViewWithTag<EditText>("nuxie-text-input-name-42")
         val connection = checkNotNull(editor.onCreateInputConnection(EditorInfo()))
         editor.setSelection(1, 2)
         connection.setComposingText("XYZ", 1)
@@ -686,90 +624,46 @@ class ExperienceTextInputTest {
     }
 
     @Test
-    fun `a response accepted after preparation starts is not duplicated on arrival`() = runTest {
-        val accepted = kotlinx.coroutines.CompletableDeferred<Unit>()
-        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
-        val batches = mutableListOf<JourneyScreenEmissionBatch>()
-        val sourceState = ExperienceTextInputState()
-        val source = JourneyRuntimeEmissionCoordinator("journey", "survey", textInputDescriptor(), 0, 0,
-            onEmissionBatch = { entered.complete(Unit); accepted.await(); batches += it; true },
-            onPresentationRevealed = {})
-        assertTrue(source.reveal())
-        val pending = async { source.publishTextCommit("name", "Ada", sourceState) }
-        entered.await()
-        val destinationState = sourceState.copyForPreparation()
-        assertNull(destinationState.committedValue("name"))
-        accepted.complete(Unit)
-        assertTrue(pending.await())
-        val destination = JourneyRuntimeEmissionCoordinator("journey", "survey", textInputDescriptor(), 1, 1,
-            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
-        assertTrue(destination.reveal())
-        assertTrue(destination.publishTextCommit("name", "Ada", destinationState))
-        assertEquals(1, batches.size)
-        source.close()
-        destination.close()
-    }
-
-    @Test
-    fun `text responses wait for reveal deduplicate and stop at close`() = runTest {
-        val batches = mutableListOf<JourneyScreenEmissionBatch>()
+    fun `text commits wait for reveal and stop at close without publications`() = runTest {
+        val state = ExperienceTextInputState()
         val coordinator = JourneyRuntimeEmissionCoordinator(
             "journey", "survey", textInputDescriptor(), 3, 7,
-            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {},
+            onEmissionBatch = { _, _ -> error("Text commits cannot publish answers") },
+            onPresentationRevealed = {},
         )
-        val pending = async { coordinator.publishTextCommit("name", "Ada") }
+        val pending = async { coordinator.publishTextCommit("name", "Ada", state, snapshot = snapshot()) }
         yield()
         assertFalse(pending.isCompleted)
         assertTrue(coordinator.reveal())
         assertTrue(pending.await())
-        assertEquals(3L, batches.single().batchSequence)
-        assertEquals(7L, batches.single().emissions.single().sequence)
-        assertEquals("text_input:name", batches.single().source.actionId)
-        assertEquals("name", batches.single().source.componentId)
-        assertEquals(JsonPrimitive("answer"), batches.single().emissions.single().payload["field"])
-        assertEquals(JsonPrimitive("Ada"), batches.single().emissions.single().payload["value"])
-        assertTrue(coordinator.publishTextCommit("name", "Ada"))
-        assertFalse(coordinator.publishTextCommit("other-screen-input", "injected"))
-        assertEquals(1, batches.size)
-        assertTrue(coordinator.publishTextCommit("name", ""))
-        assertEquals(4L, batches.last().batchSequence)
+        assertEquals("Ada", state.committedValue("name:1"))
+        assertTrue(coordinator.publishTextCommit("name", "", state, snapshot = snapshot()))
+        assertEquals("", state.committedValue("name:1"))
         coordinator.close()
-        assertFalse(coordinator.publishTextCommit("name", "late"))
-        assertEquals(2, batches.size)
+        assertFalse(coordinator.publishTextCommit("name", "late", state, snapshot = snapshot()))
+        assertEquals("", state.committedValue("name:1"))
     }
 
     @Test
-    fun `accepted text commits survive screen replacement but drafts and rejected commits do not suppress responses`() = runTest {
+    fun `accepted native text survives preparation and screen replacement`() = runTest {
         val state = ExperienceTextInputState()
-        val values = mutableListOf<JsonPrimitive>()
-        var accept = true
         fun coordinator() = JourneyRuntimeEmissionCoordinator(
             "journey", "survey", textInputDescriptor(), 0, 0,
-            onEmissionBatch = {
-                values += it.emissions.single().payload.getValue("value") as JsonPrimitive
-                accept
-            }, onPresentationRevealed = {},
+            onEmissionBatch = { _, _ -> error("Text commits cannot publish answers") },
+            onPresentationRevealed = {},
         )
         val first = coordinator()
         assertTrue(first.reveal())
-        assertTrue(first.publishTextCommit("name", "Al", state))
+        assertTrue(first.publishTextCommit("name", "Al", state, snapshot = snapshot()))
+        val replacement = state.copyForPreparation()
         first.close()
         state.detach()
         val second = coordinator()
         assertTrue(second.reveal())
-        assertTrue(second.publishTextCommit("name", "Al", state))
-        assertEquals(listOf(JsonPrimitive("Al")), values)
-        accept = false
-        assertFalse(second.publishTextCommit("name", "Bo", state))
-        assertEquals("Al", state.committedValue("name"))
-        val third = coordinator()
-        assertTrue(third.reveal())
-        accept = true
-        state.bind().write("name", ExperienceTextInputState.Value("Bo", 2, 2))
-        assertTrue(third.publishTextCommit("name", "Bo", state))
-        assertTrue(third.publishTextCommit("name", "", state))
-        assertEquals(listOf("Al", "Bo", "Bo", ""), values.map { it.content })
-        third.close()
+        assertEquals("Al", replacement.committedValue("name:1"))
+        assertTrue(second.publishTextCommit("name", "Bo", replacement, snapshot = snapshot()))
+        assertEquals("Bo", replacement.committedValue("name:1"))
+        second.close()
     }
 
     @Test
@@ -777,12 +671,70 @@ class ExperienceTextInputTest {
         var publications = 0
         val coordinator = JourneyRuntimeEmissionCoordinator(
             "journey", "survey", textInputDescriptor("abcd"), 0, 0,
-            onEmissionBatch = { publications++; true }, onPresentationRevealed = {},
+            onEmissionBatch = { it, _ -> publications++; JourneyEmissionBatchResult.ACCEPTED }, onPresentationRevealed = {},
         )
         assertTrue(coordinator.reveal())
-        assertTrue(coordinator.publishTextCommit("name", "ab"))
+        assertTrue(coordinator.publishTextCommit("name", "ab", snapshot = snapshot()))
         assertEquals(0, publications)
         coordinator.close()
+    }
+
+    private class NativeFixture(val input: ExperienceTextInput, var text: String) {
+        var node = NativeSemanticNode(42, -1, 0, 6, 0, 0, 0, 0,
+            0f, 0f, 100f, 30f, "Your name", "", "")
+        var geometry: NuxieTextGeometryCapture? = null
+        var snapshot: NuxieViewModelSnapshot? = null
+        var present = true
+        var revision = 0L
+    }
+    private val nativeFixtures = java.util.WeakHashMap<ExperienceTextInputOverlay, NativeFixture>()
+
+    // Literal captured occurrences exercise the native overlay; no run-name mapping is involved.
+    private fun nativeOverlay(context: android.content.Context, size: ExperienceArtboardSize,
+        inputs: List<ExperienceTextInput>, fonts: Map<String, java.io.File>,
+        write: (String, String, Boolean, (Result<Unit>) -> Unit) -> Unit,
+        failure: (Throwable) -> Unit, state: ExperienceTextInputState = ExperienceTextInputState()): ExperienceTextInputOverlay {
+        val input = inputs.single()
+        val fixture = NativeFixture(input, ExperienceTextInputLimit.apply(input.value, input.maxLength))
+        val overlay = ExperienceTextInputOverlay(context, size, inputs, fonts, state,
+            nativeWriter = { _, edit, done ->
+                write(input.id, edit.text, false) { result ->
+                    if (result.isSuccess) fixture.text = edit.text
+                    done(if (result.isSuccess) ExperienceSemanticTextDraft.Outcome.ACCEPTED else ExperienceSemanticTextDraft.Outcome.REJECTED)
+                }
+            }, nativeEvent = { _, _, event ->
+                write(input.id, event.text, true) { result -> result.exceptionOrNull()?.let(failure) }
+            })
+        nativeFixtures[overlay] = fixture
+        overlay.layout(0, 0, 400, 400)
+        overlay.presentGeometry(snapshot(), capturedGeometry())
+        return overlay
+    }
+
+    private fun ExperienceTextInputOverlay.presentGeometry(snapshot: NuxieViewModelSnapshot, geometry: NuxieTextGeometryCapture) {
+        val fixture = checkNotNull(nativeFixtures[this])
+        fixture.snapshot = snapshot
+        fixture.geometry = geometry
+        publishFixture(fixture)
+    }
+
+    private fun ExperienceTextInputOverlay.presentNodes(nodes: Map<String, NativeSemanticNode>) {
+        val fixture = checkNotNull(nativeFixtures[this])
+        fixture.present = nodes.isNotEmpty()
+        nodes.values.singleOrNull()?.let { fixture.node = it }
+        publishFixture(fixture)
+    }
+
+    private fun ExperienceTextInputOverlay.publishFixture(fixture: NativeFixture) {
+        if (!fixture.present) { updateNativeFields(emptyList()); return }
+        val geometry = (fixture.geometry as? NuxieTextGeometryCapture.Captured)?.fields?.values?.single()
+        val invalid = NuxieTextRunGeometry.Transform(Float.NaN, 0f, 0f, 1f, 0f, 0f)
+        val bounds = NuxieTextRunGeometry.Bounds(0f, 0f, 80f, 20f)
+        updateNativeFields(listOf(ExperienceNativeTextField(ExperienceTextFieldTarget(fixture.input.id, 42),
+            1, ++fixture.revision, fixture.node,
+            NuxieTextInputGeometry(1u, geometry?.worldTransform ?: invalid, geometry?.textBounds ?: bounds,
+                geometry?.layout, geometry?.firstBaseline, fixture.input.secure, fixture.input.multiline),
+            fixture.text, checkNotNull(fixture.snapshot))))
     }
 
     private fun capturedGeometry(width: Float = 80f): NuxieTextGeometryCapture {

@@ -26,6 +26,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -184,12 +186,25 @@ internal class NuxieExperienceActivity : Activity() {
             outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
             correlationId: ULong,
             viewModelSnapshot: NuxieViewModelSnapshot?,
+            saves: List<ExperienceResponseSaveRequest>,
         ) {
+            val weakScreen = java.lang.ref.WeakReference(this)
+            val frameSaves = saves.map { request ->
+                ExperienceFrameSave(request, checkNotNull(prepared.screenId)) {
+                    withContext(Dispatchers.Main.immediate) {
+                        val screen = weakScreen.get()
+                        if (screen != null && !screen.rendererEffects.isRetired && screen.closeState.reason == null &&
+                            PresentationRegistry.currentScreen(screen.id) === screen) {
+                            request.awaitTrigger?.let { screen.mounted?.surface?.confirmResponseSave(it) }
+                        }
+                    }
+                }
+            }
             synchronized(effectsLock) {
                 if (provisional) pendingEffects += {
-                    PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot, this)
+                    PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot, this, frameSaves)
                 } else if (closeState.reason == null) {
-                    PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot, this)
+                    PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot, this, frameSaves)
                 }
             }
         }
@@ -276,9 +291,9 @@ internal class NuxieExperienceActivity : Activity() {
             blocksInput = false
         }
 
-        fun setVisible(visible: Boolean) {
+        fun setVisible(visible: Boolean, preservePendingInput: Boolean = false) {
             animation?.setVisible(visible)
-            if (blocksInput) target.mounted?.setVisible(visible)
+            if (blocksInput) target.mounted?.setVisible(visible, preservePendingInput)
         }
 
         fun cancel() { animation?.cancel() }
@@ -311,9 +326,13 @@ internal class NuxieExperienceActivity : Activity() {
                     outgoingScreen.transitionEvents.performWith(incomingScreen.transitionEvents, custom) {
                         incoming.alpha = 1f
                         if (custom.incomingOnTop) incoming.bringToFront() else outgoing.bringToFront()
-                        outgoingScreen.beginCustomTransition(custom.id, outgoing = true)
-                        incomingScreen.beginCustomTransition(custom.id, outgoing = false)
                         incomingScreen.setVisible(visible)
+                        coroutineScope {
+                            val outgoingPhase = async { outgoingScreen.beginCustomTransition(custom.id, outgoing = true) }
+                            val incomingPhase = async { incomingScreen.beginCustomTransition(custom.id, outgoing = false) }
+                            outgoingPhase.await()
+                            incomingPhase.await()
+                        }
                     }
                 } else {
                     animation = ExperienceScreenViewTransition(outgoing, incoming, plan.kind)
@@ -627,8 +646,8 @@ internal class NuxieExperienceActivity : Activity() {
     override fun onStop() {
         visible = false
         loadingView?.setActive(false)
-        navigation?.setVisible(false)
-        screens.forEach { it.mounted?.setVisible(false) }
+        navigation?.setVisible(false, preservePendingInput = true)
+        screens.forEach { it.mounted?.setVisible(false, preservePendingInput = true) }
         super.onStop()
     }
 
@@ -700,7 +719,12 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private fun removeRecoveryView() {
-        recoveryView?.let { it.close(); contentRoot.removeView(it) }
+        recoveryView?.let {
+            it.close()
+            it.visibility = View.INVISIBLE
+            // First-frame reveal may still be traversing this child list.
+            contentRoot.post { contentRoot.removeView(it) }
+        }
         recoveryView = null
     }
 

@@ -118,6 +118,8 @@ internal enum class NuxieViewModelMutationKind(val nativeValue: Int) {
     SET_IMAGE(7),
     SET_VIEW_MODEL(8),
     LIST_INSERT(9),
+    LIST_REMOVE(10),
+    LIST_MOVE(12),
     LIST_SET(13),
     LIST_CLEAR(14),
 }
@@ -132,6 +134,7 @@ internal data class NativeViewModelWrite(
     val boolValue: Boolean = false,
     val relatedViewModel: Long = 0,
     val index: Long = 0,
+    val secondIndex: Long = 0,
 )
 
 internal sealed interface NuxieViewModelScalarValue {
@@ -181,6 +184,17 @@ internal class NuxieViewModelSnapshot private constructor(
     /** Native occurrence identity, not an authored alias or a retained handle. */
     internal val nativeRootInstanceId: Long get() = rootInstanceId
 
+    fun withoutRootProperty(name: String): NuxieViewModelSnapshot {
+        val archive = retainedGraph.withoutRootProperty(name)
+        val kept = archive.instanceIdentities
+        return NuxieViewModelSnapshot(rootInstanceId, instancesById.values.filter { it.id in kept }.map { instance ->
+            instance.copy(values = instance.values.filter { (key, value) ->
+                !(instance.id == rootInstanceId && key == name) &&
+                    (value !is Value.Reference || value.instanceId in kept)
+            })
+        }, instanceIds.filterValues { it in kept }, archive)
+    }
+
     /** Authored geometry paths may include the root view-model label. */
     fun resolveGeometryNumber(path: String): Float? =
         (resolveGeometryValue(path) as? Value.NumberValue)?.value?.takeIf(Float::isFinite)
@@ -213,10 +227,8 @@ internal class NuxieViewModelSnapshot private constructor(
         path: String,
         viewModelName: String?,
         instanceId: String?,
-        isRelative: Boolean? = null,
     ): String? {
-        if (isRelative == true && instanceId == null) return null
-        val sourceInstanceId = if (isRelative == false) null else instanceId
+        val sourceInstanceId = instanceId
         val root = instancesById[rootInstanceId] ?: return null
         val selected = when {
             sourceInstanceId != null -> instanceIds[sourceInstanceId]?.let(instancesById::get)
@@ -227,10 +239,15 @@ internal class NuxieViewModelSnapshot private constructor(
         return (resolveValue(path, selected) as? Value.StringValue)?.value
     }
 
-    /** Only one authenticated alias for an instance present in this frame is admissible. */
-    fun authoredInstanceId(nativeInstanceId: Long): String? {
-        if (nativeInstanceId !in instancesById) return null
-        return instanceIds.entries.singleOrNull { it.value == nativeInstanceId }?.key
+    fun containsInstance(nativeInstanceId: Long): Boolean = nativeInstanceId in instancesById
+
+    fun instanceAliases(nativeInstanceId: Long): Set<String> =
+        instanceIds.filterValues { it == nativeInstanceId }.keys
+
+    fun resolveNativeString(path: String, viewModelName: String?, nativeInstanceId: Long): String? {
+        val selected = instancesById[nativeInstanceId] ?: return null
+        if (viewModelName != null && selected.schemaName != viewModelName) return null
+        return (resolveValue(path, selected) as? Value.StringValue)?.value
     }
 
     /** Capture stable aliases before playback; never reassign them when a reference changes. */
@@ -420,9 +437,6 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
 
     fun freeArtboard(handle: Long): Unit = error("freeArtboard is not implemented")
 
-    fun setTextRun(handle: Long, name: String, text: String): NativeCallResult<Boolean> =
-        error("setTextRun is not implemented")
-
     fun newDefaultPlayer(artboardHandle: Long): Long =
         error("newDefaultPlayer is not implemented")
 
@@ -432,11 +446,25 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
     fun stateMachineNames(fileHandle: Long, artboardName: String?): NativeCallResult<List<String>> =
         error("stateMachineNames is not implemented")
 
+    fun playerKind(playerHandle: Long): NativeCallResult<Int> = error("playerKind is not implemented")
+
+    fun playerFocusState(playerHandle: Long): NativeCallResult<NuxieFocusState> =
+        error("playerFocusState is not implemented")
+
     fun playerStateMachineName(playerHandle: Long): NativeCallResult<String> =
         error("playerStateMachineName is not implemented")
 
     fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int =
         error("stepPlayerFrame is not implemented")
+
+    fun setPlayerGlobalViewModel(playerHandle: Long, name: ByteArray, viewModelHandle: Long): Int =
+        error("setPlayerGlobalViewModel is not implemented")
+
+    fun setPlayerLayoutSize(playerHandle: Long, width: Float, height: Float): Int =
+        error("setPlayerLayoutSize is not implemented")
+
+    fun playerLayoutSize(playerHandle: Long): NativeCallResult<FloatArray> =
+        error("playerLayoutSize is not implemented")
 
     fun freePlayer(handle: Long): Unit = error("freePlayer is not implemented")
 
@@ -467,7 +495,7 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         playerHandle: Long,
         windowHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int = error("renderAndPresent is not implemented")
 
     fun copyPlayerToWindow(
@@ -475,14 +503,14 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         playerHandle: Long,
         windowHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int = error("copyPlayerToWindow is not implemented")
 
     fun renderToCpuFrame(
         rendererHandle: Long,
         playerHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): NuxieCpuFrame = error("renderToCpuFrame is not implemented")
 
     fun freeRenderer(handle: Long): Unit = error("freeRenderer is not implemented")
@@ -501,6 +529,9 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         authoredInstanceIndex: Int?,
     ): NativeCallResult<Long> = error("newViewModel is not implemented")
 
+    fun acquireListItem(owner: Long, path: String, index: Int, expectedIdentity: Long): NativeCallResult<Long> =
+        error("acquireListItem is not implemented")
+
     fun newDefaultViewModel(artboardHandle: Long): NativeCallResult<Long> =
         error("newDefaultViewModel is not implemented")
 
@@ -509,6 +540,15 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
 
     fun snapshotViewModel(viewModelHandle: Long): NativeCallResult<NativeViewModelSnapshot> =
         error("snapshotViewModel is not implemented")
+
+    fun installValueMarkers(file: Long, entries: Array<NativeValueMarker>): Int =
+        error("installValueMarkers is not implemented")
+
+    fun installValueRules(file: Long, entries: Array<NativeValueRule>): NativeRuleInstallResult =
+        error("installValueRules is not implemented")
+
+    fun installRuleGroups(file: Long, entries: Array<NativeRuleGroup>): Int =
+        error("installRuleGroups is not implemented")
 
     fun bindViewModel(artboardHandle: Long, viewModelHandle: Long): Int =
         error("bindViewModel is not implemented")
@@ -523,6 +563,7 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         elapsedSeconds: Float,
         correlationId: Long,
         textRunNames: List<String> = emptyList(),
+        focusInputs: List<NativeFocusInput> = emptyList(),
     ): NativeCallResult<NativePlayerStepOutcome> = error("stepPlayer is not implemented")
 
     fun freeViewModel(handle: Long): Int = error("freeViewModel is not implemented")
@@ -657,16 +698,6 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         NuxieRuntimeBridge.nativeArtboardInstanceFree(handle)
     }
 
-    override fun setTextRun(handle: Long, name: String, text: String): NativeCallResult<Boolean> {
-        val status = IntArray(1)
-        val changed = NuxieRuntimeBridge.nativeArtboardSetTextRun(
-            handle, name.toByteArray(Charsets.UTF_8), text.toByteArray(Charsets.UTF_8), status,
-        )
-        if (status[0] != NUX_STATUS_OK) return NativeCallResult(status[0], null)
-        check(changed == 0 || changed == 1) { "Native runtime returned a non-canonical text mutation result" }
-        return NativeCallResult(status[0], changed == 1)
-    }
-
     override fun stateMachineNames(fileHandle: Long, artboardName: String?): NativeCallResult<List<String>> {
         val status = intArrayOf(4)
         val names = NuxieRuntimeBridge.nativeFileStateMachineNames(fileHandle, artboardName?.encodeToByteArray(), status)
@@ -700,8 +731,6 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         val value = NuxieRuntimeBridge.nativePlayerFieldStringCopy(player, snapshot, nodeId, name.encodeToByteArray(), status)
         return NativeCallResult(status.single(), value)
     }
-    override fun fieldStringSet(player: Long, snapshot: Long, nodeId: Long, name: String, value: ByteArray): Int =
-        NuxieRuntimeBridge.nativePlayerFieldStringSet(player, snapshot, nodeId, name.encodeToByteArray(), value)
     override fun textInputGeometry(player: Long, snapshot: Long, nodeId: Long, name: String): NativeCallResult<NativeTextInputGeometry> {
         val status = intArrayOf(4)
         val geometry = NuxieRuntimeBridge.nativePlayerTextInputGeometry(player, snapshot, nodeId, name.encodeToByteArray(), status)
@@ -717,6 +746,22 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
     override fun queueSemanticAction(player: Long, snapshot: Long, nodeId: Long, action: Int) =
         NuxieRuntimeBridge.nativePlayerQueueSemanticAction(player, snapshot, nodeId, action)
 
+    override fun playerKind(playerHandle: Long): NativeCallResult<Int> {
+        val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
+        val kind = NuxieRuntimeBridge.nativePlayerKind(playerHandle, status)
+        return NativeCallResult(status.single(), kind)
+    }
+
+    override fun playerFocusState(playerHandle: Long): NativeCallResult<NuxieFocusState> {
+        val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
+        val flags = NuxieRuntimeBridge.nativePlayerFocusState(playerHandle, status)
+        val value = flags?.let {
+            check(it.size == 2) { "Native focus state must have two flags" }
+            NuxieFocusState(it[0], it[1])
+        }
+        return NativeCallResult(status.single(), value)
+    }
+
     override fun playerStateMachineName(playerHandle: Long): NativeCallResult<String> {
         val status = intArrayOf(4)
         val name = NuxieRuntimeBridge.nativePlayerStateMachineName(playerHandle, status)
@@ -731,6 +776,18 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
 
     override fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int =
         NuxieRuntimeBridge.nativePlayerStep(playerHandle, elapsedSeconds)
+
+    override fun setPlayerGlobalViewModel(playerHandle: Long, name: ByteArray, viewModelHandle: Long): Int =
+        NuxieRuntimeBridge.nativePlayerGlobalViewModelSet(playerHandle, name, viewModelHandle)
+
+    override fun setPlayerLayoutSize(playerHandle: Long, width: Float, height: Float): Int =
+        NuxieRuntimeBridge.nativePlayerLayoutSizeSet(playerHandle, width, height)
+
+    override fun playerLayoutSize(playerHandle: Long): NativeCallResult<FloatArray> {
+        val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
+        val size = NuxieRuntimeBridge.nativePlayerLayoutSize(playerHandle, status)
+        return NativeCallResult(status.single(), size)
+    }
 
     override fun freePlayer(handle: Long) {
         NuxieRuntimeBridge.nativePlayerFree(handle)
@@ -753,13 +810,13 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         playerHandle: Long,
         windowHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int = NuxieRuntimeBridge.nativeRendererRenderPlayer(
         rendererHandle,
         playerHandle,
         windowHandle,
         clearColor,
-        fitContainCenter,
+        layoutScaleFactor,
     )
 
     override fun copyPlayerToWindow(
@@ -767,22 +824,22 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         playerHandle: Long,
         windowHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int = NuxieRuntimeBridge.nativeRendererCopyPlayerToWindow(
-        rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter,
+        rendererHandle, playerHandle, windowHandle, clearColor, layoutScaleFactor,
     )
 
     override fun renderToCpuFrame(
         rendererHandle: Long,
         playerHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): NuxieCpuFrame = checkNotNull(
         NuxieRuntimeBridge.nativeRendererRenderPlayerToCpuFrame(
             rendererHandle,
             playerHandle,
             clearColor,
-            fitContainCenter,
+            layoutScaleFactor,
         ),
     ) { "Android Vulkan renderer did not return a CPU frame" }
 
@@ -818,6 +875,14 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         return NativeCallResult(status.single(), handle.takeUnless { it == 0L })
     }
 
+    override fun acquireListItem(owner: Long, path: String, index: Int, expectedIdentity: Long): NativeCallResult<Long> {
+        val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
+        val handle = NuxieRuntimeBridge.nativeViewModelListItemAcquire(
+            owner, path.encodeToByteArray(), index, expectedIdentity, status,
+        )
+        return NativeCallResult(status.single(), handle.takeUnless { it == 0L })
+    }
+
     override fun newDefaultViewModel(artboardHandle: Long): NativeCallResult<Long> {
         val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
         val handle = NuxieRuntimeBridge.nativeViewModelInstanceNewDefault(artboardHandle, status)
@@ -836,6 +901,18 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         return NativeCallResult(status.single(), snapshot)
     }
 
+    override fun installValueMarkers(file: Long, entries: Array<NativeValueMarker>): Int =
+        NuxieRuntimeBridge.nativeFileSetValueMarkers(file, entries)
+
+    override fun installValueRules(file: Long, entries: Array<NativeValueRule>): NativeRuleInstallResult {
+        val diagnostic = arrayOfNulls<String>(2)
+        val status = NuxieRuntimeBridge.nativeFileSetValueRules(file, entries, diagnostic)
+        return NativeRuleInstallResult(status, diagnostic[0], diagnostic[1])
+    }
+
+    override fun installRuleGroups(file: Long, entries: Array<NativeRuleGroup>): Int =
+        NuxieRuntimeBridge.nativeFileSetRuleGroups(file, entries)
+
     override fun bindViewModel(artboardHandle: Long, viewModelHandle: Long): Int =
         NuxieRuntimeBridge.nativeArtboardInstanceBindViewModel(artboardHandle, viewModelHandle)
 
@@ -850,6 +927,7 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
             boolValue = write.boolValue,
             relatedViewModel = write.relatedViewModel,
             index = write.index,
+            secondIndex = write.secondIndex,
         )
 
     override fun stepPlayer(
@@ -859,6 +937,7 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         elapsedSeconds: Float,
         correlationId: Long,
         textRunNames: List<String>,
+        focusInputs: List<NativeFocusInput>,
     ): NativeCallResult<NativePlayerStepOutcome> {
         val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
         val outcome = NuxieRuntimeBridge.nativePlayerStepTyped(
@@ -877,6 +956,7 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
             elapsedSeconds = elapsedSeconds,
             correlationId = correlationId,
             textRunNames = textRunNames.map { it.encodeToByteArray() }.toTypedArray(),
+            focusInputs = focusInputs.toTypedArray(),
             statusOut = status,
         )
         return NativeCallResult(status.single(), outcome)
@@ -1118,6 +1198,8 @@ internal class NuxieBoundViewModel(
 internal class NuxieRuntimeCallException(
     operation: String,
     val status: Int,
+    val diagnosticCode: String? = null,
+    val diagnosticMessage: String? = null,
 ) : IllegalStateException("Native runtime $operation failed with status $status")
 
 internal fun requireNativeSuccess(status: Int, operation: String) {

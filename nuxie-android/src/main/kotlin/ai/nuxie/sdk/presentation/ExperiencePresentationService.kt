@@ -16,7 +16,6 @@ import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.Collections
@@ -92,6 +91,7 @@ internal data class PreparedPresentation(
     val screenLifecycle: ExperienceScreenLifecycle = ExperienceScreenLifecycle(),
     val transition: JsonObject? = null,
     val retainedViewModel: AtomicReference<NuxieViewModelSnapshot?> = AtomicReference(),
+    val runValues: ExperienceRunValues? = null,
 )
 
 internal sealed interface PresentationShell {
@@ -174,7 +174,7 @@ internal object PresentationRegistry {
         val onFailure: (Throwable) -> Unit,
         val onDismissed: (CloseReason) -> Unit,
         val onOutcome: (CloseReason) -> Unit,
-        val onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit,
+        val onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?, RendererEffectLifetime?, List<ExperienceFrameSave>) -> Unit,
         val onTextCommitted: (String, String, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit,
         val onRecovery: (Throwable) -> Unit = {},
         val onTextInputEvent: (String, ExperienceSemanticTextDraft.Event, RendererEffectLifetime?) -> Unit = { _, _, _ -> },
@@ -206,8 +206,8 @@ internal object PresentationRegistry {
         onFailure: (Throwable) -> Unit,
         onDismissed: (CloseReason) -> Unit,
         onOutcome: (CloseReason) -> Unit,
-        onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit =
-            { _, _, _, _ -> },
+        onRuntimeStep: (NuxiePlayerStepOutcome, ULong, NuxieViewModelSnapshot?, RendererEffectLifetime?, List<ExperienceFrameSave>) -> Unit =
+            { _, _, _, _, _ -> },
         onTextCommitted: (String, String, NuxieViewModelSnapshot?, RendererEffectLifetime?) -> Unit = { _, _, _, _ -> },
         requiresAcquiring: Boolean = false,
         onRecovery: (Throwable) -> Unit = {},
@@ -239,7 +239,7 @@ internal object PresentationRegistry {
         synchronized(lock) {
             check(id !in entries) { "duplicate presentation id" }
             Entry(PresentationContentState.Acquiring(screen), Callbacks({}, { onClosed(CloseReason.Error(it)) }, onClosed,
-                onClosed, { _, _, _, _ -> }, { _, _, _, _ -> })).also { it.retry = onRetry; entries[id] = it }.detached
+                onClosed, { _, _, _, _, _ -> }, { _, _, _, _ -> })).also { it.retry = onRetry; entries[id] = it }.detached
         }
 
     fun updateAcquisition(id: String, progress: AcquisitionProgress) = synchronized(lock) {
@@ -466,6 +466,7 @@ internal object PresentationRegistry {
         correlationId: ULong,
         viewModelSnapshot: NuxieViewModelSnapshot?,
         source: PresentationScreenHandle? = null,
+        saves: List<ExperienceFrameSave> = emptyList(),
     ) {
         val callback = synchronized(lock) {
             entries[id]?.takeUnless {
@@ -473,7 +474,7 @@ internal object PresentationRegistry {
                     (source != null && (it.latestScreen.get() !== source || source.rendererEffects?.isRetired == true))
             }?.callbacks?.onRuntimeStep
         } ?: return
-        callback(outcome, correlationId, viewModelSnapshot, source?.rendererEffects)
+        callback(outcome, correlationId, viewModelSnapshot, source?.rendererEffects, saves)
     }
 
     fun currentScreen(id: String): PresentationScreenHandle? = synchronized(lock) {
@@ -547,9 +548,12 @@ internal class ExperiencePresentationService(
     private val emit: (String, Map<String, Any?>, String?) -> Unit,
     private val scope: CoroutineScope,
     private val runtimeAvailable: () -> Boolean,
+    private val currentDistinctId: () -> String,
     private val launch: (String) -> Unit,
     private val commerce: JourneyCommercePreparing = JourneyCommercePreparing.NONE,
-    private val openLink: (String, String?) -> Unit = { _, _ -> },
+    private val openLink: (JourneyLinkRouting.Destination, Activity?) -> Boolean = { _, _ -> false },
+    private val foregroundActivity: () -> Activity? = { null },
+    private val isAppForeground: () -> Boolean = { foregroundActivity() != null },
     private val firstFrameTimeoutMillis: Long = FIRST_FRAME_TIMEOUT_MILLIS,
     private val beforeHostTeardownForTesting: () -> Unit = {},
 ) {
@@ -558,20 +562,56 @@ internal class ExperiencePresentationService(
         emit: (String, Map<String, Any?>, String?) -> Unit,
         scope: CoroutineScope,
         runtimeAvailable: () -> Boolean,
+        currentDistinctId: () -> String,
         commerce: JourneyCommercePreparing = JourneyCommercePreparing.NONE,
+        foregroundActivity: () -> Activity? = { null },
+        isAppForeground: () -> Boolean = { foregroundActivity() != null },
     ) : this(
         emit = emit,
         scope = scope,
         runtimeAvailable = runtimeAvailable,
+        currentDistinctId = currentDistinctId,
         launch = AndroidPresentationLauncher(context.applicationContext ?: context),
         commerce = commerce,
-        openLink = { url, _ ->
-            (context.applicationContext ?: context).startActivity(
-                Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
-        },
+        openLink = { destination, activity -> openActivityLink(context, destination, activity) },
+        foregroundActivity = foregroundActivity,
+        isAppForeground = isAppForeground,
         firstFrameTimeoutMillis = FIRST_FRAME_TIMEOUT_MILLIS,
     )
+
+    internal suspend fun openJourneyLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest): JourneyOpenedLink? {
+        val active = synchronized(stateLock) { current?.takeIf { it.ref.journeyId == owner.journeyId && it.ownerDistinctId == owner.distinctId } }
+        return openLinkForPresentation(active, link)
+    }
+
+    private suspend fun openLinkForPresentation(active: ActivePresentation?, link: JourneyLinkRequest): JourneyOpenedLink? =
+        withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+            val activity = foregroundActivity()?.takeUnless { it.isDestroyed }
+            val screen = active?.let { PresentationRegistry.currentScreen(it.id) }
+            val live = active != null && active.ownerDistinctId == currentDistinctId() &&
+                active.journey.fences.isCurrent() &&
+                synchronized(stateLock) { current === active && !transitionInProgress } &&
+                active.shown.get() && !active.closed.get() &&
+                active.outcomeReason.get() == null && screen?.screenCloseReason() == null &&
+                screen?.purchaseActivity() === activity && activity?.isFinishing == false && activity.window.decorView.isAttachedToWindow
+            val state = if (!isAppForeground()) JourneyLinkRouting.State.BACKGROUND
+                else if (live) JourneyLinkRouting.State.SETTLED else JourneyLinkRouting.State.CLOSED
+            val destination = JourneyLinkRouting.route(link.url, link.target, state) ?: return@withContext null
+            val opened = try { openLink(destination, activity?.takeUnless { it.isFinishing }) }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (failure: Throwable) { ai.nuxie.sdk.logging.NuxieLog.w("ExperiencePresentationService", "Link handoff failed", failure); false }
+            if (opened) link.copy(screenId = link.screenId ?: active?.journey?.screenId)
+                .opened(if (destination is JourneyLinkRouting.Destination.InApp) "in_app" else "external") else null
+        }
+
+    private suspend fun openAndRecord(owner: JourneyOutcome, link: JourneyLinkRequest, record: suspend (JourneyOpenedLink) -> Unit): Boolean {
+        val active = synchronized(stateLock) { current?.takeIf { it.journey === owner } }
+        val opened = openLinkForPresentation(active, link) ?: return false
+        try { record(opened) }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Throwable) { ai.nuxie.sdk.logging.NuxieLog.w("ExperiencePresentationService", "Opened link recording failed", failure) }
+        return true
+    }
 
     private data class ActivePresentation(
         val id: String,
@@ -595,6 +635,7 @@ internal class ExperiencePresentationService(
     )
 
     private class JourneyOutcome(
+        val fences: JourneyPresentationFences,
         val screenId: String,
         val onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
         val onScreenDismissed: suspend (
@@ -603,6 +644,8 @@ internal class ExperiencePresentationService(
             String,
         ) -> JourneyScreenDismissalResult,
         val emissions: JourneyRuntimeEmissionCoordinator,
+        val openLink: suspend (JourneyLinkRequest) -> Boolean,
+        val runValues: ExperienceRunValues?,
         val screenDismissed: AtomicBoolean = AtomicBoolean(false),
         var navigationDismissal: NavigationDismissal? = null,
         var navigationHistory: List<String> = emptyList(),
@@ -723,6 +766,7 @@ internal class ExperiencePresentationService(
         }
 
     suspend fun presentJourney(
+        fences: JourneyPresentationFences,
         release: AuthenticatedJourneyRelease,
         screenId: String,
         journeyId: String,
@@ -740,15 +784,37 @@ internal class ExperiencePresentationService(
         ) -> JourneyScreenDismissalResult = { _, _, _ ->
             JourneyScreenDismissalResult.HANDLED
         },
-        onEmissionBatch: suspend (JourneyScreenEmissionBatch) -> Boolean = { true },
+        onLinkOpened: suspend (JourneyOpenedLink) -> Unit = {},
+        onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> JourneyEmissionBatchResult = { _, _ -> JourneyEmissionBatchResult.ACCEPTED },
         onPresentationRevealed: suspend (String) -> Unit = {},
         onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
         transition: JsonObject? = null,
+        runValues: ExperienceRunValues? = null,
     ): ExperienceRef {
         val reserved = reservation as? JourneyReservation
         val request = reserved?.request ?: captureRequest(ownerDistinctId)
         if (request.ownerDistinctId != ownerDistinctId) throw declinedPresentation()
         val selectedScreen = AuthenticatedPresentationScreen.resolve(release, screenId)
+        lateinit var journey: JourneyOutcome
+        journey = JourneyOutcome(
+            fences = fences,
+            runValues = runValues,
+            screenId = screenId,
+            onOutcome = onOutcome,
+            onScreenDismissed = onScreenDismissed,
+            openLink = { link -> openAndRecord(journey, link, onLinkOpened) },
+            emissions = JourneyRuntimeEmissionCoordinator(
+                journeyId = journeyId,
+                screenId = screenId,
+                descriptor = release.descriptor,
+                nextBatchSequence = nextBatchSequence,
+                nextEmissionSequence = nextEmissionSequence,
+                onEmissionBatch = onEmissionBatch,
+                onScreenChanged = onScreenChanged,
+                onPresentationRevealed = onPresentationRevealed,
+                onOpenLink = { link -> openAndRecord(journey, link, onLinkOpened); Unit },
+            ),
+        )
         return presentPrepared(
             selectedScreen = selectedScreen,
             transition = transition,
@@ -756,22 +822,7 @@ internal class ExperiencePresentationService(
             journeyId = journeyId,
             reservationId = reserved?.id,
             reservationRequired = true,
-            journey = JourneyOutcome(
-                screenId = screenId,
-                onOutcome = onOutcome,
-                onScreenDismissed = onScreenDismissed,
-                emissions = JourneyRuntimeEmissionCoordinator(
-                    journeyId = journeyId,
-                    screenId = screenId,
-                    descriptor = release.descriptor,
-                    nextBatchSequence = nextBatchSequence,
-                    nextEmissionSequence = nextEmissionSequence,
-                    onEmissionBatch = onEmissionBatch,
-                    onScreenChanged = onScreenChanged,
-                    onPresentationRevealed = onPresentationRevealed,
-                    onOpenLink = openLink,
-                ),
-            ),
+            journey = journey,
             canPresent = canPresent,
         ) {
             val commerceSession = try {
@@ -907,7 +958,7 @@ internal class ExperiencePresentationService(
                     return PreparedPresentation(source.acquired.sceneFile, source.screen.artboardName, source.screen.clearColor,
                         source.screen.shell, source.screen.screenId, source.descriptor, source.acquired.artifactsByKey,
                         source.screen.artboardSize, source.viewModelProjection, text, lifecycle, transition,
-                        AtomicReference(retained))
+                        AtomicReference(retained), journey.runValues)
                 }
                 data class Destination(val source: PreparedSource, val content: PreparedPresentation, val navigation: PreparedScreenNavigation?)
                 suspend fun acquireInitial(): PreparedSource = try {
@@ -1093,9 +1144,9 @@ internal class ExperiencePresentationService(
                             onRecovery = { error -> recordFontLoadFailure(pending, preparedContent.descriptor, error) },
                             onDismissed = { reason -> ended(pending, reason) },
                             onOutcome = { reason -> attemptOutcome(pending, reason) },
-                            onRuntimeStep = { outcome, correlationId, snapshot, lifetime ->
+                            onRuntimeStep = { outcome, correlationId, snapshot, lifetime, saves ->
                                 pending.latestViewModelSnapshot.set(snapshot)
-                                runtimeStep(pending, outcome, correlationId, lifetime, snapshot)
+                                runtimeStep(pending, outcome, correlationId, lifetime, snapshot, saves)
                             },
                             onTextCommitted = { inputId, text, snapshot, lifetime ->
                                 publishScreenEffects(pending) {
@@ -1199,6 +1250,7 @@ internal class ExperiencePresentationService(
         owner: JourneyPresentationOwner,
         action: JsonObject,
         source: JourneyScreenEmissionSource?,
+        eventSource: JourneyRuntimeEventSource? = null,
     ): JsonObject? {
         val active = synchronized(stateLock) {
             current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) }
@@ -1221,7 +1273,9 @@ internal class ExperiencePresentationService(
                     val relative = reference["isRelative"]?.let {
                         (it as? JsonPrimitive)?.takeUnless(JsonPrimitive::isString)?.booleanOrNull ?: return null
                     }
-                    active.latestViewModelSnapshot.get()?.resolveScopedString(path, model, source?.instanceId, relative)
+                    if (relative == true) {
+                        eventSource?.snapshot?.resolveNativeString(path, model, eventSource.nativeId)
+                    } else active.latestViewModelSnapshot.get()?.resolveScopedString(path, model, if (relative == false) null else source?.instanceId)
                 }
                 else -> null
             }
@@ -1304,22 +1358,11 @@ internal class ExperiencePresentationService(
                 JourneyPermissionRequest.TRACKING,
                 null,
             )
-            JourneyActionType.OPEN_LINK -> {
-                val url = action.string("url")
-                    ?: return JourneyPresentationActionResult.Failed
-                val target = action.string("target")
-                    ?: return JourneyPresentationActionResult.Failed
-                if (runCatching { openLink(url, target) }.isFailure) {
-                    JourneyPresentationActionResult.Failed
-                } else {
-                    JourneyPresentationActionResult.Advanced("next")
-                }
-            }
-            JourneyActionType.DISMISS -> {
-                PresentationRegistry.dismiss(active.id, CloseReason.UserDismissed)
-                attemptOutcome(active, CloseReason.UserDismissed)
-                JourneyPresentationActionResult.Handled
-            }
+            // Persist the authored terminal outcome before presentation teardown
+            // can emit a user-close lifecycle callback.
+            JourneyActionType.DISMISS -> JourneyPresentationActionResult.Completed(
+                action.string("reason")?.takeIf(String::isNotEmpty) ?: "completed",
+            )
             else -> JourneyPresentationActionResult.Failed
         }
     }
@@ -1557,13 +1600,15 @@ internal class ExperiencePresentationService(
         correlationId: ULong,
         lifetime: RendererEffectLifetime?,
         snapshot: NuxieViewModelSnapshot?,
+        saves: List<ExperienceFrameSave>,
     ) {
-        publishScreenEffects(active) { active.journey.emissions.publish(outcome, correlationId, lifetime, snapshot) }
+        publishScreenEffects(active) { active.journey.emissions.publish(outcome, correlationId, lifetime, snapshot, saves) }
     }
 
     private fun publishScreenEffects(active: ActivePresentation, publish: suspend () -> Boolean) {
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            val accepted = runCatching { publish() }.getOrDefault(false)
+            val accepted = runCatching { publish() }
+                .onFailure { if (it is CancellationException) throw it }.getOrDefault(false)
             if (!accepted && !active.closed.get()) {
                 PresentationRegistry.reportFailure(
                     active.id,

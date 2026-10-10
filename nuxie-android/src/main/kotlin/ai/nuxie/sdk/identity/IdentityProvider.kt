@@ -27,4 +27,7 @@ internal interface IdentityProvider {
     /** Linearize a non-publishing admission decision against identity mutation. */
     fun <T> withCurrentScope(scope: IdentityScope, block: () -> T): T? =
         if (isCurrentScope(scope)) block() else null
+    /** Suspending admission shares the same identity decision fence. */
+    suspend fun <T> withCurrentScopeSuspending(scope: IdentityScope, block: suspend () -> T): T? =
+        if (isCurrentScope(scope)) block() else null
 }

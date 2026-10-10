@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.experiences
 
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import ai.nuxie.sdk.network.ProfileDeliveryAuthority
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
@@ -14,7 +16,7 @@ import kotlinx.serialization.json.jsonPrimitive
 internal class JourneyProfileCatalog(
     private val trustedKeys: Map<String, ByteArray>,
     private val highWater: JourneyReleaseHighWaterStore,
-    private val onReleaseAdmitted: (AuthenticatedJourneyRelease) -> Boolean = { true },
+    private val onReleaseAdmitted: suspend (AuthenticatedJourneyRelease) -> Boolean = { true },
     private val supportedRuntime: () -> JourneyReleaseSupportedRuntime?,
 ) {
     data class Snapshot(
@@ -29,6 +31,7 @@ internal class JourneyProfileCatalog(
     )
 
     private val lock = Any()
+    private val admission = Mutex()
     private var current: Pair<String, Snapshot>? = null
     private var authority: ProfileDeliveryAuthority? = null
 
@@ -114,22 +117,23 @@ internal class JourneyProfileCatalog(
     }
 
     /** Called only inside ProfileService's current identity/generation commit. */
-    fun commit(distinctId: String, prepared: Prepared) = synchronized(lock) {
-        if (this@JourneyProfileCatalog.authority != null &&
-            this@JourneyProfileCatalog.authority != prepared.authority
-        ) {
+    suspend fun commit(distinctId: String, prepared: Prepared) = admission.withLock {
+        if (synchronized(lock) { authority != null && authority != prepared.authority }) {
             throw JourneyReleaseAuthenticationException("profile delivery authority changed")
         }
         // Empty canonical profiles bind authority too. Clearing customer state
         // never changes the configured app/environment for this SDK setup.
-        if (prepared.snapshot.releasesByDigest.values.any { !onReleaseAdmitted(it) }) {
-            throw JourneyReleaseAuthenticationException(
-                "authenticated Journey product mappings could not be retained",
-            )
+        highWater.admitBatch(prepared.promotions) {
+            if (prepared.snapshot.releasesByDigest.values.any { !onReleaseAdmitted(it) }) {
+                throw JourneyReleaseAuthenticationException(
+                    "authenticated Journey product mappings could not be retained",
+                )
+            }
         }
-        highWater.admitBatch(prepared.promotions)
-        this@JourneyProfileCatalog.authority = prepared.authority
-        current = distinctId to prepared.snapshot
+        synchronized(lock) {
+            this@JourneyProfileCatalog.authority = prepared.authority
+            current = distinctId to prepared.snapshot
+        }
     }
 
     fun snapshot(distinctId: String): Snapshot? = synchronized(lock) {

@@ -8,6 +8,37 @@ import org.junit.Test
 
 class PurchaseScopeDeviceTest {
     @Test
+    fun unaliasedNestedCopyReportsItsNativeFrameValues() {
+        val bytes = InstrumentationRegistry.getInstrumentation().context.assets
+            .open("runtime/purchase-scopes/screen.riv").use { it.readBytes() }
+        val renderer = checkNotNull(NuxieRuntime.shared.newAndroidVulkanRenderer(320, 100))
+        try {
+            val file = checkNotNull(NuxieRuntime.shared.importFile(renderer, bytes))
+            try {
+                val artboard = checkNotNull(file.newArtboard("Purchase"))
+                try {
+                    artboard.bindDefaultViewModel("PurchaseRoot")
+                    val player = file.newExperiencePlayer(artboard, "Purchase")
+                    try {
+                        repeat(20) { player.stepTyped(elapsedSeconds = 0.016) }
+                        val down = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
+                            NuxiePlayerPointerEvent(NuxiePlayerPointerKind.DOWN, 240f, 30f, 1, 0f)))
+                        val up = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
+                            NuxiePlayerPointerEvent(NuxiePlayerPointerKind.UP, 240f, 30f, 1, 0.1f)))
+                        val settled = player.stepTyped(elapsedSeconds = 0.016)
+                        val event = (down.events + up.events + settled.events).single()
+                        val frame = checkNotNull(artboard.defaultViewModelSnapshot())
+                        assertTrue(event.sourceViewModelInstanceId != 0L)
+                        assertTrue(frame.containsInstance(event.sourceViewModelInstanceId))
+                        assertNull(frame.instanceAliases(event.sourceViewModelInstanceId).singleOrNull())
+                        assertEquals("plan:annual", frame.resolveNativeString("placementId", "Plan", event.sourceViewModelInstanceId))
+                    } finally { player.close() }
+                } finally { artboard.close() }
+            } finally { file.close() }
+        } finally { renderer.close() }
+    }
+
+    @Test
     fun publishedPurchaseComponentEmitsWhenPlayedDirectly() {
         val bytes = InstrumentationRegistry.getInstrumentation().context.assets
             .open("runtime/purchase-scopes/screen.riv").use { it.readBytes() }
@@ -57,7 +88,7 @@ class PurchaseScopeDeviceTest {
                     try {
                         player.stepTyped(elapsedSeconds = 0.0)
                         repeat(20) { player.stepTyped(elapsedSeconds = 0.016) }
-                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                         for (x in listOf(80f, 240f)) {
                             val down = player.stepTyped(elapsedSeconds = 0.0, pointers = listOf(
                                 NuxiePlayerPointerEvent(NuxiePlayerPointerKind.DOWN, x, 30f, 1, 0f)))
@@ -73,7 +104,7 @@ class PurchaseScopeDeviceTest {
                             } }
                             assertEquals("One purchase interaction per tap: $details", 1, emitted.size)
                             val frame = checkNotNull(artboard.defaultViewModelSnapshot())
-                            val authoredId = frame.authoredInstanceId(emitted.single().sourceViewModelInstanceId)
+                            val authoredId = frame.instanceAliases(emitted.single().sourceViewModelInstanceId).singleOrNull()
                             assertEquals(if (x == 80f) "plan.first" else "plan.second", authoredId)
                             assertEquals(if (x == 80f) "plan:monthly" else "plan:annual",
                                 frame.resolveScopedString("placementId", "Plan", authoredId))
@@ -102,7 +133,7 @@ class PurchaseScopeDeviceTest {
                         assertEquals("plan:annual", before.resolveString("second.placementId"))
                         assertEquals("plan:monthly", before.resolveScopedString("placementId", "Plan", "plan.first"))
                         assertEquals("plan:annual", before.resolveScopedString("placementId", "Plan", "plan.second"))
-                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                     } finally { player.close() }
                 } finally { artboard.close() }
             } finally { file.close() }

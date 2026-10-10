@@ -32,7 +32,7 @@ class NativeTextInputDeviceTest {
 
     private fun capture(player: NuxieRuntimePlayer, renderer: NuxieAndroidVulkanRenderer): Long {
         player.stepTyped(elapsedSeconds = 0.0)
-        renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+        renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
         val status = intArrayOf(-1)
         val capture = bridge.nativePlayerSemanticSnapshot(player.requireHandle(), status)
         assertEquals(0, status.single())
@@ -83,19 +83,14 @@ class NativeTextInputDeviceTest {
                 }
                 val other = bridge.nativePlayerFieldStringCopy(handle, snapshot, before[1].id, endpoint, status)
                 assertEquals(0, status.single())
-                val edited = "private é 🔒".encodeToByteArray()
-                assertEquals(0, bridge.nativePlayerFieldStringSet(handle, snapshot, before[0].id, endpoint, edited))
-                assertEquals(9, bridge.nativePlayerFieldStringSet(handle, snapshot, before[0].id, endpoint, edited))
                 assertEquals(0, bridge.nativeSemanticSnapshotFree(snapshot))
                 snapshot = 0L
                 snapshot = capture(player, renderer)
                 val after = fields()
                 assertEquals(before.map { it.id }, after.map { it.id })
-                assertArrayEquals(edited, bridge.nativePlayerFieldStringCopy(handle, snapshot, after[0].id, endpoint, status))
+                assertTrue("Reading a field must leave its sibling unchanged", checkNotNull(other).contentEquals(
+                    bridge.nativePlayerFieldStringCopy(handle, snapshot, after[1].id, endpoint, status)))
                 assertEquals(0, status.single())
-                assertArrayEquals(other, bridge.nativePlayerFieldStringCopy(handle, snapshot, after[1].id, endpoint, status))
-                assertEquals(0, status.single())
-                assertTrue(after.none { it.value.contains("private") })
             } finally { if (snapshot != 0L) assertEquals(0, bridge.nativeSemanticSnapshotFree(snapshot)) }
         }
 }

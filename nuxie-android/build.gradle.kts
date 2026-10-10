@@ -60,6 +60,8 @@ android {
     // by compiling it with JVM tests; it is never part of an Android variant/AAR.
     java.srcDir("src/hostRenderHarness/kotlin")
   }
+  sourceSets.getByName("test").java.srcDir("src/sharedTest/kotlin")
+  sourceSets.getByName("androidTest").java.srcDir("src/sharedTest/kotlin")
   sourceSets.getByName("androidTest").assets.srcDir(rootProject.file("fixtures"))
   defaultConfig {
     ndk {
@@ -118,6 +120,7 @@ dependencies {
   lintPublish(project(":nuxie-lint"))
   lintChecks(project(":nuxie-lint"))
   implementation(libs.androidx.sqlite.framework)
+  implementation(libs.androidx.browser)
   // StoreProduct exposes ProductDetails, so Billing is part of consumers'
   // compile classpath. Use the plain artifact: billing-ktx ships Kotlin 2.2
   // metadata this repo's pinned compiler cannot read.
@@ -131,6 +134,7 @@ dependencies {
   testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.robolectric)
 
+  androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
   androidTestImplementation(libs.androidx.test.runner)
   androidTestImplementation(libs.junit)
 }
@@ -151,6 +155,7 @@ val compileHostRenderBridge by tasks.registering(Exec::class) {
   group = "host render"
   description = "Compiles the host JVM JNI adapter against scripting-enabled NUXIE_HOST_CAPI_LIB."
   inputs.file("src/main/cpp/nuxie_runtime_android.c")
+  inputs.file("src/main/cpp/nuxie_host_installs.h")
   inputs.file(rootProject.file("runtime/prebuilt/include/nux_capi.generated.h"))
   hostCapiLibrary.orNull?.let { inputs.file(it) }
   outputs.file(hostBridgeLibrary)

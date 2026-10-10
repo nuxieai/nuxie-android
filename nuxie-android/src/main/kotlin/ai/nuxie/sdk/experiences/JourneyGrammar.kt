@@ -19,7 +19,7 @@ import kotlinx.serialization.json.JsonPrimitive
 /** Lowered actions carry selectors and local outlets, never nested programs. */
 internal object JourneyGrammar {
     val presenting = setOf("navigate", "back", "video", "purchase", "restore", "request_notifications",
-        "request_permission", "request_tracking", "open_link", "dismiss")
+        "request_permission", "request_tracking", "dismiss")
 
     fun action(input: JsonElement?, screens: Set<String>, placements: Set<String>) {
         val action = record(input)
@@ -145,7 +145,11 @@ internal object JourneyGrammar {
             "String" -> { exact(value, setOf("type", "value")); text(value["value"]) }
             "Array" -> { exact(value, setOf("type", "items")); array(value["items"], 256).forEach(::value) }
             "Object" -> { exact(value, setOf("type", "fields")); values(value["fields"]) }
-            "Event.Field", "Response.Field", "Customer.Field" -> { exact(value, setOf("type", "key")); journeyId(value["key"]) }
+            "Response.Field" -> {
+                exact(value, setOf("type", "key"), setOf("form")); journeyId(value["key"])
+                value["form"]?.let(JourneyReleaseJson::responseFormName)
+            }
+            "Event.Field", "Customer.Field" -> { exact(value, setOf("type", "key")); journeyId(value["key"]) }
             else -> fail("value expression")
         }
     }

@@ -101,7 +101,14 @@ enum class PurchaseHandlingMode {
     APP_MANAGED,
 }
 
-/** Optional checkout seam for a provider SDK or custom billing stack. */
+/**
+ * Optional checkout seam for a provider SDK or custom billing stack.
+ *
+ * Nuxie calls both methods from a background coroutine on the IO dispatcher,
+ * never on the main thread, for host calls and for Journey purchases alike.
+ * Switch to the main thread yourself for any UI work, such as showing a
+ * provider's checkout sheet.
+ */
 interface NuxiePurchaseDelegate {
     suspend fun purchase(product: StoreProduct): PurchaseResult
 
