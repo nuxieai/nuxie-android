@@ -128,7 +128,6 @@ def dependencies():
         ("org.jetbrains.kotlinx", "kotlinx-coroutines-android", versions["coroutines"], "compile"),
         ("org.jetbrains.kotlin", "kotlin-stdlib", versions["kotlin"], "compile"),
         ("androidx.sqlite", "sqlite-framework", versions["sqlite"], "runtime"),
-        ("androidx.browser", "browser", versions["browser"], "runtime"),
         ("org.jetbrains.kotlinx", "kotlinx-serialization-json", versions["serialization-json"], "runtime"),
     ]
 

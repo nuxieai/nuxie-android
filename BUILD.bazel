@@ -22,7 +22,6 @@ cc_binary(
 )
 
 SDK_DEPS = [
-    "@sdk_maven//:androidx_browser_browser",
     "@sdk_maven//:androidx_sqlite_sqlite_framework",
     "@sdk_maven//:com_android_billingclient_billing",
     "@sdk_maven//:org_jetbrains_kotlinx_kotlinx_coroutines_android",
