@@ -169,14 +169,14 @@ class NuxieOwnedRuntimeTest {
         val window = NuxieRuntimeWindow(40L, native)
 
         assertEquals(5, renderer.resize(300, 400))
-        assertEquals(1, renderer.renderAndPresent(player, window, 0xFF000000.toInt(), true))
+        assertEquals(1, renderer.renderAndPresent(player, window, 0xFF000000.toInt(), 1f))
 
         renderer.detachSurface()
         window.close()
         window.close()
         assertEquals(listOf(40L), native.releasedWindows)
         assertThrows(IllegalStateException::class.java) {
-            renderer.renderAndPresent(player, window, 0, true)
+            renderer.renderAndPresent(player, window, 0, 1f)
         }
 
         renderer.close()
@@ -196,13 +196,13 @@ class NuxieOwnedRuntimeTest {
         val player = checkNotNull(checkNotNull(file.newArtboard()).newPlayer())
         val window = NuxieRuntimeWindow(40L, native)
         native.presentation = 0
-        assertEquals(0, renderer.renderAndPresent(player, window, 0, true))
-        assertEquals(0, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(0, renderer.renderAndPresent(player, window, 0, 1f))
+        assertEquals(0, renderer.renderAndPresent(player, window, 0, 1f))
         assertEquals(listOf("attach:40"), native.surfaceCalls)
         native.presentation = 2
-        assertEquals(2, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(2, renderer.renderAndPresent(player, window, 0, 1f))
         native.presentation = 1
-        assertEquals(1, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(1, renderer.renderAndPresent(player, window, 0, 1f))
         assertEquals(listOf("attach:40", "attach:40"), native.surfaceCalls)
         renderer.close()
         renderer.close()
@@ -219,10 +219,10 @@ class NuxieOwnedRuntimeTest {
         val player = checkNotNull(checkNotNull(file.newArtboard()).newPlayer())
         val window = NuxieRuntimeWindow(40L, native)
         native.presentation = 3
-        assertEquals(0, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(0, renderer.renderAndPresent(player, window, 0, 1f))
         assertEquals(listOf("attach:40"), native.surfaceCalls)
         native.presentation = 1
-        assertEquals(1, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(1, renderer.renderAndPresent(player, window, 0, 1f))
         assertEquals(listOf("attach:40", "attach:40"), native.surfaceCalls)
         renderer.close()
         assertEquals(listOf("attach:40", "attach:40", "detach"), native.surfaceCalls)
@@ -237,14 +237,14 @@ class NuxieOwnedRuntimeTest {
         val player = checkNotNull(checkNotNull(file.newArtboard()).newPlayer())
         val window = NuxieRuntimeWindow(40L, native)
         native.attachStatus = 5
-        assertEquals(-5, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(-5, renderer.renderAndPresent(player, window, 0, 1f))
         assertEquals(0, native.presentCalls)
         native.attachStatus = 0
-        assertEquals(1, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(1, renderer.renderAndPresent(player, window, 0, 1f))
         renderer.resize(300, 400)
         assertEquals(listOf("attach:40", "attach:40", "detach"), native.surfaceCalls)
         native.presentation = -5
-        assertEquals(-5, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(-5, renderer.renderAndPresent(player, window, 0, 1f))
         assertEquals(listOf("attach:40", "attach:40", "detach", "attach:40", "detach"), native.surfaceCalls)
         renderer.close()
     }
@@ -257,7 +257,7 @@ class NuxieOwnedRuntimeTest {
         val file = checkNotNull(runtime.importFile(renderer, byteArrayOf(1)))
         val player = checkNotNull(checkNotNull(file.newArtboard()).newPlayer())
         val window = NuxieRuntimeWindow(40L, native)
-        assertEquals(1, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(1, renderer.renderAndPresent(player, window, 0, 1f))
         native.detachStatus = 5
         assertEquals(5, renderer.detachSurface())
         native.detachStatus = 0
@@ -279,7 +279,7 @@ class NuxieOwnedRuntimeTest {
         val frame = renderer.renderToCpuFrame(
             player = player,
             clearColor = 0xFFFF00FF.toInt(),
-            fitContainCenter = true,
+            layoutScaleFactor = 1f,
         )
 
         assertEquals(2, frame.width)
@@ -289,7 +289,7 @@ class NuxieOwnedRuntimeTest {
 
         renderer.close()
         assertThrows(IllegalStateException::class.java) {
-            renderer.renderToCpuFrame(player, 0, true)
+            renderer.renderToCpuFrame(player, 0, 1f)
         }
     }
 
@@ -305,36 +305,36 @@ class NuxieOwnedRuntimeTest {
         val window = NuxieRuntimeWindow(40L, native)
         for (status in contract.getValue("failureStatuses").jsonArray.map { it.jsonPrimitive.int }) {
             native.attachStatus = status
-            assertEquals(-status, renderer.renderAndPresent(player, window, 0, true))
+            assertEquals(-status, renderer.renderAndPresent(player, window, 0, 1f))
         }
         native.attachStatus = -99
-        assertEquals(-4, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(-4, renderer.renderAndPresent(player, window, 0, 1f))
         assertEquals(0, native.copyCalls)
         assertEquals(0, native.presentCalls)
         native.surfaceCalls.clear()
         native.attachStatus = contract.getValue("unsupportedAttachment").jsonPrimitive.int
         repeat(2) {
             assertEquals(contract.getValue("copyPresented").jsonPrimitive.int,
-                renderer.renderAndPresent(player, window, 0, true))
+                renderer.renderAndPresent(player, window, 0, 1f))
         }
         assertEquals(2, native.copyCalls)
         assertEquals(0, native.presentCalls)
         assertEquals(listOf("attach:40"), native.surfaceCalls)
         native.copyDisposition = contract.getValue("copyFailure").jsonPrimitive.int
-        assertEquals(native.copyDisposition, renderer.renderAndPresent(player, window, 0, true))
+        assertEquals(native.copyDisposition, renderer.renderAndPresent(player, window, 0, 1f))
         window.close()
         val replacement = NuxieRuntimeWindow(41L, native)
         native.attachStatus = contract.getValue("attached").jsonPrimitive.int
-        assertEquals(1, renderer.renderAndPresent(player, replacement, 0, true))
+        assertEquals(1, renderer.renderAndPresent(player, replacement, 0, 1f))
         assertEquals(1, native.presentCalls)
         renderer.resize(300, 400)
         native.attachStatus = contract.getValue("unsupportedAttachment").jsonPrimitive.int
         native.copyDisposition = 1
-        assertEquals(1, renderer.renderAndPresent(player, replacement, 0, true))
+        assertEquals(1, renderer.renderAndPresent(player, replacement, 0, 1f))
         val attachments = native.surfaceCalls.toList()
         renderer.resize(400, 300)
         native.attachStatus = 0
-        assertEquals(1, renderer.renderAndPresent(player, replacement, 0, true))
+        assertEquals(1, renderer.renderAndPresent(player, replacement, 0, 1f))
         assertEquals("Resize must retain the connected CPU producer", attachments, native.surfaceCalls)
         assertEquals(1, native.presentCalls)
         renderer.close()
@@ -477,7 +477,7 @@ class NuxieOwnedRuntimeTest {
             playerHandle: Long,
             windowHandle: Long,
             clearColor: Int,
-            fitContainCenter: Boolean,
+            layoutScaleFactor: Float,
         ): Int {
             presentCalls++
             return presentation
@@ -488,7 +488,7 @@ class NuxieOwnedRuntimeTest {
             playerHandle: Long,
             windowHandle: Long,
             clearColor: Int,
-            fitContainCenter: Boolean,
+            layoutScaleFactor: Float,
         ): Int {
             copyCalls++
             return copyDisposition
@@ -498,7 +498,7 @@ class NuxieOwnedRuntimeTest {
             rendererHandle: Long,
             playerHandle: Long,
             clearColor: Int,
-            fitContainCenter: Boolean,
+            layoutScaleFactor: Float,
         ): NuxieCpuFrame = NuxieCpuFrame(
             width = 2,
             height = 1,

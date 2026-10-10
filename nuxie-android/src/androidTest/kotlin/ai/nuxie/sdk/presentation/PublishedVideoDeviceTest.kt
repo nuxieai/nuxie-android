@@ -98,9 +98,9 @@ class PublishedVideoDeviceTest {
                     override fun onFirstFrame() {
                         if (sceneName == "waiting") {
                             mounted.surface.bitmap?.let { bitmap ->
-                                val scale = minOf(bitmap.width / width, bitmap.height / height)
-                                val x = ((bitmap.width - width * scale) / 2 + sampleX * scale).toInt()
-                                val y = ((bitmap.height - height * scale) / 2 + sampleY * scale).toInt()
+                                val density = mounted.surface.resources.displayMetrics.density
+                                val x = (sampleX * density * bitmap.width / mounted.surface.width).toInt()
+                                val y = (sampleY * density * bitmap.height / mounted.surface.height).toInt()
                                 val pixel = bitmap.getPixel(x, y)
                                 firstContainsVideo.set((Color.red(pixel) > 180 && Color.blue(pixel) < 70) ||
                                     (Color.blue(pixel) > 180 && Color.red(pixel) < 70))
@@ -136,9 +136,9 @@ class PublishedVideoDeviceTest {
                 failure.get()?.let { throw AssertionError("Mounted playback failed", it) }
                 instrumentation.runOnMainSync {
                     mounted.surface.bitmap?.let { bitmap ->
-                        val scale = minOf(bitmap.width / width, bitmap.height / height)
-                        val x = ((bitmap.width - width * scale) / 2 + sampleX * scale).toInt()
-                        val y = ((bitmap.height - height * scale) / 2 + sampleY * scale).toInt()
+                        val density = mounted.surface.resources.displayMetrics.density
+                        val x = (sampleX * density * bitmap.width / mounted.surface.width).toInt()
+                        val y = (sampleY * density * bitmap.height / mounted.surface.height).toInt()
                         val pixel = bitmap.getPixel(x, y)
                         if (Color.red(pixel) > 180 && Color.blue(pixel) < 70 && colors.lastOrNull() != true) colors += true
                         if (Color.blue(pixel) > 180 && Color.red(pixel) < 70 && colors.lastOrNull() != false) colors += false
@@ -199,9 +199,9 @@ class PublishedVideoDeviceTest {
                     val sampleWidth = minOf(128, mounted.surface.width).coerceAtLeast(1)
                     val sampleHeight = (mounted.surface.height.toLong() * sampleWidth / mounted.surface.width.coerceAtLeast(1)).toInt().coerceAtLeast(1)
                     mounted.surface.getBitmap(sampleWidth, sampleHeight)?.let { bitmap ->
-                        val scale = minOf(bitmap.width / width, bitmap.height / height)
-                        val x = ((bitmap.width - width * scale) / 2 + sampleX * scale).toInt()
-                        val y = ((bitmap.height - height * scale) / 2 + sampleY * scale).toInt()
+                        val density = mounted.surface.resources.displayMetrics.density
+                        val x = (sampleX * density * bitmap.width / mounted.surface.width).toInt()
+                        val y = (sampleY * density * bitmap.height / mounted.surface.height).toInt()
                         val pixel = bitmap.getPixel(x, y)
                         matches = if (expectRed) Color.red(pixel) > 180 && Color.blue(pixel) < 70
                             else Color.blue(pixel) > 180 && Color.red(pixel) < 70

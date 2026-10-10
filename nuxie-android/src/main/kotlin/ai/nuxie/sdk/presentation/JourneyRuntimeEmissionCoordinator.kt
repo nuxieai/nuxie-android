@@ -10,7 +10,7 @@ import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
-import java.util.UUID
+import ai.nuxie.sdk.events.TimeBasedEpochGenerator
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
@@ -42,12 +42,13 @@ internal class JourneyRuntimeEmissionCoordinator(
     descriptor: JsonObject,
     nextBatchSequence: Long,
     nextEmissionSequence: Long,
-    private val onEmissionBatch: suspend (JourneyScreenEmissionBatch) -> Boolean,
+    private val onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> Boolean,
     private val onScreenChanged: suspend (String) -> Boolean = { true },
     private val onPresentationRevealed: suspend (String) -> Unit,
-    private val onOpenLink: (String, String?) -> Unit = { _, _ -> },
-    private val createId: () -> String = { UUID.randomUUID().toString() },
+    private val onOpenLink: suspend (JourneyLinkRequest) -> Unit = {},
+    private val createId: () -> String = { TimeBasedEpochGenerator.shared.next() },
     private val nowMillis: () -> Long = System::currentTimeMillis,
+
 ) {
     private val gate = Mutex()
     private val revealed = CompletableDeferred<Unit>()
@@ -93,15 +94,17 @@ internal class JourneyRuntimeEmissionCoordinator(
 
     suspend fun publish(outcome: NuxiePlayerStepOutcome, correlationId: ULong, lifetime: RendererEffectLifetime? = null, snapshot: NuxieViewModelSnapshot? = null): Boolean {
         if (!awaitReveal(lifetime)) return true
-        return gate.withLock {
+        var frameLinks: JourneyFrameLinks? = null
+        val accepted = gate.withLock {
             if (closed) return@withLock false
             if (lifetime?.isRetired == true) return@withLock true
             val projected = project(outcome, correlationId, snapshot)
-            projected.links.forEach { link ->
-                runCatching { onOpenLink(link.url, link.target) }
-                    .onFailure { error ->
-                        Log.w(LOG_TAG, "Journey renderer open-link callback failed", error)
-                    }
+            frameLinks = JourneyFrameLinks {
+                projected.links.forEach { link ->
+                    try { onOpenLink(JourneyLinkRequest(link.url, link.target, screenId, link.instanceId)) }
+                    catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (error: Throwable) { Log.w(LOG_TAG, "Journey renderer open-link callback failed", error) }
+                }
             }
             val drafts = when (val control = projected.control) {
                 null -> projected.drafts
@@ -121,8 +124,10 @@ internal class JourneyRuntimeEmissionCoordinator(
                 screenId = screenId,
                 actionId = "runtime:$correlationId",
             )
-            publishDrafts(drafts, source)
+            publishDrafts(drafts, source, (projected.eventSource ?: JourneyRuntimeEmissionSources()).copy(frameLinks = frameLinks))
         }
+        frameLinks?.perform()
+        return accepted
     }
 
     /** Commits only an editable input belonging to this signed screen. */
@@ -181,6 +186,7 @@ internal class JourneyRuntimeEmissionCoordinator(
     private suspend fun publishDrafts(
         drafts: List<Draft>,
         source: JourneyScreenEmissionSource,
+        eventSource: JourneyRuntimeEmissionSources? = null,
     ): Boolean {
         if (drafts.isEmpty()) return true
         if (drafts.any(Draft::isInvalid)) {
@@ -211,8 +217,11 @@ internal class JourneyRuntimeEmissionCoordinator(
             source = source,
             emissions = emissions,
         )
-        val accepted = runCatching { onEmissionBatch(batch) }
+        val accepted = runCatching {
+            onEmissionBatch(batch, eventSource?.bound(batch))
+        }
             .onFailure { error ->
+                if (error is kotlinx.coroutines.CancellationException) throw error
                 Log.w(LOG_TAG, "Journey renderer emission publication failed", error)
             }
             .getOrDefault(false)
@@ -241,9 +250,16 @@ internal class JourneyRuntimeEmissionCoordinator(
         var source: JourneyScreenEmissionSource? = null
         var control: Control? = null
         var multipleControls = false
+        val draftEventSources = mutableListOf<JourneyRuntimeEventSource?>()
+        var controlEventSource: JourneyRuntimeEventSource? = null
 
         outcome.events.forEach { event ->
-            val properties = event.propertiesMap() ?: return@forEach
+            val properties = event.propertiesMap(rejectDuplicates = event.name == GENERATED_INTERACTION_EVENT || controls.containsKey(event.name)) ?: run {
+                if (event.url.isNotEmpty() && event.name != GENERATED_INTERACTION_EVENT) {
+                    links += OpenLink(event.url, event.target)
+                }
+                return@forEach
+            }
             val eventScreenId = properties.string("screenId", "screen_id") ?: screenId
             val componentId = properties.string(
                 "componentId",
@@ -252,15 +268,27 @@ internal class JourneyRuntimeEmissionCoordinator(
                 "element_id",
             )
             val declaredInstanceId = properties.string("instanceId", "instance_id")
-            val instanceId = if (event.sourceViewModelInstanceId != 0L) {
-                val captured = checkNotNull(snapshot?.authoredInstanceId(event.sourceViewModelInstanceId)) {
-                    "Runtime event source has no unique authenticated instance in the current frame"
-                }
-                check(declaredInstanceId == null || declaredInstanceId == captured) {
-                    "Runtime event source conflicts with its declared instance"
-                }
-                captured
-            } else declaredInstanceId
+            val nativeId = event.sourceViewModelInstanceId
+            val aliases = snapshot?.instanceAliases(nativeId).orEmpty()
+            val instanceId = if (nativeId != 0L) aliases.singleOrNull() else declaredInstanceId
+            val invalidSource = nativeId != 0L && (
+                snapshot == null || !snapshot.containsInstance(nativeId) || aliases.size > 1 ||
+                    event.properties.count { it.name == "instanceId" || it.name == "instance_id" } > 1 ||
+                    (properties.keys.any { it == "instanceId" || it == "instance_id" } &&
+                        (declaredInstanceId == null || declaredInstanceId != instanceId))
+                )
+            if (event.url.isNotEmpty() && event.name != GENERATED_INTERACTION_EVENT) {
+                links += OpenLink(event.url, event.target, instanceId.takeUnless { invalidSource })
+                return@forEach
+            }
+            if (invalidSource) {
+                Log.w(LOG_TAG, "Rejected runtime event source", null, Log.sensitive("screen", screenId))
+                return@forEach
+            }
+            val eventSource = snapshot?.let {
+                val resolved = if (nativeId == 0L) it.nativeRootInstanceId else nativeId
+                if (it.containsInstance(resolved)) JourneyRuntimeEventSource(resolved, it) else null
+            }
             val actionId = controlActionId(event, properties)
             if (event.name == GENERATED_INTERACTION_EVENT && actionId == null) {
                 return@forEach
@@ -268,6 +296,7 @@ internal class JourneyRuntimeEmissionCoordinator(
             when {
                 actionId != null -> {
                     if (control != null) multipleControls = true else {
+                        controlEventSource = eventSource
                         control = Control(
                             screenId = eventScreenId,
                             invocation = Invocation(
@@ -279,12 +308,11 @@ internal class JourneyRuntimeEmissionCoordinator(
                         )
                     }
                 }
-                event.url.isNotEmpty() -> links += OpenLink(
-                    event.url,
-                    event.target.takeIf(String::isNotEmpty),
-                )
                 event.name.isNotEmpty() -> {
-                    drafts += Draft.Event(event.name, properties)
+                    val payload = if (instanceId != null && nativeId != 0L && declaredInstanceId == null)
+                        JsonObject(properties + ("instanceId" to JsonPrimitive(instanceId))) else properties
+                    drafts += Draft.Event(event.name, payload)
+                    draftEventSources += eventSource
                     if (source == null) {
                         source = JourneyScreenEmissionSource(
                             screenId = eventScreenId,
@@ -335,9 +363,10 @@ internal class JourneyRuntimeEmissionCoordinator(
         }
         if (multipleControls) {
             Log.w(LOG_TAG, "Rejected renderer transaction with multiple signed controls")
-            return Projection(emptyList(), null, null, emptyList())
+            return Projection(emptyList(), null, null, links)
         }
-        return Projection(drafts, source, control, links)
+        return Projection(drafts, source, control, links, JourneyRuntimeEmissionSources(controlEventSource,
+            draftEventSources + List(drafts.size - draftEventSources.size) { null }))
     }
 
     private fun controlActionId(
@@ -390,8 +419,10 @@ internal class JourneyRuntimeEmissionCoordinator(
             }
         }.onFailure { error ->
             Log.w(LOG_TAG, "Rejected signed screen control", error, Log.sensitive("action", control.invocation.actionId))
-        }.getOrNull()
+        }.getOrElse { error -> if (error is MissingInstanceId) emptyList() else null }
     }
+
+    private class MissingInstanceId : IllegalArgumentException("instance id is missing")
 
     private fun resolveSource(source: JsonObject, invocation: Invocation): JsonElement =
         when (source.string("source")) {
@@ -400,9 +431,8 @@ internal class JourneyRuntimeEmissionCoordinator(
             "component_id" -> JsonPrimitive(requireNotNull(invocation.componentId).takeIf {
                 it.isNotEmpty()
             } ?: error("component id is missing"))
-            "instance_id" -> JsonPrimitive(requireNotNull(invocation.instanceId).takeIf {
-                it.isNotEmpty()
-            } ?: error("instance id is missing"))
+            "instance_id" -> invocation.instanceId?.takeIf(String::isNotEmpty)?.let(::JsonPrimitive)
+                ?: throw MissingInstanceId()
             else -> error("unsupported screen value source")
         }
 
@@ -442,6 +472,7 @@ internal class JourneyRuntimeEmissionCoordinator(
         val source: JourneyScreenEmissionSource?,
         val control: Control?,
         val links: List<OpenLink>,
+        val eventSource: JourneyRuntimeEmissionSources? = null,
     )
 
     private data class Control(val screenId: String, val invocation: Invocation)
@@ -453,7 +484,7 @@ internal class JourneyRuntimeEmissionCoordinator(
         val instanceId: String?,
     )
 
-    private data class OpenLink(val url: String, val target: String?)
+    private data class OpenLink(val url: String, val target: String?, val instanceId: String? = null)
 
     private companion object {
         const val LOG_TAG = "Nuxie"
@@ -478,10 +509,10 @@ internal class JourneyRuntimeEmissionCoordinator(
                 }
                 .toMap()
 
-        fun NuxieRuntimeEvent.propertiesMap(): JsonObject? {
+        fun NuxieRuntimeEvent.propertiesMap(rejectDuplicates: Boolean): JsonObject? {
             val keys = properties.map { it.name }
-            if (keys.size != keys.toSet().size) return null
-            return properties.mapNotNull { property ->
+            if (rejectDuplicates && keys.size != keys.toSet().size) return null
+            return properties.distinctBy { it.name }.mapNotNull { property ->
                 property.value.toJsonElement()?.let { property.name to it }
             }.toMap().let(::JsonObject)
         }

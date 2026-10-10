@@ -19,6 +19,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -145,6 +146,27 @@ class NuxieLifecycleCoordinatorTest {
     }
 
     @Test
+    fun lateSetupTreatsVisiblePausedHostAsForegroundWithoutAnInAppHost() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val context = RuntimeEnvironment.getApplication()
+        val coordinator = NuxieLifecycleCoordinator(
+            AppLifecycleTracker(context.getSharedPreferences("late-paused", Context.MODE_PRIVATE),
+                { "1" }, { 100_000L }, { _, _ -> }), SessionService { 100_000L }, scope)
+        val host = Robolectric.buildActivity(Activity::class.java).setup().visible().pause()
+        try {
+            coordinator.admitVisibleActivity(host.get())
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertEquals(null, coordinator.resumedActivity())
+            assertTrue(coordinator.isAppForeground())
+            coordinator.close()
+            coordinator.admitVisibleActivity(host.get())
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertEquals(null, coordinator.resumedActivity())
+            assertFalse(coordinator.isAppForeground())
+        } finally { host.stop().destroy(); scope.cancel() }
+    }
+
+    @Test
     fun lateSetupAdmitsVisibleHostOnceAndPreservesForegroundOrdering() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val order = CopyOnWriteArrayList<String>()
@@ -177,6 +199,8 @@ class NuxieLifecycleCoordinatorTest {
 
         try {
             coordinator.admitVisibleActivity(activity)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertEquals(activity, coordinator.resumedActivity())
             coordinator.onActivityStarted(activity)
             coordinator.onActivityStopped(activity)
             coordinator.onActivityStarted(activity)

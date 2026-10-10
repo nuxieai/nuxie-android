@@ -2240,6 +2240,37 @@ static jfloatArray new_float_values(JNIEnv *env, const float *values, jsize coun
   return result;
 }
 
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerLayoutSizeSet(
+    JNIEnv *env, jobject self, jlong player, jfloat width, jfloat height) {
+  (void)env;
+  (void)self;
+  return (jint)nux_player_layout_size_set(
+      (struct NuxPlayer *)from_handle(player), width, height);
+}
+
+JNIEXPORT jfloatArray JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerLayoutSize(
+    JNIEnv *env, jobject self, jlong player, jintArray status_out) {
+  (void)self;
+  struct NuxPlayerLayoutSize size;
+  memset(&size, 0, sizeof(size));
+  size.struct_size = (uint32_t)sizeof(size);
+  NuxStatus status = nux_player_layout_size(
+      (const struct NuxPlayer *)from_handle(player), &size);
+  jfloatArray output = NULL;
+  if (status == NUX_STATUS_OK) {
+    const float values[] = {size.width, size.height};
+    output = new_float_values(env, values, 2);
+    if (output == NULL) status = NUX_STATUS_RUNTIME_ERROR;
+  }
+  if (!set_status_out(env, status_out, status)) {
+    if (output != NULL) (*env)->DeleteLocalRef(env, output);
+    return NULL;
+  }
+  return output;
+}
+
 JNIEXPORT jobject JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerTextInputGeometry(
     JNIEnv *env, jobject self, jlong player, jlong snapshot, jlong node_id,
@@ -3228,7 +3259,7 @@ static jint blit_android_vulkan_frame(
 JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererCopyPlayerToWindow(
     JNIEnv *env, jobject self, jlong renderer, jlong player, jlong window,
-    jint clear_color, jboolean fit_contain_center) {
+    jint clear_color, jfloat layout_scale_factor) {
   (void)env;
   (void)self;
   if (renderer == 0 || player == 0 || window == 0) {
@@ -3239,9 +3270,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererCopyPlayerToWindow(
   NuxStatus status = nux_renderer_android_vulkan_render_player(
       (struct NuxAndroidVulkanRenderer *)from_handle(renderer),
       (struct NuxPlayer *)from_handle(player), (uint32_t)clear_color,
-      fit_contain_center == JNI_TRUE
-          ? NUX_ANDROID_VULKAN_RENDERER_FIT_CONTAIN_CENTER
-          : NUX_ANDROID_VULKAN_RENDERER_FIT_NONE,
+      NUX_ANDROID_VULKAN_RENDERER_FIT_LAYOUT, layout_scale_factor,
       &frame, &result);
   log_and_free_result("renderer_android_vulkan_render_player", status, result);
   if (status != NUX_STATUS_OK || frame == NULL) {
@@ -3300,7 +3329,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererDetachSurface(
 JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererRenderPlayer(
     JNIEnv *env, jobject self, jlong renderer, jlong player, jlong window,
-    jint clear_color, jboolean fit_contain_center) {
+    jint clear_color, jfloat layout_scale_factor) {
   (void)env;
   (void)self;
   if (renderer == 0 || player == 0 || window == 0) {
@@ -3311,9 +3340,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererRenderPlayer(
   NuxStatus status = nux_renderer_android_vulkan_present_player(
       (struct NuxAndroidVulkanRenderer *)from_handle(renderer),
       (struct NuxPlayer *)from_handle(player), (uint32_t)clear_color,
-      fit_contain_center == JNI_TRUE
-          ? NUX_ANDROID_VULKAN_RENDERER_FIT_CONTAIN_CENTER
-          : NUX_ANDROID_VULKAN_RENDERER_FIT_NONE,
+      NUX_ANDROID_VULKAN_RENDERER_FIT_LAYOUT, layout_scale_factor,
       &presentation, &result);
   log_and_free_result("renderer_android_vulkan_present_player", status, result);
   return status == NUX_STATUS_OK ? (jint)presentation : -((jint)status);
@@ -3324,7 +3351,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererRenderPlayer(
 JNIEXPORT jobject JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererRenderPlayerToCpuFrame(
     JNIEnv *env, jobject self, jlong renderer, jlong player, jint clear_color,
-    jboolean fit_contain_center) {
+    jfloat layout_scale_factor) {
   (void)self;
   if (renderer == 0 || player == 0) return NULL;
 
@@ -3333,9 +3360,7 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativeRendererRenderPlayerToCpuFram
   NuxStatus status = nux_renderer_android_vulkan_render_player(
       (struct NuxAndroidVulkanRenderer *)from_handle(renderer),
       (struct NuxPlayer *)from_handle(player), (uint32_t)clear_color,
-      fit_contain_center == JNI_TRUE
-          ? NUX_ANDROID_VULKAN_RENDERER_FIT_CONTAIN_CENTER
-          : NUX_ANDROID_VULKAN_RENDERER_FIT_NONE,
+      NUX_ANDROID_VULKAN_RENDERER_FIT_LAYOUT, layout_scale_factor,
       &frame, &result);
   log_and_free_result("renderer_android_vulkan_render_player", status, result);
   if (status != NUX_STATUS_OK || frame == NULL) {

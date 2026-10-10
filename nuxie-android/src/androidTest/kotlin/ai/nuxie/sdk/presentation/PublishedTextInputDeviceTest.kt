@@ -155,7 +155,7 @@ class PublishedTextInputDeviceTest {
             repeat(2) {
                 val reservation = checkNotNull(core.presentations.reserveJourney(owner))
                 try {
-                    core.presentations.presentJourney(fixture.release, "screen_1", "degraded-journey", owner,
+                    core.presentations.presentJourney(testPresentationFences(), fixture.release, "screen_1", "degraded-journey", owner,
                         reservation, acquire = { error("Unsupported rendering must fail before acquiring artifacts") },
                         onOutcome = { error("A rejected presentation has no screen outcome") })
                     fail("A device without a renderer must reject presentation")
@@ -307,7 +307,7 @@ class PublishedTextInputDeviceTest {
                 cleanup += player::close
                 if (startSmall) assertEquals(0, renderer.resize(1080, 2400))
                 player.stepWithEvents(0.0)
-                val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                val frame = renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                 assertEquals(1080 * 2400 * 4, frame.rgba.size)
                 assertTrue("Published content must produce non-background pixels", frame.rgba.indices.any {
                     it % 4 != 3 && frame.rgba[it] != 0.toByte()
@@ -315,7 +315,7 @@ class PublishedTextInputDeviceTest {
                 return RenderedResources(
                     render = {
                         player.stepWithEvents(1.0 / 60.0)
-                        val next = renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        val next = renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                         assertEquals(1080 * 2400 * 4, next.rgba.size)
                     },
                     cleanup = { cleanup.asReversed().forEach { it() } },
@@ -771,7 +771,7 @@ class PublishedTextInputDeviceTest {
             val cancelWaiter = item.getValue("cancelWaiter").jsonPrimitive.content.toBooleanStrict()
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             val service = ExperiencePresentationService(instrumentation.targetContext, { _, _, _ -> }, scope,
-                { NuxieRuntime.shared.isAvailable })
+                { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "terminal-owner" })
             val checkpointEntered = CountDownLatch(1)
             val checkpoint = CompletableDeferred<JourneyScreenDismissalResult>()
             val sourceReleased = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -785,7 +785,7 @@ class PublishedTextInputDeviceTest {
             try {
                 runBlocking {
                     kotlinx.coroutines.withTimeout(30_000) {
-                        service.presentJourney(fixture.release, "screen_1", "terminal-device", "terminal-owner",
+                        service.presentJourney(testPresentationFences(), fixture.release, "screen_1", "terminal-device", "terminal-owner",
                             service.reserveJourney("terminal-owner"),
                             acquire = { AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv,
                                 protection = Closeable { sourceReleased.set(true) }) },
@@ -799,7 +799,7 @@ class PublishedTextInputDeviceTest {
                 activity = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
                 navigation = scope.async {
                     runCatching {
-                        service.presentJourney(fixture.release, "screen_2", "terminal-device", "terminal-owner", null,
+                        service.presentJourney(testPresentationFences(), fixture.release, "screen_2", "terminal-device", "terminal-owner", null,
                             acquire = { AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv,
                                 protection = Closeable { destinationReleased.set(true) }) }, onOutcome = {})
                     }
@@ -1235,12 +1235,12 @@ class PublishedTextInputDeviceTest {
                 return -1
             }
             override fun renderAndPresent(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
-                clearColor: Int, fitContainCenter: Boolean): Int = error("Unsupported attachment must never use GPU surface presentation")
+                clearColor: Int, layoutScaleFactor: Float): Int = error("Unsupported attachment must never use GPU surface presentation")
             override fun copyPlayerToWindow(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
-                clearColor: Int, fitContainCenter: Boolean): Int {
+                clearColor: Int, layoutScaleFactor: Float): Int {
                 copied.incrementAndGet()
                 return ai.nuxie.sdk.runtime.JniNuxieTypedRuntimeNative.copyPlayerToWindow(
-                    rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter)
+                    rendererHandle, playerHandle, windowHandle, clearColor, layoutScaleFactor)
             }
             override fun freeRenderer(handle: Long) {
                 freed.incrementAndGet()
@@ -1462,12 +1462,12 @@ class PublishedTextInputDeviceTest {
         val shown = java.util.concurrent.atomic.AtomicInteger()
         val service = ExperiencePresentationService(instrumentation.targetContext, { name, _, _ ->
             if (name == ai.nuxie.sdk.events.SystemEventNames.EXPERIENCE_SHOWN) shown.incrementAndGet()
-        }, scope, { NuxieRuntime.shared.isAvailable })
+        }, scope, { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "early-owner" })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val before = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
         val pending = scope.async {
-            service.presentJourney(fixture.release, "screen_1", "early-shell", "early-owner",
+            service.presentJourney(testPresentationFences(), fixture.release, "screen_1", "early-shell", "early-owner",
                 service.reserveJourney("early-owner"), acquire = {
                     started.countDown()
                     releaseAcquisition.await()
@@ -1614,12 +1614,12 @@ class PublishedTextInputDeviceTest {
         val shown = java.util.concurrent.atomic.AtomicInteger()
         val service = ExperiencePresentationService(instrumentation.targetContext, { name, _, _ ->
             if (name == ai.nuxie.sdk.events.SystemEventNames.EXPERIENCE_SHOWN) shown.incrementAndGet()
-        }, scope, { NuxieRuntime.shared.isAvailable })
+        }, scope, { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "recovery-owner" })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val pending = scope.async {
             runCatching {
-                service.presentJourney(fixture.release, "screen_1", "recovery-device", "recovery-owner",
+                service.presentJourney(testPresentationFences(), fixture.release, "screen_1", "recovery-device", "recovery-owner",
                     service.reserveJourney("recovery-owner"), acquire = {
                         if (attempts.incrementAndGet() == 1 && !closeWhileSlow) throw java.io.IOException("Fixture transport failure")
                         kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { release.await() }
@@ -1747,11 +1747,11 @@ class PublishedTextInputDeviceTest {
         val checkpoints = java.util.concurrent.atomic.AtomicInteger()
         val service = ExperiencePresentationService(instrumentation.targetContext, { name, _, _ ->
             if (name == ai.nuxie.sdk.events.SystemEventNames.EXPERIENCE_SHOWN) shown.incrementAndGet()
-        }, scope, { NuxieRuntime.shared.isAvailable })
+        }, scope, { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "native-recovery-owner" })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val pending = scope.async {
-            service.presentJourney(fixture.release, "screen_1", "native-recovery-device", "native-recovery-owner",
+            service.presentJourney(testPresentationFences(), fixture.release, "screen_1", "native-recovery-device", "native-recovery-owner",
                 service.reserveJourney("native-recovery-owner"), acquire = {
                     AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv,
                         protection = Closeable { closed.incrementAndGet() })
@@ -1922,7 +1922,7 @@ class PublishedTextInputDeviceTest {
         val batches = LinkedBlockingQueue<JourneyScreenEmissionBatch>()
         val screens = LinkedBlockingQueue<String>()
         val service = ExperiencePresentationService(instrumentation.targetContext, { _, _, _ -> }, scope,
-            { NuxieRuntime.shared.isAvailable })
+            { NuxieRuntime.shared.isAvailable }, currentDistinctId = { owner })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val navigationContract = instrumentation.context.assets.open("journeys/planes/persistent-navigation-android.json")
@@ -1938,12 +1938,12 @@ class PublishedTextInputDeviceTest {
         var nextEmission = 0L
         fun present(screenId: String): Activity {
             runBlocking {
-                service.presentJourney(fixture.release, screenId, journey, owner, service.reserveJourney(owner),
+                service.presentJourney(testPresentationFences(), fixture.release, screenId, journey, owner, service.reserveJourney(owner),
                     acquire = { AcquiredJourneyRelease(fixture.release.identity, fixture.assets, fixture.riv,
                         protection = Closeable {}) },
                     nextBatchSequence = nextBatch, nextEmissionSequence = nextEmission,
                     onScreenChanged = { screens.add(it); true },
-                    onEmissionBatch = { batch ->
+                    onEmissionBatch = { batch, frameSources ->
                         batches.add(batch)
                         true
                     }, onScreenDismissed = { _, _, _ ->
@@ -1984,7 +1984,7 @@ class PublishedTextInputDeviceTest {
             val unusedLeaseClosed = java.util.concurrent.atomic.AtomicBoolean(false)
             val failedPreparation = scope.async {
                 runCatching {
-                    service.presentJourney(fixture.release, navigationScreens[1], journey, owner, null,
+                    service.presentJourney(testPresentationFences(), fixture.release, navigationScreens[1], journey, owner, null,
                         acquire = { AcquiredJourneyRelease(fixture.release.identity, fixture.assets, invalidRiv,
                             protection = Closeable { unusedLeaseClosed.set(true) }) }, onOutcome = {})
                 }
@@ -2095,20 +2095,20 @@ class PublishedTextInputDeviceTest {
         val destinationCloses = java.util.concurrent.atomic.AtomicInteger()
         val checkpoints = java.util.concurrent.atomic.AtomicInteger()
         val service = ExperiencePresentationService(instrumentation.targetContext, { _, _, _ -> }, scope,
-            { NuxieRuntime.shared.isAvailable })
+            { NuxieRuntime.shared.isAvailable }, currentDistinctId = { "recover-owner" })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val invalid = File.createTempFile("navigation-recovery", ".riv", instrumentation.targetContext.cacheDir).apply { writeText("invalid native fixture") }
         var next: Deferred<ai.nuxie.sdk.ExperienceRef>? = null
         try {
-            val initial = scope.async { service.presentJourney(fixture.release, screenIds[0], "recover-navigation", "recover-owner",
+            val initial = scope.async { service.presentJourney(testPresentationFences(), fixture.release, screenIds[0], "recover-navigation", "recover-owner",
                 service.reserveJourney("recover-owner"), acquire = { AcquiredJourneyRelease(fixture.release.identity,
                     fixture.assets, fixture.riv, protection = Closeable {}) },
                 onScreenDismissed = { _, _, _ -> checkpoints.incrementAndGet(); JourneyScreenDismissalResult.HANDLED }, onOutcome = {}) }
             val activity = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
             runBlocking { kotlinx.coroutines.withTimeout(30_000) { initial.await() } }
             val sourceId = checkNotNull(activity.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
-            next = scope.async { service.presentJourney(fixture.release, screenIds[1], "recover-navigation", "recover-owner", null,
+            next = scope.async { service.presentJourney(testPresentationFences(), fixture.release, screenIds[1], "recover-navigation", "recover-owner", null,
                 acquire = {
                     val attempt = attempts.incrementAndGet()
                     if (attempt == 1) throw java.io.IOException("Fixture acquisition failure")
@@ -2403,7 +2403,7 @@ class PublishedTextInputDeviceTest {
         val directory = File(context.cacheDir, owner).apply { mkdirs() }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val store = SQLiteEventStore(context, databaseFile = File(directory, "events.db"))
-        val presentations = ExperiencePresentationService(context, { _, _, _ -> }, scope, { NuxieRuntime.shared.isAvailable })
+        val presentations = ExperiencePresentationService(context, { _, _, _ -> }, scope, { NuxieRuntime.shared.isAvailable }, currentDistinctId = { owner })
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
         val accepted = LinkedBlockingQueue<JourneyScreenEmissionBatch>()
@@ -2436,8 +2436,10 @@ class PublishedTextInputDeviceTest {
             override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
             override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
             override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
-            override fun resolveAction(owner: JourneyPresentationOwner, action: JsonObject, source: JourneyScreenEmissionSource?) =
-                presentations.resolveJourneyAction(owner, action, source)
+            override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest) =
+                presentations.openJourneyLink(owner, link)
+            override fun resolveAction(owner: JourneyPresentationOwner, action: JsonObject, source: JourneyScreenEmissionSource?, eventSource: JourneyRuntimeEventSource?) =
+                presentations.resolveJourneyAction(owner, action, source, eventSource)
             override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String): JourneyPresentationActionResult {
                 if (purchasing && action["type"]?.jsonPrimitive?.content == "purchase") {
                     purchases.add(action.getValue("placementId").jsonPrimitive.content)
@@ -2455,7 +2457,7 @@ class PublishedTextInputDeviceTest {
                     responsesBeforeNavigation.set(JourneyRunJournal(directory, owner, JourneyStorageScope(authority))
                         .runs().single().context.getValue("responses").jsonObject)
                 }
-                presentations.presentJourney(request.release, request.screenId, request.journeyId,
+                presentations.presentJourney(request.fences, request.release, request.screenId, request.journeyId,
                     request.ownerDistinctId, request.reservation, request.canPresent,
                     acquire = {
                         if (purchasing || scripted || candidateSemantics) artifactAcquirer.acquire(request.release, checkNotNull(catalog.snapshot(owner)).profile.delivery)
@@ -2470,8 +2472,9 @@ class PublishedTextInputDeviceTest {
                             if (method == "error") errorDismissals.add(it)
                         }
                     },
-                    onEmissionBatch = { batch ->
-                        val committed = request.onEmissionBatch(batch)
+                    onLinkOpened = request.onLinkOpened,
+                    onEmissionBatch = { batch, frameSources ->
+                        val committed = request.onEmissionBatch(batch, frameSources)
                         if (committed) accepted.add(batch)
                         committed
                     }, onPresentationRevealed = { id ->
@@ -2532,10 +2535,9 @@ class PublishedTextInputDeviceTest {
                 var downTime = SystemClock.uptimeMillis()
                 fun dispatch(action: Int, authoredY: Float = 30f) = instrumentation.runOnMainSync {
                     if (action == MotionEvent.ACTION_DOWN) downTime = SystemClock.uptimeMillis()
-                    val authoredHeight = if (purchaseNavigationFixture) 150f else 100f
-                    val scale = minOf(target.width / 320f, target.height / authoredHeight)
-                    val x = (target.width - 320f * scale) / 2f + purchaseX * scale
-                    val y = (target.height - authoredHeight * scale) / 2f + authoredY * scale
+                    val density = target.resources.displayMetrics.density
+                    val x = purchaseX * density
+                    val y = authoredY * density
                     val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
                     try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }
                 }
@@ -2634,9 +2636,9 @@ class PublishedTextInputDeviceTest {
                 var downTime = SystemClock.uptimeMillis()
                 fun dispatch(action: Int) = instrumentation.runOnMainSync {
                     if (action == MotionEvent.ACTION_DOWN) downTime = SystemClock.uptimeMillis()
-                    val scale = minOf(target.width / 390f, target.height / 844f)
-                    val x = (target.width - 390f * scale) / 2f + 100f * scale
-                    val y = (target.height - 844f * scale) / 2f + 728f * scale
+                    val density = target.resources.displayMetrics.density
+                    val x = 100f * density
+                    val y = 728f * density
                     val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
                     try { assertTrue(target.dispatchTouchEvent(event)) } finally { event.recycle() }
                 }
@@ -2794,7 +2796,7 @@ class PublishedTextInputDeviceTest {
                     UUID.randomUUID().toString(), JourneyScreenEmissionSource("screen_1", "corpus-continue"),
                     listOf(JourneyScreenEmission(UUID.randomUUID().toString(), reopened.nextPresentationEmissionSequence,
                         System.currentTimeMillis(), "corpus_next_0", JsonObject(emptyMap()))),
-                )))
+                ), null))
             }
             assertHostedScreen(instrumentation, first, "screen_2")
             assertEquals(1, monitor.hits)
@@ -3413,6 +3415,17 @@ class PublishedTextInputDeviceTest {
             if (before.getPixel(x, y) != after.getPixel(x, y)) changed++
         }
         return changed
+    }
+
+    private fun testPresentationFences(): JourneyPresentationFences {
+        val identity = object : ai.nuxie.sdk.identity.IdentityProvider {
+            override fun distinctId() = "device-owner"
+            override fun anonymousId() = "anonymous"
+            override fun rawDistinctId() = "device-owner"
+            override val isIdentified = true
+        }
+        val execution = ai.nuxie.sdk.journey.JourneyExecutionFence()
+        return JourneyPresentationFences(identity, identity.captureScope(), execution, execution.token())
     }
 
 }

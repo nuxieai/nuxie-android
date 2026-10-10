@@ -16,6 +16,28 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [23, 35])
 class ExperienceRecoveryViewTest {
+    @Test
+    @Config(sdk = [30])
+    fun `recovery padding converts every fractional-density inset back to pixels`() {
+        val controller = Robolectric.buildActivity(LayoutInsetsActivity::class.java).setup().visible()
+        val activity = controller.get()
+        val density = activity.resources.displayMetrics.density
+        activity.resources.displayMetrics.density = 2.625f
+        val view = ExperienceRecoveryView(activity, Color.BLACK, AcquisitionProgress.Phase.FAILED, { true }, {})
+        try {
+            activity.setContentView(view)
+            applyLayoutTestInsets(activity, view)
+            assertEquals(63, view.paddingLeft)
+            assertEquals(189, view.paddingTop)
+            assertEquals(84, view.paddingRight)
+            assertEquals(105, view.paddingBottom)
+        } finally {
+            view.close()
+            activity.resources.displayMetrics.density = density
+            controller.pause().stop().destroy()
+        }
+    }
+
     private fun descendants(view: View): List<View> = listOf(view) +
         if (view is ViewGroup) (0 until view.childCount).flatMap { descendants(view.getChildAt(it)) } else emptyList()
 

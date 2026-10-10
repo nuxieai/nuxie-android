@@ -118,6 +118,7 @@ dependencies {
   lintPublish(project(":nuxie-lint"))
   lintChecks(project(":nuxie-lint"))
   implementation(libs.androidx.sqlite.framework)
+  implementation(libs.androidx.browser)
   // StoreProduct exposes ProductDetails, so Billing is part of consumers'
   // compile classpath. Use the plain artifact: billing-ktx ships Kotlin 2.2
   // metadata this repo's pinned compiler cannot read.

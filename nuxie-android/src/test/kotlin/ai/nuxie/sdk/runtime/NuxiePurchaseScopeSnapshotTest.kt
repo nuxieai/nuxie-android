@@ -46,8 +46,7 @@ class NuxiePurchaseScopeSnapshotTest {
                 vector.getValue("expected").jsonPrimitive.contentOrNull,
                 current.resolveScopedString(ref.getValue("path").jsonPrimitive.content,
                     ref["viewModelName"]?.jsonPrimitive?.content,
-                    vector["instanceId"]?.jsonPrimitive?.content,
-                    ref["isRelative"]?.jsonPrimitive?.booleanOrNull))
+                    if (ref["isRelative"]?.jsonPrimitive?.booleanOrNull == false) null else vector["instanceId"]?.jsonPrimitive?.content))
         }
         assertNull(current.resolveScopedString("product.placementId", null, "retired"))
         assertNull(current.resolveScopedString("placementId", "Product", null))

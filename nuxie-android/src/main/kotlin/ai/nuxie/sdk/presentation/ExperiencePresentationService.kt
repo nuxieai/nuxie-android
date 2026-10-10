@@ -16,7 +16,6 @@ import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.Collections
@@ -547,9 +546,12 @@ internal class ExperiencePresentationService(
     private val emit: (String, Map<String, Any?>, String?) -> Unit,
     private val scope: CoroutineScope,
     private val runtimeAvailable: () -> Boolean,
+    private val currentDistinctId: () -> String,
     private val launch: (String) -> Unit,
     private val commerce: JourneyCommercePreparing = JourneyCommercePreparing.NONE,
-    private val openLink: (String, String?) -> Unit = { _, _ -> },
+    private val openLink: (JourneyLinkRouting.Destination, Activity?) -> Boolean = { _, _ -> false },
+    private val foregroundActivity: () -> Activity? = { null },
+    private val isAppForeground: () -> Boolean = { foregroundActivity() != null },
     private val firstFrameTimeoutMillis: Long = FIRST_FRAME_TIMEOUT_MILLIS,
     private val beforeHostTeardownForTesting: () -> Unit = {},
 ) {
@@ -558,20 +560,56 @@ internal class ExperiencePresentationService(
         emit: (String, Map<String, Any?>, String?) -> Unit,
         scope: CoroutineScope,
         runtimeAvailable: () -> Boolean,
+        currentDistinctId: () -> String,
         commerce: JourneyCommercePreparing = JourneyCommercePreparing.NONE,
+        foregroundActivity: () -> Activity? = { null },
+        isAppForeground: () -> Boolean = { foregroundActivity() != null },
     ) : this(
         emit = emit,
         scope = scope,
         runtimeAvailable = runtimeAvailable,
+        currentDistinctId = currentDistinctId,
         launch = AndroidPresentationLauncher(context.applicationContext ?: context),
         commerce = commerce,
-        openLink = { url, _ ->
-            (context.applicationContext ?: context).startActivity(
-                Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
-        },
+        openLink = { destination, activity -> openActivityLink(context, destination, activity) },
+        foregroundActivity = foregroundActivity,
+        isAppForeground = isAppForeground,
         firstFrameTimeoutMillis = FIRST_FRAME_TIMEOUT_MILLIS,
     )
+
+    internal suspend fun openJourneyLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest): JourneyOpenedLink? {
+        val active = synchronized(stateLock) { current?.takeIf { it.ref.journeyId == owner.journeyId && it.ownerDistinctId == owner.distinctId } }
+        return openLinkForPresentation(active, link)
+    }
+
+    private suspend fun openLinkForPresentation(active: ActivePresentation?, link: JourneyLinkRequest): JourneyOpenedLink? =
+        withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+            val activity = foregroundActivity()?.takeUnless { it.isDestroyed }
+            val screen = active?.let { PresentationRegistry.currentScreen(it.id) }
+            val live = active != null && active.ownerDistinctId == currentDistinctId() &&
+                active.journey.fences.isCurrent() &&
+                synchronized(stateLock) { current === active && !transitionInProgress } &&
+                active.shown.get() && !active.closed.get() &&
+                active.outcomeReason.get() == null && screen?.screenCloseReason() == null &&
+                screen?.purchaseActivity() === activity && activity?.isFinishing == false && activity.window.decorView.isAttachedToWindow
+            val state = if (!isAppForeground()) JourneyLinkRouting.State.BACKGROUND
+                else if (live) JourneyLinkRouting.State.SETTLED else JourneyLinkRouting.State.CLOSED
+            val destination = JourneyLinkRouting.route(link.url, link.target, state) ?: return@withContext null
+            val opened = try { openLink(destination, activity?.takeUnless { it.isFinishing }) }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (failure: Throwable) { ai.nuxie.sdk.logging.NuxieLog.w("ExperiencePresentationService", "Link handoff failed", failure); false }
+            if (opened) link.copy(screenId = link.screenId ?: active?.journey?.screenId)
+                .opened(if (destination is JourneyLinkRouting.Destination.InApp) "in_app" else "external") else null
+        }
+
+    private suspend fun openAndRecord(owner: JourneyOutcome, link: JourneyLinkRequest, record: suspend (JourneyOpenedLink) -> Unit): Boolean {
+        val active = synchronized(stateLock) { current?.takeIf { it.journey === owner } }
+        val opened = openLinkForPresentation(active, link) ?: return false
+        try { record(opened) }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Throwable) { ai.nuxie.sdk.logging.NuxieLog.w("ExperiencePresentationService", "Opened link recording failed", failure) }
+        return true
+    }
 
     private data class ActivePresentation(
         val id: String,
@@ -595,6 +633,7 @@ internal class ExperiencePresentationService(
     )
 
     private class JourneyOutcome(
+        val fences: JourneyPresentationFences,
         val screenId: String,
         val onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
         val onScreenDismissed: suspend (
@@ -603,6 +642,7 @@ internal class ExperiencePresentationService(
             String,
         ) -> JourneyScreenDismissalResult,
         val emissions: JourneyRuntimeEmissionCoordinator,
+        val openLink: suspend (JourneyLinkRequest) -> Boolean,
         val screenDismissed: AtomicBoolean = AtomicBoolean(false),
         var navigationDismissal: NavigationDismissal? = null,
         var navigationHistory: List<String> = emptyList(),
@@ -723,6 +763,7 @@ internal class ExperiencePresentationService(
         }
 
     suspend fun presentJourney(
+        fences: JourneyPresentationFences,
         release: AuthenticatedJourneyRelease,
         screenId: String,
         journeyId: String,
@@ -740,7 +781,8 @@ internal class ExperiencePresentationService(
         ) -> JourneyScreenDismissalResult = { _, _, _ ->
             JourneyScreenDismissalResult.HANDLED
         },
-        onEmissionBatch: suspend (JourneyScreenEmissionBatch) -> Boolean = { true },
+        onLinkOpened: suspend (JourneyOpenedLink) -> Unit = {},
+        onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> Boolean = { _, _ -> true },
         onPresentationRevealed: suspend (String) -> Unit = {},
         onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
         transition: JsonObject? = null,
@@ -749,6 +791,25 @@ internal class ExperiencePresentationService(
         val request = reserved?.request ?: captureRequest(ownerDistinctId)
         if (request.ownerDistinctId != ownerDistinctId) throw declinedPresentation()
         val selectedScreen = AuthenticatedPresentationScreen.resolve(release, screenId)
+        lateinit var journey: JourneyOutcome
+        journey = JourneyOutcome(
+            fences = fences,
+            screenId = screenId,
+            onOutcome = onOutcome,
+            onScreenDismissed = onScreenDismissed,
+            openLink = { link -> openAndRecord(journey, link, onLinkOpened) },
+            emissions = JourneyRuntimeEmissionCoordinator(
+                journeyId = journeyId,
+                screenId = screenId,
+                descriptor = release.descriptor,
+                nextBatchSequence = nextBatchSequence,
+                nextEmissionSequence = nextEmissionSequence,
+                onEmissionBatch = onEmissionBatch,
+                onScreenChanged = onScreenChanged,
+                onPresentationRevealed = onPresentationRevealed,
+                onOpenLink = { link -> openAndRecord(journey, link, onLinkOpened); Unit },
+            ),
+        )
         return presentPrepared(
             selectedScreen = selectedScreen,
             transition = transition,
@@ -756,22 +817,7 @@ internal class ExperiencePresentationService(
             journeyId = journeyId,
             reservationId = reserved?.id,
             reservationRequired = true,
-            journey = JourneyOutcome(
-                screenId = screenId,
-                onOutcome = onOutcome,
-                onScreenDismissed = onScreenDismissed,
-                emissions = JourneyRuntimeEmissionCoordinator(
-                    journeyId = journeyId,
-                    screenId = screenId,
-                    descriptor = release.descriptor,
-                    nextBatchSequence = nextBatchSequence,
-                    nextEmissionSequence = nextEmissionSequence,
-                    onEmissionBatch = onEmissionBatch,
-                    onScreenChanged = onScreenChanged,
-                    onPresentationRevealed = onPresentationRevealed,
-                    onOpenLink = openLink,
-                ),
-            ),
+            journey = journey,
             canPresent = canPresent,
         ) {
             val commerceSession = try {
@@ -1199,6 +1245,7 @@ internal class ExperiencePresentationService(
         owner: JourneyPresentationOwner,
         action: JsonObject,
         source: JourneyScreenEmissionSource?,
+        eventSource: JourneyRuntimeEventSource? = null,
     ): JsonObject? {
         val active = synchronized(stateLock) {
             current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) }
@@ -1221,7 +1268,9 @@ internal class ExperiencePresentationService(
                     val relative = reference["isRelative"]?.let {
                         (it as? JsonPrimitive)?.takeUnless(JsonPrimitive::isString)?.booleanOrNull ?: return null
                     }
-                    active.latestViewModelSnapshot.get()?.resolveScopedString(path, model, source?.instanceId, relative)
+                    if (relative == true) {
+                        eventSource?.snapshot?.resolveNativeString(path, model, eventSource.nativeId)
+                    } else active.latestViewModelSnapshot.get()?.resolveScopedString(path, model, if (relative == false) null else source?.instanceId)
                 }
                 else -> null
             }
@@ -1304,17 +1353,6 @@ internal class ExperiencePresentationService(
                 JourneyPermissionRequest.TRACKING,
                 null,
             )
-            JourneyActionType.OPEN_LINK -> {
-                val url = action.string("url")
-                    ?: return JourneyPresentationActionResult.Failed
-                val target = action.string("target")
-                    ?: return JourneyPresentationActionResult.Failed
-                if (runCatching { openLink(url, target) }.isFailure) {
-                    JourneyPresentationActionResult.Failed
-                } else {
-                    JourneyPresentationActionResult.Advanced("next")
-                }
-            }
             JourneyActionType.DISMISS -> {
                 PresentationRegistry.dismiss(active.id, CloseReason.UserDismissed)
                 attemptOutcome(active, CloseReason.UserDismissed)
@@ -1563,7 +1601,8 @@ internal class ExperiencePresentationService(
 
     private fun publishScreenEffects(active: ActivePresentation, publish: suspend () -> Boolean) {
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            val accepted = runCatching { publish() }.getOrDefault(false)
+            val accepted = runCatching { publish() }
+                .onFailure { if (it is CancellationException) throw it }.getOrDefault(false)
             if (!accepted && !active.closed.get()) {
                 PresentationRegistry.reportFailure(
                     active.id,

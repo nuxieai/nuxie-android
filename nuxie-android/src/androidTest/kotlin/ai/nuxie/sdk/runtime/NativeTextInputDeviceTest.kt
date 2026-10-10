@@ -32,7 +32,7 @@ class NativeTextInputDeviceTest {
 
     private fun capture(player: NuxieRuntimePlayer, renderer: NuxieAndroidVulkanRenderer): Long {
         player.stepTyped(elapsedSeconds = 0.0)
-        renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+        renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
         val status = intArrayOf(-1)
         val capture = bridge.nativePlayerSemanticSnapshot(player.requireHandle(), status)
         assertEquals(0, status.single())

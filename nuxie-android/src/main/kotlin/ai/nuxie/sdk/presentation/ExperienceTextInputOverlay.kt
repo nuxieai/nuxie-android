@@ -35,13 +35,12 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import java.io.File
 import java.util.Locale
-import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** Native editors share the renderer's centered-contain coordinate space. UI-thread owned. */
+/** Native editors share the renderer's layout coordinate space. UI-thread owned. */
 internal class ExperienceTextInputOverlay(
     context: Context,
-    private val artboardSize: ExperienceArtboardSize,
+    private var artboardSize: ExperienceArtboardSize,
     inputs: List<ExperienceTextInput>,
     private val fonts: Map<String, File>,
     private val writer: (String, String, Boolean, (Result<Unit>) -> Unit) -> Unit,
@@ -370,11 +369,17 @@ internal class ExperienceTextInputOverlay(
         }
     }
 
+    fun updateLayoutBounds(bounds: ExperienceArtboardSize) {
+        artboardSize = bounds
+        layoutEditors()
+    }
+
     private fun layoutEditors() {
-        if (width <= 0 || height <= 0) return
-        val scale = min(width / artboardSize.width, height / artboardSize.height)
-        val left = (width - artboardSize.width * scale) / 2f
-        val top = (height - artboardSize.height * scale) / 2f
+        val transform = ExperienceLayoutTransform.create(artboardSize, width.toFloat(), height.toFloat(),
+            resources.displayMetrics.density) ?: return
+        val scale = transform.scale
+        val left = transform.contentLeft
+        val top = transform.contentTop
         for (binding in bindings) {
             val input = binding.input
             val editor = binding.editor
@@ -448,7 +453,12 @@ internal class ExperienceTextInputOverlay(
                 .takeIf { value -> value.isFinite() && value > -Int.MAX_VALUE && value < Int.MAX_VALUE }
         }
         editor.presentedTextOriginY = localBaseline(0f) ?: return false
-        editor.presentedFirstBaseline = field.firstBaseline?.let(::localBaseline)
+        // Blanking the bound runtime run during native editing removes its shaped
+        // baseline. Keep that baseline while typography matches, then transform it
+        // with the current field geometry so density and layout changes stay current.
+        editor.capturedFirstBaseline = field.firstBaseline?.let { metrics to it }
+            ?: editor.capturedFirstBaseline?.takeIf { it.first == metrics }
+        editor.presentedFirstBaseline = editor.capturedFirstBaseline?.second?.let(::localBaseline)
         editor.setTextSize(TypedValue.COMPLEX_UNIT_PX, metrics.fontSize * scale)
         editor.letterSpacing = input.style.letterSpacing * scale / editor.textSize
         val extraLineSpacing = if (metrics.lineHeight == -1f) 0f
@@ -460,6 +470,7 @@ internal class ExperienceTextInputOverlay(
 
     private inner class Editor(context: Context, private val input: ExperienceTextInput) : EditText(context) {
         var semanticNode: NativeSemanticNode? = null
+        var capturedFirstBaseline: Pair<ExperienceTextInput.EffectiveMetrics, Float>? = null
         var presentedTextOriginY: Float = 0f
             set(value) {
                 if (field == value) return
@@ -478,8 +489,7 @@ internal class ExperienceTextInputOverlay(
             // TextView's baseline includes top padding. Measure the actual native layout,
             // then align that baseline without moving or resizing the published field box.
             val desired = presentedFirstBaseline
-            // During native editing the runtime run is intentionally blank. Its text
-            // origin remains valid even when it has no shaped first-line baseline.
+            // A field without a captured baseline still has a valid text origin.
             val top = if (desired == null) presentedTextOriginY.roundToInt()
                 else (desired - (baseline - paddingTop)).roundToInt()
             if (paddingTop != top) {

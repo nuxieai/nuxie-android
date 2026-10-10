@@ -5,9 +5,15 @@ import ai.nuxie.sdk.runtime.NuxiePlayerPointerKind
 import android.view.MotionEvent
 import kotlin.math.min
 
-/** Authored extent used by both centered-contain rendering and pointer projection. */
-internal data class ExperienceArtboardSize(val width: Float, val height: Float) {
+/** Root extent in layout points. */
+internal data class ExperienceArtboardSize(
+    val width: Float,
+    val height: Float,
+    val originX: Float = 0f,
+    val originY: Float = 0f,
+) {
     init {
+        require(originX.isFinite() && originY.isFinite())
         require(width.isFinite() && width > 0f) { "Artboard width must be finite and positive" }
         require(height.isFinite() && height > 0f) { "Artboard height must be finite and positive" }
     }
@@ -16,21 +22,24 @@ internal data class ExperienceArtboardSize(val width: Float, val height: Float) 
 /**
  * Bounded UI-thread input staging for one runtime presentation.
  *
- * Android coordinates are projected through the same centered-contain
- * geometry used by the renderer. Events remain queued until one runtime
+ * Android pixels are projected into the runtime's layout points. Events remain queued until one runtime
  * frame consumes them; release atomically clears the queue and permanently
  * closes this presentation's input seam.
  */
 internal class ExperienceRuntimePointerInput(
-    private val artboardSize: ExperienceArtboardSize?,
+    private var artboardSize: ExperienceArtboardSize?,
 ) {
     private val lock = Any()
     private val queue = PointerQueue()
     private var released = false
 
-    fun enqueue(event: MotionEvent, viewportWidth: Int, viewportHeight: Int): Boolean {
+    fun updateBounds(bounds: ExperienceArtboardSize) {
+        artboardSize = bounds
+    }
+
+    fun enqueue(event: MotionEvent, viewportWidth: Int, viewportHeight: Int, density: Float): Boolean {
         val size = artboardSize ?: return false
-        val transform = ContainCenterTransform.create(size, viewportWidth, viewportHeight)
+        val transform = ExperienceLayoutTransform.create(size, viewportWidth.toFloat(), viewportHeight.toFloat(), density)
             ?: return false
         val projected = event.projectedPointers(transform) ?: return false
         synchronized(lock) {
@@ -149,46 +158,8 @@ internal class ExperienceRuntimePointerInput(
     }
 }
 
-internal data class ContainCenterTransform(
-    val scale: Float,
-    val contentLeft: Float,
-    val contentTop: Float,
-) {
-    fun project(x: Float, y: Float): Pair<Float, Float>? {
-        val projectedX = (x - contentLeft) / scale
-        val projectedY = (y - contentTop) / scale
-        return if (projectedX.isFinite() && projectedY.isFinite()) {
-            projectedX to projectedY
-        } else {
-            null
-        }
-    }
-
-    companion object {
-        fun create(
-            artboard: ExperienceArtboardSize,
-            viewportWidth: Int,
-            viewportHeight: Int,
-        ): ContainCenterTransform? {
-            if (viewportWidth <= 0 || viewportHeight <= 0) return null
-            val scale = min(
-                viewportWidth.toFloat() / artboard.width,
-                viewportHeight.toFloat() / artboard.height,
-            )
-            if (!scale.isFinite() || scale <= 0f) return null
-            val contentWidth = artboard.width * scale
-            val contentHeight = artboard.height * scale
-            return ContainCenterTransform(
-                scale = scale,
-                contentLeft = (viewportWidth - contentWidth) / 2f,
-                contentTop = (viewportHeight - contentHeight) / 2f,
-            )
-        }
-    }
-}
-
 private fun MotionEvent.projectedPointers(
-    transform: ContainCenterTransform,
+    transform: ExperienceLayoutTransform,
 ): List<NuxiePlayerPointerEvent>? {
     val timestampSeconds = eventTime / 1_000f
     if (!timestampSeconds.isFinite() || timestampSeconds < 0f) return emptyList()

@@ -77,6 +77,17 @@ sealed interface NuxieActivity {
         val legId: String,
         val generation: Long,
     ) : NuxieActivity
+    /** A runtime link or Journey open-link step handed to the browser or system. */
+    data class LinkOpened(
+        val experience: ExperienceRef,
+        val legId: String,
+        val generation: Long,
+        val url: String,
+        val target: String?,
+        val destination: String,
+        val screenId: String?,
+        val instanceId: String?,
+    ) : NuxieActivity
     data class JourneyCompleted(
         val experience: ExperienceRef,
         val legId: String,
@@ -191,6 +202,7 @@ private fun NuxieActivity.wireName(): String = when (this) {
         is NuxieActivity.ExperienceErrored -> "experience_errored"
         is NuxieActivity.JourneyStarted -> "journey_started"
         is NuxieActivity.JourneyCompleted -> "journey_completed"
+        is NuxieActivity.LinkOpened -> "link_opened"
         is NuxieActivity.PurchaseCompleted -> "purchase_completed"
         is NuxieActivity.PurchaseFailed -> "purchase_failed"
         is NuxieActivity.PurchaseCancelled -> "purchase_cancelled"
@@ -227,6 +239,16 @@ private fun NuxieActivity.wireProperties(): Map<String, NuxieActivityValue> = bu
                 add(activity.experience)
                 put("leg_id", activity.legId.activityValue())
                 put("leg_generation", NuxieActivityValue.Int(activity.generation))
+            }
+            is NuxieActivity.LinkOpened -> {
+                add(activity.experience)
+                put("leg_id", activity.legId.activityValue())
+                put("leg_generation", NuxieActivityValue.Int(activity.generation))
+                put("url", activity.url.activityValue())
+                activity.target?.let { put("target", it.activityValue()) }
+                put("destination", activity.destination.activityValue())
+                activity.screenId?.let { put("screen_id", it.activityValue()) }
+                activity.instanceId?.let { put("instance_id", it.activityValue()) }
             }
             is NuxieActivity.JourneyCompleted -> {
                 add(activity.experience)

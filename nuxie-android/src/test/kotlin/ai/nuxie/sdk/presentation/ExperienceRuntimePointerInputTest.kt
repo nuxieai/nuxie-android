@@ -40,7 +40,7 @@ class ExperienceRuntimePointerInputTest {
                             else -> error("Unknown pointer fixture action: $action")
                         }
                         val event = motion(code, 1_000L + index, 10f + index, 20f)
-                        try { assertTrue(input.enqueue(event, 100, 100)) } finally { event.recycle() }
+                        try { assertTrue(input.enqueue(event, 100, 100, density = 1f)) } finally { event.recycle() }
                     }
                 }
             }
@@ -49,14 +49,14 @@ class ExperienceRuntimePointerInputTest {
     }
 
     @Test
-    fun `tap down and up project through centered contain into one runtime batch`() {
+    fun `tap down and up project through view density into one runtime batch`() {
         val input = ExperienceRuntimePointerInput(ExperienceArtboardSize(400f, 200f))
         val down = motion(MotionEvent.ACTION_DOWN, 1_000, 500f, 500f)
         val up = motion(MotionEvent.ACTION_UP, 1_200, 750f, 625f)
 
         try {
-            assertTrue(input.enqueue(down, viewportWidth = 1_000, viewportHeight = 1_000))
-            assertTrue(input.enqueue(up, viewportWidth = 1_000, viewportHeight = 1_000))
+            assertTrue(input.enqueue(down, viewportWidth = 1_000, viewportHeight = 1_000, density = 2.5f))
+            assertTrue(input.enqueue(up, viewportWidth = 1_000, viewportHeight = 1_000, density = 2.5f))
         } finally {
             down.recycle()
             up.recycle()
@@ -67,14 +67,14 @@ class ExperienceRuntimePointerInputTest {
                 NuxiePlayerPointerEvent(
                     NuxiePlayerPointerKind.DOWN,
                     x = 200f,
-                    y = 100f,
+                    y = 200f,
                     pointerId = 0,
                     timestampSeconds = 1f,
                 ),
                 NuxiePlayerPointerEvent(
                     NuxiePlayerPointerKind.UP,
                     x = 300f,
-                    y = 150f,
+                    y = 250f,
                     pointerId = 0,
                     timestampSeconds = 1.2f,
                 ),
@@ -91,11 +91,11 @@ class ExperienceRuntimePointerInputTest {
         val up = motion(MotionEvent.ACTION_UP, 200, 10f, 20f)
 
         try {
-            assertTrue(input.enqueue(down, 100, 100))
+            assertTrue(input.enqueue(down, 100, 100, density = 1f))
             input.release()
 
             assertEquals(emptyList<NuxiePlayerPointerEvent>(), input.takeBatch())
-            assertFalse(input.enqueue(up, 100, 100))
+            assertFalse(input.enqueue(up, 100, 100, density = 1f))
         } finally {
             down.recycle()
             up.recycle()
@@ -108,7 +108,7 @@ class ExperienceRuntimePointerInputTest {
         val event = motion(MotionEvent.ACTION_DOWN, 100, 10f, 20f)
 
         try {
-            assertFalse(input.enqueue(event, 100, 100))
+            assertFalse(input.enqueue(event, 100, 100, density = 1f))
         } finally {
             event.recycle()
         }

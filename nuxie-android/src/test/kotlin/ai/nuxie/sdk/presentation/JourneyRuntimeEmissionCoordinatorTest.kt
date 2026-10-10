@@ -26,6 +26,62 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class JourneyRuntimeEmissionCoordinatorTest {
+    @Test fun `accepted frame link cancellation escapes publication`() = runTest {
+        val cancelled = kotlinx.coroutines.CancellationException("link cancelled")
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", JsonObject(emptyMap()), 0, 0,
+            onEmissionBatch = { _, sources -> sources?.frameLinks?.perform(); true }, onPresentationRevealed = {},
+            onOpenLink = { throw cancelled })
+        assertTrue(coordinator.reveal())
+        val events = listOf(NuxieRuntimeEvent(0, 128, "sibling", "", "", 0f, emptyList()),
+            NuxieRuntimeEvent(1, 131, "", "https://example.test", "_self", 0f, emptyList()))
+        try {
+            coordinator.publish(NuxiePlayerStepOutcome(false, emptyList(), events, emptyList(), emptyList()), 1uL)
+            org.junit.Assert.fail("Cancellation must escape the accepted batch")
+        } catch (failure: kotlinx.coroutines.CancellationException) { org.junit.Assert.assertSame(cancelled, failure) }
+    }
+
+    @Test fun `rejected frame links run after batch handoff outside publication gate`() = runTest {
+        val order = mutableListOf<String>()
+        lateinit var coordinator: JourneyRuntimeEmissionCoordinator
+        coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", JsonObject(emptyMap()), 0, 0,
+            onEmissionBatch = { it, _ -> order += "batch"; false }, onPresentationRevealed = {},
+            onOpenLink = { order += "link"; coordinator.close() })
+        assertTrue(coordinator.reveal())
+        val events = listOf(NuxieRuntimeEvent(0, 131, "", "https://example.test", "_self", 0f, emptyList(), 99),
+            NuxieRuntimeEvent(1, 128, "sibling", "", "", 0f, emptyList()))
+        assertFalse(coordinator.publish(NuxiePlayerStepOutcome(false, emptyList(), events, emptyList(), emptyList()), 1uL))
+        assertEquals(listOf("batch", "link"), order)
+    }
+
+    @Test fun `two controls reject the batch but preserve its link`() = runTest {
+        val descriptor = Json.parseToJsonElement("""{"screenBehaviors":[{"screenId":"screen","controls":[{"actionId":"control","behavior":{"kind":"declarative","program":[]}}]}]}""").jsonObject
+        var batches = 0
+        val links = mutableListOf<JourneyLinkRequest>()
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", descriptor, 0, 0,
+            onEmissionBatch = { _, _ -> batches++; true }, onPresentationRevealed = {}, onOpenLink = { links += it })
+        assertTrue(coordinator.reveal())
+        val control = NuxieRuntimeEvent(0, 128, "control", "", "", 0f, emptyList())
+        val link = NuxieRuntimeEvent(2, 131, "", "https://example.test", "_self", 0f, emptyList())
+        assertTrue(coordinator.publish(NuxiePlayerStepOutcome(false, emptyList(), listOf(control, control, link), emptyList(), emptyList()), 1uL))
+        assertEquals(0, batches)
+        assertEquals(listOf("https://example.test"), links.map { it.url })
+    }
+
+    @Test fun `unaliased control drops its own drafts and preserves siblings`() = runTest {
+        val descriptor = Json.parseToJsonElement("""{"screenBehaviors":[{"screenId":"screen","controls":[{"actionId":"control","behavior":{"kind":"declarative","program":[{"type":"emit","eventName":"before_missing","payload":{}},{"type":"emit","eventName":"requires_alias","payload":{"instance":{"source":"instance_id"}}}]}}]}]}""").jsonObject
+        val batches = mutableListOf<JourneyScreenEmissionBatch>()
+        val coordinator = JourneyRuntimeEmissionCoordinator("journey", "screen", descriptor, 0, 0,
+            onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {})
+        assertTrue(coordinator.reveal())
+        val frame = ai.nuxie.sdk.runtime.NuxieViewModelSnapshot.fromNative(ai.nuxie.sdk.runtime.NativeViewModelSnapshot(1,
+            arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(1, 0), ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(3, 0)), emptyArray()))
+        val events = listOf(NuxieRuntimeEvent(0, 128, "control", "", "", 0f, emptyList(), 3),
+            NuxieRuntimeEvent(1, 128, "sibling", "", "", 0f, emptyList()))
+        assertTrue(coordinator.publish(NuxiePlayerStepOutcome(false, emptyList(), events, emptyList(), emptyList()), 1uL, snapshot = frame))
+        assertEquals(listOf("sibling"), batches.single().emissions.map { it.name })
+        assertEquals(listOf(0L), batches.single().emissions.map { it.sequence })
+    }
+
     @Test
     fun `durable admission waits for live host before releasing effects and is not replayed on recreation`() = runTest {
         val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
@@ -37,7 +93,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             screenId = screenEmissionFixture.getValue("run").jsonObject.getValue("screen_id").jsonPrimitive.content,
             descriptor = controlDescriptor(),
             nextBatchSequence = 0, nextEmissionSequence = 0,
-            onEmissionBatch = { order += "batch"; true },
+            onEmissionBatch = { it, _ -> order += "batch"; true },
             onScreenChanged = { order += "screen"; true },
             onPresentationRevealed = { order += "admission"; admissionCount++ },
         )
@@ -62,7 +118,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             screenId = screenEmissionFixture.getValue("run").jsonObject.getValue("screen_id").jsonPrimitive.content,
             descriptor = controlDescriptor(),
             nextBatchSequence = 0, nextEmissionSequence = 0,
-            onEmissionBatch = { error("Closed generation must not publish") },
+            onEmissionBatch = { it, _ -> error("Closed generation must not publish") },
             onPresentationRevealed = {},
         )
         val publication = async { coordinator.publish(controlOutcome(), 17uL) }
@@ -95,7 +151,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             nextBatchSequence = expected.getValue("batch_sequence").jsonPrimitive.long,
             nextEmissionSequence = expected.getValue("emission_sequences").jsonArray
                 .first().jsonPrimitive.long,
-            onEmissionBatch = { batch ->
+            onEmissionBatch = { batch, frameSources ->
                 order += "batch"
                 batches += batch
                 true
@@ -157,7 +213,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             descriptor = JsonObject(emptyMap()),
             nextBatchSequence = 0,
             nextEmissionSequence = 0,
-            onEmissionBatch = { batches += it; true },
+            onEmissionBatch = { it, _ -> batches += it; true },
             onPresentationRevealed = {},
             createId = incrementingIds(),
             nowMillis = { 99 },
@@ -216,7 +272,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             },
             nextBatchSequence = 0,
             nextEmissionSequence = 0,
-            onEmissionBatch = { batches += it; true },
+            onEmissionBatch = { it, _ -> batches += it; true },
             onPresentationRevealed = {},
         )
         coordinator.reveal()
@@ -246,7 +302,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             descriptor = controlDescriptor(),
             nextBatchSequence = 0,
             nextEmissionSequence = 0,
-            onEmissionBatch = { batches += it; true },
+            onEmissionBatch = { it, _ -> batches += it; true },
             onPresentationRevealed = {},
         )
         coordinator.reveal()
@@ -276,7 +332,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             descriptor = JsonObject(emptyMap()),
             nextBatchSequence = 0,
             nextEmissionSequence = 0,
-            onEmissionBatch = { batches += it; true },
+            onEmissionBatch = { it, _ -> batches += it; true },
             onPresentationRevealed = {},
         )
         coordinator.reveal()
@@ -311,7 +367,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             descriptor = controlDescriptor(),
             nextBatchSequence = 0,
             nextEmissionSequence = 0,
-            onEmissionBatch = { batches += it; true },
+            onEmissionBatch = { it, _ -> batches += it; true },
             onPresentationRevealed = {},
         )
         coordinator.reveal()
@@ -340,7 +396,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             descriptor = JsonObject(emptyMap()),
             nextBatchSequence = 0,
             nextEmissionSequence = 0,
-            onEmissionBatch = {
+            onEmissionBatch = { it, _ ->
                 attempts += 1
                 false
             },
@@ -363,7 +419,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
             descriptor = JsonObject(emptyMap()),
             nextBatchSequence = 0,
             nextEmissionSequence = 0,
-            onEmissionBatch = {
+            onEmissionBatch = { it, _ ->
                 attempts += 1
                 true
             },
@@ -388,7 +444,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
         var batches = 0
         var admissions = 0
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", JsonObject(emptyMap()), 0, 0,
-            onEmissionBatch = { batches++; true }, onPresentationRevealed = { admissions++ })
+            onEmissionBatch = { it, _ -> batches++; true }, onPresentationRevealed = { admissions++ })
         val old = RendererEffectLifetime()
         val waiting = async { coordinator.publish(outcome(events = listOf(event("old"))), 1uL, old) }
         val text = async { coordinator.publishTextCommit("old-input", "stale", lifetime = old) }
@@ -411,7 +467,7 @@ class JourneyRuntimeEmissionCoordinatorTest {
         val release = kotlinx.coroutines.CompletableDeferred<Unit>()
         val sequences = mutableListOf<Long>()
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", JsonObject(emptyMap()), 0, 0,
-            onEmissionBatch = { batch ->
+            onEmissionBatch = { batch, frameSources ->
                 sequences += batch.batchSequence
                 if (sequences.size == 1) { entered.complete(Unit); release.await() }
                 true

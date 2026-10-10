@@ -500,6 +500,19 @@ internal class NuxieRuntimePlayer internal constructor(
     private var interactionStepPending = true
     private var stepFailed = false
 
+    fun setLayoutSize(width: Float, height: Float) {
+        require(width.isFinite() && width > 0f && height.isFinite() && height > 0f)
+        val status = native.setPlayerLayoutSize(requireHandle(), width, height)
+        if (status != NUX_STATUS_OK) throw NuxieRuntimeCallException("set player layout size", status)
+    }
+
+    /** Read after a zero step has settled the new root size. */
+    fun layoutSize(): Pair<Float, Float> {
+        val size = requireNativeValue(native.playerLayoutSize(requireHandle()), "read player layout size")
+        check(size.size == 2 && size.all { it.isFinite() && it > 0f }) { "Invalid player layout size" }
+        return size[0] to size[1]
+    }
+
     fun videoSetCaptions(component: Long, language: String, cues: List<NuxieVideoCaptionCue>) {
         require(component >= 0)
         val status = native.videoSetCaptions(requireHandle(), component, language, cues)
@@ -747,7 +760,7 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
         player: NuxieRuntimePlayer,
         window: NuxieRuntimeWindow,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int {
         val rendererHandle = owned.require()
         val playerHandle = player.requireHandle()
@@ -764,13 +777,13 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
         }
         if (copiesToWindow) {
             val disposition = native.copyPlayerToWindow(
-                rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter,
+                rendererHandle, playerHandle, windowHandle, clearColor, layoutScaleFactor,
             )
             if (disposition < 0) detachSurface()
             return disposition
         }
         val disposition = native.renderAndPresent(
-            rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter,
+            rendererHandle, playerHandle, windowHandle, clearColor, layoutScaleFactor,
         )
         // REATTACH retires the surface without delivering a frame. Let the host
         // schedule its next frame normally, without activating an unseen screen.
@@ -788,12 +801,12 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
     fun renderToCpuFrame(
         player: NuxieRuntimePlayer,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): NuxieCpuFrame = native.renderToCpuFrame(
         owned.require(),
         player.requireHandle(),
         clearColor,
-        fitContainCenter,
+        layoutScaleFactor,
     )
 
     fun close() {

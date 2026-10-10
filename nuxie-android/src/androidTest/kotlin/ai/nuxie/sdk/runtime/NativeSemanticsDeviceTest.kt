@@ -25,7 +25,7 @@ class NativeSemanticsDeviceTest {
                         val handle = player.requireHandle()
                         assertEquals(0, bridge.nativePlayerEnableSemantics(handle))
                         player.stepTyped(elapsedSeconds = 0.0)
-                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                         snapshot = bridge.nativePlayerSemanticSnapshot(handle, status)
                         assertEquals(0, status.single())
                         assertNotEquals(0L, snapshot)
@@ -57,7 +57,7 @@ class NativeSemanticsDeviceTest {
                         assertEquals(0, bridge.nativeSemanticSnapshotFree(snapshot))
                         snapshot = 0L
                         player.stepTyped(elapsedSeconds = 0.0)
-                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                         snapshot = bridge.nativePlayerSemanticSnapshot(handle, status)
                         assertEquals(0, status.single())
                         val nextNode = checkNotNull(bridge.nativeSemanticSnapshotNode(snapshot, 0, status))
@@ -68,7 +68,7 @@ class NativeSemanticsDeviceTest {
                         assertEquals(0, bridge.nativeSemanticSnapshotFree(snapshot))
                         snapshot = 0L
                         player.stepTyped(elapsedSeconds = 0.0)
-                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                         snapshot = bridge.nativePlayerSemanticSnapshot(handle, status)
                         val emptyNode = checkNotNull(bridge.nativeSemanticSnapshotNode(snapshot, 0, status))
                         assertArrayEquals(byteArrayOf(), bridge.nativePlayerFieldStringCopy(handle, snapshot, emptyNode.id, endpoint, status))
@@ -106,7 +106,7 @@ class NativeSemanticsDeviceTest {
                         player.stepTyped(elapsedSeconds = 0.0)
                         assertEquals(0L, bridge.nativePlayerSemanticSnapshot(handle, status))
                         assertEquals(9, status.single()) // HANDLE_MISMATCH: no delivered revision.
-                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), true)
+                        renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f)
                         snapshot = bridge.nativePlayerSemanticSnapshot(handle, status)
                         assertEquals(0, status.single())
                         assertNotEquals(0L, snapshot)

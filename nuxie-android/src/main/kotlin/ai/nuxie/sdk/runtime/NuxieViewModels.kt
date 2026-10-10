@@ -213,10 +213,8 @@ internal class NuxieViewModelSnapshot private constructor(
         path: String,
         viewModelName: String?,
         instanceId: String?,
-        isRelative: Boolean? = null,
     ): String? {
-        if (isRelative == true && instanceId == null) return null
-        val sourceInstanceId = if (isRelative == false) null else instanceId
+        val sourceInstanceId = instanceId
         val root = instancesById[rootInstanceId] ?: return null
         val selected = when {
             sourceInstanceId != null -> instanceIds[sourceInstanceId]?.let(instancesById::get)
@@ -227,11 +225,17 @@ internal class NuxieViewModelSnapshot private constructor(
         return (resolveValue(path, selected) as? Value.StringValue)?.value
     }
 
-    /** Only one authenticated alias for an instance present in this frame is admissible. */
-    fun authoredInstanceId(nativeInstanceId: Long): String? {
-        if (nativeInstanceId !in instancesById) return null
-        return instanceIds.entries.singleOrNull { it.value == nativeInstanceId }?.key
+    fun containsInstance(nativeInstanceId: Long): Boolean = nativeInstanceId in instancesById
+
+    fun instanceAliases(nativeInstanceId: Long): Set<String> =
+        instanceIds.filterValues { it == nativeInstanceId }.keys
+
+    fun resolveNativeString(path: String, viewModelName: String?, nativeInstanceId: Long): String? {
+        val selected = instancesById[nativeInstanceId] ?: return null
+        if (viewModelName != null && selected.schemaName != viewModelName) return null
+        return (resolveValue(path, selected) as? Value.StringValue)?.value
     }
+
 
     /** Capture stable aliases before playback; never reassign them when a reference changes. */
     fun captureInstanceIds(bindings: List<NuxieViewModelInstanceBinding>): Map<String, Long> {
@@ -438,6 +442,12 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
     fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int =
         error("stepPlayerFrame is not implemented")
 
+    fun setPlayerLayoutSize(playerHandle: Long, width: Float, height: Float): Int =
+        error("setPlayerLayoutSize is not implemented")
+
+    fun playerLayoutSize(playerHandle: Long): NativeCallResult<FloatArray> =
+        error("playerLayoutSize is not implemented")
+
     fun freePlayer(handle: Long): Unit = error("freePlayer is not implemented")
 
     fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long =
@@ -467,7 +477,7 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         playerHandle: Long,
         windowHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int = error("renderAndPresent is not implemented")
 
     fun copyPlayerToWindow(
@@ -475,14 +485,14 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
         playerHandle: Long,
         windowHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int = error("copyPlayerToWindow is not implemented")
 
     fun renderToCpuFrame(
         rendererHandle: Long,
         playerHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): NuxieCpuFrame = error("renderToCpuFrame is not implemented")
 
     fun freeRenderer(handle: Long): Unit = error("freeRenderer is not implemented")
@@ -732,6 +742,15 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
     override fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int =
         NuxieRuntimeBridge.nativePlayerStep(playerHandle, elapsedSeconds)
 
+    override fun setPlayerLayoutSize(playerHandle: Long, width: Float, height: Float): Int =
+        NuxieRuntimeBridge.nativePlayerLayoutSizeSet(playerHandle, width, height)
+
+    override fun playerLayoutSize(playerHandle: Long): NativeCallResult<FloatArray> {
+        val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
+        val size = NuxieRuntimeBridge.nativePlayerLayoutSize(playerHandle, status)
+        return NativeCallResult(status.single(), size)
+    }
+
     override fun freePlayer(handle: Long) {
         NuxieRuntimeBridge.nativePlayerFree(handle)
     }
@@ -753,13 +772,13 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         playerHandle: Long,
         windowHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int = NuxieRuntimeBridge.nativeRendererRenderPlayer(
         rendererHandle,
         playerHandle,
         windowHandle,
         clearColor,
-        fitContainCenter,
+        layoutScaleFactor,
     )
 
     override fun copyPlayerToWindow(
@@ -767,22 +786,22 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         playerHandle: Long,
         windowHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): Int = NuxieRuntimeBridge.nativeRendererCopyPlayerToWindow(
-        rendererHandle, playerHandle, windowHandle, clearColor, fitContainCenter,
+        rendererHandle, playerHandle, windowHandle, clearColor, layoutScaleFactor,
     )
 
     override fun renderToCpuFrame(
         rendererHandle: Long,
         playerHandle: Long,
         clearColor: Int,
-        fitContainCenter: Boolean,
+        layoutScaleFactor: Float,
     ): NuxieCpuFrame = checkNotNull(
         NuxieRuntimeBridge.nativeRendererRenderPlayerToCpuFrame(
             rendererHandle,
             playerHandle,
             clearColor,
-            fitContainCenter,
+            layoutScaleFactor,
         ),
     ) { "Android Vulkan renderer did not return a CPU frame" }
 

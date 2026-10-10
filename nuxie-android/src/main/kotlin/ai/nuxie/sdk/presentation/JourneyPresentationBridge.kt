@@ -2,7 +2,11 @@ package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.experiences.AuthenticatedJourneyRelease
 import ai.nuxie.sdk.experiences.JourneyReleaseDelivery
+import ai.nuxie.sdk.identity.IdentityProvider
+import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.journey.JourneyActionType
+import ai.nuxie.sdk.journey.JourneyExecutionFence
+import ai.nuxie.sdk.journey.JourneyExecutionFenceToken
 import java.io.Closeable
 import kotlinx.serialization.json.JsonObject
 
@@ -45,7 +49,19 @@ internal data class JourneyScreenEmissionBatch(
     val emissions: List<JourneyScreenEmission>,
 )
 
+internal class JourneyPresentationFences(
+    private val identity: IdentityProvider,
+    private val identityScope: IdentityScope,
+    private val executionFence: JourneyExecutionFence,
+    private val executionToken: JourneyExecutionFenceToken,
+) {
+    fun isCurrent(): Boolean = executionFence.performIfCurrent(executionToken) {
+        identity.withCurrentScope(identityScope) { true } == true
+    } == true
+}
+
 internal data class JourneyPresentationRequest(
+    val fences: JourneyPresentationFences,
     val release: AuthenticatedJourneyRelease,
     val delivery: JourneyReleaseDelivery,
     val screenId: String,
@@ -63,7 +79,8 @@ internal data class JourneyPresentationRequest(
     ) -> JourneyScreenDismissalResult = { _, _, _ ->
         JourneyScreenDismissalResult.HANDLED
     },
-    val onEmissionBatch: suspend (JourneyScreenEmissionBatch) -> Boolean = { true },
+    val onLinkOpened: suspend (JourneyOpenedLink) -> Unit = {},
+    val onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> Boolean = { _, _ -> true },
     val onPresentationRevealed: suspend (String) -> Unit = {},
     val onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
     val transition: JsonObject? = null,
@@ -105,6 +122,8 @@ internal sealed interface JourneyPresentationActionResult {
 
 /** Adapter owned by NuxieCore so the executor has no Activity dependency. */
 internal interface JourneyPresenting {
+    suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest): JourneyOpenedLink?
+
     fun reserve(ownerDistinctId: String): JourneyPresentationReservation?
 
     suspend fun present(request: JourneyPresentationRequest): JourneyPresentationResult
@@ -117,6 +136,7 @@ internal interface JourneyPresenting {
         owner: JourneyPresentationOwner,
         action: JsonObject,
         source: JourneyScreenEmissionSource?,
+        eventSource: JourneyRuntimeEventSource? = null,
     ): JsonObject? = action
 
     suspend fun dispatchAction(

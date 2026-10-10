@@ -42,6 +42,7 @@ internal class NuxieLifecycleCoordinator(
     )
     private var sawInitialForeground = false
     private var lastResumed = java.lang.ref.WeakReference<Activity>(null)
+    private val resumedActivities = java.util.Collections.newSetFromMap(java.util.WeakHashMap<Activity, Boolean>())
 
     private val closed = AtomicBoolean(false)
 
@@ -84,9 +85,14 @@ internal class NuxieLifecycleCoordinator(
     }
 
     /** Admit a host that was already visible when a late SDK setup registered callbacks. */
+    @Suppress("DEPRECATION")
     fun admitVisibleActivity(activity: Activity) {
-        if (!activity.isFinishing && !activity.isDestroyed && activity.window.decorView.isShown) {
-            onActivityStarted(activity)
+        activity.runOnUiThread {
+            if (closed.get() || activity.isFinishing || activity.isDestroyed || !activity.window.decorView.isShown) return@runOnUiThread
+            val probe = NuxieResumedActivityProbe().also {
+                it.coordinator = java.lang.ref.WeakReference(this)
+            }
+            activity.fragmentManager.beginTransaction().add(probe, null).commitAllowingStateLoss()
         }
     }
 
@@ -115,7 +121,10 @@ internal class NuxieLifecycleCoordinator(
 
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
     override fun onActivityResumed(activity: Activity) {
-        if (!closed.get()) lastResumed = java.lang.ref.WeakReference(activity)
+        if (!closed.get()) {
+            lastResumed = java.lang.ref.WeakReference(activity)
+            resumedActivities.add(activity)
+        }
     }
 
     /** Main-thread lookup for native checkout; never retain or select a stopped Activity. */
@@ -127,9 +136,19 @@ internal class NuxieLifecycleCoordinator(
             ?: startedActivities.firstOrNull { usable(it) && it.hasWindowFocus() }
             ?: startedActivities.firstOrNull(::usable)
     }
-    override fun onActivityPaused(activity: Activity) = Unit
+    internal fun isAppForeground(): Boolean = !closed.get() && startedActivities.isNotEmpty()
+
+    internal fun resumedActivity(): Activity? {
+        if (closed.get()) return null
+        fun usable(activity: Activity) = activity in resumedActivities && activity in startedActivities && !activity.isDestroyed
+        return lastResumed.get()?.takeIf(::usable) ?: resumedActivities.firstOrNull(::usable)
+    }
+
+    override fun onActivityPaused(activity: Activity) {
+        resumedActivities.remove(activity)
+    }
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
-    override fun onActivityDestroyed(activity: Activity) = Unit
+    override fun onActivityDestroyed(activity: Activity) { resumedActivities.remove(activity) }
 
     private suspend fun runBestEffort(
         label: String,
@@ -147,5 +166,38 @@ internal class NuxieLifecycleCoordinator(
 
     private companion object {
         const val LOG_TAG = "Nuxie"
+    }
+}
+
+/** One-shot platform lifecycle probe for SDK setup after Activity.onResume. */
+// Kotlin internal emits a JVM-public class and public no-argument constructor for restoration.
+@android.annotation.SuppressLint("ValidFragment")
+@Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+internal class NuxieResumedActivityProbe : android.app.Fragment() {
+    internal var coordinator = java.lang.ref.WeakReference<NuxieLifecycleCoordinator>(null)
+    private var started = false
+
+    override fun onStart() {
+        super.onStart()
+        started = true
+        // A resumed host receives onResume before this admission reaches the queue.
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            val host = activity
+            if (started && host != null && !host.isDestroyed && !host.isFinishing) {
+                coordinator.get()?.onActivityStarted(host)
+            }
+            coordinator.clear()
+            fragmentManager?.takeUnless { it.isDestroyed }?.beginTransaction()?.remove(this)?.commitAllowingStateLoss()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        activity?.let { coordinator.get()?.onActivityResumed(it) }
+    }
+
+    override fun onStop() {
+        started = false
+        super.onStop()
     }
 }

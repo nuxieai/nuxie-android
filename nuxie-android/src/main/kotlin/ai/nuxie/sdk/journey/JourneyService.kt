@@ -17,11 +17,14 @@ import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.identity.IdentityScope
 import ai.nuxie.sdk.network.ProfileDeliveryAuthority
 import ai.nuxie.sdk.presentation.JourneyPresentationActionResult
+import ai.nuxie.sdk.presentation.JourneyPresentationFences
 import ai.nuxie.sdk.presentation.JourneyPresentationOwner
 import ai.nuxie.sdk.presentation.JourneyPresentationRequest
 import ai.nuxie.sdk.presentation.JourneyPresentationReservation
 import ai.nuxie.sdk.presentation.JourneyPresentationResult
 import ai.nuxie.sdk.presentation.JourneyPresenting
+import ai.nuxie.sdk.presentation.JourneyRuntimeEmissionSources
+import ai.nuxie.sdk.presentation.JourneyRuntimeEventSource
 import ai.nuxie.sdk.presentation.JourneyScreenEmissionBatch
 import ai.nuxie.sdk.presentation.JourneyScreenDismissalResult
 import ai.nuxie.sdk.presentation.JourneySurfaceOutcome
@@ -31,6 +34,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -127,6 +131,10 @@ internal fun interface JourneyDispatching {
     suspend fun dispatch(request: JourneyDispatchRequest): JourneyDispatchResult
 }
 
+internal fun interface JourneyLinkRecording {
+    suspend fun captureLinkOpened(link: ai.nuxie.sdk.presentation.JourneyOpenedLink, request: JourneyDispatchRequest): Boolean
+}
+
 /**
  * Owns authenticated journey execution. A private FIFO gives profile,
  * event, lifecycle, and identity changes one deterministic order while the
@@ -178,10 +186,11 @@ internal class JourneyService(
     },
     private val featureAccess: suspend (String) -> FeatureAccess? = { null },
     private val offerFeatureAccess: suspend (String) -> FeatureAccess? = featureAccess,
-    private val dispatcher: JourneyDispatching = JourneyDispatching {
-        JourneyDispatchResult.Unsupported
+    private val dispatcher: JourneyDispatching = object : JourneyDispatching {
+        override suspend fun dispatch(request: JourneyDispatchRequest) = JourneyDispatchResult.Unsupported
     },
     private val presenter: JourneyPresenting? = null,
+    private val linkRecorder: JourneyLinkRecording = JourneyLinkRecording { _, _ -> error("Journey link recorder is not configured") },
     private val pinnedReleaseAuthenticator: (
         JsonObject,
         JsonObject,
@@ -264,6 +273,7 @@ internal class JourneyService(
             val release: AuthenticatedJourneyRelease,
             val executionFenceToken: JourneyExecutionFenceToken,
             val batch: JourneyScreenEmissionBatch,
+            val eventSource: JourneyRuntimeEmissionSources?,
             val accepted: CompletableDeferred<Boolean>,
         ) : Command {
             override val done: CompletableDeferred<Unit>? = null
@@ -289,6 +299,7 @@ internal class JourneyService(
             val signal: JourneyControlExecutor.Signal,
             val checkpoint: JourneyControlExecutor.Checkpoint?,
             val dismissPresentationOnCompletion: Boolean,
+            val eventSource: JourneyRuntimeEventSource? = null,
         ) : Command {
             override val done: CompletableDeferred<Unit>? = null
         }
@@ -396,7 +407,11 @@ internal class JourneyService(
                 command.accepted?.complete(result.getOrNull() == true)
             }
             if (command is Command.PresentationBatch) {
-                command.accepted.complete(result.getOrNull() == true)
+                val failure = result.exceptionOrNull()
+                if (failure is CancellationException) {
+                    command.accepted.completeExceptionally(failure)
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                } else { command.accepted.complete(result.getOrNull() == true) }
             }
             if (command is Command.PresentationLifecycle) {
                 command.result.complete(
@@ -500,6 +515,7 @@ internal class JourneyService(
         release: AuthenticatedJourneyRelease,
         executionFenceToken: JourneyExecutionFenceToken,
         batch: JourneyScreenEmissionBatch,
+        eventSource: JourneyRuntimeEmissionSources? = null,
     ): Boolean {
         val accepted = CompletableDeferred<Boolean>()
         val command = Command.PresentationBatch(
@@ -508,6 +524,7 @@ internal class JourneyService(
             release = release,
             executionFenceToken = executionFenceToken,
             batch = batch,
+            eventSource = eventSource,
             accepted = accepted,
         )
         if (coroutineContext[WorkerContext]?.owner === this) {
@@ -899,13 +916,21 @@ internal class JourneyService(
         else -> null
     }?.takeIf(String::isNotEmpty)
 
+    private suspend fun recordLink(link: ai.nuxie.sdk.presentation.JourneyOpenedLink, request: JourneyDispatchRequest) {
+        runCatching { linkRecorder.captureLinkOpened(link, request) }
+            .onFailure {
+                if (it is CancellationException) throw it
+                Log.w("JourneyService", "Opened link recording failed", it)
+            }
+    }
+
     private fun resolvePresentationAction(
         action: JsonObject,
         context: JsonObject,
     ): JsonObject? {
         if (JourneyActionType.from(action) != JourneyActionType.OPEN_LINK) return action
-        val expression = action["url"] as? JsonObject ?: return null
-        val url = JourneyValues.resolve(expression, context) as? JsonPrimitive ?: return null
+        val expression = action["url"] ?: return null
+        val url = JourneyValues.resolve(expression as? JsonObject ?: return null, context) as? JsonPrimitive ?: return null
         if (!url.isString || url.content.isEmpty()) return null
         return JsonObject(action + ("url" to JsonPrimitive(url.content)))
     }
@@ -1719,13 +1744,17 @@ internal class JourneyService(
                 publication = publication,
             )
         } ?: return false
-        return settlePresentationPublication(
+        val accepted = settlePresentationPublication(
             staged,
             command.release,
             target,
             command.executionFenceToken,
             identityScope,
+            command.eventSource,
         )
+        // The worker cannot consume queued continuations until these links settle.
+        command.eventSource?.frameLinks?.perform()
+        return accepted
     }
 
     private suspend fun settlePresentationPublication(
@@ -1734,6 +1763,7 @@ internal class JourneyService(
         target: JourneyRunJournal,
         executionToken: JourneyExecutionFenceToken,
         identityScope: IdentityScope,
+        eventSource: JourneyRuntimeEmissionSources? = null,
     ): Boolean {
         val publication = stagedRun.pendingPresentationPublication ?: return true
         val admission = StableEventCommitAdmission { commit ->
@@ -1851,6 +1881,7 @@ internal class JourneyService(
                     executorSignal(event),
                     null,
                     dismissPresentationOnCompletion = true,
+                    eventSource = eventSource?.source(routedEvent?.id),
                 ),
             )
             return true
@@ -1885,6 +1916,7 @@ internal class JourneyService(
                     JourneyControlExecutor.Signal(responsesChanged = true),
                     checkpoint,
                     dismissPresentationOnCompletion = true,
+                    eventSource = eventSource?.source(routedEvent?.id),
                 ),
             )
         }
@@ -1951,6 +1983,7 @@ internal class JourneyService(
             initialCheckpoint = command.checkpoint,
             target = target,
             dismissPresentationOnCompletion = command.dismissPresentationOnCompletion,
+            eventSource = command.eventSource,
         )
     }
 
@@ -2177,6 +2210,7 @@ internal class JourneyService(
         release: AuthenticatedJourneyRelease,
         executionSnapshot: JourneyRun.ExecutionSnapshot,
         executionToken: JourneyExecutionFenceToken,
+        identityScope: IdentityScope,
         target: JourneyRunJournal,
         reservation: JourneyPresentationReservation?,
         canPresent: () -> Boolean,
@@ -2192,6 +2226,7 @@ internal class JourneyService(
         val result = try {
             presentation.present(
                 JourneyPresentationRequest(
+                    fences = JourneyPresentationFences(identity, identityScope, executionFence, executionToken),
                     release = release,
                     delivery = executionSnapshot.delivery,
                     screenId = screenId,
@@ -2231,13 +2266,21 @@ internal class JourneyService(
                             executionFenceToken = executionToken,
                         )
                     },
-                    onEmissionBatch = { batch ->
+                    onLinkOpened = { link ->
+                        if (identity.isCurrentScope(identityScope) && identityScope.distinctId == target.distinctId && executionFence.isCurrent(executionToken)) {
+                            recordLink(link, JourneyDispatchRequest(run, release, run.stepId,
+                                JsonObject(emptyMap()), link.effectId ?: ai.nuxie.sdk.events.TimeBasedEpochGenerator.shared.next(), target.distinctId,
+                                identityScope, executionFence, executionToken))
+                        }
+                    },
+                    onEmissionBatch = { batch, frameSources ->
                         handlePresentationBatch(
                             runId = runId,
                             expectedScreenId = screenId,
                             release = release,
                             executionFenceToken = executionToken,
                             batch = batch,
+                            eventSource = frameSources,
                         )
                     },
                     onOutcome = { outcome ->
@@ -2274,6 +2317,7 @@ internal class JourneyService(
         target: JourneyRunJournal,
         initialPresentationReservation: JourneyPresentationReservation? = null,
         dismissPresentationOnCompletion: Boolean = true,
+        eventSource: JourneyRuntimeEventSource? = null,
     ) {
         val leg = release.leg
         val executionSnapshot = initial.executionSnapshot ?: run {
@@ -2403,6 +2447,7 @@ internal class JourneyService(
                                 release = release,
                                 executionSnapshot = executionSnapshot,
                                 executionToken = executionToken,
+                                identityScope = identityScope,
                                 target = target,
                                 reservation = reserved,
                                 canPresent = { foreground.get() && current() },
@@ -2444,7 +2489,19 @@ internal class JourneyService(
                             }
                         }
                         val owner = JourneyPresentationOwner(run.journeyId, target.distinctId)
-                        val dispatched = if (presentation != null &&
+                        val dispatched = if (actionType == JourneyActionType.OPEN_LINK) {
+                            val resolved = resolvePresentationAction(result.action, run.context)
+                            val url = resolved?.text("url")
+                            val linkTarget = resolved?.get("target")?.let { it as? JsonPrimitive }?.takeIf { it.isString }?.content
+                            if (resolved != null && !url.isNullOrEmpty() && linkTarget != null) {
+                                val opened = presentation?.openLink(owner, ai.nuxie.sdk.presentation.JourneyLinkRequest(url, linkTarget, null, effectId = effectId))
+                                if (opened != null) {
+                                    recordLink(opened, JourneyDispatchRequest(run, release, result.stepId,
+                                        resolved, effectId, target.distinctId, identityScope, executionFence, executionToken))
+                                }
+                            }
+                            JourneyDispatchResult.Outlet("next")
+                        } else if (presentation != null &&
                             actionType?.isPresentationOwned == true &&
                             presentation.owns(owner)
                         ) {
@@ -2453,7 +2510,8 @@ internal class JourneyService(
                                 run.context,
                             )
                             val resolved = contextResolved?.let {
-                                presentation.resolveAction(owner, it, run.presentationSource?.source)
+                                presentation.resolveAction(owner, it, run.presentationSource?.source,
+                                    eventSource.takeIf { run.presentationSource?.eventId == initial.presentationSource?.eventId })
                             }
                             if (resolved == null) {
                                 finishExecution(run, "abandoned")
@@ -2506,6 +2564,7 @@ internal class JourneyService(
                                         release = release,
                                         executionSnapshot = executionSnapshot,
                                         executionToken = executionToken,
+                                        identityScope = identityScope,
                                         target = target,
                                         reservation = reserved,
                                         canPresent = { foreground.get() && current() },

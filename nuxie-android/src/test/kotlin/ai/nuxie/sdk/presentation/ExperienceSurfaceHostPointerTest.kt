@@ -163,11 +163,11 @@ class ExperienceSurfaceHostPointerTest {
                 allowResize.countDown()
             }
             drain(lane)
-            assertEquals("Resize retires the pending frame and requires a fresh step", 4, native.elapsedSteps.size)
+            assertEquals("Resize settles with a zero step", listOf(0f, 0.064f, 0.016f, 0f), native.elapsedSteps)
             assertEquals("Retired frame effects await the replacement delivery", listOf(1uL, 3uL), published)
             host.doFrame(1_112_000_000L)
             drain(lane)
-            assertEquals("A queued resize must not count the same elapsed time twice", 0.016f, native.elapsedSteps.last(), 0.000001f)
+            assertEquals("The next animation step includes time spent settling layout", 0.032f, native.elapsedSteps.last(), 0.000001f)
         } finally {
             host.release()
             lane.shutdown()
@@ -538,7 +538,7 @@ class ExperienceSurfaceHostPointerTest {
             drain(lane)
             host.onSurfaceTextureUpdated(texture)
             drain(lane)
-            assertEquals(listOf(NativePlayerPointer(0, 200f, 100f, 0, 1f)), native.pointerSteps.single())
+            assertEquals(listOf(NativePlayerPointer(0, 500f, 500f, 0, 1f)), native.pointerSteps.single())
             host.setPresentationVisible(false)
             host.setPresentationVisible(true)
             host.setPresentationVisible(false)
@@ -550,8 +550,8 @@ class ExperienceSurfaceHostPointerTest {
             host.onSurfaceTextureUpdated(texture)
             drain(lane)
             assertEquals(listOf(
-                NativePlayerPointer(3, 200f, 100f, 0, 1f),
-                NativePlayerPointer(0, 300f, 100f, 0, 100f),
+                NativePlayerPointer(3, 500f, 500f, 0, 1f),
+                NativePlayerPointer(0, 750f, 500f, 0, 100f),
             ), native.pointerSteps.last())
             assertEquals(listOf(0f, 0f), native.elapsedSteps)
             assertEquals(1, native.playersCreated)
@@ -751,8 +751,8 @@ class ExperienceSurfaceHostPointerTest {
 
             assertEquals(
                 listOf(
-                    NativePlayerPointer(0, 200f, 100f, 0, 1f),
-                    NativePlayerPointer(2, 200f, 100f, 0, 1.1f),
+                    NativePlayerPointer(0, 500f, 500f, 0, 1f),
+                    NativePlayerPointer(2, 500f, 500f, 0, 1.1f),
                 ),
                 native.pointerSteps.first { it.isNotEmpty() },
             )
@@ -1068,6 +1068,12 @@ class ExperienceSurfaceHostPointerTest {
         override fun freeArtboard(handle: Long) = Unit
         override fun stateMachineNames(fileHandle: Long, artboardName: String?): NativeCallResult<List<String>> = NativeCallResult(0, emptyList())
         override fun newDefaultPlayer(artboardHandle: Long): Long = 3L.also { playersCreated += 1; stateWrites.lastOrNull()?.let(stateAtPlayerCreation::add) }
+        private var layoutSize = floatArrayOf(100f, 100f)
+        override fun setPlayerLayoutSize(playerHandle: Long, width: Float, height: Float): Int {
+            layoutSize = floatArrayOf(width, height)
+            return 0
+        }
+        override fun playerLayoutSize(playerHandle: Long) = NativeCallResult(0, layoutSize)
         override fun freePlayer(handle: Long) = Unit
         override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long = 4L
         override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long): Int = 0
@@ -1114,14 +1120,14 @@ class ExperienceSurfaceHostPointerTest {
             playerHandle: Long,
             windowHandle: Long,
             clearColor: Int,
-            fitContainCenter: Boolean,
+            layoutScaleFactor: Float,
         ): Int { onRender(); return presentation }
 
         override fun renderToCpuFrame(
             rendererHandle: Long,
             playerHandle: Long,
             clearColor: Int,
-            fitContainCenter: Boolean,
+            layoutScaleFactor: Float,
         ): NuxieCpuFrame = error("not used")
 
         override fun freeRenderer(handle: Long) = Unit

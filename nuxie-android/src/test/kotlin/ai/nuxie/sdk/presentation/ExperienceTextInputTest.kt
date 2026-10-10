@@ -54,7 +54,7 @@ class ExperienceTextInputTest {
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey",
             JsonObject(descriptor + ("screenBehaviors" to behaviors)), 0, 0,
-            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
+            onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {})
         coordinator.reveal()
         assertTrue(coordinator.publishTextInputEvent("name", ExperienceSemanticTextDraft.Event(
             ExperienceSemanticTextDraft.EventKind.EDITING_ENDED, "same")))
@@ -75,7 +75,7 @@ class ExperienceTextInputTest {
             .replace("\"textRunName\":", "\"editableValueName\":\"editable\",\"textRunName\":")) as JsonObject
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", descriptor, 0, 0,
-            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
+            onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {})
         fun owner(id: Long) = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(id,
             arrayOf(NativeViewModelSnapshotInstance(id, 0)), emptyArray()))
         coordinator.reveal()
@@ -134,7 +134,7 @@ class ExperienceTextInputTest {
         val state = ExperienceTextInputState()
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", descriptor, 0, 0,
-            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
+            onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {})
         coordinator.reveal()
         for (snapshot in listOf(null, responseSnapshot(JsonPrimitive(Float.NaN)))) {
             assertTrue(runCatching { coordinator.publishTextCommit("name", "50", state, snapshot = snapshot) }.isFailure)
@@ -168,7 +168,7 @@ class ExperienceTextInputTest {
             .replace("\"responseFieldKey\":", "\"responseCapture\":\"binding\",\"responseFieldKey\":")) as JsonObject
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val coordinator = JourneyRuntimeEmissionCoordinator("journey", "survey", descriptor, 0, 0,
-            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
+            onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {})
         assertTrue(coordinator.reveal())
         val snapshot = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(1,
             arrayOf(NativeViewModelSnapshotInstance(1, 0), NativeViewModelSnapshotInstance(2, 1),
@@ -490,7 +490,7 @@ class ExperienceTextInputTest {
                 (editor.parent as View).matrix.mapPoints(corners)
                 item.getValue("corners").jsonArray.forEachIndexed { index, value ->
                     assertEquals(item.getValue("name").jsonPrimitive.content,
-                        value.jsonPrimitive.float * 2f + if (index % 2 == 1) 100f else 0f, corners[index], 0.002f)
+                        value.jsonPrimitive.float, corners[index], 0.002f)
                 }
                 if (!composing) {
                     assertTrue(editor.requestFocus())
@@ -520,7 +520,7 @@ class ExperienceTextInputTest {
     }
 
     @Test
-    fun `geometry uses renderer contain fit and invalid geometry hides editor`() {
+    fun `geometry uses view density and invalid geometry hides editor`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val input = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(value = "abcd")
         val overlay = ExperienceTextInputOverlay(activity, ExperienceArtboardSize(200f, 100f),
@@ -534,9 +534,9 @@ class ExperienceTextInputTest {
         val origin = floatArrayOf(0f, 0f)
         editor.matrix.mapPoints(origin)
         (editor.parent as View).matrix.mapPoints(origin)
-        assertArrayEquals(floatArrayOf(20f, 140f), origin, 0.002f)
-        assertEquals(160, editor.layoutParams.width)
-        assertEquals(40, editor.layoutParams.height)
+        assertArrayEquals(floatArrayOf(10f, 20f), origin, 0.002f)
+        assertEquals(80, editor.layoutParams.width)
+        assertEquals(20, editor.layoutParams.height)
         assertEquals(Color.TRANSPARENT, editor.currentTextColor)
         overlay.update(snapshot(), capturedGeometry(width = Float.NaN))
         assertEquals(View.INVISIBLE, editor.visibility)
@@ -692,7 +692,7 @@ class ExperienceTextInputTest {
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val sourceState = ExperienceTextInputState()
         val source = JourneyRuntimeEmissionCoordinator("journey", "survey", textInputDescriptor(), 0, 0,
-            onEmissionBatch = { entered.complete(Unit); accepted.await(); batches += it; true },
+            onEmissionBatch = { it, _ -> entered.complete(Unit); accepted.await(); batches += it; true },
             onPresentationRevealed = {})
         assertTrue(source.reveal())
         val pending = async { source.publishTextCommit("name", "Ada", sourceState) }
@@ -702,7 +702,7 @@ class ExperienceTextInputTest {
         accepted.complete(Unit)
         assertTrue(pending.await())
         val destination = JourneyRuntimeEmissionCoordinator("journey", "survey", textInputDescriptor(), 1, 1,
-            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {})
+            onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {})
         assertTrue(destination.reveal())
         assertTrue(destination.publishTextCommit("name", "Ada", destinationState))
         assertEquals(1, batches.size)
@@ -715,7 +715,7 @@ class ExperienceTextInputTest {
         val batches = mutableListOf<JourneyScreenEmissionBatch>()
         val coordinator = JourneyRuntimeEmissionCoordinator(
             "journey", "survey", textInputDescriptor(), 3, 7,
-            onEmissionBatch = { batches += it; true }, onPresentationRevealed = {},
+            onEmissionBatch = { it, _ -> batches += it; true }, onPresentationRevealed = {},
         )
         val pending = async { coordinator.publishTextCommit("name", "Ada") }
         yield()
@@ -745,7 +745,7 @@ class ExperienceTextInputTest {
         var accept = true
         fun coordinator() = JourneyRuntimeEmissionCoordinator(
             "journey", "survey", textInputDescriptor(), 0, 0,
-            onEmissionBatch = {
+            onEmissionBatch = { it, _ ->
                 values += it.emissions.single().payload.getValue("value") as JsonPrimitive
                 accept
             }, onPresentationRevealed = {},
@@ -777,7 +777,7 @@ class ExperienceTextInputTest {
         var publications = 0
         val coordinator = JourneyRuntimeEmissionCoordinator(
             "journey", "survey", textInputDescriptor("abcd"), 0, 0,
-            onEmissionBatch = { publications++; true }, onPresentationRevealed = {},
+            onEmissionBatch = { it, _ -> publications++; true }, onPresentationRevealed = {},
         )
         assertTrue(coordinator.reveal())
         assertTrue(coordinator.publishTextCommit("name", "ab"))

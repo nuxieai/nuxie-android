@@ -27,7 +27,7 @@ internal class JourneyEffectDispatcher(
         AppAction,
         ((() -> Unit) -> Boolean),
     ) -> Boolean,
-) : JourneyDispatching {
+) : JourneyDispatching, JourneyLinkRecording {
     override suspend fun dispatch(request: JourneyDispatchRequest): JourneyDispatchResult {
         if (!requestIsCurrent(request)) return JourneyDispatchResult.Failed
         return when (request.action.text("type")) {
@@ -93,6 +93,16 @@ internal class JourneyEffectDispatcher(
         properties["name"] = name
         nativePayload?.let { properties["payload"] = it }
         return captureThenAdvance(APP_ACTION_REQUESTED, properties, request)
+    }
+
+    override suspend fun captureLinkOpened(link: ai.nuxie.sdk.presentation.JourneyOpenedLink, request: JourneyDispatchRequest): Boolean {
+        val properties = attribution(request).toMutableMap()
+        properties["url"] = link.url
+        link.target?.let { properties["target"] = it }
+        properties["destination"] = link.destination
+        link.screenId?.let { properties["screen_id"] = it }
+        link.instanceId?.let { properties["instance_id"] = it }
+        return captureThenAdvance(JourneyEventNames.LINK_OPENED, properties, request) is JourneyDispatchResult.Outlet
     }
 
     private suspend fun captureThenAdvance(

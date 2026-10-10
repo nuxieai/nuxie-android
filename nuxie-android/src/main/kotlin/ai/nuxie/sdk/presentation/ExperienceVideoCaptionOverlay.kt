@@ -23,8 +23,9 @@ internal class ExperienceVideoCaptionOverlay(context: Context) : LinearLayout(co
     }
 
     fun updateInsets(insets: ExperienceSafeAreaInsets) {
-        setPadding(margin + insets.left.toInt(), margin,
-            margin + insets.right.toInt(), margin + insets.bottom.toInt())
+        val density = resources.displayMetrics.density
+        setPadding(margin + (insets.left * density).toInt(), margin,
+            margin + (insets.right * density).toInt(), margin + (insets.bottom * density).toInt())
     }
 
     fun update(captions: Map<Long, NuxieVideoCaption>) {
