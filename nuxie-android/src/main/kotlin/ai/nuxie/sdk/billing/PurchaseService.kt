@@ -21,6 +21,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -1787,8 +1788,9 @@ internal class PurchaseService(
         }
         if (ownsOperation) {
             // The host owns only its wait. SDK lifetime owns an admitted
-            // verification and applying the server's accepted refresh.
-            val job = scope.launch {
+            // verification and applying the server's accepted refresh. Keep
+            // the caller's dispatcher; replace only its cancellation owner.
+            val job = scope.launch(currentCoroutineContext().minusKey(Job)) {
                 try {
                     val refreshed = performSyncEvidence(current, refreshProviderState)
                     if (!refreshed && current.synced) completeManaged(current)
