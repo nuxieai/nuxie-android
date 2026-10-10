@@ -381,14 +381,14 @@ class PurchaseOutcomeCommitFixtureTest {
         assertEquals(
             name,
             expected.requiredInt("pendingRecords"),
-            harness.store.load().values.count {
+            kotlinx.coroutines.runBlocking { harness.store.load() }.values.count {
                 it.purchaseState == StoredPurchaseState.PENDING && !it.revoked
             },
         )
         assertEquals(
             name,
             expected.requiredInt("uniqueEvidenceRows") + expected.requiredInt("pendingRecords"),
-            harness.store.load().size,
+            kotlinx.coroutines.runBlocking { harness.store.load() }.size,
         )
         // This is the Journey router's actual completion-carrier input
         // count (purchase AND restore both route, matching iOS), independent
@@ -545,7 +545,7 @@ class PurchaseOutcomeCommitFixtureTest {
         if (onlyExternalEntries) {
             assertTrue(name, harness.billing.launches.isEmpty())
             assertTrue(name, harness.billing.queries.isEmpty())
-            assertTrue(name, harness.store.load().isEmpty())
+            assertTrue(name, kotlinx.coroutines.runBlocking { harness.store.load() }.isEmpty())
             assertTrue(name, harness.store.everStoredTokens.isEmpty())
             assertTrue(name, harness.syncStarts.isEmpty())
             assertTrue(name, harness.trackedFeatureIds.none(harness.core.featureInfo::isAllowed))
@@ -621,7 +621,7 @@ class PurchaseOutcomeCommitFixtureTest {
             assertEquals(name, expected.experienceId, actual.purchaseContext?.experienceId)
             assertEquals(name, expected.experienceVersion, actual.purchaseContext?.experienceVersion)
         }
-        harness.store.load().values
+        kotlinx.coroutines.runBlocking { harness.store.load() }.values
             .filter { it.purchaseState == StoredPurchaseState.PURCHASED }
             .forEach { evidence ->
                 val expected = contract.products.values.single {
@@ -666,7 +666,7 @@ class PurchaseOutcomeCommitFixtureTest {
             val token = body.requiredString("purchase_token")
             assertTrue(name, token in harness.store.everPurchasedTokens)
             assertEquals(name, harness.ownerDistinctId, body.requiredString("distinct_id"))
-            val stored = harness.store.load().getValue(token)
+            val stored = kotlinx.coroutines.runBlocking { harness.store.load() }.getValue(token)
             val product = contract.products.values.single { it.productId == stored.nuxieProductId }
             assertEquals(name, product.storeProductId, body.requiredString("product_id"))
         }
@@ -902,6 +902,7 @@ class PurchaseOutcomeCommitFixtureTest {
         private var externalOperationSequence = 0
 
         val service = PurchaseService(
+            ioDispatcher = kotlinx.coroutines.Dispatchers.Unconfined,
             billing = billing,
             evidenceStore = store,
             synchronizer = PurchaseSynchronizer { evidence ->
@@ -1053,9 +1054,9 @@ class PurchaseOutcomeCommitFixtureTest {
         val everStoredTokens = linkedSetOf<String>()
         val everPurchasedTokens = linkedSetOf<String>()
 
-        override fun load(): Map<String, PurchaseEvidence> = entries.toMap()
+        override suspend fun load(): Map<String, PurchaseEvidence> = entries.toMap()
 
-        override fun upsert(evidence: PurchaseEvidence): Boolean {
+        override suspend fun upsert(evidence: PurchaseEvidence): Boolean {
             entries[evidence.purchaseToken] = evidence
             everStoredTokens += evidence.purchaseToken
             if (evidence.purchaseState == StoredPurchaseState.PURCHASED) {
@@ -1064,16 +1065,16 @@ class PurchaseOutcomeCommitFixtureTest {
             return true
         }
 
-        override fun loadBindings(): List<StoredPurchaseBinding> = bindings.values.toList()
+        override suspend fun loadBindings(): List<StoredPurchaseBinding> = bindings.values.toList()
 
-        override fun upsertBinding(binding: StoredPurchaseBinding): Boolean {
+        override suspend fun upsertBinding(binding: StoredPurchaseBinding): Boolean {
             bindings[binding.obfuscatedAccountId to binding.productIdentity] = binding
             return true
         }
 
-        override fun loadProductMappings(): List<StoredProductMapping> = mappings.values.toList()
+        override suspend fun loadProductMappings(): List<StoredProductMapping> = mappings.values.toList()
 
-        override fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
+        override suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
             mappings[mapping.productIdentity] = mapping
             return true
         }

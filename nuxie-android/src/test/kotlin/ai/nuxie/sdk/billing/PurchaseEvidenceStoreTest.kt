@@ -12,6 +12,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
@@ -22,9 +24,65 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class PurchaseEvidenceStoreTest {
     @Test
-    fun fileStoreSurvivesAProcessStyleReconstruction() {
+    fun unreadableAndCorruptEvidenceFilesAreLogged(): Unit = kotlinx.coroutines.runBlocking {
+        val directory = Files.createTempDirectory("nuxie-corrupt-evidence").toFile()
+        ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.WARN)
+        org.robolectric.shadows.ShadowLog.clear()
+        try {
+            File(directory, "purchase-evidence.json").writeText("{bad-json")
+            File(directory, "purchase-bindings.json").mkdir()
+            File(directory, "purchase-catalog.json").writeText("[broken")
+            val store = FilePurchaseEvidenceStore(directory)
+            assertTrue(store.load().isEmpty())
+            assertTrue(store.loadBindings().isEmpty())
+            assertTrue(store.loadProductMappings().isEmpty())
+            val warnings = org.robolectric.shadows.ShadowLog.getLogsForTag("NuxieBilling").map { it.msg }
+            for (description in listOf("evidence", "bindings", "catalog")) {
+                assertTrue("Unreadable $description must be distinguishable from no retained data", warnings.any {
+                    it.contains("Could not read purchase $description")
+                })
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun cancelledInstallerStillPinsFirstArrivalBeforeTheNextMapping() = kotlinx.coroutines.test.runTest {
+        val store = InMemoryPurchaseEvidenceStore()
+        val first = StoredProductMapping(
+            storeProductId = "play-credits", nuxieProductId = "credits", productType = "inapp", consumable = false,
+            featureAllowances = listOf(StoredFeatureAllowance("credits", "METERED", false, 1.0)),
+        )
+        val replacement = first.copy(featureAllowances = listOf(StoredFeatureAllowance("credits", "METERED", false, 99.0)))
+        val started = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val seen = mutableListOf<Double?>()
+        store.setProductMappingsChangedListener {
+            if (seen.isEmpty()) {
+                started.complete(Unit)
+                release.await()
+            }
+            seen += store.loadProductMappings().single().featureAllowances.single().allowance
+        }
+        val installer = async { store.upsertProductMapping(first) }
+        started.await()
+        installer.cancel()
+        val next = async { store.upsertProductMapping(replacement) }
+        runCurrent()
+        assertEquals(listOf(first), store.loadProductMappings())
+        assertTrue("The replacement waits for the admitted first arrival", !next.isCompleted)
+        release.complete(Unit)
+        assertTrue(next.await())
+        installer.join()
+        assertEquals(listOf(1.0, 99.0), seen)
+    }
+
+    @Test
+    fun fileStoreSurvivesAProcessStyleReconstruction(): Unit = kotlinx.coroutines.runBlocking {
         val directory = Files.createTempDirectory("nuxie-purchase-evidence").toFile()
         try {
             val evidence = PurchaseEvidence(
@@ -68,7 +126,7 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
-    fun fileStoreDistinguishesAbsentEmptyAndPopulatedPinnedAllowances() {
+    fun fileStoreDistinguishesAbsentEmptyAndPopulatedPinnedAllowances(): Unit = kotlinx.coroutines.runBlocking {
         val directory = Files.createTempDirectory("nuxie-pinned-purchase-allowances").toFile()
         try {
             val base = PurchaseEvidence(
@@ -112,7 +170,7 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
-    fun testStoreAuthorityIsSeparateWhileNativeDirectoryRemainsStable() {
+    fun testStoreAuthorityIsSeparateWhileNativeDirectoryRemainsStable(): Unit = kotlinx.coroutines.runBlocking {
         val root = Files.createTempDirectory("nuxie-test-store-scope").toFile()
         try {
             val key = "pk_test_separation"
@@ -139,7 +197,7 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
-    fun authorityScopedDirectoryDoesNotReplayEvidenceAcrossEnvironments() {
+    fun authorityScopedDirectoryDoesNotReplayEvidenceAcrossEnvironments(): Unit = kotlinx.coroutines.runBlocking {
         val filesDirectory = Files.createTempDirectory("nuxie-billing-authority").toFile()
         val apiKey = "pk_secret_authority"
         try {
@@ -176,7 +234,7 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
-    fun fileStoreRetainsCustomerScopedCatalogBindings() {
+    fun fileStoreRetainsCustomerScopedCatalogBindings(): Unit = kotlinx.coroutines.runBlocking {
         val directory = Files.createTempDirectory("nuxie-purchase-bindings").toFile()
         try {
             val binding = StoredPurchaseBinding(
@@ -209,7 +267,7 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
-    fun fileStoreRetainsAppScopedProductMappings() {
+    fun fileStoreRetainsAppScopedProductMappings(): Unit = kotlinx.coroutines.runBlocking {
         val directory = Files.createTempDirectory("nuxie-product-mappings").toFile()
         try {
             val mapping = StoredProductMapping(
@@ -241,7 +299,7 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
-    fun productMappingReplacementWaitsForTheFirstArrivalListener() {
+    fun productMappingReplacementWaitsForTheFirstArrivalListener(): Unit = kotlinx.coroutines.runBlocking {
         val directory = Files.createTempDirectory("nuxie-product-mapping-linearization").toFile()
         val releaseFirstListener = CountDownLatch(1)
         val firstListenerStarted = CountDownLatch(1)
@@ -277,14 +335,14 @@ class PurchaseEvidenceStoreTest {
             }
 
             firstWorker = thread(name = "first-product-mapping") {
-                runCatching { check(store.upsertProductMapping(first)) }
+                runCatching { kotlinx.coroutines.runBlocking { check(store.upsertProductMapping(first)) } }
                     .onFailure { workerFailure.compareAndSet(null, it) }
             }
             assertTrue(firstListenerStarted.await(5, TimeUnit.SECONDS))
 
             secondWorker = thread(name = "replacement-product-mapping") {
                 secondWorkerStarted.countDown()
-                runCatching { check(store.upsertProductMapping(replacement)) }
+                runCatching { kotlinx.coroutines.runBlocking { check(store.upsertProductMapping(replacement)) } }
                     .onFailure { workerFailure.compareAndSet(null, it) }
                 secondWorkerFinished.countDown()
             }
@@ -305,7 +363,7 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
-    fun fileStoreRetainsBindingsAndMappingsForEveryFullProductIdentity() {
+    fun fileStoreRetainsBindingsAndMappingsForEveryFullProductIdentity(): Unit = kotlinx.coroutines.runBlocking {
         val directory = Files.createTempDirectory("nuxie-product-identity").toFile()
         try {
             val store = FilePurchaseEvidenceStore(directory)
@@ -366,7 +424,7 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
-    fun fileStoreIgnoresRetiredAllowanceKeys() {
+    fun fileStoreIgnoresRetiredAllowanceKeys(): Unit = kotlinx.coroutines.runBlocking {
         // Pre-GA hard cut: the retired localFeatureGrants key is not migrated;
         // a mapping carrying only the old key decodes with no allowances.
         val directory = Files.createTempDirectory("nuxie-product-mapping-retired").toFile()
@@ -385,7 +443,7 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
-    fun licensingKeyVerifierAcceptsOnlyMatchingPlayEvidence() {
+    fun licensingKeyVerifierAcceptsOnlyMatchingPlayEvidence(): Unit = kotlinx.coroutines.runBlocking {
         val pair = KeyPairGenerator.getInstance("RSA").apply { initialize(1024) }.generateKeyPair()
         val originalJson = """{"purchaseToken":"token-1"}"""
         val signature = Signature.getInstance("SHA1withRSA").run {

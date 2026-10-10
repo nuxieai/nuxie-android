@@ -199,7 +199,7 @@ class NuxieTest {
     }
 
     @Test
-    fun setupRejectsABlankKeyWithoutInitializing() {
+    fun setupRejectsABlankKeyWithoutInitializing(): Unit = kotlinx.coroutines.runBlocking {
         assertFalse(Nuxie.isSetup)
         assertThrows(IllegalArgumentException::class.java) {
             Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("   "))
@@ -282,7 +282,7 @@ class NuxieTest {
     }
 
     @Test
-    fun setupInitializesOnceAndIgnoresRepeatedCalls() {
+    fun setupInitializesOnceAndIgnoresRepeatedCalls(): Unit = kotlinx.coroutines.runBlocking {
         Nuxie.setup(RuntimeEnvironment.getApplication(), NuxieConfiguration("pk_test_first"))
         assertTrue(Nuxie.isSetup)
         val core = Nuxie.core
@@ -496,12 +496,12 @@ class NuxieTest {
     }
 
     @Test
-    fun versionIsExposed() {
+    fun versionIsExposed(): Unit = kotlinx.coroutines.runBlocking {
         assertTrue(Nuxie.version.isNotBlank())
     }
 
     @Test
-    fun hasFeatureBeforeSetupThrows() {
+    fun hasFeatureBeforeSetupThrows(): Unit = kotlinx.coroutines.runBlocking {
         assertThrows(IllegalStateException::class.java) {
             runBlocking { Nuxie.hasFeature("premium") }
         }

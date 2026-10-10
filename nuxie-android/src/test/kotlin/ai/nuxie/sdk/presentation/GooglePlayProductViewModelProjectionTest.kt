@@ -105,7 +105,7 @@ class GooglePlayProductViewModelProjectionTest {
     }
 
     @Test
-    fun `exact live offer replaces signed previews before presentation`() {
+    fun `exact live offer replaces signed previews before presentation`(): Unit = kotlinx.coroutines.runBlocking {
         val projection = GooglePlayProductViewModelProjection.prepare(
             descriptor = descriptor(
                 "price" to JsonPrimitive("$19.99"),
@@ -150,7 +150,7 @@ class GooglePlayProductViewModelProjectionTest {
     }
 
     @Test
-    fun `time ordered free trial and paid introduction project distinct truthful values`() {
+    fun `time ordered free trial and paid introduction project distinct truthful values`(): Unit = kotlinx.coroutines.runBlocking {
         val projection = GooglePlayProductViewModelProjection.prepare(
             descriptor = descriptor(
                 "price" to JsonPrimitive("$19.99"),
@@ -184,7 +184,7 @@ class GooglePlayProductViewModelProjectionTest {
     }
 
     @Test
-    fun `signed commerce claim fails closed without matching ProductDetails`() {
+    fun `signed commerce claim fails closed without matching ProductDetails`(): Unit = kotlinx.coroutines.runBlocking {
         val failure = assertThrows(IllegalStateException::class.java) {
             GooglePlayProductViewModelProjection.prepare(
                 descriptor("price" to JsonPrimitive("$19.99")),
@@ -197,7 +197,7 @@ class GooglePlayProductViewModelProjectionTest {
     }
 
     @Test
-    fun `cta without a signed commerce value claim does not require ProductDetails`() {
+    fun `cta without a signed commerce value claim does not require ProductDetails`(): Unit = kotlinx.coroutines.runBlocking {
         assertNull(
             GooglePlayProductViewModelProjection.prepare(
                 descriptor("name" to JsonPrimitive("Continue")),
@@ -208,7 +208,7 @@ class GooglePlayProductViewModelProjectionTest {
     }
 
     @Test
-    fun `one-time product uses the exact localized purchase option price`() {
+    fun `one-time product uses the exact localized purchase option price`(): Unit = kotlinx.coroutines.runBlocking {
         val projection = GooglePlayProductViewModelProjection.prepare(
             descriptor("price" to JsonPrimitive("$9.99")),
             products = listOf(oneTime()),

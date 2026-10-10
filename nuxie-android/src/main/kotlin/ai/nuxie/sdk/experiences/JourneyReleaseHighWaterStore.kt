@@ -1,6 +1,9 @@
 package ai.nuxie.sdk.experiences
 
 import android.content.Context
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
@@ -18,31 +21,44 @@ internal class JourneyReleaseHighWaterStore(context: Context) {
     }
 
     /** Validate the complete batch before atomically publishing any replay authority. */
-    fun admitBatch(candidates: Map<String, JourneyReleaseIdentity>) = synchronized(processLock) {
-        val promotions = candidates.filter { (key, candidate) ->
-            val current = read(key)
-            if (candidate.streamKey != key || candidate.publishedAtSeq < 0 ||
-                (current != null && candidate.publishedAtSeq <= current.sequence && candidate != current.identity)
-            ) {
-                throw JourneyReleaseAuthenticationException("replay rejected")
+    fun admitBatch(candidates: Map<String, JourneyReleaseIdentity>) = runBlocking {
+        admitBatch(candidates) { }
+    }
+
+    /** Keep replay validation and suspendable mapping retention in one admission order. */
+    suspend fun admitBatch(
+        candidates: Map<String, JourneyReleaseIdentity>,
+        retainMappings: suspend () -> Unit,
+    ) = admission.withLock {
+        val promotions = synchronized(processLock) {
+            candidates.filter { (key, candidate) ->
+                val current = read(key)
+                if (candidate.streamKey != key || candidate.publishedAtSeq < 0 ||
+                    (current != null && candidate.publishedAtSeq <= current.sequence && candidate != current.identity)
+                ) {
+                    throw JourneyReleaseAuthenticationException("replay rejected")
+                }
+                current == null || candidate.publishedAtSeq > current.sequence
             }
-            current == null || candidate.publishedAtSeq > current.sequence
         }
-        if (promotions.isEmpty()) return@synchronized
-        val editor = preferences.edit()
-        for ((key, identity) in promotions) {
-            editor.putString(key, buildJsonObject {
-                put("appId", identity.appId)
-                put("environment", identity.environment)
-                put("experienceId", identity.experienceId)
-                put("experienceVersionId", identity.experienceVersionId)
-                put("buildId", identity.buildId)
-                put("versionNumber", identity.versionNumber)
-                put("publishedAt", identity.publishedAt)
-                put("publishedAtSeq", identity.publishedAtSeq)
-            }.toString())
+        retainMappings()
+        if (promotions.isEmpty()) return@withLock
+        synchronized(processLock) {
+            val editor = preferences.edit()
+            for ((key, identity) in promotions) {
+                editor.putString(key, buildJsonObject {
+                    put("appId", identity.appId)
+                    put("environment", identity.environment)
+                    put("experienceId", identity.experienceId)
+                    put("experienceVersionId", identity.experienceVersionId)
+                    put("buildId", identity.buildId)
+                    put("versionNumber", identity.versionNumber)
+                    put("publishedAt", identity.publishedAt)
+                    put("publishedAtSeq", identity.publishedAtSeq)
+                }.toString())
+            }
+            check(editor.commit()) { "Could not persist release replay authority" }
         }
-        check(editor.commit()) { "Could not persist release replay authority" }
     }
 
     private fun read(key: String): Record? {
@@ -61,5 +77,6 @@ internal class JourneyReleaseHighWaterStore(context: Context) {
 
     private companion object {
         val processLock = Any()
+        val admission = Mutex()
     }
 }

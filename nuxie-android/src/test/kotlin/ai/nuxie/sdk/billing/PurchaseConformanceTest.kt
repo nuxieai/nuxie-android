@@ -106,6 +106,7 @@ class PurchaseConformanceTest {
         var evidenceAtCapture: PurchaseEvidence? = null
         var completionsAtCapture: Int? = null
         val service = PurchaseService(
+            ioDispatcher = kotlinx.coroutines.Dispatchers.Unconfined,
             purchaseStorageScope = "test-fixture",
             billing = billing,
             evidenceStore = store,
@@ -117,7 +118,7 @@ class PurchaseConformanceTest {
             distinctId = core.identity::distinctId,
             emit = { name, properties ->
                 if (name == expectedEventName) {
-                    evidenceAtCapture = store.load()[token]
+                    evidenceAtCapture = kotlinx.coroutines.runBlocking { store.load()[token] }
                     completionsAtCapture = billing.managedCompletions
                     emissions += name to properties
                 }
