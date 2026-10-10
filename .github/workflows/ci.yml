@@ -87,7 +87,7 @@ jobs:
 
       - name: Run local gate
         run: >-
-          ./gradlew
+          ./gradlew --no-daemon --max-workers=2
           :nuxie-android:test
           :nuxie-android:apiCheck
           :nuxie-android:lint
