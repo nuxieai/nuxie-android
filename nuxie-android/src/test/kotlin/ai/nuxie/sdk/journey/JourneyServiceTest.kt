@@ -2875,9 +2875,13 @@ class JourneyServiceTest {
             holdClosePublication = true, terminalStartsEntry = true)
     }
 
+    @Test fun `durably completed Journey closes its screen when report publication throws`() = runBlocking {
+        assertAuthoredDismiss("purchase", failReportOnce = true)
+    }
+
     private suspend fun assertAuthoredDismiss(commerce: String?, retryOutcome: String? = null, runtimeFrames: Boolean = false,
         pendingClose: Boolean = false, terminalOutcome: String? = null, holdClosePublication: Boolean = false,
-        failCompletionOnce: Boolean = false, failPublicationOnce: Boolean = false, secondPurchase: Boolean = false, terminalStartsEntry: Boolean = false) {
+        failCompletionOnce: Boolean = false, failPublicationOnce: Boolean = false, secondPurchase: Boolean = false, terminalStartsEntry: Boolean = false, failReportOnce: Boolean = false) {
         val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/authored-dismiss.json").readText()).jsonObject
             .getValue("cases").jsonArray.single { it.jsonObject.getValue("name").jsonPrimitive.content == (commerce ?: "user_close") }.jsonObject
@@ -2920,6 +2924,12 @@ class JourneyServiceTest {
             )),
             "routes" to Json.parseToJsonElement("""[{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"buy","entryStepId":"commerce"},{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"close","entryStepId":"close_marker"}]"""),
         ))
+        if (failReportOnce) {
+            leg = JsonObject(leg + ("steps" to JsonArray(leg.getValue("steps").jsonArray.map {
+                if (it.jsonObject["id"] == JsonPrimitive("dismiss")) Json.parseToJsonElement(
+                    """{"kind":"complete","id":"dismiss","outcome":"completed"}""") else it
+            })))
+        }
         if (secondPurchase) {
             val steps = leg.getValue("steps").jsonArray.map { step ->
                 if (step.jsonObject["id"] == JsonPrimitive("commerce")) JsonObject(step.jsonObject +
@@ -3017,8 +3027,15 @@ class JourneyServiceTest {
         val failCompletionClock = java.util.concurrent.atomic.AtomicBoolean()
         val failPublication = java.util.concurrent.atomic.AtomicBoolean(failPublicationOnce)
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val failReport = java.util.concurrent.atomic.AtomicBoolean(failReportOnce)
         val journeys = JourneyService(identity = identity, events = store, catalog = catalog, journalDirectory = directory,
-            scope = scope, capture = { name, properties, _, _ -> captures += name to properties; true },
+            scope = scope, capture = { name, properties, _, _ ->
+                captures += name to properties
+                if (name == JourneyEventNames.LEG_COMPLETED && failReport.compareAndSet(true, false)) {
+                    throw java.io.IOException("Completion publication unavailable")
+                }
+                true
+            },
             dispatcher = JourneyEffectDispatcher(identity, capture = { name, properties, _, _, admission, _ ->
                 admission.commitIfCurrent { captures += name to properties; true } == true
             }, deliverAppAction = { _, _ -> error("No app action authored") }),
@@ -3188,6 +3205,10 @@ class JourneyServiceTest {
             assertEquals(request.journeyId, completed.single().second["journey_id"])
             assertEquals((if (pendingClose) pendingExpected else vector).getValue("outcome").jsonPrimitive.content, completed.single().second["outcome"])
             assertFalse(presentations.ownsJourney(JourneyPresentationOwner(request.journeyId, "customer")))
+            if (failReportOnce) {
+                assertFalse(failReport.get())
+                assertEquals("completed", JourneyRunJournal(directory, "customer", JourneyStorageScope(authority)).runs().single().completion?.outcome)
+            }
             if (pendingClose && !terminalStartsEntry) {
                 journeys.handleEvent(StoredEvent(claimedEffects.single(), SystemEventNames.PURCHASE_COMPLETED,
                     buildJsonObject { put("placement_id", "golden:monthly") }, 100_002L, "customer"),
