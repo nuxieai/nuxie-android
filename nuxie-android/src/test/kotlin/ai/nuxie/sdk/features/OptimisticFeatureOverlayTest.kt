@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.features
 
+import kotlinx.coroutines.sync.withLock
 import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
@@ -641,34 +642,34 @@ class OptimisticFeatureOverlayTest {
 
     private class FailingPinEvidenceStore : PurchaseEvidenceStore {
         private val delegate = InMemoryPurchaseEvidenceStore()
-        private val mappingInstallationLock = Any()
+        private val mappingInstallationLock = kotlinx.coroutines.sync.Mutex()
 
         @Volatile
         var failPinnedEvidenceUpserts = false
 
         @Volatile
-        private var productMappingsChangedListener: (() -> Unit)? = null
+        private var productMappingsChangedListener: (suspend () -> Unit)? = null
 
-        override fun load(): Map<String, PurchaseEvidence> = delegate.load()
+        override suspend fun load(): Map<String, PurchaseEvidence> = delegate.load()
 
-        override fun upsert(evidence: PurchaseEvidence): Boolean =
+        override suspend fun upsert(evidence: PurchaseEvidence): Boolean =
             if (failPinnedEvidenceUpserts && evidence.pinnedFeatureAllowances != null) {
                 false
             } else {
                 delegate.upsert(evidence)
             }
 
-        override fun loadProductMappings(): List<StoredProductMapping> =
+        override suspend fun loadProductMappings(): List<StoredProductMapping> =
             delegate.loadProductMappings()
 
-        override fun upsertProductMapping(mapping: StoredProductMapping): Boolean =
-            synchronized(mappingInstallationLock) {
+        override suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean =
+            mappingInstallationLock.withLock {
                 delegate.upsertProductMapping(mapping).also { persisted ->
                     if (persisted) productMappingsChangedListener?.invoke()
                 }
             }
 
-        override fun setProductMappingsChangedListener(listener: (() -> Unit)?) {
+        override fun setProductMappingsChangedListener(listener: (suspend () -> Unit)?) {
             productMappingsChangedListener = listener
         }
     }

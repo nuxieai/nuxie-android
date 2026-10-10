@@ -1,5 +1,9 @@
 package ai.nuxie.sdk.billing
 
+import kotlinx.coroutines.withContext
+
+import kotlinx.coroutines.Dispatchers
+
 import android.app.Activity
 import android.content.Context
 import ai.nuxie.sdk.logging.NuxieLog as Log
@@ -273,7 +277,8 @@ internal class PlayBillingConnection(
                 }
             }
             .build()
-        return awaitClient().launchBillingFlow(activity, params)
+        val client = awaitClient()
+        return withContext(Dispatchers.Main.immediate) { client.launchBillingFlow(activity, params) }
     }
 
     override suspend fun queryActive(productType: String): ActivePurchasesResult {

@@ -93,7 +93,7 @@ class NuxieMeteredUseTest {
     }
 
     @Test
-    fun useFeatureWarnsAndDoesNothingBeforeSetupWhileWaitingThrows() {
+    fun useFeatureWarnsAndDoesNothingBeforeSetupWhileWaitingThrows(): Unit = kotlinx.coroutines.runBlocking {
         Nuxie.useFeature("credits")
 
         assertThrows(IllegalStateException::class.java) {
@@ -226,7 +226,7 @@ class NuxieMeteredUseTest {
     }
 
     @Test
-    fun fireAndForgetUseFeatureDoesNotSurfaceBackgroundMetadataFailure() {
+    fun fireAndForgetUseFeatureDoesNotSurfaceBackgroundMetadataFailure(): Unit = kotlinx.coroutines.runBlocking {
         Nuxie.overridesForTesting = NuxieCore.Overrides(
             transport = usageTransport(),
             registerLifecycle = false,

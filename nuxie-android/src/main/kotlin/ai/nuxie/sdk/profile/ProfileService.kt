@@ -14,6 +14,13 @@ import android.content.Context
 import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.io.File
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -70,6 +77,7 @@ internal class ProfileService(
     private val localeSettings: ProfileLocaleSettings,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     cacheDirectory: File? = null,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     class CachedProfile(
         val distinctId: String,
@@ -80,7 +88,7 @@ internal class ProfileService(
     )
 
     // Lock order for nested admission work: identity -> locale -> profile.
-    private val lock = Any()
+    private val lock = Mutex()
     private val appContext = context.applicationContext ?: context
     private val baseDir = cacheDirectory ?: storageScope.cacheDirectory(appContext.cacheDir)
     private val authorityStore = ProfileAuthorityBindingStore(appContext, storageScope)
@@ -163,7 +171,7 @@ internal class ProfileService(
         val identityScope = identity.captureScope()
         val localeScope = localeSettings.captureScope()
         return withCurrentScope(identityScope, localeScope) {
-            synchronized(lock) {
+            withProfileLock {
                 resident?.takeIf {
                     it.distinctId == identityScope.distinctId &&
                         it.locale == localeScope.identifier &&
@@ -194,7 +202,7 @@ internal class ProfileService(
         val identityScope = identity.captureScope()
         var obsolete: Job? = null
         val withdrawal = withCurrentScope(identityScope, localeScope) {
-            synchronized(lock) {
+            withProfileLock {
                 obsolete = detachPreparationLocked()
                 nextProfileGeneration += 1
                 latestAppliedGeneration = nextProfileGeneration
@@ -230,7 +238,7 @@ internal class ProfileService(
     // MARK: internals
 
     private suspend fun handleUserChange(newDistinctId: String, admission: Admission) {
-        val cached = synchronized(lock) { loadCached(newDistinctId) }
+        val cached = withProfileLock { loadCached(newDistinctId) }
         if (cached != null && cached.locale == admission.localeScope.identifier && isUsable(cached)) {
             if (!applyProfile(cached, admission, AuthoritySource.CACHE)) {
                 evictCache(newDistinctId, admission)
@@ -245,7 +253,7 @@ internal class ProfileService(
     private suspend fun loadFromDisk() {
         val admission = beginAdmission() ?: return
         val distinctId = admission.identityScope.distinctId
-        val cached = synchronized(lock) { loadCached(distinctId) }
+        val cached = withProfileLock { loadCached(distinctId) }
         if (cached != null && cached.locale == admission.localeScope.identifier && isUsable(cached)) {
             if (!applyProfile(cached, admission, AuthoritySource.CACHE)) {
                 evictCache(distinctId, admission)
@@ -261,7 +269,7 @@ internal class ProfileService(
         val admission = beginAdmission() ?: return false
         val distinctId = admission.identityScope.distinctId
         val locale = admission.localeScope.identifier
-        val scopedResident = synchronized(lock) {
+        val scopedResident = withProfileLock {
             resident?.takeIf {
                 it.distinctId == distinctId && it.locale == locale
             }
@@ -328,11 +336,11 @@ internal class ProfileService(
     /** A 304 refreshes storage lifetime without replacing runtime authority. */
     private fun refreshCacheFreshness(cached: CachedProfile, admission: Admission): Boolean =
         withCurrentScope(admission.identityScope, admission.localeScope) {
-            synchronized(lock) {
+            withProfileLock {
                 if (admission.generation != nextProfileGeneration ||
                     admission.generation < latestAppliedGeneration
                 ) {
-                    return@synchronized false
+                    return@withProfileLock false
                 }
                 latestAppliedGeneration = admission.generation
                 resident = cached
@@ -353,11 +361,11 @@ internal class ProfileService(
         val deliveryAuthority = cached.validator?.authority ?: return false
         val authorityAccepted = runCatching {
             withCurrentScope(admission.identityScope, admission.localeScope) {
-                synchronized(lock) {
+                withProfileLock {
                     if (admission.generation != nextProfileGeneration ||
                         admission.generation < latestAppliedGeneration
                     ) {
-                        return@synchronized false
+                        return@withProfileLock false
                     }
                     when (authoritySource) {
                         AuthoritySource.NETWORK -> authorityStore.bind(deliveryAuthority)
@@ -385,7 +393,7 @@ internal class ProfileService(
             artifactResult.getAndSet(null)?.close()
             currentCoroutineContext().ensureActive()
             if (withCurrentScope(admission.identityScope, admission.localeScope) {
-                    synchronized(lock) { admission.generation == nextProfileGeneration }
+                    withProfileLock { admission.generation == nextProfileGeneration }
                 } == true) throw cancelled
             return false
         } catch (failure: Throwable) {
@@ -398,31 +406,38 @@ internal class ProfileService(
         var featurePublication: FeatureInfo.Mutation? = null
         val admitted = try {
             currentCoroutineContext().ensureActive()
-            withCurrentScope(admission.identityScope, admission.localeScope) {
-                synchronized(lock) {
-                    if (admission.generation != nextProfileGeneration ||
-                        admission.generation < latestAppliedGeneration
-                    ) {
-                        return@synchronized false
+            withContext(ioDispatcher) {
+                identity.withCurrentScopeSuspending(admission.identityScope) {
+                    localeSettings.withCurrentScopeSuspending(admission.localeScope) {
+                        lock.withLock {
+                            if (admission.generation != nextProfileGeneration ||
+                                admission.generation < latestAppliedGeneration
+                            ) {
+                                return@withLock false
+                            }
+                            // Once current admission begins persisting, finish its
+                            // matching catalog/profile installation atomically.
+                            withContext(NonCancellable) {
+                                latestAppliedGeneration = admission.generation
+                                runCatching {
+                                    journeyProfiles.commit(cached.distinctId, planePrepared.catalog)
+                                }.getOrElse {
+                                    Log.w(LOG_TAG, "Journey plane profile commit failed", it)
+                                    return@withContext false
+                                }
+                                resident = cached
+                                persist(cached)
+                                featurePublication = stageFeatureProfile(
+                                    cached.distinctId,
+                                    cached.body,
+                                    admission.featurePurchaseRevision,
+                                    admission.featureAuthoritativeRevision,
+                                    { isAdmissionCurrent(admission) },
+                                )
+                                true
+                            }
+                        }
                     }
-                    latestAppliedGeneration = admission.generation
-
-                    runCatching {
-                        journeyProfiles.commit(cached.distinctId, planePrepared.catalog)
-                    }.getOrElse {
-                        Log.w(LOG_TAG, "Journey plane profile commit failed", it)
-                        return@synchronized false
-                    }
-                    resident = cached
-                    persist(cached)
-                    featurePublication = stageFeatureProfile(
-                        cached.distinctId,
-                        cached.body,
-                        admission.featurePurchaseRevision,
-                        admission.featureAuthoritativeRevision,
-                        { isAdmissionCurrent(admission) },
-                    )
-                    true
                 }
             } == true
         } catch (failure: Throwable) {
@@ -467,7 +482,7 @@ internal class ProfileService(
             result.set(manager.prepareJourneys(snapshot))
         }
         val accepted = withCurrentScope(admission.identityScope, admission.localeScope) {
-            synchronized(lock) {
+            withProfileLock {
                 if (admission.generation != nextProfileGeneration || admission.generation < latestAppliedGeneration) false
                 else {
                     admissionPreparation = task
@@ -478,7 +493,7 @@ internal class ProfileService(
         if (!accepted) task.cancel(CancellationException("Obsolete profile preparation"))
         try { task.await() }
         finally {
-            synchronized(lock) {
+            withProfileLock {
                 if (admissionPreparation === task) admissionPreparation = null
             }
         }
@@ -490,11 +505,11 @@ internal class ProfileService(
         val localeScope = localeSettings.captureScope()
         var obsolete: Job? = null
         val admission = withCurrentScope(identityScope, localeScope) {
-            synchronized(lock) {
+            withProfileLock {
                 if (expectedDistinctId != null &&
                     identityScope.distinctId != expectedDistinctId
                 ) {
-                    return@synchronized null
+                    return@withProfileLock null
                 }
                 obsolete = detachPreparationLocked()
                 nextProfileGeneration += 1
@@ -517,6 +532,10 @@ internal class ProfileService(
             nextProfileGeneration == admission.generation &&
             latestAppliedGeneration == admission.generation
 
+    private fun <T> withProfileLock(block: () -> T): T = runBlocking {
+        lock.withLock { block() }
+    }
+
     private fun <T> withCurrentScope(
         identityScope: IdentityScope,
         localeScope: ProfileLocaleScope,
@@ -527,7 +546,7 @@ internal class ProfileService(
 
     private suspend fun clearCache(distinctId: String) {
         var obsolete: Job? = null
-        val admissionGeneration = synchronized(lock) {
+        val admissionGeneration = withProfileLock {
             obsolete = detachPreparationLocked()
             nextProfileGeneration += 1
             latestAppliedGeneration = nextProfileGeneration
@@ -542,11 +561,11 @@ internal class ProfileService(
 
     private suspend fun evictCache(distinctId: String, admission: Admission) {
         val evicted = withCurrentScope(admission.identityScope, admission.localeScope) {
-            synchronized(lock) {
+            withProfileLock {
                 if (admission.generation != nextProfileGeneration ||
                     admission.generation < latestAppliedGeneration
                 ) {
-                    return@synchronized false
+                    return@withProfileLock false
                 }
                 latestAppliedGeneration = admission.generation
                 if (resident?.distinctId == distinctId) resident = null

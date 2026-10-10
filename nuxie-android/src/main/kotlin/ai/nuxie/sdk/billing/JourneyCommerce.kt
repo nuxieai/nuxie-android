@@ -9,8 +9,6 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.doubleOrNull
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 internal class JourneyCommerceException(message: String) : IllegalStateException(message)
 
@@ -194,15 +192,13 @@ internal class JourneyCommerceSession(
             ?: return PurchaseResult.Failed(
                 JourneyCommerceException("No live Play product for Placement '$placementId'"),
             )
-        return withContext(Dispatchers.Main.immediate) {
-            purchases.purchase(
-                activity = activity,
-                product = product,
-                replacement = null,
-                expectedOwnerDistinctId = correlation.distinctId,
-                outcomeCorrelation = correlation,
-            )
-        }
+        return purchases.purchase(
+            activity = activity,
+            product = product,
+            replacement = null,
+            expectedOwnerDistinctId = correlation.distinctId,
+            outcomeCorrelation = correlation,
+        )
     }
 
     suspend fun restore(correlation: CommerceOutcomeCorrelation): RestoreResult =
@@ -231,7 +227,7 @@ internal class JourneyCommercePreparer(
 }
 
 /** Register signed mappings before out-of-band Play evidence can arrive. */
-internal fun PurchaseEvidenceStore.registerJourneyProductMappings(
+internal suspend fun PurchaseEvidenceStore.registerJourneyProductMappings(
     release: AuthenticatedJourneyRelease,
 ): Boolean = JourneyProductCatalog.parse(release).requests.all { request ->
     upsertProductMapping(

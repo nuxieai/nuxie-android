@@ -124,7 +124,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         try {
@@ -407,7 +407,7 @@ class JourneyServiceTest {
         val identity = identity("customer")
         val catalog = catalog()
         val prepared = catalog.prepare(profile(), authority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         var now = 100_000L
@@ -474,7 +474,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val presenter = RecordingJourneyPresenter(available = false)
@@ -633,7 +633,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val presenter = RecordingJourneyPresenter()
         val systemCaptures = CopyOnWriteArrayList<String>()
@@ -774,7 +774,7 @@ class JourneyServiceTest {
             val catalog = catalog(renderedEntry)
             val renderedAuthority = authority(renderedEntry)
             val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-            catalog.commit("customer", prepared)
+            runBlocking { catalog.commit("customer", prepared) }
             val snapshot = requireNotNull(catalog.snapshot("customer"))
             val release = snapshot.releasesByDigest.values.single()
             val journal = JourneyRunJournal(
@@ -880,7 +880,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val captures = CopyOnWriteArrayList<String>()
         val presenter = RecordingJourneyPresenter(
@@ -934,7 +934,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val presenter = RecordingJourneyPresenter()
@@ -978,7 +978,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val baseline = requireNotNull(catalog.snapshot("customer"))
         val original = baseline.releasesByDigest.values.single()
         val route = buildJsonObject {
@@ -1047,7 +1047,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val presenter = RecordingJourneyPresenter()
         val service = JourneyService(
@@ -1076,7 +1076,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val presenter = RecordingJourneyPresenter()
         val service = JourneyService(
@@ -1111,7 +1111,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val presentationStarted = CompletableDeferred<Unit>()
         val allowPresentation = CompletableDeferred<Unit>()
@@ -1164,7 +1164,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val presenter = RecordingJourneyPresenter()
@@ -1213,7 +1213,7 @@ class JourneyServiceTest {
             val catalog = catalog(renderedEntry)
             val renderedAuthority = authority(renderedEntry)
             val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-            catalog.commit("customer", prepared)
+            runBlocking { catalog.commit("customer", prepared) }
             val snapshot = requireNotNull(catalog.snapshot("customer"))
             val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
             val presenter = RecordingJourneyPresenter()
@@ -1280,7 +1280,7 @@ class JourneyServiceTest {
             val catalog = catalog(renderedEntry)
             val renderedAuthority = authority(renderedEntry)
             val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-            catalog.commit("customer", prepared)
+            runBlocking { catalog.commit("customer", prepared) }
             val snapshot = requireNotNull(catalog.snapshot("customer"))
             val captures = CopyOnWriteArrayList<String>()
             val presenter = RecordingJourneyPresenter(
@@ -1322,7 +1322,7 @@ class JourneyServiceTest {
             val catalog = catalog(renderedEntry)
             val renderedAuthority = authority(renderedEntry)
             val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-            catalog.commit("customer", prepared)
+            runBlocking { catalog.commit("customer", prepared) }
             val snapshot = requireNotNull(catalog.snapshot("customer"))
             val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
             val presenter = RecordingJourneyPresenter()
@@ -1390,7 +1390,7 @@ class JourneyServiceTest {
             val catalog = catalog(renderedEntry)
             val renderedAuthority = authority(renderedEntry)
             val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-            catalog.commit("customer", prepared)
+            runBlocking { catalog.commit("customer", prepared) }
             val snapshot = requireNotNull(catalog.snapshot("customer"))
             val manager = RecordingArtifactManager()
             val firstLeaseCloses = AtomicInteger()
@@ -2059,7 +2059,7 @@ class JourneyServiceTest {
                 .getValue("environment").jsonPrimitive.content,
         )
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val dispatchStarted = CompletableDeferred<JourneyDispatchRequest>()
         val resumeDispatch = CompletableDeferred<Unit>()
@@ -2127,7 +2127,7 @@ class JourneyServiceTest {
                 .getValue("environment").jsonPrimitive.content,
         )
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val dispatchStarted = CompletableDeferred<JourneyDispatchRequest>()
         val resumeDispatch = CompletableDeferred<Unit>()
@@ -2944,7 +2944,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val baseline = requireNotNull(catalog.snapshot("customer"))
         val original = baseline.releasesByDigest.values.single()
         val leg = original.leg
@@ -3262,7 +3262,7 @@ class JourneyServiceTest {
         catalog: JourneyProfileCatalog,
     ): JourneyProfileCatalog.Snapshot {
         val prepared = catalog.prepare(profile(), authority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         return requireNotNull(catalog.snapshot("customer"))
     }
 
@@ -3279,7 +3279,7 @@ class JourneyServiceTest {
     ): JourneyDispatchRequest {
         val catalog = catalog()
         val prepared = catalog.prepare(profile(), authority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val arm = snapshot.profile.armedLegs.single()
         val release = snapshot.releasesByDigest.values.single()
