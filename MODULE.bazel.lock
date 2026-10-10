@@ -263,12 +263,16 @@
   "moduleExtensions": {
     "//scripts/bazel:repositories.bzl%runtime_artifacts": {
       "general": {
-        "bzlTransitiveDigest": "i+SaRSL51IbXQHTmHhOxDQuUAPmaedlwOnF2lZd2Tus=",
+        "bzlTransitiveDigest": "c90df7C6ArWzfjos3c05uVGyYMxu4gI1zxLXthRpGtU=",
         "usagesDigest": "0nj1ZqkBwqfOrV3IYW0HIosTOu5pP7BPy8sQgfo1nVU=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
           "nuxie_runtime_android": {
             "repoRuleId": "@@//scripts/bazel:repositories.bzl%_runtime",
+            "attributes": {}
+          },
+          "nuxie_runtime_host": {
+            "repoRuleId": "@@//scripts/bazel:repositories.bzl%_host_runtime",
             "attributes": {}
           }
         }
