@@ -1,7 +1,6 @@
 package ai.nuxie.sdk.experiences
 
 import android.content.Context
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
@@ -20,12 +19,11 @@ internal class JourneyReleaseHighWaterStore(context: Context) {
         read(streamKey)?.sequence ?: 0L
     }
 
-    /** Validate the complete batch before atomically publishing any replay authority. */
-    fun admitBatch(candidates: Map<String, JourneyReleaseIdentity>) = runBlocking {
-        admitBatch(candidates) { }
-    }
-
-    /** Keep replay validation and suspendable mapping retention in one admission order. */
+    /**
+     * Validate the complete batch before atomically publishing any replay
+     * authority. Replay validation and suspendable mapping retention share one
+     * admission order.
+     */
     suspend fun admitBatch(
         candidates: Map<String, JourneyReleaseIdentity>,
         retainMappings: suspend () -> Unit,

@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.experiences
 
 import ai.nuxie.sdk.fixtures.FixtureRunner
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
@@ -18,19 +19,23 @@ class JourneyReleaseHighWaterStoreTest {
     private val identity = JourneyReleaseIdentity("app", "test", "experience", "version", "build", 1, "2026-09-13T00:00:00Z", 7)
     @Before fun clear() { preferences.edit().clear().commit() }
 
+    // Admission is suspending only; these vectors retain no product mappings.
+    private fun JourneyReleaseHighWaterStore.admit(candidates: Map<String, JourneyReleaseIdentity>) =
+        runBlocking { admitBatch(candidates) {} }
+
     @Test fun sharedPublicationAdmissionVectors() {
         FixtureRunner.run("journeys/planes/publication-admission.json", "journeys/planes/publication-admission") { vector ->
             clear()
             val current = requireNotNull(JourneyReleaseIdentity.fromJson(vector.body.getValue("current").jsonObject))
             val candidate = requireNotNull(JourneyReleaseIdentity.fromJson(vector.body.getValue("candidate").jsonObject))
             val store = JourneyReleaseHighWaterStore(context)
-            store.admitBatch(mapOf(current.streamKey to current))
+            store.admit(mapOf(current.streamKey to current))
             if (vector.body.getValue("valid").jsonPrimitive.content == "true") {
-                store.admitBatch(mapOf(candidate.streamKey to candidate))
+                store.admit(mapOf(candidate.streamKey to candidate))
                 assertEquals(candidate.publishedAtSeq, store.floor(current.streamKey))
             } else {
                 assertThrows(JourneyReleaseAuthenticationException::class.java) {
-                    store.admitBatch(mapOf(candidate.streamKey to candidate))
+                    store.admit(mapOf(candidate.streamKey to candidate))
                 }
                 assertEquals(current.publishedAtSeq, store.floor(current.streamKey))
             }
@@ -38,27 +43,27 @@ class JourneyReleaseHighWaterStoreTest {
     }
 
     @Test fun exactPublicationReplaysAcrossInstancesButConflictingFieldsDoNot() {
-        JourneyReleaseHighWaterStore(context).admitBatch(mapOf(identity.streamKey to identity))
+        JourneyReleaseHighWaterStore(context).admit(mapOf(identity.streamKey to identity))
         val reopened = JourneyReleaseHighWaterStore(context)
-        reopened.admitBatch(mapOf(identity.streamKey to identity))
+        reopened.admit(mapOf(identity.streamKey to identity))
         for (changed in listOf(identity.copy(buildId = "other"), identity.copy(experienceVersionId = "other"),
             identity.copy(versionNumber = 2), identity.copy(publishedAt = "2026-09-14T00:00:00Z"),
             identity.copy(publishedAtSeq = 6))) {
             assertThrows(JourneyReleaseAuthenticationException::class.java) {
-                reopened.admitBatch(mapOf(identity.streamKey to changed))
+                reopened.admit(mapOf(identity.streamKey to changed))
             }
         }
         assertEquals(7L, reopened.floor(identity.streamKey))
-        reopened.admitBatch(mapOf(identity.streamKey to identity.copy(buildId = "new", publishedAtSeq = 8)))
+        reopened.admit(mapOf(identity.streamKey to identity.copy(buildId = "new", publishedAtSeq = 8)))
         assertEquals(8L, JourneyReleaseHighWaterStore(context).floor(identity.streamKey))
     }
 
     @Test fun batchConflictDoesNotPartiallyPromoteAnotherStream() {
         val store = JourneyReleaseHighWaterStore(context)
-        store.admitBatch(mapOf(identity.streamKey to identity))
+        store.admit(mapOf(identity.streamKey to identity))
         val other = identity.copy(experienceId = "other")
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
-            store.admitBatch(linkedMapOf(other.streamKey to other,
+            store.admit(linkedMapOf(other.streamKey to other,
                 identity.streamKey to identity.copy(buildId = "conflict")))
         }
         assertEquals(0L, store.floor(other.streamKey))
@@ -69,13 +74,13 @@ class JourneyReleaseHighWaterStoreTest {
         val store = JourneyReleaseHighWaterStore(context)
         assertEquals(7L, store.floor(identity.streamKey))
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
-            store.admitBatch(mapOf(identity.streamKey to identity))
+            store.admit(mapOf(identity.streamKey to identity))
         }
         val newer = identity.copy(publishedAtSeq = 8)
-        store.admitBatch(mapOf(identity.streamKey to newer))
-        JourneyReleaseHighWaterStore(context).admitBatch(mapOf(identity.streamKey to newer))
+        store.admit(mapOf(identity.streamKey to newer))
+        JourneyReleaseHighWaterStore(context).admit(mapOf(identity.streamKey to newer))
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
-            store.admitBatch(mapOf(identity.streamKey to newer.copy(buildId = "conflict")))
+            store.admit(mapOf(identity.streamKey to newer.copy(buildId = "conflict")))
         }
     }
 
@@ -88,7 +93,7 @@ class JourneyReleaseHighWaterStoreTest {
         }
         preferences.edit().clear().commit()
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
-            JourneyReleaseHighWaterStore(context).admitBatch(mapOf("wrong-stream" to identity))
+            JourneyReleaseHighWaterStore(context).admit(mapOf("wrong-stream" to identity))
         }
     }
 }
