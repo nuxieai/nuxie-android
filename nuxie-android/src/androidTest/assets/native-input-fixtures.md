@@ -22,8 +22,8 @@ identity and a two-way StringTrim binding to `State.answer`. Initial source text
 is `  initial  `. Forward presentation trims it; reverse editing preserves the
 entered text, following the native converter contract.
 
-Generate with `NUXIE_NATIVE_INPUT_FIXTURE_PATH=<absolute output path> cargo test
--p nuxie-authoring --lib generate_mounted_input_fixture -- --ignored` from
+Generate with `NUXIE_NATIVE_INPUT_FIXTURE_PATH=<absolute output path> bash
+scripts/bazel.sh test -p nuxie-authoring --lib generate_mounted_input_fixture -- --ignored` from
 `tools/nuxie-editor`. The external font is an unchanged copy of
 `crates/editor/assets/nuxie-editor-ui-400.ttf`.
 
