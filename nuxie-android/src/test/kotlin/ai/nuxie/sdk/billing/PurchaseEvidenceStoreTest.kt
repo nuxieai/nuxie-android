@@ -8,10 +8,13 @@ import java.nio.file.Files
 import java.security.KeyPairGenerator
 import java.security.Signature
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.serialization.json.Json
@@ -73,6 +76,85 @@ class PurchaseEvidenceStoreTest {
         } finally {
             directory.deleteRecursively()
         }
+    }
+
+    @Test
+    fun everyFileStoreMethodEntersTheInjectedIoDispatcher(): Unit = kotlinx.coroutines.runBlocking {
+        val directory = Files.createTempDirectory("nuxie-evidence-io-boundary").toFile()
+        val io = RecordingIoDispatcher()
+        try {
+            val store = FilePurchaseEvidenceStore(directory, io)
+            val listenerThread = AtomicReference<Thread?>()
+            store.setProductMappingsChangedListener { listenerThread.set(Thread.currentThread()) }
+            val evidence = PurchaseEvidence(
+                purchaseToken = "token-io",
+                packageName = "com.example.app",
+                storeProductIds = listOf("play-pro"),
+                purchaseState = StoredPurchaseState.PURCHASED,
+                syncAttributionDistinctId = "customer-1",
+                acknowledged = false,
+                firstSeenMillis = 1L,
+            )
+            val binding = StoredPurchaseBinding(
+                obfuscatedAccountId = "account-hash",
+                distinctId = "customer-1",
+                storeProductId = "play-pro",
+                nuxieProductId = "pro",
+                productType = "subs",
+                consumable = false,
+                nuxieManaged = true,
+            )
+            val mapping = StoredProductMapping(
+                storeProductId = "play-pro",
+                nuxieProductId = "pro",
+                productType = "subs",
+                consumable = false,
+            )
+            val stayedOnCaller = mutableListOf<String>()
+            suspend fun entersIo(method: String, call: suspend () -> Unit) {
+                val before = io.dispatches.get()
+                call()
+                if (io.dispatches.get() == before) stayedOnCaller += method
+            }
+
+            entersIo("upsert") { assertTrue(store.upsert(evidence)) }
+            entersIo("load") { assertEquals(evidence, store.load().getValue("token-io")) }
+            entersIo("upsertBinding") { assertTrue(store.upsertBinding(binding)) }
+            entersIo("loadBindings") { assertEquals(listOf(binding), store.loadBindings()) }
+            entersIo("upsertProductMapping") { assertTrue(store.upsertProductMapping(mapping)) }
+            entersIo("loadProductMappings") { assertEquals(listOf(mapping), store.loadProductMappings()) }
+
+            assertEquals(
+                "Every file store read and write must enter the injected IO dispatcher",
+                emptyList<String>(),
+                stayedOnCaller,
+            )
+            assertTrue(
+                "The mapping listener must run inside the store's IO boundary",
+                listenerThread.get() === io.thread.get(),
+            )
+        } finally {
+            io.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    private class RecordingIoDispatcher : CoroutineDispatcher(), AutoCloseable {
+        val dispatches = AtomicInteger()
+        val thread = AtomicReference<Thread?>()
+        private val executor = Executors.newSingleThreadExecutor { task ->
+            Thread(task, "recording-evidence-io").apply {
+                isDaemon = true
+                thread.set(this)
+            }
+        }
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            dispatches.incrementAndGet()
+            executor.execute(block)
+        }
+
+        override fun close() = executor.shutdown()
     }
 
     @Test
