@@ -2866,9 +2866,18 @@ class JourneyServiceTest {
         assertAuthoredDismiss("purchase", failPublicationOnce = true)
     }
 
+    @Test fun `settled closed purchase does not finish a later cancelled purchase`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true, secondPurchase = true)
+    }
+
+    @Test fun `deferred commerce still starts an armed terminal event journey`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true,
+            holdClosePublication = true, terminalStartsEntry = true)
+    }
+
     private suspend fun assertAuthoredDismiss(commerce: String?, retryOutcome: String? = null, runtimeFrames: Boolean = false,
         pendingClose: Boolean = false, terminalOutcome: String? = null, holdClosePublication: Boolean = false,
-        failCompletionOnce: Boolean = false, failPublicationOnce: Boolean = false) {
+        failCompletionOnce: Boolean = false, failPublicationOnce: Boolean = false, secondPurchase: Boolean = false, terminalStartsEntry: Boolean = false) {
         val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/authored-dismiss.json").readText()).jsonObject
             .getValue("cases").jsonArray.single { it.jsonObject.getValue("name").jsonPrimitive.content == (commerce ?: "user_close") }.jsonObject
@@ -2881,15 +2890,22 @@ class JourneyServiceTest {
         val entry = fixture.getValue("renderedEntry").jsonObject
         val catalog = catalog(entry)
         val authority = authority(entry)
-        catalog.commit("customer", catalog.prepare(profile(releaseEntry = entry), authority))
+        val firstProfile = profile(releaseEntry = entry)
+        val profileDocument = if (terminalStartsEntry) {
+            val secondProfile = profile(releaseEntry = fixture.getValue("entry").jsonObject)
+            JsonObject(firstProfile + mapOf(
+                "armedLegs" to JsonArray(firstProfile.getValue("armedLegs").jsonArray + secondProfile.getValue("armedLegs").jsonArray),
+                "releases" to JsonArray(firstProfile.getValue("releases").jsonArray + secondProfile.getValue("releases").jsonArray)))
+        } else firstProfile
+        catalog.commit("customer", catalog.prepare(profileDocument, authority))
         val baseline = requireNotNull(catalog.snapshot("customer"))
-        val original = baseline.releasesByDigest.values.single()
+        val original = baseline.releasesByDigest.getValue(entry.getValue("envelope").jsonObject.getValue("descriptorSha256").jsonPrimitive.content)
         val type = commerce ?: "purchase"
         val action = buildJsonObject {
             put("type", type)
             if (type == "purchase") put("placementId", "golden:monthly")
         }
-        val leg = JsonObject(original.leg + mapOf(
+        var leg = JsonObject(original.leg + mapOf(
             "entryStepId" to JsonPrimitive("present"),
             "offers" to JsonArray(emptyList()),
             "steps" to JsonArray(listOf(
@@ -2904,18 +2920,53 @@ class JourneyServiceTest {
             )),
             "routes" to Json.parseToJsonElement("""[{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"buy","entryStepId":"commerce"},{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"close","entryStepId":"close_marker"}]"""),
         ))
+        if (secondPurchase) {
+            val steps = leg.getValue("steps").jsonArray.map { step ->
+                if (step.jsonObject["id"] == JsonPrimitive("commerce")) JsonObject(step.jsonObject +
+                    ("outlets" to buildJsonObject { put("completed", "thanks") })) else step
+            } + listOf(
+                Json.parseToJsonElement("""{"kind":"action","id":"thanks","action":{"type":"navigate","screenId":"screen_thanks"},"outlets":{}}"""),
+                buildJsonObject { put("kind", "action"); put("id", "commerce_again"); put("action", action)
+                    putJsonObject("outlets") { put("completed", "dismiss") } },
+            )
+            leg = JsonObject(leg + mapOf("steps" to JsonArray(steps),
+                "screens" to JsonArray(leg.getValue("screens").jsonArray + buildJsonObject { put("id", "screen_thanks") }),
+                "routes" to JsonArray(leg.getValue("routes").jsonArray + Json.parseToJsonElement(
+                    """{"host":{"kind":"screen","screenId":"screen_thanks"},"eventName":"buy_more","entryStepId":"commerce_again"}"""))))
+        }
         val products = JsonArray(original.descriptor.getValue("products").jsonArray.map {
             JsonObject(it.jsonObject + ("type" to JsonPrimitive("consumable")))
         })
         val envelope = JourneyReleaseEnvelope.authenticate(entry.getValue("envelope").toString().encodeToByteArray(),
             mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP)))
+        val render = original.descriptor.getValue("render").jsonObject
+        val fixtureRender = if (secondPurchase) JsonObject(render + ("screens" to JsonArray(
+            render.getValue("screens").jsonArray + JsonObject(render.getValue("screens").jsonArray.first().jsonObject +
+                ("id" to JsonPrimitive("screen_thanks")))))) else render
         val release = AuthenticatedJourneyRelease(envelope, original.identity,
-            JsonObject(original.descriptor + mapOf("leg" to leg, "products" to products)), original.publishedAtSeqToPromote)
-        val snapshot = baseline.copy(releasesByDigest = mapOf(release.descriptorSha256 to release))
+            JsonObject(original.descriptor + mapOf("leg" to leg, "products" to products, "render" to fixtureRender)), original.publishedAtSeqToPromote)
+        val terminalEntry = buildJsonObject { put("type", "event"); put("eventName", SystemEventNames.PURCHASE_COMPLETED) }
+        val snapshot = baseline.copy(
+            profile = if (terminalStartsEntry) JourneyPlaneProfile.decode(JsonObject(profileDocument + ("armedLegs" to JsonArray(
+                profileDocument.getValue("armedLegs").jsonArray.map {
+                    if (it.jsonObject.getValue("reference").jsonObject["descriptorSha256"] != JsonPrimitive(release.descriptorSha256))
+                        JsonObject(it.jsonObject + ("entryCondition" to terminalEntry)) else it
+                }))).toString().encodeToByteArray()) else baseline.profile,
+            releasesByDigest = (baseline.releasesByDigest + (release.descriptorSha256 to release)).mapValues { (digest, value) ->
+                if (terminalStartsEntry && digest != release.descriptorSha256) AuthenticatedJourneyRelease(JourneyReleaseEnvelope.authenticate(fixture.getValue("entry").jsonObject.getValue("envelope").toString().encodeToByteArray(),
+                    mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))), value.identity,
+                    JsonObject(value.descriptor + ("leg" to JsonObject(value.leg + mapOf(
+                        "entryCondition" to terminalEntry,
+                        "policy" to JsonObject(value.leg.getValue("policy").jsonObject + ("entry" to JsonObject(
+                            value.leg.getValue("policy").jsonObject.getValue("entry").jsonObject +
+                                ("frequency" to buildJsonObject { put("type", "every_match") })))))))), value.publishedAtSeqToPromote)
+                else value
+            })
         val launched = CopyOnWriteArrayList<String>()
         val presentations = ExperiencePresentationService(emit = { _, _, _ -> }, scope = scope,
             runtimeAvailable = { true }, currentDistinctId = identity::distinctId, launch = launched::add)
         val requestReady = CompletableDeferred<JourneyPresentationRequest>()
+        val requests = CopyOnWriteArrayList<JourneyPresentationRequest>()
         val publications = CopyOnWriteArrayList<JourneyScreenEmissionBatch>()
         val claimedEffect = CompletableDeferred<String>()
         val claimedEffects = CopyOnWriteArrayList<String>()
@@ -2940,11 +2991,12 @@ class JourneyServiceTest {
                         onOutcome = request.onOutcome)
                 }
                 withTimeout(5_000) {
-                    while (launched.isEmpty() || PresentationRegistry.observe(launched.single())?.value !is
+                    while (launched.isEmpty() || PresentationRegistry.observe(launched.last())?.value !is
                         ai.nuxie.sdk.presentation.PresentationContentState.Ready) kotlinx.coroutines.delay(10)
                 }
-                PresentationRegistry.reportFirstFrame(launched.single())
+                PresentationRegistry.reportFirstFrame(launched.last())
                 showing.await()
+                requests += request
                 requestReady.complete(request)
                 return JourneyPresentationResult.Shown
             }
@@ -2997,7 +3049,7 @@ class JourneyServiceTest {
             val request = withTimeout(5_000) { requestReady.await() }
             suspend fun runtimeTap(eventName: String = "buy") {
                 val prior = publications.size
-                PresentationRegistry.reportRuntimeStep(launched.single(), NuxiePlayerStepOutcome(true,
+                PresentationRegistry.reportRuntimeStep(launched.last(), NuxiePlayerStepOutcome(true,
                     emptyList(), listOf(ai.nuxie.sdk.runtime.NuxieRuntimeEvent(0, 128, eventName, "", "", 0f, emptyList())),
                     emptyList(), emptyList()), (prior + 1).toULong(), null)
                 withTimeout(5_000) { while (publications.size == prior) kotlinx.coroutines.delay(10) }
@@ -3066,7 +3118,8 @@ class JourneyServiceTest {
                                 journeys.eventAdmissionGeneration())
                         }
                         releaseCloseCapture.complete(Unit)
-                        withTimeout(5_000) { close.await(); terminal.await() }
+                        val terminalAccepted = withTimeout(5_000) { close.await(); terminal.await() }
+                        if (terminalStartsEntry) assertTrue("Deferral must acknowledge durable handling", terminalAccepted)
                     } else runtimeTap("close")
                     withTimeout(5_000) {
                         while (presentations.ownsJourney(JourneyPresentationOwner(request.journeyId, "customer"))) kotlinx.coroutines.delay(10)
@@ -3103,22 +3156,48 @@ class JourneyServiceTest {
                     assertFalse(failCompletionClock.get())
                     assertTrue(captures.none { it.first == JourneyEventNames.LEG_COMPLETED })
                 }
-                journeys.handleEvent(StoredEvent(effectId,
+                if (!holdClosePublication) journeys.handleEvent(StoredEvent(effectId,
                     terminalOutcome ?: (if (commerce == "purchase") SystemEventNames.PURCHASE_COMPLETED else SystemEventNames.RESTORE_COMPLETED),
                     buildJsonObject { if (commerce == "purchase") put("placement_id", "golden:monthly") },
                     100_001L, "customer"), journeys.eventAdmissionGeneration())
+                if (secondPurchase) {
+                    withTimeout(5_000) { while (requests.size < 2) kotlinx.coroutines.delay(10) }
+                    val next = requests.last()
+                    assertEquals("screen_thanks", next.screenId)
+                    assertTrue(next.onScreenChanged("screen_thanks"))
+                    val nextBatch = JourneyScreenEmissionBatch(next.journeyId, 2, "second-purchase",
+                        JourneyScreenEmissionSource("screen_thanks", "buy_more"), listOf(JourneyScreenEmission(
+                            "00000000-0000-7000-8000-000000000909", 2, 100_002L, "buy_more", JsonObject(emptyMap()))))
+                    assertEquals(JourneyEmissionBatchResult.ACCEPTED, next.onEmissionBatch(nextBatch, null))
+                    withTimeout(5_000) { while (claimedEffects.size < 2) kotlinx.coroutines.delay(10) }
+                    val secondEffect = claimedEffects.last()
+                    assertNotEquals(effectId, secondEffect)
+                    journeys.handleEvent(StoredEvent(secondEffect, SystemEventNames.PURCHASE_CANCELLED,
+                        buildJsonObject { put("placement_id", "golden:monthly") }, 100_003L, "customer"),
+                        journeys.eventAdmissionGeneration())
+                    assertTrue(JourneyRunJournal(directory, "customer", JourneyStorageScope(authority)).runs().any { it.completion == null })
+                    assertTrue(presentations.ownsJourney(JourneyPresentationOwner(next.journeyId, "customer")))
+                    assertEquals("screen_thanks", presentations.journeyScreenId(JourneyPresentationOwner(next.journeyId, "customer")))
+                    assertTrue(captures.none { it.first == JourneyEventNames.LEG_COMPLETED })
+                    return
+                }
             } else presentations.dismiss(CloseReason.UserDismissed)
-            withTimeout(5_000) { while (captures.none { it.first == JourneyEventNames.LEG_COMPLETED }) kotlinx.coroutines.delay(10) }
-            val completed = captures.filter { it.first == JourneyEventNames.LEG_COMPLETED }
+            withTimeout(5_000) { while (captures.none { it.first == JourneyEventNames.LEG_COMPLETED && it.second["journey_id"] == request.journeyId }) kotlinx.coroutines.delay(10) }
+            val completed = captures.filter { it.first == JourneyEventNames.LEG_COMPLETED && it.second["journey_id"] == request.journeyId }
             assertEquals((if (pendingClose) pendingExpected else vector).getValue("reports").jsonPrimitive.int, completed.size)
             assertEquals(request.journeyId, completed.single().second["journey_id"])
             assertEquals((if (pendingClose) pendingExpected else vector).getValue("outcome").jsonPrimitive.content, completed.single().second["outcome"])
             assertFalse(presentations.ownsJourney(JourneyPresentationOwner(request.journeyId, "customer")))
-            if (pendingClose) {
+            if (pendingClose && !terminalStartsEntry) {
                 journeys.handleEvent(StoredEvent(claimedEffects.single(), SystemEventNames.PURCHASE_COMPLETED,
                     buildJsonObject { put("placement_id", "golden:monthly") }, 100_002L, "customer"),
                     journeys.eventAdmissionGeneration())
-                assertEquals(1, captures.count { it.first == JourneyEventNames.LEG_COMPLETED })
+                assertEquals(1, captures.count { it.first == JourneyEventNames.LEG_COMPLETED && it.second["journey_id"] == request.journeyId })
+            }
+            if (terminalStartsEntry) {
+                val other = captures.filter { it.first == JourneyEventNames.LEG_COMPLETED && it.second["journey_id"] != request.journeyId }
+                assertEquals("The terminal event starts its other armed Journey without reconcile", 1, other.size)
+                assertEquals("continue", other.single().second["outcome"])
             }
         } finally {
             presentations.shutdownOwnedBy("customer")
