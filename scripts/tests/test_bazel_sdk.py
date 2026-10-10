@@ -1,4 +1,5 @@
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -367,17 +368,61 @@ class BazelSdkPackagingTests(unittest.TestCase):
 
     def test_public_api_oracle_receives_the_actual_publication_bytecode(self):
         publication = self.directory / "sdk.aar"
+        compiled = io.BytesIO()
+        with zipfile.ZipFile(compiled, "w") as jar:
+            jar.writestr("compiled.class", b"the compiled publication bytecode")
+        bytecode = compiled.getvalue()
         with zipfile.ZipFile(publication, "w") as archive:
-            archive.writestr("classes.jar", b"the compiled publication bytecode")
+            archive.writestr("classes.jar", bytecode)
+            archive.writestr("AndroidManifest.xml", '<manifest package="ai.nuxie.sdk" xmlns:android="http://schemas.android.com/apk/res/android"><uses-sdk android:minSdkVersion="23" /></manifest>')
         with patch.object(sdk, "ROOT", self.directory), patch.object(sdk, "gradle") as validate:
             sdk.verify_api(publication)
             jar = self.directory / "build/bazel-sdk/api/classes.jar"
-            self.assertEqual(jar.read_bytes(), b"the compiled publication bytecode")
+            self.assertEqual(jar.read_bytes(), bytecode)
             self.assertEqual(validate.call_args.args, (":nuxie-android:bazelApiCheck",))
             self.assertEqual(validate.call_args.kwargs["properties"], ("-PnuxieBazelApiJar=" + str(jar),))
             previous = jar.stat().st_mtime_ns
             sdk.verify_api(publication)
             self.assertEqual(jar.stat().st_mtime_ns, previous)
+
+    def test_publication_resource_oracle_rejects_missing_wrong_path_or_changed_bytes(self):
+        source = self.directory / "nuxie-android/src/main/resources"
+        timezone = source / "ai/nuxie/sdk/journey/timezone-bundle.json"
+        timezone.parent.mkdir(parents=True)
+        timezone.write_bytes(b"pinned timezone bytes")
+        license = source / "META-INF/LICENSE-unicode.txt"
+        license.parent.mkdir()
+        license.write_bytes(b"original license")
+        expected = {"ai/nuxie/sdk/journey/timezone-bundle.json": timezone.read_bytes(),
+                    "META-INF/LICENSE-unicode.txt": license.read_bytes()}
+        def compiled(entries):
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w") as jar:
+                for name, data in entries.items():
+                    jar.writestr(name, data)
+            return output.getvalue()
+        with patch.object(sdk, "ROOT", self.directory):
+            sdk.verify_java_resources(compiled(expected))
+            for entries in ({"META-INF/LICENSE-unicode.txt": license.read_bytes()},
+                            {"nuxie-android/src/main/resources/" + key: data for key, data in expected.items()}):
+                with self.subTest(entries=entries), self.assertRaisesRegex(ValueError, "missing.*classpath resource"):
+                    sdk.verify_java_resources(compiled(entries))
+            with self.assertRaisesRegex(ValueError, "differs from its authored bytes"):
+                sdk.verify_java_resources(compiled({**expected, "ai/nuxie/sdk/journey/timezone-bundle.json": b"mutant bytes"}))
+
+    def test_publication_manifest_retains_owning_package_and_minimum_api(self):
+        publication = self.directory / "sdk.aar"
+        for package, minimum in (("ai.nuxie.sdk", "23"), ("ai.nuxie.sdk", "24"),
+                                 ("ai.nuxie.other", "23"), ("ai.nuxie.sdk", None)):
+            with self.subTest(package=package, minimum=minimum):
+                uses_sdk = '' if minimum is None else f'<uses-sdk android:minSdkVersion="{minimum}" />'
+                with zipfile.ZipFile(publication, "w") as archive:
+                    archive.writestr("AndroidManifest.xml", f'<manifest package="{package}" xmlns:android="http://schemas.android.com/apk/res/android">{uses_sdk}</manifest>')
+                if package == "ai.nuxie.sdk" and minimum == "23":
+                    sdk.verify_manifest(publication)
+                else:
+                    with self.assertRaisesRegex(ValueError, "minimum Android API 23"):
+                        sdk.verify_manifest(publication)
 
     def test_instrumentation_accepts_completed_tests_and_runner_skips(self):
         output = (

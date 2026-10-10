@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import io
 import fcntl
 import json
 import os
@@ -215,12 +216,38 @@ def verify_native(aar_path, ndk):
                     raise ValueError("JNI adapter must link the runtime by its portable library name")
 
 
+def verify_manifest(aar_path):
+    with zipfile.ZipFile(aar_path) as archive:
+        manifest = ET.fromstring(archive.read("AndroidManifest.xml"))
+    android = "{http://schemas.android.com/apk/res/android}"
+    minimum = manifest.find("uses-sdk")
+    if manifest.get("package") != "ai.nuxie.sdk" or minimum is None or minimum.get(android + "minSdkVersion") != "23":
+        raise ValueError("SDK AAR must retain its owning package and minimum Android API 23")
+
+
+def verify_java_resources(bytecode):
+    source = ROOT / "nuxie-android/src/main/resources"
+    with zipfile.ZipFile(io.BytesIO(bytecode)) as jar:
+        for path in sorted(source.rglob("*")):
+            if not path.is_file():
+                continue
+            name = path.relative_to(source).as_posix()
+            try:
+                actual = jar.read(name)
+            except KeyError as error:
+                raise ValueError("SDK bytecode is missing its classpath resource: " + name) from error
+            if actual != path.read_bytes():
+                raise ValueError("SDK classpath resource differs from its authored bytes: " + name)
+
+
 def verify_api(aar_path):
+    verify_manifest(aar_path)
     directory = ROOT / "build/bazel-sdk/api"
     directory.mkdir(parents=True, exist_ok=True)
     jar = directory / "classes.jar"
     with zipfile.ZipFile(aar_path) as archive:
         data = archive.read("classes.jar")
+    verify_java_resources(data)
     if not jar.is_file() or jar.read_bytes() != data:
         temporary = jar.with_suffix(".tmp")
         temporary.write_bytes(data)

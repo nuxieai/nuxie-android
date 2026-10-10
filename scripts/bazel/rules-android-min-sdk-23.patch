@@ -1,0 +1,6 @@
+diff --git a/rules/min_sdk_version.bzl b/rules/min_sdk_version.bzl
+--- a/rules/min_sdk_version.bzl
++++ b/rules/min_sdk_version.bzl
+@@ -27 +27 @@
+-_DEPOT_FLOOR = 24
++_DEPOT_FLOOR = 23
