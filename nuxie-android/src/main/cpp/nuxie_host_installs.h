@@ -3,7 +3,9 @@
 
 #include <jni.h>
 #include <stdlib.h>
-#include "nux_capi.generated.h"
+
+/* Include after the generated C API header. Only the JNI shim names the C API
+   directly, so this header uses its types without including it. */
 
 /* All borrowed strings and arrays live until the synchronous install returns. */
 struct InstallAllocation { void *value; struct InstallAllocation *next; };

@@ -658,7 +658,7 @@ class FeatureCommandRecoveryTest {
     }
 
     @Test
-    fun sharedCooldownsSurviveReopeningAndApplyToExplicitReplay() {
+    fun sharedCooldownsSurviveReopeningAndApplyToExplicitReplay(): Unit = kotlinx.coroutines.runBlocking {
         FixtureRunner.run("features/command-recovery.json", "features/command-recovery") { vector -> runBlocking {
             val status = vector.body.getValue("statusCode").jsonPrimitive.int
             val header = vector.body.getValue("retryAfter").jsonPrimitive.content

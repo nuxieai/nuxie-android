@@ -8,16 +8,20 @@ import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureService
 import ai.nuxie.sdk.features.FeatureUsageResult
 import ai.nuxie.sdk.network.NuxieApi
+import ai.nuxie.sdk.network.isInvalidPurchaseTokenRejection
 import android.app.Activity
 import ai.nuxie.sdk.logging.NuxieLog as Log
 import com.android.billingclient.api.BillingClient
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -41,7 +45,7 @@ internal class PurchaseSettings(
 
 internal sealed interface PurchaseSyncOutcome {
     data class Accepted(val response: NuxieApi.PurchaseResponse) : PurchaseSyncOutcome
-    data class Rejected(val permanent: Boolean) : PurchaseSyncOutcome
+    data class Rejected(val permanent: Boolean, val invalidToken: Boolean = false) : PurchaseSyncOutcome
 }
 
 internal fun interface PurchaseSynchronizer {
@@ -71,10 +75,16 @@ internal class NuxieApiPurchaseSynchronizer(
             ),
         )
         if (response.success) PurchaseSyncOutcome.Accepted(response)
-        else PurchaseSyncOutcome.Rejected(isPermanentPurchaseRejection(response.body))
+        else PurchaseSyncOutcome.Rejected(
+            permanent = isPermanentPurchaseRejection(response.body),
+            invalidToken = isInvalidPurchaseTokenRejection(response.body),
+        )
     } catch (rejected: NuxieApi.PurchaseRejectedException) {
-        PurchaseSyncOutcome.Rejected(rejected.permanent)
-    } catch (_: Exception) {
+        PurchaseSyncOutcome.Rejected(rejected.permanent, rejected.invalidToken)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        Log.w("NuxieBilling", "Purchase evidence sync failed", error)
         PurchaseSyncOutcome.Rejected(permanent = false)
     }
 }
@@ -141,6 +151,7 @@ internal class PurchaseService(
     /** Internal test observation only; null in production and never controls behavior. */
     private val purchaseCommitObserver: ((PurchaseCommitObservation) -> Unit)? = null,
     private val testStore: NuxieTestStore? = null,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     private data class InFlightPurchase(
         val result: CompletableDeferred<PurchaseResult>,
@@ -480,7 +491,7 @@ internal class PurchaseService(
             marked && clearOutcomeCorrelation(current.checkoutCompletionEventId)
         }
 
-    private fun clearOutcomeCorrelation(eventId: String?): Boolean {
+    private suspend fun clearOutcomeCorrelation(eventId: String?): Boolean {
         if (eventId == null) return true
         var cleared = true
         evidenceStore.loadBindings()
@@ -526,9 +537,7 @@ internal class PurchaseService(
             // Pin first-arrival allowances in the same linearization as
             // identity projection snapshots, but reserve no FeatureInfo FIFO
             // slot until an active SDK scope can also publish it.
-            kotlinx.coroutines.runBlocking {
-                projectionRefresh.withLock { deriveOptimisticProjection() }
-            }
+            projectionRefresh.withLock { deriveOptimisticProjection() }
             scope.launch { refreshOptimisticProjection() }
         }
         initialProjectionRefresh = scope.launch { refreshOptimisticProjection() }
@@ -675,7 +684,7 @@ internal class PurchaseService(
         }
     }
 
-    private fun eligibleEvidence(distinctId: String, featureId: String): List<PurchaseEvidence> {
+    private suspend fun eligibleEvidence(distinctId: String, featureId: String): List<PurchaseEvidence> {
         val descriptors = evidenceStore.loadProductMappings()
         val bindings = evidenceStore.loadBindings()
         return evidenceStore.load().values.filter { evidence ->
@@ -801,6 +810,16 @@ internal class PurchaseService(
         replacement: SubscriptionReplacement?,
         expectedOwnerDistinctId: String? = null,
         outcomeCorrelation: CommerceOutcomeCorrelation? = null,
+    ): PurchaseResult = withContext(ioDispatcher) {
+        purchaseOnIo(activity, product, replacement, expectedOwnerDistinctId, outcomeCorrelation)
+    }
+
+    private suspend fun purchaseOnIo(
+        activity: Activity,
+        product: StoreProduct,
+        replacement: SubscriptionReplacement?,
+        expectedOwnerDistinctId: String?,
+        outcomeCorrelation: CommerceOutcomeCorrelation?,
     ): PurchaseResult {
         val product = product.forJourneyCheckout(outcomeCorrelation?.journeyId)
         ensureCheckoutIntakeOpen()
@@ -960,6 +979,13 @@ internal class PurchaseService(
     suspend fun restorePurchases(
         expectedOwnerDistinctId: String? = null,
         outcomeCorrelation: CommerceOutcomeCorrelation? = null,
+    ): RestoreResult = withContext(ioDispatcher) {
+        restorePurchasesOnIo(expectedOwnerDistinctId, outcomeCorrelation)
+    }
+
+    private suspend fun restorePurchasesOnIo(
+        expectedOwnerDistinctId: String?,
+        outcomeCorrelation: CommerceOutcomeCorrelation?,
     ): RestoreResult {
         val initiatingOwner = distinctId()
         if (expectedOwnerDistinctId != null && initiatingOwner != expectedOwnerDistinctId) {
@@ -1031,18 +1057,39 @@ internal class PurchaseService(
             } else {
                 RestoreDecision(
                     RestoreResult.Restored,
-                    found.mapNotNull {
+                    found.distinctBy { it.purchaseToken }.mapNotNull { purchase ->
                         commitPurchaseOutcome(
-                            classifyPurchaseObservation(it, PurchaseOutcomeSource.STARTUP_RECOVERY),
+                            classifyPurchaseObservation(purchase, PurchaseOutcomeSource.STARTUP_RECOVERY),
                             effects,
-                        )
+                        ) ?: evidenceStore.load()[purchase.purchaseToken]?.takeIf {
+                            purchase.state == StoredPurchaseState.PURCHASED &&
+                                it.purchaseState == StoredPurchaseState.PURCHASED &&
+                                it.synced && !it.revoked && !it.permanentlyRejected
+                        }
                     },
                 )
             }
         }
-        decision.followUps.forEach { finishPurchase(it) }
+        // Restore is an explicit request for current provider authority, not a replay
+        // of the earlier checkout receipt. Keep its delivery and completion claims.
+        val refreshResults = decision.followUps.associate { evidence ->
+            evidence.purchaseToken to if (evidence.ownerDistinctId == initiatingOwner) {
+                syncEvidence(evidence, refreshProviderState = true)
+            } else {
+                finishPurchase(evidence)
+                false
+            }
+        }
         val outcome = if (expectedOwnerDistinctId != null && decision.outcome == RestoreResult.Restored) {
-            strictRestoreOutcome(found, initiatingOwner)
+            if (decision.followUps.any {
+                    it.ownerDistinctId == initiatingOwner && refreshResults[it.purchaseToken] != true
+                }) {
+                RestoreResult.Failed(RestoreReconciliationException(
+                    "Restore is waiting for purchase verification.",
+                ))
+            } else {
+                strictRestoreOutcome(found, initiatingOwner)
+            }
         } else {
             decision.outcome
         }
@@ -1057,7 +1104,7 @@ internal class PurchaseService(
      * result; authenticated routes opt into this stricter decision by passing
      * their presentation owner.
      */
-    private fun strictRestoreOutcome(
+    private suspend fun strictRestoreOutcome(
         found: List<PlayPurchase>,
         initiatingOwner: String,
     ): RestoreResult {
@@ -1264,7 +1311,7 @@ internal class PurchaseService(
         else PurchaseOutcomeSource.CHECKOUT
 
     /** Classify provenance while the serialized purchase decision is held. */
-    private fun classifyPurchaseObservation(
+    private suspend fun classifyPurchaseObservation(
         purchase: PlayPurchase,
         observedSource: PurchaseOutcomeSource,
     ): PlayPurchaseObservation {
@@ -1719,9 +1766,12 @@ internal class PurchaseService(
         if (current.synced) completeManaged(current) else syncEvidence(current)
     }
 
-    private suspend fun syncEvidence(original: PurchaseEvidence): Boolean {
+    private suspend fun syncEvidence(
+        original: PurchaseEvidence,
+        refreshProviderState: Boolean = false,
+    ): Boolean {
         val current = evidenceStore.load()[original.purchaseToken] ?: original
-        if (current.synced) return true
+        if (current.synced && !refreshProviderState) return true
         val operation: CompletableDeferred<Boolean>
         val ownsOperation: Boolean
         synchronized(usageCoordinationLock) {
@@ -1736,22 +1786,41 @@ internal class PurchaseService(
                 ownsOperation = true
             }
         }
-        if (!ownsOperation) return operation.await()
-        val synced = try {
-            performSyncEvidence(current)
-        } catch (_: Exception) {
-            false
-        }
-        operation.complete(synced)
-        synchronized(usageCoordinationLock) {
-            if (syncOperations[original.purchaseToken] === operation) {
-                syncOperations.remove(original.purchaseToken)
+        if (ownsOperation) {
+            // The host owns only its wait. SDK lifetime owns an admitted
+            // verification and applying the server's accepted refresh. Keep
+            // the caller's dispatcher; replace only its cancellation owner.
+            val job = scope.launch(currentCoroutineContext().minusKey(Job)) {
+                try {
+                    val refreshed = performSyncEvidence(current, refreshProviderState)
+                    if (!refreshed && current.synced) completeManaged(current)
+                    operation.complete(refreshed)
+                } catch (cancelled: CancellationException) {
+                    operation.cancel(cancelled)
+                    throw cancelled
+                } catch (failure: Exception) {
+                    Log.w("NuxieBilling", "Could not apply purchase synchronization.", failure)
+                    operation.complete(false)
+                }
+            }
+            job.invokeOnCompletion { failure ->
+                // Also settle waiters if SDK shutdown prevented the job body
+                // from starting, or if a fatal failure escaped it.
+                if (failure != null) operation.completeExceptionally(failure)
+                synchronized(usageCoordinationLock) {
+                    if (syncOperations[original.purchaseToken] === operation) {
+                        syncOperations.remove(original.purchaseToken)
+                    }
+                }
             }
         }
-        return synced
+        return operation.await()
     }
 
-    private suspend fun performSyncEvidence(original: PurchaseEvidence): Boolean {
+    private suspend fun performSyncEvidence(
+        original: PurchaseEvidence,
+        refreshProviderState: Boolean,
+    ): Boolean {
         val attempted = projectionRefresh.withLock {
             val current = evidenceStore.load()[original.purchaseToken] ?: original
             upsertEvidenceLocked(
@@ -1759,12 +1828,20 @@ internal class PurchaseService(
                 rejectIfTerminal = true,
             )
         } ?: return false
-        when (val outcome = runCatching { synchronizer.sync(attempted) }
-            .getOrElse { PurchaseSyncOutcome.Rejected(permanent = false) }) {
+        val outcome = try {
+            synchronizer.sync(attempted)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            Log.w("NuxieBilling", "Purchase synchronization failed.", failure)
+            PurchaseSyncOutcome.Rejected(permanent = false)
+        }
+        when (outcome) {
             is PurchaseSyncOutcome.Rejected -> {
-                if (outcome.permanent) {
+                val refreshingSynced = refreshProviderState && attempted.synced
+                if (outcome.invalidToken || (!refreshingSynced && outcome.permanent)) {
                     revokeEvidence(attempted.copy(permanentlyRejected = true))
-                } else {
+                } else if (!refreshingSynced) {
                     scheduleSyncRetry(attempted.purchaseToken, attempted.syncAttempts)
                 }
                 return false
@@ -1824,7 +1901,7 @@ internal class PurchaseService(
         }
     }
 
-    private fun currentProvenOwner(evidence: PurchaseEvidence): String? {
+    private suspend fun currentProvenOwner(evidence: PurchaseEvidence): String? {
         val boundOwner = evidence.obfuscatedAccountId?.let { accountId ->
             evidenceStore.loadBindings().firstOrNull { binding ->
                 binding.obfuscatedAccountId == accountId &&
@@ -1954,7 +2031,7 @@ internal class PurchaseService(
     }
 
     /** Merge monotonic evidence facts; called only while [projectionRefresh] is held. */
-    private fun upsertEvidenceLocked(
+    private suspend fun upsertEvidenceLocked(
         candidate: PurchaseEvidence,
         rejectIfTerminal: Boolean = false,
     ): PurchaseEvidence? {
@@ -1996,7 +2073,7 @@ internal class PurchaseService(
             pinnedFeatureAllowances = current?.pinnedFeatureAllowances
                 ?: candidate.pinnedFeatureAllowances,
         )
-        return merged.takeIf(evidenceStore::upsert)
+        return merged.takeIf { evidenceStore.upsert(it) }
     }
 
     private suspend fun stageEvidenceRevocation(evidence: PurchaseEvidence): StagedRevocation =
@@ -2345,7 +2422,7 @@ internal class PurchaseService(
         outcomeEventId = outcomeEventId,
     )
 
-    internal fun rememberProduct(product: StoreProduct): Boolean =
+    internal suspend fun rememberProduct(product: StoreProduct): Boolean =
         evidenceStore.upsertProductMapping(product.toMapping()).also { persisted ->
             if (persisted) scope.launch { refreshOptimisticProjection() }
         }
@@ -2394,7 +2471,7 @@ internal class PurchaseService(
     }
 
     /** Called only while [projectionRefresh] is held. */
-    private fun stageOptimisticProjectionLocked(): FeatureInfo.Mutation? {
+    private suspend fun stageOptimisticProjectionLocked(): FeatureInfo.Mutation? {
         val currentDistinctId = distinctId()
         return features.stageOptimisticPurchaseProjection(
             currentDistinctId,
@@ -2414,7 +2491,7 @@ internal class PurchaseService(
     }
 
     /** Resolve each retained token once; later catalog replacements cannot swap its allowances. */
-    private fun deriveOptimisticProjection(currentDistinctId: String = distinctId()):
+    private suspend fun deriveOptimisticProjection(currentDistinctId: String = distinctId()):
         Map<String, OptimisticFeatureOverlay>? {
         if (testStore != null) return null
         val descriptors = evidenceStore.loadProductMappings()

@@ -785,7 +785,7 @@ internal class ExperiencePresentationService(
             JourneyScreenDismissalResult.HANDLED
         },
         onLinkOpened: suspend (JourneyOpenedLink) -> Unit = {},
-        onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> Boolean = { _, _ -> true },
+        onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> JourneyEmissionBatchResult = { _, _ -> JourneyEmissionBatchResult.ACCEPTED },
         onPresentationRevealed: suspend (String) -> Unit = {},
         onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
         transition: JsonObject? = null,
@@ -1358,11 +1358,11 @@ internal class ExperiencePresentationService(
                 JourneyPermissionRequest.TRACKING,
                 null,
             )
-            JourneyActionType.DISMISS -> {
-                PresentationRegistry.dismiss(active.id, CloseReason.UserDismissed)
-                attemptOutcome(active, CloseReason.UserDismissed)
-                JourneyPresentationActionResult.Handled
-            }
+            // Persist the authored terminal outcome before presentation teardown
+            // can emit a user-close lifecycle callback.
+            JourneyActionType.DISMISS -> JourneyPresentationActionResult.Completed(
+                action.string("reason")?.takeIf(String::isNotEmpty) ?: "completed",
+            )
             else -> JourneyPresentationActionResult.Failed
         }
     }

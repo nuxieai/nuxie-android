@@ -354,7 +354,7 @@ internal class ExperienceSurfaceHost(
     private var firstFrameUpdateBaseline = 0L
     @Volatile private var firstFramePresented = false
     @Volatile private var firstFrameComposed = false
-    private var androidSurface: Surface? = null
+    @Volatile private var androidSurface: Surface? = null
     private var saveDescriptor: JsonObject? = null
     private val unpublishedSteps = ArrayDeque<PublishedStep>()
     // SUBMITTED retains the exact frame until native completion. Polling must
@@ -511,13 +511,25 @@ internal class ExperienceSurfaceHost(
                     else -> null
                 }
                 if (globalPath != null) {
-                    environment?.setValue(globalPath, value)
+                    val write = {
+                        if (!released.get()) {
+                            try { environment?.setValue(globalPath, value) }
+                            catch (error: Exception) {
+                                if (error is kotlinx.coroutines.CancellationException) throw error
+                                if (reportedStatePaths.add(path)) Log.w(LOG_TAG, "Experience state path rejected", error,
+                                    Log.sensitive("path", path))
+                            }
+                        }
+                    }
+                    val shared = runValues
+                    if (shared == null) write() else shared.mutateWhenPresented(write, {})
                     continue
                 }
                 val projected = viewModelState
                 if (projected != null) projected.setValue(path, value)
                 else boundArtboard.setDefaultViewModelValue(path, value)
             } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
                 // Reserved environment fields are optional in older releases. One
                 // rejected field must not prevent valid siblings or close the screen.
                 if (reportedStatePaths.add(path)) Log.w(LOG_TAG, "Experience state path rejected", error, Log.sensitive("path", path))
@@ -554,6 +566,18 @@ internal class ExperienceSurfaceHost(
         surfaceTextureListener = this
     }
 
+    private fun enqueuePreparation(onLoaded: ((Boolean) -> Unit)?, prepare: () -> Unit) {
+        val reject = { onLoaded?.invoke(false); Unit }
+        val accepted = lane.enqueue {
+            val apply = {
+                if (released.get()) reject() else prepare()
+            }
+            val shared = runValues
+            if (shared == null) apply() else shared.mutateWhenPresented(apply, reject)
+        }
+        if (!accepted) reject()
+    }
+
     /**
      * Load a verified Nuxie scene and select its artboard/player. Must be
      * called before the surface is created (tracer entry point; the
@@ -572,7 +596,7 @@ internal class ExperienceSurfaceHost(
         retireSemantics()
         discardFocusInput()
         riveFocusState = NuxieFocusState(false, false)
-        lane.enqueue {
+        enqueuePreparation(onLoaded) {
             saveDescriptor = descriptor
             val requirements = descriptor?.get("requirements") as? JsonObject
             semanticsEnabled = (requirements?.get("requiredCapabilities") as? JsonArray).orEmpty()
@@ -585,7 +609,7 @@ internal class ExperienceSurfaceHost(
                 reportFailure(ExperiencePresentationException.Reason.PREPARATION_FAILED,
                     "Experience run values could not be prepared", error)
                 onLoaded?.invoke(false)
-                return@enqueue
+                return@enqueuePreparation
             }
             ownsRuntimeFile = shared?.values == null
             if (shared != null) renderer = shared.renderer
@@ -596,7 +620,7 @@ internal class ExperienceSurfaceHost(
                     "Experience renderer creation failed",
                 )
                 onLoaded?.invoke(false)
-                return@enqueue
+                return@enqueuePreparation
             }
             var videoBindings: List<ExperienceVideoAssetBinding> = emptyList()
             var videoTargets: List<ExperienceVideoElement> = emptyList()
@@ -614,7 +638,7 @@ internal class ExperienceSurfaceHost(
                         "Runtime could not inspect the Experience asset catalog",
                     )
                     onLoaded?.invoke(false)
-                    return@enqueue
+                    return@enqueuePreparation
                 }
                 val systemFonts = mutableListOf<SystemFontCache.Lease>()
                 val import = runCatching {
@@ -634,7 +658,7 @@ internal class ExperienceSurfaceHost(
                         error,
                     )
                     onLoaded?.invoke(false)
-                    return@enqueue
+                    return@enqueuePreparation
                 }
                 videoBindings = import.videos
                 videoTargets = import.videoElements
@@ -658,7 +682,7 @@ internal class ExperienceSurfaceHost(
                         error,
                     )
                     onLoaded?.invoke(false)
-                    return@enqueue
+                    return@enqueuePreparation
                 }
             }
             val loadedFile = file
@@ -669,7 +693,7 @@ internal class ExperienceSurfaceHost(
                     "Runtime rejected the prepared Experience content",
                 )
                 onLoaded?.invoke(false)
-                return@enqueue
+                return@enqueuePreparation
             }
             artboard = if (artboardName != null) {
                 loadedFile.newArtboard(artboardName)
@@ -684,7 +708,7 @@ internal class ExperienceSurfaceHost(
                     "Experience artboard is unavailable",
                 )
                 onLoaded?.invoke(false)
-                return@enqueue
+                return@enqueuePreparation
             }
             try {
                 environment = loadedFile.globalViewModel("env")
@@ -725,7 +749,7 @@ internal class ExperienceSurfaceHost(
                     error,
                 )
                 onLoaded?.invoke(false)
-                return@enqueue
+                return@enqueuePreparation
             }
             applyRuntimeValues(runtimeValues)
             try {
@@ -751,7 +775,7 @@ internal class ExperienceSurfaceHost(
                     error,
                 )
                 onLoaded?.invoke(false)
-                return@enqueue
+                return@enqueuePreparation
             }
             onLoaded?.invoke(true)
         }
@@ -983,10 +1007,13 @@ internal class ExperienceSurfaceHost(
         surfaceWidth = width
         surfaceHeight = height
         requestedDensity = resources.displayMetrics.density
-        val layout = ExperienceSurfaceLayout.create(width, height, requestedDensity)
         val surface = Surface(texture)
         androidSurface = surface
-        lane.enqueue {
+        enqueuePreparation(null) {
+            if (androidSurface !== surface) return@enqueuePreparation
+            val width = surfaceWidth
+            val height = surfaceHeight
+            val layout = ExperienceSurfaceLayout.create(width, height, requestedDensity)
             // Attach only once both the headless renderer and this surface's
             // window exist; a failed create/acquire keeps the frame gate shut.
             val activeRenderer = ensureRenderer(width.coerceAtLeast(1), height.coerceAtLeast(1))
@@ -995,7 +1022,7 @@ internal class ExperienceSurfaceHost(
                     ExperiencePresentationException.Reason.HOST_FAILED,
                     "Experience renderer creation failed",
                 )
-                return@enqueue
+                return@enqueuePreparation
             }
             if ((if (ownsRuntimeFile) activeRenderer.resize(width.coerceAtLeast(1), height.coerceAtLeast(1)) else activeRenderer.resizeIfIdle(width.coerceAtLeast(1), height.coerceAtLeast(1))) != NUX_STATUS_OK) {
                 Log.w(LOG_TAG, "Android Vulkan renderer resize failed")
@@ -1003,7 +1030,7 @@ internal class ExperienceSurfaceHost(
                     ExperiencePresentationException.Reason.HOST_FAILED,
                     "Experience renderer resize failed",
                 )
-                return@enqueue
+                return@enqueuePreparation
             }
             window = runtime.acquireWindow(surface)
             if (window == null) {
@@ -1012,7 +1039,7 @@ internal class ExperienceSurfaceHost(
                     ExperiencePresentationException.Reason.HOST_FAILED,
                     "Experience surface acquisition failed",
                 )
-                return@enqueue
+                return@enqueuePreparation
             }
             surfaceLayout = layout
             appliedLayout = null

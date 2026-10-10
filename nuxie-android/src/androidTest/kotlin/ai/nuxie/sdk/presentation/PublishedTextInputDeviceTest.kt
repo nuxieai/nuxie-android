@@ -2342,7 +2342,7 @@ class PublishedTextInputDeviceTest {
                     onScreenChanged = { screens.add(it); true },
                     onEmissionBatch = { batch, _ ->
                         batches.add(batch)
-                        true
+                        JourneyEmissionBatchResult.ACCEPTED
                     }, onScreenDismissed = { _, _, _ ->
                         dismissalCheckpoints++
                         if (holdCheckpoint) {
@@ -2875,7 +2875,7 @@ class PublishedTextInputDeviceTest {
                     onLinkOpened = request.onLinkOpened,
                     onEmissionBatch = { batch, frameSources ->
                         val committed = request.onEmissionBatch(batch, frameSources)
-                        if (committed) accepted.add(batch)
+                        if (committed == JourneyEmissionBatchResult.ACCEPTED) accepted.add(batch)
                         committed
                     }, onPresentationRevealed = { id ->
                         request.onPresentationRevealed(id)
@@ -3220,7 +3220,7 @@ class PublishedTextInputDeviceTest {
                     UUID.randomUUID().toString(), JourneyScreenEmissionSource("screen_1", "corpus-continue"),
                     listOf(JourneyScreenEmission(UUID.randomUUID().toString(), reopened.nextPresentationEmissionSequence,
                         System.currentTimeMillis(), "corpus_next_0", JsonObject(emptyMap()))),
-                ), null))
+                ), null) == JourneyEmissionBatchResult.ACCEPTED)
             }
             assertTrue("Accepted navigation must finish presenting", navigationPresented.await(10, TimeUnit.SECONDS))
             assertHostedScreen(instrumentation, first, "screen_2")

@@ -3,6 +3,7 @@ package ai.nuxie.sdk.network
 import ai.nuxie.sdk.journey.JourneyResponseSave
 import ai.nuxie.sdk.journey.JourneyResponseSaveReply
 import ai.nuxie.sdk.journey.JourneyResponseSaveTransport
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import ai.nuxie.sdk.NuxieEnvironment
@@ -23,6 +24,11 @@ import kotlinx.serialization.json.jsonObject
 private const val PROFILE_APP_ID_HEADER = "Nuxie-App-Id"
 private const val PROFILE_APP_ENVIRONMENT_HEADER = "Nuxie-App-Environment"
 
+internal fun isInvalidPurchaseTokenRejection(body: JsonObject): Boolean =
+    listOf("code", "reason", "error").any { key ->
+        (body[key] as? JsonPrimitive)?.takeIf { it.isString }?.content == "invalid_purchase_token"
+    }
+
 /**
  * The API client, ported from the iOS `NuxieApi`. Ordinary captured events
  * use `/batch`; Feature consumption uses `/feature/consume`.
@@ -33,6 +39,7 @@ internal class NuxieApi(
     environment: NuxieEnvironment,
     private val transport: HttpTransport = HttpUrlConnectionTransport(),
     baseUrlOverride: URL? = null,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : JourneyResponseSaveTransport {
     private val baseUrl: String = baseUrlOverride?.let(::normalizedBaseUrl) ?: when (environment) {
         NuxieEnvironment.PRODUCTION -> "https://i.nuxie.ai"
@@ -48,6 +55,7 @@ internal class NuxieApi(
     class PurchaseRejectedException(
         val statusCode: Int,
         val permanent: Boolean,
+        val invalidToken: Boolean = false,
     ) : IOException("/purchase rejected with status $statusCode")
 
     data class PlayPurchaseReport(
@@ -144,7 +152,7 @@ internal class NuxieApi(
      * duplicate-key validated and bounded by the transport read cap; callers
      * parse it.
      */
-    fun fetchProfile(
+    suspend fun fetchProfile(
         distinctId: String,
         locale: String?,
         revalidating: ProfileCacheValidator? = null,
@@ -169,7 +177,7 @@ internal class NuxieApi(
             put("User-Agent", "Nuxie-Android-SDK/${SdkVersion.VALUE}")
             scopedValidator?.let { put("If-None-Match", it.rawValue) }
         }
-        val response = transport.execute(
+        val response = execute(
             HttpTransport.Request(url = URL("$baseUrl/profile"), headers = headers, body = body),
         )
         if (response.statusCode == 304) {
@@ -237,7 +245,7 @@ internal class NuxieApi(
 
     override suspend fun sendResponseSave(sheet: JourneyResponseSave): JourneyResponseSaveReply = withContext(Dispatchers.IO) {
         val body = JsonObject(sheet.toJson() + ("apiKey" to JsonPrimitive(apiKey))).toString().encodeToByteArray()
-        val response = transport.execute(HttpTransport.Request(
+        val response = execute(HttpTransport.Request(
             url = URL("$baseUrl/responses/save"),
             headers = mapOf("Content-Type" to "application/json", "Accept-Encoding" to "gzip",
                 "User-Agent" to "Nuxie-Android-SDK/${SdkVersion.VALUE}"),
@@ -254,7 +262,7 @@ internal class NuxieApi(
      * @throws IOException on transport failure (retryable)
      * @throws BatchRejectedException on a non-2xx response
      */
-    fun postBatch(encodedItems: List<String>): BatchAcknowledgment {
+    suspend fun postBatch(encodedItems: List<String>): BatchAcknowledgment {
         require(encodedItems.isNotEmpty()) { "postBatch requires at least one item." }
         val body = buildString {
             // iOS parity: every POST body carries camel-cased "apiKey".
@@ -268,7 +276,7 @@ internal class NuxieApi(
             append("]}")
         }.encodeToByteArray()
 
-        val response = transport.execute(
+        val response = execute(
             HttpTransport.Request(
                 url = URL("$baseUrl/batch"),
                 headers = mapOf(
@@ -291,7 +299,7 @@ internal class NuxieApi(
      * projection of the captured event (same encoder, same lift rules) plus
      * apiKey. Returns the duplicate-key-validated response body text.
      */
-    fun postEvent(encodedBatchItem: String): String {
+    suspend fun postEvent(encodedBatchItem: String): String {
         require(encodedBatchItem.startsWith("{")) { "postEvent expects an encoded batch item." }
         val body = buildString {
             append("{\"apiKey\":")
@@ -299,7 +307,7 @@ internal class NuxieApi(
             append(',')
             append(encodedBatchItem, 1, encodedBatchItem.length)
         }.encodeToByteArray()
-        val response = transport.execute(
+        val response = execute(
             HttpTransport.Request(
                 url = URL("$baseUrl/event"),
                 headers = mapOf(
@@ -318,9 +326,9 @@ internal class NuxieApi(
         return text
     }
 
-    fun consumeFeature(command: JsonObject): JsonObject {
+    suspend fun consumeFeature(command: JsonObject): JsonObject {
         val body = JsonObject(command + ("apiKey" to JsonPrimitive(apiKey))).toString().encodeToByteArray()
-        val response = transport.execute(HttpTransport.Request(
+        val response = execute(HttpTransport.Request(
             url = URL("$baseUrl/feature/consume"),
             headers = mapOf("Content-Type" to "application/json", "Accept-Encoding" to "gzip",
                 "User-Agent" to "Nuxie-Android-SDK/${SdkVersion.VALUE}"), body = body,
@@ -349,7 +357,7 @@ internal class NuxieApi(
     }
 
     /** POST /entitled using the iOS FeatureCheckRequest body shape. */
-    fun checkFeature(
+    suspend fun checkFeature(
         customerId: String,
         featureId: String,
         requiredBalance: Double?,
@@ -366,7 +374,7 @@ internal class NuxieApi(
             entityId?.let { append(",\"entityId\":").append(jsonString(it)) }
             append('}')
         }.encodeToByteArray()
-        val response = transport.execute(
+        val response = execute(
             HttpTransport.Request(
                 url = URL("$baseUrl/entitled"),
                 headers = mapOf(
@@ -407,7 +415,7 @@ internal class NuxieApi(
     }
 
     /** Verify a pending Play purchase and commit its first spend atomically. */
-    fun useFeatureWithPurchase(report: PurchaseBackedFeatureUseReport): FeatureCheckResult {
+    suspend fun useFeatureWithPurchase(report: PurchaseBackedFeatureUseReport): FeatureCheckResult {
         require(report.eventData.value.isFinite() && report.eventData.value > 0 &&
             report.eventData.value % 1.0 == 0.0 && report.eventData.value <= 9_007_199_254_740_991.0) {
             "Feature quantity must be a positive exact integer"
@@ -444,7 +452,7 @@ internal class NuxieApi(
      * Submit Play evidence for server-authoritative verification. UNIV-2632
      * supplies the server-side Play Developer API arm served by this contract.
      */
-    fun postPurchase(report: PlayPurchaseReport): PurchaseResponse {
+    suspend fun postPurchase(report: PlayPurchaseReport): PurchaseResponse {
         val body = buildString {
             append("{\"apiKey\":").append(jsonString(apiKey))
             append(",\"type\":\"playstore\"")
@@ -462,7 +470,7 @@ internal class NuxieApi(
             append(",\"distinct_id\":").append(jsonString(report.distinctId))
             append('}')
         }.encodeToByteArray()
-        val response = transport.execute(
+        val response = execute(
             HttpTransport.Request(
                 url = URL("$baseUrl/purchase"),
                 headers = mapOf(
@@ -475,7 +483,12 @@ internal class NuxieApi(
         )
         if (response.statusCode !in 200..299) {
             val permanent = response.statusCode in 400..499 && response.statusCode !in setOf(408, 429)
-            throw PurchaseRejectedException(response.statusCode, permanent)
+            val invalidToken = runCatching {
+                val text = response.body.decodeToString()
+                StrictJsonValidator.requireNoDuplicateKeys(text)
+                isInvalidPurchaseTokenRejection(Json.parseToJsonElement(text).jsonObject)
+            }.getOrDefault(false)
+            throw PurchaseRejectedException(response.statusCode, permanent, invalidToken)
         }
         val text = response.body.decodeToString().ifBlank { "{}" }
         StrictJsonValidator.requireNoDuplicateKeys(text)
@@ -518,6 +531,10 @@ internal class NuxieApi(
             },
         )
     }
+
+    /** Every API caller may arrive on Main, including explicit host Restore. */
+    private suspend fun execute(request: HttpTransport.Request): HttpTransport.Response =
+        withContext(ioDispatcher) { runCatching { transport.execute(request) } }.getOrThrow()
 
     private fun JsonObject.nullableString(key: String, context: String): String? =
         when (val value = this[key]) {

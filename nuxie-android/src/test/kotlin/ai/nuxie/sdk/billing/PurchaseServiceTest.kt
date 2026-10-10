@@ -11,6 +11,7 @@ import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.features.FeatureAllowance
+import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.testsupport.FakeTransport
 import android.app.Activity
@@ -20,6 +21,11 @@ import com.android.billingclient.api.ProductDetails
 import java.io.File
 import java.math.BigDecimal
 import java.security.MessageDigest
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.test.resetMain
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
@@ -63,6 +69,76 @@ class PurchaseServiceTest {
     fun closeFixtures() {
         fixtures.asReversed().forEach(Fixture::close)
         fixtures.clear()
+    }
+
+    @Test
+    fun hostRestoreReadsEvidenceOffMain() = runTest {
+        val hostMain = AtomicReference<Thread>()
+        val store = RecordingEvidenceStore {
+            assertTrue("Restore evidence reads must leave host-main", Thread.currentThread() !== hostMain.get())
+        }
+        val fixture = fixture(this, store = store, ioDispatcher = Dispatchers.IO)
+        runCurrent()
+        withHostMain(hostMain) {
+            assertEquals(RestoreResult.NoPurchases, fixture.service.restorePurchases())
+        }
+        assertEquals(listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP), fixture.billing.queries)
+    }
+
+    @Test
+    fun hostPurchasePersistsEvidenceOffMainBeforeLaunchingBilling() = runTest {
+        val hostMain = AtomicReference<Thread>()
+        val store = RecordingEvidenceStore {
+            assertTrue("Purchase evidence writes must leave host-main", Thread.currentThread() !== hostMain.get())
+        }
+        val fixture = fixture(this, store = store, ioDispatcher = Dispatchers.IO)
+        fixture.billing.launchCode = BillingClient.BillingResponseCode.USER_CANCELED
+        val hostActivity = activity()
+        runCurrent()
+        withHostMain(hostMain) {
+            assertEquals(PurchaseResult.Cancelled, fixture.service.purchase(hostActivity, product(), null))
+        }
+        assertEquals("play-pro", fixture.billing.launched?.product?.storeProductId)
+        assertEquals("play-pro", store.loadProductMappings().single().storeProductId)
+        assertEquals("play-pro", store.loadBindings().single().storeProductId)
+    }
+
+    @Test
+    fun onlyThePlayBillingLaunchRunsOnMain() = runTest {
+        val hostMain = AtomicReference<Thread>()
+        val hostActivity = activity()
+        val checkoutProduct = product(rawProduct = oneTimeProductDetails())
+        val cancel = BillingResult.newBuilder().setResponseCode(BillingClient.BillingResponseCode.USER_CANCELED).build()
+        val adapter = object : BillingClientAdapter by InertBillingClientAdapter {
+            override val isReady: Boolean = true
+            override fun launchBillingFlow(activity: Activity, params: com.android.billingclient.api.BillingFlowParams): BillingResult {
+                assertTrue("Only launching the Play UI needs Main", Thread.currentThread() === hostMain.get())
+                return cancel
+            }
+        }
+        val connection = PlayBillingConnection(BillingClientAdapterFactory { adapter }, backgroundScope)
+        try {
+            withHostMain(hostMain) {
+                val result = withContext(Dispatchers.IO) {
+                    connection.launch(hostActivity, CheckoutRequest(checkoutProduct, "account", null))
+                }
+                assertEquals(BillingClient.BillingResponseCode.USER_CANCELED, result.responseCode)
+            }
+        } finally {
+            connection.close()
+        }
+    }
+
+    private suspend fun withHostMain(hostMain: AtomicReference<Thread>, block: suspend () -> Unit) {
+        Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "host-main").also(hostMain::set) }
+            .asCoroutineDispatcher().use { main ->
+                Dispatchers.setMain(main)
+                try {
+                    withContext(Dispatchers.Main.immediate) { block() }
+                } finally {
+                    Dispatchers.resetMain()
+                }
+            }
     }
 
     @Test
@@ -2029,6 +2105,223 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun ordinaryRestoreRefreshesSyncedSubscriptionAfterBackendGrantExpires() = runTest {
+        val actions = mutableListOf<String>()
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, actions = actions, emissions = emissions)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(PurchaseEvidence(
+            purchaseToken = "retained-subscription",
+            packageName = "com.example.app",
+            storeProductIds = listOf("play-pro"),
+            nuxieProductId = "nuxie-pro",
+            productType = BillingClient.ProductType.SUBS,
+            purchaseState = StoredPurchaseState.PURCHASED,
+            obfuscatedAccountId = accountHash(owner),
+            syncAttributionDistinctId = owner,
+            ownerDistinctId = owner,
+            acknowledged = true,
+            synced = true,
+            syncedCustomerId = owner,
+            backendSyncedAtMillis = 1L,
+            firstSeenMillis = 1L,
+            catalogResolved = true,
+            completionEmitted = true,
+            syncedEventEmitted = true,
+            signatureVerified = true,
+            authorityScope = "test-fixture",
+        ))
+        // The backend's previous grant has expired while Play still reports ownership.
+        fixture.core.features.hydrateProfile(owner, Json.parseToJsonElement(
+            """{"features":[]}""",
+        ).jsonObject)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("retained-subscription", obfuscatedAccountId = accountHash(owner))
+                .copy(acknowledged = true),
+        )
+        var reconciliations = 0
+        fixture.synchronizer = {
+            reconciliations += 1
+            accepted(owner, it)
+        }
+
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+
+        assertEquals("Restore must refresh provider authority even after an earlier sync", 1, reconciliations)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        assertEquals(null, fixture.billing.launched)
+        assertEquals(0, actions.count { it == "ack" || it == "consume" })
+        assertEquals(0, emissions.count { it.first == SystemEventNames.PURCHASE_COMPLETED })
+        assertEquals(1, emissions.count { it.first == SystemEventNames.RESTORE_COMPLETED })
+        assertTrue(fixture.store.load().getValue("retained-subscription").completionEmitted)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        val failedRefresh = fixture.service.restorePurchases(expectedOwnerDistinctId = owner)
+        assertTrue("A signed Restore must not accept an old sync after refresh fails", failedRefresh is RestoreResult.Failed)
+        fixture.synchronizer = { accepted(owner, it) }
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases(expectedOwnerDistinctId = owner))
+        assertEquals(0, emissions.count { it.first == SystemEventNames.PURCHASE_COMPLETED })
+        fixture.close()
+    }
+
+    @Test
+    fun cancellingHostRestoreDoesNotDiscardTheAcceptedRefresh() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(retainedRestoreEvidence(owner))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+        )
+        val started = CompletableDeferred<Unit>()
+        val serverAccepted = CompletableDeferred<Unit>()
+        fixture.synchronizer = {
+            started.complete(Unit)
+            serverAccepted.await()
+            accepted(owner, it)
+        }
+        val host = async { fixture.service.restorePurchases() }
+        runCurrent()
+        started.await()
+        host.cancel()
+        runCurrent()
+        assertTrue(host.isCancelled)
+        serverAccepted.complete(Unit)
+        runCurrent()
+        assertTrue("The SDK applies the accepted refresh after the host stops waiting", fixture.core.featureInfo.isAllowed("pro"))
+        assertEquals(1, fixture.store.load().getValue("refresh-token").syncAttempts)
+        fixture.close()
+    }
+
+    @Test
+    fun rejectedSyncedRestoreRefreshRetainsEvidenceForLaterRestore() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(retainedRestoreEvidence(owner))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+        )
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = true) }
+
+        // Host Restore reports Play ownership even when backend refresh fails.
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+        val retained = fixture.store.load().getValue("refresh-token")
+        assertFalse("A rejected refresh must not revoke verified evidence", retained.revoked)
+        assertFalse("A rejected refresh must allow a later refresh", retained.permanentlyRejected)
+        assertTrue(retained.synced)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        assertTrue(fixture.service.restorePurchases(expectedOwnerDistinctId = owner) is RestoreResult.Failed)
+        fixture.synchronizer = { accepted(owner, it) }
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases(expectedOwnerDistinctId = owner))
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        assertEquals(null, fixture.billing.launched)
+        assertEquals(0, fixture.purchaseCompletionEventIds.size)
+        fixture.close()
+    }
+
+    @Test
+    fun failedSyncedRefreshCompletesPlayWithoutBackgroundRefreshRetries() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(retainedRestoreEvidence(owner).copy(acknowledged = false))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)),
+        )
+        var calls = 0
+        fixture.synchronizer = { calls += 1; PurchaseSyncOutcome.Rejected(permanent = false) }
+        assertTrue(fixture.service.restorePurchases(expectedOwnerDistinctId = owner) is RestoreResult.Failed)
+        assertEquals("Verified evidence still needs Play completion", 1, actions.count { it == "ack" })
+        assertTrue(fixture.store.load().getValue("refresh-token").acknowledged)
+        advanceTimeBy(600_000)
+        runCurrent()
+        assertEquals("A synced refresh waits for the next explicit Restore", 1, calls)
+        fixture.close()
+    }
+
+    @Test
+    fun syncedRefreshDoesNotScheduleBackgroundRetries() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(retainedRestoreEvidence(owner))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+        )
+        var calls = 0
+        fixture.synchronizer = { calls += 1; PurchaseSyncOutcome.Rejected(permanent = false) }
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+        advanceTimeBy(600_000)
+        runCurrent()
+        assertEquals("An explicit refresh does not create a background sync loop", 1, calls)
+        fixture.close()
+    }
+
+    @Test
+    fun restoreDoesNotRefreshAnotherCustomersSyncedToken() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        val original = retainedRestoreEvidence(owner)
+        fixture.store.upsert(original)
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+        )
+        fixture.core.identity.setDistinctId("other-customer")
+        var calls = 0
+        fixture.synchronizer = { calls += 1; PurchaseSyncOutcome.Rejected(permanent = true) }
+        assertEquals(RestoreResult.NoPurchases,
+            fixture.service.restorePurchases(expectedOwnerDistinctId = "other-customer"))
+        assertEquals("Restore must not submit another customer's token", 0, calls)
+        val retained = fixture.store.load().getValue("refresh-token")
+        assertEquals(owner, retained.ownerDistinctId)
+        assertEquals(original.syncAttempts, retained.syncAttempts)
+        assertFalse(retained.revoked)
+        assertFalse(retained.permanentlyRejected)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun syncedRefreshRevokesOnlyAnExplicitInvalidTokenResponse() = runTest {
+        val responses = listOf(
+            Triple(409, """{"code":"google_play_purchase_conflict"}""", false),
+            Triple(400, """{"code":"google_play_purchase_invalid"}""", false),
+            Triple(400, """{"code":"google_play_purchase_unsupported"}""", false),
+            Triple(401, "Invalid API key", false),
+            Triple(400, """{"code":"invalid_purchase_token"}""", true),
+            Triple(200, """{"success":false,"code":"invalid_purchase_token"}""", true),
+        )
+        for ((status, body, invalidToken) in responses) {
+            val fixture = fixture(this)
+            val owner = fixture.core.identity.distinctId()
+            fixture.store.upsert(retainedRestoreEvidence(owner))
+            fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+                playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+            )
+            val api = NuxieApi("pk_test", NuxieEnvironment.DEVELOPMENT, object : HttpTransport {
+                override fun execute(request: HttpTransport.Request) =
+                    HttpTransport.Response(status, body.encodeToByteArray())
+            })
+            val synchronizer = NuxieApiPurchaseSynchronizer(api)
+            fixture.synchronizer = { synchronizer.sync(it) }
+            assertTrue(fixture.service.restorePurchases(expectedOwnerDistinctId = owner) is RestoreResult.Failed)
+            val retained = fixture.store.load().getValue("refresh-token")
+            assertEquals("Only an explicit invalid token may revoke: $status $body", invalidToken, retained.revoked)
+            assertEquals(invalidToken, retained.permanentlyRejected)
+            fixture.close()
+        }
+    }
+
+    private fun retainedRestoreEvidence(owner: String) = PurchaseEvidence(
+        purchaseToken = "refresh-token", packageName = "com.example.app",
+        storeProductIds = listOf("play-pro"), nuxieProductId = "nuxie-pro",
+        productType = BillingClient.ProductType.SUBS, purchaseState = StoredPurchaseState.PURCHASED,
+        obfuscatedAccountId = accountHash(owner), syncAttributionDistinctId = owner,
+        ownerDistinctId = owner, nuxieManaged = true, acknowledged = true, synced = true, syncedCustomerId = owner,
+        backendSyncedAtMillis = 1L, firstSeenMillis = 1L, catalogResolved = true,
+        completionEmitted = true, syncedEventEmitted = true, signatureVerified = true,
+        authorityScope = "test-fixture",
+    )
+
+    @Test
     fun recoveryDoesNotBypassAPendingManagedCompletionBackoff() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(
@@ -2122,7 +2415,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun explicitVerificationFailureIsPermanentButAmbiguousFailureIsTransient() {
+    fun explicitVerificationFailureIsPermanentButAmbiguousFailureIsTransient(): Unit = kotlinx.coroutines.runBlocking {
         val permanent = Json.parseToJsonElement(
             """{"success":false,"error":"verification failed"}""",
         ).jsonObject
@@ -2334,6 +2627,7 @@ class PurchaseServiceTest {
         assertFalse("sync" in actions)
         assertTrue(fixture.store.load().isEmpty())
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.core.eventLog.awaitBarrier()
         assertEquals(
             listOf(SystemEventNames.PURCHASE_COMPLETED),
             journeyEvents.map(StoredEvent::name),
@@ -2908,6 +3202,7 @@ class PurchaseServiceTest {
         logDroppedExternalPurchase: (String, Int, Throwable) -> Unit = { _, _, _ -> },
         journeyEvents: MutableList<StoredEvent>? = null,
         testStore: NuxieTestStore? = null,
+        ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.Unconfined,
     ): Fixture {
         val storageDirectory = temporaryFolder.newFolder("fixture-${fixtures.size}")
         val core = NuxieCore(
@@ -2992,6 +3287,7 @@ class PurchaseServiceTest {
             verifyPurchaseSignature = verifyPurchaseSignature,
             logDroppedExternalPurchase = logDroppedExternalPurchase,
             testStore = testStore,
+            ioDispatcher = ioDispatcher,
         )
         fixture = Fixture(
             core,
@@ -3021,7 +3317,7 @@ class PurchaseServiceTest {
         fun close() = core.stop()
     }
 
-    private class RecordingEvidenceStore : PurchaseEvidenceStore {
+    private class RecordingEvidenceStore(private val checkThread: () -> Unit = {}) : PurchaseEvidenceStore {
         private val entries = linkedMapOf<String, PurchaseEvidence>()
         private val bindings =
             linkedMapOf<Pair<String, StoredProductIdentity>, StoredPurchaseBinding>()
@@ -3029,15 +3325,16 @@ class PurchaseServiceTest {
         var actions: MutableList<String> = mutableListOf()
         var failEvidenceUpserts = false
         var afterNextLoad: ((Map<String, PurchaseEvidence>) -> Unit)? = null
-        var afterNextMappingsLoad: ((List<StoredProductMapping>) -> Unit)? = null
-        override fun load(): Map<String, PurchaseEvidence> {
+        var afterNextMappingsLoad: (suspend (List<StoredProductMapping>) -> Unit)? = null
+        override suspend fun load(): Map<String, PurchaseEvidence> {
+            checkThread()
             val snapshot = entries.toMap()
             val callback = afterNextLoad
             afterNextLoad = null
             callback?.invoke(snapshot)
             return snapshot
         }
-        override fun upsert(evidence: PurchaseEvidence): Boolean {
+        override suspend fun upsert(evidence: PurchaseEvidence): Boolean {
             actions += "persist"
             if (failEvidenceUpserts) return false
             entries[evidence.purchaseToken] = evidence
@@ -3046,19 +3343,21 @@ class PurchaseServiceTest {
         fun replaceWithoutRecording(evidence: PurchaseEvidence) {
             entries[evidence.purchaseToken] = evidence
         }
-        override fun loadBindings(): List<StoredPurchaseBinding> = bindings.values.toList()
-        override fun upsertBinding(binding: StoredPurchaseBinding): Boolean {
+        override suspend fun loadBindings(): List<StoredPurchaseBinding> = bindings.values.toList()
+        override suspend fun upsertBinding(binding: StoredPurchaseBinding): Boolean {
+            checkThread()
             bindings[binding.obfuscatedAccountId to binding.productIdentity] = binding
             return true
         }
-        override fun loadProductMappings(): List<StoredProductMapping> {
+        override suspend fun loadProductMappings(): List<StoredProductMapping> {
             val snapshot = mappings.values.toList()
             val callback = afterNextMappingsLoad
             afterNextMappingsLoad = null
             callback?.invoke(snapshot)
             return snapshot
         }
-        override fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
+        override suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
+            checkThread()
             mappings[mapping.productIdentity] = mapping
             return true
         }

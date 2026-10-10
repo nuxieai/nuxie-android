@@ -5,6 +5,30 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class JourneyReleaseValuePolicyTest {
+    @Test fun `nested object declarations keep strict shapes`() {
+        fun policy(state: String) = Json.parseToJsonElement("""{"state":$state,"responses":{},"ruleGroups":[]}""").jsonObject
+        val accepted = JourneyReleaseValuePolicy.parse(policy("""{"profile":{"type":"object","fields":{"name":{"type":"string"},"minutes":{"type":"number"},"topics":{"type":"enum","values":["Reading, writing","Travel"],"multiple":true},"settings":{"type":"object","fields":{"day":{"type":"date"}}}}}}"""))
+        assertTrue(accepted.rules.isEmpty())
+        assertTrue(accepted.groups.isEmpty())
+        for (state in listOf(
+            """{"profile":{"type":"object"}}""",
+            """{"profile":{"type":"object","fields":{}}}""",
+            """{"profile":{"type":"list","items":{"x":{"type":"number"}},"fields":{"x":{"type":"number"}}}}""",
+            """{"profile":{"type":"object","items":{"x":{"type":"number"}},"fields":{"x":{"type":"number"}}}}""",
+            """{"profile":{"type":"number","fields":{"x":{"type":"number"}}}}""",
+            """{"profile":{"type":"object","fields":{"name":{"type":"string","extra":true}}}}""",
+            """{"profile":{"type":"object","fields":{"name":{"type":"string","default":"Ana"}}}}""",
+            """{"profile":{"type":"object","fields":{"isset:name":{"type":"boolean"}}}}""",
+            """{"profile":{"type":"object","fields":{"x":{"type":"enum","values":["a","a"]}}}}""",
+            """{"profile":{"type":"object","fields":{"x":{"type":"number","multiple":true}}}}""",
+            """{"profile":{"type":"object","fields":{"x":{"type":"list"}}}}""",
+            """{"profile":{"type":"object","fields":{"x":{"type":"date","fields":{}}}}}""",
+        )) assertThrows(state, JourneyReleaseAuthenticationException::class.java) { JourneyReleaseValuePolicy.parse(policy(state)) }
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneyReleaseValuePolicy.parse(Json.parseToJsonElement("""{"state":{},"responses":{"form":{"title":"Form","model":"Responses:form","fields":[{"key":"profile","label":"Profile","type":"object","fields":{"x":{"type":"number"}},"rules":[]}]}},"ruleGroups":[]}""").jsonObject)
+        }
+    }
+
     private val policy = Json.parseToJsonElement("""{
       "state":{},
       "responses":{"feedback":{"title":"Feedback","model":"Responses:feedback","fields":[

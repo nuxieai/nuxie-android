@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.journey
 
+import ai.nuxie.sdk.presentation.JourneyEmissionBatchResult
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.setMain
@@ -14,6 +15,13 @@ import ai.nuxie.sdk.presentation.LinkStateRenderCapabilityShadow
 import ai.nuxie.sdk.presentation.LinkStateNativeMountShadow
 import ai.nuxie.sdk.presentation.openActivityLink
 import ai.nuxie.sdk.LogLevel
+import ai.nuxie.sdk.Nuxie
+import ai.nuxie.sdk.NuxieConfiguration
+import ai.nuxie.sdk.NuxieListener
+import ai.nuxie.sdk.core.NuxieCore
+import ai.nuxie.sdk.testsupport.FakeTransport
+import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
+import kotlin.concurrent.thread
 import ai.nuxie.sdk.core.supportedRuntimeForEmbeddedRuntime
 import ai.nuxie.sdk.presentation.JourneyRuntimeEmissionCoordinator
 import ai.nuxie.sdk.runtime.NuxieHostCommand
@@ -87,6 +95,7 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import org.junit.After
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -122,7 +131,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         try {
@@ -405,7 +414,7 @@ class JourneyServiceTest {
         val identity = identity("customer")
         val catalog = catalog()
         val prepared = catalog.prepare(profile(), authority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         var now = 100_000L
@@ -472,7 +481,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val presenter = RecordingJourneyPresenter(available = false)
@@ -585,7 +594,7 @@ class JourneyServiceTest {
         assertNull(journal.runs().single().completion)
         assertTrue(request.onEmissionBatch(JourneyScreenEmissionBatch(request.journeyId, 0, "after-goal",
             JourneyScreenEmissionSource("screen_welcome", "continue"),
-            listOf(JourneyScreenEmission("continue-event", 0, 100_300L, "continue", JsonObject(emptyMap())))), null))
+            listOf(JourneyScreenEmission("continue-event", 0, 100_300L, "continue", JsonObject(emptyMap())))), null) == JourneyEmissionBatchResult.ACCEPTED)
         withTimeout(5_000) {
             while (presenter.shownCount.get() < 2) kotlinx.coroutines.delay(10)
         }
@@ -617,7 +626,7 @@ class JourneyServiceTest {
             ai.nuxie.sdk.presentation.ExperienceResponseSaveRequest("feedback", null, JsonObject(emptyMap())),
             "screen_welcome", { error("Unaccepted save cannot confirm") })
         assertFalse(request.onEmissionBatch(batch,
-            ai.nuxie.sdk.presentation.JourneyRuntimeEmissionSources(saves = listOf(save))))
+            ai.nuxie.sdk.presentation.JourneyRuntimeEmissionSources(saves = listOf(save))) == JourneyEmissionBatchResult.ACCEPTED)
         assertFalse(captured.contains("survey_submitted"))
         assertFalse(captured.contains(JourneyEventNames.LEG_COMPLETED))
         val run = JourneyRunJournal(directory, "customer", JourneyStorageScope(authority)).runs().single()
@@ -631,7 +640,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val presenter = RecordingJourneyPresenter()
         val systemCaptures = CopyOnWriteArrayList<String>()
@@ -692,8 +701,8 @@ class JourneyServiceTest {
             ),
         )
 
-        assertTrue(request.onEmissionBatch(first, null))
-        assertTrue(request.onEmissionBatch(first, null))
+        assertTrue(request.onEmissionBatch(first, null) == JourneyEmissionBatchResult.ACCEPTED)
+        assertTrue(request.onEmissionBatch(first, null) == JourneyEmissionBatchResult.ACCEPTED)
 
         val retained = JourneyRunJournal(
             directory,
@@ -734,7 +743,7 @@ class JourneyServiceTest {
                         ),
                     ),
                 ), null,
-            ),
+            ) == JourneyEmissionBatchResult.ACCEPTED,
         )
         // This lifecycle command is a FIFO barrier behind the routed continuation.
         service.onAppDidEnterBackground()
@@ -772,7 +781,7 @@ class JourneyServiceTest {
             val catalog = catalog(renderedEntry)
             val renderedAuthority = authority(renderedEntry)
             val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-            catalog.commit("customer", prepared)
+            runBlocking { catalog.commit("customer", prepared) }
             val snapshot = requireNotNull(catalog.snapshot("customer"))
             val release = snapshot.releasesByDigest.values.single()
             val journal = JourneyRunJournal(
@@ -878,7 +887,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val captures = CopyOnWriteArrayList<String>()
         val presenter = RecordingJourneyPresenter(
@@ -932,7 +941,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val presenter = RecordingJourneyPresenter()
@@ -976,7 +985,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val baseline = requireNotNull(catalog.snapshot("customer"))
         val original = baseline.releasesByDigest.values.single()
         val route = buildJsonObject {
@@ -1045,7 +1054,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val presenter = RecordingJourneyPresenter()
         val service = JourneyService(
@@ -1074,7 +1083,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val presenter = RecordingJourneyPresenter()
         val service = JourneyService(
@@ -1109,7 +1118,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val presentationStarted = CompletableDeferred<Unit>()
         val allowPresentation = CompletableDeferred<Unit>()
@@ -1162,7 +1171,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val presenter = RecordingJourneyPresenter()
@@ -1211,7 +1220,7 @@ class JourneyServiceTest {
             val catalog = catalog(renderedEntry)
             val renderedAuthority = authority(renderedEntry)
             val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-            catalog.commit("customer", prepared)
+            runBlocking { catalog.commit("customer", prepared) }
             val snapshot = requireNotNull(catalog.snapshot("customer"))
             val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
             val presenter = RecordingJourneyPresenter()
@@ -1278,7 +1287,7 @@ class JourneyServiceTest {
             val catalog = catalog(renderedEntry)
             val renderedAuthority = authority(renderedEntry)
             val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-            catalog.commit("customer", prepared)
+            runBlocking { catalog.commit("customer", prepared) }
             val snapshot = requireNotNull(catalog.snapshot("customer"))
             val captures = CopyOnWriteArrayList<String>()
             val presenter = RecordingJourneyPresenter(
@@ -1320,7 +1329,7 @@ class JourneyServiceTest {
             val catalog = catalog(renderedEntry)
             val renderedAuthority = authority(renderedEntry)
             val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-            catalog.commit("customer", prepared)
+            runBlocking { catalog.commit("customer", prepared) }
             val snapshot = requireNotNull(catalog.snapshot("customer"))
             val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
             val presenter = RecordingJourneyPresenter()
@@ -1388,7 +1397,7 @@ class JourneyServiceTest {
             val catalog = catalog(renderedEntry)
             val renderedAuthority = authority(renderedEntry)
             val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-            catalog.commit("customer", prepared)
+            runBlocking { catalog.commit("customer", prepared) }
             val snapshot = requireNotNull(catalog.snapshot("customer"))
             val manager = RecordingArtifactManager()
             val firstLeaseCloses = AtomicInteger()
@@ -2057,7 +2066,7 @@ class JourneyServiceTest {
                 .getValue("environment").jsonPrimitive.content,
         )
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val dispatchStarted = CompletableDeferred<JourneyDispatchRequest>()
         val resumeDispatch = CompletableDeferred<Unit>()
@@ -2125,7 +2134,7 @@ class JourneyServiceTest {
                 .getValue("environment").jsonPrimitive.content,
         )
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val dispatchStarted = CompletableDeferred<JourneyDispatchRequest>()
         val resumeDispatch = CompletableDeferred<Unit>()
@@ -2298,6 +2307,183 @@ class JourneyServiceTest {
         assertEquals(listOf("\$app_action_requested"), captures.map { it.first })
         assertEquals(request.run.journeyId, captures.single().second["journey_id"])
         assertEquals(request.run.generation, captures.single().second["leg_generation"])
+    }
+
+    @Test fun `app action handler that resets the SDK returns and fails the step`() {
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = FakeTransport(),
+            registerLifecycle = false,
+            requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
+            eventDatabaseFile = File(directory, "app-action-reset-events.db"),
+        )
+        Nuxie.setup(context, NuxieConfiguration("pk_test_app_action_reset"))
+        val callbackReturned = CountDownLatch(1)
+        val listener = NuxieListener { sdk, action ->
+            assertEquals("sign_out", action.name)
+            sdk.reset()
+            callbackReturned.countDown()
+        }
+        try {
+            val core = requireNotNull(Nuxie.core)
+            Nuxie.identify("customer")
+            Nuxie.listener = listener
+            val request = dispatchRequest(
+                core.identity,
+                buildJsonObject {
+                    put("type", "app_action")
+                    put("name", "sign_out")
+                },
+            )
+            // Production wiring: the SDK identity, fenced capture, and the
+            // facade's delivery, which calls the listener on Main under the fences.
+            val dispatcher = JourneyEffectDispatcher(
+                identity = core.identity,
+                capture = core.eventLog::captureIdempotentlyIfCurrent,
+                deliverAppAction = Nuxie::deliverAppAction,
+            )
+            // Robolectric's Main is this test thread. Interrupt a parked handler
+            // so the case fails instead of hanging the suite.
+            val main = Thread.currentThread()
+            val settled = CountDownLatch(1)
+            val watchdog = thread(isDaemon = true, name = "app-action-watchdog") {
+                if (!settled.await(5, TimeUnit.SECONDS)) main.interrupt()
+            }
+            val result = try {
+                runBlocking { dispatcher.dispatch(request) }
+            } catch (parked: InterruptedException) {
+                throw AssertionError("An App Action handler that calls sdk.reset() must return within 5 s", parked)
+            } finally {
+                settled.countDown()
+                watchdog.join()
+                Thread.interrupted()
+            }
+
+            assertEquals("the handler returned", 0L, callbackReturned.count)
+            assertNotEquals("customer", Nuxie.distinctId)
+            assertFalse(Nuxie.isIdentified)
+            // The reset moved the identity the step was admitted under, so the
+            // step fails instead of advancing, as at base and on iOS.
+            assertEquals(JourneyDispatchResult.Failed, result)
+
+            Nuxie.listener = null
+            val identified = CountDownLatch(1)
+            thread(isDaemon = true, name = "later-identify") {
+                Nuxie.identify("customer-2")
+                identified.countDown()
+            }
+            assertTrue(
+                "A later identify from another thread must finish within 5 s",
+                identified.await(5, TimeUnit.SECONDS),
+            )
+            assertEquals("customer-2", Nuxie.distinctId)
+        } finally {
+            Nuxie.listener = null
+            Nuxie.resetForTesting()
+            Nuxie.overridesForTesting = null
+        }
+    }
+
+    @Test fun `posted app action handler can reset the SDK`() = postedIdentityAction(reset = true)
+
+    @Test fun `posted app action handler can identify the SDK`() = postedIdentityAction(reset = false)
+
+    private fun postedIdentityAction(reset: Boolean) {
+        Nuxie.overridesForTesting = NuxieCore.Overrides(
+            transport = FakeTransport(),
+            registerLifecycle = false,
+            requestInitialProfileRefresh = false,
+            billingClientFactory = InertBillingClientAdapter.factory,
+            eventDatabaseFile = File(directory, "posted-identity-events.db"),
+        )
+        Nuxie.setup(context, NuxieConfiguration("pk_test_posted_identity"))
+        val calls = AtomicInteger()
+        val result = java.util.concurrent.atomic.AtomicReference<JourneyDispatchResult?>()
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        val finished = CountDownLatch(1)
+        val main = Thread.currentThread()
+        var dispatchThread: Thread? = null
+        var watchdog: Thread? = null
+        try {
+            val core = requireNotNull(Nuxie.core)
+            Nuxie.identify("customer")
+            val originalSession = core.sessions.getSessionId(readOnly = true)
+            Nuxie.listener = NuxieListener { sdk, action ->
+                assertEquals("switch_customer", action.name)
+                assertEquals(main, Thread.currentThread())
+                calls.incrementAndGet()
+                if (reset) sdk.reset() else sdk.identify("replacement")
+            }
+            val request = dispatchRequest(core.identity, buildJsonObject {
+                put("type", "app_action")
+                put("name", "switch_customer")
+            })
+            val dispatcher = JourneyEffectDispatcher(
+                identity = core.identity,
+                capture = core.eventLog::captureIdempotentlyIfCurrent,
+                deliverAppAction = Nuxie::deliverAppAction,
+            )
+            // Starting off Main forces deliverAppAction through its posted
+            // Runnable, rather than the inline path covered above.
+            val looper = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            looper.idle()
+            dispatchThread = thread(isDaemon = true, name = "posted-app-action") {
+                try {
+                    assertNotEquals(android.os.Looper.getMainLooper(), android.os.Looper.myLooper())
+                    result.set(runBlocking {
+                        val dispatched = dispatcher.dispatch(request)
+                        // Draining capture can deliver activity to Main too.
+                        // Keep the test thread pumping its looper until this
+                        // worker has checked the durable identify consequence.
+                        if (!reset) {
+                            core.eventLog.awaitBarrier()
+                            core.userTransitions.drain()
+                            // Upload completion must not erase the durable-event oracle.
+                            core.delivery.flushAll()
+                            val session = requireNotNull(core.sessions.getSessionId(readOnly = true))
+                            val identify = core.store.querySessionEvents(session).single {
+                                it.name == "\$identify" && it.properties["distinct_id"] == JsonPrimitive("replacement")
+                            }
+                            assertEquals("replacement", identify.distinctId)
+                        }
+                        dispatched
+                    })
+                } catch (error: Throwable) {
+                    failure.set(error)
+                } finally {
+                    finished.countDown()
+                }
+            }
+            assertEquals("handler cannot run before Main consumes the Runnable", 0, calls.get())
+            watchdog = thread(isDaemon = true, name = "posted-identity-watchdog") {
+                if (!finished.await(5, TimeUnit.SECONDS)) main.interrupt()
+            }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            do {
+                looper.idle()
+            } while (!finished.await(10, TimeUnit.MILLISECONDS) && System.nanoTime() < deadline)
+            assertEquals("posted App Action must settle", 0L, finished.count)
+            assertNull(failure.get())
+            assertEquals(1, calls.get())
+            assertEquals(JourneyDispatchResult.Failed, result.get())
+            if (reset) {
+                assertFalse(Nuxie.isIdentified)
+                assertNotEquals("customer", Nuxie.distinctId)
+            } else {
+                assertTrue(Nuxie.isIdentified)
+                assertEquals("replacement", Nuxie.distinctId)
+                assertNotEquals(originalSession, core.sessions.getSessionId(readOnly = true))
+            }
+        } finally {
+            finished.countDown()
+            dispatchThread?.interrupt()
+            dispatchThread?.join(5_000)
+            watchdog?.join(5_000)
+            Thread.interrupted()
+            Nuxie.listener = null
+            Nuxie.resetForTesting()
+            Nuxie.overridesForTesting = null
+        }
     }
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
@@ -2729,6 +2915,477 @@ class JourneyServiceTest {
         }
     }
 
+    @Test fun `purchase then authored dismiss completes the same Journey once`() = runBlocking {
+        assertAuthoredDismiss("purchase")
+    }
+
+    @Test fun `restore then authored dismiss completes the same Journey once`() = runBlocking {
+        assertAuthoredDismiss("restore")
+    }
+
+    @Test fun `genuine user close still reports host dismissed through the real presenter`() = runBlocking {
+        assertAuthoredDismiss(null)
+    }
+
+    @Test fun `cancelled purchase without outlet permits Subscribe again`() = runBlocking {
+        assertAuthoredDismiss("purchase", SystemEventNames.PURCHASE_CANCELLED)
+    }
+
+    @Test fun `failed purchase without outlet permits Subscribe again`() = runBlocking {
+        assertAuthoredDismiss("purchase", SystemEventNames.PURCHASE_FAILED)
+    }
+
+    @Test fun `runtime second purchase tap stays open and cancelled retry completes`() = runBlocking {
+        assertAuthoredDismiss("purchase", SystemEventNames.PURCHASE_CANCELLED, runtimeFrames = true)
+    }
+
+    @Test fun `runtime second restore tap stays open and failed retry completes`() = runBlocking {
+        assertAuthoredDismiss("restore", SystemEventNames.RESTORE_FAILED, runtimeFrames = true)
+    }
+
+    @Test fun `deferred purchase allows runtime authored close then completes once`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true)
+    }
+
+    @Test fun `authored close then cancelled without outlet uses close outcome`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true, terminalOutcome = SystemEventNames.PURCHASE_CANCELLED)
+    }
+
+    @Test fun `authored close then failed without outlet uses close outcome`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true, terminalOutcome = SystemEventNames.PURCHASE_FAILED)
+    }
+
+    @Test fun `terminal purchase waits for accepted authored route while publication is held`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true, holdClosePublication = true)
+    }
+
+    @Test fun `failed completion keeps closed purchase correlation for retry`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true,
+            terminalOutcome = SystemEventNames.PURCHASE_FAILED, failCompletionOnce = true)
+    }
+
+    @Test fun `terminal purchase recovers a previously failed authored publication`() = runBlocking {
+        assertAuthoredDismiss("purchase", failPublicationOnce = true)
+    }
+
+    @Test fun `settled closed purchase does not finish a later cancelled purchase`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true, secondPurchase = true)
+    }
+
+    @Test fun `deferred commerce still starts an armed terminal event journey`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true,
+            holdClosePublication = true, terminalStartsEntry = true)
+    }
+
+    @Test fun `durably deferred failure retries completion without event replay`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true,
+            terminalOutcome = SystemEventNames.PURCHASE_FAILED, holdClosePublication = true,
+            deferredFailureRetry = true)
+    }
+
+    @Test fun `durably completed Journey closes its screen when report publication throws`() = runBlocking {
+        assertAuthoredDismiss("purchase", failReportOnce = true)
+    }
+
+    @Test fun `dismissed lifecycle route retains pending purchase`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true, lifecycleRoute = SystemEventNames.SCREEN_DISMISSED)
+    }
+
+    @Test fun `shown lifecycle route retains pending purchase`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true, lifecycleRoute = SystemEventNames.SCREEN_SHOWN)
+    }
+
+    @Test fun `deferred restore allows authored close then follows restored outlet once`() = runBlocking {
+        assertAuthoredDismiss("restore", runtimeFrames = true, pendingClose = true)
+    }
+
+    @Test fun `deferred purchase allows exit then follows completed outlet once`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true, exitClose = true)
+    }
+
+    @Test fun `exit then cancelled purchase keeps authored close outcome`() = runBlocking {
+        assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true,
+            terminalOutcome = SystemEventNames.PURCHASE_CANCELLED, exitClose = true)
+    }
+
+    private suspend fun assertAuthoredDismiss(commerce: String?, retryOutcome: String? = null, runtimeFrames: Boolean = false,
+        pendingClose: Boolean = false, terminalOutcome: String? = null, holdClosePublication: Boolean = false,
+        failCompletionOnce: Boolean = false, failPublicationOnce: Boolean = false, secondPurchase: Boolean = false, terminalStartsEntry: Boolean = false, failReportOnce: Boolean = false, deferredFailureRetry: Boolean = false, lifecycleRoute: String? = null, exitClose: Boolean = false) {
+        val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/authored-dismiss.json").readText()).jsonObject
+            .getValue("cases").jsonArray.single { it.jsonObject.getValue("name").jsonPrimitive.content == (commerce ?: "user_close") }.jsonObject
+        val pendingCorpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/pending-commerce.json").readText()).jsonObject
+        val pendingExpected = pendingCorpus.getValue("cases").jsonArray.map(JsonElement::jsonObject).single {
+            it.getValue("terminalEvent").jsonPrimitive.content == (terminalOutcome ?: if (commerce == "restore") SystemEventNames.RESTORE_COMPLETED else SystemEventNames.PURCHASE_COMPLETED)
+        }
+        val identity = IdentityService(context).also { it.setDistinctId("customer") }
+        val entry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(entry)
+        val authority = authority(entry)
+        val firstProfile = profile(releaseEntry = entry)
+        val profileDocument = if (terminalStartsEntry) {
+            val secondProfile = profile(releaseEntry = fixture.getValue("entry").jsonObject)
+            JsonObject(firstProfile + mapOf(
+                "armedLegs" to JsonArray(firstProfile.getValue("armedLegs").jsonArray + secondProfile.getValue("armedLegs").jsonArray),
+                "releases" to JsonArray(firstProfile.getValue("releases").jsonArray + secondProfile.getValue("releases").jsonArray)))
+        } else firstProfile
+        catalog.commit("customer", catalog.prepare(profileDocument, authority))
+        val baseline = requireNotNull(catalog.snapshot("customer"))
+        if (!terminalStartsEntry) assertEquals(1, baseline.releasesByDigest.size)
+        val original = baseline.releasesByDigest.getValue(entry.getValue("envelope").jsonObject.getValue("descriptorSha256").jsonPrimitive.content)
+        val type = commerce ?: "purchase"
+        val action = buildJsonObject {
+            put("type", type)
+            if (type == "purchase") put("placementId", "golden:monthly")
+        }
+        var leg = JsonObject(original.leg + mapOf(
+            "entryStepId" to JsonPrimitive("present"),
+            "offers" to JsonArray(emptyList()),
+            "steps" to JsonArray(listOf(
+                Json.parseToJsonElement("""{"kind":"action","id":"present","action":{"type":"navigate","screenId":"screen_welcome"},"outlets":{}}"""),
+                buildJsonObject {
+                    put("kind", "action"); put("id", "commerce"); put("action", action)
+                    putJsonObject("outlets") { put(if (type == "purchase") "completed" else "restored", "dismiss") }
+                },
+                buildJsonObject {
+                    put("kind", "action"); put("id", "dismiss")
+                    putJsonObject("action") {
+                        put("type", "dismiss")
+                        if (pendingClose) put("reason", if (type == "restore") "restore_finished" else "purchase_finished")
+                    }
+                    putJsonObject("outlets") {}
+                },
+                Json.parseToJsonElement("""{"kind":"action","id":"close","action":{"type":"${if (exitClose) "exit" else "dismiss"}","reason":"author_closed"},"outlets":{}}"""),
+                Json.parseToJsonElement("""{"kind":"action","id":"close_marker","action":{"type":"send_event","eventName":"authored_close_requested","payload":{}},"outlets":{"next":"close"}}"""),
+            )),
+            "routes" to Json.parseToJsonElement("""[{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"buy","entryStepId":"commerce"},{"host":{"kind":"screen","screenId":"${if (lifecycleRoute == SystemEventNames.SCREEN_SHOWN) "screen_thanks" else "screen_welcome"}"},"eventName":"${lifecycleRoute ?: "close"}","entryStepId":"close_marker"}]"""),
+        ))
+        if (lifecycleRoute == SystemEventNames.SCREEN_SHOWN) {
+            leg = JsonObject(leg + ("screens" to JsonArray(leg.getValue("screens").jsonArray +
+                buildJsonObject { put("id", "screen_thanks") })))
+        }
+        if (failReportOnce) {
+            leg = JsonObject(leg + ("steps" to JsonArray(leg.getValue("steps").jsonArray.map {
+                if (it.jsonObject["id"] == JsonPrimitive("dismiss")) Json.parseToJsonElement(
+                    """{"kind":"complete","id":"dismiss","outcome":"completed"}""") else it
+            })))
+        }
+        if (secondPurchase) {
+            val steps = leg.getValue("steps").jsonArray.map { step ->
+                if (step.jsonObject["id"] == JsonPrimitive("commerce")) JsonObject(step.jsonObject +
+                    ("outlets" to buildJsonObject { put("completed", "thanks") })) else step
+            } + listOf(
+                Json.parseToJsonElement("""{"kind":"action","id":"thanks","action":{"type":"navigate","screenId":"screen_thanks"},"outlets":{}}"""),
+                buildJsonObject { put("kind", "action"); put("id", "commerce_again"); put("action", action)
+                    putJsonObject("outlets") { put("completed", "dismiss") } },
+            )
+            leg = JsonObject(leg + mapOf("steps" to JsonArray(steps),
+                "screens" to JsonArray(leg.getValue("screens").jsonArray + buildJsonObject { put("id", "screen_thanks") }),
+                "routes" to JsonArray(leg.getValue("routes").jsonArray + Json.parseToJsonElement(
+                    """{"host":{"kind":"screen","screenId":"screen_thanks"},"eventName":"buy_more","entryStepId":"commerce_again"}"""))))
+        }
+        val products = JsonArray(original.descriptor.getValue("products").jsonArray.map {
+            JsonObject(it.jsonObject + ("type" to JsonPrimitive("consumable")))
+        })
+        val envelope = JourneyReleaseEnvelope.authenticate(entry.getValue("envelope").toString().encodeToByteArray(),
+            mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP)))
+        val render = original.descriptor.getValue("render").jsonObject
+        val fixtureRender = if (secondPurchase || lifecycleRoute == SystemEventNames.SCREEN_SHOWN) JsonObject(render + ("screens" to JsonArray(
+            render.getValue("screens").jsonArray + JsonObject(render.getValue("screens").jsonArray.first().jsonObject +
+                ("id" to JsonPrimitive("screen_thanks")))))) else render
+        val release = AuthenticatedJourneyRelease(envelope, original.identity,
+            JsonObject(original.descriptor + mapOf("leg" to leg, "products" to products, "render" to fixtureRender)), original.publishedAtSeqToPromote)
+        val terminalEntry = buildJsonObject { put("type", "event"); put("eventName", SystemEventNames.PURCHASE_COMPLETED) }
+        val snapshot = baseline.copy(
+            profile = if (terminalStartsEntry) JourneyPlaneProfile.decode(JsonObject(profileDocument + ("armedLegs" to JsonArray(
+                profileDocument.getValue("armedLegs").jsonArray.map {
+                    if (it.jsonObject.getValue("reference").jsonObject["descriptorSha256"] != JsonPrimitive(release.descriptorSha256))
+                        JsonObject(it.jsonObject + ("entryCondition" to terminalEntry)) else it
+                }))).toString().encodeToByteArray()) else baseline.profile,
+            releasesByDigest = (baseline.releasesByDigest + (release.descriptorSha256 to release)).mapValues { (digest, value) ->
+                if (terminalStartsEntry && digest != release.descriptorSha256) AuthenticatedJourneyRelease(JourneyReleaseEnvelope.authenticate(fixture.getValue("entry").jsonObject.getValue("envelope").toString().encodeToByteArray(),
+                    mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))), value.identity,
+                    JsonObject(value.descriptor + ("leg" to JsonObject(value.leg + mapOf(
+                        "entryCondition" to terminalEntry,
+                        "policy" to JsonObject(value.leg.getValue("policy").jsonObject + ("entry" to JsonObject(
+                            value.leg.getValue("policy").jsonObject.getValue("entry").jsonObject +
+                                ("frequency" to buildJsonObject { put("type", "every_match") })))))))), value.publishedAtSeqToPromote)
+                else value
+            })
+        val launched = CopyOnWriteArrayList<String>()
+        val presentations = ExperiencePresentationService(emit = { _, _, _ -> }, scope = scope,
+            runtimeAvailable = { true }, currentDistinctId = identity::distinctId, launch = launched::add)
+        val requestReady = CompletableDeferred<JourneyPresentationRequest>()
+        val requests = CopyOnWriteArrayList<JourneyPresentationRequest>()
+        val publications = CopyOnWriteArrayList<JourneyScreenEmissionBatch>()
+        val claimedEffect = CompletableDeferred<String>()
+        val claimedEffects = CopyOnWriteArrayList<String>()
+        val failCompletionClock = java.util.concurrent.atomic.AtomicBoolean()
+        val completionFailureCount = java.util.concurrent.atomic.AtomicInteger()
+        val presenter = object : JourneyPresenting {
+            override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest) = presentations.openJourneyLink(owner, link)
+            override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
+            override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
+            override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
+            override fun resolveAction(owner: JourneyPresentationOwner, action: JsonObject, source: JourneyScreenEmissionSource?, eventSource: ai.nuxie.sdk.presentation.JourneyRuntimeEventSource?) =
+                presentations.resolveJourneyAction(owner, action, source, eventSource)
+            override suspend fun present(request: JourneyPresentationRequest): JourneyPresentationResult {
+                val file = File(directory, "dismiss-scene").apply { writeBytes(byteArrayOf(1)) }
+                val showing = scope.async {
+                    presentations.presentJourney(request.fences, request.release, request.screenId, request.journeyId,
+                        request.ownerDistinctId, request.reservation,
+                        acquire = { AcquiredJourneyRelease(identity = request.release.identity,
+                            artifactsByKey = mapOf("renders/main.riv" to file), sceneFile = file, protection = Closeable {}) },
+                        onScreenChanged = request.onScreenChanged, onScreenDismissed = request.onScreenDismissed,
+                        onPresentationRevealed = request.onPresentationRevealed, onEmissionBatch = { batch, sources ->
+                            request.onEmissionBatch(batch, sources).also { publications += batch }
+                        },
+                        onOutcome = request.onOutcome)
+                }
+                withTimeout(5_000) {
+                    while (launched.isEmpty() || PresentationRegistry.observe(launched.last())?.value !is
+                        ai.nuxie.sdk.presentation.PresentationContentState.Ready) kotlinx.coroutines.delay(10)
+                }
+                PresentationRegistry.reportFirstFrame(launched.last())
+                showing.await()
+                requests += request
+                requestReady.complete(request)
+                return JourneyPresentationResult.Shown
+            }
+            override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String): JourneyPresentationActionResult {
+                if (action["type"] == JsonPrimitive(type)) {
+                    // The store boundary is controlled; authored dismissal uses the real service.
+                    claimedEffects += effectId
+                    claimedEffect.complete(effectId)
+                    return JourneyPresentationActionResult.AwaitingOutcome
+                }
+                return presentations.dispatchJourneyAction(owner, action, effectId)
+            }
+            override suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) {
+                presentations.shutdownJourney(ownerDistinctId, journeyId)
+                if (deferredFailureRetry && completionFailureCount.get() == 0) failCompletionClock.set(true)
+            }
+            override suspend fun shutdownOwnedBy(ownerDistinctId: String) = presentations.shutdownOwnedBy(ownerDistinctId)
+        }
+        val closeCaptureEntered = CompletableDeferred<Unit>()
+        val releaseCloseCapture = CompletableDeferred<Unit>()
+        val failPublication = java.util.concurrent.atomic.AtomicBoolean(failPublicationOnce)
+        val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val failReport = java.util.concurrent.atomic.AtomicBoolean(failReportOnce)
+        val journeys = JourneyService(identity = identity, events = store, catalog = catalog, journalDirectory = directory,
+            scope = scope, capture = { name, properties, _, _ ->
+                captures += name to properties
+                if (name == JourneyEventNames.LEG_COMPLETED && failReport.compareAndSet(true, false)) {
+                    throw java.io.IOException("Completion publication unavailable")
+                }
+                true
+            },
+            dispatcher = JourneyEffectDispatcher(identity, capture = { name, properties, _, _, admission, _ ->
+                admission.commitIfCurrent { captures += name to properties; true } == true
+            }, deliverAppAction = { _, _ -> error("No app action authored") }),
+            captureScreenEvent = { name, properties, id, distinctId, occurredAt, admission, origin ->
+                if (name == "checkout_publication" && failPublication.compareAndSet(true, false)) {
+                    throw java.io.IOException("Renderer event capture unavailable")
+                }
+                if (holdClosePublication && name == "close") {
+                    closeCaptureEntered.complete(Unit)
+                    releaseCloseCapture.await()
+                }
+                val event = StoredEvent(id, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId, journeyOrigin = origin)
+                val settled = admission?.commitIfCurrent { true } != null
+                StableEventCaptureResult(settled, event.takeIf { settled })
+            },
+            capturePresentationEvent = { name, properties, id, distinctId, occurredAt, admission ->
+                val event = StoredEvent(id, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId)
+                val settled = admission?.commitIfCurrent { true } != null
+                StableEventCaptureResult(settled, event.takeIf { settled })
+            }, presenter = presenter, nowMillis = {
+                if (failCompletionClock.compareAndSet(true, false)) {
+                    completionFailureCount.incrementAndGet()
+                    throw java.io.IOException("Completion clock unavailable")
+                }
+                100_000L
+            })
+        try {
+            journeys.initialize()
+            journeys.onAppWillEnterForeground()
+            journeys.profileDidCommit(snapshot, authority, "customer", 1)
+            val request = withTimeout(5_000) { requestReady.await() }
+            suspend fun runtimeTap(eventName: String = "buy") {
+                val prior = publications.size
+                PresentationRegistry.reportRuntimeStep(launched.last(), NuxiePlayerStepOutcome(true,
+                    emptyList(), listOf(ai.nuxie.sdk.runtime.NuxieRuntimeEvent(0, 128, eventName, "", "", 0f, emptyList())),
+                    emptyList(), emptyList()), (prior + 1).toULong(), null)
+                withTimeout(5_000) { while (publications.size == prior) kotlinx.coroutines.delay(10) }
+            }
+            if (commerce != null) {
+                val batch = JourneyScreenEmissionBatch(request.journeyId, 0, "commerce-dismiss",
+                    JourneyScreenEmissionSource("screen_welcome", "buy"), listOf(JourneyScreenEmission(
+                        "00000000-0000-7000-8000-000000000901", 0, 100_000L, "buy", JsonObject(emptyMap()))))
+                if (runtimeFrames) runtimeTap() else assertTrue(request.onEmissionBatch(batch, null) == JourneyEmissionBatchResult.ACCEPTED)
+                var effectId = withTimeout(5_000) { claimedEffect.await() }
+                if (retryOutcome != null) {
+                    val retry = batch.copy(batchSequence = 1, invocationId = "commerce-retry",
+                        emissions = listOf(JourneyScreenEmission("00000000-0000-7000-8000-000000000902",
+                            1, 100_001L, "buy", JsonObject(emptyMap()))))
+                    if (runtimeFrames) {
+                        runtimeTap()
+                        assertTrue("A pending operation must not close the paywall", presentations.ownsJourney(JourneyPresentationOwner(request.journeyId, "customer")))
+                        assertTrue("A declined tap must not abandon the Journey", captures.none { it.first == JourneyEventNames.LEG_COMPLETED })
+                        assertEquals(1, claimedEffects.size)
+                    } else {
+                        val pending = request.onEmissionBatch(retry, null)
+                        assertFalse("Pending purchase rejects a second operation", pending == JourneyEmissionBatchResult.ACCEPTED)
+                        assertEquals(JourneyEmissionBatchResult.DECLINED, pending)
+                    }
+                    suspend fun outcome(id: String, owner: String, name: String = retryOutcome) {
+                        journeys.handleEvent(StoredEvent(id, name,
+                            buildJsonObject { put("placement_id", "golden:monthly") }, 100_002L, owner),
+                            journeys.eventAdmissionGeneration())
+                    }
+                    outcome("unrelated-effect", "customer")
+                    outcome(effectId, "other-customer")
+                    if (runtimeFrames) runtimeTap()
+                    else {
+                        val unrelated = request.onEmissionBatch(retry, null)
+                        assertFalse("Only this owner's correlated outcome releases the operation", unrelated == JourneyEmissionBatchResult.ACCEPTED)
+                        assertEquals(JourneyEmissionBatchResult.DECLINED, unrelated)
+                    }
+                    assertEquals(1, claimedEffects.size)
+                    outcome(effectId, "customer")
+                    assertTrue(presentations.ownsJourney(JourneyPresentationOwner(request.journeyId, "customer")))
+                    assertTrue(captures.none { it.first == JourneyEventNames.LEG_COMPLETED })
+                    if (runtimeFrames) {
+                        runtimeTap()
+                        assertEquals(listOf(0L, 1L, 1L, 1L), publications.map { it.batchSequence })
+                        assertEquals(listOf(0L, 1L, 1L, 1L), publications.map { it.emissions.single().sequence })
+                    } else assertTrue("Settled purchase permits Subscribe again", request.onEmissionBatch(retry, null) == JourneyEmissionBatchResult.ACCEPTED)
+                    withTimeout(5_000) { while (claimedEffects.size < 2) kotlinx.coroutines.delay(10) }
+                    assertEquals(2, claimedEffects.size)
+                    val previous = effectId
+                    effectId = claimedEffects.last()
+                    assertNotEquals(previous, effectId)
+                    outcome(previous, "customer", if (commerce == "purchase") SystemEventNames.PURCHASE_COMPLETED else SystemEventNames.RESTORE_COMPLETED)
+                    assertTrue(presentations.ownsJourney(JourneyPresentationOwner(request.journeyId, "customer")))
+                    assertTrue(captures.none { it.first == JourneyEventNames.LEG_COMPLETED })
+                }
+                if (pendingClose) {
+                    journeys.handleEvent(StoredEvent("pending-telemetry", SystemEventNames.PURCHASE_PENDING,
+                        buildJsonObject { put("placement_id", "golden:monthly") }, 100_001L, "customer"),
+                        journeys.eventAdmissionGeneration())
+                    if (holdClosePublication) {
+                        val close = scope.async { runtimeTap("close") }
+                        withTimeout(5_000) { closeCaptureEntered.await() }
+                        val terminal = scope.async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                            journeys.handleEvent(StoredEvent(effectId, terminalOutcome ?: SystemEventNames.PURCHASE_COMPLETED,
+                                buildJsonObject { put("placement_id", "golden:monthly") }, 100_001L, "customer"),
+                                journeys.eventAdmissionGeneration())
+                        }
+                        releaseCloseCapture.complete(Unit)
+                        val terminalAccepted = withTimeout(5_000) { close.await(); terminal.await() }
+                        assertTrue("Deferral must acknowledge durable handling", terminalAccepted)
+                    } else if (lifecycleRoute == SystemEventNames.SCREEN_SHOWN) {
+                        assertTrue(request.onScreenChanged("screen_thanks"))
+                    } else if (lifecycleRoute == SystemEventNames.SCREEN_DISMISSED) {
+                        request.onScreenDismissed("screen_welcome", null, "user")
+                    } else runtimeTap("close")
+                    withTimeout(5_000) {
+                        while (presentations.ownsJourney(JourneyPresentationOwner(request.journeyId, "customer"))) kotlinx.coroutines.delay(10)
+                    }
+                    assertEquals("Accepted non-commerce route executes once", pendingExpected.getValue("authoredActions").jsonPrimitive.int, captures.count { it.first == "authored_close_requested" })
+                    if (!holdClosePublication) assertTrue("Closing the screen keeps the pending Journey active", captures.none { it.first == JourneyEventNames.LEG_COMPLETED })
+                    assertEquals(1, claimedEffects.size)
+                    if (!holdClosePublication) {
+                        val waiting = JourneyRunJournal(directory, "customer", JourneyStorageScope(authority)).runs().single()
+                        assertEquals(effectId, waiting.pendingCommerce?.effectId)
+                        assertEquals("commerce", waiting.pendingCommerce?.stepId)
+                        assertEquals("author_closed", waiting.authoredCloseOutcome)
+                        for ((id, owner) in listOf("unrelated" to "customer", effectId to "another-customer")) {
+                            journeys.handleEvent(StoredEvent(id,
+                                if (commerce == "restore") SystemEventNames.RESTORE_COMPLETED else SystemEventNames.PURCHASE_COMPLETED,
+                                if (commerce == "restore") JsonObject(emptyMap()) else buildJsonObject { put("placement_id", "golden:monthly") }, 100_002L, owner),
+                                journeys.eventAdmissionGeneration())
+                        }
+                        assertTrue(captures.none { it.first == JourneyEventNames.LEG_COMPLETED })
+                    }
+                }
+                if (failPublicationOnce) {
+                    val failed = batch.copy(batchSequence = 1, invocationId = "failed-checkout-publication",
+                        emissions = listOf(JourneyScreenEmission(effectId, 1, 100_001L,
+                            "checkout_publication", JsonObject(emptyMap()))))
+                    assertEquals(JourneyEmissionBatchResult.REJECTED, request.onEmissionBatch(failed, null))
+                    assertFalse(failPublication.get())
+                    assertEquals(1, claimedEffects.size)
+                }
+                if (failCompletionOnce) {
+                    failCompletionClock.set(true)
+                    assertFalse(journeys.handleEvent(StoredEvent(effectId, checkNotNull(terminalOutcome),
+                        buildJsonObject { put("placement_id", "golden:monthly") }, 100_003L, "customer"),
+                        journeys.eventAdmissionGeneration()))
+                    assertFalse(failCompletionClock.get())
+                    assertTrue(captures.none { it.first == JourneyEventNames.LEG_COMPLETED })
+                }
+                if (!holdClosePublication) journeys.handleEvent(StoredEvent(effectId,
+                    terminalOutcome ?: (if (commerce == "purchase") SystemEventNames.PURCHASE_COMPLETED else SystemEventNames.RESTORE_COMPLETED),
+                    buildJsonObject { if (commerce == "purchase") put("placement_id", "golden:monthly") },
+                    100_001L, "customer"), journeys.eventAdmissionGeneration())
+                if (secondPurchase) {
+                    withTimeout(5_000) { while (requests.size < 2) kotlinx.coroutines.delay(10) }
+                    val next = requests.last()
+                    assertEquals("screen_thanks", next.screenId)
+                    assertTrue(next.onScreenChanged("screen_thanks"))
+                    val nextBatch = JourneyScreenEmissionBatch(next.journeyId, 2, "second-purchase",
+                        JourneyScreenEmissionSource("screen_thanks", "buy_more"), listOf(JourneyScreenEmission(
+                            "00000000-0000-7000-8000-000000000909", 2, 100_002L, "buy_more", JsonObject(emptyMap()))))
+                    assertEquals(JourneyEmissionBatchResult.ACCEPTED, next.onEmissionBatch(nextBatch, null))
+                    withTimeout(5_000) { while (claimedEffects.size < 2) kotlinx.coroutines.delay(10) }
+                    val secondEffect = claimedEffects.last()
+                    assertNotEquals(effectId, secondEffect)
+                    journeys.handleEvent(StoredEvent(secondEffect, SystemEventNames.PURCHASE_CANCELLED,
+                        buildJsonObject { put("placement_id", "golden:monthly") }, 100_003L, "customer"),
+                        journeys.eventAdmissionGeneration())
+                    assertTrue(JourneyRunJournal(directory, "customer", JourneyStorageScope(authority)).runs().any { it.completion == null })
+                    assertTrue(presentations.ownsJourney(JourneyPresentationOwner(next.journeyId, "customer")))
+                    assertEquals("screen_thanks", presentations.journeyScreenId(JourneyPresentationOwner(next.journeyId, "customer")))
+                    assertTrue(captures.none { it.first == JourneyEventNames.LEG_COMPLETED })
+                    return
+                }
+            } else presentations.dismiss(CloseReason.UserDismissed)
+            // This new retry case must span the production five-second retry interval.
+            withTimeout(if (deferredFailureRetry) 10_000 else 5_000) {
+                while (captures.none { it.first == JourneyEventNames.LEG_COMPLETED && it.second["journey_id"] == request.journeyId }) kotlinx.coroutines.delay(10)
+            }
+            if (deferredFailureRetry) assertEquals("One failed settlement is retried without another event", 1, completionFailureCount.get())
+            if (!secondPurchase) assertEquals("A single-screen case launches exactly once", 1, launched.size)
+            if (!terminalStartsEntry) assertEquals("No extra Journey completion", 1, captures.count { it.first == JourneyEventNames.LEG_COMPLETED })
+            val completed = captures.filter { it.first == JourneyEventNames.LEG_COMPLETED && it.second["journey_id"] == request.journeyId }
+            assertEquals((if (pendingClose) pendingExpected else vector).getValue("reports").jsonPrimitive.int, completed.size)
+            assertEquals(request.journeyId, completed.single().second["journey_id"])
+            assertEquals((if (pendingClose) pendingExpected else vector).getValue("outcome").jsonPrimitive.content, completed.single().second["outcome"])
+            assertFalse(presentations.ownsJourney(JourneyPresentationOwner(request.journeyId, "customer")))
+            if (failReportOnce) {
+                assertFalse(failReport.get())
+                assertEquals("completed", JourneyRunJournal(directory, "customer", JourneyStorageScope(authority)).runs().single().completion?.outcome)
+            }
+            if (pendingClose && !terminalStartsEntry && !deferredFailureRetry) {
+                journeys.handleEvent(StoredEvent(claimedEffects.single(),
+                    if (commerce == "restore") SystemEventNames.RESTORE_COMPLETED else SystemEventNames.PURCHASE_COMPLETED,
+                    if (commerce == "restore") JsonObject(emptyMap()) else buildJsonObject { put("placement_id", "golden:monthly") }, 100_002L, "customer"),
+                    journeys.eventAdmissionGeneration())
+                assertEquals(1, captures.count { it.first == JourneyEventNames.LEG_COMPLETED && it.second["journey_id"] == request.journeyId })
+            }
+            if (terminalStartsEntry) {
+                val other = captures.filter { it.first == JourneyEventNames.LEG_COMPLETED && it.second["journey_id"] != request.journeyId }
+                assertEquals("The terminal event starts its other armed Journey without reconcile", 1, other.size)
+                assertEquals("continue", other.single().second["outcome"])
+            }
+        } finally {
+            presentations.shutdownOwnedBy("customer")
+            PresentationRegistry.clearForTesting()
+        }
+    }
+
     private suspend fun assertPurchaseOfferRoute(
         access: ai.nuxie.sdk.features.FeatureAccess?,
         dismissAlternative: JsonObject? = null,
@@ -2741,7 +3398,7 @@ class JourneyServiceTest {
         val catalog = catalog(renderedEntry)
         val renderedAuthority = authority(renderedEntry)
         val prepared = catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val baseline = requireNotNull(catalog.snapshot("customer"))
         val original = baseline.releasesByDigest.values.single()
         val leg = original.leg
@@ -2901,7 +3558,7 @@ class JourneyServiceTest {
             val batch = JourneyScreenEmissionBatch(request.journeyId, 0, "second-row",
                 JourneyScreenEmissionSource("screen_welcome", "runtime:1"),
                 listOf(JourneyScreenEmission("00000000-0000-7000-8000-000000000911", 0, 100_000L, "buy", JsonObject(emptyMap()))))
-            assertTrue(request.onEmissionBatch(batch, ai.nuxie.sdk.presentation.JourneyRuntimeEmissionSources(drafts = listOf(ai.nuxie.sdk.presentation.JourneyRuntimeEventSource(3, frame))).bound(batch)))
+            assertTrue(request.onEmissionBatch(batch, ai.nuxie.sdk.presentation.JourneyRuntimeEmissionSources(drafts = listOf(ai.nuxie.sdk.presentation.JourneyRuntimeEventSource(3, frame))).bound(batch)) == JourneyEmissionBatchResult.ACCEPTED)
             withTimeout(5_000L) { while (presenter.actions.isEmpty()) kotlinx.coroutines.delay(10) }
             assertEquals(JsonPrimitive("golden:monthly"), presenter.actions.single().first["placementId"])
             assertEquals(3L, presenter.resolvedNativeIds.single())
@@ -3059,7 +3716,7 @@ class JourneyServiceTest {
         catalog: JourneyProfileCatalog,
     ): JourneyProfileCatalog.Snapshot {
         val prepared = catalog.prepare(profile(), authority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         return requireNotNull(catalog.snapshot("customer"))
     }
 
@@ -3076,7 +3733,7 @@ class JourneyServiceTest {
     ): JourneyDispatchRequest {
         val catalog = catalog()
         val prepared = catalog.prepare(profile(), authority)
-        catalog.commit("customer", prepared)
+        runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val arm = snapshot.profile.armedLegs.single()
         val release = snapshot.releasesByDigest.values.single()

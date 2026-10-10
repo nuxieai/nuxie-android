@@ -12,6 +12,11 @@ import ai.nuxie.sdk.experiences.JourneyReleaseSupportedRuntime
 import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.identity.IdentityService
+import ai.nuxie.sdk.billing.InMemoryPurchaseEvidenceStore
+import ai.nuxie.sdk.billing.StoredProductMapping
+import ai.nuxie.sdk.billing.StoredFeatureAllowance
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlin.coroutines.CoroutineContext
 import ai.nuxie.sdk.identity.UserTransitionCoordinator
 import ai.nuxie.sdk.journey.JourneyProfileConsumer
 import ai.nuxie.sdk.network.HttpTransport
@@ -211,6 +216,7 @@ class ProfileServiceTest {
         journeyRuntime: JourneyProfileConsumer? = null,
         journeyArtifacts: JourneyArtifactManager? = null,
         publishFeatureProfile: suspend (FeatureInfo.Mutation?) -> Unit = {},
+        ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     ) {
         private val context = RuntimeEnvironment.getApplication()
         val identity = IdentityService(context).apply { setDistinctId(distinctId) }
@@ -247,6 +253,7 @@ class ProfileServiceTest {
             scope = scope,
             localeSettings = locales,
             nowMillis = { now },
+            ioDispatcher = ioDispatcher,
         )
 
         fun hasDiskProfile(): Boolean = profileFile.exists()
@@ -466,6 +473,28 @@ class ProfileServiceTest {
         core.stop()
     }
 
+    @Test fun transportCancellationStopsTheProfileWorkerWithoutAnotherRequest() = runBlocking {
+        val calls = AtomicInteger()
+        val plane = planeProfileFixture()
+        val fixture = ProfileFixture(
+            transport = HttpTransport {
+                calls.incrementAndGet()
+                throw kotlinx.coroutines.CancellationException("controlled profile cancellation")
+            },
+            distinctId = "cancel-http", localeIdentifier = "en_US",
+            journeyProfiles = JourneyProfileCatalog(
+                trustedKeys = JourneyTrustRoots.keys(NuxieEnvironment.DEVELOPMENT),
+                highWater = JourneyReleaseHighWaterStore(RuntimeEnvironment.getApplication()),
+                supportedRuntime = { plane.second },
+            ),
+        )
+        try {
+            assertFalse(withTimeout(5_000) { fixture.service.refreshAndWait() })
+            assertFalse(withTimeout(5_000) { fixture.service.refreshAndWait() })
+            assertEquals("A cancelled profile worker must not issue another HTTP request", 1, calls.get())
+        } finally { fixture.close() }
+    }
+
     @Test fun localeChangeCancelsObsoletePreparationAndPreservesCommittedLease() = runBlocking {
         verifyPreparationCancellation("locale") { fixture -> fixture.service.setLocaleIdentifier("fr_FR") }
     }
@@ -521,6 +550,65 @@ class ProfileServiceTest {
             manager.release.complete(Unit)
             fixture.close()
             runtime.retained.forEach(PreparedJourneyArtifacts::close)
+        }
+    }
+
+    @Test
+    fun staleProfileCannotLeaveAMappingOrOverwriteTheNewerMapping() = runBlocking {
+        val plane = planeProfileFixture()
+        val store = InMemoryPurchaseEvidenceStore()
+        val newer = StoredProductMapping(
+            storeProductId = "play-credits", nuxieProductId = "credits",
+            productType = "inapp", consumable = false,
+            featureAllowances = listOf(StoredFeatureAllowance("credits", "METERED", false, 99.0)),
+        )
+        val older = newer.copy(
+            featureAllowances = listOf(StoredFeatureAllowance("credits", "METERED", false, 1.0)),
+        )
+        assertTrue(store.upsertProductMapping(newer))
+        val queued = CompletableDeferred<Pair<CoroutineContext, Runnable>>()
+        val dispatches = AtomicInteger()
+        val io = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) {
+                if (dispatches.getAndIncrement() == 0) queued.complete(context to block)
+                else Dispatchers.IO.dispatch(context, block)
+            }
+        }
+        val installs = AtomicInteger()
+        val catalog = JourneyProfileCatalog(
+            trustedKeys = JourneyTrustRoots.keys(NuxieEnvironment.DEVELOPMENT),
+            highWater = JourneyReleaseHighWaterStore(RuntimeEnvironment.getApplication()),
+            supportedRuntime = { plane.second },
+            onReleaseAdmitted = {
+                installs.incrementAndGet()
+                store.upsertProductMapping(older)
+            },
+        )
+        val fixture = ProfileFixture(
+            transport = profileTransport(plane.first), distinctId = "stale-mapping",
+            localeIdentifier = "en_US", apiKey = "pk_stale_mapping", journeyProfiles = catalog,
+            ioDispatcher = io,
+        )
+        val refresh = async(Dispatchers.Default) { fixture.service.refreshAndWait() }
+        var released = false
+        try {
+            val work = withTimeout(5_000) { queued.await() }
+            fixture.service.transitionObserver.handleUserChange(
+                UserTransitionCoordinator.Kind.IDENTIFY, fixture.distinctId, fixture.distinctId,
+            )
+            Dispatchers.IO.dispatch(work.first, work.second)
+            released = true
+            assertFalse(withTimeout(5_000) { refresh.await() })
+            assertEquals("No stale signed mapping reaches storage", 0, installs.get())
+            assertEquals(listOf(newer), store.loadProductMappings())
+            assertNull(catalog.snapshot(fixture.distinctId))
+        } finally {
+            if (!released && queued.isCompleted) {
+                val work = queued.await()
+                Dispatchers.IO.dispatch(work.first, work.second)
+            }
+            refresh.cancelAndJoin()
+            fixture.close()
         }
     }
 

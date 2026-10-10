@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include "nux_capi.generated.h"
 #include "nuxie_host_installs.h"
 
 /* A field-aware JNI source exercises the production mapper without a runtime. */

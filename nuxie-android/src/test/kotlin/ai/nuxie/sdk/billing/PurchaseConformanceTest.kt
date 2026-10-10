@@ -4,6 +4,7 @@ import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.fixtures.FixtureRunner
+import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.testsupport.FakeTransport
 import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponse
@@ -13,6 +14,7 @@ import com.android.billingclient.api.BillingResult
 import java.io.File
 import java.security.MessageDigest
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -104,15 +106,19 @@ class PurchaseConformanceTest {
         var evidenceAtCapture: PurchaseEvidence? = null
         var completionsAtCapture: Int? = null
         val service = PurchaseService(
+            ioDispatcher = kotlinx.coroutines.Dispatchers.Unconfined,
             purchaseStorageScope = "test-fixture",
             billing = billing,
             evidenceStore = store,
-            synchronizer = NuxieApiPurchaseSynchronizer(core.api),
+            synchronizer = NuxieApiPurchaseSynchronizer(NuxieApi(
+                "pk_test_purchase_conformance", NuxieEnvironment.DEVELOPMENT, transport,
+                ioDispatcher = StandardTestDispatcher(testScheduler),
+            )),
             features = core.features,
             distinctId = core.identity::distinctId,
             emit = { name, properties ->
                 if (name == expectedEventName) {
-                    evidenceAtCapture = store.load()[token]
+                    evidenceAtCapture = kotlinx.coroutines.runBlocking { store.load()[token] }
                     completionsAtCapture = billing.managedCompletions
                     emissions += name to properties
                 }

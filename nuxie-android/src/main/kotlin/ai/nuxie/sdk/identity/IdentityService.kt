@@ -4,6 +4,9 @@ import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.events.TimeBasedEpochGenerator
 import android.content.Context
 import ai.nuxie.sdk.logging.NuxieLog as Log
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -24,7 +27,9 @@ import kotlinx.serialization.json.buildJsonObject
 internal class IdentityService(
     context: Context,
 ) : IdentityProvider {
-    private val decisionLock = Any()
+    private val decisionLock = Mutex()
+    // True on the thread whose synchronous bridge currently holds decisionLock.
+    private val decisionHeldByThisThread = ThreadLocal<Boolean>()
     private val lock = Any()
     private val file: File
 
@@ -57,7 +62,7 @@ internal class IdentityService(
         get() = synchronized(lock) { identifiedId != null }
 
     /** Identify. Migrates anonymous properties on the anon -> identified edge. */
-    fun setDistinctId(distinctId: String) = synchronized(decisionLock) {
+    fun setDistinctId(distinctId: String) = withDecision {
         synchronized(lock) {
             val oldEffectiveId = effectiveIdLocked()
             val wasIdentified = identifiedId != null
@@ -80,7 +85,7 @@ internal class IdentityService(
     }
 
     /** Reset to anonymous. Clears the previous identity's property bag. */
-    fun reset(keepAnonymousId: Boolean) = synchronized(decisionLock) {
+    fun reset(keepAnonymousId: Boolean) = withDecision {
         synchronized(lock) {
             val previousEffectiveId = effectiveIdLocked()
             val wasIdentified = identifiedId != null
@@ -95,18 +100,47 @@ internal class IdentityService(
         }
     }
 
-    override fun captureScope(): IdentityScope = synchronized(decisionLock) {
+    override fun captureScope(): IdentityScope = synchronized(lock) {
         IdentityScope(distinctId(), identityRevision)
     }
 
-    override fun isCurrentScope(scope: IdentityScope): Boolean = synchronized(decisionLock) {
+    override fun isCurrentScope(scope: IdentityScope): Boolean = synchronized(lock) {
         identityRevision == scope.revision && distinctId() == scope.distinctId
     }
 
     override fun <T> withCurrentScope(scope: IdentityScope, block: () -> T): T? =
-        synchronized(decisionLock) {
+        withDecision {
             if (identityRevision == scope.revision && distinctId() == scope.distinctId) block() else null
         }
+
+    override suspend fun <T> withCurrentScopeSuspending(scope: IdentityScope, block: suspend () -> T): T? =
+        decisionLock.withLock {
+            if (isCurrentScope(scope)) block() else null
+        }
+
+    // The public identity API remains synchronous and shares the coroutine
+    // fence used by suspendable profile admission. A synchronous decision
+    // re-enters on the thread that already holds the fence, as the JVM monitor
+    // it replaced did and as iOS's NSRecursiveLock does: a host App Action
+    // callback runs inside withCurrentScope and may call identify or reset.
+    // The suspending admission runs no host code under the fence, so it takes
+    // the Mutex without the thread flag and never re-enters.
+    // The facade also uses this one fence for the entire identity transition,
+    // including session rotation, event capture and Feature staging. A separate
+    // facade lock would invert the order when an admitted App Action re-enters.
+    fun <T> withDecision(block: () -> T): T {
+        if (decisionHeldByThisThread.get() == true) return block()
+        return runBlocking {
+            decisionLock.withLock {
+                decisionHeldByThisThread.set(true)
+                try {
+                    block()
+                } finally {
+                    decisionHeldByThisThread.remove()
+                }
+            }
+        }
+    }
 
     fun setUserProperties(properties: Map<String, Any?>) {
         if (properties.isEmpty()) return

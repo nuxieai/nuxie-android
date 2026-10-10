@@ -16,6 +16,61 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SharedValuesDeviceTest {
+    @Test fun groupInstallationKeepsUnconstrainedAnswers() = runBlocking {
+        checkUnconstrainedGroup(requiredEmail = true)
+    }
+
+    @Test fun groupInstallationRetainsAnEmptyNativeGroup() = runBlocking {
+        checkUnconstrainedGroup(requiredEmail = false)
+    }
+
+    private suspend fun checkUnconstrainedGroup(requiredEmail: Boolean) {
+        assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
+        val assets = InstrumentationRegistry.getInstrumentation().context.assets
+        fun read(name: String) = assets.open("runtime/rule-group-install/$name").use { it.readBytes() }
+        var descriptor = Json.parseToJsonElement(read("policy.json").decodeToString()).jsonObject
+        if (!requiredEmail) {
+            val forms = descriptor.getValue("responses").jsonObject
+            val form = forms.getValue("profile").jsonObject
+            val fields = form.getValue("fields").jsonArray.mapIndexed { index, field ->
+                if (index == 0) JsonObject(field.jsonObject + ("rules" to JsonArray(emptyList()))) else field
+            }
+            descriptor = JsonObject(descriptor + ("responses" to JsonObject(forms +
+                ("profile" to JsonObject(form + ("fields" to JsonArray(fields)))))))
+        }
+        descriptor = JsonObject(descriptor + ("render" to buildJsonObject { put("assets", JsonArray(emptyList())) }))
+        assertEquals(listOf("email", "name"), descriptor.getValue("ruleGroups").jsonArray.single()
+            .jsonObject.getValue("members").jsonArray.map { it.jsonObject.getValue("property").jsonPrimitive.content })
+        val run = ExperienceRunValues()
+        try {
+            run.lane.call {
+                val native = run.prepare(read("screen.riv"), descriptor, emptyMap())
+                val values = checkNotNull(native.values)
+                values.setValue("responses:profile/email", NuxieViewModelScalarValue.StringValue("person@example.test"))
+                values.setValue("responses:profile/name", NuxieViewModelScalarValue.StringValue("Ada"))
+                assertEquals(NuxieViewModelScalarValue.BooleanValue(true),
+                    values.snapshot().resolveScalar(listOf("responses:profile", "valid")))
+                fun assertNoNameErrors() {
+                    val snapshot = values.nativeSnapshot()
+                    val form = snapshot.values.single { it.ownerInstanceId == snapshot.rootInstanceId && it.name == "responses:profile" }.referencedInstanceId
+                    val errors = snapshot.values.single { it.ownerInstanceId == form && it.name == "errors" }.referencedInstanceId
+                    assertTrue(snapshot.values.single { it.ownerInstanceId == errors && it.name == "name" }.listItemIds.isEmpty())
+                }
+                assertNoNameErrors()
+                val command = NuxieHostCommand("\$nuxie.response.save", NuxieHostValue.Object(listOf(
+                    NuxieHostValue.Object.Field("form", NuxieHostValue.String("profile")))))
+                val request = checkNotNull(ExperienceResponseSaveRequest.capture(command, values.nativeSnapshot(),
+                    native.file.viewModelCatalog(), descriptor))
+                assertEquals(buildJsonObject { put("email", "person@example.test"); put("name", "Ada") }, request.answers)
+                values.setValue("responses:profile/email", NuxieViewModelScalarValue.StringValue(""))
+                assertEquals(NuxieViewModelScalarValue.BooleanValue(!requiredEmail),
+                    values.snapshot().resolveScalar(listOf("responses:profile", "valid")))
+                assertNoNameErrors()
+            }
+            assertEquals(buildJsonObject { put("name", "Ada") }, run.responseAnswers("profile", descriptor))
+        } finally { run.retire() }
+    }
+
     @Test fun publishedF5InstallsResponseRulesBeforeFirstMutation() = runBlocking {
         assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
         val instrumentation = InstrumentationRegistry.getInstrumentation()

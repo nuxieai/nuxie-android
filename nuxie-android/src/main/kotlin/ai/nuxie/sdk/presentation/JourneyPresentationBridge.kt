@@ -80,12 +80,20 @@ internal data class JourneyPresentationRequest(
         JourneyScreenDismissalResult.HANDLED
     },
     val onLinkOpened: suspend (JourneyOpenedLink) -> Unit = {},
-    val onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> Boolean = { _, _ -> true },
+    val onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> JourneyEmissionBatchResult = { _, _ -> JourneyEmissionBatchResult.ACCEPTED },
     val onPresentationRevealed: suspend (String) -> Unit = {},
     val onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
     val transition: JsonObject? = null,
     val runValues: ExperienceRunValues? = null,
 )
+
+/** Whether the renderer's batch advanced the durable publication sequence. */
+internal enum class JourneyEmissionBatchResult {
+    ACCEPTED,
+    /** A live surface declined this input without consuming its sequence. */
+    DECLINED,
+    REJECTED,
+}
 
 internal sealed interface JourneyPresentationResult {
     data object Shown : JourneyPresentationResult
@@ -109,6 +117,7 @@ internal data class JourneyPresentationPermissionEvent(
 internal sealed interface JourneyPresentationActionResult {
     data class Navigate(val screenId: String) : JourneyPresentationActionResult
     data class Advanced(val outlet: String) : JourneyPresentationActionResult
+    data class Completed(val outcome: String) : JourneyPresentationActionResult
     data class PermissionResolved(
         val outlet: String,
         val event: JourneyPresentationPermissionEvent,
