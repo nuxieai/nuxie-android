@@ -240,7 +240,7 @@ genrule(
     srcs = ["example-app/src/main/AndroidManifest.xml"],
     outs = ["ExampleAndroidManifest.xml"],
     tools = ["//scripts/bazel:package_aar"],
-    cmd = "$(location //scripts/bazel:package_aar) manifest --package ai.nuxie.example --input $(SRCS) --output $@",
+    cmd = "$(location //scripts/bazel:package_aar) manifest --package ai.nuxie.example --debuggable --input $(SRCS) --output $@",
 )
 
 genrule(

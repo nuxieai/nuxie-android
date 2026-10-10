@@ -36,6 +36,9 @@ setting and asset-smoke fixtures. Its main and debug manifests are combined by
 the Android rule's manifest merger, which also retains dependency permissions.
 The instrumentation APK receives the SDK's production Activity through an
 explicit manifest export.
+Both debug APKs declare debugging in their generated application manifest and
+package the arm64-v8a and x86_64 runtime/JNI libraries. The SDK AAR retains its
+release application attributes.
 
 `prepare` creates the AAR, sources, Javadoc, POM, Gradle module metadata and
 checksum sidecars in a conventional Maven repository. `sdk-artifacts.json`

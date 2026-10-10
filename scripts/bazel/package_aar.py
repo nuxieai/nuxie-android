@@ -86,6 +86,7 @@ def main():
     manifest.add_argument("--input", type=Path, required=True)
     manifest.add_argument("--output", type=Path, required=True)
     manifest.add_argument("--package", default="ai.nuxie.sdk")
+    manifest.add_argument("--debuggable", action="store_true")
     instrumentation = commands.add_parser("instrumentation-manifest")
     instrumentation.add_argument("--input", type=Path, required=True)
     instrumentation.add_argument("--output", type=Path, required=True)
@@ -122,6 +123,11 @@ def main():
         sdk = ET.SubElement(root, "uses-sdk")
         sdk.set("{http://schemas.android.com/apk/res/android}minSdkVersion", "23")
         sdk.set("{http://schemas.android.com/apk/res/android}targetSdkVersion", "36")
+        if args.command == "instrumentation-manifest" or args.debuggable:
+            application = root.find("application")
+            if application is None:
+                raise ValueError("Debug APK manifest must declare an application")
+            application.set("{http://schemas.android.com/apk/res/android}debuggable", "true")
         if args.command == "instrumentation-manifest":
             runner = ET.SubElement(root, "instrumentation")
             runner.set("{http://schemas.android.com/apk/res/android}name", "androidx.test.runner.AndroidJUnitRunner")
